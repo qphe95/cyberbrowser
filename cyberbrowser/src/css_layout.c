@@ -4024,6 +4024,81 @@ static void layout_collect_js_sheet_array(JSContextHandle ctx, GCValue arr,
     }
 }
 
+/* A shadow root's adopted sheet scoped to its host: every style rule's
+ * selectors prefixed with the host's scope class (":host" becomes the
+ * class itself, ":host(x)" the class and x); at-rule preludes are kept, rules inside @media, @supports,
+ * @container and @layer are scoped, and the contents of @keyframes,
+ * @font-face and @page blocks and of style rules (nested rules included)
+ * are copied as they are.  (Braces inside strings and comments are not
+ * told apart.) */
+static char *layout_scope_sheet(const char *css, const char *scope_class) {
+    size_t n = strlen(css), cap = n * 2 + 64, o = 0, cl = strlen(scope_class);
+    char *out = malloc(cap);
+    bool opaque[64];            /* per open block: its contents copied as they are */
+    int depth = 0;
+    size_t seg = 0;             /* the text since the last { } or ; */
+#define OUT(p, len) do { size_t l_ = (len); if (o + l_ + 1 > cap) { while (o + l_ + 1 > cap) cap *= 2; out = realloc(out, cap); } memcpy(out + o, (p), l_); o += l_; } while (0)
+#define OPEN(op) do { if (depth < 64) opaque[depth] = (op); depth++; } while (0)
+    for (size_t i = 0; i < n; i++) {
+        char c = css[i];
+        if (c != '{' && c != '}' && c != ';') continue;
+        bool in_opaque = depth > 0 && opaque[depth - 1 < 64 ? depth - 1 : 63];
+        if (c != '{' || in_opaque) {
+            OUT(css + seg, i + 1 - seg);
+            seg = i + 1;
+            if (c == '}') { if (depth > 0) depth--; }
+            else if (c == '{') OPEN(true);
+            continue;
+        }
+        /* a prelude: [seg, i) */
+        size_t b = seg, e = i;
+        while (b < e && isspace((unsigned char)css[b])) b++;
+        while (e > b && isspace((unsigned char)css[e - 1])) e--;
+        OUT(css + seg, b - seg);
+        if (b == e || css[b] == '@') {
+            OUT(css + b, i + 1 - b);
+            OPEN(b < e && (!strncasecmp(css + b, "@keyframes", 10) || !strncasecmp(css + b, "@-webkit-keyframes", 18) ||
+                           !strncasecmp(css + b, "@font-face", 10) || !strncasecmp(css + b, "@page", 5)));
+            seg = i + 1;
+            continue;
+        }
+        /* the selector list, each selector prefixed */
+        bool first = true;
+        for (size_t p = b; p <= e; ) {
+            size_t q = p;
+            int paren = 0;
+            while (q < e && (css[q] != ',' || paren)) { if (css[q] == '(') paren++; else if (css[q] == ')') paren--; q++; }
+            size_t sb = p, se = q;
+            while (sb < se && isspace((unsigned char)css[sb])) sb++;
+            while (se > sb && isspace((unsigned char)css[se - 1])) se--;
+            if (se > sb) {
+                if (!first) OUT(", ", 2);
+                first = false;
+                OUT(".", 1);
+                OUT(scope_class, cl);
+                if (se - sb >= 6 && !strncmp(css + sb, ":host(", 6)) {
+                    /* :host(x) y: the host matching x */
+                    size_t k = sb + 6;
+                    int d = 1;
+                    while (k < se && d) { if (css[k] == '(') d++; else if (css[k] == ')') d--; if (d) k++; }
+                    OUT(css + sb + 6, k - sb - 6);
+                    if (k < se) OUT(css + k + 1, se - k - 1);
+                } else if (se - sb >= 5 && !strncmp(css + sb, ":host", 5)) OUT(css + sb + 5, se - sb - 5);
+                else { OUT(" ", 1); OUT(css + sb, se - sb); }
+            }
+            p = q + 1;
+        }
+        OUT("{", 1);
+        OPEN(true);             /* (a style rule's block) */
+        seg = i + 1;
+    }
+    OUT(css + seg, n - seg);
+#undef OUT
+#undef OPEN
+    out[o] = '\0';
+    return out;
+}
+
 static void layout_collect_constructed_stylesheets(LayoutContext *ctx,
                                                     LayoutStyleSheetList *list)
 {
@@ -4038,56 +4113,33 @@ static void layout_collect_constructed_stylesheets(LayoutContext *ctx,
     GCValue adopted = JS_GetPropertyStr(js, doc, "__adoptedStyleSheets");
     layout_collect_js_sheet_array(js, adopted, list);
 
-    /* Shadow-root adopted stylesheets.  Each sheet is scoped to its host by
-     * prefixing every selector with a unique class assigned to the host. */
-    const char *script =
-        "(function(){"
-        "  var out=[];"
-        "  var counter = (window.__cyber_scope_counter || 0);"
-        "  var roots=window.__cyber_adopting_roots||[];"
-        "  for(var i=0;i<roots.length;i++){"
-        "    var sr=roots[i], host=sr.host;"
-        "    if(sr && host && host.isConnected){"
-        "      var sheets=sr.__adoptedStyleSheets;"
-        "      if(sheets && sheets.length){"
-        "        var sid=host.getAttribute('__cyber_scope_id');"
-        "        if(!sid){ sid='cs'+(++counter); }"
-        "        var scopeClass='cyber-scope-'+sid;"
-        "        for(var j=0;j<sheets.length;j++){"
-        "          var css=sheets[j].cssText||'';"
-        "          if(!css) continue;"
-        "          var scoped=css.replace(/([^{};@][^{};]*)\\{/g, function(m, sel){"
-        "            if(sel.trim().charAt(0)==='@') return m;"
-        "            var parts=sel.split(',');"
-        "            for(var k=0;k<parts.length;k++){"
-        "              var s=parts[k].trim();"
-        "              if(!s) continue;"
-        "              if(s.indexOf(':host')===0) s='.'+scopeClass+s.substring(5);"
-        "              else s='.'+scopeClass+' '+s;"
-        "              parts[k]=s;"
-        "            }"
-        "            return parts.join(', ')+'{';"
-        "          });"
-        "          out.push(scoped);"
-        "        }"
-        "      }"
-        "    }"
-        "  }"
-        "  window.__cyber_scope_counter=counter;"
-        "  return out;"
-        "})()";
-    GCValue scoped_css = JS_Eval(js, script, strlen(script),
-                                 "<constructed-css>", JS_EVAL_TYPE_GLOBAL);
-    if (JS_IsArray(js, scoped_css)) {
-        GCValue len_val = JS_GetPropertyStr(js, scoped_css, "length");
-        uint32_t m = 0;
-        JS_ToUint32(js, &m, len_val);
-        for (uint32_t j = 0; j < m; j++) {
-            GCValue text = JS_GetPropertyUint32(js, scoped_css, j);
-            const char *s = JS_ToCString(js, text);
-            if (s && s[0]) {
-                layout_sheet_list_add_text(list, s, strlen(s), NULL);
-                font_registry_scan_css(s, strlen(s), ctx->base_url);
+    /* Shadow-root adopted stylesheets, each scoped to its host by its scope
+     * class (shadow_dom_api.c gives the host __cyber_scope_id). */
+    GCValue roots = JS_GetPropertyStr(js, global, "__cyber_adopting_roots");
+    if (!JS_IsArray(js, roots)) return;
+    uint32_t nr = 0;
+    JS_ToUint32(js, &nr, JS_GetPropertyStr(js, roots, "length"));
+    for (uint32_t i = 0; i < nr; i++) {
+        GCValue sr = JS_GetPropertyUint32(js, roots, i);
+        GCValue host = JS_IsObject(sr) ? JS_GetPropertyStr(js, sr, "host") : JS_UNDEFINED;
+        NodeId hn = JS_IsObject(host) ? dom_node_of(host) : DOM_NULL;
+        if (!hn || !JS_ToBool(js, JS_GetPropertyStr(js, host, "isConnected"))) continue;
+        const char *sid = dom_get_attr_str(hn, "__cyber_scope_id");
+        if (!sid) continue;
+        char scope_class[96];
+        snprintf(scope_class, sizeof scope_class, "cyber-scope-%s", sid);
+        GCValue sheets = JS_GetPropertyStr(js, sr, "__adoptedStyleSheets");
+        uint32_t ns = 0;
+        if (!JS_IsObject(sheets)) continue;
+        JS_ToUint32(js, &ns, JS_GetPropertyStr(js, sheets, "length"));
+        for (uint32_t j = 0; j < ns; j++) {
+            GCValue text = JS_GetPropertyStr(js, JS_GetPropertyUint32(js, sheets, j), "cssText");
+            const char *css = JS_IsString(text) ? JS_ToCString(js, text) : NULL;
+            if (css && css[0]) {
+                char *scoped = layout_scope_sheet(css, scope_class);
+                layout_sheet_list_add_text(list, scoped, strlen(scoped), NULL);
+                font_registry_scan_css(scoped, strlen(scoped), ctx->base_url);
+                free(scoped);
             }
         }
     }

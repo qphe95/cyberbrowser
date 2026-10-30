@@ -22,10 +22,15 @@
  */
 #include "html_element_api.h"
 
+#include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include <quickjs.h>
 #include <quickjs_gc_unified.h>
+#include "dom_js.h"
+#include "css_style.h"
 
 static const char k_html_element_js[] =
 "(function(P){\n"
@@ -38,33 +43,7 @@ static const char k_html_element_js[] =
 "    if (typeof P[name] === 'function') return;\n"
 "    Object.defineProperty(P, name, {configurable:true, writable:true, value:fn});\n"
 "  }\n"
-"  var SKIP = {SCRIPT:1, STYLE:1, TEMPLATE:1, NOSCRIPT:1, HEAD:1, TITLE:1, META:1, LINK:1};\n"
-"  var BLOCK = {ADDRESS:1, ARTICLE:1, ASIDE:1, BLOCKQUOTE:1, DD:1, DIV:1, DL:1, DT:1,\n"
-"    FIELDSET:1, FIGCAPTION:1, FIGURE:1, FOOTER:1, FORM:1, H1:1, H2:1, H3:1, H4:1, H5:1, H6:1,\n"
-"    HEADER:1, HR:1, LI:1, MAIN:1, NAV:1, OL:1, P:1, PRE:1, SECTION:1, TABLE:1, TR:1, UL:1};\n"
-"  function hiddenEl(el) {\n"
-"    if (el.hasAttribute && el.hasAttribute('hidden')) return true;\n"
-"    var s = el.style;\n"
-"    return !!s && (s.display === 'none' || s.visibility === 'hidden');\n"
-"  }\n"
-"  function collect(node, out) {\n"
-"    for (var c = node.firstChild; c; c = c.nextSibling) {\n"
-"      if (c.nodeType === 3) { out.push(String(c.data == null ? c.textContent : c.data).replace(/[ \\t\\n\\r]+/g, ' ')); continue; }\n"
-"      if (c.nodeType !== 1) continue;\n"
-"      var tag = String(c.tagName || '').toUpperCase();\n"
-"      if (SKIP[tag] || hiddenEl(c)) continue;\n"
-"      if (tag === 'BR') { out.push('\\n'); continue; }\n"
-"      var block = !!BLOCK[tag];\n"
-"      if (block) out.push('\\n');\n"
-"      collect(c, out);\n"
-"      if (block) out.push('\\n');\n"
-"    }\n"
-"  }\n"
-"  function renderedText(el) {\n"
-"    if (SKIP[String(el.tagName || '').toUpperCase()]) return el.textContent || '';\n"
-"    var out = []; collect(el, out);\n"
-"    return out.join('').replace(/ *\\n */g, '\\n').replace(/\\n{2,}/g, '\\n').replace(/^\\n+|\\n+$/g, '').replace(/^ +| +$/g, '');\n"
-"  }\n"
+"  var renderedText = __cyberInnerText;   /* (inner_text below) */\n"
 "  function setText(el, v) {\n"
 "    var s = v == null ? '' : String(v);\n"
 "    while (el.firstChild) el.removeChild(el.firstChild);\n"
@@ -257,9 +236,163 @@ static void run_installer(JSContextHandle ctx, const char *src, size_t len, cons
     }
 }
 
+/* ---- innerText's getter, over the node store ----
+ * The rendered text approximated from the tree: script/style/template/head
+ * content skipped, elements hidden by the hidden attribute or an inline
+ * display:none / visibility:hidden skipped, white space runs as one space,
+ * <br> a line break, block-level elements on their own lines; then spaces
+ * around line breaks, repeated and outer line breaks, and outer spaces go. */
+
+typedef struct TextBuf { char *s; size_t n, cap; } TextBuf;
+
+static void tb_put(TextBuf *b, const char *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        while (b->n + n + 1 > b->cap) b->cap = b->cap ? b->cap * 2 : 256;
+        b->s = realloc(b->s, b->cap);
+    }
+    memcpy(b->s + b->n, s, n);
+    b->n += n;
+}
+
+static bool tag_in(const char *tag, const char *const *list) {
+    for (int i = 0; list[i]; i++) if (!strcmp(tag, list[i])) return true;
+    return false;
+}
+
+static const char *const k_skip[] = { "script", "style", "template", "noscript", "head", "title", "meta", "link", NULL };
+static const char *const k_block[] = { "address", "article", "aside", "blockquote", "dd", "div", "dl", "dt", "fieldset",
+    "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "li", "main", "nav",
+    "ol", "p", "pre", "section", "table", "tr", "ul", NULL };
+
+/* Does the style attribute say display:none or visibility:hidden? */
+static bool inline_hidden(const char *style) {
+    for (const char *p = style; p && *p; ) {
+        while (*p == ' ' || *p == ';' || *p == '\t' || *p == '\n') p++;
+        const char *name = p;
+        while (*p && *p != ':' && *p != ';') p++;
+        if (*p != ':') continue;
+        size_t nl = (size_t)(p - name);
+        while (nl && (name[nl - 1] == ' ' || name[nl - 1] == '\t')) nl--;
+        const char *v = ++p;
+        while (*p && *p != ';') p++;
+        while (v < p && (*v == ' ' || *v == '\t')) v++;
+        size_t vl = (size_t)(p - v);
+        while (vl && (v[vl - 1] == ' ' || v[vl - 1] == '\t')) vl--;
+        if ((nl == 7 && !strncasecmp(name, "display", 7) && vl >= 4 && !strncasecmp(v, "none", 4)) ||
+            (nl == 10 && !strncasecmp(name, "visibility", 10) && vl >= 6 && !strncasecmp(v, "hidden", 6)))
+            return true;
+    }
+    return false;
+}
+
+static void collect(uint32_t node, TextBuf *b) {
+    for (uint32_t c = g_dom.first[node]; c; c = g_dom.next[c]) {
+        if (g_dom.kind[c] == DOM_K_TEXT) {
+            const char *t = g_dom.text[c].s;
+            uint32_t n = g_dom.text[c].len;
+            for (uint32_t i = 0; t && i < n; ) {
+                if (t[i] == ' ' || t[i] == '\t' || t[i] == '\n' || t[i] == '\r') {
+                    while (i < n && (t[i] == ' ' || t[i] == '\t' || t[i] == '\n' || t[i] == '\r')) i++;
+                    tb_put(b, " ", 1);
+                } else {
+                    uint32_t j = i;
+                    while (j < n && !(t[j] == ' ' || t[j] == '\t' || t[j] == '\n' || t[j] == '\r')) j++;
+                    tb_put(b, t + i, j - i);
+                    i = j;
+                }
+            }
+            continue;
+        }
+        if (g_dom.kind[c] != DOM_K_ELEMENT) continue;
+        const char *tag = css_atom_str(g_dom.tag[c]);
+        NodeId id = dom_id_of(c);
+        if (!tag || tag_in(tag, k_skip) || dom_attr(id, "hidden") || inline_hidden(dom_attr(id, "style"))) continue;
+        if (!strcmp(tag, "br")) { tb_put(b, "\n", 1); continue; }
+        bool block = tag_in(tag, k_block);
+        if (block) tb_put(b, "\n", 1);
+        collect(c, b);
+        if (block) tb_put(b, "\n", 1);
+    }
+}
+
+/* textContent's concatenation (for a skipped root). */
+static void all_text(uint32_t node, TextBuf *b) {
+    for (uint32_t c = g_dom.first[node]; c; c = g_dom.next[c]) {
+        if (g_dom.kind[c] == DOM_K_TEXT) tb_put(b, g_dom.text[c].s, g_dom.text[c].len);
+        else if (g_dom.kind[c] == DOM_K_ELEMENT) all_text(c, b);
+    }
+}
+
+static GCValue js_inner_text(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    NodeId id = argc && JS_IsObject(argv[0]) ? dom_node_of(argv[0]) : DOM_NULL;
+    if (!id || !dom_valid(id)) return JS_NewString(ctx, "");
+    uint32_t s = dom_slot(id);
+    TextBuf b = { 0 };
+    const char *tag = g_dom.kind[s] == DOM_K_ELEMENT ? css_atom_str(g_dom.tag[s]) : NULL;
+    if (tag && tag_in(tag, k_skip)) {
+        all_text(s, &b);
+        GCValue v = JS_NewStringLen(ctx, b.s ? b.s : "", b.n);
+        free(b.s);
+        return v;
+    }
+    collect(s, &b);
+    /* " *\n *" -> "\n", "\n\n+" -> "\n", then trim line breaks and spaces */
+    size_t o = 0;
+    for (size_t i = 0; i < b.n; i++) {
+        char c = b.s[i];
+        if (c == '\n') {
+            while (o && b.s[o - 1] == ' ') o--;
+            if (o && b.s[o - 1] == '\n') continue;
+            b.s[o++] = '\n';
+            while (i + 1 < b.n && b.s[i + 1] == ' ') i++;
+            continue;
+        }
+        b.s[o++] = c;
+    }
+    size_t st = 0, en = o;
+    while (st < en && b.s[st] == '\n') st++;
+    while (en > st && b.s[en - 1] == '\n') en--;
+    while (st < en && b.s[st] == ' ') st++;
+    while (en > st && b.s[en - 1] == ' ') en--;
+    GCValue v = JS_NewStringLen(ctx, b.s ? b.s + st : "", en - st);
+    free(b.s);
+    return v;
+}
+
+/* __cyberOptions(select): its list of options (HTML 4.10.7), the option
+ * children and the option children of its optgroup children, in tree
+ * order, as an array (form_controls.js). */
+static GCValue js_options(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    NodeId id = argc && JS_IsObject(argv[0]) ? dom_node_of(argv[0]) : DOM_NULL;
+    GCValue arr = JS_NewArray(ctx);
+    if (!id || !dom_valid(id)) return arr;
+    static CssAtom option, optgroup;
+    if (!option) {
+        css_atom_reserve(2);
+        option = css_atom_intern("option", 6);
+        optgroup = css_atom_intern("optgroup", 8);
+    }
+    uint32_t k = 0, sel = dom_slot(id);
+    for (uint32_t c = g_dom.first[sel]; c; c = g_dom.next[c]) {
+        if (g_dom.kind[c] != DOM_K_ELEMENT) continue;
+        if (g_dom.tag[c] == option) JS_SetPropertyUint32(ctx, arr, k++, dom_js(ctx, dom_id_of(c)));
+        else if (g_dom.tag[c] == optgroup)
+            for (uint32_t o = g_dom.first[c]; o; o = g_dom.next[o])
+                if (g_dom.kind[o] == DOM_K_ELEMENT && g_dom.tag[o] == option)
+                    JS_SetPropertyUint32(ctx, arr, k++, dom_js(ctx, dom_id_of(o)));
+    }
+    return arr;
+}
+
 void html_element_api_install(JSContextHandle ctx, GCValue element_proto)
 {
     if (!JS_IsObject(element_proto)) return;
+    JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberInnerText",
+                              JS_NewCFunction(ctx, js_inner_text, "__cyberInnerText", 1), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberOptions",
+                              JS_NewCFunction(ctx, js_options, "__cyberOptions", 1), JS_PROP_CONFIGURABLE);
     run_installer(ctx, k_html_element_js, sizeof(k_html_element_js) - 1, "<html_element_api>", element_proto);
 }
 

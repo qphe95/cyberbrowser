@@ -629,8 +629,20 @@
         for (var k in props) Object.defineProperty(r, k, { value: props[k], writable: true });
         return r;
     }
+    /* A rule's serialization, kept until it (or a rule inside it) changes:
+     * layout re-reads a modified sheet's text, mostly unchanged (CSS-in-JS
+     * inserts rules one at a time). */
+    var RULE_TEXT = Symbol('ruleText');
+    function ruleText(r) {
+        var t = r[RULE_TEXT];
+        if (t === undefined) { t = r.__text(); Object.defineProperty(r, RULE_TEXT, { value: t, configurable: true, writable: true }); }
+        return t;
+    }
     function touched(r) {
-        for (var x = r; x; x = x.__parentRule) if (x.__sheet) { x.__sheet[SHEET].modified = true; x.__sheet.__changed(); return; }
+        for (var x = r; x; x = x.__parentRule) {
+            if (x[RULE_TEXT] !== undefined) x[RULE_TEXT] = undefined;
+            if (x.__sheet) { x.__sheet[SHEET].modified = true; x.__sheet.__changed(); return; }
+        }
     }
 
     /* declarations: the native CSSStyleDeclaration */
@@ -1115,6 +1127,7 @@
     getter(StyleSheet.prototype, 'disabled', function () { return this[SHEET].disabled; },
         function (v) { this[SHEET].disabled = !!v; this.__changed(); });
     define(CSSStyleSheet.prototype, '__changed', function () {
+        this[SHEET].textCache = undefined;
         if (typeof global.__cyberRelayout === 'function') global.__cyberRelayout();
     });
     /* the text layout renders: the serialization once modified */
@@ -1122,7 +1135,8 @@
         var st = this[SHEET];
         if (st.disabled) return '';
         if (!st.modified && !st.constructed) return st.text;
-        return sheetRules(this).map(function (r) { return r.__text(); }).join('\n');
+        if (st.textCache === undefined) st.textCache = sheetRules(this).map(ruleText).join('\n');
+        return st.textCache;
     });
     Object.defineProperty(CSSStyleSheet.prototype, '__cyberModified', { get: function () { return this[SHEET].modified || this[SHEET].disabled; } });
     /* (layout reads constructed sheets\x27 cssText: their rules\x27 text) */

@@ -224,6 +224,24 @@ TEST(test_dom_stream_implies_html_head_body) {
     return true;
 }
 
+/* Page markup gets HTML's implied end tags (li, dd/dt, option, td/tr, p
+ * before blocks) and end tags that close across the stack. */
+TEST(test_dom_stream_implied_end_tags) {
+    bool ok = true;
+    ok &= streamed_as("<ul><li>a<li>b</ul>", "html(head,body(ul(li,li)))");
+    ok &= streamed_as("<select><option>a<option>b<optgroup><option>c</select><p>x", "html(head,body(select(option,option,optgroup(option)),p))");
+    ok &= streamed_as("<div><span>x</div><i>y</i>", "html(head,body(div(span),i))");
+    ok &= streamed_as("<p>a<div>b</div>", "html(head,body(p,div))");
+    ok &= streamed_as("<dl><dt>a<dd>b<dt>c</dl>", "html(head,body(dl(dt,dd,dt)))");
+    ok &= streamed_as("<table><tr><td>1<td>2<tr><td>3</table>", "html(head,body(table(tr(td,td),tr(td))))");
+    ok &= streamed_as("<p><b>x</p>y", "html(head,body(p(b)))");
+    ok &= streamed_as("<div></span>a</div>", "html(head,body(div))");
+    ok &= streamed_as("<ytd-permission-role-bottom-bar-renderer></ytd-permission-role-bottom-bar-renderer><i>x</i>",
+                       "html(head,body(ytd-permission-role-bottom-bar-renderer,i))");
+    ASSERT_TRUE(ok);
+    return true;
+}
+
 /* An unquoted attribute value runs to a space or '>': '/' is part of it
  * (<script src=/a.js> was src=""). */
 TEST(test_dom_parse_unquoted_attr_slash) {
@@ -1509,6 +1527,7 @@ TEST(test_dom_streamed_page_runs_scripts_in_place) {
 
 void run_dom_tests(void) {
     printf("\n--- Node store DOM Tests ---\n");
+    RUN_TEST(test_dom_stream_implied_end_tags);
     RUN_TEST(test_dom_parse_matches_legacy_fixtures);
     RUN_TEST(test_dom_parse_unquoted_attr_slash);
     RUN_TEST(test_dom_stream_implies_html_head_body);

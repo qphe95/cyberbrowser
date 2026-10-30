@@ -246,7 +246,11 @@
 
     /* ---- select / option ---- */
     var SP = proto('HTMLSelectElement'), OP = proto('HTMLOptionElement');
+    /* the list of options: the select's option children and those of its
+     * optgroup children, in tree order (one native walk of the store) */
+    var nativeOptions = global.__cyberOptions;
     function optionsOf(sel) {
+        if (nativeOptions) return nativeOptions(sel);
         var out = [];
         (function walk(n) {
             for (var c = n.firstChild; c; c = c.nextSibling) {
@@ -268,8 +272,9 @@
     function setSelected(o, v) { var s = state(o); s.selected = !!v; s.dirtySelected = true; }
     /* the selectedness setting algorithm, for a single select: the last
      * selected option, else the first non-disabled one (display size 1) */
-    function selectedIndexOf(sel) {
-        var opts = optionsOf(sel), idx = -1;
+    function selectedIndexOf(sel, opts) {
+        opts = opts || optionsOf(sel);
+        var idx = -1;
         for (var i = 0; i < opts.length; i++) if (optionSelected(opts[i])) idx = sel.multiple ? (idx < 0 ? i : idx) : i;
         if (idx < 0 && !sel.multiple && !(Number(sel.getAttribute('size')) > 1)) {
             for (var j = 0; j < opts.length; j++) if (!opts[j].hasAttribute('disabled')) return j;
@@ -286,7 +291,7 @@
         reflectBool(OP, 'defaultSelected', 'selected');
         accessor(OP, 'selected', function () {
             var sel = selectOf(this);
-            if (sel && !sel.multiple) return optionsOf(sel)[selectedIndexOf(sel)] === this;
+            if (sel && !sel.multiple) { var opts = optionsOf(sel); return opts[selectedIndexOf(sel, opts)] === this; }
             return optionSelected(this);
         }, function (v) {
             var sel = selectOf(this);
@@ -309,7 +314,7 @@
             opts.forEach(function (o, k) { setSelected(o, k === (i | 0)); });
         });
         accessor(SP, 'value', function () {
-            var o = optionsOf(this)[selectedIndexOf(this)];
+            var opts = optionsOf(this), o = opts[selectedIndexOf(this, opts)];
             return o ? o.value : '';
         }, function (v) {
             v = String(v);

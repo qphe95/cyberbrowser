@@ -631,6 +631,10 @@ typedef struct Builder {
     uint32_t sp;
     CssAtom id_name;
     bool keep_top_text;         /* fragment parsing: text outside any element is kept */
+    /* HTML's implied end tags and end tags across the stack (page markup,
+     * innerHTML, DOMParser).  Off for re-parsing a serialized DOM, whose
+     * nesting scripts may have made any shape (html_parse's snapshots). */
+    bool html_rules;
     /* Streaming (dom_stream_*): the tree is live while it is built. */
     bool streaming;
     uint8_t *fresh;             /* per open element: created in the current step */
@@ -820,6 +824,134 @@ static bool doc_before(Builder *b, const DomTok *t, CssAtom tag) {
 }
 
 /* Is end tag t </name> (ASCII case-insensitive, then > or white space)? */
+/* ---- implied end tags and end tags across the stack (HTML 13.2.6.4.7,
+ * "in body", reduced to this builder: no adoption agency, no foster
+ * parenting) ---- */
+
+typedef struct TreeAtoms {
+    CssAtom li, dd, dt, p, option, optgroup, tr, td, th, button, address, div, select;
+    CssAtom special[96], scope[12], p_closer[40];
+    int nspecial, nscope, np_closer;
+} TreeAtoms;
+static TreeAtoms g_t;
+
+static void tree_atoms(void) {
+    if (g_t.li) return;
+    static const char *const special[] = {
+        "address", "applet", "area", "article", "aside", "base", "basefont", "bgsound", "blockquote", "body", "br",
+        "button", "caption", "center", "col", "colgroup", "dd", "details", "dir", "div", "dl", "dt", "embed",
+        "fieldset", "figcaption", "figure", "footer", "form", "frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6",
+        "head", "header", "hgroup", "hr", "html", "iframe", "img", "input", "keygen", "li", "link", "listing",
+        "main", "marquee", "menu", "meta", "nav", "noembed", "noframes", "noscript", "object", "ol", "p", "param",
+        "plaintext", "pre", "script", "search", "section", "select", "source", "style", "summary", "table",
+        "tbody", "td", "template", "textarea", "tfoot", "th", "thead", "title", "tr", "track", "ul", "wbr", "xmp" };
+    static const char *const scope[] = { "applet", "caption", "html", "table", "td", "th", "marquee", "object", "template" };
+    static const char *const p_closer[] = {
+        "address", "article", "aside", "blockquote", "center", "details", "dialog", "dir", "div", "dl", "fieldset",
+        "figcaption", "figure", "footer", "header", "hgroup", "main", "menu", "nav", "ol", "p", "search", "section",
+        "summary", "ul", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "listing", "form", "table", "hr", "xmp", "li", "dd", "dt" };
+    css_atom_reserve(160);
+#define T(x) css_atom_intern(x, strlen(x))
+    g_t.dd = T("dd"); g_t.dt = T("dt"); g_t.p = T("p"); g_t.option = T("option"); g_t.optgroup = T("optgroup");
+    g_t.tr = T("tr"); g_t.td = T("td"); g_t.th = T("th"); g_t.button = T("button"); g_t.address = T("address");
+    g_t.div = T("div"); g_t.select = T("select");
+    for (size_t i = 0; i < sizeof special / sizeof special[0]; i++) g_t.special[g_t.nspecial++] = T(special[i]);
+    for (size_t i = 0; i < sizeof scope / sizeof scope[0]; i++) g_t.scope[g_t.nscope++] = T(scope[i]);
+    for (size_t i = 0; i < sizeof p_closer / sizeof p_closer[0]; i++) g_t.p_closer[g_t.np_closer++] = T(p_closer[i]);
+    g_t.li = T("li");       /* (last: it marks the set as made) */
+#undef T
+}
+
+static bool atom_in(CssAtom a, const CssAtom *set, int n) {
+    for (int i = 0; i < n; i++) if (set[i] == a) return true;
+    return false;
+}
+
+/* Pop the open elements down to (and including) stack index k. */
+static void pop_to(Builder *b, uint32_t k) {
+    for (uint32_t i = b->sp; i-- > k; )
+        if (b->doc_mode && b->stack[i] == b->el_head && b->phase == DOC_IN_HEAD) b->phase = DOC_AFTER_HEAD;
+    b->sp = k;
+}
+
+/* The index of the topmost open tag element "in scope" (no scope boundary
+ * above it; button scope adds <button>), or -1. */
+static int in_scope(const Builder *b, CssAtom tag, bool button) {
+    for (uint32_t i = b->sp; i-- > 0; ) {
+        CssAtom a = g_dom.tag[b->stack[i]];
+        if (a == tag) return (int)i;
+        if (atom_in(a, g_t.scope, g_t.nscope) || (button && a == g_t.button)) return -1;
+    }
+    return -1;
+}
+
+/* A start tag closes what it implies the end of. */
+static void close_implied(Builder *b, CssAtom tag) {
+    if (!b->sp) return;
+    CssAtom top = g_dom.tag[b->stack[b->sp - 1]];
+    if (tag == g_t.option) { if (top == g_t.option) pop_to(b, b->sp - 1); return; }
+    if (tag == g_t.optgroup) {
+        if (top == g_t.option) { pop_to(b, b->sp - 1); top = b->sp ? g_dom.tag[b->stack[b->sp - 1]] : 0; }
+        if (top == g_t.optgroup) pop_to(b, b->sp - 1);
+        return;
+    }
+    if (tag == g_t.td || tag == g_t.th) { if (top == g_t.td || top == g_t.th) pop_to(b, b->sp - 1); return; }
+    if (tag == g_t.tr) {
+        if (top == g_t.td || top == g_t.th) { pop_to(b, b->sp - 1); top = b->sp ? g_dom.tag[b->stack[b->sp - 1]] : 0; }
+        if (top == g_t.tr) pop_to(b, b->sp - 1);
+        return;
+    }
+    if (tag == g_t.li || tag == g_t.dd || tag == g_t.dt) {
+        /* the nearest li (dd/dt) above any special element but address,
+         * div and p */
+        for (uint32_t i = b->sp; i-- > 0; ) {
+            CssAtom a = g_dom.tag[b->stack[i]];
+            if (tag == g_t.li ? a == g_t.li : (a == g_t.dd || a == g_t.dt)) { pop_to(b, i); break; }
+            if (atom_in(a, g_t.special, g_t.nspecial) && a != g_t.address && a != g_t.div && a != g_t.p) break;
+        }
+    }
+    if (atom_in(tag, g_t.p_closer, g_t.np_closer)) {
+        int k = in_scope(b, g_t.p, true);
+        if (k >= 0) pop_to(b, (uint32_t)k);
+    }
+}
+
+/* An end tag: the matching open element, popped with those above it; or
+ * ignored (a special one not in scope, or another blocked by a special
+ * element above it). */
+static void close_end_tag(Builder *b, const DomTok *t) {
+    char name[256];             /* (custom element names run long) */
+    size_t n = 0;
+    bool whole = false;
+    for (size_t i = t->src + 2; i < t->end && i < b->len; i++) {
+        char ch = b->html[i];
+        if (ch == '>' || ch == '/' || c_isspace((unsigned char)ch)) { whole = true; break; }
+        if (n + 1 >= sizeof name) break;
+        name[n++] = (char)tolower((unsigned char)ch);
+    }
+    if (!whole && n + 1 >= sizeof name) return;     /* (a name longer still: ignored) */
+    CssAtom tag = n ? css_atom_find(name, n) : 0;
+    if (!tag) return;
+    if (atom_in(tag, g_t.special, g_t.nspecial)) {
+        int k = in_scope(b, tag, tag == g_t.p);
+        if (tag == g_t.select) {        /* (select scope: anything but option/optgroup bounds it) */
+            k = -1;
+            for (uint32_t i = b->sp; i-- > 0; ) {
+                CssAtom a = g_dom.tag[b->stack[i]];
+                if (a == g_t.select) { k = (int)i; break; }
+                if (a != g_t.option && a != g_t.optgroup) break;
+            }
+        }
+        if (k >= 0) pop_to(b, (uint32_t)k);
+        return;
+    }
+    for (uint32_t i = b->sp; i-- > 0; ) {
+        CssAtom a = g_dom.tag[b->stack[i]];
+        if (a == tag) { pop_to(b, i); return; }
+        if (atom_in(a, g_t.special, g_t.nspecial)) return;
+    }
+}
+
 static bool end_tag_is(const Builder *b, const DomTok *t, const char *name) {
     size_t n = strlen(name), at = t->src + 2;
     if (at + n > b->len || strncasecmp(b->html + at, name, n) != 0) return false;
@@ -838,6 +970,7 @@ static bool all_space(const DomStr *d) {
  * of the input re-tokenized from *detour (a top-level end tag that the legacy
  * parser resumed from inside). */
 static bool build_tokens(Builder *b, TokChunk *c, size_t *pi, size_t *detour) {
+    tree_atoms();
     for (size_t i = *pi; i < c->n; i++) {
         DomTok *t = &c->toks[i];
         if (b->doc_mode) {
@@ -852,6 +985,11 @@ static bool build_tokens(Builder *b, TokChunk *c, size_t *pi, size_t *detour) {
         bool top_fresh = top && b->streaming && b->fresh[b->sp - 1];
         switch (t->kind) {
         case TK_START: {
+            if (top && b->html_rules) {
+                close_implied(b, t->tag);
+                top = b->sp ? b->stack[b->sp - 1] : 0;
+                top_fresh = top && b->streaming && b->fresh[b->sp - 1];
+            }
             uint32_t parent = top ? top : b->frag;
             uint32_t s = build_element(b, t, parent, top_fresh);
             if (b->doc_mode) {
@@ -880,7 +1018,9 @@ static bool build_tokens(Builder *b, TokChunk *c, size_t *pi, size_t *detour) {
             break;
         }
         case TK_END:
-            if (top) {
+            if (top && b->html_rules) {
+                close_end_tag(b, t);
+            } else if (top) {
                 const char *tn = css_atom_str(g_dom.tag[top]);
                 size_t tl = strlen(tn);
                 if (t->src + 2 + tl <= b->len && strncasecmp(b->html + t->src + 2, tn, tl) == 0) {
@@ -921,6 +1061,7 @@ static void parse_into(const char *html, size_t len, uint32_t frag, uint32_t own
     double t0 = now_ms();
     Builder b = { .html = html, .len = len, .frag = frag, .owner = owner, .stack = malloc(MAX_NESTING * sizeof(uint32_t)) };
     b.keep_top_text = fragment_mode;
+    b.html_rules = (owner || fragment_mode);
     css_atom_reserve(1);
     b.id_name = css_atom_intern("id", 2);
     uint32_t before = g_dom.live;
@@ -1002,6 +1143,7 @@ DomStream *dom_stream_begin(NodeId parent, NodeId owner_doc) {
     st->b.fresh = calloc(MAX_NESTING, 1);
     st->b.id_name = css_atom_intern("id", 2);
     st->b.streaming = true;
+    st->b.html_rules = true;
     /* (a whole document: html, head and body implied) */
     if (g_dom.kind[st->b.frag] == DOM_K_DOCUMENT) { doc_atoms(); st->b.doc_mode = true; }
     return st;

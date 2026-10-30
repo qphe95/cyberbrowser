@@ -116,6 +116,8 @@ void url_classes_install(JSContextHandle ctx, GCValue global);
 void url_hyperlinks_install(JSContextHandle ctx, GCValue global);
 /* __cyberEventPath for dom_events.js (browser/event_path.c). */
 void event_path_install(JSContextHandle ctx, GCValue global);
+/* NodeIterator, TreeWalker and document.create* (browser/traversal.c). */
+void traversal_install(JSContextHandle ctx, GCValue global);
 void dom_element_set_attr(JSContextHandle ctx, NodeId n, const char *name, const char *value);
 GCValue js_service_worker_register(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_service_worker_get_registration(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
