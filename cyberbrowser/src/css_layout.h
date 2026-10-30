@@ -346,6 +346,24 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char text_overflow_ellipsis;
     /* object-fit: 0 fill, 1 contain, 2 cover, 3 none, 4 scale-down. */
     unsigned char object_fit;
+
+    /* CSS Grid container: the track lists and areas as specified
+     * (interned, NULL = none), parsed at layout time against the final
+     * font size.  grid_flow: bit 0 column, bit 1 dense. */
+    const char *grid_cols, *grid_rows, *grid_areas, *grid_auto_cols, *grid_auto_rows;
+    unsigned char grid_flow;
+    /* Grid item placement: grid-row-start/-end, grid-column-start/-end as
+     * specified (interned, NULL = auto). */
+    const char *grid_rs, *grid_re, *grid_cs, *grid_ce;
+    /* justify-items / justify-self: 0 = normal/auto, else CssAlignItems + 1. */
+    unsigned char justify_items, justify_self;
+    /* Table part (from the tag or display: table-*): 0 none, 1 table,
+     * 2 row group, 3 row, 4 cell, 5 caption, 6 column (ignored).
+     * border-spacing (when border_spacing_set; else the cellspacing
+     * attribute or 2px) and border-collapse: collapse (no spacing). */
+    unsigned char table_role;
+    unsigned char border_spacing_set, border_collapse;
+    double border_spacing_h, border_spacing_v;
 } LayoutStyle;
 
 /* A box of the layout tree: its computed style (shared, read-only once the

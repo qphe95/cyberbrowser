@@ -226,6 +226,7 @@ static inline LayoutBox* layout_box(LayoutContext *ctx, int idx)
 
 /* Forward declarations for display/visibility helpers used during tree build. */
 static CssDisplay layout_default_display(const char *tag_name);
+static unsigned char layout_default_table_role(const char *tag_name);
 static char* layout_resolve_url(const char *base_url, const char *href);
 
 /* ============================================================================
@@ -549,9 +550,9 @@ static void layout_box_init(LayoutContext *ctx, int idx)
     HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
     if (node && node->type == HTML_NODE_ELEMENT) {
         box->s->display = layout_default_display(node->tag_name);
+        box->s->table_role = layout_default_table_role(node->tag_name);
         /* HTML UA stylesheet: table cells are middle-aligned by default. */
-        if (strcasecmp(node->tag_name, "td") == 0 || strcasecmp(node->tag_name, "th") == 0)
-            box->s->vertical_align = 1;
+        if (box->s->table_role == 4) box->s->vertical_align = 1;
     } else {
         box->s->display = CSS_DISPLAY_INLINE;
     }
@@ -1380,6 +1381,36 @@ static CssDisplay layout_default_display(const char *tag_name) {
     return CSS_DISPLAY_INLINE;
 }
 
+/* The table part an HTML element is by the UA stylesheet (LayoutStyle.table_role). */
+static unsigned char layout_default_table_role(const char *tag_name)
+{
+    if (!tag_name || tag_name[0] != 't') {
+        if (tag_name && strcasecmp(tag_name, "caption") == 0) return 5;
+        if (tag_name && (strcasecmp(tag_name, "col") == 0 || strcasecmp(tag_name, "colgroup") == 0)) return 6;
+        return 0;
+    }
+    if (strcasecmp(tag_name, "table") == 0) return 1;
+    if (strcasecmp(tag_name, "tbody") == 0 || strcasecmp(tag_name, "thead") == 0 ||
+        strcasecmp(tag_name, "tfoot") == 0) return 2;
+    if (strcasecmp(tag_name, "tr") == 0) return 3;
+    if (strcasecmp(tag_name, "td") == 0 || strcasecmp(tag_name, "th") == 0) return 4;
+    return 0;
+}
+
+/* The table part a display value makes a box. */
+static unsigned char css_display_table_role(const char *value)
+{
+    if (strncasecmp(value, "table", 5) != 0 && strcasecmp(value, "inline-table") != 0) return 0;
+    if (strcasecmp(value, "table") == 0 || strcasecmp(value, "inline-table") == 0) return 1;
+    if (strcasecmp(value, "table-row-group") == 0 || strcasecmp(value, "table-header-group") == 0 ||
+        strcasecmp(value, "table-footer-group") == 0) return 2;
+    if (strcasecmp(value, "table-row") == 0) return 3;
+    if (strcasecmp(value, "table-cell") == 0) return 4;
+    if (strcasecmp(value, "table-caption") == 0) return 5;
+    if (strncasecmp(value, "table-column", 12) == 0) return 6;
+    return 0;
+}
+
 static bool layout_display_is_block_level(CssDisplay d)
 {
     return d == CSS_DISPLAY_BLOCK || d == CSS_DISPLAY_FLEX || d == CSS_DISPLAY_GRID ||
@@ -1938,6 +1969,242 @@ static void layout_parse_mask_position(LayoutBox *box, const char *value)
     box->s->mask_pos_pct = (unsigned char)((pct[0] ? 1 : 0) | (pct[1] ? 2 : 0));
 }
 
+/* The text of value up to its first top-level '/' (out of parentheses and
+ * strings) into a (trimmed, interned) and the rest into b; *has_b says
+ * whether there was a '/'. */
+static void css_split_slash(const char *value, const char **a, const char **b, bool *has_b)
+{
+    int depth = 0;
+    char q = 0;
+    const char *p = value, *slash = NULL;
+    for (; *p; p++) {
+        if (q) { if (*p == q) q = 0; continue; }
+        if (*p == '"' || *p == '\'') q = *p;
+        else if (*p == '(' || *p == '[') depth++;
+        else if ((*p == ')' || *p == ']') && depth > 0) depth--;
+        else if (*p == '/' && depth == 0) { slash = p; break; }
+    }
+    const char *ae = slash ? slash : p;
+    const char *as = value;
+    while (as < ae && isspace((unsigned char)*as)) as++;
+    while (ae > as && isspace((unsigned char)ae[-1])) ae--;
+    *a = ae > as ? layout_intern(as, (size_t)(ae - as)) : NULL;
+    *has_b = slash != NULL;
+    *b = NULL;
+    if (slash) {
+        const char *bs = slash + 1, *be = bs + strlen(bs);
+        while (bs < be && isspace((unsigned char)*bs)) bs++;
+        while (be > bs && isspace((unsigned char)be[-1])) be--;
+        *b = be > bs ? layout_intern(bs, (size_t)(be - bs)) : NULL;
+    }
+}
+
+/* A track list or placement as stored: NULL for none / auto. */
+static const char *css_grid_value(const char *v, const char *none)
+{
+    if (!v) return NULL;
+    while (isspace((unsigned char)*v)) v++;
+    if (!*v || strcasecmp(v, none) == 0) return NULL;
+    return layout_intern(v, strlen(v));
+}
+
+/* One grid line placement as the -start/-end pair of grid-row / grid-column
+ * / grid-area: a lone custom ident also names the end line (Grid §8.4). */
+static bool css_grid_is_ident(const char *v)
+{
+    if (!v || !*v || isdigit((unsigned char)*v) || *v == '-' || *v == '+') return false;
+    if (strncasecmp(v, "span", 4) == 0 && (v[4] == '\0' || isspace((unsigned char)v[4]))) return false;
+    if (strcasecmp(v, "auto") == 0) return false;
+    for (const char *p = v; *p; p++) if (isspace((unsigned char)*p)) return false;
+    return true;
+}
+
+/* grid-template (also grid's template form): rows with optional area
+ * strings, '/', columns.  Strings go to areas, the sizes after them to rows. */
+static void css_apply_grid_template(LayoutBox *box, const char *value)
+{
+    const char *a, *b;
+    bool has_b;
+    css_split_slash(value, &a, &b, &has_b);
+    if (!has_b) {
+        box->s->grid_rows = box->s->grid_cols = box->s->grid_areas = NULL;
+        return;
+    }
+    box->s->grid_cols = css_grid_value(b, "none");
+    if (!a || (!strchr(a, '"') && !strchr(a, '\''))) {
+        box->s->grid_rows = css_grid_value(a, "none");
+        box->s->grid_areas = NULL;
+        return;
+    }
+    char areas[1024], rows[1024];
+    size_t an = 0, rn = 0;
+    const char *p = a;
+    bool pending = false;   /* a string with no size after it yet */
+    while (*p) {
+        while (isspace((unsigned char)*p)) p++;
+        if (!*p) break;
+        if (*p == '"' || *p == '\'') {
+            if (pending && rn + 6 < sizeof(rows)) rn += (size_t)snprintf(rows + rn, sizeof(rows) - rn, "auto ");
+            char q = *p++;
+            const char *s = p;
+            while (*p && *p != q) p++;
+            if (an + (size_t)(p - s) + 4 < sizeof(areas)) {
+                areas[an++] = '"';
+                memcpy(areas + an, s, (size_t)(p - s));
+                an += (size_t)(p - s);
+                areas[an++] = '"';
+                areas[an++] = ' ';
+            }
+            if (*p) p++;
+            pending = true;
+            continue;
+        }
+        const char *s = p;
+        int depth = 0;
+        while (*p && (depth > 0 || !isspace((unsigned char)*p))) {
+            if (*p == '(' || *p == '[') depth++;
+            else if (*p == ')' || *p == ']') depth--;
+            p++;
+        }
+        if (rn + (size_t)(p - s) + 2 < sizeof(rows)) {
+            memcpy(rows + rn, s, (size_t)(p - s));
+            rn += (size_t)(p - s);
+            rows[rn++] = ' ';
+        }
+        if (*s != '[') pending = false;
+    }
+    if (pending && rn + 6 < sizeof(rows)) rn += (size_t)snprintf(rows + rn, sizeof(rows) - rn, "auto ");
+    box->s->grid_areas = an ? layout_intern(areas, an - 1) : NULL;
+    box->s->grid_rows = rn ? layout_intern(rows, rn - 1) : NULL;
+}
+
+static unsigned char css_parse_self_align(const char *v)
+{
+    while (isspace((unsigned char)*v)) v++;
+    if (strncasecmp(v, "auto", 4) == 0 || strncasecmp(v, "normal", 6) == 0 || strncasecmp(v, "legacy", 6) == 0)
+        return 0;
+    if (strncasecmp(v, "left", 4) == 0) return (unsigned char)(CSS_ALIGN_FLEX_START + 1);
+    if (strncasecmp(v, "right", 5) == 0) return (unsigned char)(CSS_ALIGN_FLEX_END + 1);
+    char w[32];
+    size_t n = 0;
+    while (v[n] && !isspace((unsigned char)v[n]) && n + 1 < sizeof(w)) { w[n] = v[n]; n++; }
+    w[n] = '\0';
+    if (strcasecmp(w, "safe") == 0 || strcasecmp(w, "unsafe") == 0) return css_parse_self_align(v + n);
+    return (unsigned char)(css_parse_align_items(w) + 1);
+}
+
+/* Grid, box-alignment shorthands and table spacing properties. */
+static void layout_apply_grid_declaration(LayoutBox *box, const char *prop, const char *value,
+                                          double parent_width, double viewport_width)
+{
+    LayoutStyle *s = box->s;
+    const char *a, *b;
+    bool has_b;
+    if (strcasecmp(prop, "grid-template-columns") == 0) s->grid_cols = css_grid_value(value, "none");
+    else if (strcasecmp(prop, "grid-template-rows") == 0) s->grid_rows = css_grid_value(value, "none");
+    else if (strcasecmp(prop, "grid-template-areas") == 0) s->grid_areas = css_grid_value(value, "none");
+    else if (strcasecmp(prop, "grid-auto-columns") == 0) s->grid_auto_cols = css_grid_value(value, "auto");
+    else if (strcasecmp(prop, "grid-auto-rows") == 0) s->grid_auto_rows = css_grid_value(value, "auto");
+    else if (strcasecmp(prop, "grid-auto-flow") == 0) {
+        s->grid_flow = (unsigned char)((strstr(value, "column") ? 1 : 0) | (strstr(value, "dense") ? 2 : 0));
+    } else if (strcasecmp(prop, "grid-template") == 0) {
+        css_apply_grid_template(box, value);
+    } else if (strcasecmp(prop, "grid") == 0) {
+        s->grid_auto_cols = s->grid_auto_rows = NULL;
+        s->grid_flow = 0;
+        const char *af = strstr(value, "auto-flow");
+        if (!af) {
+            css_apply_grid_template(box, value);
+            return;
+        }
+        css_split_slash(value, &a, &b, &has_b);
+        bool rows_side = a && strstr(a, "auto-flow");   /* auto-flow [dense] <auto-rows> / <cols> */
+        const char *flow = rows_side ? a : b, *tmpl = rows_side ? b : a;
+        const char *t = flow ? flow : "";
+        char rest[512];
+        size_t rn = 0;
+        while (*t) {
+            while (isspace((unsigned char)*t)) t++;
+            const char *w = t;
+            while (*t && !isspace((unsigned char)*t)) t++;
+            size_t wl = (size_t)(t - w);
+            if ((wl == 9 && strncasecmp(w, "auto-flow", 9) == 0)) continue;
+            if (wl == 5 && strncasecmp(w, "dense", 5) == 0) { s->grid_flow |= 2; continue; }
+            if (wl && rn + wl + 2 < sizeof(rest)) { memcpy(rest + rn, w, wl); rn += wl; rest[rn++] = ' '; }
+        }
+        const char *autos = rn ? layout_intern(rest, rn - 1) : NULL;
+        s->grid_areas = NULL;
+        if (rows_side) {
+            s->grid_rows = NULL;
+            s->grid_auto_rows = autos;
+            s->grid_cols = css_grid_value(tmpl, "none");
+        } else {
+            s->grid_flow |= 1;
+            s->grid_cols = NULL;
+            s->grid_auto_cols = autos;
+            s->grid_rows = css_grid_value(tmpl, "none");
+        }
+    } else if (strcasecmp(prop, "grid-row-start") == 0) s->grid_rs = css_grid_value(value, "auto");
+    else if (strcasecmp(prop, "grid-row-end") == 0) s->grid_re = css_grid_value(value, "auto");
+    else if (strcasecmp(prop, "grid-column-start") == 0) s->grid_cs = css_grid_value(value, "auto");
+    else if (strcasecmp(prop, "grid-column-end") == 0) s->grid_ce = css_grid_value(value, "auto");
+    else if (strcasecmp(prop, "grid-row") == 0 || strcasecmp(prop, "grid-column") == 0) {
+        css_split_slash(value, &a, &b, &has_b);
+        const char *st = css_grid_value(a, "auto");
+        const char *en = has_b ? css_grid_value(b, "auto") : (css_grid_is_ident(st) ? st : NULL);
+        if (prop[5] == 'r') { s->grid_rs = st; s->grid_re = en; }
+        else { s->grid_cs = st; s->grid_ce = en; }
+    } else if (strcasecmp(prop, "grid-area") == 0) {
+        const char *v[4] = { NULL, NULL, NULL, NULL };
+        const char *rest = value;
+        int n = 0;
+        while (rest && n < 4) {
+            css_split_slash(rest, &a, &b, &has_b);
+            v[n++] = css_grid_value(a, "auto");
+            rest = has_b ? (b ? b : "") : NULL;
+        }
+        /* Omitted values: a custom ident repeats, anything else is auto. */
+        if (n < 2) v[1] = css_grid_is_ident(v[0]) ? v[0] : NULL;
+        if (n < 3) v[2] = css_grid_is_ident(v[0]) ? v[0] : NULL;
+        if (n < 4) v[3] = css_grid_is_ident(v[1]) ? v[1] : NULL;
+        s->grid_rs = v[0]; s->grid_cs = v[1]; s->grid_re = v[2]; s->grid_ce = v[3];
+    } else if (strcasecmp(prop, "grid-gap") == 0 || strcasecmp(prop, "grid-row-gap") == 0 ||
+               strcasecmp(prop, "grid-column-gap") == 0) {
+        double *r = &s->gap_row, *c = &s->gap_col;
+        if (prop[5] == 'g') css_parse_shorthand_1_or_2(value, parent_width, viewport_width, s->font_size, r, c);
+        else if (prop[5] == 'r') *r = css_parse_length(value, parent_width, viewport_width, s->font_size);
+        else *c = css_parse_length(value, parent_width, viewport_width, s->font_size);
+    } else if (strcasecmp(prop, "justify-items") == 0) s->justify_items = css_parse_self_align(value);
+    else if (strcasecmp(prop, "justify-self") == 0) s->justify_self = css_parse_self_align(value);
+    else if (strcasecmp(prop, "place-items") == 0 || strcasecmp(prop, "place-self") == 0 ||
+             strcasecmp(prop, "place-content") == 0) {
+        char first[64];
+        size_t n = 0;
+        while (isspace((unsigned char)*value)) value++;
+        while (value[n] && !isspace((unsigned char)value[n]) && n + 1 < sizeof(first)) { first[n] = value[n]; n++; }
+        first[n] = '\0';
+        const char *second = value + n;
+        while (isspace((unsigned char)*second)) second++;
+        if (!*second) second = first;
+        if (prop[6] == 'i') {
+            s->align_items = css_parse_align_items(first);
+            s->justify_items = css_parse_self_align(second);
+        } else if (prop[6] == 's') {
+            s->align_self = (strcasecmp(first, "auto") == 0 || strcasecmp(first, "normal") == 0)
+                ? 0 : (unsigned char)(css_parse_align_items(first) + 1);
+            s->justify_self = css_parse_self_align(second);
+        } else {
+            s->justify_content = css_parse_justify_content(second);
+        }
+    } else if (strcasecmp(prop, "border-spacing") == 0) {
+        css_parse_shorthand_1_or_2(value, parent_width, viewport_width, s->font_size,
+                                   &s->border_spacing_h, &s->border_spacing_v);
+        s->border_spacing_set = 1;
+    } else if (strcasecmp(prop, "border-collapse") == 0) {
+        s->border_collapse = strcasecmp(value, "collapse") == 0 ? 1 : 0;
+    }
+}
+
 static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                                      double parent_width, double viewport_width,
                                      const char *base_url)
@@ -1953,6 +2220,11 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         box->s->webkit_box = (strcasecmp(value, "-webkit-box") == 0 || strcasecmp(value, "box") == 0) ? 1 :
                           strcasecmp(value, "-webkit-inline-box") == 0 ? 2 : 0;
         if (strcasecmp(value, "inline-table") == 0) box->s->display = CSS_DISPLAY_BLOCK;
+        box->s->table_role = css_display_table_role(value);
+    } else if (strncasecmp(prop, "grid", 4) == 0 || strcasecmp(prop, "justify-items") == 0 ||
+               strcasecmp(prop, "justify-self") == 0 || strncasecmp(prop, "place-", 6) == 0 ||
+               strncasecmp(prop, "border-spacing", 14) == 0 || strcasecmp(prop, "border-collapse") == 0) {
+        layout_apply_grid_declaration(box, prop, value, parent_width, viewport_width);
     } else if (strcasecmp(prop, "visibility") == 0) {
         box->s->visibility = css_parse_visibility(value);
         box->s->visibility_set = 1;
@@ -5220,6 +5492,8 @@ static bool layout_reads_attr(const char *name)
     static const char *const names[] = {
         "width", "height", "viewbox", "type", "src", "srcset", "rel", "href", "media",
         "hidden", "colspan", "rowspan", "span", "dir", "lang", "slot", "name", "size", "cols", "rows",
+        /* presentational hints */
+        "bgcolor", "align", "valign", "nowrap", "cellpadding", "cellspacing", "border", "color", "face",
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcasecmp(name, names[i]) == 0) return true;
@@ -6814,6 +7088,106 @@ static void style_note_result(StylePass *P, int idx, const LayoutBox *box, const
 
 static void style_finish_box(StylePass *P, LayoutBox *box, const LayoutBox *parent, bool element);
 
+static void hint_apply(LayoutContext *ctx, LayoutBox *box, const char *prop, const char *value)
+{
+    CssDeclaration d = { (char *)prop, (char *)value, false };
+    layout_apply_declaration(box, &d, ctx->viewport_width, ctx->viewport_width, ctx->base_url);
+}
+
+/* A dimension attribute (width="85%", height="10") as a CSS length. */
+static bool hint_dimension(const char *v, char *out, size_t cap)
+{
+    if (!v) return false;
+    while (isspace((unsigned char)*v)) v++;
+    char *end = NULL;
+    double n = strtod(v, &end);
+    if (end == v || n < 0.0) return false;
+    snprintf(out, cap, "%g%s", n, *end == '%' ? "%" : "px");
+    return true;
+}
+
+/* HTML presentational hints (HTML §15.3): attributes that map to CSS
+ * below every author rule (bgcolor, width/height, align, valign, nowrap,
+ * cellpadding / cellspacing).  The style cache keys cover the attributes;
+ * a table's cellpadding is read from the cell's nearest table. */
+static void style_presentational_hints(LayoutContext *ctx, LayoutBox *box, int idx, HtmlNode *node)
+{
+    const char *tag = node->tag_name ? node->tag_name : "";
+    unsigned char role = layout_default_table_role(tag);
+    bool body = strcasecmp(tag, "body") == 0;
+    if (!role && !body && strcasecmp(tag, "font") != 0 && strcasecmp(tag, "div") != 0 &&
+        strcasecmp(tag, "p") != 0 && strncasecmp(tag, "h", 1) != 0 && strcasecmp(tag, "hr") != 0)
+        return;
+    char buf[64];
+    const char *v;
+    if ((role || body) && (v = layout_node_attribute(node, "bgcolor")) && *v)
+        hint_apply(ctx, box, "background-color", v);
+    if (strcasecmp(tag, "font") == 0) {
+        if ((v = layout_node_attribute(node, "color")) && *v) hint_apply(ctx, box, "color", v);
+        if ((v = layout_node_attribute(node, "face")) && *v) hint_apply(ctx, box, "font-family", v);
+        return;
+    }
+    if (role == 1 || role == 4 || role == 6 || strcasecmp(tag, "hr") == 0) {
+        if (hint_dimension(layout_node_attribute(node, "width"), buf, sizeof(buf))) hint_apply(ctx, box, "width", buf);
+    }
+    if (role == 1 || role == 3 || role == 4) {
+        if (hint_dimension(layout_node_attribute(node, "height"), buf, sizeof(buf))) hint_apply(ctx, box, "height", buf);
+    }
+    v = layout_node_attribute(node, "align");
+    if (role == 1) {
+        /* Quirks-mode tables don't inherit text-align (the pages that put
+         * them in <center> are legacy ones). */
+        for (int p = ctx->tree.nodes[idx].parent_idx, hops = 0; p >= 0 && hops < 8;
+             p = ctx->tree.nodes[p].parent_idx, hops++) {
+            HtmlNode *pn = layout_node_dom(ctx, ctx->tree.nodes[p].dom_node_idx);
+            if (pn && pn->type == HTML_NODE_ELEMENT && pn->tag_name && strcasecmp(pn->tag_name, "center") == 0) {
+                hint_apply(ctx, box, "text-align", "left");
+                break;
+            }
+        }
+        if (v && strcasecmp(v, "center") == 0) {
+            hint_apply(ctx, box, "margin-left", "auto");
+            hint_apply(ctx, box, "margin-right", "auto");
+        } else if (v && (strcasecmp(v, "left") == 0 || strcasecmp(v, "right") == 0)) {
+            hint_apply(ctx, box, "float", v);
+        }
+        if (hint_dimension(layout_node_attribute(node, "cellspacing"), buf, sizeof(buf)))
+            hint_apply(ctx, box, "border-spacing", buf);
+        if (hint_dimension(layout_node_attribute(node, "border"), buf, sizeof(buf)) && strcmp(buf, "0px") != 0) {
+            hint_apply(ctx, box, "border-style", "outset");
+            hint_apply(ctx, box, "border-width", buf);
+            hint_apply(ctx, box, "border-color", "gray");
+        }
+        return;
+    }
+    if (v && *v && (role >= 2 || strcasecmp(tag, "div") == 0 || strcasecmp(tag, "p") == 0 ||
+                    (tag[0] == 'h' && tag[1] >= '1' && tag[1] <= '6' && !tag[2]))) {
+        if (strcasecmp(v, "center") == 0 || strcasecmp(v, "middle") == 0) hint_apply(ctx, box, "text-align", "center");
+        else if (strcasecmp(v, "left") == 0 || strcasecmp(v, "right") == 0 || strcasecmp(v, "justify") == 0)
+            hint_apply(ctx, box, "text-align", v);
+    } else if (role == 4 && tag[1] == 'h') {
+        hint_apply(ctx, box, "text-align", "center");
+    }
+    if (role >= 2 && role <= 4 && (v = layout_node_attribute(node, "valign")) && *v) {
+        if (strcasecmp(v, "top") == 0 || strcasecmp(v, "bottom") == 0 || strcasecmp(v, "middle") == 0 ||
+            strcasecmp(v, "baseline") == 0)
+            hint_apply(ctx, box, "vertical-align", v);
+    }
+    if (role != 4) return;
+    if (layout_node_attribute(node, "nowrap")) hint_apply(ctx, box, "white-space", "nowrap");
+    /* Cell padding: the table's cellpadding, else the UA's 1px. */
+    const char *pad = "1px";
+    for (int p = ctx->tree.nodes[idx].parent_idx, hops = 0; p >= 0 && hops < 4;
+         p = ctx->tree.nodes[p].parent_idx, hops++) {
+        HtmlNode *pn = layout_node_dom(ctx, ctx->tree.nodes[p].dom_node_idx);
+        if (!pn || pn->type != HTML_NODE_ELEMENT || !pn->tag_name) continue;
+        if (strcasecmp(pn->tag_name, "table") != 0) continue;
+        if (hint_dimension(layout_node_attribute(pn, "cellpadding"), buf, sizeof(buf))) pad = buf;
+        break;
+    }
+    hint_apply(ctx, box, "padding", pad);
+}
+
 static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
 {
     LayoutContext *ctx = P->ctx;
@@ -7067,6 +7441,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
             }
         }
 
+        style_presentational_hints(ctx, box, idx, node);
         for (int d = 0; d < count; d++) {
             const char *prop = applied[d].decl->property;
             if (prop && prop[0] == '-' && prop[1] == '-') continue;
@@ -8730,6 +9105,10 @@ static double layout_intrinsic_contribution(LayoutContext *ctx, int c, bool want
     return w < 0.0 ? 0.0 : w;
 }
 
+static double layout_grid_intrinsic(LayoutContext *ctx, int idx, bool want_max);
+static double layout_table_intrinsic(LayoutContext *ctx, int idx, bool want_max);
+static bool table_is_table(const LayoutBox *b);
+
 static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_max)
 {
     LayoutBox *box = layout_box(ctx, idx);
@@ -8797,7 +9176,12 @@ static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_ma
             n++;
         }
         if (is_row && (want_max || !wraps) && n > 1) content += (n - 1) * box->s->gap_col;
+    } else if (box->s->display == CSS_DISPLAY_GRID) {
+        content = layout_grid_intrinsic(ctx, idx, want_max);
+    } else if (table_is_table(box) && (content = layout_table_intrinsic(ctx, idx, want_max)) >= 0.0) {
+        /* (a table without rows or cells is sized as a block) */
     } else {
+        content = 0.0;
         /* Block / inline formatting: inline-level children accumulate along
          * a line (max-content) while block-level children stand alone. */
         double line = 0.0, pending_space = 0.0;
@@ -8965,6 +9349,9 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
     double content_left = box->x + box->padding_left + box->s->border_left;
     double content_top  = box->y + box->padding_top + box->s->border_top;
     double avail_width  = box->content_width;
+    HtmlNode *self_dom = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+    bool in_center = self_dom && self_dom->type == HTML_NODE_ELEMENT && self_dom->tag_name &&
+                     strcasecmp(self_dom->tag_name, "center") == 0;
 
     int nkids = 0;
     int *kids = layout_collect_flow_children(ctx, idx, &nkids);
@@ -9019,10 +9406,12 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
              * extent (e.g. a fixed-width thumb frame inside). */
             child->x = content_left + child->margin_left;
             child->y = cur.y + child->margin_top;
-            if (child->s->display == CSS_DISPLAY_OTHER &&
+            if ((child->s->display == CSS_DISPLAY_OTHER || child->s->display == CSS_DISPLAY_GRID ||
+                 table_is_table(child)) &&
                 !(child->s->width_set || child->s->width_percent > 0.0 || child->s->width_keyword)) {
-                /* Floated table (Wikipedia's figure thumbs): shrink-to-fit
-                 * before layout so a caption wraps instead of widening it. */
+                /* Floated table (Wikipedia's figure thumbs) or grid:
+                 * shrink-to-fit before layout so a caption wraps instead of
+                 * widening it, and auto tracks don't stretch. */
                 double a = avail_width - child->margin_left - child->margin_right;
                 if (a < 0.0) a = 0.0;
                 child->width = layout_shrink_to_fit(ctx, c, a);
@@ -9128,15 +9517,18 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
             }
 
             child->x = content_left + child->margin_left;
-            if ((child->s->margin_auto & 0xA) && (child->s->width_set || child->s->width_percent > 0.0 || child->s->width_keyword ||
-                                               child->max_width > 0.0)) {
+            /* <center> centers its block children (-webkit-center). */
+            unsigned char mauto = child->s->margin_auto;
+            if (in_center && !(mauto & 0xA) && child->s->float_side == 0) mauto |= 0xA;
+            if ((mauto & 0xA) && (child->s->width_set || child->s->width_percent > 0.0 || child->s->width_keyword ||
+                                  child->max_width > 0.0)) {
                 /* Auto horizontal margins absorb the free space (§10.3.3). */
-                double ml = (child->s->margin_auto & 8) ? 0.0 : child->margin_left;
-                double mr = (child->s->margin_auto & 2) ? 0.0 : child->margin_right;
+                double ml = (mauto & 8) ? 0.0 : child->margin_left;
+                double mr = (mauto & 2) ? 0.0 : child->margin_right;
                 double free_w = avail_width - child->width - ml - mr;
                 if (free_w > 0.0) {
-                    if ((child->s->margin_auto & 0xA) == 0xA) child->x = content_left + free_w / 2.0;
-                    else if (child->s->margin_auto & 8) child->x = content_left + free_w;
+                    if ((mauto & 0xA) == 0xA) child->x = content_left + free_w / 2.0;
+                    else if (mauto & 8) child->x = content_left + free_w;
                 }
             }
             child->y = cur.y + gap;
@@ -10321,6 +10713,976 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
     free(kids);
 }
 
+/* ---- Grid layout (CSS Grid §7-§12) ----
+ * 1. the track lists (repeat(), auto-fill/-fit, minmax(), fit-content(),
+ *    line names) and grid-template-areas, parsed against the final font size;
+ * 2. item placement: definite lines, spans, areas and named lines, then
+ *    auto-placement (row or column flow, sparse or dense) with implicit
+ *    tracks sized by grid-auto-rows/-columns;
+ * 3. column sizing from the items' min/max-content contributions (§12.5:
+ *    intrinsic sizes, spanning items, maximize, flexible tracks, stretched
+ *    auto tracks), items laid out at their column widths, then row sizing
+ *    from their heights;
+ * 4. alignment: justify-/align-self (stretch by default) and
+ *    justify-content over the columns. */
+
+enum { GT_LEN, GT_FR, GT_AUTO, GT_MINC, GT_MAXC, GT_FIT };
+
+typedef struct {
+    unsigned char kmin, kmax;          /* GT_*: min and max sizing functions */
+    double min_px, min_pct;            /* GT_LEN min */
+    double max_px, max_pct;            /* GT_LEN max; flex factor for GT_FR; limit for GT_FIT */
+} GridTrackDef;
+
+#define GRID_MAX_TRACKS 512
+#define GRID_MAX_NAMES 64
+#define GRID_MAX_AREAS 64
+
+typedef struct { const char *name; size_t len; int line; } GridLineName;
+
+typedef struct {
+    GridTrackDef t[GRID_MAX_TRACKS];
+    int n;
+    GridLineName names[GRID_MAX_NAMES];
+    int nnames;
+    int fit_start, fit_count;          /* repeat(auto-fit, ...) tracks: empty ones collapse */
+} GridTrackList;
+
+typedef struct { const char *name; size_t len; int r0, r1, c0, c1; } GridArea;
+
+/* Next whitespace-separated token of a track list, keeping (...) and [...]
+ * together.  Returns false at the end. */
+static bool grid_token(const char **p, const char **s, size_t *n)
+{
+    const char *q = *p;
+    while (*q && (isspace((unsigned char)*q) || *q == ',')) q++;
+    if (!*q) { *p = q; return false; }
+    const char *st = q;
+    int depth = 0;
+    while (*q && (depth > 0 || (!isspace((unsigned char)*q) && *q != ','))) {
+        if (*q == '(' || *q == '[') depth++;
+        else if ((*q == ')' || *q == ']') && depth > 0) depth--;
+        q++;
+    }
+    *s = st;
+    *n = (size_t)(q - st);
+    *p = q;
+    return true;
+}
+
+static bool grid_breadth(const char *s, size_t n, double fs, unsigned char *k, double *px, double *pct)
+{
+    char buf[128];
+    if (n == 0 || n >= sizeof(buf)) return false;
+    memcpy(buf, s, n);
+    buf[n] = '\0';
+    *px = *pct = 0.0;
+    if (strcasecmp(buf, "auto") == 0) { *k = GT_AUTO; return true; }
+    if (strcasecmp(buf, "min-content") == 0) { *k = GT_MINC; return true; }
+    if (strcasecmp(buf, "max-content") == 0) { *k = GT_MAXC; return true; }
+    char *end = NULL;
+    double v = strtod(buf, &end);
+    if (end != buf && strcasecmp(end, "fr") == 0) { *k = GT_FR; *px = v < 0.0 ? 0.0 : v; return true; }
+    if (end == buf && !strchr(buf, '(')) return false;
+    CssLen l = css_parse_len(buf, fs);
+    *k = GT_LEN;
+    *px = l.px;
+    *pct = l.pct;
+    return true;
+}
+
+static bool grid_track_size(const char *s, size_t n, double fs, GridTrackDef *t)
+{
+    memset(t, 0, sizeof(*t));
+    if (n > 7 && strncasecmp(s, "minmax(", 7) == 0 && s[n - 1] == ')') {
+        const char *in = s + 7, *e = s + n - 1, *comma = in;
+        int depth = 0;
+        for (; comma < e; comma++) {
+            if (*comma == '(') depth++;
+            else if (*comma == ')') depth--;
+            else if (*comma == ',' && depth == 0) break;
+        }
+        if (comma >= e) return false;
+        const char *a = in, *ae = comma, *b = comma + 1, *be = e;
+        while (a < ae && isspace((unsigned char)*a)) a++;
+        while (ae > a && isspace((unsigned char)ae[-1])) ae--;
+        while (b < be && isspace((unsigned char)*b)) b++;
+        while (be > b && isspace((unsigned char)be[-1])) be--;
+        if (!grid_breadth(a, (size_t)(ae - a), fs, &t->kmin, &t->min_px, &t->min_pct)) return false;
+        if (!grid_breadth(b, (size_t)(be - b), fs, &t->kmax, &t->max_px, &t->max_pct)) return false;
+        if (t->kmin == GT_FR) { t->kmin = GT_AUTO; t->min_px = 0.0; }
+        return true;
+    }
+    if (n > 12 && strncasecmp(s, "fit-content(", 12) == 0 && s[n - 1] == ')') {
+        unsigned char k;
+        if (!grid_breadth(s + 12, n - 13, fs, &k, &t->max_px, &t->max_pct) || k != GT_LEN) return false;
+        t->kmin = GT_AUTO;
+        t->kmax = GT_FIT;
+        return true;
+    }
+    unsigned char k;
+    double px, pct;
+    if (!grid_breadth(s, n, fs, &k, &px, &pct)) return false;
+    if (k == GT_FR) { t->kmin = GT_AUTO; t->kmax = GT_FR; t->max_px = px; return true; }
+    t->kmin = t->kmax = k;
+    t->min_px = t->max_px = px;
+    t->min_pct = t->max_pct = pct;
+    return true;
+}
+
+/* A track's definite size for counting auto repetitions (§7.2.3.2). */
+static double grid_track_fixed(const GridTrackDef *t, double avail)
+{
+    if (t->kmax == GT_LEN) return t->max_px + t->max_pct * (avail > 0.0 ? avail : 0.0);
+    if (t->kmin == GT_LEN) return t->min_px + t->min_pct * (avail > 0.0 ? avail : 0.0);
+    return 0.0;
+}
+
+static void grid_add_names(GridTrackList *L, const char *s, size_t n, int line)
+{
+    const char *p = s + 1, *e = s + n - (s[n - 1] == ']' ? 1 : 0);
+    while (p < e) {
+        while (p < e && isspace((unsigned char)*p)) p++;
+        const char *w = p;
+        while (p < e && !isspace((unsigned char)*p)) p++;
+        if (p > w && L->nnames < GRID_MAX_NAMES) {
+            L->names[L->nnames].name = w;
+            L->names[L->nnames].len = (size_t)(p - w);
+            L->names[L->nnames].line = line;
+            L->nnames++;
+        }
+    }
+}
+
+/* One track list into L.  avail (< 0: indefinite) sizes auto repetitions. */
+static void grid_parse_tracks(const char *src, double fs, double avail, double gap, GridTrackList *L)
+{
+    L->n = 0;
+    L->nnames = 0;
+    L->fit_start = L->fit_count = 0;
+    if (!src) return;
+    /* The space the tracks outside an auto repetition take. */
+    double other = 0.0;
+    int nother = 0;
+    const char *p = src, *s;
+    size_t n;
+    while (grid_token(&p, &s, &n)) {
+        if (*s == '[' || (n > 7 && strncasecmp(s, "repeat(", 7) == 0)) continue;
+        GridTrackDef t;
+        if (grid_track_size(s, n, fs, &t)) { other += grid_track_fixed(&t, avail); nother++; }
+    }
+    p = src;
+    while (grid_token(&p, &s, &n) && L->n < GRID_MAX_TRACKS) {
+        if (*s == '[') { grid_add_names(L, s, n, L->n); continue; }
+        if (n > 8 && strncasecmp(s, "repeat(", 7) == 0 && s[n - 1] == ')') {
+            const char *in = s + 7, *e = s + n - 1, *comma = in;
+            while (comma < e && *comma != ',') comma++;
+            if (comma >= e) continue;
+            char cnt[32];
+            size_t cl = 0;
+            for (const char *c = in; c < comma && cl + 1 < sizeof(cnt); c++)
+                if (!isspace((unsigned char)*c)) cnt[cl++] = *c;
+            cnt[cl] = '\0';
+            /* The repeated list (no nested repeat()). */
+            GridTrackDef rep[64];
+            struct { const char *s; size_t n; int at; } rnames[16];
+            int nrep = 0, nrn = 0;
+            char inner[1024];
+            size_t il = (size_t)(e - comma - 1);
+            if (il >= sizeof(inner)) il = sizeof(inner) - 1;
+            memcpy(inner, comma + 1, il);
+            inner[il] = '\0';
+            const char *ip = inner, *is;
+            size_t in_n;
+            while (grid_token(&ip, &is, &in_n)) {
+                if (*is == '[') {
+                    if (nrn < 16) { rnames[nrn].s = is; rnames[nrn].n = in_n; rnames[nrn].at = nrep; nrn++; }
+                    continue;
+                }
+                if (nrep < 64 && grid_track_size(is, in_n, fs, &rep[nrep])) nrep++;
+            }
+            if (nrep == 0) continue;
+            int count;
+            bool fit = strcasecmp(cnt, "auto-fit") == 0;
+            if (fit || strcasecmp(cnt, "auto-fill") == 0) {
+                double per = 0.0;
+                for (int i = 0; i < nrep; i++) per += grid_track_fixed(&rep[i], avail);
+                per += gap * nrep;
+                count = 1;
+                if (avail > 0.0 && per > 0.0) {
+                    double room = avail - other - gap * nother + gap;
+                    count = (int)floor((room + 1e-6) / per);
+                    if (count < 1) count = 1;
+                }
+                if (fit) { L->fit_start = L->n; L->fit_count = count * nrep; }
+            } else {
+                count = atoi(cnt);
+                if (count < 1) count = 1;
+            }
+            for (int r = 0; r < count && L->n < GRID_MAX_TRACKS; r++) {
+                int base = L->n;
+                for (int i = 0; i < nrep && L->n < GRID_MAX_TRACKS; i++) L->t[L->n++] = rep[i];
+                for (int k = 0; k < nrn; k++) {
+                    /* (inner points into a stack buffer: intern the names) */
+                    const char *nm = layout_intern(rnames[k].s, rnames[k].n);
+                    if (nm) grid_add_names(L, nm, rnames[k].n, base + rnames[k].at);
+                }
+            }
+            if (fit && L->fit_count > L->n - L->fit_start) L->fit_count = L->n - L->fit_start;
+            continue;
+        }
+        if (grid_track_size(s, n, fs, &L->t[L->n])) L->n++;
+    }
+}
+
+/* grid-template-areas: each named area's rectangle (0-based lines). */
+static int grid_parse_areas(const char *src, GridArea *areas, int max, int *rows, int *cols)
+{
+    int na = 0, r = 0;
+    *rows = *cols = 0;
+    if (!src) return 0;
+    const char *p = src;
+    while (*p) {
+        while (*p && *p != '"' && *p != '\'') p++;
+        if (!*p) break;
+        char q = *p++;
+        int c = 0;
+        while (*p && *p != q) {
+            while (*p && *p != q && isspace((unsigned char)*p)) p++;
+            if (!*p || *p == q) break;
+            const char *w = p;
+            if (*p == '.') {
+                while (*p == '.') p++;
+            } else {
+                while (*p && *p != q && !isspace((unsigned char)*p) && *p != '.') p++;
+                size_t len = (size_t)(p - w);
+                int a = 0;
+                while (a < na && !(areas[a].len == len && memcmp(areas[a].name, w, len) == 0)) a++;
+                if (a == na && na < max) {
+                    areas[na].name = w; areas[na].len = len;
+                    areas[na].r0 = r; areas[na].r1 = r + 1;
+                    areas[na].c0 = c; areas[na].c1 = c + 1;
+                    na++;
+                } else if (a < na) {
+                    if (r + 1 > areas[a].r1) areas[a].r1 = r + 1;
+                    if (c + 1 > areas[a].c1) areas[a].c1 = c + 1;
+                    if (c < areas[a].c0) areas[a].c0 = c;
+                }
+            }
+            c++;
+        }
+        if (*p) p++;
+        if (c > *cols) *cols = c;
+        r++;
+    }
+    *rows = r;
+    return na;
+}
+
+typedef struct {
+    GridTrackList cols, rows;
+    GridArea areas[GRID_MAX_AREAS];
+    int nareas, area_rows, area_cols;
+} GridDefs;
+
+/* A named line: an area's edge, name-start / name-end, or an explicit name. */
+static int grid_named_line(const GridDefs *D, bool rows, const char *nm, size_t len, bool end)
+{
+    for (int a = 0; a < D->nareas; a++)
+        if (D->areas[a].len == len && memcmp(D->areas[a].name, nm, len) == 0)
+            return rows ? (end ? D->areas[a].r1 : D->areas[a].r0) : (end ? D->areas[a].c1 : D->areas[a].c0);
+    const GridTrackList *L = rows ? &D->rows : &D->cols;
+    for (int i = 0; i < L->nnames; i++)
+        if (L->names[i].len == len && memcmp(L->names[i].name, nm, len) == 0) return L->names[i].line;
+    /* name-start / name-end of an area */
+    if (len > 6 && (memcmp(nm + len - 6, "-start", 6) == 0 || (len > 4 && memcmp(nm + len - 4, "-end", 4) == 0))) {
+        bool is_end = memcmp(nm + len - 4, "-end", 4) == 0;
+        size_t bl = len - (is_end ? 4 : 6);
+        for (int a = 0; a < D->nareas; a++)
+            if (D->areas[a].len == bl && memcmp(D->areas[a].name, nm, bl) == 0)
+                return rows ? (is_end ? D->areas[a].r1 : D->areas[a].r0) : (is_end ? D->areas[a].c1 : D->areas[a].c0);
+    }
+    return -1;
+}
+
+/* One placement property: *line (0-based) when definite, else *span
+ * (>= 1) from "span N"; both unset for auto. */
+static void grid_line_value(const GridDefs *D, bool rows, const char *v, bool end, int explicit_lines,
+                            int *line, int *span)
+{
+    *line = -1;
+    *span = 0;
+    if (!v) return;
+    while (isspace((unsigned char)*v)) v++;
+    if (strncasecmp(v, "span", 4) == 0 && (isspace((unsigned char)v[4]) || !v[4])) {
+        int n = atoi(v + 4);
+        *span = n > 0 ? n : 1;
+        return;
+    }
+    char *e = NULL;
+    long n = strtol(v, &e, 10);
+    if (e != v) {
+        if (n > 0) *line = (int)n - 1;
+        else if (n < 0) *line = explicit_lines + (int)n;
+        if (*line < 0) *line = 0;
+        return;
+    }
+    size_t len = 0;
+    while (v[len] && !isspace((unsigned char)v[len])) len++;
+    int l = grid_named_line(D, rows, v, len, end);
+    if (l >= 0) *line = l;
+}
+
+/* An item's start track and span on one axis; false when it is auto. */
+static bool grid_resolve_axis(const GridDefs *D, bool rows, const char *sv, const char *ev, int explicit_tracks,
+                              int *start, int *span)
+{
+    int sl, ss, el, es;
+    grid_line_value(D, rows, sv, false, explicit_tracks + 1, &sl, &ss);
+    grid_line_value(D, rows, ev, true, explicit_tracks + 1, &el, &es);
+    if (sl >= 0 && el >= 0) {
+        if (el < sl) { int t = sl; sl = el; el = t; }
+        *start = sl;
+        *span = el > sl ? el - sl : 1;
+        return true;
+    }
+    if (sl >= 0) { *start = sl; *span = es > 0 ? es : 1; return true; }
+    if (el >= 0) {
+        int sp = ss > 0 ? ss : 1;
+        *start = el - sp < 0 ? 0 : el - sp;
+        *span = el - *start > 0 ? el - *start : 1;
+        return true;
+    }
+    *span = ss > 0 ? ss : (es > 0 ? es : 1);
+    return false;
+}
+
+typedef struct {
+    int idx;
+    bool is_text;
+    int r, c, rs, cs;                  /* start track and span on each axis */
+    double min_w, max_w;               /* column contributions (margin box) */
+    double h;                          /* margin-box height at its column width */
+    int order, seq;
+} GridItem;
+
+typedef struct {
+    unsigned char kmin, kmax;
+    double minv, limit, fr;            /* fixed minimum; fixed maximum / fit-content limit; flex factor */
+    double base, growth;               /* growth < 0: infinite */
+    bool collapsed;
+} GridSize;
+
+static int grid_item_order_cmp(const void *a, const void *b)
+{
+    const GridItem *x = (const GridItem *)a, *y = (const GridItem *)b;
+    if (x->order != y->order) return x->order < y->order ? -1 : 1;
+    return x->seq - y->seq;
+}
+
+static bool grid_occupied(const unsigned char *occ, int M, int maj, int majspan, int mn, int mnspan, int nmaj)
+{
+    for (int a = maj; a < maj + majspan; a++) {
+        if (a >= nmaj) return false;
+        for (int b = mn; b < mn + mnspan; b++) if (occ[(size_t)a * M + b]) return true;
+    }
+    return false;
+}
+
+/* Auto-placement (§8.5).  The major axis is rows for row flow (it grows),
+ * the minor one has M tracks. */
+static int grid_place_items(GridItem *it, int n, const bool *rdef, const bool *cdef, bool column_flow,
+                            bool dense, int ncols_explicit, int nrows_explicit, int *out_cols)
+{
+    int M = column_flow ? nrows_explicit : ncols_explicit;
+    int nmaj = column_flow ? ncols_explicit : nrows_explicit;
+    for (int i = 0; i < n; i++) {
+        bool mdef = column_flow ? rdef[i] : cdef[i];
+        int mn = column_flow ? it[i].r : it[i].c, mns = column_flow ? it[i].rs : it[i].cs;
+        if (mdef && mn + mns > M) M = mn + mns;
+        if (!mdef && mns > M) M = mns;
+        bool jdef = column_flow ? cdef[i] : rdef[i];
+        int mj = column_flow ? it[i].c : it[i].r, mjs = column_flow ? it[i].cs : it[i].rs;
+        if (jdef && mj + mjs > nmaj) nmaj = mj + mjs;
+    }
+    if (M < 1) M = 1;
+    int cap = nmaj + n * 2 + 8;
+    int span_max = 1;
+    for (int i = 0; i < n; i++) {
+        int mjs = column_flow ? it[i].cs : it[i].rs;
+        if (mjs > span_max) span_max = mjs;
+    }
+    cap += span_max * n;
+    if (cap > 100000) cap = 100000;
+    unsigned char *occ = (unsigned char *)calloc((size_t)cap * (size_t)M, 1);
+    if (!occ) { *out_cols = M; return nmaj; }
+#define MAJ(i) (column_flow ? it[i].c : it[i].r)
+#define MAJS(i) (column_flow ? it[i].cs : it[i].rs)
+#define MIN_(i) (column_flow ? it[i].r : it[i].c)
+#define MINS(i) (column_flow ? it[i].rs : it[i].cs)
+#define SETPOS(i, mj, mn) do { if (column_flow) { it[i].c = (mj); it[i].r = (mn); } \
+                               else { it[i].r = (mj); it[i].c = (mn); } } while (0)
+    int used = 0;
+    /* 1. both axes definite */
+    for (int i = 0; i < n; i++) {
+        if (!(rdef[i] && cdef[i])) continue;
+        for (int a = MAJ(i); a < MAJ(i) + MAJS(i) && a < cap; a++)
+            for (int b = MIN_(i); b < MIN_(i) + MINS(i) && b < M; b++) occ[(size_t)a * M + b] = 1;
+        if (MAJ(i) + MAJS(i) > used) used = MAJ(i) + MAJS(i);
+    }
+    /* 2. major axis definite only */
+    for (int i = 0; i < n; i++) {
+        bool jdef = column_flow ? cdef[i] : rdef[i], mdef = column_flow ? rdef[i] : cdef[i];
+        if (!jdef || mdef) continue;
+        int mj = MAJ(i), mjs = MAJS(i), mns = MINS(i), at = 0;
+        while (at + mns <= M && grid_occupied(occ, M, mj, mjs, at, mns, cap)) at++;
+        if (at + mns > M) at = 0;
+        SETPOS(i, mj, at);
+        for (int a = mj; a < mj + mjs && a < cap; a++)
+            for (int b = at; b < at + mns && b < M; b++) occ[(size_t)a * M + b] = 1;
+        if (mj + mjs > used) used = mj + mjs;
+    }
+    /* 3. the rest, in order */
+    int cr = 0, cc = 0;
+    for (int i = 0; i < n; i++) {
+        bool jdef = column_flow ? cdef[i] : rdef[i], mdef = column_flow ? rdef[i] : cdef[i];
+        if (jdef) continue;
+        int mjs = MAJS(i), mns = MINS(i);
+        if (dense) { cr = 0; cc = 0; }
+        if (mdef) {
+            int mn = MIN_(i);
+            if (!dense && mn < cc) cr++;
+            while (cr + mjs <= cap && grid_occupied(occ, M, cr, mjs, mn, mns, cap)) cr++;
+            if (cr + mjs > cap) cr = cap - mjs;
+            SETPOS(i, cr, mn);
+            cc = mn + mns;
+        } else {
+            for (;;) {
+                if (cc + mns > M) { cr++; cc = 0; }
+                if (cr + mjs > cap) { cr = cap - mjs; break; }
+                if (!grid_occupied(occ, M, cr, mjs, cc, mns, cap)) break;
+                cc++;
+            }
+            SETPOS(i, cr, cc);
+            cc += mns;
+        }
+        for (int a = MAJ(i); a < MAJ(i) + mjs && a < cap; a++)
+            for (int b = MIN_(i); b < MIN_(i) + mns && b < M; b++) occ[(size_t)a * M + b] = 1;
+        if (MAJ(i) + mjs > used) used = MAJ(i) + mjs;
+    }
+#undef MAJ
+#undef MAJS
+#undef MIN_
+#undef MINS
+#undef SETPOS
+    free(occ);
+    *out_cols = M;
+    return used > nmaj ? used : nmaj;
+}
+
+/* Track sizing (§12.3-§12.7) on one axis.  avail < 0: indefinite.  mode 0
+ * lays out, 1 / 2 size under a min- / max-content constraint (the
+ * container's intrinsic widths).  Contributions: columns use min_w / max_w,
+ * rows h. */
+static void grid_size_tracks(GridSize *t, int n, double avail, double gap, const GridItem *it, int nit,
+                             bool rows, int mode, bool stretch)
+{
+    bool def = avail >= 0.0 && mode == 0;
+    for (int i = 0; i < n; i++) {
+        GridSize *g = &t[i];
+        if (g->collapsed) { g->base = g->growth = 0.0; continue; }
+        g->base = g->kmin == GT_LEN ? g->minv : 0.0;
+        g->growth = -1.0;
+    }
+    /* Span-1 items. */
+    for (int k = 0; k < nit; k++) {
+        int s = rows ? it[k].r : it[k].c, sp = rows ? it[k].rs : it[k].cs;
+        if (sp != 1 || s >= n) continue;
+        GridSize *g = &t[s];
+        if (g->collapsed) continue;
+        double cmin = rows ? it[k].h : it[k].min_w, cmax = rows ? it[k].h : it[k].max_w;
+        if (mode == 1) cmax = cmin;
+        if (g->kmin == GT_AUTO || g->kmin == GT_MINC) { if (cmin > g->base) g->base = cmin; }
+        else if (g->kmin == GT_MAXC) { if (cmax > g->base) g->base = cmax; }
+        if (g->kmax == GT_MINC) { if (cmin > g->growth) g->growth = cmin; }
+        else if (g->kmax == GT_MAXC || g->kmax == GT_AUTO) { if (cmax > g->growth) g->growth = cmax; }
+        else if (g->kmax == GT_FIT) {
+            double v = cmax < g->limit ? cmax : g->limit;
+            if (v > g->growth) g->growth = v;
+        } else if (g->kmax == GT_FR) {
+            if (cmax / (g->fr > 1.0 ? g->fr : 1.0) > g->growth) g->growth = cmax / (g->fr > 1.0 ? g->fr : 1.0);
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        GridSize *g = &t[i];
+        if (g->kmax == GT_FR) continue;
+        if (g->kmax == GT_LEN) g->growth = g->limit;
+        else if (g->kmax == GT_FIT && g->growth > g->limit) g->growth = g->limit;
+        if (g->growth < 0.0) g->growth = g->base;
+        if (g->growth < g->base) g->growth = g->base;
+    }
+    /* Spanning items: grow the intrinsic tracks they cross. */
+    for (int k = 0; k < nit; k++) {
+        int s = rows ? it[k].r : it[k].c, sp = rows ? it[k].rs : it[k].cs;
+        if (sp < 2 || s >= n) continue;
+        int e = s + sp > n ? n : s + sp;
+        double cmin = rows ? it[k].h : it[k].min_w, cmax = rows ? it[k].h : it[k].max_w;
+        if (mode == 1) cmax = cmin;
+        double sum_b = gap * (e - s - 1), sum_g = sum_b;
+        int nint = 0, nflex = 0, nmax = 0;
+        for (int i = s; i < e; i++) {
+            sum_b += t[i].base;
+            sum_g += t[i].kmax == GT_FR ? t[i].base : t[i].growth;
+            if (t[i].kmax == GT_FR) nflex++;
+            else {
+                if (t[i].kmin == GT_AUTO || t[i].kmin == GT_MINC || t[i].kmin == GT_MAXC) nint++;
+                if (t[i].kmax != GT_LEN) nmax++;
+            }
+        }
+        if (nflex > 0) {
+            double extra = cmin - sum_b;
+            if (extra > 0.0)
+                for (int i = s; i < e; i++)
+                    if (t[i].kmax == GT_FR && t[i].kmin != GT_LEN) t[i].base += extra / nflex;
+            continue;
+        }
+        double extra = cmin - sum_b;
+        if (extra > 0.0 && nint > 0)
+            for (int i = s; i < e; i++)
+                if (t[i].kmin == GT_AUTO || t[i].kmin == GT_MINC || t[i].kmin == GT_MAXC) {
+                    t[i].base += extra / nint;
+                    if (t[i].growth < t[i].base) t[i].growth = t[i].base;
+                }
+        extra = cmax - sum_g;
+        if (extra > 0.0 && nmax > 0)
+            for (int i = s; i < e; i++)
+                if (t[i].kmax != GT_LEN && t[i].kmax != GT_FR) t[i].growth += extra / nmax;
+    }
+    /* Maximize tracks: free space up to their growth limits. */
+    double gaps = 0.0;
+    int nlive = 0;
+    for (int i = 0; i < n; i++) if (!t[i].collapsed) nlive++;
+    gaps = nlive > 1 ? gap * (nlive - 1) : 0.0;
+    if (def) {
+        double used = gaps;
+        for (int i = 0; i < n; i++) used += t[i].base;
+        double free_space = avail - used;
+        for (int iter = 0; iter < 8 && free_space > 0.01; iter++) {
+            int m = 0;
+            for (int i = 0; i < n; i++) if (t[i].kmax != GT_FR && t[i].growth > t[i].base + 0.001) m++;
+            if (m == 0) break;
+            double share = free_space / m;
+            for (int i = 0; i < n; i++) {
+                if (t[i].kmax == GT_FR || t[i].growth <= t[i].base + 0.001) continue;
+                double add = t[i].growth - t[i].base < share ? t[i].growth - t[i].base : share;
+                t[i].base += add;
+                free_space -= add;
+            }
+        }
+    } else if (mode != 1) {
+        for (int i = 0; i < n; i++) if (t[i].kmax != GT_FR) t[i].base = t[i].growth;
+    }
+    /* Flexible tracks (§12.7). */
+    double sum_fr = 0.0;
+    for (int i = 0; i < n; i++) if (t[i].kmax == GT_FR && !t[i].collapsed) sum_fr += t[i].fr;
+    if (sum_fr > 0.0) {
+        double fr_size = 0.0;
+        if (def) {
+            double leftover = avail - gaps;
+            for (int i = 0; i < n; i++) if (t[i].kmax != GT_FR) leftover -= t[i].base;
+            bool *inflex = (bool *)calloc((size_t)n, sizeof(bool));
+            double sf = sum_fr, left = leftover;
+            for (int iter = 0; iter <= n; iter++) {
+                fr_size = left / (sf > 1.0 ? sf : 1.0);
+                bool again = false;
+                for (int i = 0; i < n; i++) {
+                    if (t[i].kmax != GT_FR || t[i].collapsed || (inflex && inflex[i])) continue;
+                    if (t[i].base > fr_size * t[i].fr) {
+                        if (inflex) inflex[i] = true;
+                        left -= t[i].base;
+                        sf -= t[i].fr;
+                        again = true;
+                    }
+                }
+                if (!again || !inflex) break;
+            }
+            free(inflex);
+        } else {
+            /* Indefinite: the largest base (or max-content) per fr. */
+            for (int i = 0; i < n; i++) {
+                if (t[i].kmax != GT_FR || t[i].collapsed) continue;
+                double f = t[i].fr > 1.0 ? t[i].fr : 1.0;
+                double v = t[i].base / f;
+                if (t[i].growth > v) v = t[i].growth;   /* (span-1 contributions per fr) */
+                if (v > fr_size) fr_size = v;
+            }
+        }
+        if (fr_size < 0.0) fr_size = 0.0;
+        for (int i = 0; i < n; i++)
+            if (t[i].kmax == GT_FR && !t[i].collapsed && fr_size * t[i].fr > t[i].base) t[i].base = fr_size * t[i].fr;
+    }
+    /* Stretch auto tracks (justify/align-content: normal). */
+    if (def && stretch) {
+        double used = gaps;
+        int m = 0;
+        for (int i = 0; i < n; i++) { used += t[i].base; if (t[i].kmax == GT_AUTO && !t[i].collapsed) m++; }
+        if (avail - used > 0.01 && m > 0)
+            for (int i = 0; i < n; i++)
+                if (t[i].kmax == GT_AUTO && !t[i].collapsed) t[i].base += (avail - used) / m;
+    }
+}
+
+/* Track definitions for n tracks: the explicit list, then the auto list. */
+static void grid_init_sizes(GridSize *t, int n, const GridTrackList *L, const GridTrackList *A, double avail)
+{
+    for (int i = 0; i < n; i++) {
+        GridTrackDef d;
+        if (i < L->n) d = L->t[i];
+        else if (A->n > 0) d = A->t[(i - L->n) % A->n];
+        else { memset(&d, 0, sizeof(d)); d.kmin = d.kmax = GT_AUTO; }
+        /* Percentages of an indefinite size behave as auto. */
+        if (d.kmin == GT_LEN && d.min_pct != 0.0 && avail < 0.0) d.kmin = GT_AUTO;
+        if (d.kmax == GT_LEN && d.max_pct != 0.0 && avail < 0.0) d.kmax = GT_AUTO;
+        t[i].kmin = d.kmin;
+        t[i].kmax = d.kmax;
+        t[i].fr = d.kmax == GT_FR ? d.max_px : 0.0;
+        t[i].collapsed = false;
+        double a = avail > 0.0 ? avail : 0.0;
+        t[i].minv = d.kmin == GT_LEN ? d.min_px + d.min_pct * a : 0.0;
+        t[i].limit = (d.kmax == GT_LEN || d.kmax == GT_FIT) ? d.max_px + d.max_pct * a : 0.0;
+        if (d.kmax == GT_LEN && t[i].limit < t[i].minv) t[i].limit = t[i].minv;
+    }
+}
+
+typedef struct {
+    LayoutContext *ctx;
+    int idx;
+    GridDefs *D;
+    GridItem *items;
+    int nitems;
+    int ncols, nrows;
+    GridSize *cols, *rows;
+} GridState;
+
+static void grid_state_free(GridState *G)
+{
+    free(G->D);
+    free(G->items);
+    free(G->cols);
+    free(G->rows);
+}
+
+/* Parse the container's templates, collect and place its items.  cw / ch
+ * < 0: indefinite. */
+static bool grid_setup(LayoutContext *ctx, int idx, double cw, double ch, GridState *G)
+{
+    LayoutBox *ct = layout_box(ctx, idx);
+    memset(G, 0, sizeof(*G));
+    G->ctx = ctx;
+    G->idx = idx;
+    double fs = ct->s->font_size > 0.0 ? ct->s->font_size : 16.0;
+    GridDefs *D = (GridDefs *)calloc(1, sizeof(GridDefs));
+    if (!D) return false;
+    G->D = D;
+    grid_parse_tracks(ct->s->grid_cols, fs, cw, ct->s->gap_col, &D->cols);
+    grid_parse_tracks(ct->s->grid_rows, fs, ch, ct->s->gap_row, &D->rows);
+    D->nareas = grid_parse_areas(ct->s->grid_areas, D->areas, GRID_MAX_AREAS, &D->area_rows, &D->area_cols);
+    int ecols = D->cols.n > D->area_cols ? D->cols.n : D->area_cols;
+    int erows = D->rows.n > D->area_rows ? D->rows.n : D->area_rows;
+
+    int nkids = 0;
+    int *kids = layout_collect_flow_children(ctx, idx, &nkids);
+    G->items = nkids > 0 ? (GridItem *)calloc((size_t)nkids, sizeof(GridItem)) : NULL;
+    bool *rdef = nkids > 0 ? (bool *)calloc((size_t)nkids * 2, sizeof(bool)) : NULL;
+    if (nkids > 0 && (!G->items || !rdef)) { free(kids); free(rdef); return false; }
+    bool *cdef = rdef ? rdef + nkids : NULL;
+    int n = 0;
+    for (int i = 0; i < nkids; i++) {
+        HtmlNode *kn = layout_node_dom(ctx, ctx->tree.nodes[kids[i]].dom_node_idx);
+        if (kn && kn->type == HTML_NODE_TEXT && layout_text_is_whitespace(css_layout_node_text(ctx, kn))) continue;
+        GridItem *it = &G->items[n];
+        LayoutBox *cb = layout_box(ctx, kids[i]);
+        it->idx = kids[i];
+        it->is_text = kn && kn->type == HTML_NODE_TEXT;
+        it->order = it->is_text ? 0 : cb->s->order;
+        it->seq = n;
+        n++;
+    }
+    free(kids);
+    if (n > 1) qsort(G->items, (size_t)n, sizeof(GridItem), grid_item_order_cmp);
+    for (int i = 0; i < n; i++) {
+        GridItem *it = &G->items[i];
+        const LayoutStyle *s = layout_box(ctx, it->idx)->s;
+        if (it->is_text) { it->rs = it->cs = 1; continue; }
+        rdef[i] = grid_resolve_axis(D, true, s->grid_rs, s->grid_re, erows, &it->r, &it->rs);
+        cdef[i] = grid_resolve_axis(D, false, s->grid_cs, s->grid_ce, ecols, &it->c, &it->cs);
+        if (it->rs > GRID_MAX_TRACKS) it->rs = GRID_MAX_TRACKS;
+        if (it->cs > GRID_MAX_TRACKS) it->cs = GRID_MAX_TRACKS;
+    }
+    bool column_flow = ct->s->grid_flow & 1;
+    int minor = 0;
+    int major = grid_place_items(G->items, n, rdef, cdef, column_flow, (ct->s->grid_flow & 2) != 0,
+                                 ecols, erows, &minor);
+    free(rdef);
+    G->nitems = n;
+    G->ncols = column_flow ? major : minor;
+    G->nrows = column_flow ? minor : major;
+    if (G->ncols < ecols) G->ncols = ecols;
+    if (G->nrows < erows) G->nrows = erows;
+    if (G->ncols > GRID_MAX_TRACKS * 4) G->ncols = GRID_MAX_TRACKS * 4;
+    if (G->nrows > 100000) G->nrows = 100000;
+    if (G->ncols < 1) G->ncols = 1;
+    if (G->nrows < 1) G->nrows = 1;
+    G->cols = (GridSize *)calloc((size_t)G->ncols, sizeof(GridSize));
+    G->rows = (GridSize *)calloc((size_t)G->nrows, sizeof(GridSize));
+    if (!G->cols || !G->rows) return false;
+    GridTrackList *ac = (GridTrackList *)malloc(sizeof(GridTrackList));
+    if (!ac) return false;
+    grid_parse_tracks(ct->s->grid_auto_cols, fs, cw, 0.0, ac);
+    grid_init_sizes(G->cols, G->ncols, &D->cols, ac, cw);
+    grid_parse_tracks(ct->s->grid_auto_rows, fs, ch, 0.0, ac);
+    grid_init_sizes(G->rows, G->nrows, &D->rows, ac, ch);
+    free(ac);
+    /* auto-fit: repeated tracks no item occupies collapse. */
+    for (int axis = 0; axis < 2; axis++) {
+        const GridTrackList *L = axis ? &D->rows : &D->cols;
+        GridSize *t = axis ? G->rows : G->cols;
+        for (int k = L->fit_start; k < L->fit_start + L->fit_count; k++) {
+            bool used = false;
+            for (int i = 0; i < n && !used; i++) {
+                int s = axis ? G->items[i].r : G->items[i].c, sp = axis ? G->items[i].rs : G->items[i].cs;
+                used = k >= s && k < s + sp;
+            }
+            if (!used) t[k].collapsed = true;
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        GridItem *it = &G->items[i];
+        if (it->c >= G->ncols) it->c = G->ncols - 1;
+        if (it->c + it->cs > G->ncols) it->cs = G->ncols - it->c;
+        if (it->r >= G->nrows) it->r = G->nrows - 1;
+        if (it->r + it->rs > G->nrows) it->rs = G->nrows - it->r;
+    }
+    return true;
+}
+
+static void grid_column_contributions(GridState *G)
+{
+    for (int i = 0; i < G->nitems; i++) {
+        GridItem *it = &G->items[i];
+        it->min_w = layout_intrinsic_contribution(G->ctx, it->idx, false);
+        it->max_w = layout_intrinsic_contribution(G->ctx, it->idx, true);
+    }
+}
+
+static double grid_tracks_total(const GridSize *t, int n, double gap)
+{
+    double sum = 0.0;
+    int live = 0;
+    for (int i = 0; i < n; i++) if (!t[i].collapsed) { sum += t[i].base; live++; }
+    return sum + (live > 1 ? gap * (live - 1) : 0.0);
+}
+
+/* The grid container's min- / max-content content width. */
+static double layout_grid_intrinsic(LayoutContext *ctx, int idx, bool want_max)
+{
+    GridState G;
+    double w = 0.0;
+    if (grid_setup(ctx, idx, -1.0, -1.0, &G)) {
+        grid_column_contributions(&G);
+        grid_size_tracks(G.cols, G.ncols, -1.0, layout_box(ctx, idx)->s->gap_col, G.items, G.nitems,
+                         false, want_max ? 2 : 1, false);
+        w = grid_tracks_total(G.cols, G.ncols, layout_box(ctx, idx)->s->gap_col);
+    }
+    grid_state_free(&G);
+    return w;
+}
+
+/* Track start offsets under justify-/align-content. */
+static void grid_track_positions(const GridSize *t, int n, double gap, double avail, CssJustifyContent jc,
+                                 double *pos)
+{
+    double total = grid_tracks_total(t, n, gap);
+    double free_space = avail >= 0.0 ? avail - total : 0.0;
+    int live = 0;
+    for (int i = 0; i < n; i++) if (!t[i].collapsed) live++;
+    double p = 0.0, extra = 0.0;
+    switch (jc) {
+    case CSS_JUSTIFY_CENTER: p = free_space / 2.0; break;
+    case CSS_JUSTIFY_FLEX_END: p = free_space; break;
+    case CSS_JUSTIFY_SPACE_BETWEEN: if (free_space > 0.0 && live > 1) extra = free_space / (live - 1); break;
+    case CSS_JUSTIFY_SPACE_AROUND: if (free_space > 0.0 && live) { extra = free_space / live; p = extra / 2.0; } break;
+    case CSS_JUSTIFY_SPACE_EVENLY: if (free_space > 0.0) { extra = free_space / (live + 1); p = extra; } break;
+    default: break;
+    }
+    bool first = true;
+    for (int i = 0; i < n; i++) {
+        if (t[i].collapsed) { pos[i] = p; continue; }
+        if (!first) p += gap + extra;
+        pos[i] = p;
+        p += t[i].base;
+        first = false;
+    }
+    pos[n] = p;
+}
+
+static void layout_grid_container(LayoutContext *ctx, int idx)
+{
+    LayoutBox *ct = layout_box(ctx, idx);
+    double content_x = ct->x + ct->padding_left + ct->s->border_left;
+    double content_y = ct->y + ct->padding_top + ct->s->border_top;
+    double cw = ct->content_width;
+    bool height_def = !layout_height_auto(ct) || ct->height > 0.0;
+    double chh = height_def ? ct->content_height : -1.0;
+    double gap_c = ct->s->gap_col, gap_r = ct->s->gap_row;
+
+    GridState G;
+    if (!grid_setup(ctx, idx, cw, chh, &G)) { grid_state_free(&G); layout_block_flow(ctx, idx); return; }
+    grid_column_contributions(&G);
+    grid_size_tracks(G.cols, G.ncols, cw, gap_c, G.items, G.nitems, false, 0,
+                     ct->s->justify_content == CSS_JUSTIFY_FLEX_START);
+    double *cpos = (double *)malloc((size_t)(G.ncols + 1) * sizeof(double));
+    double *rpos = (double *)malloc((size_t)(G.nrows + 1) * sizeof(double));
+    int *todo = G.nitems > 0 ? (int *)malloc((size_t)G.nitems * sizeof(int)) : NULL;
+    if (!cpos || !rpos || (G.nitems > 0 && !todo)) {
+        free(cpos); free(rpos); free(todo); grid_state_free(&G);
+        return;
+    }
+    grid_track_positions(G.cols, G.ncols, gap_c, cw, ct->s->justify_content, cpos);
+
+    /* Items at their column widths; heights by their own layout. */
+    int ntodo = 0;
+    for (int i = 0; i < G.nitems; i++) {
+        GridItem *it = &G.items[i];
+        LayoutBox *child = layout_box(ctx, it->idx);
+        double ax = cpos[it->c];
+        /* (the gap after the last spanned track is not part of the area) */
+        double aw = cpos[it->c + it->cs - 1] + G.cols[it->c + it->cs - 1].base - ax;
+        if (aw < 0.0) aw = 0.0;
+        if (it->is_text) {
+            child->x = content_x + ax;
+            child->y = content_y;
+            child->width = it->max_w < aw ? it->max_w : aw;
+            child->height = layout_line_advance_box(child);
+            it->h = child->height;
+            continue;
+        }
+        HtmlNode *dom = layout_node_dom(ctx, ctx->tree.nodes[it->idx].dom_node_idx);
+        layout_resolve_used_sizes(child, dom, aw, chh > 0.0 && it->rs == 1 && G.rows[it->r].kmin == GT_LEN &&
+                                  G.rows[it->r].kmax == GT_LEN ? G.rows[it->r].limit : 0.0);
+        bool w_def = child->s->width_set || child->s->width_percent > 0.0 || child->s->width_keyword ||
+                     layout_is_img(dom);
+        unsigned char ma = child->s->margin_auto;
+        double ml = (ma & 8) ? 0.0 : child->margin_left, mr = (ma & 2) ? 0.0 : child->margin_right;
+        double room = aw - ml - mr;
+        if (room < 0.0) room = 0.0;
+        int js = child->s->justify_self ? child->s->justify_self - 1
+               : (ct->s->justify_items ? ct->s->justify_items - 1 : CSS_ALIGN_STRETCH);
+        if (!w_def) {
+            if (js == CSS_ALIGN_STRETCH && !(ma & 0xA)) {
+                double w = room;
+                if (child->max_width > 0.0) {
+                    double mx = child->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX ? child->max_width
+                              : child->max_width + layout_horizontal_border_padding(child);
+                    if (w > mx) w = mx;
+                }
+                child->width = w;
+            } else {
+                child->width = layout_shrink_to_fit(ctx, it->idx, room);
+            }
+        }
+        double free_w = room - child->width;
+        double off = 0.0;
+        if ((ma & 0xA) == 0xA) off = free_w > 0.0 ? free_w / 2.0 : 0.0;
+        else if (ma & 8) off = free_w > 0.0 ? free_w : 0.0;
+        else if (!(ma & 2)) {
+            if (js == CSS_ALIGN_CENTER) off = free_w / 2.0;
+            else if (js == CSS_ALIGN_FLEX_END) off = free_w;
+        }
+        child->x = content_x + ax + ml + off;
+        child->y = content_y + child->margin_top;
+        layout_update_content_sizes(child);
+        todo[ntodo++] = it->idx;
+    }
+    if (ntodo > 0) layout_units(ctx, todo, ntodo);
+    for (int i = 0; i < G.nitems; i++) {
+        GridItem *it = &G.items[i];
+        if (it->is_text) continue;
+        LayoutBox *child = layout_box(ctx, it->idx);
+        double mt = (child->s->margin_auto & 1) ? 0.0 : child->margin_top;
+        double mb = (child->s->margin_auto & 4) ? 0.0 : child->margin_bottom;
+        it->h = child->height + mt + mb;
+    }
+
+    grid_size_tracks(G.rows, G.nrows, chh, gap_r, G.items, G.nitems, true, 0, true);
+    grid_track_positions(G.rows, G.nrows, gap_r, chh, CSS_JUSTIFY_FLEX_START, rpos);
+
+    /* Block-axis alignment; stretched items whose contents depend on their
+     * height are laid out again. */
+    int nre = 0;
+    for (int i = 0; i < G.nitems; i++) {
+        GridItem *it = &G.items[i];
+        LayoutBox *child = layout_box(ctx, it->idx);
+        double ay = rpos[it->r];
+        double ah = rpos[it->r + it->rs - 1] + G.rows[it->r + it->rs - 1].base - ay;
+        if (ah < 0.0) ah = 0.0;
+        if (it->is_text) { child->y = content_y + ay; continue; }
+        unsigned char ma = child->s->margin_auto;
+        double mt = (ma & 1) ? 0.0 : child->margin_top, mb = (ma & 4) ? 0.0 : child->margin_bottom;
+        double room = ah - mt - mb;
+        int as = child->s->align_self ? child->s->align_self - 1 : (int)ct->s->align_items;
+        HtmlNode *dom = layout_node_dom(ctx, ctx->tree.nodes[it->idx].dom_node_idx);
+        bool h_auto = layout_height_auto(child) && !layout_is_img(dom);
+        double off = 0.0;
+        if (as == CSS_ALIGN_STRETCH && h_auto && !(ma & 5)) {
+            double h = room;
+            if (child->max_height > 0.0 && h > child->max_height) h = child->max_height;
+            if (h > child->height + 0.01) {
+                child->height = h;
+                layout_update_content_sizes(child);
+                if (layout_height_sensitive(ctx, it->idx)) todo[nre++] = it->idx;
+            }
+        } else {
+            double free_h = room - child->height;
+            if ((ma & 5) == 5) off = free_h > 0.0 ? free_h / 2.0 : 0.0;
+            else if (ma & 1) off = free_h > 0.0 ? free_h : 0.0;
+            else if (!(ma & 4)) {
+                if (as == CSS_ALIGN_CENTER) off = free_h / 2.0;
+                else if (as == CSS_ALIGN_FLEX_END) off = free_h;
+            }
+        }
+        layout_move_box(ctx, it->idx, child->x, content_y + ay + mt + off);
+    }
+    if (nre > 0) {
+        double *keep = (double *)malloc((size_t)nre * sizeof(double));
+        for (int k = 0; k < nre && keep; k++) keep[k] = layout_box(ctx, todo[k])->height;
+        layout_units(ctx, todo, nre);
+        for (int k = 0; k < nre && keep; k++) {
+            LayoutBox *child = layout_box(ctx, todo[k]);
+            child->height = keep[k];
+            layout_update_content_sizes(child);
+        }
+        free(keep);
+    }
+
+    if (!height_def) {
+        double h = grid_tracks_total(G.rows, G.nrows, gap_r);
+        double mn = ct->min_height, mx = ct->max_height;
+        if (ct->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX) {
+            double v = layout_vertical_border_padding(ct);
+            mn = mn > 0.0 ? (mn - v > 0.0 ? mn - v : 0.0) : 0.0;
+            mx = mx > 0.0 ? (mx - v > 0.0 ? mx - v : 0.0) : 0.0;
+        }
+        h = flex_clamp(h, mn, mx);
+        ct->height = h + layout_vertical_border_padding(ct);
+        layout_update_content_sizes(ct);
+    }
+    free(cpos);
+    free(rpos);
+    free(todo);
+    grid_state_free(&G);
+}
+
 /* Position and size one box's subtree, given the box itself is already placed
  * (x/y) and width-resolved by its parent.  Dispatches to the appropriate
  * formatting context, then the auto-height is resolved from children. */
@@ -10442,6 +11804,499 @@ static void layout_table_row(LayoutContext *ctx, int idx)
     layout_update_content_sizes(row);
     free(widths);
     free(kids);
+}
+
+/* ---- Table layout (CSS 2.1 §17, automatic table layout) ----
+ * The table's rows (directly, or in row groups; cells directly in the table
+ * or a group form an anonymous row) become a grid of cells with colspan /
+ * rowspan.  Column min/max widths come from the cells' min-/max-content
+ * widths (a fixed width is a column's preferred width, a percentage a share
+ * of the table); the table takes its specified width or shrinks to fit its
+ * container; columns get their minimums and share the rest by their maximums.
+ * Cells are laid out at their column widths, rows take the tallest cell,
+ * cells stretch to their rows with vertical-align moving their content. */
+
+typedef struct {
+    int idx;
+    int row, col, rs, cs;              /* cs < 0: every column (anonymous cell) */
+    double minw, maxw, pct;
+    bool fixed;
+} TableCell;
+
+typedef struct {
+    int idx;                           /* -1: anonymous */
+    int group;                         /* index into groups, -1: none */
+    double y, h;
+} TableRow;
+
+typedef struct {
+    TableCell *cells;
+    int ncells, cap_cells;
+    TableRow *rows;
+    int nrows, cap_rows;
+    int groups[64];
+    int ngroups;
+    int captions[8];
+    int ncaptions;
+    int ncols;
+    double *cmin, *cmax, *cpct;
+    unsigned char *cfixed;
+    double hs, vs;                     /* border-spacing */
+} TableGrid;
+
+static void table_free(TableGrid *T)
+{
+    free(T->cells);
+    free(T->rows);
+    free(T->cmin);
+    free(T->cmax);
+    free(T->cpct);
+    free(T->cfixed);
+}
+
+static bool table_is_table(const LayoutBox *b)
+{
+    return b->s->table_role == 1 && b->s->display != CSS_DISPLAY_FLEX && b->s->display != CSS_DISPLAY_GRID &&
+           b->s->display != CSS_DISPLAY_NONE && b->s->display != CSS_DISPLAY_INLINE;
+}
+
+static bool table_skip_child(LayoutContext *ctx, int c)
+{
+    HtmlNode *kn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
+    if (!kn) return true;
+    if (kn->type == HTML_NODE_TEXT) return layout_text_is_whitespace(css_layout_node_text(ctx, kn));
+    return kn->type != HTML_NODE_ELEMENT;
+}
+
+static int table_add_row(TableGrid *T, int idx, int group)
+{
+    if (T->nrows == T->cap_rows) {
+        int nc = T->cap_rows ? T->cap_rows * 2 : 16;
+        TableRow *nr = (TableRow *)realloc(T->rows, (size_t)nc * sizeof(TableRow));
+        if (!nr) return -1;
+        T->rows = nr;
+        T->cap_rows = nc;
+    }
+    TableRow *r = &T->rows[T->nrows];
+    memset(r, 0, sizeof(*r));
+    r->idx = idx;
+    r->group = group;
+    return T->nrows++;
+}
+
+static void table_add_cell(TableGrid *T, int idx, int row, int cs, int rs)
+{
+    if (T->ncells == T->cap_cells) {
+        int nc = T->cap_cells ? T->cap_cells * 2 : 32;
+        TableCell *ncl = (TableCell *)realloc(T->cells, (size_t)nc * sizeof(TableCell));
+        if (!ncl) return;
+        T->cells = ncl;
+        T->cap_cells = nc;
+    }
+    TableCell *c = &T->cells[T->ncells++];
+    memset(c, 0, sizeof(*c));
+    c->idx = idx;
+    c->row = row;
+    c->cs = cs;
+    c->rs = rs;
+}
+
+static int table_span_attr(LayoutContext *ctx, int c, const char *name)
+{
+    HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
+    const char *v = dn ? layout_node_attribute(dn, name) : NULL;
+    if (!v) return 1;
+    int n = atoi(v);
+    if (strcmp(name, "rowspan") == 0) return n < 0 ? 1 : (n > 65534 ? 65534 : n);   /* 0: to the end */
+    return n < 1 ? 1 : (n > 1000 ? 1000 : n);
+}
+
+/* The cells of row r: the row box's children. */
+static void table_row_cells(LayoutContext *ctx, TableGrid *T, int row_box, int r)
+{
+    for (int c = ctx->tree.nodes[row_box].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+        if (!layout_is_in_flow(layout_box(ctx, c)) || table_skip_child(ctx, c)) continue;
+        table_add_cell(T, c, r, table_span_attr(ctx, c, "colspan"), table_span_attr(ctx, c, "rowspan"));
+    }
+}
+
+/* Rows and cells of a table or row group's children. */
+static bool table_collect_children(LayoutContext *ctx, TableGrid *T, int parent, int group, bool *real)
+{
+    int anon = -1;   /* the anonymous row open for loose cells */
+    for (int c = ctx->tree.nodes[parent].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+        LayoutBox *cb = layout_box(ctx, c);
+        if (!layout_is_in_flow(cb) || table_skip_child(ctx, c)) continue;
+        unsigned char role = cb->s->display == CSS_DISPLAY_NONE ? 0 : cb->s->table_role;
+        if (role == 5 && group < 0) {
+            if (T->ncaptions < 8) T->captions[T->ncaptions++] = c;
+            anon = -1;
+        } else if (role == 6) {
+            continue;
+        } else if (role == 2 && group < 0) {
+            int g = T->ngroups < 64 ? T->ngroups++ : -1;
+            if (g >= 0) T->groups[g] = c;
+            table_collect_children(ctx, T, c, g, real);
+            anon = -1;
+        } else if (role == 3) {
+            int r = table_add_row(T, c, group);
+            if (r >= 0) table_row_cells(ctx, T, c, r);
+            *real = true;
+            anon = -1;
+        } else if (role == 4) {
+            if (anon < 0) anon = table_add_row(T, -1, group);
+            if (anon >= 0) table_add_cell(T, c, anon, table_span_attr(ctx, c, "colspan"),
+                                          table_span_attr(ctx, c, "rowspan"));
+            *real = true;
+        } else {
+            /* Other content: a row of one cell across the table. */
+            int r = table_add_row(T, -1, group);
+            if (r >= 0) table_add_cell(T, c, r, -1, 1);
+            anon = -1;
+        }
+    }
+    return true;
+}
+
+static bool table_grow_cols(TableGrid *T, int n)
+{
+    if (n <= T->ncols) return true;
+    double *a = (double *)realloc(T->cmin, (size_t)n * sizeof(double));
+    if (!a) return false;
+    T->cmin = a;
+    a = (double *)realloc(T->cmax, (size_t)n * sizeof(double));
+    if (!a) return false;
+    T->cmax = a;
+    a = (double *)realloc(T->cpct, (size_t)n * sizeof(double));
+    if (!a) return false;
+    T->cpct = a;
+    unsigned char *f = (unsigned char *)realloc(T->cfixed, (size_t)n);
+    if (!f) return false;
+    T->cfixed = f;
+    for (int i = T->ncols; i < n; i++) { T->cmin[i] = T->cmax[i] = T->cpct[i] = 0.0; T->cfixed[i] = 0; }
+    T->ncols = n;
+    return true;
+}
+
+/* Collect the table, place its cells (colspan / rowspan) and compute the
+ * column min / max widths.  False when it has no rows or cells. */
+static bool table_build(LayoutContext *ctx, int idx, TableGrid *T)
+{
+    LayoutBox *tb = layout_box(ctx, idx);
+    memset(T, 0, sizeof(*T));
+    bool real = false;
+    table_collect_children(ctx, T, idx, -1, &real);
+    if (!real) return false;
+    if (tb->s->border_collapse) T->hs = T->vs = 0.0;
+    else if (tb->s->border_spacing_set) { T->hs = tb->s->border_spacing_h; T->vs = tb->s->border_spacing_v; }
+    else T->hs = T->vs = 2.0;
+
+    /* Placement: a column cursor per row skipping slots taken by rowspans. */
+    int *busy = NULL;   /* rows still covered per column */
+    int nbusy = 0;
+    int ci = 0;
+    for (int r = 0; r < T->nrows; r++) {
+        for (int k = 0; k < nbusy; k++) if (busy[k] > 0) busy[k]--;
+        int col = 0;
+        for (; ci < T->ncells && T->cells[ci].row == r; ci++) {
+            TableCell *c = &T->cells[ci];
+            while (col < nbusy && busy[col] > 0) col++;
+            c->col = col;
+            int cs = c->cs < 0 ? 1 : c->cs;
+            int rs = c->rs == 0 ? T->nrows - r : c->rs;
+            if (rs > T->nrows - r) rs = T->nrows - r;
+            if (rs < 1) rs = 1;
+            c->rs = rs;
+            if (col + cs > nbusy) {
+                int *nb = (int *)realloc(busy, (size_t)(col + cs) * sizeof(int));
+                if (!nb) break;
+                for (int k = nbusy; k < col + cs; k++) nb[k] = 0;
+                busy = nb;
+                nbusy = col + cs;
+            }
+            for (int k = col; k < col + cs; k++) busy[k] = rs;
+            col += cs;
+        }
+    }
+    free(busy);
+    if (!table_grow_cols(T, nbusy > 0 ? nbusy : 1)) return false;
+    for (int i = 0; i < T->ncells; i++) {
+        TableCell *c = &T->cells[i];
+        if (c->cs < 0) c->cs = T->ncols - c->col;
+        if (c->col + c->cs > T->ncols) c->cs = T->ncols - c->col;
+        if (c->cs < 1) c->cs = 1;
+    }
+
+    /* Column widths from single-column cells, then the spanning ones. */
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < T->ncells; i++) {
+            TableCell *c = &T->cells[i];
+            if ((pass == 0) != (c->cs == 1)) continue;
+            LayoutBox *cb = layout_box(ctx, c->idx);
+            c->minw = layout_intrinsic_width(ctx, c->idx, false);
+            c->maxw = layout_intrinsic_width(ctx, c->idx, true);
+            if (cb->s->width_percent > 0.0) {
+                c->pct = cb->s->width_percent;
+            } else if (cb->s->width_set) {
+                c->fixed = true;
+                if (c->maxw < c->minw) c->maxw = c->minw;
+            }
+            if (c->maxw < c->minw) c->maxw = c->minw;
+            if (c->cs == 1) {
+                int k = c->col;
+                if (c->minw > T->cmin[k]) T->cmin[k] = c->minw;
+                if (c->fixed && !T->cfixed[k]) { T->cfixed[k] = 1; T->cmax[k] = c->maxw; }
+                else if (c->fixed || !T->cfixed[k]) { if (c->maxw > T->cmax[k]) T->cmax[k] = c->maxw; }
+                if (c->pct > T->cpct[k]) T->cpct[k] = c->pct;
+                if (T->cmax[k] < T->cmin[k]) T->cmax[k] = T->cmin[k];
+                continue;
+            }
+            double smin = T->hs * (c->cs - 1), smax = smin, wsum = 0.0;
+            for (int k = c->col; k < c->col + c->cs; k++) { smin += T->cmin[k]; smax += T->cmax[k]; wsum += T->cmax[k]; }
+            double dmin = c->minw - smin, dmax = c->maxw - smax;
+            for (int k = c->col; k < c->col + c->cs; k++) {
+                double share = wsum > 0.0 ? T->cmax[k] / wsum : 1.0 / c->cs;
+                if (dmin > 0.0) T->cmin[k] += dmin * share;
+                if (dmax > 0.0) T->cmax[k] += dmax * share;
+                if (T->cmax[k] < T->cmin[k]) T->cmax[k] = T->cmin[k];
+            }
+        }
+    }
+    return true;
+}
+
+static double table_spacing(const TableGrid *T)
+{
+    return T->hs * (T->ncols + 1);
+}
+
+/* The table's min- / max-content content width; -1 when it has no rows or
+ * cells. */
+static double layout_table_intrinsic(LayoutContext *ctx, int idx, bool want_max)
+{
+    TableGrid T;
+    double w = -1.0;
+    if (table_build(ctx, idx, &T)) {
+        w = table_spacing(&T);
+        for (int k = 0; k < T.ncols; k++) w += want_max ? T.cmax[k] : T.cmin[k];
+        for (int i = 0; i < T.ncaptions; i++) {
+            double cw = layout_intrinsic_contribution(ctx, T.captions[i], false);
+            if (cw > w) w = cw;
+        }
+    }
+    table_free(&T);
+    return w;
+}
+
+/* Column widths for a table content width W (§17.5.2.2, as browsers do it). */
+static void table_distribute(const TableGrid *T, double W, double *w)
+{
+    double avail = W - table_spacing(T);
+    if (avail < 0.0) avail = 0.0;
+    double used = 0.0, mins = 0.0, maxs = 0.0;
+    for (int k = 0; k < T->ncols; k++) {
+        if (T->cpct[k] > 0.0) {
+            w[k] = T->cpct[k] * avail;
+            if (w[k] < T->cmin[k]) w[k] = T->cmin[k];
+            used += w[k];
+        } else {
+            mins += T->cmin[k];
+            maxs += T->cmax[k];
+        }
+    }
+    double R = avail - used;
+    int nauto = 0, nfixed = 0;
+    double auto_max = 0.0, fixed_max = 0.0;
+    for (int k = 0; k < T->ncols; k++) {
+        if (T->cpct[k] > 0.0) continue;
+        if (R <= mins) w[k] = T->cmin[k];
+        else if (R <= maxs && maxs > mins) w[k] = T->cmin[k] + (T->cmax[k] - T->cmin[k]) * (R - mins) / (maxs - mins);
+        else w[k] = T->cmax[k];
+        if (T->cfixed[k]) { nfixed++; fixed_max += T->cmax[k]; }
+        else { nauto++; auto_max += T->cmax[k]; }
+    }
+    double extra = R - maxs;
+    if (extra <= 0.01) return;
+    /* Space beyond every maximum: auto columns first, by their maximums. */
+    for (int k = 0; k < T->ncols; k++) {
+        if (T->cpct[k] > 0.0) continue;
+        if (nauto > 0) {
+            if (T->cfixed[k]) continue;
+            w[k] += auto_max > 0.0 ? extra * T->cmax[k] / auto_max : extra / nauto;
+        } else if (nfixed > 0) {
+            w[k] += fixed_max > 0.0 ? extra * T->cmax[k] / fixed_max : extra / nfixed;
+        }
+    }
+    if (nauto == 0 && nfixed == 0) {
+        int np = 0;
+        for (int k = 0; k < T->ncols; k++) if (T->cpct[k] > 0.0) np++;
+        for (int k = 0; k < T->ncols && np > 0; k++) if (T->cpct[k] > 0.0) w[k] += extra / np;
+    }
+}
+
+static void layout_table(LayoutContext *ctx, int idx)
+{
+    LayoutBox *tb = layout_box(ctx, idx);
+    TableGrid T;
+    bool w_auto = !(tb->s->width_set || tb->s->width_percent > 0.0 || tb->s->width_keyword);
+    double hpb = layout_horizontal_border_padding(tb);
+    if (!table_build(ctx, idx, &T)) {
+        /* No rows or cells (display: table around blocks): a block that
+         * shrinks to fit. */
+        table_free(&T);
+        if (w_auto) {
+            double w = layout_shrink_to_fit(ctx, idx, tb->width);
+            if (w < tb->width) { tb->width = w; layout_update_content_sizes(tb); }
+        }
+        layout_block_flow(ctx, idx);
+        return;
+    }
+    double minsum = table_spacing(&T), maxsum = minsum;
+    for (int k = 0; k < T.ncols; k++) { minsum += T.cmin[k]; maxsum += T.cmax[k]; }
+    double avail = tb->width - hpb;
+    double W = w_auto ? (maxsum < avail ? maxsum : avail) : avail;
+    if (W < minsum) W = minsum;
+    if (fabs(W + hpb - tb->width) > 0.01) {
+        /* Auto margins (or a <center> parent) center the narrowed table. */
+        double old_w = tb->width;
+        tb->width = W + hpb;
+        int p = ctx->tree.nodes[idx].parent_idx;
+        HtmlNode *pd = p >= 0 ? layout_node_dom(ctx, ctx->tree.nodes[p].dom_node_idx) : NULL;
+        bool center_parent = pd && pd->type == HTML_NODE_ELEMENT && pd->tag_name &&
+                             strcasecmp(pd->tag_name, "center") == 0;
+        if (w_auto && tb->s->float_side == 0) {
+            if ((tb->s->margin_auto & 0xA) == 0xA || center_parent) tb->x += (old_w - tb->width) / 2.0;
+            else if (tb->s->margin_auto & 8) tb->x += old_w - tb->width;
+        }
+        layout_update_content_sizes(tb);
+    }
+    double content_x = tb->x + tb->padding_left + tb->s->border_left;
+    double content_y = tb->y + tb->padding_top + tb->s->border_top;
+    double cw = tb->content_width;
+
+    double *colw = (double *)calloc((size_t)T.ncols + 1, sizeof(double));
+    double *colx = (double *)calloc((size_t)T.ncols + 1, sizeof(double));
+    int *list = (int *)malloc(((size_t)T.ncells + 8) * sizeof(int));
+    if (!colw || !colx || !list) { free(colw); free(colx); free(list); table_free(&T); return; }
+    table_distribute(&T, cw, colw);
+    {
+        double x = content_x + T.hs;
+        for (int k = 0; k < T.ncols; k++) { colx[k] = x; x += colw[k] + T.hs; }
+        colx[T.ncols] = x;
+    }
+
+    /* Captions above the rows. */
+    double y = content_y;
+    for (int i = 0; i < T.ncaptions; i++) {
+        int c = T.captions[i];
+        LayoutBox *cap = layout_box(ctx, c);
+        layout_resolve_used_sizes(cap, layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx), cw, 0.0);
+        cap->x = content_x + cap->margin_left;
+        cap->y = y + cap->margin_top;
+        layout_update_content_sizes(cap);
+        layout_node_serial(ctx, c);
+        y = cap->y + cap->height + cap->margin_bottom;
+    }
+
+    /* Cells at their column widths. */
+    for (int i = 0; i < T.ncells; i++) {
+        TableCell *c = &T.cells[i];
+        LayoutBox *cell = layout_box(ctx, c->idx);
+        HtmlNode *dom = layout_node_dom(ctx, ctx->tree.nodes[c->idx].dom_node_idx);
+        double w = colx[c->col + c->cs] - colx[c->col] - T.hs;
+        layout_resolve_used_sizes(cell, dom, cw, 0.0);
+        cell->margin_left = cell->margin_right = cell->margin_top = cell->margin_bottom = 0.0;
+        cell->x = colx[c->col];
+        cell->y = y;
+        cell->width = w < 0.0 ? 0.0 : w;
+        layout_update_content_sizes(cell);
+        list[i] = c->idx;
+    }
+    layout_units(ctx, list, T.ncells);
+
+    /* Row heights: the tallest single-row cell, the row's own height, then
+     * rowspans add what they still need to their last row. */
+    for (int r = 0; r < T.nrows; r++) {
+        TableRow *row = &T.rows[r];
+        row->h = 0.0;
+        if (row->idx >= 0) {
+            LayoutBox *rb = layout_box(ctx, row->idx);
+            if (rb->s->height_set && rb->s->height_percent <= 0.0) row->h = rb->s->css_height;
+        }
+    }
+    for (int i = 0; i < T.ncells; i++) {
+        TableCell *c = &T.cells[i];
+        if (c->rs != 1) continue;
+        double h = layout_box(ctx, c->idx)->height;
+        if (h > T.rows[c->row].h) T.rows[c->row].h = h;
+    }
+    for (int i = 0; i < T.ncells; i++) {
+        TableCell *c = &T.cells[i];
+        if (c->rs == 1) continue;
+        double have = T.vs * (c->rs - 1);
+        for (int r = c->row; r < c->row + c->rs; r++) have += T.rows[r].h;
+        double need = layout_box(ctx, c->idx)->height - have;
+        if (need > 0.0) T.rows[c->row + c->rs - 1].h += need;
+    }
+    y += T.vs;
+    for (int r = 0; r < T.nrows; r++) {
+        T.rows[r].y = y;
+        y += T.rows[r].h + T.vs;
+    }
+    double rows_end = y;
+
+    /* Cells into their rows; vertical-align moves their content. */
+    for (int i = 0; i < T.ncells; i++) {
+        TableCell *c = &T.cells[i];
+        LayoutBox *cell = layout_box(ctx, c->idx);
+        double h = T.vs * (c->rs - 1);
+        for (int r = c->row; r < c->row + c->rs; r++) h += T.rows[r].h;
+        layout_move_box(ctx, c->idx, cell->x, T.rows[c->row].y);
+        double free_h = h - cell->height;
+        if (free_h > 0.0) {
+            double dy = cell->s->vertical_align == 1 ? free_h * 0.5 : cell->s->vertical_align == 3 ? free_h : 0.0;
+            if (dy != 0.0) layout_shift_subtree_y(ctx, c->idx, dy);
+            cell->height = h;
+            layout_update_content_sizes(cell);
+        }
+    }
+    /* Row and row-group boxes span their cells (backgrounds, hit testing). */
+    double row_x = content_x + T.hs, row_w = cw - 2.0 * T.hs;
+    if (row_w < 0.0) row_w = 0.0;
+    for (int r = 0; r < T.nrows; r++) {
+        if (T.rows[r].idx < 0) continue;
+        LayoutBox *rb = layout_box(ctx, T.rows[r].idx);
+        rb->x = row_x;
+        rb->y = T.rows[r].y;
+        rb->width = row_w;
+        rb->height = T.rows[r].h;
+        layout_update_content_sizes(rb);
+    }
+    for (int g = 0; g < T.ngroups; g++) {
+        LayoutBox *gb = layout_box(ctx, T.groups[g]);
+        double top = -1.0, bottom = 0.0;
+        for (int r = 0; r < T.nrows; r++) {
+            if (T.rows[r].group != g) continue;
+            if (top < 0.0) top = T.rows[r].y;
+            bottom = T.rows[r].y + T.rows[r].h;
+        }
+        gb->x = row_x;
+        gb->y = top < 0.0 ? content_y : top;
+        gb->width = row_w;
+        gb->height = top < 0.0 ? 0.0 : bottom - top;
+        layout_update_content_sizes(gb);
+    }
+
+    double content_h = rows_end - content_y;
+    double total = content_h + layout_vertical_border_padding(tb);
+    if (layout_height_auto(tb) || tb->height < total) {
+        tb->height = total;
+        layout_update_content_sizes(tb);
+    }
+    free(colw);
+    free(colx);
+    free(list);
+    table_free(&T);
 }
 
 /* Children of an inline box that the parent flow wrapped across lines (or
@@ -11105,8 +12960,16 @@ static void layout_node_serial_impl(LayoutContext *ctx, int idx)
         layout_flex_container(ctx, idx);
         return;
     }
+    if (box->s->display == CSS_DISPLAY_GRID) {
+        layout_grid_container(ctx, idx);
+        return;
+    }
+    if (table_is_table(box)) {
+        layout_table(ctx, idx);
+        return;
+    }
 
-    /* Table rows get a (minimal) horizontal cell layout. */
+    /* Rows outside a table get a (minimal) horizontal cell layout. */
     HtmlNode *rowdom = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
     if (rowdom && rowdom->type == HTML_NODE_ELEMENT &&
         strcasecmp(rowdom->tag_name, "tr") == 0) {

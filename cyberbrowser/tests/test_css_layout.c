@@ -1295,8 +1295,118 @@ TEST(test_layout_pre_wrap_breaks_between_inline_runs) {
     return true;
 }
 
+/* Grid: template areas, fixed / minmax(0,1fr) columns, min-content and
+ * fr rows of an auto-height container, gaps (Wikipedia's page layout). */
+TEST(test_layout_grid_template_areas) {
+    const char *html =
+        "<html><head><style>"
+        ".g { display: grid; width: 800px; grid-template: min-content 1fr / 200px minmax(0,1fr);"
+        "     grid-template-areas: 'side main' 'foot foot'; gap: 10px 20px }"
+        ".s { grid-area: side; height: 50px } .m { grid-area: main; height: 100px }"
+        ".f { grid-area: foot; height: 30px }"
+        "</style></head><body><div class=\"g\"><div class=\"f\"></div><div class=\"m\"></div>"
+        "<div class=\"s\"></div></div></body></html>";
+    HtmlDocument *doc = parse_with_store_ids(html);
+    ASSERT_TRUE(doc != NULL);
+    LayoutContext ctx = {0};
+    ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 1000.0, 600.0));
+    LayoutBox *g = box_with_class(&ctx, doc, "g"), *s = box_with_class(&ctx, doc, "s");
+    LayoutBox *m = box_with_class(&ctx, doc, "m"), *f = box_with_class(&ctx, doc, "f");
+    ASSERT_TRUE(g && s && m && f);
+    ASSERT_TRUE(near_equal(g->height, 140));
+    ASSERT_TRUE(near_equal(s->x - g->x, 0) && near_equal(s->y - g->y, 0) && near_equal(s->width, 200));
+    ASSERT_TRUE(near_equal(m->x - g->x, 220) && near_equal(m->width, 580) && near_equal(m->y - g->y, 0));
+    ASSERT_TRUE(near_equal(f->x - g->x, 0) && near_equal(f->width, 800) && near_equal(f->y - g->y, 110));
+    css_layout_tree_free(&ctx);
+    html_document_free(doc);
+    return true;
+}
+
+/* Grid: repeat(auto-fill, minmax()), auto-placement, line numbers and
+ * spans, stretch in the block axis, and a floated grid's intrinsic width. */
+TEST(test_layout_grid_auto_placement) {
+    const char *html =
+        "<html><head><style>"
+        ".g { display: grid; width: 700px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));"
+        "     gap: 10px; grid-auto-rows: 20px }"
+        ".h { display: grid; width: 300px; grid-template-columns: 100px 100px 100px }"
+        ".a { grid-column: 2 / span 2; height: 10px } .b { grid-column: -2; height: 40px }"
+        ".fl { float: left; display: grid; grid-template-columns: auto auto }"
+        "</style></head><body>"
+        "<div class=\"g\"><i class=\"i1\"></i><i></i><i></i><i></i><i class=\"i5\"></i><i></i></div>"
+        "<div class=\"h\"><i class=\"a\"></i><i class=\"b\"></i><i class=\"c\"></i></div>"
+        "<div class=\"fl\"><b style=\"display:block;width:30px\"></b><b style=\"display:block;width:50px\"></b></div>"
+        "</body></html>";
+    HtmlDocument *doc = parse_with_store_ids(html);
+    ASSERT_TRUE(doc != NULL);
+    LayoutContext ctx = {0};
+    ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 1000.0, 600.0));
+    LayoutBox *g = box_with_class(&ctx, doc, "g"), *i1 = box_with_class(&ctx, doc, "i1");
+    LayoutBox *i5 = box_with_class(&ctx, doc, "i5");
+    ASSERT_TRUE(g && i1 && i5);
+    /* 4 columns of (700 - 30) / 4 = 167.5 */
+    ASSERT_TRUE(near_equal(i1->width, 167.5) && near_equal(i1->height, 20));
+    ASSERT_TRUE(near_equal(i5->x - g->x, 0) && near_equal(i5->y - g->y, 30));
+    ASSERT_TRUE(near_equal(g->height, 50));
+    LayoutBox *h = box_with_class(&ctx, doc, "h"), *a = box_with_class(&ctx, doc, "a");
+    LayoutBox *b = box_with_class(&ctx, doc, "b"), *c = box_with_class(&ctx, doc, "c");
+    ASSERT_TRUE(h && a && b && c);
+    ASSERT_TRUE(near_equal(a->x - h->x, 100) && near_equal(a->width, 200));
+    /* b (line -2: the last column) is behind the cursor, so it opens row 2;
+     * c, auto, goes after it (sparse): row 3. */
+    ASSERT_TRUE(near_equal(b->x - h->x, 200) && near_equal(b->y - h->y, 10));
+    ASSERT_TRUE(near_equal(c->y - h->y, 50) && near_equal(c->x - h->x, 0));
+    LayoutBox *fl = box_with_class(&ctx, doc, "fl");
+    ASSERT_TRUE(fl && near_equal(fl->width, 80));
+    css_layout_tree_free(&ctx);
+    html_document_free(doc);
+    return true;
+}
+
+/* Tables: shrink-to-fit width from the cells' max-content widths, colspan,
+ * row heights and vertical-align: middle, a specified width shared by the
+ * columns' maximums, and presentational attributes. */
+TEST(test_layout_table_columns) {
+    const char *html =
+        "<html><body>"
+        "<table class=\"t1\" cellspacing=\"0\" cellpadding=\"0\">"
+        "<tr><td class=\"c1\"><div class=\"d1\" style=\"width:40px;height:10px\"></div></td>"
+        "<td class=\"c2\"><div style=\"width:100px;height:30px\"></div></td></tr>"
+        "<tr><td colspan=\"2\" class=\"c3\"><div style=\"width:20px;height:5px\"></div></td></tr></table>"
+        "<table class=\"t2\" width=\"500\" cellpadding=\"0\"><tbody>"
+        "<tr><td class=\"e1\" bgcolor=\"#ff6600\"><div style=\"width:40px;height:10px\"></div></td>"
+        "<td class=\"e2\"><div style=\"width:100px;height:10px\"></div></td></tr></tbody></table>"
+        "</body></html>";
+    HtmlDocument *doc = parse_with_store_ids(html);
+    ASSERT_TRUE(doc != NULL);
+    LayoutContext ctx = {0};
+    ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 1000.0, 600.0));
+    LayoutBox *t1 = box_with_class(&ctx, doc, "t1"), *c1 = box_with_class(&ctx, doc, "c1");
+    LayoutBox *c2 = box_with_class(&ctx, doc, "c2"), *c3 = box_with_class(&ctx, doc, "c3");
+    LayoutBox *d1 = box_with_class(&ctx, doc, "d1");
+    ASSERT_TRUE(t1 && c1 && c2 && c3 && d1);
+    ASSERT_TRUE(near_equal(t1->width, 140) && near_equal(t1->height, 35));
+    ASSERT_TRUE(near_equal(c1->x - t1->x, 0) && near_equal(c2->x - t1->x, 40) && near_equal(c2->width, 100));
+    ASSERT_TRUE(near_equal(c1->height, 30) && near_equal(d1->y - c1->y, 10));
+    ASSERT_TRUE(near_equal(c3->width, 140) && near_equal(c3->y - t1->y, 30));
+    LayoutBox *t2 = box_with_class(&ctx, doc, "t2"), *e1 = box_with_class(&ctx, doc, "e1");
+    LayoutBox *e2 = box_with_class(&ctx, doc, "e2");
+    ASSERT_TRUE(t2 && e1 && e2);
+    /* 500 - 3 x 2px spacing = 494; 354px beyond the maximums goes 40:100. */
+    ASSERT_TRUE(near_equal(t2->width, 500));
+    ASSERT_TRUE(fabs(e1->width - (40 + 354.0 * 40 / 140)) < 0.05);
+    ASSERT_TRUE(fabs(e2->x - t2->x - (2 + e1->width + 2)) < 0.05);
+    ASSERT_TRUE(near_equal(e1->s->background_color_r, 1.0) && e1->s->background_color_a > 0.99);
+    css_layout_tree_free(&ctx);
+    html_document_free(doc);
+    return true;
+}
+
 void run_css_layout_tests(void) {
     printf("\n--- CSS Layout Engine Tests ---\n");
+    RUN_TEST(test_layout_grid_template_areas);
+    RUN_TEST(test_layout_grid_auto_placement);
+    RUN_TEST(test_layout_table_columns);
     RUN_TEST(test_layout_basic_document);
     RUN_TEST(test_layout_stylesheet);
     RUN_TEST(test_layout_auto_height);
