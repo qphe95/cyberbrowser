@@ -132,7 +132,7 @@ const REPORT = `(function () {
       var t = tests[i];
       if (t.status === 0) r.pass++;
       else if (t.status === 4) r.skip++;
-      else { r.fail++; if (r.fails.length < 30) r.fails.push(t.name + ': ' + TEST[t.status] + (t.message ? ' ' + String(t.message).slice(0, 300) : '')); }
+      else { r.fail++; if (r.fails.length < 200) r.fails.push(t.name + ': ' + TEST[t.status] + (t.message ? ' ' + String(t.message).slice(0, 300) : '')); }
     }
     var x = new XMLHttpRequest();
     x.open('POST', '/result');

@@ -860,20 +860,31 @@ ssize_t tls_client_read(TlsClient *client, unsigned char *buf, size_t len) {
     return ret;
 }
 
+/* All of buf, written as the transport takes it: a write moves at most one
+ * TLS record (16 KB) or one relay message (LOOP_DATA_MAX) at a time, and a
+ * caller that wrote once sent a request body's first part only (its server
+ * then waited for the rest).  Returns len, or what was written before an
+ * error (-1 when nothing was), 0 when the transport would block at once. */
 ssize_t tls_client_write(TlsClient *client, const unsigned char *buf, size_t len) {
     if (!client || !client->connected) {
         return -1;
     }
-    if (client->plain) {
-        int w = client->loop_id ? loop_bio_send(client, buf, len) : mbedtls_net_send(&client->net, buf, len);
-        if (w == MBEDTLS_ERR_SSL_WANT_WRITE) return 0;
-        return w;
+    size_t done = 0;
+    while (done < len) {
+        int w;
+        if (client->plain)
+            w = client->loop_id ? loop_bio_send(client, buf + done, len - done)
+                                : mbedtls_net_send(&client->net, buf + done, len - done);
+        else
+            w = mbedtls_ssl_write(&client->ssl, buf + done, len - done);
+        if (w == MBEDTLS_ERR_SSL_WANT_READ || w == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            if (!done) return 0;
+            continue;
+        }
+        if (w <= 0) return done ? (ssize_t)done : (w < 0 ? w : -1);
+        done += (size_t)w;
     }
-    int ret = mbedtls_ssl_write(&client->ssl, buf, len);
-    if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
-        return 0;
-    }
-    return ret;
+    return (ssize_t)done;
 }
 
 void tls_client_close(TlsClient *client) {

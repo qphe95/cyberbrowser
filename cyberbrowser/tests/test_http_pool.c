@@ -6,6 +6,7 @@
 #include "test_runner.h"
 #include "http_download.h"
 #include "tls_client.h"
+#include "net_loopback.h"
 #include "platform.h"
 #include <pthread.h>
 #include <stdio.h>
@@ -307,6 +308,55 @@ TEST(test_http_pool_per_host_cap) {
     return true;
 }
 
+/* A request body larger than one write of the transport arrives whole: a
+ * loopback relay that takes 10 bytes a write (as the real one takes one
+ * message, and TLS one record) got only the first part of a POST. */
+static char *g_lb_got;
+static size_t g_lb_n, g_lb_off;
+static const char k_lb_resp[] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+static int lb_connect(const char *host, const char *port) { (void)host; (void)port; g_lb_n = g_lb_off = 0; return 7; }
+static int lb_send(int id, const unsigned char *buf, size_t len, unsigned ms) {
+    (void)id; (void)ms;
+    size_t n = len < 10 ? len : 10;
+    g_lb_got = realloc(g_lb_got, g_lb_n + n);
+    memcpy(g_lb_got + g_lb_n, buf, n);
+    g_lb_n += n;
+    return (int)n;
+}
+static int lb_recv(int id, unsigned char *buf, size_t len, unsigned ms) {
+    (void)id; (void)ms;
+    size_t left = sizeof k_lb_resp - 1 - g_lb_off, n = left < len ? left : len;
+    memcpy(buf, k_lb_resp + g_lb_off, n);
+    g_lb_off += n;
+    return (int)n;
+}
+static bool lb_readable(int id) { (void)id; return true; }
+static void lb_close(int id) { (void)id; }
+
+TEST(test_http_large_post_body_whole) {
+    static const TlsLoopback lb = { lb_connect, lb_send, lb_recv, lb_readable, lb_close };
+    size_t n = 70000;
+    char *body = malloc(n);
+    for (size_t i = 0; i < n; i++) body[i] = (char)('a' + i % 26);
+    tls_set_loopback(&lb);
+    HttpBuffer out = { 0 };
+    int status = 0;
+    char err[256] = "";
+    bool ok = http_request_to_memory("http://127.0.0.1:9/sink", "POST", body, n, NULL, 0, &out, &status, err, sizeof err);
+    tls_set_loopback(NULL);
+    const char *end = NULL;
+    for (size_t i = 0; i + 4 <= g_lb_n; i++) if (!memcmp(g_lb_got + i, "\r\n\r\n", 4)) { end = g_lb_got + i + 4; break; }
+    size_t got = end ? g_lb_n - (size_t)(end - g_lb_got) : 0;
+    if (!ok || got != n) printf("    ok %d status %d body %zu of %zu (%s)\n", ok, status, got, n, err);
+    bool same = end && got == n && !memcmp(end, body, n);
+    http_free_buffer(&out);
+    free(body);
+    free(g_lb_got);
+    g_lb_got = NULL;
+    ASSERT_TRUE(ok && status == 200 && same);
+    return true;
+}
+
 void run_http_pool_tests(void) {
     printf("\n--- HTTP connection pool tests ---\n");
     RUN_TEST(test_http_pool_reuses_connection);
@@ -314,4 +364,5 @@ void run_http_pool_tests(void) {
     RUN_TEST(test_http_pool_close_and_eof);
     RUN_TEST(test_http_pool_retries_dropped_connection);
     RUN_TEST(test_http_pool_per_host_cap);
+    RUN_TEST(test_http_large_post_body_whole);
 }
