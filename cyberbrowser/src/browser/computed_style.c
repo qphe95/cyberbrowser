@@ -181,12 +181,22 @@ static bool mentions(const char *v, const char *word) {
     return false;
 }
 
+static const char *computed_of(JSContextHandle ctx, ComputedStyle *cs, const char *name);
+
+/* The element's font size in px: the layout's, or (without a styled box)
+ * its computed font-size. */
+static double font_px(JSContextHandle ctx, ComputedStyle *cs) {
+    if (cs->used.font_size > 0) return cs->used.font_size;
+    if (!cs->styled) return 16;
+    double v = atof(computed_of(ctx, cs, "font-size"));
+    return v > 0 ? v : 16;
+}
+
 static void env_of(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p, const char *v, CssComputeEnv *env) {
     memset(env, 0, sizeof *env);
     bool is_fs = !strcmp(p->name, "font-size"), is_color = !strcmp(p->name, "color");
     ComputedStyle *par = (is_fs || is_color) ? parent_of(ctx, cs) : NULL;
-    env->font_size = cs->used.font_size > 0 ? cs->used.font_size : 16;
-    if (is_fs) env->font_size = par && par->used.font_size > 0 ? par->used.font_size : 16;
+    env->font_size = is_fs ? (par ? font_px(ctx, par) : 16) : font_px(ctx, cs);
     env->root_font_size = cs->root_font_size;
     env->vw = cs->vw;
     env->vh = cs->vh;
@@ -207,7 +217,22 @@ static int weight_num(const char *w) {
 /* The computed value of v for p (not a CSS-wide keyword). */
 static char *compute_value(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p, const char *v) {
     const char *n = p->name;
-    if (!strcmp(n, "font-size") && cs->used.font_size > 0) return px(cs->used.font_size);
+    if (!strcmp(n, "font-size")) {
+        if (cs->used.font_size > 0) return px(cs->used.font_size);
+        /* no styled box: from the declaration and the parent's size */
+        ComputedStyle *par = parent_of(ctx, cs);
+        double pf = par ? font_px(ctx, par) : 16;
+        static const struct { const char *k; double px; } sizes[] = {
+            { "xx-small", 9 }, { "x-small", 10 }, { "small", 13 }, { "medium", 16 }, { "large", 18 },
+            { "x-large", 24 }, { "xx-large", 32 }, { "xxx-large", 48 },
+        };
+        for (size_t k = 0; k < sizeof sizes / sizeof sizes[0]; k++)
+            if (!strcmp(v, sizes[k].k)) return px(sizes[k].px);
+        if (!strcmp(v, "larger")) return px(pf * 1.2);
+        if (!strcmp(v, "smaller")) return px(pf / 1.2);
+        if (!strcmp(v, "math")) return px(pf);
+        if (strchr(v, '%') && !strchr(v, '(')) return px(pf * atof(v) / 100);
+    }
     if (!strcmp(n, "font-weight")) {
         int w;
         if (!strcmp(v, "bolder") || !strcmp(v, "lighter")) {
@@ -222,7 +247,7 @@ static char *compute_value(JSContextHandle ctx, ComputedStyle *cs, const CssProp
     }
     if (!strcmp(n, "line-height") && strchr(v, '%') && !strchr(v, '(')) {
         double pct = atof(v);
-        return px(pct / 100 * (cs->used.font_size > 0 ? cs->used.font_size : 16));
+        return px(pct / 100 * font_px(ctx, cs));
     }
     CssComputeEnv env;
     env_of(ctx, cs, p, v, &env);

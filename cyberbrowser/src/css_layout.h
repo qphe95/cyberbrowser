@@ -659,6 +659,12 @@ bool css_layout_element_cascade(LayoutContext *ctx, int idx, CssCascadeFn fn, vo
 /* The computed value of custom property name (--x) on box idx's element
  * from ctx's last layout, or NULL. */
 const char *css_layout_element_custom(LayoutContext *ctx, int idx, const char *name);
+/* The same for an element of the mirror document (dom index) that has no
+ * styled box (inside a display:none subtree): var() resolves against the
+ * custom properties of box holder (its nearest styled ancestor). */
+bool css_layout_dom_cascade(LayoutContext *ctx, int dom, int holder, CssCascadeFn fn, void *ud);
+/* The user agent's display of an element with tag (lower case). */
+const char *css_layout_tag_display(const char *tag);
 /* Layouts on kept trees reuse clean subtrees from the last layout's calls:
  * forget them (an image or a font changed the measurements), and how many
  * subtrees (of how many boxes) were reused. */

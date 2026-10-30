@@ -1419,16 +1419,45 @@ bool layout_query_font_size(JSContextHandle ctx, GCValue element, double *px)
     return true;
 }
 
+/* The cached layout, current for a style query about id (no layout styling
+ * display:none subtrees: an element there is matched on its own). */
+static bool lq_style_ready(JSContextHandle ctx, NodeId id)
+{
+    if (!id) return false;
+    g_lq_who = id;
+    g_lq_ask = LQ_ASK_STYLE;
+    bool ok = lq_ensure(ctx);
+    g_lq_ask = LQ_ASK_POS;
+    g_lq_who = 0;
+    return ok;
+}
+
+/* The nearest styled box at or above id's place in the layout, or -1. */
+static int lq_styled_holder(NodeId id)
+{
+    bool inside;
+    int h = lq_box_or_holder(id, &inside);
+    while (h >= 0 && (g_lq_layout.boxes[h].flags & LAYOUT_STYLE_SKIPPED)) h = g_lq_layout.tree.nodes[h].parent_idx;
+    return h;
+}
+
 bool layout_query_cascade(JSContextHandle ctx, GCValue element, LayoutCascadeFn fn, void *ud, LayoutQueryUsed *used)
 {
     memset(used, 0, sizeof(*used));
-    double fs = 0;
-    /* (styles the element, laying out again with everything styled when it
-     * is inside a display:none subtree) */
-    if (!layout_query_font_size(ctx, element, &fs)) return false;
     NodeId id = dom_node_of(element);
+    if (!lq_style_ready(ctx, id)) return false;
     int idx = lq_box_index(id);
-    if (idx < 0) return false;
+    if (idx < 0 || (g_lq_layout.boxes[idx].flags & LAYOUT_STYLE_SKIPPED)) {
+        /* No styled box (inside a display:none subtree): its declarations,
+         * matched on their own; font size and custom properties from the
+         * nearest styled ancestor. */
+        int holder = lq_styled_holder(id);
+        int dom = g_lq_doc ? html_mirror_index_of(g_lq_doc, id) : -1;
+        if (holder < 0 || dom < 0) return false;
+        used->font_size = 0;    /* (computed from its declarations) */
+        used->display = css_layout_tag_display(dom_tag_name(id));
+        return css_layout_dom_cascade(&g_lq_layout, dom, holder, fn, ud);
+    }
     const LayoutBox *b = &g_lq_layout.boxes[idx];
     used->font_size = b->s->font_size;
     static const char *const roles[] = { NULL, "table", "table-row-group", "table-row", "table-cell", "table-caption", "table-column" };
@@ -1460,9 +1489,10 @@ bool layout_query_cascade(JSContextHandle ctx, GCValue element, LayoutCascadeFn 
 
 char *layout_query_custom(JSContextHandle ctx, GCValue element, const char *name)
 {
-    double fs = 0;
-    if (!layout_query_font_size(ctx, element, &fs)) return NULL;   /* (styles it) */
-    int idx = lq_box_index(dom_node_of(element));
+    NodeId id = dom_node_of(element);
+    if (!lq_style_ready(ctx, id)) return NULL;
+    /* (inside a display:none subtree: the nearest styled ancestor's) */
+    int idx = lq_styled_holder(id);
     const char *v = idx >= 0 ? css_layout_element_custom(&g_lq_layout, idx, name) : NULL;
     return v ? strdup(v) : NULL;
 }

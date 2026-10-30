@@ -13425,12 +13425,38 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
 }
 
 /* The declarations that apply to box idx's element (css_layout.h). */
+static bool cascade_at(LayoutContext *ctx, int dom, const CssCustomProps *props, CssCascadeFn fn, void *ud);
+
 bool css_layout_element_cascade(LayoutContext *ctx, int idx, CssCascadeFn fn, void *ud)
 {
     if (!ctx || idx < 0 || idx >= ctx->tree.count || !ctx->doc) return false;
+    return cascade_at(ctx, ctx->tree.nodes[idx].dom_node_idx, ctx->custom_props ? ctx->custom_props[idx] : NULL, fn, ud);
+}
+
+bool css_layout_dom_cascade(LayoutContext *ctx, int dom, int holder, CssCascadeFn fn, void *ud)
+{
+    if (!ctx || !ctx->doc || dom < 0) return false;
+    const CssCustomProps *props = ctx->custom_props && holder >= 0 && holder < ctx->tree.count ? ctx->custom_props[holder] : NULL;
+    return cascade_at(ctx, dom, props, fn, ud);
+}
+
+const char *css_layout_tag_display(const char *tag)
+{
+    switch (layout_default_display(tag ? tag : "")) {
+    case CSS_DISPLAY_BLOCK: return "block";
+    case CSS_DISPLAY_INLINE_BLOCK: return "inline-block";
+    case CSS_DISPLAY_FLEX: return "flex";
+    case CSS_DISPLAY_GRID: return "grid";
+    case CSS_DISPLAY_NONE: return "none";
+    case CSS_DISPLAY_LIST_ITEM: return "list-item";
+    default: return "inline";
+    }
+}
+
+static bool cascade_at(LayoutContext *ctx, int dom, const CssCustomProps *props, CssCascadeFn fn, void *ud)
+{
     const CssStyleSet *set = styleset_cached(ctx->style_gen, ctx->viewport_width, ctx->viewport_height);
     if (!set) return false;
-    int dom = ctx->tree.nodes[idx].dom_node_idx;
     HtmlNode *node = layout_node_dom(ctx, dom);
     if (!node || node->type != HTML_NODE_ELEMENT) return false;
     const CssStyleDoc *sd = css_styledoc_get(ctx->doc);
@@ -13439,7 +13465,6 @@ bool css_layout_element_cascade(LayoutContext *ctx, int idx, CssCascadeFn fn, vo
     css_style_bloom_enter(t, sd, po_array_parent(&ctx->doc->array, dom));
     const CssAppliedDecl *applied = NULL;
     int count = css_style_match(set, sd, dom, t, &applied);
-    const CssCustomProps *props = ctx->custom_props ? ctx->custom_props[idx] : NULL;
     InlineBlock inl[4];
     int ninl = 0;
     for (HtmlAttribute *attr = node->attributes; attr && ninl < 4; attr = attr->next) {

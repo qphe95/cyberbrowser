@@ -976,7 +976,9 @@ TEST(test_dom_computed_font_size_inside_hidden_subtree) {
         "d.body.appendChild(p);"
         "var fs=getComputedStyle(p.firstChild).fontSize;"
         "p.remove(); s.remove(); return fs==='20px' ? 1 : 0;})()"));
-    ASSERT_EQ(1, (int)(layout_api_style_all_layouts() - before));
+    /* (an element inside a display:none subtree is styled on its own: no
+     * layout styling every hidden subtree) */
+    ASSERT_EQ(0, (int)(layout_api_style_all_layouts() - before));
     return true;
 }
 
