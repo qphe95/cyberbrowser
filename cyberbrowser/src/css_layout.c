@@ -684,6 +684,8 @@ void css_layout_tree_free(LayoutContext *ctx)
         for (int i = 0; i < ctx->text_gen_cap; i++) free(ctx->text_gen[i]);
         free(ctx->text_gen);
     }
+    for (int i = 0; ctx->pieces && i < ctx->pieces_n; i++) free(ctx->pieces[i].p);
+    free(ctx->pieces);
     memset(ctx, 0, sizeof(*ctx));
 }
 
@@ -1401,20 +1403,28 @@ static bool layout_display_is_block_level(CssDisplay d)
 }
 
 /* Blockification (CSS Display §2.7) and block-in-inline: flex/grid items,
- * absolutely positioned and floated boxes compute to block-level; an inline
- * element containing in-flow block-level children is laid out as a block
- * (the anonymous block boxes a browser creates around them span the same
- * area).  Runs bottom-up so a promotion propagates to inline ancestors. */
+ * absolutely positioned and floated boxes compute to block-level.  An
+ * inline element containing in-flow block-level children is split around
+ * them (block_in_inline 2: its parent's flow lays it out in pieces); one
+ * containing such an inline is laid out as a block instead (the anonymous
+ * block boxes a browser creates around its blocks span the same area).
+ * Runs bottom-up so a promotion propagates to inline ancestors. */
 static void layout_blockify(LayoutContext *ctx)
 {
     const int *post = ctx->tree.postorder;
+    for (int i = 0; ctx->pieces && i < ctx->pieces_n; i++) free(ctx->pieces[i].p);
+    free(ctx->pieces);
+    ctx->pieces = NULL;
+    ctx->pieces_n = 0;
     if (!post) return;
+    bool split = false;
     for (int k = 0; k < ctx->tree.count; k++) {
         int i = post[k];
         LayoutBox *box = layout_box(ctx, i);
         if (box->s->display != CSS_DISPLAY_INLINE) continue;
         HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
         if (!node || node->type != HTML_NODE_ELEMENT) continue;
+        if (box->s->block_in_inline == 2) box->s->block_in_inline = 0;   /* (a kept style) */
         bool promote = box->s->position == CSS_POSITION_ABSOLUTE || box->s->position == CSS_POSITION_FIXED ||
                        box->s->float_side != 0;
         int p = ctx->tree.nodes[i].parent_idx;
@@ -1422,17 +1432,26 @@ static void layout_blockify(LayoutContext *ctx)
             CssDisplay pd = layout_box(ctx, p)->s->display;
             if (pd == CSS_DISPLAY_FLEX || pd == CSS_DISPLAY_GRID) promote = true;
         }
+        bool blocks = false, nested = false;
         for (int c = ctx->tree.nodes[i].first_child_idx; !promote && c >= 0;
              c = ctx->tree.nodes[c].next_sibling_idx) {
             LayoutBox *cb = layout_box(ctx, c);
+            if (cb->s->display == CSS_DISPLAY_INLINE && cb->s->block_in_inline == 2) nested = true;
             if (layout_display_is_block_level(cb->s->display) && !cb->s->inline_level &&
                 cb->s->position != CSS_POSITION_ABSOLUTE && cb->s->position != CSS_POSITION_FIXED &&
-                cb->s->float_side == 0) {
-                promote = true;
-                box->s->block_in_inline = 1;
-            }
+                cb->s->float_side == 0)
+                blocks = true;
+        }
+        if (nested || blocks) {
+            box->s->block_in_inline = nested ? 1 : 2;
+            if (nested) promote = true;
+            else split = true;
         }
         if (promote) box->s->display = CSS_DISPLAY_BLOCK;
+    }
+    if (split) {
+        ctx->pieces = (LayoutPieceList *)calloc((size_t)ctx->tree.count, sizeof(LayoutPieceList));
+        if (ctx->pieces) ctx->pieces_n = ctx->tree.count;
     }
 }
 
@@ -8783,6 +8802,12 @@ static bool layout_text_is_whitespace(const char *s)
     return true;
 }
 
+/* Collapsible white space (space, tab, segment break). */
+static bool layout_is_space_char(char c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
+}
+
 /* Measure text at a given font size with the box's resolved font. */
 static bool layout_measure_text_styled(const LayoutBox *box, const char *text,
                                        double font_size,
@@ -8803,13 +8828,18 @@ static bool layout_measure_text_styled(const LayoutBox *box, const char *text,
     return true;
 }
 
-/* Concatenate descendant text of a DOM node (used to size inline elements). */
-static void layout_concat_dom_text(LayoutContext *ctx, HtmlNode *node,
-                                   char *buf, size_t bufsz, size_t *len)
+static inline bool layout_is_in_flow(const LayoutBox *box);
+
+/* Concatenate the text in a box (used to size inline elements): its
+ * descendants in the flow (not floated, positioned or display:none ones). */
+static void layout_concat_box_text(LayoutContext *ctx, int idx, char *buf, size_t bufsz, size_t *len)
 {
-    HtmlDocument *doc = ctx->doc;
-    for (HtmlNode *c = html_node_first_child(doc, node); c && *len + 1 < bufsz;
-         c = html_node_next_sibling(doc, c)) {
+    for (int k = ctx->tree.nodes[idx].first_child_idx; k >= 0 && *len + 1 < bufsz;
+         k = ctx->tree.nodes[k].next_sibling_idx) {
+        const LayoutBox *kb = layout_box(ctx, k);
+        if (!layout_is_in_flow(kb) || kb->s->float_side != 0) continue;
+        HtmlNode *c = layout_node_dom(ctx, ctx->tree.nodes[k].dom_node_idx);
+        if (!c) continue;
         const char *ct = c->type == HTML_NODE_TEXT ? css_layout_node_text(ctx, c) : NULL;
         if (ct) {
             size_t tl = strlen(ct);
@@ -8818,7 +8848,7 @@ static void layout_concat_dom_text(LayoutContext *ctx, HtmlNode *node,
             *len += tl;
             buf[*len] = '\0';
         } else if (c->type == HTML_NODE_ELEMENT) {
-            layout_concat_dom_text(ctx, c, buf, bufsz, len);
+            layout_concat_box_text(ctx, k, buf, bufsz, len);
         }
     }
 }
@@ -9048,6 +9078,8 @@ static bool layout_first_img_size(HtmlDocument *doc, HtmlNode *node,
  *   margins collapse together into a single max();
  * - an inline-level first/last child forms a line box, which blocks the
  *   collapse.  Whitespace-only text is not significant. */
+static bool layout_inline_range_empty(LayoutContext *ctx, int first, int last);
+
 static void layout_sig_children(LayoutContext *ctx, int idx, int *out_first, int *out_last)
 {
     *out_first = *out_last = -1;
@@ -9055,6 +9087,26 @@ static void layout_sig_children(LayoutContext *ctx, int idx, int *out_first, int
          c = ctx->tree.nodes[c].next_sibling_idx) {
         LayoutBox *ch = layout_box(ctx, c);
         if (!layout_is_in_flow(ch) || ch->s->float_side != 0) continue;
+        if (ch->s->display == CSS_DISPLAY_INLINE && ch->s->block_in_inline == 2) {
+            /* A split inline: its children, between its edges (which make
+             * line boxes when they take room). */
+            const LayoutStyle *s = ch->s;
+            bool l = s->margin_left != 0.0 || s->padding_left != 0.0 || s->border_left != 0.0;
+            bool r = s->margin_right != 0.0 || s->padding_right != 0.0 || s->border_right != 0.0;
+            if (l) {
+                if (*out_first < 0) *out_first = c;
+                *out_last = c;
+            }
+            for (int k = ctx->tree.nodes[c].first_child_idx; k >= 0; k = ctx->tree.nodes[k].next_sibling_idx) {
+                LayoutBox *kb = layout_box(ctx, k);
+                if (!layout_is_in_flow(kb) || kb->s->float_side != 0) continue;
+                if (!layout_box_is_block_level(kb) && layout_inline_range_empty(ctx, k, k)) continue;
+                if (*out_first < 0) *out_first = k;
+                *out_last = k;
+            }
+            if (r) *out_last = c;
+            continue;
+        }
         HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
         if (dn && dn->type == HTML_NODE_TEXT &&
             layout_text_is_whitespace(css_layout_node_text(ctx, dn))) continue;
@@ -9423,6 +9475,173 @@ static double layout_pct_base_height(LayoutContext *ctx, int idx)
     return 0.0;
 }
 
+/* Is the inline content of the siblings first..last (first -1: none)
+ * empty: only collapsible white space, floats, and inline elements with
+ * nothing else and no horizontal margin, border or padding?  A piece of a split
+ * inline holding nothing more makes no line box (CSS 2.1 §9.4.2). */
+static bool layout_inline_range_empty(LayoutContext *ctx, int first, int last)
+{
+    for (int c = first; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+        LayoutBox *b = layout_box(ctx, c);
+        if (b->s->display != CSS_DISPLAY_NONE && b->s->position != CSS_POSITION_ABSOLUTE &&
+            b->s->position != CSS_POSITION_FIXED && b->s->float_side == 0) {
+            HtmlNode *d = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
+            if (!d) return false;
+            if (d->type == HTML_NODE_TEXT) {
+                const char *t = css_layout_node_text(ctx, d);
+                if ((t && !layout_text_is_whitespace(t)) || (b->s->white_space >= 2 && b->s->white_space <= 4 && t && t[0]))
+                    return false;
+            } else if (d->type == HTML_NODE_ELEMENT) {
+                const LayoutStyle *s = b->s;
+                if (s->display != CSS_DISPLAY_INLINE || !d->tag_name ||
+                    strcasecmp(d->tag_name, "img") == 0 || strcasecmp(d->tag_name, "br") == 0 ||
+                    layout_is_replaced_form_element(d->tag_name) || strcasecmp(d->tag_name, "svg") == 0 ||
+                    strcasecmp(d->tag_name, "canvas") == 0)
+                    return false;
+                if (s->margin_left != 0.0 || s->margin_right != 0.0 || s->padding_left != 0.0 ||
+                    s->padding_right != 0.0 || s->border_left != 0.0 || s->border_right != 0.0)
+                    return false;
+                if (!layout_inline_range_empty(ctx, ctx->tree.nodes[c].first_child_idx, -1)) return false;
+            }
+        }
+        if (c == last) break;
+    }
+    return true;
+}
+
+/* A piece of a split inline in a block flow: the inline (el), the children
+ * it has (first..last; first -1: none), which of its edges, whether it
+ * makes a line box, and where its line started. */
+typedef struct FlowPiece {
+    int el, first, last;
+    unsigned char sides;
+    bool shown;
+    double start_x, start_y;
+} FlowPiece;
+
+static void layout_flow_noreuse_up(LayoutContext *ctx, int idx);
+
+/* The start of a piece in the flow: a line box (after a block, its bottom
+ * margin no longer collapses), and the room its left edge takes.  True
+ * when it starts its line. */
+static bool layout_piece_start(LayoutContext *ctx, FlowPiece *fp, FlowCursor *cur, double *pending_mb,
+                               bool *any_placed, double content_left, double avail_width)
+{
+    if (!fp->shown) {
+        /* (no line box: its white space and empty inlines are nowhere; its
+         * floats are items of the flow) */
+        for (int k = fp->first; k >= 0; k = ctx->tree.nodes[k].next_sibling_idx) {
+            LayoutBox *kb = layout_box(ctx, k);
+            if (kb->s->float_side != 0) {
+                if (k == fp->last) break;
+                continue;
+            }
+            kb->x = cur->x;
+            kb->y = cur->y;
+            kb->width = kb->height = 0.0;
+            layout_update_content_sizes(kb);
+            if (k == fp->last) break;
+        }
+        return false;
+    }
+    LayoutBox *eb = layout_box(ctx, fp->el);
+    if (*pending_mb > 0.0) {
+        cur->y += *pending_mb;
+        *pending_mb = 0.0;
+        *any_placed = true;
+    }
+    double line_left = content_left, line_avail = avail_width;
+    layout_flow_line_geometry(ctx->float_stack + t_float_base, ctx->float_count - t_float_base, cur->y,
+                              content_left, avail_width, &line_left, &line_avail);
+    if (cur->x < line_left) cur->x = line_left;
+    fp->start_x = cur->x;
+    fp->start_y = cur->y;
+    if (fp->sides & 1) cur->x += eb->margin_left + eb->s->border_left + eb->padding_left;
+    return fp->start_x <= line_left + 0.001;
+}
+
+/* The end of a piece: the room its right edge takes, and its border boxes,
+ * one per line it is on, noted against their first child (which line
+ * alignment and later moves carry), the inline's own box when it has
+ * none.  line_ends: nothing follows it on its line (a trailing space of
+ * its text hangs there, outside it). */
+static void layout_piece_end(LayoutContext *ctx, FlowPiece *fp, FlowCursor *cur, bool line_ends)
+{
+    if (!fp->shown) return;
+    int el = fp->el;
+    LayoutBox *eb = layout_box(ctx, el);
+    if (fp->sides & 2) cur->x += eb->padding_right + eb->s->border_right + eb->margin_right;
+    double adv = layout_line_advance_box(eb);
+    if (adv > cur->line_box) cur->line_box = adv;
+    double ca = layout_content_area_height(eb);
+    double lpad = eb->padding_left + eb->s->border_left, rpad = eb->padding_right + eb->s->border_right;
+    LayoutPieceList *pl = &ctx->pieces[el];
+    /* (lines: runs of children with the same top) */
+    int k = fp->first, nlines = 0;
+    for (;;) {
+        int anchor = -1, end = -1;
+        double x0 = 1e30, x1 = -1e30, ly = 0.0;
+        for (; k >= 0; k = k == fp->last ? -1 : ctx->tree.nodes[k].next_sibling_idx) {
+            const LayoutBox *kb = layout_box(ctx, k);
+            if (!layout_is_in_flow(kb) || (kb->width <= 0.0 && kb->height <= 0.0)) continue;
+            if (anchor >= 0 && fabs(kb->y - ly) > 0.5) break;
+            if (anchor < 0) { anchor = k; ly = kb->y; }
+            if (kb->x < x0) x0 = kb->x;
+            if (kb->x + kb->width > x1) { x1 = kb->x + kb->width; end = k; }
+        }
+        if (k < 0 && line_ends && end >= 0) {
+            const LayoutBox *eb2 = layout_box(ctx, end);
+            HtmlNode *tn = layout_node_dom(ctx, ctx->tree.nodes[end].dom_node_idx);
+            const char *t = tn && tn->type == HTML_NODE_TEXT ? css_layout_box_text(ctx, end, css_layout_node_text(ctx, tn)) : NULL;
+            size_t tl = t ? strlen(t) : 0;
+            double sw = 0.0;
+            double fs = eb2->s->font_size > 0.0 ? eb2->s->font_size : 16.0;
+            if (tl > 0 && t[tl - 1] == ' ' && eb2->s->white_space != 2 && eb2->s->white_space != 3 &&
+                eb2->wrap_cont_w <= 0.0 && layout_measure_text_styled(eb2, " ", fs, &sw, NULL))
+                x1 -= sw;
+        }
+        bool first_line = nlines == 0, last_line = k < 0;
+        /* (the line's top: where the piece started, or a text box on it; an
+         * inline box on it is placed in the line by its own leading) */
+        if (first_line) {
+            ly = fp->start_y;
+        } else {
+            for (int t = anchor; t >= 0; t = ctx->tree.nodes[t].first_child_idx) {
+                HtmlNode *tn = layout_node_dom(ctx, ctx->tree.nodes[t].dom_node_idx);
+                if (tn && tn->type == HTML_NODE_TEXT) { ly = layout_box(ctx, t)->y; break; }
+            }
+        }
+        if (anchor < 0) {
+            if (nlines > 0) break;
+            /* (nothing in it: its edges alone) */
+            x0 = x1 = fp->start_x + ((fp->sides & 1) ? eb->margin_left + lpad : 0.0);
+            ly = fp->start_y;
+        }
+        LayoutPiece pc;
+        pc.sides = (unsigned char)(((fp->sides & 1) && first_line ? 1 : 0) | ((fp->sides & 2) && last_line ? 2 : 0));
+        double bx = x0 - ((pc.sides & 1) ? lpad : 0.0);
+        double bw = x1 + ((pc.sides & 2) ? rpad : 0.0) - bx;
+        double by = ly + (adv - ca) / 2.0 - eb->padding_top - eb->s->border_top;
+        double bh = ca + eb->padding_top + eb->padding_bottom + eb->s->border_top + eb->s->border_bottom;
+        const LayoutBox *ab = anchor >= 0 ? layout_box(ctx, anchor) : NULL;
+        pc.anchor = anchor;
+        pc.dx = bx - (ab ? ab->x : 0.0);
+        pc.dy = by - (ab ? ab->y : 0.0);
+        pc.w = bw;
+        pc.h = bh;
+        if (pl->n == pl->cap) {
+            int nc = pl->cap ? 2 * pl->cap : 4;
+            LayoutPiece *np = (LayoutPiece *)realloc(pl->p, (size_t)nc * sizeof(LayoutPiece));
+            if (!np) return;
+            pl->p = np;
+            pl->cap = nc;
+        }
+        pl->p[pl->n++] = pc;
+        nlines++;
+        if (k < 0) break;
+    }
+}
+
 static void layout_block_flow_inner(LayoutContext *ctx, int idx);
 
 static void layout_block_flow(LayoutContext *ctx, int idx)
@@ -9451,6 +9670,92 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
     int nkids = 0;
     int *kids = layout_collect_flow_children(ctx, idx, &nkids);
 
+    /* Inlines split around their block-level children (block_in_inline 2):
+     * their children are items of this flow, the blocks laid out as blocks
+     * and each stretch of inline content between them as a piece of the
+     * inline, between a start and an end item (piece_of 2k and 2k + 1 for
+     * piece k) where its edges take room and its border boxes are noted.
+     * piece_of[i]: -1 for any other item. */
+    FlowPiece *fpieces = NULL;
+    int *piece_of = NULL, nfp = 0, extra = 0;
+    for (int i = 0; ctx->pieces && i < nkids; i++) {
+        LayoutBox *kb = layout_box(ctx, kids[i]);
+        if (kb->s->block_in_inline == 2 && kb->s->display == CSS_DISPLAY_INLINE)
+            extra += 4 * ctx->tree.nodes[kids[i]].child_count + 4;
+    }
+    if (extra > 0) {
+        int cap = nkids + extra;
+        int *items = (int *)malloc((size_t)cap * sizeof(int));
+        piece_of = (int *)malloc((size_t)cap * sizeof(int));
+        fpieces = (FlowPiece *)calloc((size_t)extra, sizeof(FlowPiece));
+        if (!items || !piece_of || !fpieces) {
+            free(items);
+            free(piece_of);
+            free(fpieces);
+            piece_of = NULL;
+            fpieces = NULL;
+        } else {
+            int n = 0;
+            for (int i = 0; i < nkids; i++) {
+                int el = kids[i];
+                LayoutBox *eb = layout_box(ctx, el);
+                if (!(eb->s->block_in_inline == 2 && eb->s->display == CSS_DISPLAY_INLINE)) {
+                    items[n] = el;
+                    piece_of[n++] = -1;
+                    continue;
+                }
+                ctx->pieces[el].n = 0;
+                layout_resolve_used_sizes(eb, layout_node_dom(ctx, ctx->tree.nodes[el].dom_node_idx),
+                                          avail_width, layout_pct_base_height(ctx, idx));
+                bool ldeco = eb->margin_left != 0.0 || eb->padding_left != 0.0 || eb->s->border_left != 0.0;
+                bool rdeco = eb->margin_right != 0.0 || eb->padding_right != 0.0 || eb->s->border_right != 0.0;
+                bool first_piece = true;
+                for (int k = ctx->tree.nodes[el].first_child_idx;;) {
+                    int b = k, last = -1;
+                    while (b >= 0) {
+                        LayoutBox *bb = layout_box(ctx, b);
+                        if (layout_is_in_flow(bb) && layout_box_is_block_level(bb) && bb->s->float_side == 0) break;
+                        last = b;
+                        b = ctx->tree.nodes[b].next_sibling_idx;
+                    }
+                    FlowPiece *fp = &fpieces[nfp];
+                    fp->el = el;
+                    fp->first = last >= 0 ? k : -1;
+                    fp->last = last;
+                    fp->sides = (unsigned char)((first_piece ? 1 : 0) | (b < 0 ? 2 : 0));
+                    fp->shown = !layout_inline_range_empty(ctx, fp->first, fp->last) ||
+                                ((fp->sides & 1) && ldeco) || ((fp->sides & 2) && rdeco);
+                    items[n] = el;
+                    piece_of[n++] = 2 * nfp;
+                    for (int q = fp->first; q >= 0; q = ctx->tree.nodes[q].next_sibling_idx) {
+                        LayoutBox *qb = layout_box(ctx, q);
+                        if (layout_is_in_flow(qb) && (fp->shown || qb->s->float_side != 0)) {
+                            items[n] = q;
+                            piece_of[n++] = -1;
+                        }
+                        if (q == fp->last) break;
+                    }
+                    items[n] = el;
+                    piece_of[n++] = 2 * nfp + 1;
+                    nfp++;
+                    if (b < 0) break;
+                    items[n] = b;
+                    piece_of[n++] = -1;
+                    first_piece = false;
+                    k = ctx->tree.nodes[b].next_sibling_idx;
+                }
+            }
+            free(kids);
+            kids = items;
+            nkids = n;
+        }
+    }
+    /* (laid out again each time: its pieces are not in the flow record) */
+    if (fpieces) layout_flow_noreuse_up(ctx, idx);
+    /* Where a piece's left edge opened its line: white space after it is
+     * still at the line's start. */
+    double lead_x = -1e30, lead_y = -1e30;
+
     FlowCursor cur = {0};
     cur.x = content_left;
     cur.y = content_top;
@@ -9467,7 +9772,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
 
     /* text-align: indices of the inline runs on the current line; the line is
      * shifted when it finishes (wrap, block child, or end of container). */
-    int *line_members = (nkids > 0) ? (int*)malloc((size_t)nkids * sizeof(int)) : NULL;
+    int *line_members = (nkids > 0) ? (int*)malloc((size_t)(nkids + extra) * sizeof(int)) : NULL;
     int line_member_count = 0;
 
     /* Floats placed by this container's flow; inline lines shrink around them. */
@@ -9477,6 +9782,19 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
     for (int i = 0; i < nkids; i++) {
         int c = kids[i];
         LayoutBox *child = layout_box(ctx, c);
+        if (piece_of && piece_of[i] >= 0) {
+            FlowPiece *fp = &fpieces[piece_of[i] / 2];
+            if (piece_of[i] & 1) {
+                bool line_ends = i + 1 >= nkids ||
+                                 (piece_of[i + 1] < 0 && layout_box_is_block_level(layout_box(ctx, kids[i + 1])) &&
+                                  layout_box(ctx, kids[i + 1])->s->float_side == 0);
+                layout_piece_end(ctx, fp, &cur, line_ends);
+            } else if (layout_piece_start(ctx, fp, &cur, &pending_mb, &any_placed, content_left, avail_width)) {
+                lead_x = cur.x;
+                lead_y = cur.y;
+            }
+            continue;
+        }
 
         /* Resolve used sizes against this container's content box. */
         layout_resolve_used_sizes(child, layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx),
@@ -9717,7 +10035,8 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                 if (!layout_text_is_whitespace(css_layout_node_text(ctx, dom)) ||
                     (keeps_nl && css_layout_node_text(ctx, dom) && strchr(css_layout_node_text(ctx, dom), '\n'))) {
                     text = css_layout_box_text(ctx, c, css_layout_node_text(ctx, dom));
-                    if (text[0] == ' ' && cur.x <= line_left + 0.001 && child->s->white_space != 2 &&
+                    bool line_start = cur.x <= line_left + 0.001 || (cur.x <= lead_x + 0.001 && cur.y == lead_y);
+                    if (text[0] == ' ' && line_start && child->s->white_space != 2 &&
                         child->s->white_space != 3) {
                         /* A collapsible space at the start of a line is removed. */
                         text++;
@@ -9735,9 +10054,17 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                 } else {
                     size_t cl = 0;
                     concat[0] = '\0';
-                    layout_concat_dom_text(ctx, dom, concat, sizeof(concat), &cl);
+                    layout_concat_box_text(ctx, c, concat, sizeof(concat), &cl);
                     if (cl > 0 && !layout_text_is_whitespace(concat)) {
                         text = concat;
+                        if (layout_is_space_char(text[0]) &&
+                            child->s->white_space != 2 && child->s->white_space != 3 &&
+                            (cur.x <= line_left + 0.001 || (cur.x <= lead_x + 0.001 && cur.y == lead_y))) {
+                            /* At the start of its line: its leading collapsible
+                             * space is removed (from its first text too). */
+                            while (layout_is_space_char(*text)) text++;
+                            child->text_lead_skip = 1;
+                        }
                     } else if (cl > 0 && child->s->display == CSS_DISPLAY_INLINE &&
                                layout_horizontal_border_padding(child) <= 0.0) {
                         /* <span> </span> between inline content (YouTube's
@@ -9755,7 +10082,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                  * to a single space; at block boundaries (line start) it
                  * disappears entirely.  Handle it fully here so the generic
                  * fallbacks cannot resurrect it as an 80x24 box. */
-                if (cur.x > line_left + 0.001) {
+                if (cur.x > line_left + 0.001 && !(cur.x <= lead_x + 0.001 && cur.y == lead_y)) {
                     double sw = 0.0;
                     if (!layout_measure_text_styled(child, " ", fs, &sw, NULL)) sw = fs * 0.3;
                     child->width = sw;
@@ -10055,7 +10382,6 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                                   (layout_box_is_atomic_inline(kb) ? kb->margin_bottom : 0.0);
                     if (kbot > bottom) bottom = kbot;
                 }
-                bottom += child->padding_bottom + child->s->border_bottom;
                 /* The inline box keeps its own (font) height; the line box
                  * grows around taller atomic content. */
                 if (bottom - cur.y > cur.line_box) cur.line_box = bottom - cur.y;
@@ -10089,6 +10415,55 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
     free(line_members);
 
     cur.y += cur.line_box;  /* finish trailing inline line */
+
+    /* A split inline's own box: around its pieces and blocks (what scripts
+     * measure); pieces with no child to follow are placed against it. */
+    for (int k = 0; k < nfp; k++) {
+        int el = fpieces[k].el;
+        if (k + 1 < nfp && fpieces[k + 1].el == el) continue;
+        LayoutPieceList *pl = &ctx->pieces[el];
+        LayoutBox *eb = layout_box(ctx, el);
+        double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30;
+        for (int q = 0; q < pl->n; q++) {
+            const LayoutPiece *pc = &pl->p[q];
+            if (pc->anchor < 0) continue;
+            const LayoutBox *ab = layout_box(ctx, pc->anchor);
+            double px = ab->x + pc->dx, py = ab->y + pc->dy;
+            if (px < x0) x0 = px;
+            if (py < y0) y0 = py;
+            if (px + pc->w > x1) x1 = px + pc->w;
+            if (py + pc->h > y1) y1 = py + pc->h;
+        }
+        for (int b = ctx->tree.nodes[el].first_child_idx; b >= 0; b = ctx->tree.nodes[b].next_sibling_idx) {
+            const LayoutBox *bb = layout_box(ctx, b);
+            if (!layout_is_in_flow(bb) || !layout_box_is_block_level(bb) || bb->s->float_side != 0) continue;
+            if (bb->x < x0) x0 = bb->x;
+            if (bb->y < y0) y0 = bb->y;
+            if (bb->x + bb->width > x1) x1 = bb->x + bb->width;
+            if (bb->y + bb->height > y1) y1 = bb->y + bb->height;
+        }
+        for (int q = 0; q < pl->n; q++) {
+            const LayoutPiece *pc = &pl->p[q];
+            if (pc->anchor >= 0) continue;
+            if (pc->dx < x0) x0 = pc->dx;
+            if (pc->dy < y0) y0 = pc->dy;
+            if (pc->dx + pc->w > x1) x1 = pc->dx + pc->w;
+            if (pc->dy + pc->h > y1) y1 = pc->dy + pc->h;
+        }
+        if (x1 < x0) continue;
+        eb->x = x0;
+        eb->y = y0;
+        eb->width = x1 - x0;
+        eb->height = y1 - y0;
+        layout_update_content_sizes(eb);
+        for (int q = 0; q < pl->n; q++) {
+            if (pl->p[q].anchor >= 0) continue;
+            pl->p[q].dx -= x0;
+            pl->p[q].dy -= y0;
+        }
+    }
+    free(fpieces);
+    free(piece_of);
 
     free(kids);
 
@@ -12012,7 +12387,12 @@ static int table_span_attr(LayoutContext *ctx, int c, const char *name)
 static double table_column_width(LayoutContext *ctx, int c)
 {
     LayoutBox *b = layout_box(ctx, c);
-    return b->s->width_set && b->s->width_percent <= 0.0 && b->s->css_width >= 0.0 ? b->s->css_width : -1.0;
+    if (!(b->s->width_set && b->s->width_percent <= 0.0 && b->s->css_width >= 0.0)) return -1.0;
+    /* (min- and max-width apply to columns: max first, then min wins) */
+    double w = b->s->css_width;
+    if (b->s->max_width >= 0.0 && w > b->s->max_width) w = b->s->max_width;
+    if (b->s->min_width > w) w = b->s->min_width;
+    return w;
 }
 
 /* Column box c (a table-column or table-column-group): the columns it makes,
@@ -12444,7 +12824,7 @@ static void layout_inline_wrapped_children(LayoutContext *ctx, int idx)
     LayoutBox *box = layout_box(ctx, idx);
     double cont_x = box->wrap_cont_x, cont_w = box->wrap_cont_w;
     double cx = box->x + box->padding_left + box->s->border_left;
-    double cy = box->y + box->padding_top + box->s->border_top;
+    double cy = box->y;   /* (an inline's vertical padding and border take no room) */
     double line_start = cx;
     double line_right = box->x + box->wrap_first_w;
     for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0;
@@ -12467,7 +12847,7 @@ static void layout_inline_wrapped_children(LayoutContext *ctx, int idx)
                    strcasecmp(dom->tag_name, "img") != 0) {
             size_t cl = 0;
             concat[0] = '\0';
-            layout_concat_dom_text(ctx, dom, concat, sizeof(concat), &cl);
+            layout_concat_box_text(ctx, c, concat, sizeof(concat), &cl);
             if (cl > 0) text = concat;
         }
         bool has_nl = text && keeps_nl && strchr(text, '\n');
@@ -12804,6 +13184,14 @@ static void flow_reuse_children(LayoutContext *ctx, LayoutFlow *F, const LayoutB
     }
 }
 
+/* Box idx and its ancestors are not reused at the next flow pass. */
+static void layout_flow_noreuse_up(LayoutContext *ctx, int idx)
+{
+    LayoutFlow *F = ctx->flow;
+    if (!F || !F->pass) return;
+    for (int i = idx; i >= 0; i = ctx->tree.nodes[i].parent_idx) F->cur.noreuse[i] = 1;
+}
+
 static bool flow_try(LayoutContext *ctx, LayoutFlow *F, int idx, uint64_t entry)
 {
     if (!F->clean[idx] || ctx->float_count != 0) return false;
@@ -12953,7 +13341,9 @@ static void layout_node_serial_impl(LayoutContext *ctx, int idx)
          * measuring text with real glyph metrics when the font is available
          * so positions match the parent's measured width. */
         double cx = box->x + box->padding_left + box->s->border_left;
-        double cy = box->y + box->padding_top + box->s->border_top;
+        double cy = box->y;   /* (its vertical padding and border take no room on the line) */
+        /* (it starts its line: its first text has no leading space) */
+        bool lead = box->text_lead_skip != 0;
         /* If this inline box was word-wrapped by the block-flow inline branch
          * and it has exactly one significant child (the common <a>text</a>
          * case, possibly nested like <b><a>text</a></b>), propagate the wrap
@@ -13027,8 +13417,14 @@ static void layout_node_serial_impl(LayoutContext *ctx, int idx)
                     sized = true;
                 } else {
                     double tw = 0.0;
-                    if (layout_measure_text_styled(child, css_layout_box_text(ctx, c, css_layout_node_text(ctx, dom)),
-                                                   fs, &tw, NULL)) {
+                    const char *tt = css_layout_box_text(ctx, c, css_layout_node_text(ctx, dom));
+                    child->text_lead_skip = 0;
+                    if (lead && tt[0] == ' ' && child->s->white_space != 2 && child->s->white_space != 3) {
+                        tt++;
+                        child->text_lead_skip = 1;
+                    }
+                    lead = false;
+                    if (layout_measure_text_styled(child, tt, fs, &tw, NULL)) {
                         child->width = tw;
                         child->height = line_adv;
                         sized = true;
@@ -13054,6 +13450,10 @@ static void layout_node_serial_impl(LayoutContext *ctx, int idx)
                 layout_svg_size(ctx, c, dom, &child->width, &child->height);
                 sized = true;
             }
+            if (dom && dom->type == HTML_NODE_ELEMENT && child->s->display == CSS_DISPLAY_INLINE) {
+                child->text_lead_skip = lead;
+                lead = false;
+            }
             if (!sized && dom && dom->type == HTML_NODE_ELEMENT &&
                 child->s->display == CSS_DISPLAY_INLINE) {
                 /* Nested inline element: its max-content width (text, atomic
@@ -13073,7 +13473,7 @@ static void layout_node_serial_impl(LayoutContext *ctx, int idx)
                 char concat[8192];
                 size_t cl = 0;
                 concat[0] = '\0';
-                layout_concat_dom_text(ctx, dom, concat, sizeof(concat), &cl);
+                layout_concat_box_text(ctx, c, concat, sizeof(concat), &cl);
                 if (cl > 0 && !layout_text_is_whitespace(concat)) {
                     double tw = 0.0;
                     if (layout_measure_text_styled(child, concat, fs, &tw, NULL)) {

@@ -1204,7 +1204,16 @@ int main(int argc, char **argv) {
         open_tab_in(g_focus, url);
     }
     const char *script = getenv("CYBER_UI_SCRIPT");
-    if (script && *script && !(g_script = fopen(script, "r"))) ui_log("[ui] cannot open script %s", script);
+    /* (again for a while: a file just written may be held a moment, by a
+     * virus scanner; a run that can't have its script ends rather than
+     * waits as a browser nobody drives) */
+    for (int tries = 0; script && *script && !g_script && tries < 40; tries++) {
+        if (!(g_script = fopen(script, "r"))) Sleep(50);
+    }
+    if (script && *script && !g_script) {
+        ui_log("[ui] cannot open script %s", script);
+        return 1;
+    }
     if (g_wins[g_focus].n == 0 && !g_script) { open_tab_in(g_focus, "about:blank"); SetFocus(g_wins[g_focus].addr); }
 
     for (;;) {

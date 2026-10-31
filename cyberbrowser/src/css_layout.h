@@ -298,9 +298,12 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * (inline-flex / inline-grid / inline-table; inline-block uses
      * CSS_DISPLAY_INLINE_BLOCK).  Cleared by blockification. */
     unsigned char inline_level;
-    /* An inline element laid out as a block because it holds block-level
-     * children (block-in-inline): percentages in it resolve against the
-     * block around it.  Set by blockification. */
+    /* Block-in-inline, set by blockification: 2 for an inline element
+     * with block-level children, split around them (its parent's flow lays
+     * out the inline content between them as pieces of it, the blocks as
+     * its own children: LayoutContext.pieces); 1 for one laid out as a
+     * block instead (one holding such an inline), where percentages
+     * resolve against the block around it. */
     unsigned char block_in_inline;
     /* display: table-caption (sized at min-content in a shrink-to-fit table). */
     unsigned char table_caption;
@@ -406,6 +409,21 @@ typedef struct LayoutBox {
     double opacity_eff;
 } LayoutBox;
 
+/* A piece of an inline split around its block-level children
+ * (block_in_inline 2): its border box, placed relative to its first child
+ * (anchor; -1: to the inline's own box) so it moves with it, and which of
+ * the inline's left (1) and right (2) edges it has. */
+typedef struct LayoutPiece {
+    int anchor;
+    double dx, dy, w, h;
+    unsigned char sides;
+} LayoutPiece;
+
+typedef struct LayoutPieceList {
+    LayoutPiece *p;
+    int n, cap;
+} LayoutPieceList;
+
 /* Flat node reference used by both passes. */
 typedef struct LayoutNodeRef {
     int dom_node_idx;       /* index into HtmlDocument's PreOrderCompactionArray */
@@ -476,6 +494,11 @@ typedef struct LayoutContext {
     /* Per text box: the text with white space collapsed (white-space
      * normal/nowrap/pre-line), or NULL to use the DOM text as is. */
     char **text_norm;
+
+    /* Per box, the pieces of a split inline (block_in_inline 2); NULL when
+     * the tree has none. */
+    LayoutPieceList *pieces;
+    int pieces_n;
 
     /* Per document node (index): its text with generated ::after content
      * realized, or NULL.  Layout never writes the document itself (it may

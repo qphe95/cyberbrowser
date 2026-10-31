@@ -426,6 +426,27 @@ bool sandbox_grant_folder(const wchar_t *dir, SandboxKind kind, bool write) {
     if (GetNamedSecurityInfoW(dir, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &old, NULL, &sd) !=
         ERROR_SUCCESS)
         return false;
+    /* Already given (an inherited grant to everything in it): setting it
+     * again would rewrite what everything in the folder inherits, which
+     * at the same time as another process doing it (test runs side by
+     * side) can leave a file with none of it. */
+    GENERIC_MAPPING fmap = { FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS };
+    ACCESS_MASK need = write ? GENERIC_ALL : GENERIC_READ | GENERIC_EXECUTE;
+    MapGenericMask(&need, &fmap);
+    for (DWORD i = 0; old && i < old->AceCount; i++) {
+        ACCESS_ALLOWED_ACE *ace = NULL;
+        if (!GetAce(old, i, (void **)&ace) || ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE) continue;
+        if ((ace->Header.AceFlags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)) !=
+                (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) ||
+            (ace->Header.AceFlags & INHERIT_ONLY_ACE))
+            continue;
+        ACCESS_MASK have = ace->Mask;
+        MapGenericMask(&have, &fmap);
+        if ((have & need) == need && EqualSid((PSID)&ace->SidStart, sid)) {
+            LocalFree(sd);
+            return true;
+        }
+    }
     EXPLICIT_ACCESSW ea;
     memset(&ea, 0, sizeof(ea));
     ea.grfAccessPermissions = write ? GENERIC_ALL : GENERIC_READ | GENERIC_EXECUTE;

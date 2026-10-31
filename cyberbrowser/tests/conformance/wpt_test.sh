@@ -51,10 +51,15 @@ if [ -n "$REFTEST" ]; then
     # each from its own copy of the build (its own browser_data and logs),
     # take every SHARDS-th page.
     n=${SHARDS:-6}
-    rm -f "$out"/pages-*.txt
+    rm -f "$out"/pages-*.txt "$out"/script-*.txt
     awk -v n="$n" -v o="$out" '{ print > (o "/pages-" (NR % n) ".txt") }' "$out/pages.txt"
     pids=
     for i in $(seq 0 $((n - 1))); do
+        # (the first browser gives the UI sandbox the results folder before
+        # the others start, rather than all of them at once)
+        if [ "$i" = 1 ]; then
+            for t in $(seq 50); do [ -s "$out/shard-0/logs/ui.log" ] && break; sleep 0.2; done
+        fi
         [ -s "$out/pages-$i.txt" ] || continue
         d="$out/shard-$i"
         mkdir -p "$d"
@@ -62,7 +67,8 @@ if [ -n "$REFTEST" ]; then
         cp "$build"/*.dll "$d/" 2> /dev/null
         [ -d "$build/shaders" ] && cp -r "$build/shaders" "$d/"
         script "$out/pages-$i.txt" > "$out/script-$i.txt"
-        (cd "$d" && rm -rf browser_data logs/* && CYBER_UI_SCRIPT="$W/script-$i.txt" ./cb_coord.exe) 2> "$out/coord-$i.txt" &
+        rm -rf "${d:?}/browser_data" "$d"/logs/*
+        (cd "$d" && CYBER_UI_SCRIPT="$W/script-$i.txt" ./cb_coord.exe) 2> "$out/coord-$i.txt" &
         pids="$pids $!"
     done
     wait $pids

@@ -230,6 +230,40 @@ static bool node_has_hidden_class(LayoutContext *ctx, int node_idx)
  * Emissions that bypass the size filters (text glyphs, <img>, background
  * images) must check this so hidden subtrees (scripts, off-screen menus,
  * head content) do not leak onto the page at the origin. */
+/* The backgrounds and borders of the pieces of split inline el (the left
+ * edge on its first, the right on its last) that are placed against child
+ * anchor (-1: those placed against el itself). */
+static void paint_pieces(LayoutContext *ctx, DisplayList *dl, int el, int anchor, float op)
+{
+    const LayoutBox *box = &ctx->boxes[el];
+    const LayoutPieceList *pieces = &ctx->pieces[el];
+    float br_r = (float)(box->s->border_color_set ? box->s->border_color_r : box->s->color_r);
+    float br_g = (float)(box->s->border_color_set ? box->s->border_color_g : box->s->color_g);
+    float br_b = (float)(box->s->border_color_set ? box->s->border_color_b : box->s->color_b);
+    float br_a = (float)(box->s->border_color_set ? box->s->border_color_a : box->s->color_a) * op;
+    for (int q = 0; q < pieces->n; q++) {
+        const LayoutPiece *pc = &pieces->p[q];
+        if (pc->anchor != anchor) continue;
+        const LayoutBox *ab = pc->anchor >= 0 ? &ctx->boxes[pc->anchor] : box;
+        float px = (float)(ab->x + pc->dx), py = (float)(ab->y + pc->dy);
+        float pw = (float)pc->w, ph = (float)pc->h;
+        if (pw <= 0.0f || ph <= 0.0f) continue;
+        if (box->s->background_color_a > 0.0f)
+            display_list_add_rect(dl, px, py, pw, ph, (float)box->s->background_color_r,
+                                  (float)box->s->background_color_g, (float)box->s->background_color_b,
+                                  (float)box->s->background_color_a * op);
+        float bt = (float)box->s->border_top, bb = (float)box->s->border_bottom;
+        float bl = (pc->sides & 1) ? (float)box->s->border_left : 0.0f;
+        float brr = (pc->sides & 2) ? (float)box->s->border_right : 0.0f;
+        float mid = ph - bt - bb;
+        if (mid < 0.0f) mid = 0.0f;
+        if (bt > 0.0f) display_list_add_rect(dl, px, py, pw, bt, br_r, br_g, br_b, br_a);
+        if (bb > 0.0f) display_list_add_rect(dl, px, py + ph - bb, pw, bb, br_r, br_g, br_b, br_a);
+        if (bl > 0.0f) display_list_add_rect(dl, px, py + bt, bl, mid, br_r, br_g, br_b, br_a);
+        if (brr > 0.0f) display_list_add_rect(dl, px + pw - brr, py + bt, brr, mid, br_r, br_g, br_b, br_a);
+    }
+}
+
 static bool box_or_ancestor_hidden(LayoutContext *ctx, int node_idx)
 {
     int idx = node_idx;
@@ -1024,6 +1058,16 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         pending_box = i;
         pending_from = dl->count;
         LayoutBox *box = &ctx->boxes[i];
+        /* The pieces of a split inline that start with this box: where their
+         * line is in the paint order. */
+        int par = ctx->tree.nodes[i].parent_idx;
+        if (par >= 0 && ctx->pieces && par < ctx->pieces_n && ctx->pieces[par].n > 0) {
+            const LayoutBox *pb = &ctx->boxes[par];
+            if (pb->s->block_in_inline == 2 && (pb->flags & LAYOUT_HAS_LAYOUT) && pb->s->display != CSS_DISPLAY_NONE &&
+                pb->s->visibility != CSS_VISIBILITY_HIDDEN && pb->opacity_eff >= 0.004 &&
+                !node_has_hidden_class(ctx, par) && !box_or_ancestor_hidden(ctx, par))
+                paint_pieces(ctx, dl, par, i, (float)pb->opacity_eff);
+        }
         if (!(box->flags & LAYOUT_HAS_LAYOUT)) continue;
         if (box->s->display == CSS_DISPLAY_NONE) continue;
         if (box->s->visibility == CSS_VISIBILITY_HIDDEN) continue;
@@ -1105,16 +1149,22 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             }
         }
 
+        /* An inline split around its blocks: its pieces' backgrounds and
+         * borders, not its own box's (those with a child paint before it). */
+        const LayoutPieceList *pieces = box->s->block_in_inline == 2 && ctx->pieces && i < ctx->pieces_n
+                                        ? &ctx->pieces[i] : NULL;
+        if (pieces) paint_pieces(ctx, dl, i, -1, op);
+
         /* Backgrounds paint first: under the borders, list marker and the
          * box's content. */
         /* (a color however thin: a 1px box is a line) */
-        if (box->width > 0.0f && box->height > 0.0f && box->s->background_color_a > 0.0f &&
+        if (!pieces && box->width > 0.0f && box->height > 0.0f && box->s->background_color_a > 0.0f &&
             !display_list_add_rect(dl, (float)box->x, (float)box->y,
                                    (float)box->width, (float)box->height,
                                    (float)box->s->background_color_r, (float)box->s->background_color_g,
                                    (float)box->s->background_color_b, (float)box->s->background_color_a * op))
             return false;
-        if (box->width >= 2.0f && box->height >= 2.0f && box->width * box->height >= 6.0f) {
+        if (!pieces && box->width >= 2.0f && box->height >= 2.0f && box->width * box->height >= 6.0f) {
             /* Background image, stretched to the padding box. */
             if (g_image_cache && box->s->background_image_url[0]) {
                 int handle = image_cache_request(g_image_cache, box->s->background_image_url,
@@ -1334,8 +1384,8 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
          * The color defaults to currentColor when no border-color was given.
          * Emitted before the small-box filter: a thin box (e.g. <hr>) still
          * needs its border painted. */
-        if (box->s->border_top > 0.0 || box->s->border_right > 0.0 ||
-            box->s->border_bottom > 0.0 || box->s->border_left > 0.0) {
+        if (!pieces && (box->s->border_top > 0.0 || box->s->border_right > 0.0 ||
+                        box->s->border_bottom > 0.0 || box->s->border_left > 0.0)) {
             float br_r = (float)(box->s->border_color_set ? box->s->border_color_r : box->s->color_r);
             float br_g = (float)(box->s->border_color_set ? box->s->border_color_g : box->s->color_g);
             float br_b = (float)(box->s->border_color_set ? box->s->border_color_b : box->s->color_b);

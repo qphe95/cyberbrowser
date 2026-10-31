@@ -113,6 +113,20 @@ static void frame_save_jpg(PageFrame *f, const char *out_path) {
 static void render_document_to_jpg(HtmlDocument *doc, ImageCache *image_cache, const char *out_path) {
     PageFrame f = {0};
     page_frame_build(&f, doc, image_cache, WIREFRAME_WIDTH, WIREFRAME_HEIGHT);
+    /* CYBER_BOX_DUMP=1: every box, indented by depth: its node, border box and display. */
+    if (f.valid && cyber_getenv("CYBER_BOX_DUMP")) {
+        const LayoutContext *lc = &f.layout;
+        for (int k = 0; lc->tree.preorder && k < lc->tree.count; k++) {
+            int i = lc->tree.preorder[k], depth = 0;
+            for (int p = lc->tree.nodes[i].parent_idx; p >= 0; p = lc->tree.nodes[p].parent_idx) depth++;
+            const HtmlNode *n = (const HtmlNode *)po_array_payload(&doc->array, lc->tree.nodes[i].dom_node_idx);
+            const LayoutBox *b = &lc->boxes[i];
+            const char *t = n && n->type == HTML_NODE_TEXT ? css_layout_node_text((LayoutContext *)lc, (HtmlNode *)n) : NULL;
+            printf("%*s%s%s%.20s%s %.1f,%.1f %.1fx%.1f d%d\n", depth * 2, "",
+                   n && n->type == HTML_NODE_ELEMENT ? n->tag_name : "#text", t ? " \"" : "", t ? t : "", t ? "\"" : "",
+                   b->x, b->y, b->width, b->height, (int)b->s->display);
+        }
+    }
     frame_save_jpg(&f, out_path);
     page_frame_free(&f);
 }
