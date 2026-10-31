@@ -25,9 +25,13 @@ mkdir -p "$out"
 out=$(cd "$out" && pwd)
 rm -f "$out"/step-*.flag "$out"/pages.txt
 
+# (each phase's time, printed at the end)
+t0=$EPOCHREALTIME; times=
+mark() { local now=$EPOCHREALTIME; times="$times $1 $(( (${now/./} - ${t0/./}) / 1000 )) ms,"; t0=$now; }
 node "$dir/wpt_server.js" "$wpt" "$P" "$out" "$@" > "$out/server.log" 2>&1 &
 server=$!
-for i in $(seq 100); do [ -s "$out/server.log" ] && break; sleep 0.2; done
+for i in $(seq 400); do [ -s "$out/server.log" ] && break; sleep 0.05; done
+mark server
 head -1 "$out/server.log"
 
 # Each page by its URL, then its answer (or its time up and 5 s more).  With
@@ -51,52 +55,85 @@ script() {   # <pages file>: the UI script for its pages
 }
 mkdir -p "$out/logs"
 if [ -n "$REFTEST" ]; then
-    # Reftest pages don't depend on one another: SHARDS browsers (default: one per CPU),
-    # each from its own copy of the build (its own browser_data and logs),
-    # take every SHARDS-th page.
-    n=${SHARDS:-$(nproc)}
+    # Reftest pages don't depend on one another: SHARDS browsers (default:
+    # one per two CPUs, which measured best) take every SHARDS-th page, each
+    # from <build>/shard-N (kept from run to run: its copy of the browser's
+    # programs is made again only when the build's is newer; not hard links,
+    # whose one set of permissions the sandboxes of all the shards would
+    # share), with its own browser_data and logs.  All made ready in one
+    # process (a program started here costs tens of ms).
+    n=${SHARDS:-$(( $(nproc) / 2 > 0 ? $(nproc) / 2 : 1 ))}
     rm -f "$out"/pages-*.txt "$out"/script-*.txt
-    awk -v n="$n" -v o="$out" '{ print > (o "/pages-" (NR % n) ".txt") }' "$out/pages.txt"
-    # Each browser runs from <build>/shard-N (kept from run to run: its copy
-    # of the browser's programs is made again only when the build's is
-    # newer; not hard links, whose one set of permissions the sandboxes of
-    # all the shards would share), all of them made ready before any starts.
-    for i in $(seq 0 $((n - 1))); do
-        [ -s "$out/pages-$i.txt" ] || continue
-        d="$build/shard-$i"
-        mkdir -p "$d"
-        for f in "$build"/cb_*.exe; do
-            case "$f" in *cb_harness.exe|*cb_webgpu_fuzz.exe) continue;; esac
-            [ -f "$d/${f##*/}" ] && ! [ "$f" -nt "$d/${f##*/}" ] || cp -p "$f" "$d/"
-        done
-        script "$out/pages-$i.txt" > "$out/script-$i.txt"
-        rm -rf "${d:?}/browser_data" "$d"/logs/*
-    done
+    node -e '
+        const fs = require("fs"), path = require("path"), [build, out, W, n] = process.argv.slice(1);
+        const lines = fs.readFileSync(out + "/pages.txt", "utf8").split("
+").filter(Boolean);
+        const exes = fs.readdirSync(build).filter(f => /^cb_.*.exe$/.test(f) && !/^cb_(harness|webgpu_fuzz).exe$/.test(f));
+        for (let i = 0; i < +n; i++) {
+            const mine = lines.filter((l, j) => (j + 1) % n === i);
+            if (!mine.length) continue;
+            const d = build + "/shard-" + i;
+            fs.mkdirSync(d, { recursive: true });
+            for (const e of exes) {
+                const from = path.join(build, e), to = path.join(d, e), st = fs.statSync(from);
+                let have = null;
+                try { have = fs.statSync(to); } catch (x) {}
+                if (!have || st.mtimeMs > have.mtimeMs) { fs.copyFileSync(from, to); fs.utimesSync(to, st.atime, st.mtime); }
+            }
+            fs.rmSync(d + "/browser_data", { recursive: true, force: true });
+            fs.rmSync(d + "/logs", { recursive: true, force: true });
+            fs.mkdirSync(d + "/logs");
+            let sc = "open about:blank
+viewport 800 600
+";
+            for (const l of mine) {
+                const [k, url, ms, shot] = l.split(" ");
+                sc += "go " + url + "
+waitfile " + W + "/step-" + k + ".flag " + ms + "
+shotc " + shot + "
+";
+            }
+            fs.writeFileSync(out + "/script-" + i + ".txt", sc + "quit
+");
+            fs.writeFileSync(out + "/pages-" + i + ".txt", mine.join("
+") + "
+");
+        }' "$build" "$out" "$W" "$n"
+    mark prepare
     pids=
     for i in $(seq 0 $((n - 1))); do
         [ -s "$out/pages-$i.txt" ] || continue
         # (the first browser gives the UI sandbox the results folder before
         # the others start, rather than all of them at once)
         if [ "$i" = 1 ]; then
-            for t in $(seq 50); do [ -s "$build/shard-0/logs/ui.log" ] && break; sleep 0.1; done
+            for t in $(seq 200); do [ -s "$build/shard-0/logs/ui.log" ] && break; sleep 0.025; done
         fi
-        (cd "$build/shard-$i" && CYBER_FRAME_IMAGE_WAIT=1 CYBER_UI_SCRIPT="$W/script-$i.txt" ./cb_coord.exe) \
+        (cd "$build/shard-$i" && CYBER_FRAME_IMAGE_WAIT=1 CYBER_RAF_MS=${CYBER_RAF_MS:-2} CYBER_UI_SCRIPT="$W/script-$i.txt" ./cb_coord.exe) \
             2> "$out/coord-$i.txt" &
         pids="$pids $!"
     done
+    mark launch
     wait $pids
-    for i in $(seq 0 $((n - 1))); do
-        [ -d "$build/shard-$i/logs" ] || continue
-        mkdir -p "$out/logs/shard-$i"
-        cp "$build/shard-$i"/logs/*.log "$out/logs/shard-$i/" 2> /dev/null
-    done
+    mark browsers
+    # Their logs, each folder renamed into the results (in one process: a
+    # program started here costs tens of ms).
+    node -e '
+        const fs = require("fs"), [build, out, n] = process.argv.slice(1);
+        for (let i = 0; i < +n; i++) {
+            const from = `${build}/shard-${i}/logs`, to = `${out}/logs/shard-${i}`;
+            if (!fs.existsSync(from)) continue;
+            fs.rmSync(to, { recursive: true, force: true });
+            fs.renameSync(from, to);
+            fs.mkdirSync(from);
+        }' "$build" "$out" "$n"
 else
     script "$out/pages.txt" > "$out/script.txt"
     (cd "$build" && rm -rf browser_data logs/* && CYBER_UI_SCRIPT="$W/script.txt" ./cb_coord.exe) 2> "$out/coord.txt"
     cp "$build"/logs/*.log "$out/logs/" 2> /dev/null
 fi
 kill $server 2> /dev/null
-[ -n "$REFTEST" ] && node "$dir/reftest_compare.js" "$out"
+mark logs
+[ -n "$REFTEST" ] && node "$dir/reftest_compare.js" "$out" && mark compare
 
 node -e '
 const r = JSON.parse(require("fs").readFileSync(process.argv[1] + "/results.json", "utf8"));
@@ -112,3 +149,5 @@ const s = `pages ${pages}: ${clean} with no failure; ` + Object.entries(by).map(
 process.stdout.write(s);
 require("fs").writeFileSync(process.argv[1] + "/summary.txt", s);
 ' "$out"
+mark summary
+echo "times:${times%,}"

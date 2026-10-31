@@ -732,12 +732,48 @@ static bool content_pixels(const Win *w, uint8_t **px, uint32_t *pw, uint32_t *p
     return false;
 }
 
+/* pw x ph pixels (BGRA, top-down) as path, run-length encoded: "CBRL",
+ * the width and height (uint32 each), then runs of 5 bytes: a count
+ * (uint16, 1..65535) and the color (B, G, R), row after row.  A page of
+ * flat color is bytes, not a 1.4 MB bitmap a screenshot. */
+static bool write_rle(const char *path, const uint8_t *px, uint32_t pw, uint32_t ph) {
+    size_t n = (size_t)pw * ph, cap = 12 + n * 5, o = 12;
+    uint8_t *file = (uint8_t *)malloc(cap);
+    if (!file) return false;
+    memcpy(file, "CBRL", 4);
+    memcpy(file + 4, &pw, 4);
+    memcpy(file + 8, &ph, 4);
+    for (size_t i = 0; i < n;) {
+        const uint8_t *c = px + i * 4;
+        size_t j = i + 1;
+        while (j < n && j - i < 65535 && !memcmp(px + j * 4, c, 3)) j++;
+        uint16_t count = (uint16_t)(j - i);
+        memcpy(file + o, &count, 2);
+        memcpy(file + o + 2, c, 3);
+        o += 5;
+        i = j;
+    }
+    HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    DWORD wrote = 0;
+    bool ok = h != INVALID_HANDLE_VALUE && WriteFile(h, file, (DWORD)o, &wrote, NULL) && wrote == o;
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    free(file);
+    return ok;
+}
+
 /* The content alone (the page as the GPU process drew it), saved as a
- * 24-bit BMP: what reftests compare. */
+ * 24-bit BMP, or run-length encoded for a path ending ".rle": what
+ * reftests compare. */
 static bool save_content_shot(const Win *w, const char *path) {
     uint8_t *px = NULL;
     uint32_t pw = 0, ph = 0;
     if (!IsWindowVisible(w->content) || !content_pixels(w, &px, &pw, &ph)) return false;
+    size_t plen = strlen(path);
+    if (plen > 4 && !_stricmp(path + plen - 4, ".rle")) {
+        bool ok = write_rle(path, px, pw, ph);
+        free(px);
+        return ok;
+    }
     uint32_t stride = (pw * 3 + 3) & ~3u;
     BITMAPFILEHEADER fh;
     BITMAPINFOHEADER bh;
@@ -752,20 +788,25 @@ static bool save_content_shot(const Win *w, const char *path) {
     bh.biPlanes = 1;
     bh.biBitCount = 24;
     bh.biCompression = BI_RGB;
-    uint8_t *row = (uint8_t *)calloc(1, stride);
-    FILE *f = row ? fopen(path, "wb") : NULL;
-    bool ok = f != NULL;
-    if (f) {
-        fwrite(&fh, sizeof(fh), 1, f);
-        fwrite(&bh, sizeof(bh), 1, f);
-        for (uint32_t y = ph; y-- > 0;) {
+    /* (the whole file made here, then one write: row by row through stdio
+     * was hundreds of system calls a screenshot) */
+    size_t total = fh.bfSize;
+    uint8_t *file = (uint8_t *)calloc(1, total);
+    bool ok = false;
+    if (file) {
+        memcpy(file, &fh, sizeof(fh));
+        memcpy(file + sizeof(fh), &bh, sizeof(bh));
+        uint8_t *row = file + fh.bfOffBits;
+        for (uint32_t y = ph; y-- > 0; row += stride) {
             const uint8_t *s = px + (size_t)y * pw * 4;
             for (uint32_t x = 0; x < pw; x++) memcpy(row + x * 3, s + x * 4, 3);   /* (BGRA to BGR) */
-            fwrite(row, 1, stride, f);
         }
-        fclose(f);
+        HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        DWORD wrote = 0;
+        ok = h != INVALID_HANDLE_VALUE && WriteFile(h, file, (DWORD)total, &wrote, NULL) && wrote == total;
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
     }
-    free(row);
+    free(file);
     free(px);
     return ok;
 }

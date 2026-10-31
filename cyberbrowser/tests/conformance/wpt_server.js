@@ -136,7 +136,7 @@ if (REFTEST) {
         for (const u of [t, ...info.refs.map(r => r.url)]) {
             if (seen.has(u)) continue;
             seen.add(u);
-            steps.push({ k: steps.length + 1, url: u, shot: path.join(out, 'shots', `${steps.length + 1}.bmp`) });
+            steps.push({ k: steps.length + 1, url: u, shot: path.join(out, 'shots', `${steps.length + 1}.rle`) });
         }
     }
     fs.writeFileSync(path.join(out, 'reftests.json'), JSON.stringify({ refInfo, steps }, null, 1));
@@ -282,11 +282,13 @@ http.createServer((req, res) => {
         return;
     }
     if (url.pathname === '/refready' && req.method === 'POST') {
+        const t_req = process.env.CYBER_TRACE_STEPS ? ((Date.now() * 10000) % 1e9 / 1e4).toFixed(1) : null;
         let body = '';
         req.on('data', d => body += d);
         req.on('end', () => {
             const st = steps.find(x => '/' + x.url === body && !fs.existsSync(path.join(out, `step-${x.k}.flag`)));
             if (st) fs.writeFileSync(path.join(out, `step-${st.k}.flag`), 'ready');
+            if (t_req) console.log(`[trace] ${t_req} refready request, ${((Date.now() * 10000) % 1e9 / 1e4).toFixed(1)} flag written`);
             res.writeHead(204); res.end();
         });
         return;

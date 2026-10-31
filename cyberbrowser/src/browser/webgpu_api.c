@@ -317,13 +317,13 @@ static void report(JSContextHandle ctx, const char *what) {
 static GCValue n_install(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
     if (argc < 3) return JS_UNDEFINED;
-    GCValue gen = JS_Eval(ctx, webgl_gen_js, strlen(webgl_gen_js), "<webgl_gen>", JS_EVAL_TYPE_GLOBAL);
+    GCValue gen = builtin_eval(ctx, webgl_gen_js, "<webgl_gen>");
     if (JS_IsException(gen)) { report(ctx, "webgl_gen"); return JS_UNDEFINED; }
-    GCValue fn = JS_Eval(ctx, webgl_api_js, strlen(webgl_api_js), "<webgl_api>", JS_EVAL_TYPE_GLOBAL);
+    GCValue fn = builtin_eval(ctx, webgl_api_js, "<webgl_api>");
     if (JS_IsException(fn)) { report(ctx, "webgl_api"); return JS_UNDEFINED; }
     GCValue args[4] = { argv[0], argv[1], argv[2], gen };
     if (JS_IsException(JS_Call(ctx, fn, JS_UNDEFINED, 4, args))) report(ctx, "webgl_api");
-    fn = JS_Eval(ctx, webgpu_api_js, strlen(webgpu_api_js), "<webgpu_api>", JS_EVAL_TYPE_GLOBAL);
+    fn = builtin_eval(ctx, webgpu_api_js, "<webgpu_api>");
     if (JS_IsException(fn)) { report(ctx, "webgpu_api"); return JS_UNDEFINED; }
     if (JS_IsException(JS_Call(ctx, fn, JS_UNDEFINED, 3, args))) report(ctx, "webgpu_api");
     return JS_UNDEFINED;
@@ -339,7 +339,7 @@ void webgpu_api_install(JSContextHandle ctx, GCValue global, GCValue window) {
     };
     for (size_t i = 0; i < sizeof(fns) / sizeof(fns[0]); i++)
         JS_SetPropertyStr(ctx, nat, fns[i].name, JS_NewCFunction(ctx, fns[i].fn, fns[i].name, fns[i].n));
-    GCValue fn = JS_Eval(ctx, webgpu_lazy_js, strlen(webgpu_lazy_js), "<webgpu_lazy>", JS_EVAL_TYPE_GLOBAL);
+    GCValue fn = builtin_eval(ctx, webgpu_lazy_js, "<webgpu_lazy>");
     if (JS_IsException(fn)) { report(ctx, "webgpu_lazy"); return; }
     GCValue args[4] = { global, window, nat, JS_NewCFunction(ctx, n_install, "install", 3) };
     if (JS_IsException(JS_Call(ctx, fn, JS_UNDEFINED, 4, args))) report(ctx, "webgpu_lazy");

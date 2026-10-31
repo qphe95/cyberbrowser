@@ -2107,6 +2107,17 @@ static void js_c_frame_pool_clear(BOOL heap_live)
     g_c_frame_pool_epoch = g_gc_epoch;
 }
 
+/* JS_FreeRuntimeBeforeWipe: the heap is wiped next (gc_cleanup), so the
+ * last collection would only free what goes anyway. */
+static BOOL g_free_rt_before_wipe;
+
+void JS_FreeRuntimeBeforeWipe(JSRuntimeHandle rt)
+{
+    g_free_rt_before_wipe = TRUE;
+    JS_FreeRuntime(rt);
+    g_free_rt_before_wipe = FALSE;
+}
+
 void JS_FreeRuntime(JSRuntimeHandle rt)
 {
     struct list_head *el, *el1;
@@ -2130,7 +2141,8 @@ void JS_FreeRuntime(JSRuntimeHandle rt)
 
     /* don't remove the weak objects to avoid create new jobs with
        FinalizationRegistry */
-    JS_RunGCInternal(rt, FALSE);
+    if (!g_free_rt_before_wipe)
+        JS_RunGCInternal(rt, FALSE);
     QJS_LOGI("JS_FreeRuntime: GC done");
 
 #ifdef DUMP_LEAKS

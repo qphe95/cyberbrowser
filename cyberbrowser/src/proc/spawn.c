@@ -98,9 +98,19 @@ HANDLE spawn_child(const wchar_t *exe_name, const char *args, HANDLE *inherit, i
         SECURITY_ATTRIBUTES *sa = sb ? sb->object_sa : NULL;
         /* Suspended until it is in its jobs, so nothing it starts escapes them. */
         DWORD how = flags | EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED;
-        BOOL started = sb && sb->token
-            ? CreateProcessAsUserW(sb->token, exe, cmd, sa, sa, TRUE, how, NULL, NULL, &si.StartupInfo, &pi)
-            : CreateProcessW(exe, cmd, sa, sa, TRUE, how, NULL, NULL, &si.StartupInfo, &pi);
+        BOOL started = FALSE;
+        /* (again a few times when the program can't be opened just now: one
+         * just copied is held a moment, by a virus scanner) */
+        for (int tries = 0; tries < 10; tries++) {
+            started = sb && sb->token
+                ? CreateProcessAsUserW(sb->token, exe, cmd, sa, sa, TRUE, how, NULL, NULL, &si.StartupInfo, &pi)
+                : CreateProcessW(exe, cmd, sa, sa, TRUE, how, NULL, NULL, &si.StartupInfo, &pi);
+            DWORD e = started ? 0 : GetLastError();
+            if (started || (e != ERROR_FILE_NOT_FOUND && e != ERROR_ACCESS_DENIED && e != ERROR_SHARING_VIOLATION))
+                break;
+            Sleep(50);
+            SetLastError(e);
+        }
         if (started) {
             bool jobbed = (!job || AssignProcessToJobObject(job, pi.hProcess)) &&
                           (!sb || !sb->job || AssignProcessToJobObject(sb->job, pi.hProcess));

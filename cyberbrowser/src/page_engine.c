@@ -705,6 +705,14 @@ static bool frame_log(void) {
 
 static bool g_frame_image_wait = true;
 void page_set_frame_image_wait(bool on) { g_frame_image_wait = on; }
+/* CYBER_FRAME_IMAGE_WAIT=1 (reftests): images a frame asked for that came
+ * while it waited are in that frame (it is built again at once), not only
+ * in the next one, which a page could say it is ready before. */
+static bool frame_images_in_same_frame(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("CYBER_FRAME_IMAGE_WAIT") ? 1 : 0;
+    return on;
+}
 
 void page_frame_build(PageFrame *f, HtmlDocument *doc, ImageCache *images, int width, int height) {
     /* The same document again (the layout mirror, updated in place): the
@@ -756,8 +764,17 @@ void page_frame_build(PageFrame *f, HtmlDocument *doc, ImageCache *images, int w
      * (on_image_progress), and the next turn builds the frame again.  An
      * interactive embedder paints now instead (page_set_frame_image_wait):
      * the page's thread does not wait on the network. */
-    if (g_frame_image_wait && !image_cache_wait_pending_ms(images, 1500))
+    bool pending = g_frame_image_wait && image_cache_has_pending(images);
+    if (g_frame_image_wait && !image_cache_wait_pending_ms(images, 1500)) {
         printf("Images still loading; painting without them for now\n");
+    } else if (pending && frame_images_in_same_frame()) {
+        static int depth;
+        if (depth < 2) {
+            depth++;
+            page_frame_build(f, doc, images, width, height);
+            depth--;
+        }
+    }
 }
 
 /* Before the page's first script: engine polyfills, diagnostics and the
@@ -1230,6 +1247,7 @@ void gc_cleanup(void);
  * the whole JS heap at once (the runtime keeps its shapes, and so what they
  * reach, as roots): a new runtime holds nothing the last page made. */
 bool page_engine_reset(void) {
+    uint64_t t0 = gc_os_now_ns();
     page_close();
     timer_api_reset();
     scheduler_reset();
@@ -1237,17 +1255,29 @@ bool page_engine_reset(void) {
     import_map_reset();
     extern JSRuntimeHandle g_js_runtime;
     css_document_state_destroy(g_js_runtime);
-    cleanup_browser_context();
+    {
+        extern JSRuntimeHandle g_js_runtime;
+        extern JSContextHandle g_js_context;
+        g_js_runtime = GC_HANDLE_NULL;
+        g_js_context = GC_HANDLE_NULL;
+        if (SAFE_VALID(g_rt)) JS_FreeRuntimeBeforeWipe(g_rt);
+    }
     g_rt = GC_HANDLE_NULL;
     g_ctx = GC_HANDLE_NULL;
     g_global = JS_UNDEFINED;
+    uint64_t t1 = gc_os_now_ns();
     gc_cleanup();
+    uint64_t t2 = gc_os_now_ns();
     dom_store_reset();
     dom_api_reset();
     frame_api_reset();
     media_api_reset();
     g_dom_needs_layout = 0;
-    return init_browser_context();
+    bool ok = init_browser_context();
+    if (getenv("CYBER_TAB_CPU"))
+        fprintf(stderr, "[engine] reset: free %.1f ms, heap %.1f ms, new %.1f ms\n", (t1 - t0) / 1e6, (t2 - t1) / 1e6,
+                (gc_os_now_ns() - t2) / 1e6);
+    return ok;
 }
 
 /* The window's size as scripts and layout queries see it: the size frames

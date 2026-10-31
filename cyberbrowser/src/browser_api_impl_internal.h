@@ -493,6 +493,9 @@ GCValue js_url_create_object_url(JSContextHandle ctx, GCValue this_val, int argc
 GCValue js_url_revoke_object_url(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 void url_api_install(JSContextHandle ctx, GCValue global);
 void platform_api_install(JSContextHandle ctx, GCValue global, GCValue window);
+/* Run one of the engine's own scripts (a compiled-in string) in ctx, from
+ * bytecode kept since its first run in this process. */
+GCValue builtin_eval(JSContextHandle ctx, const char *src, const char *name);
 void webgpu_api_install(JSContextHandle ctx, GCValue global, GCValue window);
 void frame_api_install(JSContextHandle ctx, GCValue global);
 void frame_api_on_connect(JSContextHandle ctx, NodeId subtree);

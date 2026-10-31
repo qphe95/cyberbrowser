@@ -792,8 +792,18 @@ GCValue js_clear_interval(JSContextHandle ctx, GCValue this_val, int argc, GCVal
     return JS_UNDEFINED;
 }
 
-/* The frame interval of requestAnimationFrame, in page time. */
-#define RAF_FRAME_MS 16ull
+/* The frame interval of requestAnimationFrame, in page time: 16 ms, or
+ * CYBER_RAF_MS (test runs, whose frames need no pacing to a display: a
+ * callback still waits for the last frame to reach the GPU process). */
+static unsigned long long raf_frame_ms(void) {
+    static unsigned long long ms;
+    if (!ms) {
+        const char *e = getenv("CYBER_RAF_MS");
+        int v = e ? atoi(e) : 0;
+        ms = v >= 1 && v <= 1000 ? (unsigned long long)v : 16ull;
+    }
+    return ms;
+}
 
 // requestAnimationFrame(callback)
 GCValue js_request_animation_frame(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
@@ -809,7 +819,7 @@ GCValue js_request_animation_frame(JSContextHandle ctx, GCValue this_val, int ar
      * ran 10,000 frames in one load.)  Virtual time skips to the frame when
      * the page is otherwise idle. */
     unsigned long long now = page_time_ms();
-    unsigned long long frame = (now / RAF_FRAME_MS + 1) * RAF_FRAME_MS;
+    unsigned long long frame = (now / raf_frame_ms() + 1) * raf_frame_ms();
     int id = add_timer(ctx, TIMER_TYPE_RAF, argv[0], frame - now, 0, NULL);
     return JS_NewInt32(ctx, id);
 }

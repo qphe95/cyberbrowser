@@ -64,6 +64,18 @@ static char g_title[PROTO_TITLE_MAX];
 static char g_next_url[PROTO_URL_MAX + 1];
 static void navigate_request(const uint8_t *url, uint32_t len);
 
+/* CYBER_TRACE_STEPS=1: a timestamped line at each step of a load (by the
+ * clock the UI's script log uses), to see where a page's time goes. */
+static void trace(const char *what, unsigned v) {
+    static int on = -1;
+    if (on < 0) on = getenv("CYBER_TRACE_STEPS") ? 1 : 0;
+    if (!on) return;
+    FILETIME ft;
+    GetSystemTimePreciseAsFileTime(&ft);
+    ULARGE_INTEGER t = { .LowPart = ft.dwLowDateTime, .HighPart = ft.dwHighDateTime };
+    fprintf(stderr, "[trace] %.1f %s %u\n", (double)(t.QuadPart % 1000000000ull) / 1e4, what, v);
+}
+
 static void memory_report(const char *what) {
     PROCESS_MEMORY_COUNTERS_EX pm;
     memset(&pm, 0, sizeof(pm));
@@ -162,6 +174,7 @@ static void paint(void) {
         g_need_paint = false;
         return;
     }
+    trace("frame sent", g_frame_no);
     TuFrame fr = { g_frame_no, 0, g_width, g_height, g_scroll, g_content_height };
     chan_send(&g_chan, TU_FRAME, &fr, sizeof(fr), 1000);
     g_in_flight = true;
@@ -410,6 +423,7 @@ static bool drain(void) {
     int g;
     while ((g = gpu_client_poll(&done)) > 0) {
         if (done == g_frame_no) g_in_flight = false;
+        trace("frame done", done);
         any = true;
     }
     if (g < 0) g_in_flight = false;     /* no GPU process: nothing to wait for */
@@ -591,6 +605,7 @@ static bool net_request(const char *url, const char *method, const char *body, s
                         const char **headers, size_t nheaders, HttpBuffer *out, int *status,
                         char *err, size_t err_len) {
     memset(out, 0, sizeof(*out));
+    trace(method[0] == 'P' ? "request POST" : "request", (unsigned)body_len);
     if (body_len > BIG_MAX / 2) { snprintf(err, err_len, "request body too large"); return false; }
     /* method, url, headers: NUL-terminated, after the fixed part */
     size_t hlen = 0;
@@ -724,6 +739,7 @@ static void navigate_request(const uint8_t *url, uint32_t len) {
     }
     memcpy(g_next_url, url, len);
     g_next_url[len] = 0;
+    trace("navigate", len);
 }
 
 static bool store_call(uint16_t type, const char *path, const void *data, uint32_t dlen,
@@ -860,8 +876,20 @@ static void cpu_ms(double *thread_ms, double *process_ms) {
                                (((unsigned long long)u.dwHighDateTime << 32) | u.dwLowDateTime)) / 1e4;
 }
 
+/* The system timer at 1 ms while this tab runs, as a browser's renderer
+ * asks: a page's 2 ms setTimeout, and the waits for it, otherwise come
+ * every 15.6 ms.  (ntdll's call: winmm's timeBeginPeriod would load user32,
+ * which can't start in a process without win32k.) */
+static void fine_timer(void) {
+    typedef LONG(NTAPI * SetRes)(ULONG, BOOLEAN, PULONG);
+    SetRes set = (SetRes)(void *)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtSetTimerResolution");
+    ULONG actual = 0;
+    if (set) set(10000, TRUE, &actual);   /* (100 ns units) */
+}
+
 int main(int argc, char **argv) {
     g_start_tick = GetTickCount64();
+    fine_timer();
     det_clock_set_js_thread();
     HANDLE sec = NULL, e0 = NULL, e1 = NULL;
     HANDLE net[3] = { 0 }, store[3] = { 0 }, gpu[3] = { 0 }, ctl[3] = { 0 };
@@ -937,7 +965,9 @@ load:
     g_main_thread = GetCurrentThreadId();
     page_set_load_progress(load_progress);
     g_loading = true;
+    trace("load start", 0);
     bool loaded = blank || page_load();
+    trace("load done", loaded);
     g_loading = false;
     page_set_load_progress(NULL);
     if (blank) {

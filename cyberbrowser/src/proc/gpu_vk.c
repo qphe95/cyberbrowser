@@ -118,7 +118,14 @@ static bool buf_need(Buf *b, VkDeviceSize size, VkBufferUsageFlags usage) {
     if (!ok(vkCreateBuffer(g_dev, &bi, NULL, &b->buf), "vkCreateBuffer")) return false;
     VkMemoryRequirements mr;
     vkGetBufferMemoryRequirements(g_dev, b->buf, &mr);
-    int32_t t = memory_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    int32_t t = -1;
+    /* (one the CPU reads, a readback: cached memory where there is some;
+     * reading write-combined memory took 15 ms a screenshot) */
+    if (usage & VK_BUFFER_USAGE_TRANSFER_DST_BIT)
+        t = memory_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+                                               VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+    if (t < 0)
+        t = memory_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     VkMemoryAllocateInfo ai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
     ai.allocationSize = mr.size;
     ai.memoryTypeIndex = (uint32_t)t;

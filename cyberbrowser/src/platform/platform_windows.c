@@ -94,7 +94,13 @@ void platform_mutex_unlock(PlatformMutex *mutex) {
  * ============================================================================ */
 
 unsigned long long platform_get_time_ms(void) {
-    return GetTickCount64();
+    /* (the performance counter: GetTickCount64 moves in 15.6 ms steps, which
+     * every page timer and animation frame was rounded to) */
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER now;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    return (unsigned long long)(now.QuadPart / freq.QuadPart * 1000 + now.QuadPart % freq.QuadPart * 1000 / freq.QuadPart);
 }
 
 unsigned long long platform_thread_cpu_us(void) {

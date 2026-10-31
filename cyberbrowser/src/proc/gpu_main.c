@@ -338,6 +338,27 @@ static int32_t layer_row(const Client *c) {
     return gpu_layer_row(&c->at, c->scrolls, c->nscrolls);
 }
 
+/* CYBER_TAB_CPU=1: where this process's time goes (wall ms, by kind of
+ * work), printed when it quits. */
+enum { ST_FRAME, ST_ATLAS, ST_IMAGE, ST_PRESENT, ST_SHOT, ST_N };
+static double g_stat_ms[ST_N];
+static unsigned g_stat_n[ST_N];
+static double stat_now(void) {
+    static LARGE_INTEGER f;
+    LARGE_INTEGER c;
+    if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
+}
+static void stat_add(int k, double t0) { g_stat_ms[k] += stat_now() - t0; g_stat_n[k]++; }
+static void stat_print(void) {
+    static const char *names[ST_N] = { "frames", "atlases", "images", "presents", "shots" };
+    if (!getenv("CYBER_TAB_CPU")) return;
+    for (int k = 0; k < ST_N; k++)
+        fprintf(stderr, "[gpu] %s: %u, %.0f ms\n", names[k], g_stat_n[k], g_stat_ms[k]);
+    fflush(stderr);
+}
+
 static void mark_dirty(uint32_t tab) {
     for (int i = 0; i < MAX_WINDOWS; i++)
         if (g_windows[i].hwnd && g_windows[i].tab == tab) g_windows[i].dirty = true;
@@ -351,7 +372,10 @@ static void present_dirty(void) {
         w->dirty = false;
         Client *c = client_of(w->tab);
         if (!c || !c->target) continue;
-        if (g_be->present(w->hwnd, w->w, w->h, c->target, layer_row(c)) && !w->shown) {
+        double t0 = stat_now();
+        bool presented = g_be->present(w->hwnd, w->w, w->h, c->target, layer_row(c));
+        stat_add(ST_PRESENT, t0);
+        if (presented && !w->shown) {
             w->shown = true;
             GuShown s = { c->tab, (uint64_t)(uintptr_t)w->hwnd };
             if (g_have_ui) big_send(&g_ui, GU_SHOWN, &s, sizeof(s), NULL, 0, NULL, 0, 100);
@@ -428,9 +452,9 @@ static void frame(Client *c, const uint8_t *m, uint32_t len) {
 
 static void client_message(Client *c) {
     switch (c->rx.type) {
-    case TG_FRAME: frame(c, c->rx.buf, c->rx.total); break;
-    case TG_ATLAS: upload_atlas(c, c->rx.buf, c->rx.total); break;
-    case TG_IMAGE: upload_image(c, c->rx.buf, c->rx.total); break;
+    case TG_FRAME: { double t0 = stat_now(); frame(c, c->rx.buf, c->rx.total); stat_add(ST_FRAME, t0); break; }
+    case TG_ATLAS: { double t0 = stat_now(); upload_atlas(c, c->rx.buf, c->rx.total); stat_add(ST_ATLAS, t0); break; }
+    case TG_IMAGE: { double t0 = stat_now(); upload_image(c, c->rx.buf, c->rx.total); stat_add(ST_IMAGE, t0); break; }
     default: break;
     }
 }
@@ -502,6 +526,7 @@ static void ui_message(void) {
          * before what made the UI ask, on its own channel) */
         while (c && big_recv(&c->chan, &c->rx) > 0) client_message(c);
         static uint8_t *px, *out;
+        double t0 = stat_now();
         GuShot s = { 0, 0 };
         if (c && c->target && w->h) {
             free(px);
@@ -525,6 +550,7 @@ static void ui_message(void) {
             }
         }
         big_send(&g_ui, GU_SHOT, &s, sizeof(s), out, s.width * s.height * 4, NULL, 0, 5000);
+        stat_add(ST_SHOT, t0);
     }
 }
 
@@ -601,6 +627,7 @@ int main(int argc, char **argv) {
                 memcpy(&v, m.data, sizeof(v));
                 revoke(v.client);
             } else if (m.type == CS_QUIT) {
+                stat_print();
                 return 0;
             }
         }

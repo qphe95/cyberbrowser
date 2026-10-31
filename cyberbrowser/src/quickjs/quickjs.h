@@ -1018,6 +1018,8 @@ void JS_SetMaxStackSize(JSRuntimeHandle rt, size_t stack_size);
    used to check stack overflow. */
 void JS_UpdateStackTop(JSRuntimeHandle rt);
 void JS_FreeRuntime(JSRuntimeHandle rt);
+/* The same, the GC heap about to be wiped (gc_cleanup): no last collection. */
+void JS_FreeRuntimeBeforeWipe(JSRuntimeHandle rt);
 void *JS_GetRuntimeOpaque(JSRuntimeHandle rt);
 void JS_SetRuntimeOpaque(JSRuntimeHandle rt, void *opaque);
 typedef void JS_MarkFunc(JSRuntimeHandle rt, GCHandle handle);
