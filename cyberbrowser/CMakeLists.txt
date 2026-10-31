@@ -555,7 +555,7 @@ if(BE_PLATFORM_WINDOWS)
 
     # The UI: windows and input, no engine.
     add_executable(cb_ui WIN32 src/proc/ui_main.c src/proc/ui_core.c)
-    target_link_libraries(cb_ui PRIVATE cb_ipc user32 gdi32)
+    target_link_libraries(cb_ui PRIVATE cb_ipc user32 gdi32 winmm)
     target_compile_options(cb_ui PRIVATE -Wall -Wextra)
 
     # A tab: the page engine, with no network or files of its own.

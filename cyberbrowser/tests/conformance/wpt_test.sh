@@ -8,7 +8,7 @@
 #
 # PORT (default 38527) is the server's; WPT_TIMEOUT_MULT scales testharness's
 # time limits (0.3: a test that hangs gives up after 3 s, not 10); with
-# REFTEST=1, SHARDS (default 6) browsers run at once.  A run picks up where results.json in
+# REFTEST=1, SHARDS (default: one per CPU) browsers run at once.  A run picks up where results.json in
 # <results dir> left off; it prints and writes summary.txt at the end, and
 # node tests/conformance/failures.js <results dir> lists what failed.
 build=$(cd "$1" && pwd)
@@ -47,10 +47,10 @@ script() {   # <pages file>: the UI script for its pages
 }
 mkdir -p "$out/logs"
 if [ -n "$REFTEST" ]; then
-    # Reftest pages don't depend on one another: SHARDS browsers (default 6),
+    # Reftest pages don't depend on one another: SHARDS browsers (default: one per CPU),
     # each from its own copy of the build (its own browser_data and logs),
     # take every SHARDS-th page.
-    n=${SHARDS:-6}
+    n=${SHARDS:-$(nproc)}
     rm -f "$out"/pages-*.txt "$out"/script-*.txt
     awk -v n="$n" -v o="$out" '{ print > (o "/pages-" (NR % n) ".txt") }' "$out/pages.txt"
     pids=
@@ -63,12 +63,17 @@ if [ -n "$REFTEST" ]; then
         [ -s "$out/pages-$i.txt" ] || continue
         d="$out/shard-$i"
         mkdir -p "$d"
-        cp "$build"/*.exe "$d/"
+        # (the browser's own programs, when changed: not hard links, whose
+        # one set of permissions the sandboxes of all the shards would share)
+        for f in "$build"/cb_*.exe; do
+            case "$f" in *cb_harness.exe|*cb_webgpu_fuzz.exe) continue;; esac
+            cmp -s "$f" "$d/${f##*/}" || cp "$f" "$d/"
+        done
         cp "$build"/*.dll "$d/" 2> /dev/null
         [ -d "$build/shaders" ] && cp -r "$build/shaders" "$d/"
         script "$out/pages-$i.txt" > "$out/script-$i.txt"
         rm -rf "${d:?}/browser_data" "$d"/logs/*
-        (cd "$d" && CYBER_UI_SCRIPT="$W/script-$i.txt" ./cb_coord.exe) 2> "$out/coord-$i.txt" &
+        (cd "$d" && CYBER_FRAME_IMAGE_WAIT=1 CYBER_UI_SCRIPT="$W/script-$i.txt" ./cb_coord.exe) 2> "$out/coord-$i.txt" &
         pids="$pids $!"
     done
     wait $pids

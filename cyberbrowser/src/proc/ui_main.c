@@ -35,6 +35,7 @@
 #include <string.h>
 #include <windows.h>
 #include <windowsx.h>
+#include <mmsystem.h>
 
 #include "chan.h"
 #include "bigmsg.h"
@@ -1121,11 +1122,12 @@ static bool script_command(void) {
         SetWindowPos(w->wnd, NULL, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER);
         return true;
     }
-    /* shotc PATH: the content alone (shot: the window), once no new frame
-     * has come for 50 ms (one on its way when the page said it was ready). */
+    /* shotc PATH: the content alone (shot: the window), once the tab has
+     * shown a frame (the frame a page says it is ready after has come by
+     * then: it was sent before the page said so). */
     if (sscanf(g_cmd, "shotc %4095s", arg) == 1) {
         drain_all();
-        if (t && t->has_frame && now - t->last_frame_tick < 50 && now - g_cmd_start < 3000) return false;
+        if (t && !t->has_frame && now - g_cmd_start < 3000) return false;
         /* (again until the content has a frame to read, for up to 3 s: the
          * first tab's may not be shown yet) */
         bool ok = save_content_shot(w, arg);
@@ -1155,7 +1157,12 @@ static void script_step(void) {
             if (g_cmd[0] == '#') continue;
             g_cmd_pending = true;
             g_cmd_start = GetTickCount();
-            ui_log("[script] %s", g_cmd);
+            /* (when, to the millisecond, by the clock tab logs use too:
+             * where a script's time goes) */
+            FILETIME ft;
+            GetSystemTimePreciseAsFileTime(&ft);
+            ULARGE_INTEGER t = { .LowPart = ft.dwLowDateTime, .HighPart = ft.dwHighDateTime };
+            ui_log("[script] %.1f %s", (double)(t.QuadPart % 1000000000ull) / 1e4, g_cmd);
         }
         if (!script_command()) return;
         g_cmd_pending = false;
@@ -1204,6 +1211,8 @@ int main(int argc, char **argv) {
         open_tab_in(g_focus, url);
     }
     const char *script = getenv("CYBER_UI_SCRIPT");
+    /* (a script waits in 1 ms steps, not the default 15.6 ms ticks) */
+    if (script && *script) timeBeginPeriod(1);
     /* (again for a while: a file just written may be held a moment, by a
      * virus scanner; a run that can't have its script ends rather than
      * waits as a browser nobody drives) */
@@ -1231,7 +1240,7 @@ int main(int argc, char **argv) {
             if (!chan_arm(&g_tabs[i].chan)) ready = true;
             waits[n++] = chan_event(&g_tabs[i].chan);
         }
-        if (!ready) MsgWaitForMultipleObjectsEx((DWORD)n, waits, g_script ? 15 : INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        if (!ready) MsgWaitForMultipleObjectsEx((DWORD)n, waits, g_script ? 1 : INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         chan_disarm(&g_coord);
         if (g_have_gpu) chan_disarm(&g_gpu);
         for (int i = 0; i < MAX_TABS; i++)

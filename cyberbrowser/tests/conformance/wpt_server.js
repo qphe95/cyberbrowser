@@ -151,7 +151,10 @@ const REFREADY = `<script>//<![CDATA[
   function check() {
     var de = document.documentElement;
     if (de && de.classList && de.classList.contains('reftest-wait')) { setTimeout(check, 50); return; }
-    var go = function () { requestAnimationFrame(function () { requestAnimationFrame(ready); }); };
+    /* (two frames, as wptrunner waits: the second callback runs once the
+     * first frame is with the GPU process, and an image that frame was
+     * still waiting for is in the one built after it) */
+    var go = function () { requestAnimationFrame(function () { requestAnimationFrame(function () { setTimeout(ready, 0); }); }); };
     if (document.fonts && document.fonts.ready) document.fonts.ready.then(go, go); else go();
   }
   if (document.readyState === 'complete') setTimeout(check, 0); else addEventListener('load', function () { setTimeout(check, 0); });

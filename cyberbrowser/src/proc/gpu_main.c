@@ -498,6 +498,9 @@ static void ui_message(void) {
         memcpy(&q, g_ui_rx.buf, sizeof(q));
         Window *w = window_of((HWND)(uintptr_t)q.hwnd);
         Client *c = w ? client_of(w->tab) : NULL;
+        /* (the frames the tab sent first: it may have sent its last one
+         * before what made the UI ask, on its own channel) */
+        while (c && big_recv(&c->chan, &c->rx) > 0) client_message(c);
         static uint8_t *px, *out;
         GuShot s = { 0, 0 };
         if (c && c->target && w->h) {

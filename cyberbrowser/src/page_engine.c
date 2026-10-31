@@ -625,18 +625,31 @@ static bool pump_due_work(JSContextHandle ctx) {
     return pump_event_loop(ctx, wait != 0);
 }
 
+static bool pump_due_work(JSContextHandle ctx);
+uint64_t gc_os_now_ns(void);
+
+/* DOMContentLoaded, then load once the document's images are in (HTML: an
+ * img being fetched delays the load event), the event loop running in
+ * between; at most 10 s. */
 static void dispatch_page_lifecycle_events(JSContextHandle ctx) {
-    const char *lifecycle_js =
+    const char *dcl_js =
         "document.readyState = 'interactive';"
-        "var dcl = new Event('DOMContentLoaded', { bubbles: true });"
-        "document.dispatchEvent(dcl);"
+        "document.dispatchEvent(new Event('DOMContentLoaded', { bubbles: true }));";
+    JS_Eval(ctx, dcl_js, strlen(dcl_js), "<lifecycle>", JS_EVAL_TYPE_GLOBAL);
+    pump_due_work(ctx);
+    image_api_scan(ctx);
+    unsigned long long until = gc_os_now_ns() / 1000000ull + 10000ull;
+    while (g_loop_images && image_cache_has_pending(g_loop_images) && gc_os_now_ns() / 1000000ull < until) {
+        image_cache_wait_pending_ms(g_loop_images, 5);
+        pump_due_work(ctx);
+    }
+    if (g_loop_images) image_cache_process_pending(g_loop_images);
+    const char *load_js =
         "document.readyState = 'complete';"
         "var loadEvt = new Event('load');"
         "window.dispatchEvent(loadEvt);"
         "document.dispatchEvent(loadEvt);";
-    GCValue result = JS_Eval(ctx, lifecycle_js, strlen(lifecycle_js),
-                             "<lifecycle>", JS_EVAL_TYPE_GLOBAL);
-    (void)result;
+    JS_Eval(ctx, load_js, strlen(load_js), "<lifecycle>", JS_EVAL_TYPE_GLOBAL);
 }
 
 static GCValue get_global_document(JSContextHandle ctx) {
@@ -1222,7 +1235,11 @@ void page_set_viewport(int width, int height) {
 
 /* Off for a hidden tab: page_turn lays nothing out (what changed waits). */
 static bool g_rendering = true;
-void page_set_rendering(bool on) { g_rendering = on; }
+void timer_set_raf_paused(bool paused);
+void page_set_rendering(bool on) {
+    g_rendering = on;
+    timer_set_raf_paused(!on);
+}
 
 static unsigned g_frames_built;
 static unsigned long long g_frames_wall_us, g_frames_cpu_us;
@@ -1244,6 +1261,16 @@ void page_turn(bool run_timers, bool wait, int width, int height, PageTurn *out)
     {
         CP_SCOPE("process-images");
         had_images = image_cache_process_pending(g_loop_images);
+    }
+    if (g_dom_needs_layout && !g_rendering) {
+        /* Not rendered (a hidden tab): its images load all the same, as a
+         * browser's do in a background tab (laid out once it is shown). */
+        static uint64_t scanned;
+        uint64_t stamp = dom_change_stamp();
+        if (stamp != scanned) {
+            scanned = stamp;
+            image_api_scan(g_ctx);
+        }
     }
     if (g_dom_needs_layout && g_rendering) {
         g_dom_needs_layout = 0;

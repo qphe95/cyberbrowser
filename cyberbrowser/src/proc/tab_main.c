@@ -57,6 +57,7 @@ static uint32_t g_frame_no;
 static bool g_in_flight, g_need_paint;
 /* Not shown (UT_VISIBLE): scripts and timers run, nothing is laid out or painted. */
 static bool g_hidden;
+void timer_set_raf_paused(bool paused);     /* (browser/timer_api.c) */
 static char g_title[PROTO_TITLE_MAX];
 
 static void memory_report(const char *what) {
@@ -64,8 +65,18 @@ static void memory_report(const char *what) {
     memset(&pm, 0, sizeof(pm));
     pm.cb = sizeof(pm);
     K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&pm, sizeof(pm));
-    fprintf(stderr, "[tab %u] memory %s: private %.1f MB, working set %.1f MB\n", g_tab, what,
-            pm.PrivateUsage / 1048576.0, pm.WorkingSetSize / 1048576.0);
+    /* (and when: since the process was created, and its CPU time so far) */
+    FILETIME c, e, k, u, now;
+    GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u);
+    GetSystemTimeAsFileTime(&now);
+    ULARGE_INTEGER ci = { .LowPart = c.dwLowDateTime, .HighPart = c.dwHighDateTime },
+                   ni = { .LowPart = now.dwLowDateTime, .HighPart = now.dwHighDateTime },
+                   ki = { .LowPart = k.dwLowDateTime, .HighPart = k.dwHighDateTime },
+                   ui = { .LowPart = u.dwLowDateTime, .HighPart = u.dwHighDateTime };
+    fprintf(stderr, "[tab %u] memory %s: private %.1f MB, working set %.1f MB (%.0f ms after the process was created "
+            "at %.1f, %.0f ms cpu)\n", g_tab, what, pm.PrivateUsage / 1048576.0, pm.WorkingSetSize / 1048576.0,
+            (ni.QuadPart - ci.QuadPart) / 1e4, (double)(ci.QuadPart % 1000000000ull) / 1e4,
+            (ki.QuadPart + ui.QuadPart) / 1e4);
     fflush(stderr);
 }
 
@@ -889,7 +900,10 @@ int main(int argc, char **argv) {
         return 1;
     }
     page_engine_load_fonts();
-    page_set_frame_image_wait(false);   /* (images arriving later lay out again) */
+    /* (images arriving later lay out again; CYBER_FRAME_IMAGE_WAIT=1, for
+     * reftests: a frame waits for its images, as cb_harness's do, so the one
+     * a page says it is ready after has them) */
+    page_set_frame_image_wait(getenv("CYBER_FRAME_IMAGE_WAIT") != NULL);
     memory_report("engine ready");
     page_prepare(url);
     page_set_viewport((int)g_width, (int)g_height);
@@ -942,6 +956,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "[tab %u] load event at %llu ms (cpu: main thread %.0f ms, process %.0f ms; "
             "%u frames built, %.0f ms, %.0f ms cpu)\n",
             g_tab, loaded_at - g_start_tick, cpu_t, cpu_p, frames, frames_wall, frames_cpu);
+    memory_report("at the load event");
     {
         DomFetchStats fs;
         dom_fetch_stats(&fs);
@@ -952,6 +967,11 @@ int main(int argc, char **argv) {
     }
     for (;;) {
         bool input = drain();
+        /* Animation frame callbacks run when a frame can follow them: not
+         * while one is with the GPU process (nor while hidden), as a
+         * browser's run when its compositor asks for the next frame.  So
+         * what a page did before one is in the frame drawn after it. */
+        timer_set_raf_paused(g_hidden || g_in_flight);
         PageTurn t;
         page_turn(true, false, (int)g_width, (int)g_height, &t);
         if (t.new_frame) {

@@ -312,6 +312,16 @@ void timer_cancel_realm(JSContextHandle realm) {
 }
 
 // Find the next timer that should fire, returns its ID or 0 if none
+/* Not rendered (a hidden tab): animation frame callbacks wait, as in a
+ * browser's background tab, until it is shown. */
+static bool g_raf_paused;
+
+void timer_set_raf_paused(bool paused) { g_raf_paused = paused; }
+
+static inline bool timer_waits(const Timer *t) {
+    return !t->active || (g_raf_paused && t->type == TIMER_TYPE_RAF);
+}
+
 int find_due_timer(unsigned long long current_time) {
     timer_state_ensure_initialized();
     pthread_mutex_lock(&g_timer_state.mutex);
@@ -321,7 +331,7 @@ int find_due_timer(unsigned long long current_time) {
     
     for (int i = 0; i < MAX_TIMERS; i++) {
         Timer *t = &g_timer_state.timers[i];
-        if (t->active && t->trigger_time <= current_time && t->trigger_time < earliest_time) {
+        if (!timer_waits(t) && t->trigger_time <= current_time && t->trigger_time < earliest_time) {
             earliest_time = t->trigger_time;
             due_id = t->id;
         }
@@ -340,7 +350,7 @@ unsigned long long timer_next_due_ms(void) {
     unsigned long long earliest = (unsigned long long)(-1);
     for (int i = 0; i < MAX_TIMERS; i++) {
         Timer *t = &g_timer_state.timers[i];
-        if (t->active && t->trigger_time < earliest) {
+        if (!timer_waits(t) && t->trigger_time < earliest) {
             earliest = t->trigger_time;
         }
     }
@@ -673,7 +683,7 @@ int timer_has_pending(void) {
     int has_pending = 0;
     
     for (int i = 0; i < MAX_TIMERS; i++) {
-        if (g_timer_state.timers[i].active && g_timer_state.timers[i].trigger_time <= now) {
+        if (!timer_waits(&g_timer_state.timers[i]) && g_timer_state.timers[i].trigger_time <= now) {
             has_pending = 1;
             break;
         }

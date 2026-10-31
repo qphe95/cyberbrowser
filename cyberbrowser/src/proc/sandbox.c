@@ -21,6 +21,7 @@ static SECURITY_ATTRIBUTES g_object_sa;
 static PSID g_user;                     /* this process's user */
 static PSID g_tab_sids[COORD_MAX_TABS];
 static wchar_t g_tab_names[COORD_MAX_TABS][64];  /* their profiles, deleted when the tab ends */
+static wchar_t g_tab_slot_names[COORD_MAX_TABS][64];   /* each slot's name, for this coordinator's life */
 static PSID g_store_sid, g_ui_sid, g_net_sid;
 static union { SID s; char b[SECURITY_MAX_SID_SIZE]; } g_net_caps[2];
 static SID_AND_ATTRIBUTES g_net_cap_list[8];
@@ -28,6 +29,7 @@ static DWORD g_net_ncaps;
 static union { ACL acl; char b[512]; } g_tab_dacl[COORD_MAX_TABS];
 static PSID g_webgpu_sids[COORD_MAX_WEBGPU];
 static wchar_t g_webgpu_names[COORD_MAX_WEBGPU][64];
+static wchar_t g_webgpu_slot_names[COORD_MAX_WEBGPU][64];
 static union { ACL acl; char b[512]; } g_webgpu_dacl[COORD_MAX_WEBGPU];
 
 #define TAB_MEMORY_LIMIT   (4ull << 30)
@@ -41,9 +43,16 @@ static union { ACL acl; char b[512]; } g_webgpu_dacl[COORD_MAX_WEBGPU];
  * time: CreateProcess refuses an AppContainer SID with no profile. */
 static PSID profile_sid(const wchar_t *name) {
     PSID sid = NULL;
-    HRESULT hr = CreateAppContainerProfile(name, name, L"cyberbrowser sandbox", NULL, 0, &sid);
-    if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS))
-        hr = DeriveAppContainerSidFromAppContainerName(name, &sid);
+    HRESULT hr = E_FAIL;
+    /* (again a few times: browsers starting together, test runs side by
+     * side, registering one profile at once may see E_UNEXPECTED) */
+    for (int tries = 0; tries < 10; tries++) {
+        hr = CreateAppContainerProfile(name, name, L"cyberbrowser sandbox", NULL, 0, &sid);
+        if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS))
+            hr = DeriveAppContainerSidFromAppContainerName(name, &sid);
+        if (SUCCEEDED(hr)) break;
+        Sleep(20 + 20 * tries);
+    }
     if (FAILED(hr)) {
         fprintf(stderr, "[sandbox] profile %ls: %lx\n", name, (unsigned long)hr);
         return NULL;
@@ -51,31 +60,42 @@ static PSID profile_sid(const wchar_t *name) {
     return sid;
 }
 
-/* A profile of its own for the tab process about to start in `slot`,
- * "cyberbrowser.tab.<coordinator pid>.<64 random bits>": its SID is no
- * other process's, ever, and what the tab leaves in the profile's folder and
- * registry storage goes with it (sandbox_tab_ended).  The name is random,
- * not a count: a tab can read its own, and a count would tell it how many
- * tabs (of any site) came before it. */
+/* A slot's profile name, "cyberbrowser.<kind>.<coordinator pid>.<64 random
+ * bits>", made the first time the slot is used and kept for this
+ * coordinator's life.  Random, not a count: a process can read its own, and
+ * a count would tell it how many (of any site) came before it.  Kept, not
+ * new for each process: Windows keeps something for every AppContainer SID
+ * a session has seen, and a new one per tab (a test run's thousands) ran it
+ * out (CreateProcess: ERROR_NO_SYSTEM_RESOURCES) until the user signed out. */
+static bool slot_name(wchar_t *name, const wchar_t *kind) {
+    if (name[0]) return true;
+    unsigned long long r = 0;
+    if (BCryptGenRandom(NULL, (PUCHAR)&r, sizeof(r), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) return false;
+    _snwprintf(name, 64, L"cyberbrowser.%ls.%lu.%016llx", kind, GetCurrentProcessId(), r);
+    return true;
+}
+
+/* A profile for the tab process about to start in `slot`, under the
+ * slot's name: the profile of the slot's last tab is deleted first (its
+ * folder and registry storage with it, sandbox_tab_ended) and made again,
+ * so nothing the last one left there reaches this one; its SID is the
+ * slot's (a SID follows from the name). */
 static PSID new_tab_sid(int slot) {
     if (slot < 0 || slot >= COORD_MAX_TABS) return NULL;
     sandbox_tab_ended(slot);
-    unsigned long long r = 0;
-    if (BCryptGenRandom(NULL, (PUCHAR)&r, sizeof(r), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) return NULL;
-    _snwprintf(g_tab_names[slot], 64, L"cyberbrowser.tab.%lu.%016llx", GetCurrentProcessId(), r);
+    if (!slot_name(g_tab_slot_names[slot], L"tab")) return NULL;
+    memcpy(g_tab_names[slot], g_tab_slot_names[slot], sizeof(g_tab_names[slot]));
     g_tab_sids[slot] = profile_sid(g_tab_names[slot]);
     if (!g_tab_sids[slot]) g_tab_names[slot][0] = 0;
     return g_tab_sids[slot];
 }
 
-/* The same for the web-GPU process about to start in `slot`:
- * "cyberbrowser.webgpu.<coordinator pid>.<64 random bits>". */
+/* The same for the web-GPU process about to start in `slot`. */
 static PSID new_webgpu_sid(int slot) {
     if (slot < 0 || slot >= COORD_MAX_WEBGPU) return NULL;
     sandbox_webgpu_ended(slot);
-    unsigned long long r = 0;
-    if (BCryptGenRandom(NULL, (PUCHAR)&r, sizeof(r), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) return NULL;
-    _snwprintf(g_webgpu_names[slot], 64, L"cyberbrowser.webgpu.%lu.%016llx", GetCurrentProcessId(), r);
+    if (!slot_name(g_webgpu_slot_names[slot], L"webgpu")) return NULL;
+    memcpy(g_webgpu_names[slot], g_webgpu_slot_names[slot], sizeof(g_webgpu_names[slot]));
     g_webgpu_sids[slot] = profile_sid(g_webgpu_names[slot]);
     if (!g_webgpu_sids[slot]) g_webgpu_names[slot][0] = 0;
     return g_webgpu_sids[slot];
