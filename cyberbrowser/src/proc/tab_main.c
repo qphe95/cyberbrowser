@@ -36,6 +36,7 @@
 #include "js_quickjs.h"
 #include "det_clock.h"
 #include "page_engine.h"
+#include "dom_fetch.h"
 #include "code_cache.h"
 #include "gpu_client.h"
 #include "http_download.h"
@@ -431,6 +432,8 @@ typedef struct Part {
 } Part;
 
 static DWORD g_main_thread;
+static unsigned long long g_net_idle_ms;    /* the main thread waiting on the network process */
+static unsigned long long g_start_tick;     /* when the process started (load timing in the log) */
 static void load_progress(void);
 
 static Chan g_net;                      /* side 0: the tab */
@@ -537,7 +540,9 @@ static uint8_t *net_call(uint16_t type, uint32_t id, const void *a, uint32_t ale
             EnterCriticalSection(&g_net_lock);
             if (p.done || p.parts) continue;
         }
+        ULONGLONG slept = main ? GetTickCount64() : 0;
         SleepConditionVariableCS(&g_net_cv, &g_net_lock, main ? 100 : INFINITE);
+        if (main) g_net_idle_ms += GetTickCount64() - slept;
     }
     for (Pending **pp = &g_pending; *pp; pp = &(*pp)->next)
         if (*pp == &p) { *pp = p.next; break; }
@@ -548,6 +553,13 @@ static uint8_t *net_call(uint16_t type, uint32_t id, const void *a, uint32_t ale
     LeaveCriticalSection(&g_net_lock);
     *len = p.len;
     return p.msg;
+}
+
+/* CYBER_NET_LOG=1: each request's start (from the tab's start), time and size. */
+static bool net_log(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("CYBER_NET_LOG") ? 1 : 0;
+    return on;
 }
 
 static bool net_request(const char *url, const char *method, const char *body, size_t body_len,
@@ -577,8 +589,12 @@ static bool net_request(const char *url, const char *method, const char *body, s
     NetRequest q = { (uint32_t)InterlockedIncrement(&g_net_id), (uint32_t)mlen, (uint32_t)ulen, (uint32_t)hlen,
                      (uint32_t)nheaders, (uint32_t)body_len, (uint32_t)rc.mode, (uint32_t)ilen };
     uint32_t len = 0;
+    ULONGLONG t0 = GetTickCount64();
     uint8_t *m = net_call(TN_REQUEST, q.id, &q, sizeof(q), strs, (uint32_t)o, body, (uint32_t)body_len, &len);
     free(strs);
+    if (net_log())
+        fprintf(stderr, "[net] %llu ms +%llu ms %s %u bytes %s %.120s\n", t0 - g_start_tick, GetTickCount64() - t0,
+                GetCurrentThreadId() == g_main_thread ? "main" : "pool", len, method, url);
     NetResponse r;
     if (!m || len < sizeof(r)) {
         free(m);
@@ -793,9 +809,6 @@ static char *unhex(const char *s) {
     return out;
 }
 
-/* When the process started (load timing in the log). */
-static unsigned long long g_start_tick;
-
 /* The CPU time the main thread and the whole process have used, in ms. */
 static void cpu_ms(double *thread_ms, double *process_ms) {
     FILETIME c, e, k, u;
@@ -910,6 +923,7 @@ int main(int argc, char **argv) {
      * time the load visibly settled. */
     unsigned long long content_at = loaded_at;
     unsigned rebuilds = 0;
+    double content_cpu = 0;
     /* A watch page has loaded when its video starts playing: its first
      * frame shown (logged once). */
     bool video_started = false;
@@ -921,12 +935,21 @@ int main(int argc, char **argv) {
     fprintf(stderr, "[tab %u] load event at %llu ms (cpu: main thread %.0f ms, process %.0f ms; "
             "%u frames built, %.0f ms, %.0f ms cpu)\n",
             g_tab, loaded_at - g_start_tick, cpu_t, cpu_p, frames, frames_wall, frames_cpu);
+    {
+        DomFetchStats fs;
+        dom_fetch_stats(&fs);
+        fprintf(stderr, "[tab %u] script fetches: %llu prefetched, %llu waited for (%.0f ms), %llu fetched inline; "
+                "main thread waited %llu ms on the network\n", g_tab,
+                (unsigned long long)fs.queued, (unsigned long long)fs.waits, fs.wait_ms, (unsigned long long)fs.sync_fetches,
+                g_net_idle_ms);
+    }
     for (;;) {
         bool input = drain();
         PageTurn t;
         page_turn(true, false, (int)g_width, (int)g_height, &t);
         if (t.new_frame) {
             content_at = GetTickCount64();
+            cpu_ms(&content_cpu, &cpu_p);
             rebuilds++;
             g_content_height = frame_extent(&page_frame()->dl);
             clamp_scroll();
@@ -946,8 +969,8 @@ int main(int argc, char **argv) {
         if (!settled && GetTickCount64() - content_at > 3000) {
             page_frame_stats(&frames, &frames_wall, &frames_cpu);
             fprintf(stderr, "[tab %u] content settled at %llu ms (%u rebuilt frames after the load event; "
-                    "%u frames built in all, %.0f ms, %.0f ms cpu)\n",
-                    g_tab, content_at - g_start_tick, rebuilds, frames, frames_wall, frames_cpu);
+                    "%u frames built in all, %.0f ms, %.0f ms cpu; main thread cpu by then %.0f ms)\n",
+                    g_tab, content_at - g_start_tick, rebuilds, frames, frames_wall, frames_cpu, content_cpu);
             settled = true;
         }
         if (!reported && GetTickCount64() - loaded_at > 3000) {

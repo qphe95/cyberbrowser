@@ -1248,9 +1248,29 @@ void page_turn(bool run_timers, bool wait, int width, int height, PageTurn *out)
             CP_SCOPE("rebuild-doc");
             new_doc = html_document_from_js_dom(g_ctx, js_doc);
         }
-        if (frame_log())
-            fprintf(stderr, "[frame] image scan %.1f ms, mirror update %.1f ms\n", (double)(scanned - wall0) / 1000.0,
+        if (frame_log()) {
+            fprintf(stderr, "[frame] at %llu ms: image scan %.1f ms, mirror update %.1f ms\n",
+                    (unsigned long long)page_clock_now_ms(), (double)(scanned - wall0) / 1000.0,
                     (double)(gc_os_now_ns() / 1000 - scanned) / 1000.0);
+            /* What changed since the last frame (CYBER_FRAME_LOG=2: the elements). */
+            static uint64_t seen;
+            const HtmlMirrorChange *ch = NULL;
+            size_t nch = 0;
+            if (new_doc && html_mirror_changes(new_doc, seen, &ch, &nch)) {
+                unsigned kinds[4] = { 0 };
+                for (size_t i = 0; i < nch; i++) if (ch[i].kind < 4) kinds[ch[i].kind]++;
+                fprintf(stderr, "[frame] changes: %u attrs, %u children, %u sheets\n", kinds[1], kinds[2], kinds[3]);
+                if (atoi(cyber_getenv("CYBER_FRAME_LOG")) >= 2)
+                    for (size_t i = 0; i < nch && i < 6; i++) {
+                        NodeId id = ch[i].id;
+                        const char *cls = id ? dom_get_attr_str(id, "class") : NULL;
+                        const char *idv = id ? dom_get_attr_str(id, "id") : NULL;
+                        fprintf(stderr, "[frame]   %s <%s#%s.%.60s>\n", ch[i].kind == 1 ? "attrs" : ch[i].kind == 2 ? "children" : "sheets",
+                                id ? dom_tag_name(id) : "?", idv ? idv : "", cls ? cls : "");
+                    }
+            }
+            seen = html_mirror_change_seq();
+        }
         if (new_doc && new_doc == g_doc) {
             html_document_free(new_doc);   /* (the same document: one reference is enough) */
         } else if (new_doc) {
