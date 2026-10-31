@@ -653,7 +653,7 @@ static bool simple_ok(uint32_t s, const SelSimple *ss, uint32_t scope) {
     }
     case SS_EMPTY:
         for (uint32_t c = g_dom.first[s]; c; c = g_dom.next[c])
-            if (g_dom.kind[c] == DOM_K_ELEMENT || (g_dom.kind[c] == DOM_K_TEXT && g_dom.text[c].len)) return false;
+            if (g_dom.kind[c] == DOM_K_ELEMENT || ((g_dom.kind[c] == DOM_K_TEXT || g_dom.kind[c] == DOM_K_CDATA) && g_dom.text[c].len)) return false;
         return true;
     case SS_ROOT: return g_dom.parent[s] && g_dom.kind[g_dom.parent[s]] == DOM_K_DOCUMENT;
     case SS_SCOPE: return s == scope;

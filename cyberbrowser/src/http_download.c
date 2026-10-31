@@ -511,6 +511,33 @@ const char *http_last_url(void) {
     return t_last_url;
 }
 
+static __thread char t_last_type[128];
+
+const char *http_last_content_type(void) {
+    return t_last_type;
+}
+
+void http_set_last_content_type(const char *type) {
+    snprintf(t_last_type, sizeof(t_last_type), "%s", type ? type : "");
+}
+
+/* t_last_type from a response's header block. */
+static void note_content_type(const char *hdrs, size_t len) {
+    t_last_type[0] = 0;
+    for (size_t i = 0; i + 13 <= len; i++) {
+        if ((i && hdrs[i - 1] != '\n') || strncasecmp(hdrs + i, "content-type:", 13)) continue;
+        const char *p = hdrs + i + 13, *e = hdrs + len;
+        while (p < e && (*p == ' ' || *p == '\t')) p++;
+        size_t n = 0;
+        while (p + n < e && p[n] != ';' && p[n] != '\r' && p[n] != '\n' && p[n] != ' ' && n + 1 < sizeof t_last_type) {
+            t_last_type[n] = (char)(p[n] >= 'A' && p[n] <= 'Z' ? p[n] + 32 : p[n]);
+            n++;
+        }
+        t_last_type[n] = 0;
+        return;
+    }
+}
+
 void http_set_last_url(const char *url) {
     snprintf(t_last_url, sizeof(t_last_url), "%s", url ? url : "");
 }
@@ -1169,6 +1196,7 @@ static void body_obs_feed(BodyObs *o, const uint8_t *p, size_t n) {
 static void body_obs_start(BodyObs *o, const char *data, size_t header_len, int status, bool chunked) {
     memset(o, 0, sizeof(*o));
     if (!g_body_observer || status < 200 || status >= 300) return;
+    note_content_type(data, header_len);
     char *ce = find_response_header((char *)data, (char *)data, (char *)data + header_len, "content-encoding:");
     size_t cl = ce ? strcspn(ce, "\r\n") : 0;
     while (cl && (*ce == ' ' || *ce == '\t')) { ce++; cl--; }
@@ -1205,8 +1233,10 @@ static bool http_request_with_method_internal(const char *url, const char *metho
     if (in_memory && replay_serve(method, url, outBuffer, outStatus)) {
         if (outTotalSize) *outTotalSize = outBuffer->size;
         /* (A recorded body is decoded and whole: observed in one piece.) */
-        if (g_body_observer && outBuffer->data && (!outStatus || (*outStatus >= 200 && *outStatus < 300)))
+        if (g_body_observer && outBuffer->data && (!outStatus || (*outStatus >= 200 && *outStatus < 300))) {
+            if (outBuffer->headers) note_content_type(outBuffer->headers, outBuffer->headers_size);
             body_observe(outBuffer->data, outBuffer->size);
+        }
         return true;
     }
     /* CYBER_REPLAY_OFFLINE=1 (benchmark replays): a request the recording

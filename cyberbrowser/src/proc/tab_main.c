@@ -427,6 +427,7 @@ typedef struct Pending {
 typedef struct Part {
     struct Part *next;
     char url[PROTO_URL_MAX + 1];        /* where it came from, after redirects */
+    char type[128];                     /* its content type */
     uint32_t len;
     char data[];
 } Part;
@@ -451,18 +452,23 @@ static DWORD WINAPI net_receiver(void *arg) {
         int r = big_recv(&g_net, &rx);
         if (r < 0) break;
         if (r == 0) { chan_wait(&g_net, 1000); continue; }
-        if (rx.type == NT_PART && rx.total > 8) {
-            uint32_t id, ulen;
+        if (rx.type == NT_PART && rx.total > 12) {
+            uint32_t id, ulen, tlen;
             memcpy(&id, rx.buf, 4);
             memcpy(&ulen, rx.buf + 4, 4);
-            if (ulen > PROTO_URL_MAX || ulen >= rx.total - 8) continue;
-            Part *part = (Part *)malloc(sizeof(Part) + rx.total - 8 - ulen);
+            if (ulen > PROTO_URL_MAX || ulen + 12 > rx.total) continue;
+            memcpy(&tlen, rx.buf + 8 + ulen, 4);
+            if (tlen >= sizeof(((Part *)0)->type) || 12 + ulen + tlen > rx.total) continue;
+            uint32_t head = 12 + ulen + tlen;
+            Part *part = (Part *)malloc(sizeof(Part) + rx.total - head);
             if (!part) continue;
             part->next = NULL;
             memcpy(part->url, rx.buf + 8, ulen);
             part->url[ulen] = 0;
-            part->len = rx.total - 8 - ulen;
-            memcpy(part->data, rx.buf + 8 + ulen, part->len);
+            memcpy(part->type, rx.buf + 12 + ulen, tlen);
+            part->type[tlen] = 0;
+            part->len = rx.total - head;
+            memcpy(part->data, rx.buf + head, part->len);
             EnterCriticalSection(&g_net_lock);
             Pending *p = g_pending;
             while (p && (p->id != id || p->done)) p = p->next;
@@ -527,6 +533,7 @@ static uint8_t *net_call(uint16_t type, uint32_t id, const void *a, uint32_t ale
                 n = q->next;
                 /* (The document's URL: page_observe takes it from here.) */
                 if (q->url[0]) http_set_last_url(q->url);
+                http_set_last_content_type(q->type);
                 http_body_observe(q->data, q->len);
                 free(q);
             }

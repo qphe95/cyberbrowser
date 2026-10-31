@@ -144,6 +144,9 @@ void html_doc_stream_append(HtmlDocStream *s, const char *data, size_t len);
 GCValue html_doc_stream_step(HtmlDocStream *s, bool final);
 const char *html_doc_stream_source(HtmlDocStream *s, size_t *len);
 void html_doc_stream_end(HtmlDocStream *s);
+/* The stream's document made the XML document of data instead (mime: its
+ * MIME type): parsed whole, its parsing ended. */
+void html_doc_stream_xml(HtmlDocStream *s, const char *data, size_t len, const char *mime);
 /* The underlying parser stream (document.write's insertion point). */
 struct DomStream *html_doc_stream_parser(HtmlDocStream *s);
 

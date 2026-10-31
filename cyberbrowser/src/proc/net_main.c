@@ -317,7 +317,8 @@ static void queue_out(Client *c, Out *o) {
 }
 
 /* A piece of a navigation's body, for c to parse (and paint) as it comes:
- * queued ahead of the request's reply (NT_PART). */
+ * queued ahead of the request's reply (NT_PART: the request id, the URL and
+ * the content type it is from, each a u32 length and bytes, then the piece). */
 typedef struct PartTo {
     Client *c;
     uint32_t id;
@@ -336,10 +337,10 @@ static void part(void *user, const char *data, size_t len) {
         t->verdict = at[0] ? doc_verdict(t->c, HTTP_MODE_NAVIGATE, at) : NET_DOC_ELSEWHERE;
     }
     if (t->verdict != NET_DOC_OK) return;
-    const char *at = http_last_url();
-    uint32_t ulen = (uint32_t)strnlen(at, PROTO_URL_MAX);
+    const char *at = http_last_url(), *type = http_last_content_type();
+    uint32_t ulen = (uint32_t)strnlen(at, PROTO_URL_MAX), tlen = (uint32_t)strlen(type);
     Out *o = (Out *)calloc(1, sizeof(Out));
-    if (o) o->head = (uint8_t *)malloc(8 + ulen);
+    if (o) o->head = (uint8_t *)malloc(12 + ulen + tlen);
     if (o && o->head) o->b.data = (char *)malloc(len);
     if (!o || !o->head || !o->b.data) {
         if (o) out_free(o);
@@ -348,7 +349,9 @@ static void part(void *user, const char *data, size_t len) {
     memcpy(o->head, &t->id, 4);
     memcpy(o->head + 4, &ulen, 4);
     memcpy(o->head + 8, at, ulen);
-    o->head_len = 8 + ulen;
+    memcpy(o->head + 8 + ulen, &tlen, 4);       /* (and its content type) */
+    memcpy(o->head + 12 + ulen, type, tlen);
+    o->head_len = 12 + ulen + tlen;
     memcpy(o->b.data, data, len);
     o->b.size = len;
     o->type = NT_PART;

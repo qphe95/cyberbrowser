@@ -139,6 +139,10 @@ void http_request_context_get(HttpRequestContext *out);
 /* The URL the last request on this thread ended at (after redirects).  A
  * remote (HttpRemote) sets it from its answer with http_set_last_url. */
 const char *http_last_url(void);
+/* The MIME type (lower-cased, no parameters) of the last response whose body
+ * was observed on this thread, or set (a tab gets it with each part). */
+const char *http_last_content_type(void);
+void http_set_last_content_type(const char *type);
 void http_set_last_url(const char *url);
 
 /* Redirects on this thread go to filter first (NULL: none): false and the

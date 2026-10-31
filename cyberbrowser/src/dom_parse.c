@@ -120,7 +120,28 @@ static const struct { const char *name; uint32_t cp; } k_entities[] = {
     { "ntilde", 0xF1 }, { "oacute", 0xF3 }, { "iacute", 0xED }, { "uacute", 0xFA },
     { "frac12", 0xBD }, { "frac14", 0xBC }, { "frac34", 0xBE }, { "prime", 0x2032 },
     { "Prime", 0x2033 }, { "dagger", 0x2020 }, { "hearts", 0x2665 }, { "check", 0x2713 },
+    { "Eacute", 0xC9 }, { "Egrave", 0xC8 }, { "Aacute", 0xC1 }, { "Agrave", 0xC0 }, { "Ouml", 0xD6 },
+    { "Uuml", 0xDC }, { "Auml", 0xC4 }, { "Ccedil", 0xC7 }, { "Ntilde", 0xD1 }, { "aring", 0xE5 },
+    { "Aring", 0xC5 }, { "oslash", 0xF8 }, { "Oslash", 0xD8 }, { "aelig", 0xE6 }, { "AElig", 0xC6 },
+    { "ecirc", 0xEA }, { "acirc", 0xE2 }, { "ocirc", 0xF4 }, { "icirc", 0xEE }, { "ucirc", 0xFB },
+    { "euml", 0xEB }, { "iuml", 0xEF }, { "yuml", 0xFF }, { "atilde", 0xE3 }, { "otilde", 0xF5 },
+    { "lrm", 0x200E }, { "rlm", 0x200F }, { "macr", 0xAF }, { "acute", 0xB4 }, { "cedil", 0xB8 },
+    { "ordf", 0xAA }, { "ordm", 0xBA }, { "not", 0xAC }, { "micro", 0xB5 }, { "brvbar", 0xA6 },
+    { "uml", 0xA8 }, { "curren", 0xA4 }, { "sup1", 0xB9 }, { "sup2", 0xB2 }, { "sup3", 0xB3 },
+    { "alpha", 0x3B1 }, { "beta", 0x3B2 }, { "gamma", 0x3B3 }, { "delta", 0x3B4 }, { "pi", 0x3C0 },
+    { "sigma", 0x3C3 }, { "omega", 0x3C9 }, { "lambda", 0x3BB }, { "mu", 0x3BC }, { "theta", 0x3B8 },
+    { "infin", 0x221E }, { "ne", 0x2260 }, { "le", 0x2264 }, { "ge", 0x2265 }, { "sum", 0x2211 },
+    { "spades", 0x2660 }, { "clubs", 0x2663 }, { "diams", 0x2666 }, { "loz", 0x25CA }, { "permil", 0x2030 },
+    { "sbquo", 0x201A }, { "bdquo", 0x201E }, { "lsaquo", 0x2039 }, { "rsaquo", 0x203A }, { "oline", 0x203E },
 };
+
+/* The code point of the named reference name (without '&' and ';'), 0 if
+ * not one of the above. */
+uint32_t dom_parse_named_entity(const char *name, size_t len) {
+    for (size_t k = 0; k < sizeof(k_entities) / sizeof(k_entities[0]); k++)
+        if (strlen(k_entities[k].name) == len && !memcmp(name, k_entities[k].name, len)) return k_entities[k].cp;
+    return 0;
+}
 
 /* Character references, in place on a NUL-terminated buffer.  Numeric
  * references (decimal and hex) and the named ones above become UTF-8;

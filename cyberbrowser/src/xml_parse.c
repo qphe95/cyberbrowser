@@ -2,8 +2,9 @@
  * xml_parse.c - XML documents into the node store (XML 1.0 and Namespaces
  * in XML, non-validating): elements and attributes in their namespaces,
  * character data with character and the predefined entity references,
- * CDATA sections, comments, processing instructions and the doctype (its
- * internal subset skipped).  White space outside the root element is no
+ * CDATA sections, comments, processing instructions and the doctype (of its
+ * internal subset, the general entities declared; with an XHTML doctype,
+ * HTML's named references too, as browsers have them).  White space outside the root element is no
  * node; the XML declaration is none either.
  *
  * Not well-formed input stops the parse: the caller gets the message and
@@ -14,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "dom_parse.h"
 #include "dom_store.h"
 #include "xml_parse.h"
 
@@ -21,6 +23,7 @@
 #define XML_URI "http://www.w3.org/XML/1998/namespace"
 
 typedef struct Binding { char *prefix; char *uri; int depth; } Binding;   /* prefix NULL: the default */
+typedef struct Entity { char *name; char *text; size_t nl, tl; } Entity;  /* from the internal subset */
 
 typedef struct P {
     const char *s, *e, *p;
@@ -33,7 +36,14 @@ typedef struct P {
     int depth;
     char *buf;              /* scratch for decoded text */
     size_t bufcap;
+    Entity *ents;
+    int nents;
+    int ent_depth;          /* entity expansions open */
+    bool html_ents;         /* an XHTML doctype: HTML's named references too */
 } P;
+
+static bool content(P *p, NodeId parent);
+static void append(NodeId parent, NodeId child);
 
 static bool fail(P *p, const char *msg) {
     if (!p->failed) {
@@ -149,8 +159,9 @@ static void buf_cp(P *p, size_t *n, uint32_t c) {
     buf_put(p, n, o, l);
 }
 
-/* A reference at p ('&'), decoded onto the buffer. */
-static bool reference(P *p, size_t *n) {
+/* A reference at p ('&'), decoded onto the buffer; in content (parent set)
+ * an entity whose text has markup is parsed there, as content of parent. */
+static bool reference(P *p, size_t *n, NodeId parent) {
     p->p++;
     if (p->p < p->e && *p->p == '#') {
         p->p++;
@@ -184,6 +195,44 @@ static bool reference(P *p, size_t *n) {
             p->p += l + 1;
             return true;
         }
+    for (int i = 0; i < p->nents; i++) {
+        Entity *en = &p->ents[i];
+        if (en->nl != l || memcmp(p->p, en->name, l)) continue;
+        p->p += l + 1;
+        if (!memchr(en->text, '<', en->tl) && !memchr(en->text, '&', en->tl)) {
+            buf_put(p, n, en->text, en->tl);
+            return true;
+        }
+        if (!parent) return fail(p, "markup in an entity in an attribute value");
+        if (p->ent_depth >= 8) return fail(p, "entities nested too deeply");
+        /* (its text then "</", where content stops, parsed in place of the input) */
+        if (*n) { append(parent, dom_create_chardata(DOM_K_TEXT, p->buf, *n, p->doc)); *n = 0; }
+        char *t = malloc(en->tl + 2);
+        if (!t) return fail(p, "out of memory");
+        memcpy(t, en->text, en->tl);
+        memcpy(t + en->tl, "</", 2);
+        const char *ss = p->s, *se = p->e, *sp = p->p;
+        p->s = p->p = t;
+        p->e = t + en->tl + 2;
+        p->ent_depth++;
+        bool ok = content(p, parent) && p->p == p->e - 2;
+        if (!ok) fail(p, "invalid entity text");
+        p->ent_depth--;
+        p->s = ss;
+        p->e = se;
+        p->p = sp;
+        free(t);
+        if (p->buf) p->buf[0] = 0;
+        return ok;
+    }
+    if (p->html_ents) {
+        uint32_t c = dom_parse_named_entity(p->p, l);
+        if (c) {
+            buf_cp(p, n, c);
+            p->p += l + 1;
+            return true;
+        }
+    }
     return fail(p, "undefined entity");
 }
 
@@ -255,13 +304,57 @@ static bool doctype(P *p) {
         if (!literal(p, &sys, &sn)) return false;
     }
     skip_ws(p);
+    /* (the XHTML and MathML DTDs: HTML's named references) */
+    if ((pn >= 17 && !memcmp(pub, "-//W3C//DTD XHTML", 17)) || (pn >= 18 && !memcmp(pub, "-//W3C//DTD MathML", 18)) ||
+        (pn >= 22 && !memcmp(pub, "-//WAPFORUM//DTD XHTML", 22)))
+        p->html_ents = true;
     if (p->p < p->e && *p->p == '[') {
-        /* (the internal subset, skipped: to its ']', past quoted strings) */
-        char q = 0;
-        for (p->p++; p->p < p->e; p->p++) {
-            if (q) { if (*p->p == q) q = 0; continue; }
-            if (*p->p == '"' || *p->p == '\'') q = *p->p;
-            else if (*p->p == ']') break;
+        /* The internal subset: its general entities with literal text noted,
+         * other declarations skipped (past quoted strings and comments). */
+        for (p->p++, skip_ws(p); p->p < p->e && *p->p != ']';) {
+            if (at(p, "<!--")) {
+                while (p->p < p->e && !at(p, "-->")) p->p++;
+                if (p->p < p->e) p->p += 3;
+                continue;
+            }
+            if (at(p, "<!ENTITY") && p->p + 8 < p->e && is_ws(p->p[8])) {
+                p->p += 8;
+                skip_ws(p);
+                size_t nl = *p->p == '%' ? 0 : name_len(p);
+                const char *nm = p->p;
+                if (nl) {
+                    p->p += nl;
+                    skip_ws(p);
+                    const char *tx;
+                    size_t tl;
+                    if (p->p < p->e && (*p->p == '"' || *p->p == '\'')) {
+                        if (!literal(p, &tx, &tl)) return false;
+                        bool dup = false;   /* (the first declaration binds) */
+                        for (int i = 0; i < p->nents; i++) dup |= p->ents[i].nl == nl && !memcmp(p->ents[i].name, nm, nl);
+                        Entity *ne = dup ? NULL : realloc(p->ents, (size_t)(p->nents + 1) * sizeof(Entity));
+                        if (ne) {
+                            p->ents = ne;
+                            Entity *en = &ne[p->nents++];
+                            en->name = malloc(nl);
+                            en->text = malloc(tl ? tl : 1);
+                            en->nl = nl;
+                            en->tl = tl;
+                            if (en->name) memcpy(en->name, nm, nl);
+                            if (en->text) memcpy(en->text, tx, tl);
+                            if (!en->name || !en->text) p->nents--;
+                        }
+                    }
+                }
+            }
+            /* (to the declaration's end) */
+            char q = 0;
+            for (; p->p < p->e; p->p++) {
+                if (q) { if (*p->p == q) q = 0; continue; }
+                if (*p->p == '"' || *p->p == '\'') q = *p->p;
+                else if (*p->p == '>') { p->p++; break; }
+                else if (*p->p == ']') break;
+            }
+            skip_ws(p);
         }
         if (p->p >= p->e) return fail(p, "unclosed internal subset");
         p->p++;
@@ -309,7 +402,7 @@ static bool element(P *p, NodeId parent) {
         while (p->p < p->e && *p->p != q) {
             char c = *p->p;
             if (c == '<') { ok = fail(p, "'<' in an attribute value"); break; }
-            if (c == '&') { if (!reference(p, &n)) { ok = false; break; } continue; }
+            if (c == '&') { if (!reference(p, &n, 0)) { ok = false; break; } continue; }
             /* (attribute value normalization: white space characters are spaces) */
             if (c == '\t' || c == '\n' || c == '\r') { buf_put(p, &n, " ", 1); p->p++; continue; }
             buf_put(p, &n, p->p++, 1);
@@ -405,7 +498,7 @@ static bool content(P *p, NodeId parent) {
             if (p->buf) p->buf[0] = 0;
             continue;
         }
-        if (c == '&') { if (!reference(p, &n)) return false; continue; }
+        if (c == '&') { if (!reference(p, &n, parent)) return false; continue; }
         if (at(p, "]]>")) return fail(p, "\"]]>\" in content");
         /* (line ends are normalized to \n) */
         if (c == '\r') {
@@ -454,6 +547,8 @@ bool dom_parse_xml(const char *s, size_t n, NodeId doc, char *err, size_t errlen
 done:
     for (int i = 0; i < p.nb; i++) { free(p.b[i].prefix); free(p.b[i].uri); }
     free(p.b);
+    for (int i = 0; i < p.nents; i++) { free(p.ents[i].name); free(p.ents[i].text); }
+    free(p.ents);
     free(p.buf);
     return !p.failed;
 }

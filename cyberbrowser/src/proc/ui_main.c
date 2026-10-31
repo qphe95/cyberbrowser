@@ -701,6 +701,44 @@ static bool content_pixels(const Win *w, uint8_t **px, uint32_t *pw, uint32_t *p
     return false;
 }
 
+/* The content alone (the page as the GPU process drew it), saved as a
+ * 24-bit BMP: what reftests compare. */
+static bool save_content_shot(const Win *w, const char *path) {
+    uint8_t *px = NULL;
+    uint32_t pw = 0, ph = 0;
+    if (!IsWindowVisible(w->content) || !content_pixels(w, &px, &pw, &ph)) return false;
+    uint32_t stride = (pw * 3 + 3) & ~3u;
+    BITMAPFILEHEADER fh;
+    BITMAPINFOHEADER bh;
+    memset(&fh, 0, sizeof(fh));
+    memset(&bh, 0, sizeof(bh));
+    fh.bfType = 0x4d42;
+    fh.bfOffBits = sizeof(fh) + sizeof(bh);
+    fh.bfSize = fh.bfOffBits + stride * ph;
+    bh.biSize = sizeof(bh);
+    bh.biWidth = (LONG)pw;
+    bh.biHeight = (LONG)ph;                    /* bottom-up */
+    bh.biPlanes = 1;
+    bh.biBitCount = 24;
+    bh.biCompression = BI_RGB;
+    uint8_t *row = (uint8_t *)calloc(1, stride);
+    FILE *f = row ? fopen(path, "wb") : NULL;
+    bool ok = f != NULL;
+    if (f) {
+        fwrite(&fh, sizeof(fh), 1, f);
+        fwrite(&bh, sizeof(bh), 1, f);
+        for (uint32_t y = ph; y-- > 0;) {
+            const uint8_t *s = px + (size_t)y * pw * 4;
+            for (uint32_t x = 0; x < pw; x++) memcpy(row + x * 3, s + x * 4, 3);   /* (BGRA to BGR) */
+            fwrite(row, 1, stride, f);
+        }
+        fclose(f);
+    }
+    free(row);
+    free(px);
+    return ok;
+}
+
 /* Window w as the user sees it, with the address bar, saved as a BMP. */
 static bool save_shot(const Win *w, const char *path) {
     HDC wdc = GetDC(w->wnd);
@@ -1074,6 +1112,23 @@ static bool script_command(void) {
         RECT r = { 0, 0, a, b };
         AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
         SetWindowPos(w->wnd, NULL, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER);
+        return true;
+    }
+    /* viewport W H: the window sized for content of W x H pixels. */
+    if (sscanf(g_cmd, "viewport %d %d", &a, &b) == 2) {
+        RECT r = { 0, 0, a, b + CONTENT_Y };
+        AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+        SetWindowPos(w->wnd, NULL, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER);
+        return true;
+    }
+    /* shotc PATH: the content alone (shot: the window). */
+    if (sscanf(g_cmd, "shotc %4095s", arg) == 1) {
+        drain_all();
+        /* (again until the content has a frame to read, for up to 3 s: the
+         * first tab's may not be shown yet) */
+        bool ok = save_content_shot(w, arg);
+        if (!ok && now - g_cmd_start < 3000) return false;
+        ui_log("[script] shotc %s: %s", arg, ok ? "saved" : "FAILED");
         return true;
     }
     if (sscanf(g_cmd, "shot %4095s", arg) == 1) {

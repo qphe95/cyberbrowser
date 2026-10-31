@@ -84,11 +84,14 @@
         if (!a || !b || a.nodeType !== b.nodeType) return false;
         switch (a.nodeType) {
         case 1: {
-            if (a.localName !== b.localName || a.namespaceURI !== b.namespaceURI) return false;
-            var an = a.getAttributeNames(), bn = b.getAttributeNames();
-            if (an.length !== bn.length) return false;
-            for (var i = 0; i < an.length; i++)
-                if (!b.hasAttribute(an[i]) || b.getAttribute(an[i]) !== a.getAttribute(an[i])) return false;
+            if (a.localName !== b.localName || a.namespaceURI !== b.namespaceURI || a.prefix !== b.prefix) return false;
+            /* (attributes by namespace and local name: their prefixes don't matter) */
+            var aa = a.attributes, ba = b.attributes;
+            if (aa.length !== ba.length) return false;
+            for (var i = 0; i < aa.length; i++) {
+                var bv = b.getAttributeNS(aa[i].namespaceURI, aa[i].localName);
+                if (bv === null || bv !== aa[i].value) return false;
+            }
             break;
         }
         case 3: case 4: case 8:

@@ -50,6 +50,9 @@ typedef struct HtmlPageStream HtmlPageStream;
 HtmlPageStream *html_page_stream_begin(void);
 HtmlPageStream *html_page_stream_begin_frame(JSContextHandle ctx, const char *base_url);
 void html_page_stream_feed(HtmlPageStream *ps, const char *data, size_t len);
+/* The page is an XML document of this MIME type: fed whole, parsed by
+ * html_page_stream_finish (call before the first feed). */
+void html_page_stream_set_xml(HtmlPageStream *ps, const char *mime);
 bool html_page_stream_finish(HtmlPageStream *ps, struct JsExecResult *out_result);
 
 typedef struct HtmlPreloadScan HtmlPreloadScan;

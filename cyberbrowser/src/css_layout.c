@@ -522,9 +522,9 @@ static const LayoutBox *layout_box_template(void)
         box->s->flex_basis_pct_px = 0.0;
         box->s->flex_shrink = 1.0;
         box->s->min_width = 0.0;
-        box->s->max_width = 0.0;
+        box->s->max_width = -1.0;     /* (none) */
         box->s->min_height = 0.0;
-        box->s->max_height = 0.0;
+        box->s->max_height = -1.0;
         box->s->top = 0.0;
         box->s->left = 0.0;
         box->s->right = 0.0;
@@ -1224,11 +1224,18 @@ static void layout_resolve_side_pcts(LayoutBox *box, double cb_width)
 }
 
 /* min-width/max-width/min-height/max-height (which 0..3): returns the px
- * part, recording a percentage part for layout_resolve_minmax_pcts(). */
+ * part, recording a percentage part for layout_resolve_minmax_pcts().  A
+ * max of none is -1; a negative value is invalid, leaving the size as it was. */
 static double layout_note_minmax(LayoutBox *box, int which, const char *value)
 {
-    CssLen l = css_parse_len(value, box->s->font_size);
+    double *cur[4] = { &box->s->min_width, &box->s->max_width, &box->s->min_height, &box->s->max_height };
     unsigned char bit = (unsigned char)(1u << which);
+    if ((which & 1) && strcasecmp(value, "none") == 0) {
+        box->s->minmax_pct_bits &= (unsigned char)~bit;
+        return -1.0;
+    }
+    CssLen l = css_parse_len(value, box->s->font_size);
+    if (l.pct < 0.0 || (l.pct == 0.0 && l.px < 0.0)) return *cur[which];
     if (l.pct != 0.0) {
         box->s->minmax_pct[which] = l.pct;
         box->s->minmax_base[which] = l.px;
@@ -1248,6 +1255,7 @@ static void layout_resolve_minmax_pcts(LayoutBox *box, double cb_width, double c
     for (int i = 0; i < 4; i++) {
         if (!(box->s->minmax_pct_bits & (1u << i))) continue;
         double basis = i < 2 ? cb_width : cb_height;
+        if (i == 3 && basis <= 0.0) { *fields[i] = -1.0; continue; }
         double v = basis > 0.0 ? box->s->minmax_base[i] + box->s->minmax_pct[i] * basis : 0.0;
         *fields[i] = v > 0.0 ? v : 0.0;
     }
@@ -8316,8 +8324,9 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
 
 static double layout_clamp_size(double value, double min_v, double max_v)
 {
+    /* (the min wins over a smaller max, CSS 2.1 §10.4) */
+    if (max_v >= 0 && value > max_v) value = max_v;
     if (min_v > 0 && value < min_v) value = min_v;
-    if (max_v > 0 && value > max_v) value = max_v;
     return value;
 }
 
@@ -8561,7 +8570,7 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
     }
 
     /* min/max-width constrains the same box that width specified. */
-    if (box->min_width > 0.0 || box->max_width > 0.0) {
+    if (box->min_width > 0.0 || box->max_width >= 0.0) {
         if (box->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX) {
             used_total_width = layout_clamp_size(used_total_width,
                                                   box->min_width, box->max_width);
@@ -8649,7 +8658,7 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
     /* min/max-height constrains the same box that height specified.  An
      * auto height stays 0 here (resolved from content by the formatting
      * context, which applies the clamp then). */
-    if (!height_auto && (box->min_height > 0.0 || box->max_height > 0.0)) {
+    if (!height_auto && (box->min_height > 0.0 || box->max_height >= 0.0)) {
         if (box->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX) {
             box->height = layout_clamp_size(box->height,
                                             box->min_height, box->max_height);
@@ -9315,7 +9324,7 @@ static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_ma
     }
 
     double total = content + hpb;
-    if (box->min_width > 0.0 || box->max_width > 0.0) {
+    if (box->min_width > 0.0 || box->max_width >= 0.0) {
         if (box->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX)
             total = layout_clamp_size(total, box->min_width, box->max_width);
         else
@@ -9607,7 +9616,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
             unsigned char mauto = child->s->margin_auto;
             if (in_center && !(mauto & 0xA) && child->s->float_side == 0) mauto |= 0xA;
             if ((mauto & 0xA) && (child->s->width_set || child->s->width_percent > 0.0 || child->s->width_keyword ||
-                                  child->max_width > 0.0)) {
+                                  child->max_width >= 0.0)) {
                 /* Auto horizontal margins absorb the free space (§10.3.3). */
                 double ml = (mauto & 8) ? 0.0 : child->margin_left;
                 double mr = (mauto & 2) ? 0.0 : child->margin_right;
@@ -10145,7 +10154,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
         double total = max_bottom - box->y + box->padding_bottom + box->s->border_bottom;
         if (total < 0.0) total = 0.0;
         /* min/max-height clamps (content-box aware). */
-        if (box->min_height > 0.0 || box->max_height > 0.0) {
+        if (box->min_height > 0.0 || box->max_height >= 0.0) {
             if (box->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX)
                 total = layout_clamp_size(total, box->min_height, box->max_height);
             else {
@@ -11667,7 +11676,7 @@ static void layout_grid_container(LayoutContext *ctx, int idx)
         if (!w_def) {
             if (js == CSS_ALIGN_STRETCH && !(ma & 0xA)) {
                 double w = room;
-                if (child->max_width > 0.0) {
+                if (child->max_width >= 0.0) {
                     double mx = child->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX ? child->max_width
                               : child->max_width + layout_horizontal_border_padding(child);
                     if (w > mx) w = mx;
@@ -11722,7 +11731,7 @@ static void layout_grid_container(LayoutContext *ctx, int idx)
         double off = 0.0;
         if (as == CSS_ALIGN_STRETCH && h_auto && !(ma & 5)) {
             double h = room;
-            if (child->max_height > 0.0 && h > child->max_height) h = child->max_height;
+            if (child->max_height >= 0.0 && h > child->max_height) h = child->max_height;
             if (h > child->height + 0.01) {
                 child->height = h;
                 layout_update_content_sizes(child);
@@ -11924,6 +11933,8 @@ typedef struct {
     int ngroups;
     int captions[8];
     int ncaptions;
+    double colspec[64];                /* the columns' (and column groups') widths; -1: auto */
+    int ncolspec;
     int ncols;
     double *cmin, *cmax, *cpct;
     unsigned char *cfixed;
@@ -11997,6 +12008,31 @@ static int table_span_attr(LayoutContext *ctx, int c, const char *name)
     return n < 1 ? 1 : (n > 1000 ? 1000 : n);
 }
 
+/* The width a column or column group box gives its columns, -1 for auto. */
+static double table_column_width(LayoutContext *ctx, int c)
+{
+    LayoutBox *b = layout_box(ctx, c);
+    return b->s->width_set && b->s->width_percent <= 0.0 && b->s->css_width >= 0.0 ? b->s->css_width : -1.0;
+}
+
+/* Column box c (a table-column or table-column-group): the columns it makes,
+ * each with its width, noted in T->colspec.  A group with columns in it is
+ * theirs; one without spans its span attribute's count. */
+static void table_note_columns(LayoutContext *ctx, TableGrid *T, int c)
+{
+    bool inner = false;
+    for (int k = ctx->tree.nodes[c].first_child_idx; k >= 0; k = ctx->tree.nodes[k].next_sibling_idx) {
+        LayoutBox *kb = layout_box(ctx, k);
+        if (kb->s->display == CSS_DISPLAY_NONE || kb->s->table_role != 6) continue;
+        inner = true;
+        double w = table_column_width(ctx, k);
+        for (int n = table_span_attr(ctx, k, "span"); n > 0 && T->ncolspec < 64; n--) T->colspec[T->ncolspec++] = w;
+    }
+    if (inner) return;
+    double w = table_column_width(ctx, c);
+    for (int n = table_span_attr(ctx, c, "span"); n > 0 && T->ncolspec < 64; n--) T->colspec[T->ncolspec++] = w;
+}
+
 /* The cells of row r: the row box's children. */
 static void table_row_cells(LayoutContext *ctx, TableGrid *T, int row_box, int r)
 {
@@ -12018,6 +12054,7 @@ static bool table_collect_children(LayoutContext *ctx, TableGrid *T, int parent,
             if (T->ncaptions < 8) T->captions[T->ncaptions++] = c;
             anon = -1;
         } else if (role == 6) {
+            if (group < 0) table_note_columns(ctx, T, c);
             continue;
         } else if (role == 2 && group < 0) {
             int g = T->ngroups < 64 ? T->ngroups++ : -1;
@@ -12075,7 +12112,13 @@ static bool table_build(LayoutContext *ctx, int idx, TableGrid *T)
     if (!real) return false;
     if (tb->s->border_collapse) T->hs = T->vs = 0.0;
     else if (tb->s->border_spacing_set) { T->hs = tb->s->border_spacing_h; T->vs = tb->s->border_spacing_v; }
-    else T->hs = T->vs = 2.0;
+    else {
+        /* (the UA style sheet's 2px is for <table>; the initial value is 0) */
+        HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+        bool html_table = node && node->type == HTML_NODE_ELEMENT && node->tag_name &&
+                          strcasecmp(node->tag_name, "table") == 0;
+        T->hs = T->vs = html_table ? 2.0 : 0.0;
+    }
 
     /* Placement: a column cursor per row skipping slots taken by rowspans. */
     int *busy = NULL;   /* rows still covered per column */
@@ -12105,7 +12148,9 @@ static bool table_build(LayoutContext *ctx, int idx, TableGrid *T)
         }
     }
     free(busy);
-    if (!table_grow_cols(T, nbusy > 0 ? nbusy : 1)) return false;
+    /* (columns make the grid wide however few cells there are) */
+    int ngrid = nbusy > T->ncolspec ? nbusy : T->ncolspec;
+    if (!table_grow_cols(T, ngrid > 0 ? ngrid : 1)) return false;
     for (int i = 0; i < T->ncells; i++) {
         TableCell *c = &T->cells[i];
         if (c->cs < 0) c->cs = T->ncols - c->col;
@@ -12113,6 +12158,9 @@ static bool table_build(LayoutContext *ctx, int idx, TableGrid *T)
         if (c->cs < 1) c->cs = 1;
     }
 
+    /* A column's width is a fixed width for it (§17.5.2). */
+    for (int k = 0; k < T->ncolspec && k < T->ncols; k++)
+        if (T->colspec[k] >= 0.0) { T->cfixed[k] = 1; T->cmin[k] = T->cmax[k] = T->colspec[k]; }
     /* Column widths from single-column cells, then the spanning ones. */
     for (int pass = 0; pass < 2; pass++) {
         for (int i = 0; i < T->ncells; i++) {
@@ -13267,7 +13315,7 @@ static void layout_position_absolute_box(LayoutContext *ctx, int idx)
             double avail = cb_w - (has_left ? box->left : 0.0) - (has_right ? box->right : 0.0) - ml - mr;
             box->width = layout_shrink_to_fit(ctx, idx, avail < 0.0 ? 0.0 : avail);
         }
-        if (box->max_width > 0.0 || box->min_width > 0.0) {
+        if (box->max_width >= 0.0 || box->min_width > 0.0) {
             if (box->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX)
                 box->width = layout_clamp_size(box->width, box->min_width, box->max_width);
             else

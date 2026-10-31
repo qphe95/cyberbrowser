@@ -365,6 +365,12 @@ static void page_observe(void *user, const char *data, size_t len) {
         /* (Before its scripts make requests of their own on this thread.) */
         o->url_set = true;
         set_document_url(http_last_url());
+        /* An XML document (XHTML, SVG, ...) is parsed whole, as XML. */
+        const char *type = http_last_content_type();
+        size_t tl = strlen(type);
+        if (o->page && (!strcmp(type, "text/xml") || !strcmp(type, "application/xml") ||
+                        (tl > 4 && !strcmp(type + tl - 4, "+xml"))))
+            html_page_stream_set_xml(o->page, type);
     }
     /* The parser runs inside the navigation's request, on its thread: what
      * its scripts fetch is theirs, not the navigation's (whose mode would

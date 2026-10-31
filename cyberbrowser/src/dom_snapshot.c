@@ -107,11 +107,11 @@ void html_document_find_roots(HtmlDocument *doc) {
 static char *raw_text_of(uint32_t s, size_t *len_out) {
     size_t n = 0;
     for (uint32_t c = g_dom.first[s]; c; c = g_dom.next[c])
-        if (g_dom.kind[c] == DOM_K_TEXT) n += g_dom.text[c].len;
+        if (g_dom.kind[c] == DOM_K_TEXT || g_dom.kind[c] == DOM_K_CDATA) n += g_dom.text[c].len;
     char *out = malloc(n + 1);
     size_t o = 0;
     for (uint32_t c = g_dom.first[s]; c; c = g_dom.next[c])
-        if (g_dom.kind[c] == DOM_K_TEXT && g_dom.text[c].len) {
+        if ((g_dom.kind[c] == DOM_K_TEXT || g_dom.kind[c] == DOM_K_CDATA) && g_dom.text[c].len) {
             memcpy(out + o, g_dom.text[c].s, g_dom.text[c].len);
             o += g_dom.text[c].len;
         }
@@ -121,7 +121,7 @@ static char *raw_text_of(uint32_t s, size_t *len_out) {
 }
 
 static int snap_node(HtmlDocument *doc, uint32_t s, int parent) {
-    if (g_dom.kind[s] == DOM_K_TEXT) {
+    if (g_dom.kind[s] == DOM_K_TEXT || g_dom.kind[s] == DOM_K_CDATA) {
         int idx = html_document_add(doc, parent, HTML_NODE_TEXT);
         HtmlNode *n = po_array_payload(&doc->array, idx);
         DomStr *t = &g_dom.text[s];
@@ -163,7 +163,7 @@ HtmlDocument *dom_snapshot_parsed(NodeId container) {
         int k = g_dom.kind[s];
         bool descend = false;
         int idx = -1;
-        if (k == DOM_K_ELEMENT || k == DOM_K_TEXT) {
+        if (k == DOM_K_ELEMENT || k == DOM_K_TEXT || k == DOM_K_CDATA) {
             idx = snap_node(doc, s, parent);
             descend = k == DOM_K_ELEMENT && !(g_dom.flags[s] & DOMF_RAW_TEXT) && g_dom.first[s];
         }

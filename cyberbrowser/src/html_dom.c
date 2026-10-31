@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <ctype.h>
 #include "html_dom.h"
+#include "xml_parse.h"
 #include "browser/css_style_decl.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
@@ -625,6 +626,41 @@ const char *html_doc_stream_source(HtmlDocStream *s, size_t *len) {
     return s ? dom_stream_source(s->st, len) : NULL;
 }
 
+/* The stream's document as the XML document of data (its MIME type mime):
+ * parsed whole (a parsererror root if not well-formed), connected, its
+ * parsing ended.  The caller runs its scripts. */
+void html_doc_stream_xml(HtmlDocStream *s, const char *data, size_t len, const char *mime) {
+    if (!s || !s->st) return;
+    JSContextHandle ctx = s->ctx;
+    while (dom_first_child(s->doc)) dom_detach(dom_first_child(s->doc), true);
+    g_dom.flags[dom_slot(s->doc)] |= DOMF_XML_DOCUMENT;
+    JS_DefinePropertyValueStr(ctx, s->js_doc, "contentType", JS_NewString(ctx, mime), JS_PROP_CONFIGURABLE);
+    char err[256];
+    if (!dom_parse_xml(data, len, s->doc, err, sizeof err)) {
+        while (dom_first_child(s->doc)) dom_detach(dom_first_child(s->doc), true);
+        static const char ns[] = "http://www.mozilla.org/newlayout/xml/parsererror.xml";
+        NodeId pe = dom_create_element_str("parsererror", 11, s->doc);
+        dom_set_element_name(pe, dom_ns_of(ns, sizeof ns - 1), NULL, 0, "parsererror", 11);
+        dom_link_append(pe, dom_create_chardata(DOM_K_TEXT, err, strlen(err), s->doc));
+        dom_link_append(s->doc, pe);
+    }
+    /* (the root, and an XHTML document's head and body, as the HTML stream
+     * notes them; none implied) */
+    stream_note_root_elements(s);
+    if (!s->de) JS_SetPropertyStr(ctx, s->js_doc, "documentElement", JS_NULL);
+    if (!s->head) JS_SetPropertyStr(ctx, s->js_doc, "head", JS_NULL);
+    if (!s->body) JS_SetPropertyStr(ctx, s->js_doc, "body", JS_NULL);
+    if (s->de) {
+        js_cyber_ce_push_stack(ctx);
+        dom_ce_on_connect(ctx, s->de);
+        js_cyber_ce_flush_reactions(ctx, JS_UNDEFINED, 0, NULL);
+        js_cyber_ce_pop_stack(ctx);
+    }
+    dom_request_layout();
+    dom_stream_end(s->st);
+    s->st = NULL;
+}
+
 void html_doc_stream_end(HtmlDocStream *s) {
     if (!s) return;
     JSContextHandle ctx = s->ctx;
@@ -1169,6 +1205,7 @@ static int ser_node_type(JSContextHandle ctx, SerNode n) {
         switch (dom_kind(n.id)) {
             case DOM_K_ELEMENT: return 1;
             case DOM_K_TEXT: return 3;
+            case DOM_K_CDATA: return 4;
             case DOM_K_COMMENT: return 8;
             case DOM_K_DOCUMENT: return 9;
             case DOM_K_FRAGMENT: return 11;
@@ -1184,7 +1221,7 @@ static int ser_node_type(JSContextHandle ctx, SerNode n) {
 
 /* Text of a text node / textContent of an element. */
 static void ser_text_content(NodeId id, SerializeBuffer *out) {
-    if (dom_kind(id) == DOM_K_TEXT) {
+    if (dom_kind(id) == DOM_K_TEXT || dom_kind(id) == DOM_K_CDATA) {
         uint32_t len = 0;
         const char *s = dom_text(id, &len);
         serialize_buf_append_raw(out, s, strnlen(s, len));
@@ -1192,7 +1229,7 @@ static void ser_text_content(NodeId id, SerializeBuffer *out) {
     }
     uint32_t r = dom_slot(id);
     for (uint32_t s = r; s; s = dom_next_in_subtree(s, r)) {
-        if (g_dom.kind[s] == DOM_K_TEXT) {
+        if (g_dom.kind[s] == DOM_K_TEXT || g_dom.kind[s] == DOM_K_CDATA) {
             uint32_t len = 0;
             const char *t = dom_text(dom_id_of(s), &len);
             size_t tl = strnlen(t, len);
@@ -2401,7 +2438,7 @@ static char *mir_raw_text(NodeId s, size_t *len_out) {
     MirBuf b = {0};
     uint32_t r = dom_slot(s);
     for (uint32_t x = r; x; x = dom_next_in_subtree(x, r)) {
-        if (g_dom.kind[x] != DOM_K_TEXT) continue;
+        if (g_dom.kind[x] != DOM_K_TEXT && g_dom.kind[x] != DOM_K_CDATA) continue;
         uint32_t tl = 0;
         const char *t = dom_text(dom_id_of(x), &tl);
         size_t n = strnlen(t, tl);
@@ -2436,7 +2473,7 @@ static bool mir_is_tag(NodeId id, const char *tag) {
 static bool mir_has_content(NodeId root) {
     for (NodeId c = dom_first_child(root); c; c = dom_next_sibling(c)) {
         if (dom_kind(c) == DOM_K_ELEMENT) return true;
-        if (dom_kind(c) == DOM_K_TEXT) {
+        if (dom_kind(c) == DOM_K_TEXT || dom_kind(c) == DOM_K_CDATA) {
             uint32_t tl = 0;
             const char *t = dom_text(c, &tl);
             for (uint32_t i = 0; i < tl; i++) if (!isspace((unsigned char)t[i])) return true;
@@ -2595,7 +2632,7 @@ static void mir_reconcile(NodeId s, int m, bool child_svg) {
     for (int i = 0; i <= items.n; i++) {
         NodeId c = i < items.n ? items.v[i] : DOM_NULL;
         int k = c ? dom_kind(c) : -1;
-        if (k == DOM_K_TEXT) {
+        if (k == DOM_K_TEXT || k == DOM_K_CDATA) {
             uint32_t tl = 0;
             const char *t = dom_text(c, &tl);
             size_t keep = 0;
@@ -2679,7 +2716,7 @@ static bool mir_children_dirty(NodeId s, int m) {
     if (mir_host(s)) return true;
     (void)m;
     for (NodeId c = dom_first_child(s); c; c = dom_next_sibling(c))
-        if (dom_kind(c) == DOM_K_TEXT && (dom_flags(c) & DOMF_DIRTY_MASK)) return true;
+        if ((dom_kind(c) == DOM_K_TEXT || dom_kind(c) == DOM_K_CDATA) && (dom_flags(c) & DOMF_DIRTY_MASK)) return true;
     return false;
 }
 

@@ -1239,7 +1239,7 @@ static char *load_parser_script(NodeId node, size_t *out_len) {
     StrBuf text SB_AUTO = sb_from("", 0);
     for (NodeId t = dom_first_child(node); t; t = dom_next_sibling(t)) {
         uint32_t n = 0;
-        const char *s = dom_kind(t) == DOM_K_TEXT ? dom_text(t, &n) : NULL;
+        const char *s = dom_kind(t) == DOM_K_TEXT || dom_kind(t) == DOM_K_CDATA ? dom_text(t, &n) : NULL;
         if (s && n) sb_insert(&text, text.len, s);   /* (text data is NUL-terminated) */
     }
     if (!text.len) return NULL;
@@ -1306,6 +1306,10 @@ struct HtmlPageStream {
     GCValue pending;            /* (rooted) an external script a write met: it
                                  * runs after the script that wrote it */
     ScriptQueue async, defer;
+    bool xml;                   /* an XML page: kept whole and parsed at the end */
+    char xml_mime[64];
+    char *xml_buf;
+    size_t xml_len, xml_cap;
 };
 
 /* The page being parsed, which document.write writes into. */
@@ -1326,7 +1330,7 @@ static void register_import_map(NodeId node) {
     StrBuf text SB_AUTO = sb_from("", 0);
     for (NodeId t = dom_first_child(node); t; t = dom_next_sibling(t)) {
         uint32_t n = 0;
-        const char *s = dom_kind(t) == DOM_K_TEXT ? dom_text(t, &n) : NULL;
+        const char *s = dom_kind(t) == DOM_K_TEXT || dom_kind(t) == DOM_K_CDATA ? dom_text(t, &n) : NULL;
         if (s && n) sb_insert(&text, text.len, s);
     }
     if (text.len) import_map_add(text.data, text.len, page_base_url());
@@ -1559,8 +1563,31 @@ HtmlPageStream *html_page_stream_begin_frame(JSContextHandle ctx, const char *ba
     return ps;
 }
 
+/* An XML page (an XHTML, SVG or XML document): what is fed is kept and
+ * parsed whole by html_page_stream_finish, its scripts then run in tree
+ * order. */
+void html_page_stream_set_xml(HtmlPageStream *ps, const char *mime) {
+    if (!ps || ps->doc_ended) return;
+    ps->xml = true;
+    snprintf(ps->xml_mime, sizeof(ps->xml_mime), "%s", mime);
+}
+
 void html_page_stream_feed(HtmlPageStream *ps, const char *data, size_t len) {
     if (!ps || !len || ps->doc_ended) return;
+    if (ps->xml) {
+        if (ps->xml_len + len + 1 > ps->xml_cap) {
+            size_t cap = ps->xml_cap ? ps->xml_cap : 65536;
+            while (cap < ps->xml_len + len + 1) cap *= 2;
+            char *b = (char *)realloc(ps->xml_buf, cap);
+            if (!b) return;
+            ps->xml_buf = b;
+            ps->xml_cap = cap;
+        }
+        memcpy(ps->xml_buf + ps->xml_len, data, len);
+        ps->xml_len += len;
+        ps->xml_buf[ps->xml_len] = 0;
+        return;
+    }
     html_doc_stream_append(ps->doc, data, len);
     page_stream_run(ps, false);
 }
@@ -1568,7 +1595,28 @@ void html_page_stream_feed(HtmlPageStream *ps, const char *data, size_t len) {
 bool html_page_stream_finish(HtmlPageStream *ps, JsExecResult *out_result) {
     if (!ps) return false;
     JSContextHandle ctx = ps->ctx;
-    page_stream_run(ps, true);
+    if (ps->xml) {
+        /* (the whole document, then its scripts in tree order, as the XML
+         * parser would have met them) */
+        html_doc_stream_xml(ps->doc, ps->xml_buf ? ps->xml_buf : "", ps->xml_len, ps->xml_mime);
+        free(ps->xml_buf);
+        ps->xml_buf = NULL;
+        GCValue doc_js = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document");
+        NodeId doc = dom_node_of(doc_js);
+        uint32_t n = 0, cap = 0, *scripts = NULL;
+        for (uint32_t s = dom_next_in_subtree(dom_slot(doc), dom_slot(doc)); s; s = dom_next_in_subtree(s, dom_slot(doc)))
+            if (g_dom.kind[s] == DOM_K_ELEMENT && !strcmp(dom_local_name(dom_id_of(s)), "script")) {
+                if (n == cap) { cap = cap ? cap * 2 : 16; scripts = (uint32_t *)realloc(scripts, cap * sizeof(uint32_t)); }
+                scripts[n++] = s;
+            }
+        for (uint32_t i = 0; i < n; i++) {
+            NodeId sid = dom_id_of(scripts[i]);
+            if (dom_valid(sid)) dispatch_parser_script(ps, dom_js(ctx, sid));
+        }
+        free(scripts);
+    } else {
+        page_stream_run(ps, true);
+    }
     html_doc_stream_end(ps->doc);
     ps->doc_ended = true;
     /* Parsing is over: "interactive", then the deferred scripts in order and

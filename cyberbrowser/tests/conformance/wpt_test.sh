@@ -25,13 +25,22 @@ server=$!
 for i in $(seq 100); do [ -s "$out/server.log" ] && break; sleep 0.2; done
 head -1 "$out/server.log"
 
-# Each page by its URL, then its answer (or its time up and 5 s more).
+# Each page by its URL, then its answer (or its time up and 5 s more).  With
+# REFTEST=1, reftest pages and their references in an 800x600 viewport, each
+# saved (shotc) once it says it is ready or its time is up.
 W=$(cygpath -m "$out")
 {
     echo "open about:blank"
-    while read -r k url ms; do
+    [ -n "$REFTEST" ] && echo "viewport 800 600"
+    while read -r k url ms shot; do
         echo "go $url"
-        echo "waitfile $W/step-$k.flag $((ms + 5000))"
+        if [ -n "$shot" ]; then
+            echo "waitfile $W/step-$k.flag $ms"
+            echo "wait 100"
+            echo "shotc $shot"
+        else
+            echo "waitfile $W/step-$k.flag $((ms + 5000))"
+        fi
     done < "$out/pages.txt"
     echo "go http://127.0.0.1:$P/end"
     echo "wait 2000"
@@ -41,6 +50,7 @@ W=$(cygpath -m "$out")
 mkdir -p "$out/logs"
 cp "$build"/logs/*.log "$out/logs/" 2> /dev/null
 kill $server 2> /dev/null
+[ -n "$REFTEST" ] && node "$dir/reftest_compare.js" "$out"
 
 node -e '
 const r = JSON.parse(require("fs").readFileSync(process.argv[1] + "/results.json", "utf8"));

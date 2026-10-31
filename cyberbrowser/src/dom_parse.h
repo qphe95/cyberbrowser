@@ -30,6 +30,9 @@ extern "C" {
 /* Decode character references in place on a NUL-terminated buffer of `len`
  * bytes (numeric and common named ones, to UTF-8).  Returns the new length. */
 uint32_t dom_parse_decode_entities(char *str, size_t len);
+/* The code point of an HTML named character reference (name without '&'
+ * and ';'), 0 if unknown. */
+uint32_t dom_parse_named_entity(const char *name, size_t len);
 
 /* Parse `len` bytes of HTML into a new detached fragment (owner `owner_doc`)
  * whose children are the top-level nodes.  Returns the fragment. */

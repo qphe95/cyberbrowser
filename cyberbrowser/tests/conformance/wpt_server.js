@@ -15,7 +15,11 @@
 // <meta name=variant> variants, .headers files, and the common {{...}}
 // substitutions in .sub. files.  Python handlers (.py) are not run, but for
 // the few emulated in PY.
-// Reftests (rel=match / rel=mismatch) are counted in reftests.txt, not run.
+// Reftests (rel=match / rel=mismatch) are counted in reftests.txt; with
+// REFTEST=1 they are what runs instead: each test page and its references
+// are steps whose content the UI script saves (pages.txt's fourth column), a
+// script injected into them saying when they are ready (load, no
+// reftest-wait, fonts, two frames), and reftest_compare.js compares them.
 // (tests/conformance/failures.js lists what failed.)
 const http = require('http'), fs = require('fs'), path = require('path');
 const [rootArg, port, out, ...dirs] = process.argv.slice(2);
@@ -100,6 +104,55 @@ ${meta.scripts.map(s => `<script src="${esc(s)}"></script>`).join('\n')}
 `;
 }
 
+/* ---- reftests ---- */
+
+const REFTEST = !!process.env.REFTEST;
+/* A reftest's references (rel=match / mismatch, resolved) and fuzziness. */
+function refsOf(f) {
+    const src = fs.readFileSync(path.join(root, f), 'utf8');
+    const refs = [];
+    for (const m of src.matchAll(/<link\b[^>]*>/gi)) {
+        const tag = m[0];
+        const rel = /rel\s*=\s*["']?(match|mismatch)\b/i.exec(tag);
+        const href = /href\s*=\s*["']([^"']+)["']|href\s*=\s*([^\s>]+)/i.exec(tag);
+        if (!rel || !href) continue;
+        const h = href[1] || href[2];
+        const abs = new URL(h, origin + '/' + f);
+        refs.push({ kind: rel[1].toLowerCase(), url: abs.pathname.slice(1) + abs.search });
+    }
+    const fuzzy = [...src.matchAll(/<meta\s+name=["']?fuzzy["']?\s+content=["']([^"']*)["']/gi)].map(m => m[1]);
+    return { refs, fuzzy };
+}
+const steps = [];                 /* { k, test, url, shot } */
+const refInfo = {};
+if (REFTEST) {
+    fs.mkdirSync(path.join(out, 'shots'), { recursive: true });
+    for (const t of reftests) {
+        const info = refsOf(t);
+        if (!info.refs.length) continue;
+        refInfo[t] = info;
+        for (const u of [t, ...info.refs.map(r => r.url)])
+            steps.push({ k: steps.length + 1, test: t, url: u, shot: path.join(out, 'shots', `${steps.length + 1}.bmp`) });
+    }
+    fs.writeFileSync(path.join(out, 'reftests.json'), JSON.stringify({ refInfo, steps }, null, 1));
+}
+/* Says when a reftest page is ready to be compared (posted to /refready). */
+const REFREADY = `<script>//<![CDATA[
+(function () {
+  function ready() {
+    var x = new XMLHttpRequest();
+    x.open('POST', '/refready'); x.send(location.pathname + location.search);
+  }
+  function check() {
+    var de = document.documentElement;
+    if (de && de.classList && de.classList.contains('reftest-wait')) { setTimeout(check, 50); return; }
+    var go = function () { requestAnimationFrame(function () { requestAnimationFrame(ready); }); };
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(go, go); else go();
+  }
+  if (document.readyState === 'complete') setTimeout(check, 0); else addEventListener('load', function () { setTimeout(check, 0); });
+})();
+//]]></script>`; /* (CDATA: well-formed in XHTML too) */
+
 /* ---- results ---- */
 
 fs.mkdirSync(out, { recursive: true });
@@ -107,10 +160,17 @@ fs.writeFileSync(path.join(out, 'reftests.txt'), reftests.join('\n') + '\n');
 const resultsFile = path.join(out, 'results.json');
 const results = fs.existsSync(resultsFile) ? JSON.parse(fs.readFileSync(resultsFile, 'utf8')) : {};
 let current = -1;
-const left = pages.map((p, i) => i).filter(i => !results[pages[i].id]);
-fs.writeFileSync(path.join(out, 'pages.txt'),
-    left.map(i => `${i + 1} ${origin}${pages[i].url} ${pages[i].ms}\n`).join(''));
-console.log(`${left.length} of ${pages.length} pages to run (${reftests.length} reftests not run)`);
+const left = REFTEST ? [] : pages.map((p, i) => i).filter(i => !results[pages[i].id]);
+if (REFTEST) {
+    const todo = steps.filter(st => !fs.existsSync(st.shot));
+    fs.writeFileSync(path.join(out, 'pages.txt'),
+        todo.map(st => `${st.k} ${origin}/${st.url} 4000 ${st.shot.split(path.sep).join('/')}\n`).join(''));
+    console.log(`${todo.length} of ${steps.length} reftest steps to run (${Object.keys(refInfo).length} reftests)`);
+} else {
+    fs.writeFileSync(path.join(out, 'pages.txt'),
+        left.map(i => `${i + 1} ${origin}${pages[i].url} ${pages[i].ms}\n`).join(''));
+    console.log(`${left.length} of ${pages.length} pages to run (${reftests.length} reftests not run)`);
+}
 
 function save() { fs.writeFileSync(resultsFile, JSON.stringify(results, null, 1)); }
 function record(r) {
@@ -213,6 +273,16 @@ http.createServer((req, res) => {
         });
         return;
     }
+    if (url.pathname === '/refready' && req.method === 'POST') {
+        let body = '';
+        req.on('data', d => body += d);
+        req.on('end', () => {
+            const st = steps.find(x => '/' + x.url === body && !fs.existsSync(path.join(out, `step-${x.k}.flag`)));
+            if (st) fs.writeFileSync(path.join(out, `step-${st.k}.flag`), 'ready');
+            res.writeHead(204); res.end();
+        });
+        return;
+    }
     if (url.pathname === '/resources/testharnessreport.js') {
         res.writeHead(200, { 'content-type': 'text/javascript' });
         return res.end(REPORT);
@@ -242,6 +312,12 @@ http.createServer((req, res) => {
             if (i > 0) headers[line.slice(0, i).trim().toLowerCase()] = line.slice(i + 1).trim();
         }
         break;
+    }
+    if (REFTEST && /^(text\/html|application\/xhtml\+xml)/.test(headers['content-type']) &&
+        steps.some(st => '/' + st.url.split('?')[0] === url.pathname)) {
+        /* (inside the root element, so XHTML stays well-formed) */
+        const text = data.toString('utf8'), end = text.toLowerCase().lastIndexOf('</html>');
+        data = Buffer.from(end < 0 ? text + REFREADY : text.slice(0, end) + REFREADY + text.slice(end), 'utf8');
     }
     res.writeHead(200, headers);
     res.end(data);

@@ -254,7 +254,7 @@ static bool inline_hidden(const char *style) {
 
 static void collect(uint32_t node, TextBuf *b) {
     for (uint32_t c = g_dom.first[node]; c; c = g_dom.next[c]) {
-        if (g_dom.kind[c] == DOM_K_TEXT) {
+        if (g_dom.kind[c] == DOM_K_TEXT || g_dom.kind[c] == DOM_K_CDATA) {
             const char *t = g_dom.text[c].s;
             uint32_t n = g_dom.text[c].len;
             for (uint32_t i = 0; t && i < n; ) {
@@ -285,7 +285,7 @@ static void collect(uint32_t node, TextBuf *b) {
 /* textContent's concatenation (for a skipped root). */
 static void all_text(uint32_t node, TextBuf *b) {
     for (uint32_t c = g_dom.first[node]; c; c = g_dom.next[c]) {
-        if (g_dom.kind[c] == DOM_K_TEXT) tb_put(b, g_dom.text[c].s, g_dom.text[c].len);
+        if (g_dom.kind[c] == DOM_K_TEXT || g_dom.kind[c] == DOM_K_CDATA) tb_put(b, g_dom.text[c].s, g_dom.text[c].len);
         else if (g_dom.kind[c] == DOM_K_ELEMENT) all_text(c, b);
     }
 }

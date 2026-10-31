@@ -1107,13 +1107,14 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
 
         /* Backgrounds paint first: under the borders, list marker and the
          * box's content. */
+        /* (a color however thin: a 1px box is a line) */
+        if (box->width > 0.0f && box->height > 0.0f && box->s->background_color_a > 0.0f &&
+            !display_list_add_rect(dl, (float)box->x, (float)box->y,
+                                   (float)box->width, (float)box->height,
+                                   (float)box->s->background_color_r, (float)box->s->background_color_g,
+                                   (float)box->s->background_color_b, (float)box->s->background_color_a * op))
+            return false;
         if (box->width >= 2.0f && box->height >= 2.0f && box->width * box->height >= 6.0f) {
-            if (box->s->background_color_a > 0.0f &&
-                !display_list_add_rect(dl, (float)box->x, (float)box->y,
-                                       (float)box->width, (float)box->height,
-                                       (float)box->s->background_color_r, (float)box->s->background_color_g,
-                                       (float)box->s->background_color_b, (float)box->s->background_color_a * op))
-                return false;
             /* Background image, stretched to the padding box. */
             if (g_image_cache && box->s->background_image_url[0]) {
                 int handle = image_cache_request(g_image_cache, box->s->background_image_url,

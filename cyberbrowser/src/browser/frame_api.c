@@ -39,7 +39,6 @@
 #include "js_quickjs.h"
 #include "platform.h"
 #include "url_whatwg.h"
-#include "xml_parse.h"
 
 extern JSContextHandle g_js_context;
 extern const char *g_cyber_start_url;
@@ -464,36 +463,6 @@ static bool xml_mime(const char *m) {
     return !strcmp(m, "text/xml") || !strcmp(m, "application/xml") || (n > 4 && !strcmp(m + n - 4, "+xml"));
 }
 
-/* The frame's document as the XML document these bytes make (its realm's
- * document emptied first; a parsererror root if not well-formed). */
-static void frame_load_xml(JSContextHandle ctx, const char *data, size_t n, const char *mime) {
-    GCValue doc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document");
-    NodeId d = dom_node_of(doc);
-    if (dom_kind(d) != DOM_K_DOCUMENT) return;
-    while (dom_first_child(d)) {
-        NodeId c = dom_first_child(d);
-        dom_unlink(c);
-    }
-    g_dom.flags[dom_slot(d)] |= DOMF_XML_DOCUMENT;
-    /* (its own documentElement, head and body were the skeleton's) */
-    static const char *const own[] = { "documentElement", "head", "body", "contentType" };
-    for (size_t i = 0; i < sizeof own / sizeof own[0]; i++) {
-        JSAtom a = JS_NewAtom(ctx, own[i]);
-        JS_DeleteProperty(ctx, doc, a, 0);
-        JS_FreeAtom(ctx, a);
-    }
-    JS_DefinePropertyValueStr(ctx, doc, "contentType", JS_NewString(ctx, mime), JS_PROP_CONFIGURABLE);
-    char err[256];
-    if (!dom_parse_xml(data ? data : "", data ? n : 0, d, err, sizeof err)) {
-        while (dom_first_child(d)) dom_unlink(dom_first_child(d));
-        static const char ns[] = "http://www.mozilla.org/newlayout/xml/parsererror.xml";
-        NodeId pe = dom_create_element_str("parsererror", 11, d);
-        dom_set_element_name(pe, dom_ns_of(ns, sizeof ns - 1), NULL, 0, "parsererror", 11);
-        dom_link_append(pe, dom_create_chardata(DOM_K_TEXT, err, strlen(err), d));
-        dom_link_append(d, pe);
-    }
-}
-
 /* Navigate f to f->url: a new realm and document with the page loaded. */
 static void frame_load(Frame *f) {
     char url[2048];
@@ -526,9 +495,8 @@ static void frame_load(Frame *f) {
     JSContextHandle ctx = f->ctx;
     char mime[128];
     response_mime(fetched ? buf.headers : NULL, mime, sizeof mime);
-    HtmlPageStream *ps = NULL;
-    if (fetched && xml_mime(mime)) frame_load_xml(ctx, buf.data, buf.size, mime);
-    else ps = html_page_stream_begin_frame(ctx, url);
+    HtmlPageStream *ps = html_page_stream_begin_frame(ctx, url);
+    if (ps && fetched && xml_mime(mime)) html_page_stream_set_xml(ps, mime);
     if (ps) {
         if (fetched && buf.data && buf.size) html_page_stream_feed(ps, buf.data, buf.size);
         else if (!blank) platform_log(LOG_LEVEL_WARN, "frame", "could not fetch frame %s: %s", url, err);
