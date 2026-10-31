@@ -1497,6 +1497,13 @@ GCValue JS_GetTypedArrayBuffer(JSContextHandle ctx, GCValue obj,
                                size_t *pbyte_offset,
                                size_t *pbyte_length,
                                size_t *pbytes_per_element);
+/* The bytes a BufferSource (ArrayBuffer, SharedArrayBuffer, typed array or
+   DataView) holds; NULL, without an exception, for anything else. */
+const uint8_t *JS_GetBufferSourceBytes(JSContextHandle ctx, GCValue obj, size_t *plen);
+/* A typed array's kind, or -1 if obj is not one. */
+int JS_GetTypedArrayKind(GCValue obj);
+/* A string of these UTF-16 code units. */
+GCValue JS_NewStringUTF16(JSContextHandle ctx, const uint16_t *buf, size_t len);
 /* Note: JSSharedArrayBufferFunctions is defined in quickjs_types.h */
 void JS_SetSharedArrayBufferFunctions(JSRuntimeHandle rt,
                                       const JSSharedArrayBufferFunctions *sf);

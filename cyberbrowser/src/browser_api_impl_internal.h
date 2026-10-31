@@ -113,6 +113,8 @@ JSAtom dom_iterator_atom(JSContextHandle ctx);
 void dom_token_list_install(JSContextHandle ctx, GCValue global, GCValue window);
 /* URL, URLSearchParams (browser/url_classes.c); <a>/<area> URL attributes and baseURI. */
 void url_classes_install(JSContextHandle ctx, GCValue global);
+/* TextEncoder and TextDecoder (encoding.c). */
+void encoding_install(JSContextHandle ctx, GCValue global);
 void url_hyperlinks_install(JSContextHandle ctx, GCValue global);
 /* __cyberEventPath for dom_events.js (browser/event_path.c). */
 void event_path_install(JSContextHandle ctx, GCValue global);
@@ -494,7 +496,6 @@ GCValue js_match_media(JSContextHandle ctx, GCValue this_val, int argc, GCValue 
 GCValue js_storage_estimate(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_null(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_media_capabilities_decoding_info(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
-GCValue js_text_encoder_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_atob(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_false(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_btoa(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
@@ -523,7 +524,6 @@ GCValue js_permission_status_constructor(JSContextHandle ctx, GCValue new_target
 GCValue js_worker_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 int is_obj_usable(JSContextHandle ctx, GCValue obj);
 GCValue js_true(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
-GCValue js_text_decoder_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_empty_array(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_dom_parser_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_promise_resolve_undefined(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);

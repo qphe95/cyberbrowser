@@ -456,6 +456,7 @@ GCValue js_source_buffer_change_type(JSContextHandle ctx, GCValue this_val, int 
     SourceBufferDataHandle sb = JS_GetOpaqueHandle2(ctx, this_val, js_source_buffer_class_id);
     if (SAFE_IS_NULL(sb)) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
     const char *mime_type = JS_ToCString(ctx, argv[0]);
+    MEDIA_LOG("changeType(%s) supported=%d", mime_type ? mime_type : "", media_type_supported(mime_type));
     if (!mime_type || !media_type_supported(mime_type))
         return JS_ThrowTypeError(ctx, "NotSupportedError: unsupported type");
     SAFE_SET_STR(sb, SourceBufferDataHandle, mime_type, mime_type);

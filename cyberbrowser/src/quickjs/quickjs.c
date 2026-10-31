@@ -69408,6 +69408,73 @@ GCValue JS_GetTypedArrayBuffer(JSContextHandle ctx, GCValue obj,
     return GC_MKHANDLE(JS_TAG_OBJECT, SAFE_GET_OR(ta, JSTypedArrayHandle, buffer_handle, GC_HANDLE_NULL));
 }
 
+/* The bytes a BufferSource holds (WebIDL): an ArrayBuffer's or
+   SharedArrayBuffer's, or the part a typed array or DataView views.  NULL,
+   without an exception, for anything else; a detached or out-of-bounds one
+   holds none (non-NULL, *plen 0). */
+const uint8_t *JS_GetBufferSourceBytes(JSContextHandle ctx, GCValue obj, size_t *plen)
+{
+    static const uint8_t none[1];
+    (void)ctx;
+    *plen = 0;
+    if (JS_VALUE_GET_TAG(obj) != JS_TAG_OBJECT)
+        return NULL;
+    JSObjectHandle p = JS_VALUE_GET_OBJ(obj);
+    int cid = SAFE_GET_OR(p, JSObjectHandle, class_id, 0);
+    JSArrayBufferHandle abuf;
+    uint32_t offset = 0, len;
+    if (cid == JS_CLASS_ARRAY_BUFFER || cid == JS_CLASS_SHARED_ARRAY_BUFFER) {
+        abuf = SAFE_GET_OR(p, JSObjectHandle, u.array_buffer_handle, GC_HANDLE_NULL);
+        len = SAFE_GET_OR(abuf, JSArrayBufferHandle, byte_length, 0);
+    } else if ((cid >= JS_CLASS_UINT8C_ARRAY && cid <= JS_CLASS_FLOAT64_ARRAY) || cid == JS_CLASS_DATAVIEW) {
+        JSTypedArrayHandle ta = SAFE_GET_OR(p, JSObjectHandle, u.typed_array_handle, GC_HANDLE_NULL);
+        JSObjectHandle abuf_obj = SAFE_GET_OR(ta, JSTypedArrayHandle, buffer_handle, GC_HANDLE_NULL);
+        abuf = SAFE_GET_OR(abuf_obj, JSObjectHandle, u.array_buffer_handle, GC_HANDLE_NULL);
+        uint32_t blen = SAFE_GET_OR(abuf, JSArrayBufferHandle, byte_length, 0);
+        offset = SAFE_GET_OR(ta, JSTypedArrayHandle, offset, 0);
+        len = SAFE_GET_OR(ta, JSTypedArrayHandle, track_rab, FALSE) ? (blen > offset ? blen - offset : 0)
+                                                                  : SAFE_GET_OR(ta, JSTypedArrayHandle, length, 0);
+        if ((uint64_t)offset + len > blen)
+            return none;
+    } else {
+        return NULL;
+    }
+    uint8_t *data = js_abuf_data(abuf);
+    if (SAFE_GET_OR(abuf, JSArrayBufferHandle, detached, TRUE) || !data)
+        return none;
+    *plen = len;
+    return data + offset;
+}
+
+/* A typed array's kind (JSTypedArrayEnum), or -1 if obj is not one. */
+int JS_GetTypedArrayKind(GCValue obj)
+{
+    if (JS_VALUE_GET_TAG(obj) != JS_TAG_OBJECT)
+        return -1;
+    int cid = SAFE_GET_OR(JS_VALUE_GET_OBJ(obj), JSObjectHandle, class_id, 0);
+    return cid >= JS_CLASS_UINT8C_ARRAY && cid <= JS_CLASS_FLOAT64_ARRAY ? cid - JS_CLASS_UINT8C_ARRAY : -1;
+}
+
+/* A string of these UTF-16 code units (unpaired surrogates kept). */
+GCValue JS_NewStringUTF16(JSContextHandle ctx, const uint16_t *buf, size_t len)
+{
+    if (len > JS_STRING_LEN_MAX)
+        return JS_ThrowRangeError(ctx, "invalid string length");
+    size_t i = 0;
+    while (i < len && buf[i] < 0x100) i++;
+    if (i < len)
+        return js_new_string16_len(ctx, buf, (int)len);
+    if (!len)
+        return JS_AtomToString(ctx, JS_ATOM_empty_string);
+    JSStringHandle str = js_alloc_string(ctx, (int)len, 0);
+    if (!SAFE_VALID(str))
+        return JS_EXCEPTION;
+    uint8_t *q = SAFE_GET_OR(str, JSStringHandle, u.str8, NULL);
+    for (i = 0; i < len; i++) q[i] = (uint8_t)buf[i];
+    q[len] = '\0';
+    return GC_MKHANDLE(JS_TAG_STRING, SAFE_HANDLE(str));
+}
+
 static GCValue js_typed_array_get_toStringTag(JSContextHandle ctx,
                                               GCValue this_val)
 {

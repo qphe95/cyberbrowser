@@ -5103,6 +5103,49 @@ TEST(test_dom_parsing_and_traversal) {
     return true;
 }
 
+/* TextDecoder: views, BOMs, errors (replaced or fatal), streaming, UTF-16
+ * and windows-1252, labels; TextEncoder: encode and encodeInto. */
+TEST(test_text_encoding) {
+    JSContextHandle ctx = get_test_context();
+    if (!SAFE_VALID(ctx)) return false;
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ var d = new TextDecoder(), b = new Uint8Array([0,0,0x68,0xC3,0xA9,0x21,0,0]);"
+        "  var dv = new DataView(b.buffer, 2, 4);"
+        "  return d.decode(new Uint8Array([0xF0,0x9F,0x98,0x80])) === '\\u{1F600}' &&"
+        "    d.decode(b.subarray(2, 6)) === 'h\\u00e9!' && d.decode(dv) === 'h\\u00e9!' &&"
+        "    d.decode(new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength)) === 'h\\u00e9!' &&"
+        "    d.decode(b.buffer.slice(2, 3)) === 'h' && d.decode() === '' && d.decode(new Uint16Array([0x6968])) === 'hi' &&"
+        "    d.decode(new Uint8Array([0xEF,0xBB,0xBF,0x61])) === 'a' &&"
+        "    new TextDecoder('utf-8', {ignoreBOM: true}).decode(new Uint8Array([0xEF,0xBB,0xBF])) === '\\uFEFF' &&"
+        "    d.decode(new Uint8Array([0xF0,0x80,0x80,0x61,0xC2,0xED,0xA0,0x80])) === '\\uFFFD\\uFFFD\\uFFFDa\\uFFFD\\uFFFD\\uFFFD\\uFFFD'; })()",
+        false));
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ var d = new TextDecoder(), f = new TextDecoder('utf-8', {fatal: true}), threw = false;"
+        "  try { f.decode(new Uint8Array([0xC3])); } catch (e) { threw = e instanceof TypeError; }"
+        "  var s = d.decode(new Uint8Array([0xE2, 0x82]), {stream: true}) + d.decode(new Uint8Array([0xAC]));"
+        "  var t = d.decode(new Uint8Array([0xE2]), {stream: true}) + d.decode();"
+        "  var le = new TextDecoder('utf-16le'), be = new TextDecoder('UTF-16BE');"
+        "  var u = le.decode(new Uint8Array([0xFF,0xFE,0x3D,0xD8]), {stream: true}) + le.decode(new Uint8Array([0x00,0xDE]));"
+        "  var bad = false; try { new TextDecoder('nope'); } catch (e) { bad = e instanceof RangeError; }"
+        "  return threw && f.fatal && s === '\\u20AC' && t === '\\uFFFD' && u === '\\u{1F600}' &&"
+        "    be.decode(new Uint8Array([0,0x41,0xD8])) === 'A\\uFFFD' && bad &&"
+        "    new TextDecoder(' Latin1 ').encoding === 'windows-1252' &&"
+        "    new TextDecoder('ascii').decode(new Uint8Array([0x80,0xE9])) === '\\u20AC\\u00e9' &&"
+        "    Object.prototype.toString.call(d) === '[object TextDecoder]'; })()",
+        false));
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ var e = new TextEncoder(), a = e.encode('a\\u00e9\\u{1F600}\\uD800');"
+        "  var dst = new Uint8Array(5), r = e.encodeInto('a\\u{1F600}b', dst);"
+        "  var r2 = e.encodeInto('\\u00e9\\u00e9\\u00e9', new Uint8Array(5));"
+        "  return a instanceof Uint8Array && a.join() === '97,195,169,240,159,152,128,239,191,189' &&"
+        "    e.encoding === 'utf-8' && e.encode().length === 0 &&"
+        "    r.read === 3 && r.written === 5 && dst.join() === '97,240,159,152,128' &&"
+        "    r2.read === 2 && r2.written === 4 &&"
+        "    new TextDecoder().decode(e.encode('caf\\u00e9 \\u{1F600}')) === 'caf\\u00e9 \\u{1F600}'; })()",
+        false));
+    return true;
+}
+
 /* new Ctor() for a defined custom element is that element. */
 TEST(test_custom_element_new) {
     JSContextHandle ctx = get_test_context();
@@ -5399,6 +5442,7 @@ void run_browser_api_impl_tests(void) {
     RUN_TEST(test_form_controls_state);
     RUN_TEST(test_dom_parsing_and_traversal);
     RUN_TEST(test_custom_element_new);
+    RUN_TEST(test_text_encoding);
     RUN_TEST(test_platform_timing_messaging_history_canvas);
     // RUN_TEST(test_js_extraction);
     // RUN_TEST(test_js_extraction_save_data);

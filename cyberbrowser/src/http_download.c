@@ -1629,8 +1629,11 @@ retry_connection:
         LOGI("Sending cookies: %.200s...", cookies);
     }
     
-    /* Extract cookies from response headers and store them with domain/path scope. */
-    char *set_cookie = find_response_header(outBuffer->data, outBuffer->data, header_end, "set-cookie:");
+    /* Extract cookies from response headers and store them with domain/path scope
+     * (Fetch 4.6: only a credentialed request's; not one without credentials,
+     * its empty Cookie header, nor a preflight). */
+    char *set_cookie = custom_cookie_empty || is_options_preflight
+        ? NULL : find_response_header(outBuffer->data, outBuffer->data, header_end, "set-cookie:");
     while (set_cookie) {
 
         char *line_end = strchr(set_cookie, '\r');

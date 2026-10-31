@@ -383,20 +383,11 @@ static char *fetch_start_page(const char *url, size_t *out_size, HtmlPageStream 
 
     HttpBuffer buffer = {0};
     char error[512] = {0};
-    /* Google's consent cookie only makes sense for Google properties; sending
-     * it to other sites is pointless, so include it just for YouTube.  (Its
-     * Cookie header replaces the jar's: YouTube takes us for a new visitor
-     * every time, with other experiments and so other script URLs than the
-     * cache holds.  As a returning visitor it plays a pre-roll ad first,
-     * which stalls the player here: until that works, a new visitor.) */
-    const bool send_google_consent = strstr(url, "youtube.") != NULL;
     const char *headers[16];
     int nheaders = 0;
     headers[nheaders++] = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
     headers[nheaders++] = "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8";
     headers[nheaders++] = "Accept-Language: en-US,en;q=0.9";
-    if (send_google_consent)
-        headers[nheaders++] = "Cookie: CONSENT=YES+US.en+; PREF=tz=America.Los_Angeles&f4=4000000";
     headers[nheaders++] = "sec-ch-ua: \"Google Chrome\";v=\"125\", \"Chromium\";v=\"125\", \"Not.A/Brand\";v=\"24\"";
     headers[nheaders++] = "sec-ch-ua-mobile: ?0";
     headers[nheaders++] = "sec-ch-ua-platform: \"Windows\"";
