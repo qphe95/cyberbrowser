@@ -56,49 +56,11 @@ script() {   # <pages file>: the UI script for its pages
 mkdir -p "$out/logs"
 if [ -n "$REFTEST" ]; then
     # Reftest pages don't depend on one another: SHARDS browsers (default:
-    # one per two CPUs, which measured best) take every SHARDS-th page, each
-    # from <build>/shard-N (kept from run to run: its copy of the browser's
-    # programs is made again only when the build's is newer; not hard links,
-    # whose one set of permissions the sandboxes of all the shards would
-    # share), with its own browser_data and logs.  All made ready in one
-    # process (a program started here costs tens of ms).
+    # one per two CPUs, which measured best) take every SHARDS-th page
+    # (reftest_prepare.js makes them ready).
     n=${SHARDS:-$(( $(nproc) / 2 > 0 ? $(nproc) / 2 : 1 ))}
     rm -f "$out"/pages-*.txt "$out"/script-*.txt
-    node -e '
-        const fs = require("fs"), path = require("path"), [build, out, W, n] = process.argv.slice(1);
-        const lines = fs.readFileSync(out + "/pages.txt", "utf8").split("
-").filter(Boolean);
-        const exes = fs.readdirSync(build).filter(f => /^cb_.*.exe$/.test(f) && !/^cb_(harness|webgpu_fuzz).exe$/.test(f));
-        for (let i = 0; i < +n; i++) {
-            const mine = lines.filter((l, j) => (j + 1) % n === i);
-            if (!mine.length) continue;
-            const d = build + "/shard-" + i;
-            fs.mkdirSync(d, { recursive: true });
-            for (const e of exes) {
-                const from = path.join(build, e), to = path.join(d, e), st = fs.statSync(from);
-                let have = null;
-                try { have = fs.statSync(to); } catch (x) {}
-                if (!have || st.mtimeMs > have.mtimeMs) { fs.copyFileSync(from, to); fs.utimesSync(to, st.atime, st.mtime); }
-            }
-            fs.rmSync(d + "/browser_data", { recursive: true, force: true });
-            fs.rmSync(d + "/logs", { recursive: true, force: true });
-            fs.mkdirSync(d + "/logs");
-            let sc = "open about:blank
-viewport 800 600
-";
-            for (const l of mine) {
-                const [k, url, ms, shot] = l.split(" ");
-                sc += "go " + url + "
-waitfile " + W + "/step-" + k + ".flag " + ms + "
-shotc " + shot + "
-";
-            }
-            fs.writeFileSync(out + "/script-" + i + ".txt", sc + "quit
-");
-            fs.writeFileSync(out + "/pages-" + i + ".txt", mine.join("
-") + "
-");
-        }' "$build" "$out" "$W" "$n"
+    node "$dir/reftest_prepare.js" "$build" "$out" "$W" "$n"
     mark prepare
     pids=
     for i in $(seq 0 $((n - 1))); do
