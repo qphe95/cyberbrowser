@@ -377,6 +377,11 @@ static GCValue js_list_get(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     NodeId el = dom_node_of(this_val);
     if (!el) return JS_ThrowTypeError(ctx, "Illegal invocation");
     static JSAtom keys[sizeof g_lists / sizeof g_lists[0]];
+    static uint32_t keys_serial;    /* (the context they were made in: atoms are its runtime's) */
+    if (keys_serial != JS_GetContextSerial(ctx)) {
+        memset(keys, 0, sizeof(keys));
+        keys_serial = JS_GetContextSerial(ctx);
+    }
     if (!keys[magic]) {
         char key[32];
         snprintf(key, sizeof key, "__tokenList_%s", g_lists[magic].attr);

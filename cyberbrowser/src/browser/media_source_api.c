@@ -583,6 +583,16 @@ static MediaPlayer *g_players[MAX_PLAYERS];
 static int g_nplayers;
 static JSContextHandle g_media_ctx;   /* the context players were attached in */
 
+/* A new document in this process (page_engine_reset, the JS heap gone with
+ * the last one's): no players, no queued events. */
+void media_api_reset(void) {
+    for (int i = 0; i < g_nplayers; i++) free(g_players[i]);
+    g_nplayers = 0;
+    g_ntasks = 0;
+    g_media_ctx = GC_HANDLE_NULL;
+    g_refreshing = false;
+}
+
 static MediaPlayer *player_of(GCValue video) {
     if (!JS_IsObject(video)) return NULL;
     for (int i = 0; i < g_nplayers; i++)

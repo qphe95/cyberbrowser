@@ -554,7 +554,7 @@ if(BE_PLATFORM_WINDOWS)
     target_compile_options(proc_tests PRIVATE -Wall -Wextra)
 
     # The UI: windows and input, no engine.
-    add_executable(cb_ui WIN32 src/proc/ui_main.c src/proc/ui_core.c)
+    add_executable(cb_ui WIN32 src/proc/ui_main.c src/proc/ui_core.c src/proc/site.c)
     target_link_libraries(cb_ui PRIVATE cb_ipc user32 gdi32 winmm)
     target_compile_options(cb_ui PRIVATE -Wall -Wextra)
 

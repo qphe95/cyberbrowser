@@ -59,6 +59,10 @@ static bool g_in_flight, g_need_paint;
 static bool g_hidden;
 void timer_set_raf_paused(bool paused);     /* (browser/timer_api.c) */
 static char g_title[PROTO_TITLE_MAX];
+/* The next document (UT_NAVIGATE): loaded in this process when the turn is
+ * over, in place of this one.  Empty: none. */
+static char g_next_url[PROTO_URL_MAX + 1];
+static void navigate_request(const uint8_t *url, uint32_t len);
 
 static void memory_report(const char *what) {
     PROCESS_MEMORY_COUNTERS_EX pm;
@@ -299,6 +303,9 @@ static void handle(const ChanMsg *m) {
         }
         return;
     }
+    case UT_NAVIGATE:
+        navigate_request(m->data, m->len);
+        return;
     case UT_CLICK: {
         if (m->len != sizeof(UtPoint)) return;
         UtPoint p;
@@ -705,6 +712,20 @@ static BigRx g_store_rx;
 static uint32_t g_store_id;
 static char g_site[SITE_MAX];            /* the page's site: its frames from others are partitioned */
 
+/* UT_NAVIGATE: a page of this process's site, loaded here next; another
+ * site's is refused (this process is its site's alone: SANDBOX_DESIGN.md). */
+static void navigate_request(const uint8_t *url, uint32_t len) {
+    char scheme[8], host[SITE_HOST_MAX + 1], site[SITE_MAX];
+    if (len == 0 || len > PROTO_URL_MAX || !g_site[0] ||
+        !site_url_host(url, len, scheme, sizeof(scheme), host, sizeof(host)) || !site_of(scheme, host, site) ||
+        strcmp(site, g_site) != 0) {
+        fprintf(stderr, "[tab %u] not loading another site's page here\n", g_tab);
+        return;
+    }
+    memcpy(g_next_url, url, len);
+    g_next_url[len] = 0;
+}
+
 static bool store_call(uint16_t type, const char *path, const void *data, uint32_t dlen,
                        char **out, size_t *out_len) {
     if (!g_have_store) return false;
@@ -905,6 +926,9 @@ int main(int argc, char **argv) {
      * a page says it is ready after has them) */
     page_set_frame_image_wait(getenv("CYBER_FRAME_IMAGE_WAIT") != NULL);
     memory_report("engine ready");
+    bool reused = false;
+load:
+    if (reused) fprintf(stderr, "[tab %u] %s, in the same process\n", g_tab, url);
     page_prepare(url);
     page_set_viewport((int)g_width, (int)g_height);
     JSContextHandle ctx = page_engine_context();
@@ -928,12 +952,12 @@ int main(int argc, char **argv) {
         memcpy(msg, &nav, sizeof(nav));
         memcpy(msg + sizeof(nav), g_elsewhere, n);
         chan_send(&g_chan, TU_NAVIGATE, msg, (uint32_t)(sizeof(nav) + n), 1000);
-        for (;;) { drain(); wait_input(INFINITE); }
+        for (;;) { drain(); if (g_next_url[0]) goto next; wait_input(INFINITE); }
     } else if (!loaded) {
         send_state(TAB_LOAD_FAILED);
         snprintf(g_title, sizeof(g_title), "Failed to load");
         chan_send(&g_chan, TU_TITLE, g_title, (uint32_t)strlen(g_title), 1000);
-        for (;;) { drain(); wait_input(INFINITE); }
+        for (;;) { drain(); if (g_next_url[0]) goto next; wait_input(INFINITE); }
     }
     send_state(TAB_LOADED);
 
@@ -967,6 +991,7 @@ int main(int argc, char **argv) {
     }
     for (;;) {
         bool input = drain();
+        if (g_next_url[0]) goto next;
         /* Animation frame callbacks run when a frame can follow them: not
          * while one is with the GPU process (nor while hidden), as a
          * browser's run when its compositor asks for the next frame.  So
@@ -1025,4 +1050,27 @@ int main(int argc, char **argv) {
         if (page_video_playing()) ms = ms < 8 ? ms : 8;         /* (its next frame) */
         if (ms) wait_input(ms);
     }
+
+next:
+    /* The next document (UT_NAVIGATE), in this process: what this one keeps
+     * is saved, the engine made ready for another, and it loads. */
+    save_local_storage();
+    {
+        static char next_url[PROTO_URL_MAX + 1];
+        memcpy(next_url, g_next_url, sizeof(next_url));
+        g_next_url[0] = 0;
+        url = next_url;
+    }
+    if (!page_engine_reset()) {
+        send_state(TAB_LOAD_FAILED);
+        return 1;
+    }
+    g_scroll = 0;
+    g_content_height = 0;
+    g_elsewhere[0] = 0;
+    g_title[0] = 0;
+    g_start_tick = GetTickCount64();
+    reused = true;
+    send_state(TAB_LOADING);
+    goto load;
 }

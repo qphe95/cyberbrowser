@@ -1212,6 +1212,44 @@ void page_close(void) {
     g_html = NULL;
 }
 
+void timer_api_reset(void);
+void scheduler_reset(void);
+void dom_fetch_reset(void);
+void import_map_reset(void);
+void dom_store_reset(void);
+
+void dom_api_reset(void);
+void frame_api_reset(void);
+void media_api_reset(void);
+void gc_cleanup(void);
+
+/* Ready the engine for another document in this process (a same-site
+ * navigation): the last one's frame, document and images go (page_close),
+ * the state its scripts left on the native side (timers, scheduled tasks,
+ * fetches, the import map, frames, media, the DOM), its JS runtime, and then
+ * the whole JS heap at once (the runtime keeps its shapes, and so what they
+ * reach, as roots): a new runtime holds nothing the last page made. */
+bool page_engine_reset(void) {
+    page_close();
+    timer_api_reset();
+    scheduler_reset();
+    dom_fetch_reset();
+    import_map_reset();
+    extern JSRuntimeHandle g_js_runtime;
+    css_document_state_destroy(g_js_runtime);
+    cleanup_browser_context();
+    g_rt = GC_HANDLE_NULL;
+    g_ctx = GC_HANDLE_NULL;
+    g_global = JS_UNDEFINED;
+    gc_cleanup();
+    dom_store_reset();
+    dom_api_reset();
+    frame_api_reset();
+    media_api_reset();
+    g_dom_needs_layout = 0;
+    return init_browser_context();
+}
+
 /* The window's size as scripts and layout queries see it: the size frames
  * are laid out at.  A change fires "resize" at the window. */
 void page_set_viewport(int width, int height) {

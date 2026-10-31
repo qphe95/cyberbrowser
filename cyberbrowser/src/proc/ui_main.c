@@ -42,6 +42,7 @@
 #include "proto.h"
 #include "spawn.h"
 #include "ui_core.h"
+#include "site.h"
 
 #define MAX_TABS 60
 #define MAX_WINS 8
@@ -59,6 +60,7 @@ typedef struct Tab {
     int win;                    /* the window it is in */
     uint32_t id;                /* of its current process */
     char url[PROTO_URL_MAX + 1];
+    char site[SITE_MAX];        /* the site its current process is for ("": none) */
     char title[PROTO_TITLE_MAX + 1];
     int state;
     bool started;               /* channel attached */
@@ -171,9 +173,17 @@ static double ui_now_ms(void) {
     return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
 }
 
+/* The site of url into out (SITE_MAX): false for a URL with none. */
+static bool url_site(const char *url, char *out) {
+    char scheme[8], host[SITE_HOST_MAX + 1];
+    return site_url_host((const uint8_t *)url, (uint32_t)strlen(url), scheme, sizeof(scheme), host, sizeof(host)) &&
+           site_of(scheme, host, out);
+}
+
 static void start_process(Tab *t) {
     static uint8_t msg[sizeof(UcOpenTab) + PROTO_URL_MAX];
     Win *w = &g_wins[t->win];
+    if (!url_site(t->url, t->site)) t->site[0] = 0;
     t->start_ms = ui_now_ms();
     t->frame_ms = t->loaded_ms = t->last_frame_ms = 0;
     t->frames = 0;
@@ -222,7 +232,27 @@ static void update_chrome(Win *w) {
 
 static void update_tab(Tab *t) { update_chrome(&g_wins[t->win]); }
 
+/* CYBER_TAB_REUSE=1: a page of the site a tab's process is for loads in
+ * that process (UT_NAVIGATE), as a browser's same-site navigations keep
+ * their renderer; another site's gets a new one. */
+static bool g_reuse;
+
 static void navigate(Tab *t, const char *url) {
+    char site[SITE_MAX];
+    size_t n = strlen(url);
+    if (getenv("CYBER_REUSE_DEBUG"))
+        ui_log("[ui] navigate: reuse %d id %u started %d state %d site %s", g_reuse, t->id, t->started, t->state, t->site);
+    if (g_reuse && t->id && t->started && t->state != ST_CRASHED && t->site[0] && n <= PROTO_URL_MAX &&
+        url_site(url, site) && !strcmp(site, t->site) && chan_send(&t->chan, UT_NAVIGATE, url, (uint32_t)n, 1000)) {
+        snprintf(t->url, sizeof(t->url), "%s", url);
+        t->start_ms = ui_now_ms();
+        t->frame_ms = t->loaded_ms = t->last_frame_ms = 0;
+        t->frames = 0;
+        t->state = ST_LOADING;
+        t->title[0] = 0;
+        update_tab(t);
+        return;
+    }
     end_process(t);
     snprintf(t->url, sizeof(t->url), "%s", url);
     start_process(t);
@@ -1210,6 +1240,7 @@ int main(int argc, char **argv) {
         url[n] = 0;
         open_tab_in(g_focus, url);
     }
+    g_reuse = getenv("CYBER_TAB_REUSE") != NULL;
     const char *script = getenv("CYBER_UI_SCRIPT");
     /* (a script waits in 1 ms steps, not the default 15.6 ms ticks) */
     if (script && *script) timeBeginPeriod(1);

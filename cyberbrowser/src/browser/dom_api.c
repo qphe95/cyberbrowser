@@ -225,6 +225,15 @@ static GCHandle *g_style_obj;
 static NodeId *g_style_owner;
 static uint32_t g_style_cap, g_style_n;
 
+/* A new document in this process (page_engine_reset): no style objects. */
+void dom_api_reset(void) {
+    if (g_style_cap) {
+        memset(g_style_obj, 0, g_style_cap * sizeof(*g_style_obj));
+        memset(g_style_owner, 0, g_style_cap * sizeof(*g_style_owner));
+    }
+    g_style_n = 0;
+}
+
 static void style_owner_written(GCHandle obj) {
     if (!g_style_cap) return;
     uint32_t h = (obj * 2654435761u) & (g_style_cap - 1);

@@ -98,6 +98,7 @@ enum {
     UT_SCROLL,          /* UtScroll */
     UT_CLICK,           /* UtPoint */
     UT_VISIBLE,         /* UtVisible: whether the tab is shown (hidden tabs do not render) */
+    UT_NAVIGATE,        /* URL: load it in this process, in place of the page (its own site only) */
 };
 
 typedef struct UtVisible {

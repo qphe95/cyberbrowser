@@ -75,8 +75,22 @@ static JSAtom symbol_atom(JSContextHandle ctx, const char *name, JSAtom *cache) 
     return *cache;
 }
 
+/* The atoms it looks up, made in the context of g_atoms_serial (atoms are
+ * its runtime's: a document loaded in this process anew has another). */
+static JSAtom g_length_atom, g_slot_atom, g_view_atom, g_listeners_atom, g_handlers_atom;
+static uint32_t g_atoms_serial;
+
+static void atoms_for(JSContextHandle ctx) {
+    uint32_t s = JS_GetContextSerial(ctx);
+    if (s == g_atoms_serial) return;
+    g_atoms_serial = s;
+    g_listeners_atom = g_handlers_atom = 0;
+    g_length_atom = JS_NewAtom(ctx, "length");
+    g_slot_atom = JS_NewAtom(ctx, "assignedSlot");
+    g_view_atom = JS_NewAtom(ctx, "defaultView");
+}
+
 /* Does map (an object of type -> list or handler) have a live entry? */
-static JSAtom g_length_atom, g_slot_atom, g_view_atom;
 
 static bool map_has(JSContextHandle ctx, GCValue obj, JSAtom key, JSAtom type, bool list) {
     if (!key) return true;      /* (unknown: let the JS side look) */
@@ -101,14 +115,9 @@ static GCValue js_event_path(JSContextHandle ctx, GCValue this_val, int argc, GC
     if (!type) return JS_EXCEPTION;
     bool composed = argc > 2 && JS_ToBool(ctx, argv[2]) > 0;
     bool handler_type = argc > 4 && JS_ToBool(ctx, argv[4]) > 0;
-    static JSAtom listeners_atom, handlers_atom;
-    JSAtom la = symbol_atom(ctx, "cyber.listeners", &listeners_atom);
-    JSAtom ha = symbol_atom(ctx, "cyber.eventHandlers", &handlers_atom);
-    if (!g_length_atom) {
-        g_length_atom = JS_NewAtom(ctx, "length");
-        g_slot_atom = JS_NewAtom(ctx, "assignedSlot");
-        g_view_atom = JS_NewAtom(ctx, "defaultView");
-    }
+    atoms_for(ctx);
+    JSAtom la = symbol_atom(ctx, "cyber.listeners", &g_listeners_atom);
+    JSAtom ha = symbol_atom(ctx, "cyber.eventHandlers", &g_handlers_atom);
     GCValue related_v = argc > 3 ? argv[3] : JS_NULL;
     bool has_related = JS_IsObject(related_v);
     uint32_t related = has_related ? slot_of(related_v) : 0;

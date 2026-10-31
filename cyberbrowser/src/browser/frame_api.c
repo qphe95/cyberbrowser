@@ -256,6 +256,27 @@ static void message_free(Message *m) {
     free(m);
 }
 
+/* A new document in this process (page_engine_reset, the JS heap gone with
+ * the last one's realms): no frames, no messages. */
+void frame_api_reset(void) {
+    while (g_frames) {
+        Frame *f = g_frames;
+        g_frames = f->next;
+        free(f);
+    }
+    while (g_messages) {
+        Message *m = g_messages;
+        g_messages = m->next;
+        message_free(m);
+    }
+    g_messages_tail = &g_messages;
+    g_next_id = 2;
+    g_main_factory = JS_UNDEFINED;
+    g_main_factory_made = false;
+    g_processing = false;
+    g_main_doc = DOM_NULL;
+}
+
 static GCValue cross_op(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
     int32_t kind = 0, id = 0;

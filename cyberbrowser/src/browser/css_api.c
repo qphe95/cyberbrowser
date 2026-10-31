@@ -523,9 +523,11 @@ GCValue js_css_style_decl_item(JSContextHandle ctx, GCValue this_val, int argc, 
 
 JSAtom dom_iterator_atom(JSContextHandle ctx) {
     static JSAtom atom = JS_ATOM_NULL;
-    if (atom == JS_ATOM_NULL) {
+    static uint32_t serial;     /* (the context it was made in: atoms are its runtime's) */
+    if (atom == JS_ATOM_NULL || serial != JS_GetContextSerial(ctx)) {
         GCValue sym = JS_Eval(ctx, "Symbol.iterator", 15, "<symbol>", JS_EVAL_TYPE_GLOBAL);
         atom = JS_ValueToAtom(ctx, sym);
+        serial = JS_GetContextSerial(ctx);
     }
     return atom;
 }

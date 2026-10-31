@@ -437,7 +437,21 @@ static void quit_server(Child *c, DWORD ms) {
 /*@ // TerminateProcess, ExitProcess
     ensures \false;     // it doesn't return: every child ends with the job
  */
+/* CYBER_TAB_CPU: what a server process cost so far. */
+static void log_cpu(const char *name, HANDLE p) {
+    FILETIME cr, ex, k, u;
+    if (!p || !getenv("CYBER_TAB_CPU") || !GetProcessTimes(p, &cr, &ex, &k, &u)) return;
+    ULARGE_INTEGER kk = { .LowPart = k.dwLowDateTime, .HighPart = k.dwHighDateTime },
+                   uu = { .LowPart = u.dwLowDateTime, .HighPart = u.dwHighDateTime };
+    fprintf(stderr, "[coord] %s: user %.1f ms, kernel %.1f ms\n", name, uu.QuadPart / 1e4, kk.QuadPart / 1e4);
+}
+
 static void exit_all(void) {
+    log_cpu("ui", g_ui.proc);
+    log_cpu("gpu", g_gpu.proc);
+    log_cpu("net", g_net.proc);
+    log_cpu("store", g_store.proc);
+    log_cpu("loop", g_loop.proc);
     /* The network process saves its cookie jars to the storage service,
      * then the storage service finishes. */
     quit_server(&g_net, 3000);
@@ -454,6 +468,19 @@ static void exit_all(void) {
     for (int i = 0; i < COORD_MAX_TABS; i++)
         if (g_tab_proc[i]) WaitForSingleObject(g_tab_proc[i], 1000);
     sandbox_end();
+    if (getenv("CYBER_TAB_CPU")) {
+        /* (what all the processes cost, ended ones too) */
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION ai;
+        if (QueryInformationJobObject(g_job, JobObjectBasicAccountingInformation, &ai, sizeof(ai), NULL))
+            fprintf(stderr, "[coord] all processes: %lu, user %.1f ms, kernel %.1f ms\n", ai.TotalProcesses,
+                    ai.TotalUserTime.QuadPart / 1e4, ai.TotalKernelTime.QuadPart / 1e4);
+        FILETIME cr, ex, k, u;
+        GetProcessTimes(GetCurrentProcess(), &cr, &ex, &k, &u);
+        ULARGE_INTEGER kk = { .LowPart = k.dwLowDateTime, .HighPart = k.dwHighDateTime },
+                       uu = { .LowPart = u.dwLowDateTime, .HighPart = u.dwHighDateTime };
+        fprintf(stderr, "[coord] the coordinator: user %.1f ms, kernel %.1f ms\n", uu.QuadPart / 1e4, kk.QuadPart / 1e4);
+        fflush(stderr);
+    }
     CloseHandle(g_job);             /* KILL_ON_JOB_CLOSE ends the rest */
     ExitProcess(0);
 }
@@ -540,6 +567,18 @@ bool coord_tab_signaled(int i, uint32_t *code) {
     DWORD c = 0;
     GetExitCodeProcess(g_tab_proc[i], &c);
     *code = c;
+    if (getenv("CYBER_TAB_CPU")) {
+        /* (what a tab process cost: its life and CPU, user and kernel) */
+        FILETIME cr, ex, k, u;
+        if (GetProcessTimes(g_tab_proc[i], &cr, &ex, &k, &u)) {
+            ULARGE_INTEGER a = { .LowPart = cr.dwLowDateTime, .HighPart = cr.dwHighDateTime },
+                           b = { .LowPart = ex.dwLowDateTime, .HighPart = ex.dwHighDateTime },
+                           kk = { .LowPart = k.dwLowDateTime, .HighPart = k.dwHighDateTime },
+                           uu = { .LowPart = u.dwLowDateTime, .HighPart = u.dwHighDateTime };
+            fprintf(stderr, "[coord] tab ended: lived %.1f ms, user %.1f ms, kernel %.1f ms\n",
+                    (b.QuadPart - a.QuadPart) / 1e4, uu.QuadPart / 1e4, kk.QuadPart / 1e4);
+        }
+    }
     unwatch(&g_tab_wait[i]);
     CloseHandle(g_tab_proc[i]);
     g_tab_proc[i] = NULL;

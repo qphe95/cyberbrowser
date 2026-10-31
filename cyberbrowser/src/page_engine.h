@@ -100,6 +100,9 @@ void page_rendering_opportunity(void);
 void page_set_viewport(int width, int height);
 /* Off: page_turn lays nothing out (a hidden tab); on again: the pending layout runs. */
 void page_set_rendering(bool on);
+/* Ready the engine for another document in this process (after
+ * page_engine_init and a page_load): page_prepare and page_load follow. */
+bool page_engine_reset(void);
 /* Changes with every DOM mutation. */
 uint64_t page_dom_version(void);
 /* On (the default): building a frame waits (up to 1.5 s) for the images it

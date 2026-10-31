@@ -17,6 +17,10 @@ out=$3
 shift 3
 P=${PORT:-38527}
 dir=$(cd "$(dirname "$0")" && pwd)
+# A page of the site a tab is on loads in its process (CYBER_TAB_REUSE=0:
+# a process each, as the browser's default).
+export CYBER_TAB_REUSE=${CYBER_TAB_REUSE-1}
+[ "$CYBER_TAB_REUSE" = 0 ] && unset CYBER_TAB_REUSE
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 rm -f "$out"/step-*.flag "$out"/pages.txt
@@ -53,34 +57,38 @@ if [ -n "$REFTEST" ]; then
     n=${SHARDS:-$(nproc)}
     rm -f "$out"/pages-*.txt "$out"/script-*.txt
     awk -v n="$n" -v o="$out" '{ print > (o "/pages-" (NR % n) ".txt") }' "$out/pages.txt"
+    # Each browser runs from <build>/shard-N (kept from run to run: its copy
+    # of the browser's programs is made again only when the build's is
+    # newer; not hard links, whose one set of permissions the sandboxes of
+    # all the shards would share), all of them made ready before any starts.
+    for i in $(seq 0 $((n - 1))); do
+        [ -s "$out/pages-$i.txt" ] || continue
+        d="$build/shard-$i"
+        mkdir -p "$d"
+        for f in "$build"/cb_*.exe; do
+            case "$f" in *cb_harness.exe|*cb_webgpu_fuzz.exe) continue;; esac
+            [ -f "$d/${f##*/}" ] && ! [ "$f" -nt "$d/${f##*/}" ] || cp -p "$f" "$d/"
+        done
+        script "$out/pages-$i.txt" > "$out/script-$i.txt"
+        rm -rf "${d:?}/browser_data" "$d"/logs/*
+    done
     pids=
     for i in $(seq 0 $((n - 1))); do
+        [ -s "$out/pages-$i.txt" ] || continue
         # (the first browser gives the UI sandbox the results folder before
         # the others start, rather than all of them at once)
         if [ "$i" = 1 ]; then
-            for t in $(seq 50); do [ -s "$out/shard-0/logs/ui.log" ] && break; sleep 0.2; done
+            for t in $(seq 50); do [ -s "$build/shard-0/logs/ui.log" ] && break; sleep 0.1; done
         fi
-        [ -s "$out/pages-$i.txt" ] || continue
-        d="$out/shard-$i"
-        mkdir -p "$d"
-        # (the browser's own programs, when changed: not hard links, whose
-        # one set of permissions the sandboxes of all the shards would share)
-        for f in "$build"/cb_*.exe; do
-            case "$f" in *cb_harness.exe|*cb_webgpu_fuzz.exe) continue;; esac
-            cmp -s "$f" "$d/${f##*/}" || cp "$f" "$d/"
-        done
-        cp "$build"/*.dll "$d/" 2> /dev/null
-        [ -d "$build/shaders" ] && cp -r "$build/shaders" "$d/"
-        script "$out/pages-$i.txt" > "$out/script-$i.txt"
-        rm -rf "${d:?}/browser_data" "$d"/logs/*
-        (cd "$d" && CYBER_FRAME_IMAGE_WAIT=1 CYBER_UI_SCRIPT="$W/script-$i.txt" ./cb_coord.exe) 2> "$out/coord-$i.txt" &
+        (cd "$build/shard-$i" && CYBER_FRAME_IMAGE_WAIT=1 CYBER_UI_SCRIPT="$W/script-$i.txt" ./cb_coord.exe) \
+            2> "$out/coord-$i.txt" &
         pids="$pids $!"
     done
     wait $pids
     for i in $(seq 0 $((n - 1))); do
-        [ -d "$out/shard-$i/logs" ] || continue
+        [ -d "$build/shard-$i/logs" ] || continue
         mkdir -p "$out/logs/shard-$i"
-        cp "$out/shard-$i"/logs/*.log "$out/logs/shard-$i/" 2> /dev/null
+        cp "$build/shard-$i"/logs/*.log "$out/logs/shard-$i/" 2> /dev/null
     done
 else
     script "$out/pages.txt" > "$out/script.txt"
