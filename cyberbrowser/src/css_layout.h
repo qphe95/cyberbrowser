@@ -693,6 +693,8 @@ bool css_layout_stylesheet_cached(const char *url);
  * names, in the background (dom_fetch's pool), so the first layout finds
  * it fetched instead of downloading every sheet in turn. */
 void css_layout_prefetch_stylesheet(const char *href);
+/* Whether a prefetched stylesheet is still downloading. */
+bool css_layout_stylesheets_pending(void);
 /* Take in the prefetched sheets whose downloads finished (without waiting),
  * which also starts the downloads of the web fonts they declare. */
 void css_layout_install_prefetched_sheets(void);

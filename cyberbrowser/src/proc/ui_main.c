@@ -25,7 +25,7 @@
  * bar, Ctrl+Tab next tab, Page Up/Down, arrows and Space scroll.
  *
  * CYBER_UI_SCRIPT=<file>: run commands from a file, one per line, for tests:
- *   open URL | go URL | waitload [MS] | wait MS | click X Y | scroll DY |
+ *   open URL | go URL | waitload [MS [QUIET]] (logs the load's timing) | wait MS | click X Y | scroll DY |
  *   select I | close | resize W H | shot FILE.bmp | log TEXT | quit |
  *   detach (the active tab into a new window) | attach W (into window W) |
  *   dragout | dragto W (the same, dragged with the mouse handlers) |
@@ -67,6 +67,9 @@ typedef struct Tab {
     uint32_t scroll_seq;
     TuFrame frame;
     DWORD last_frame_tick;
+    double start_ms, frame_ms, loaded_ms, last_frame_ms;  /* load timing for scripts: process started, first and last frames, loaded */
+    unsigned frames;
+    bool vis_told, visible;     /* what its process was last told (UT_VISIBLE) */
     UiGesture gesture;          /* its process's last click, for opening a tab */
 } Tab;
 
@@ -122,6 +125,19 @@ static Tab *active_tab(const Win *w) {
     return w->active >= 0 && w->active < w->n ? &g_tabs[w->order[w->active]] : NULL;
 }
 
+/* Each tab's process told whether it is shown (its window's active tab, the
+ * window not minimized): a hidden one does not render. */
+static void tell_visibility(void) {
+    for (int i = 0; i < MAX_TABS; i++) {
+        Tab *t = &g_tabs[i];
+        if (!t->used || !t->started || !g_wins[t->win].used) continue;
+        bool v = active_tab(&g_wins[t->win]) == t && !IsIconic(g_wins[t->win].wnd);
+        if (t->vis_told && t->visible == v) continue;
+        UtVisible m = { v ? 1u : 0u };
+        if (chan_send(&t->chan, UT_VISIBLE, &m, sizeof(m), 100)) { t->vis_told = true; t->visible = v; }
+    }
+}
+
 /* ---- tabs ---------------------------------------------------------------- */
 
 static void release(Tab *t) {
@@ -145,9 +161,22 @@ static void show_content(Win *w) {
     if (visible != (IsWindowVisible(w->content) != 0)) ShowWindow(w->content, visible ? SW_SHOWNA : SW_HIDE);
 }
 
+/* Milliseconds on the performance counter (load timing). */
+static double ui_now_ms(void) {
+    static LARGE_INTEGER f;
+    LARGE_INTEGER c;
+    if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
+}
+
 static void start_process(Tab *t) {
     static uint8_t msg[sizeof(UcOpenTab) + PROTO_URL_MAX];
     Win *w = &g_wins[t->win];
+    t->start_ms = ui_now_ms();
+    t->frame_ms = t->loaded_ms = t->last_frame_ms = 0;
+    t->frames = 0;
+    t->vis_told = false;
     t->id = g_next_id++;
     t->state = ST_STARTING;
     t->has_frame = false;
@@ -478,6 +507,9 @@ static void from_tab(Tab *t, const ChanMsg *m) {
     case TU_FRAME:
         t->frame = u.frame;
         t->last_frame_tick = GetTickCount();
+        t->last_frame_ms = ui_now_ms();
+        t->frames++;
+        if (!t->frame_ms) t->frame_ms = t->last_frame_ms;
         if (!t->has_frame) {
             t->has_frame = true;
             show_content(&g_wins[t->win]);
@@ -489,6 +521,7 @@ static void from_tab(Tab *t, const ChanMsg *m) {
         return;
     case TU_STATE:
         t->state = u.state == TAB_LOADED ? ST_LOADED : u.state == TAB_LOAD_FAILED ? ST_FAILED : ST_LOADING;
+        if (t->state == ST_LOADED && !t->loaded_ms) t->loaded_ms = ui_now_ms();
         InvalidateRect(g_wins[t->win].wnd, NULL, FALSE);
         return;
     case TU_WANT_WEBGPU: {
@@ -970,12 +1003,20 @@ static bool script_command(void) {
     if (sscanf(g_cmd, "waitfile %4095s %d", arg, &a) == 2)
         return GetFileAttributesA(arg) != INVALID_FILE_ATTRIBUTES || now - g_cmd_start >= (DWORD)a;
     if (!strncmp(g_cmd, "waitload", 8)) {
-        int limit = 60000;
-        sscanf(g_cmd, "waitload %d", &limit);
-        /* Loaded, painted, and no new frame for a second. */
+        int limit = 60000, quiet = 1000;
+        sscanf(g_cmd, "waitload %d %d", &limit, &quiet);
+        /* Loaded, painted, and no new frame for QUIET ms (default a second). */
         bool done = t && (t->state == ST_FAILED || t->state == ST_CRASHED ||
-                          (t->state == ST_LOADED && t->has_frame && now - t->last_frame_tick > 1000));
-        if (!done && now - g_cmd_start > (DWORD)limit) { ui_log("[script] waitload timed out"); return true; }
+                          (t->state == ST_LOADED && t->has_frame && now - t->last_frame_tick > (DWORD)quiet));
+        bool timed_out = !done && now - g_cmd_start > (DWORD)limit;
+        /* From the tab process's start: the first frame, the load event, and
+         * the last frame before it went quiet (settled: what the eye sees). */
+        if ((done || timed_out) && t)
+            ui_log("[script] load timing: first frame %.0f ms, loaded %.0f ms, %s %.0f ms (%u frames)",
+                   t->frame_ms ? t->frame_ms - t->start_ms : -1.0, t->loaded_ms ? t->loaded_ms - t->start_ms : -1.0,
+                   done ? "settled" : "still painting at timeout, last frame", t->last_frame_ms ? t->last_frame_ms - t->start_ms : -1.0,
+                   t->frames);
+        if (timed_out) { ui_log("[script] waitload timed out"); return true; }
         return done;
     }
     if (sscanf(g_cmd, "click %d %d", &a, &b) == 2) { UtPoint p = { a, b }; send_active(w, UT_CLICK, &p, sizeof(p)); return true; }
@@ -1137,5 +1178,6 @@ int main(int argc, char **argv) {
         }
         drain_all();
         script_step();
+        tell_visibility();
     }
 }

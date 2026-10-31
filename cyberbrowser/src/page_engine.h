@@ -90,6 +90,25 @@ GCValue page_element_at(double x, double y);
 const char *page_title(void);
 /* A DOM change is waiting to be laid out. */
 bool page_needs_layout(void);
+/* The page can be painted the first time: its stylesheets are here and
+ * the <body> has something to show. */
+bool page_first_paint_ready(void);
+/* A rendering opportunity while the page loads (between parser scripts). */
+void page_rendering_opportunity(void);
+/* The window's size for scripts (innerWidth, ...) and layout queries: the
+ * size page_turn lays out at.  A change fires "resize". */
+void page_set_viewport(int width, int height);
+/* Off: page_turn lays nothing out (a hidden tab); on again: the pending layout runs. */
+void page_set_rendering(bool on);
+/* Changes with every DOM mutation. */
+uint64_t page_dom_version(void);
+/* On (the default): building a frame waits (up to 1.5 s) for the images it
+ * started loading, for a complete one-shot picture.  Off: frames are built
+ * without waiting, and images that arrive later request a layout. */
+void page_set_frame_image_wait(bool on);
+/* The frames page_turn has built, and their cost: wall clock and this
+ * thread's CPU, in ms (mirror update, layout and display list). */
+void page_frame_stats(unsigned *frames, double *wall_ms, double *cpu_ms);
 /* Playing videos' new frames into the image cache: true if the frame needs
  * a repaint (no layout).  An embedder that calls this shows video at its
  * frame rate; one that doesn't gets a layout every 500 ms instead. */

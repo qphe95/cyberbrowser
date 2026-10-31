@@ -3911,6 +3911,15 @@ void css_layout_install_prefetched_sheets(void)
     g_sheet_prefetch_n = w;
 }
 
+/* A prefetched stylesheet still downloading (render-blocking: the first
+ * paint waits for the page's sheets, as browsers' does). */
+bool css_layout_stylesheets_pending(void)
+{
+    for (int i = 0; i < g_sheet_prefetch_n; i++)
+        if (!dom_fetch_ready(g_sheet_prefetch[i])) return true;
+    return false;
+}
+
 static void layout_fetch_stylesheet(LayoutStyleSheetList *list, const char *base_url, const char *href) {
     char *url = layout_resolve_url(base_url, href);
     if (!url) return;
@@ -12510,6 +12519,7 @@ typedef struct LayoutFlowBuf {
     uint8_t *noreuse;           /* laid out with floats placed */
     uint8_t *gen;               /* its text had generated content */
     uint8_t *copied;            /* its ok and cb are the record's (reused in the absolute pass) */
+    uint64_t *img;              /* an image's natural size as layout saw it (0: none, or unknown) */
     int *cb;                    /* how far below it the highest containing block of what is
                                    absolutely positioned below is (< 0: above it; FLOW_NO_CB) */
     int *first_child, *next_sibling;
@@ -12548,7 +12558,7 @@ static void flow_buf_free(LayoutFlowBuf *b)
 {
     free(b->entry); free(b->exit); free(b->snap1); free(b->snap2);
     free(b->pass); free(b->ok); free(b->noreuse); free(b->gen); free(b->copied); free(b->cb);
-    free(b->first_child); free(b->next_sibling);
+    free(b->img); free(b->first_child); free(b->next_sibling);
     memset(b, 0, sizeof(*b));
 }
 
@@ -12568,10 +12578,11 @@ static bool flow_buf_ensure(LayoutFlowBuf *b, int n)
     b->gen = (uint8_t *)malloc(m);
     b->copied = (uint8_t *)malloc(m);
     b->cb = (int *)malloc(m * sizeof(int));
+    b->img = (uint64_t *)malloc(m * sizeof(uint64_t));
     b->first_child = (int *)malloc(m * sizeof(int));
     b->next_sibling = (int *)malloc(m * sizeof(int));
     if (!b->entry || !b->exit || !b->snap1 || !b->snap2 || !b->pass || !b->ok || !b->noreuse || !b->gen ||
-        !b->copied || !b->cb || !b->first_child || !b->next_sibling) {
+        !b->copied || !b->cb || !b->img || !b->first_child || !b->next_sibling) {
         flow_buf_free(b);
         return false;
     }
@@ -12648,12 +12659,26 @@ static void layout_flow_begin(LayoutContext *ctx)
     memset(F->skip, 0, (size_t)n);
     F->cur.n = n;
     F->pass = 1;
+    /* Images size boxes from outside the document: one whose natural size
+     * became known (or changed) since the record is not as recorded. */
+    for (int i = 0; i < n; i++) {
+        HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
+        uint64_t sig = 0;
+        double nw, nh;
+        if (layout_is_img(dn) && layout_img_natural(ctx, dn, &nw, &nh))
+            sig = ((uint64_t)(uint32_t)nw << 32 | (uint32_t)nh) + 1;
+        F->cur.img[i] = sig;
+    }
     F->reuse = F->rec_valid && F->epoch == g_flow_epoch && F->vw == ctx->viewport_width &&
                F->vh == ctx->viewport_height && ctx->style_left && (ctx->flow_old || F->rec.n == n);
     if (!F->reuse) return;
     const LayoutFlowBuf *R = &F->rec;
     uint8_t *clean = F->clean;
     memset(clean, 1, (size_t)n);
+    for (int i = 0; i < n; i++) {
+        int oi = ctx->flow_old ? ctx->flow_old[i] : i;
+        if (oi >= 0 && R->img[oi] != F->cur.img[i]) clean[i] = 0;
+    }
     /* The elements whose children changed, and those children (their text
      * may have). */
     for (int k = 0; k < ctx->child_n; k++) {

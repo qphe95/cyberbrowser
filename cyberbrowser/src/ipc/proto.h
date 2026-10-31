@@ -97,7 +97,12 @@ enum {
     UT_RESIZE = 1,      /* UtSize */
     UT_SCROLL,          /* UtScroll */
     UT_CLICK,           /* UtPoint */
+    UT_VISIBLE,         /* UtVisible: whether the tab is shown (hidden tabs do not render) */
 };
+
+typedef struct UtVisible {
+    uint32_t visible;   /* 1 shown, 0 hidden */
+} UtVisible;
 
 typedef struct UtSize {
     uint32_t width, height;

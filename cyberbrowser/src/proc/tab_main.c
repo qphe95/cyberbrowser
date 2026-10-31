@@ -54,6 +54,8 @@ static uint32_t g_scroll, g_content_height;
 static uint32_t g_scroll_seq;           /* the UI's last scroll (UtScroll.seq) */
 static uint32_t g_frame_no;
 static bool g_in_flight, g_need_paint;
+/* Not shown (UT_VISIBLE): scripts and timers run, nothing is laid out or painted. */
+static bool g_hidden;
 static char g_title[PROTO_TITLE_MAX];
 
 static void memory_report(const char *what) {
@@ -163,13 +165,22 @@ static void send_title(void) {
  * input waits for the load (no page script runs from here mid-parse). */
 static bool g_loading;
 
+/* While the page loads (waiting on the network, never in a script), a frame
+ * of what is there so far, as a browser's rendering opportunities give one:
+ * not before the <body> has something to show (browsers hold the first
+ * paint), only when the DOM changed since the last one, and spaced so that
+ * these frames take at most about a quarter of the load (the next waits
+ * three times as long as the last took, 100 ms at least). */
 static void load_progress(void) {
-    static ULONGLONG last;
-    static bool busy;                   /* (its layout may itself wait on the network) */
+    static ULONGLONG last, gap = 100;
+    static uint64_t painted;            /* the DOM version of the last frame */
+    static bool busy, any;              /* (its layout may itself wait on the network) */
     ULONGLONG now = GetTickCount64();
-    if (!g_loading || busy || now - last < 100) return;
+    if (!g_loading || busy || g_hidden || now - last < gap) return;
+    if (!page_first_paint_ready()) return;
+    uint64_t version = page_dom_version();
+    if (any && version == painted) return;
     busy = true;
-    last = now;
     uint32_t done;
     int g;
     while ((g = gpu_client_poll(&done)) > 0)
@@ -185,6 +196,11 @@ static void load_progress(void) {
             paint();
             send_title();
         }
+        ULONGLONG end = GetTickCount64();
+        gap = 3 * (end - now) > 100 ? 3 * (end - now) : 100;
+        last = end;
+        painted = version;
+        any = true;
     }
     busy = false;
 }
@@ -243,6 +259,7 @@ static void handle(const ChanMsg *m) {
         if (sz.width != g_width || sz.height != g_height) {
             g_width = sz.width;
             g_height = sz.height;
+            page_set_viewport((int)g_width, (int)g_height);
             page_request_layout();
         }
         return;
@@ -256,6 +273,18 @@ static void handle(const ChanMsg *m) {
         clamp_scroll();
         g_scroll_seq = sc.seq;
         g_need_paint = true;
+        return;
+    }
+    case UT_VISIBLE: {
+        if (m->len != sizeof(UtVisible)) return;
+        UtVisible v;
+        memcpy(&v, m->data, sizeof(v));
+        bool hidden = !v.visible;
+        if (hidden != g_hidden) {
+            g_hidden = hidden;
+            page_set_rendering(!hidden);
+            if (!hidden) { page_request_layout(); g_need_paint = true; }
+        }
         return;
     }
     case UT_CLICK: {
@@ -764,7 +793,23 @@ static char *unhex(const char *s) {
     return out;
 }
 
+/* When the process started (load timing in the log). */
+static unsigned long long g_start_tick;
+
+/* The CPU time the main thread and the whole process have used, in ms. */
+static void cpu_ms(double *thread_ms, double *process_ms) {
+    FILETIME c, e, k, u;
+    *thread_ms = *process_ms = 0;
+    if (GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u))
+        *thread_ms = (double)((((unsigned long long)k.dwHighDateTime << 32) | k.dwLowDateTime) +
+                              (((unsigned long long)u.dwHighDateTime << 32) | u.dwLowDateTime)) / 1e4;
+    if (GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u))
+        *process_ms = (double)((((unsigned long long)k.dwHighDateTime << 32) | k.dwLowDateTime) +
+                               (((unsigned long long)u.dwHighDateTime << 32) | u.dwLowDateTime)) / 1e4;
+}
+
 int main(int argc, char **argv) {
+    g_start_tick = GetTickCount64();
     det_clock_set_js_thread();
     HANDLE sec = NULL, e0 = NULL, e1 = NULL;
     HANDLE net[3] = { 0 }, store[3] = { 0 }, gpu[3] = { 0 }, ctl[3] = { 0 };
@@ -824,8 +869,10 @@ int main(int argc, char **argv) {
         return 1;
     }
     page_engine_load_fonts();
+    page_set_frame_image_wait(false);   /* (images arriving later lay out again) */
     memory_report("engine ready");
     page_prepare(url);
+    page_set_viewport((int)g_width, (int)g_height);
     JSContextHandle ctx = page_engine_context();
     JS_Eval(ctx, CLICK_JS, sizeof(CLICK_JS) - 1, "<tab-click>", JS_EVAL_TYPE_GLOBAL);
     bool blank = strcmp(url, "about:blank") == 0;
@@ -856,22 +903,53 @@ int main(int argc, char **argv) {
     }
     send_state(TAB_LOADED);
 
-    bool reported = false;
+    bool reported = false, settled = false;
     unsigned long long loaded_at = GetTickCount64();
+    /* When the page's content last changed (a rebuilt frame; a playing
+     * video's new image is not one): logged once it has not for 3 s, as the
+     * time the load visibly settled. */
+    unsigned long long content_at = loaded_at;
+    unsigned rebuilds = 0;
+    /* A watch page has loaded when its video starts playing: its first
+     * frame shown (logged once). */
+    bool video_started = false;
+    double cpu_t, cpu_p;
+    cpu_ms(&cpu_t, &cpu_p);
+    unsigned frames;
+    double frames_wall, frames_cpu;
+    page_frame_stats(&frames, &frames_wall, &frames_cpu);
+    fprintf(stderr, "[tab %u] load event at %llu ms (cpu: main thread %.0f ms, process %.0f ms; "
+            "%u frames built, %.0f ms, %.0f ms cpu)\n",
+            g_tab, loaded_at - g_start_tick, cpu_t, cpu_p, frames, frames_wall, frames_cpu);
     for (;;) {
         bool input = drain();
         PageTurn t;
         page_turn(true, false, (int)g_width, (int)g_height, &t);
         if (t.new_frame) {
+            content_at = GetTickCount64();
+            rebuilds++;
             g_content_height = frame_extent(&page_frame()->dl);
             clamp_scroll();
             g_need_paint = true;
             send_title();
         }
         /* A playing video's new frame: the same display list, its image anew. */
-        bool video = page_refresh_videos();
+        bool video = !g_hidden && page_refresh_videos();
         if (video) g_need_paint = true;
-        if (g_need_paint && !g_in_flight) paint();
+        if (video && !video_started) {
+            cpu_ms(&cpu_t, &cpu_p);
+            fprintf(stderr, "[tab %u] video playing at %llu ms (cpu: main thread %.0f ms, process %.0f ms)\n",
+                    g_tab, GetTickCount64() - g_start_tick, cpu_t, cpu_p);
+            video_started = true;
+        }
+        if (g_need_paint && !g_in_flight && !g_hidden) paint();
+        if (!settled && GetTickCount64() - content_at > 3000) {
+            page_frame_stats(&frames, &frames_wall, &frames_cpu);
+            fprintf(stderr, "[tab %u] content settled at %llu ms (%u rebuilt frames after the load event; "
+                    "%u frames built in all, %.0f ms, %.0f ms cpu)\n",
+                    g_tab, content_at - g_start_tick, rebuilds, frames, frames_wall, frames_cpu);
+            settled = true;
+        }
         if (!reported && GetTickCount64() - loaded_at > 3000) {
             memory_report("3 s after load");
             CodeCacheStats cs;

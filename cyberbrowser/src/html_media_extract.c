@@ -19,6 +19,7 @@
 #include "css_layout.h"
 #include "url_whatwg.h"
 #include "import_map.h"
+#include "page_engine.h"
 
 extern const char *g_cyber_start_url;
 
@@ -1373,6 +1374,7 @@ static void run_script(HtmlPageStream *ps, GCValue script, bool nonblocking_exte
     ps->run++;
     JS_SetPropertyStr(ctx, doc, "currentScript", JS_NULL);
     free(src);
+    if (!ps->frame) page_rendering_opportunity();      /* (a task boundary) */
 }
 
 static void run_blocking(HtmlPageStream *ps, GCValue script) {

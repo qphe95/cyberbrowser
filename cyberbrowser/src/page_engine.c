@@ -33,6 +33,7 @@
 #include "cyber_profile.h"
 #include "cyber_sampler.h"
 #include "dom_store.h"
+#include "dom_js.h"
 
 
 #include "session_state.h"
@@ -351,6 +352,12 @@ void page_set_load_progress(void (*fn)(void)) {
 }
 
 /* The page as it arrives: first what it will fetch, then parse and run. */
+/* Between tasks while the page loads (a parser script has run): the
+ * embedder may render, under its own policy. */
+void page_rendering_opportunity(void) {
+    if (g_load_progress) g_load_progress();
+}
+
 static void page_observe(void *user, const char *data, size_t len) {
     PageObserver *o = (PageObserver *)user;
     if (!o->url_set) {
@@ -664,17 +671,39 @@ void page_frame_free(PageFrame *f) {
     f->valid = false;
 }
 
+uint64_t gc_os_now_ns(void);
+
+/* CYBER_FRAME_LOG=1: each frame's stages and their times. */
+static bool frame_log(void) {
+    static int on = -1;
+    if (on < 0) on = cyber_getenv("CYBER_FRAME_LOG") ? 1 : 0;
+    return on;
+}
+
+static bool g_frame_image_wait = true;
+void page_set_frame_image_wait(bool on) { g_frame_image_wait = on; }
+
 void page_frame_build(PageFrame *f, HtmlDocument *doc, ImageCache *images, int width, int height) {
-    page_frame_free(f);
+    /* The same document again (the layout mirror, updated in place): the
+     * layout keeps its tree, restyles what changed and reuses the subtrees
+     * that did not (css_layout_run); only the display list starts over. */
+    if (f->valid && f->layout.doc == doc) {
+        display_list_free(&f->dl);
+        f->valid = false;
+    } else {
+        page_frame_free(f);
+        memset(&f->layout, 0, sizeof(f->layout));
+    }
     printf("Running CSS layout (%dx%d) ...\n", width, height);
-    memset(&f->layout, 0, sizeof(f->layout));
     f->layout.js_ctx = g_ctx;
     f->layout.dump_path = layout_dump_path();
     bool ok;
+    unsigned long long t0 = gc_os_now_ns() / 1000;
     {
         CP_SCOPE("css-layout");
         ok = css_layout_run(&f->layout, doc, NULL, (double)width, (double)height);
     }
+    unsigned long long t1 = gc_os_now_ns() / 1000;
     if (!ok) {
         printf("WARNING: css_layout_run() failed\n");
         css_layout_tree_free(&f->layout);
@@ -686,6 +715,10 @@ void page_frame_build(PageFrame *f, HtmlDocument *doc, ImageCache *images, int w
         CP_SCOPE("build-display-list");
         ok = css_layout_build_display_list(&f->layout, &f->dl);
     }
+    if (frame_log())
+        fprintf(stderr, "[frame] layout %.1f ms (%d boxes), display list %.1f ms (%d commands)\n",
+                (double)(t1 - t0) / 1000.0, f->layout.tree.count,
+                (double)(gc_os_now_ns() / 1000 - t1) / 1000.0, f->dl.count);
     if (!ok) {
         printf("WARNING: css_layout_build_display_list() failed\n");
         display_list_free(&f->dl);
@@ -697,8 +730,10 @@ void page_frame_build(PageFrame *f, HtmlDocument *doc, ImageCache *images, int w
      * backgrounds) finish loading here, within a bound (a slow CDN must not
      * hold the frame): taken one turn at a time, each arrival laid the page
      * out again.  One that arrives later requests a layout
-     * (on_image_progress), and the next turn builds the frame again. */
-    if (!image_cache_wait_pending_ms(images, 1500))
+     * (on_image_progress), and the next turn builds the frame again.  An
+     * interactive embedder paints now instead (page_set_frame_image_wait):
+     * the page's thread does not wait on the network. */
+    if (g_frame_image_wait && !image_cache_wait_pending_ms(images, 1500))
         printf("Images still loading; painting without them for now\n");
 }
 
@@ -1154,6 +1189,40 @@ void page_close(void) {
     g_html = NULL;
 }
 
+/* The window's size as scripts and layout queries see it: the size frames
+ * are laid out at.  A change fires "resize" at the window. */
+void page_set_viewport(int width, int height) {
+    if (!SAFE_VALID(g_ctx) || width <= 0 || height <= 0) return;
+    GCValue global = JS_GetGlobalObject(g_ctx);
+    GCValue win = JS_GetPropertyStr(g_ctx, global, "window");
+    if (!JS_IsObject(win)) return;
+    int32_t w = 0, h = 0;
+    JS_ToInt32(g_ctx, &w, JS_GetPropertyStr(g_ctx, win, "innerWidth"));
+    JS_ToInt32(g_ctx, &h, JS_GetPropertyStr(g_ctx, win, "innerHeight"));
+    if (w == width && h == height) return;
+    JS_SetPropertyStr(g_ctx, win, "innerWidth", JS_NewInt32(g_ctx, width));
+    JS_SetPropertyStr(g_ctx, win, "innerHeight", JS_NewInt32(g_ctx, height));
+    JS_SetPropertyStr(g_ctx, win, "outerWidth", JS_NewInt32(g_ctx, width));
+    JS_SetPropertyStr(g_ctx, win, "outerHeight", JS_NewInt32(g_ctx, height));
+    dom_request_relayout();
+    static const char fire[] = "window.dispatchEvent(new Event('resize'))";
+    GCValue r = JS_Eval(g_ctx, fire, sizeof(fire) - 1, "<resize>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(r)) JS_GetException(g_ctx);
+}
+
+/* Off for a hidden tab: page_turn lays nothing out (what changed waits). */
+static bool g_rendering = true;
+void page_set_rendering(bool on) { g_rendering = on; }
+
+static unsigned g_frames_built;
+static unsigned long long g_frames_wall_us, g_frames_cpu_us;
+
+void page_frame_stats(unsigned *frames, double *wall_ms, double *cpu_ms) {
+    if (frames) *frames = g_frames_built;
+    if (wall_ms) *wall_ms = (double)g_frames_wall_us / 1000.0;
+    if (cpu_ms) *cpu_ms = (double)g_frames_cpu_us / 1000.0;
+}
+
 void page_turn(bool run_timers, bool wait, int width, int height, PageTurn *out) {
     bool had_timers = false;
     bool had_images = false;
@@ -1166,21 +1235,30 @@ void page_turn(bool run_timers, bool wait, int width, int height, PageTurn *out)
         CP_SCOPE("process-images");
         had_images = image_cache_process_pending(g_loop_images);
     }
-    if (g_dom_needs_layout) {
+    if (g_dom_needs_layout && g_rendering) {
         g_dom_needs_layout = 0;
+        unsigned long long wall0 = gc_os_now_ns() / 1000, cpu0 = platform_thread_cpu_us();
 
         GCValue js_doc = get_global_document(g_ctx);
         image_api_scan(g_ctx);
+        unsigned long long scanned = gc_os_now_ns() / 1000;
 
         HtmlDocument *new_doc = NULL;
         {
             CP_SCOPE("rebuild-doc");
             new_doc = html_document_from_js_dom(g_ctx, js_doc);
         }
-        if (new_doc) {
+        if (frame_log())
+            fprintf(stderr, "[frame] image scan %.1f ms, mirror update %.1f ms\n", (double)(scanned - wall0) / 1000.0,
+                    (double)(gc_os_now_ns() / 1000 - scanned) / 1000.0);
+        if (new_doc && new_doc == g_doc) {
+            html_document_free(new_doc);   /* (the same document: one reference is enough) */
+        } else if (new_doc) {
             page_frame_free(&g_frame);   /* it refers into the old document */
             if (g_doc) html_document_free(g_doc);
             g_doc = new_doc;
+        }
+        if (new_doc) {
 
             /* Print metadata from the rebuilt native document. */
             const char *title = get_title_text(g_doc);
@@ -1197,6 +1275,9 @@ void page_turn(bool run_timers, bool wait, int width, int height, PageTurn *out)
         } else {
             printf("WARNING: failed to rebuild native document from JS DOM\n");
         }
+        g_frames_built++;
+        g_frames_wall_us += gc_os_now_ns() / 1000 - wall0;
+        g_frames_cpu_us += platform_thread_cpu_us() - cpu0;
     }
     out->had_timers = had_timers;
     out->had_images = had_images;
@@ -1219,6 +1300,33 @@ const char *page_title(void) {
 
 bool page_needs_layout(void) {
     return g_dom_needs_layout != 0;
+}
+
+/* Something to show yet: the page's stylesheets are here, and the
+ * document's <body> holds an element or text that is not white space
+ * (what browsers hold the first paint for). */
+bool page_first_paint_ready(void) {
+    if (css_layout_stylesheets_pending()) return false;     /* (render-blocking sheets) */
+    NodeId html = DOM_NULL, body = DOM_NULL;
+    for (NodeId c = dom_first_child(g_dom_document); c && !html; c = dom_next_sibling(c))
+        if (dom_kind(c) == DOM_K_ELEMENT) html = c;
+    for (NodeId c = html ? dom_first_child(html) : DOM_NULL; c && !body; c = dom_next_sibling(c))
+        if (dom_kind(c) == DOM_K_ELEMENT && dom_tag_name(c) && !strcmp(dom_tag_name(c), "body")) body = c;
+    for (NodeId c = body ? dom_first_child(body) : DOM_NULL; c; c = dom_next_sibling(c)) {
+        if (dom_kind(c) == DOM_K_ELEMENT) return true;
+        if (dom_kind(c) == DOM_K_TEXT) {
+            uint32_t n = 0;
+            const char *t = dom_text(c, &n);
+            for (uint32_t i = 0; t && i < n; i++)
+                if (!isspace((unsigned char)t[i])) return true;
+        }
+    }
+    return false;
+}
+
+/* A number that changes with every DOM mutation (tree, attribute, text). */
+uint64_t page_dom_version(void) {
+    return g_dom.structure_version + g_dom.attr_version + g_dom.text_version;
 }
 
 bool page_refresh_videos(void) {
