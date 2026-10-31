@@ -357,8 +357,36 @@ TEST(test_http_large_post_body_whole) {
     return true;
 }
 
+/* Expires dates (RFC 6265 5.1.1) make a cookie persistent: the jar saves it
+ * with that time.  Max-Age wins over Expires; a date gone deletes. */
+TEST(test_http_cookie_expires) {
+    HttpCookieJar *jar = http_cookie_jar_new();
+    http_cookie_jar_use(jar);
+    const char *u = "https://www.example.com/";
+    http_cookie_set_for_request(u, "a=1; Domain=.example.com; Expires=Thu, 29-Apr-2037 01:10:12 GMT; Path=/; Secure");
+    http_cookie_set_for_request(u, "b=2; expires=Wed, 01 Jan 2031 00:00:00 GMT");
+    http_cookie_set_for_request(u, "c=3; Expires=Sun Nov  6 08:49:37 2039");
+    http_cookie_set_for_request(u, "d=4; Max-Age=60; Expires=Thu, 01 Jan 2032 00:00:00 GMT");
+    http_cookie_set_for_request(u, "e=5; Expires=nonsense");                         /* session */
+    http_cookie_set_for_request(u, "f=6; Expires=Thu, 01-Jan-70 00:00:01 GMT");     /* gone */
+    size_t len = 0;
+    char *text = http_cookie_jar_save(jar, &len);
+    http_cookie_jar_use(NULL);
+    bool a = text && strstr(text, "a\t1\texample.com\t/\t2124580212\t");
+    bool b = text && strstr(text, "b\t2\t") && strstr(text, "\t1924992000\t");
+    bool c = text && strstr(text, "c\t3\t") && strstr(text, "\t2204182177\t");
+    bool d = text && strstr(text, "d\t4\t") && !strstr(text, "\t1956528000\t");   /* Max-Age's, not the date */
+    bool e = text && !strstr(text, "e\t5\t");
+    bool f = text && !strstr(text, "f\t6\t");
+    if (!(a && b && c && d && e && f)) printf("    saved:\n%s\n", text ? text : "(none)");
+    free(text);
+    ASSERT_TRUE(a && b && c && d && e && f);
+    return true;
+}
+
 void run_http_pool_tests(void) {
     printf("\n--- HTTP connection pool tests ---\n");
+    RUN_TEST(test_http_cookie_expires);
     RUN_TEST(test_http_pool_reuses_connection);
     RUN_TEST(test_http_pool_framing_keeps_connection);
     RUN_TEST(test_http_pool_close_and_eof);

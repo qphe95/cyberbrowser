@@ -104,6 +104,7 @@ static bool js_get_document_origin(JSContextHandle ctx, char *out, size_t out_le
 static bool parse_url_origin(const char *url, char *out, size_t out_len);
 static bool is_same_origin(const char *a, const char *b);
 static bool cors_requires_preflight(const char *method, const char **headers, int header_count);
+static const char *body_default_type(JSContextHandle ctx, GCValue body_val, char *buf, size_t cap);
 static bool cors_perform_preflight(JSContextHandle ctx, const char *url, const char *method,
                                    const char **headers, int header_count,
                                    const char *origin, bool credentials,
@@ -398,8 +399,12 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
             if (strncasecmp(headers[i], "Referer:", 8) == 0) has_referer = true;
             if (strncasecmp(headers[i], "Cookie:", 7) == 0) has_cookie = true;
         }
-        if (is_post && !has_content_type) {
-            if (header_count < 24) headers[header_count++] = "Content-Type: application/json";
+        char ct_type[256], ct_header[300];
+        const char *ct = is_post && req_body[0] && !has_content_type
+            ? body_default_type(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, ct_type, sizeof(ct_type)) : NULL;
+        if (ct && header_count < 24) {
+            snprintf(ct_header, sizeof(ct_header), "Content-Type: %s", ct);
+            headers[header_count++] = ct_header;
         }
         if (header_count < 24) headers[header_count++] = "Accept: */*";
 
@@ -442,6 +447,12 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
             has_cookie = true;
         }
 
+        /* Its own mode, as fetch's (the thread's may be the page's navigation,
+         * when a script sends it while the page loads). */
+        HttpRequestContext was_ctx;
+        http_request_context_get(&was_ctx);
+        http_request_context_set(same_origin ? HTTP_MODE_NO_CORS : HTTP_MODE_CORS, origin);
+
         if (!same_origin) {
             if (cors_requires_preflight(method, headers, header_count)) {
                 char preflight_err[256] = {0};
@@ -449,6 +460,7 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
                                                            origin, credentials,
                                                            preflight_err, sizeof(preflight_err));
                 if (!preflight_ok) {
+                    http_request_context_set(was_ctx.mode, was_ctx.initiator);
                     platform_log(LOG_LEVEL_WARN, "js_xhr_send", "CORS preflight failed: %s", preflight_err);
                     SAFE_SET(xhr, XMLHttpRequestHandle, status, 0);
                     SAFE_SET(xhr, XMLHttpRequestHandle, response_text, JS_UNDEFINED);
@@ -471,6 +483,7 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
                                               headers, header_count,
                                               &response_buffer, &status_code,
                                               error_buf, sizeof(error_buf));
+        http_request_context_set(was_ctx.mode, was_ctx.initiator);
 
         if (success && response_buffer.data && status_code >= 200 && status_code < 300) {
             if (!same_origin) {
@@ -1458,9 +1471,12 @@ static bool cors_perform_preflight(JSContextHandle ctx, const char *url, const c
         return false;
     }
 
+    /* (Fetch, CORS-preflight fetch: a safelisted method needs no listing;
+     * "*" allows any method to a request without credentials.) */
     char acam[512];
-    if (!cors_find_header(resp.headers, "Access-Control-Allow-Methods", acam, sizeof(acam)) ||
-        !cors_list_contains(acam, method)) {
+    if (!cors_find_header(resp.headers, "Access-Control-Allow-Methods", acam, sizeof(acam))) acam[0] = '\0';
+    if (!is_cors_safe_method(method) && !cors_list_contains(acam, method) &&
+        !(!credentials && cors_list_contains(acam, "*"))) {
         snprintf(err, err_len, "CORS preflight blocked: method %s not allowed", method);
         platform_http_free_buffer(&resp);
         return false;
@@ -1469,7 +1485,8 @@ static bool cors_perform_preflight(JSContextHandle ctx, const char *url, const c
     if (acrh_value[0]) {
         char acah[1024];
         if (!cors_find_header(resp.headers, "Access-Control-Allow-Headers", acah, sizeof(acah))) {
-            snprintf(err, err_len, "CORS preflight blocked: missing Access-Control-Allow-Headers");
+            snprintf(err, err_len, "CORS preflight blocked: missing Access-Control-Allow-Headers (for %.200s; %.120s)",
+                     acrh_value, url);
             platform_http_free_buffer(&resp);
             return false;
         }
@@ -1486,7 +1503,9 @@ static bool cors_perform_preflight(JSContextHandle ctx, const char *url, const c
                 if (len >= sizeof(name)) len = sizeof(name) - 1;
                 memcpy(name, p, len);
                 name[len] = '\0';
-                if (!cors_list_contains(acah, name)) {
+                /* ("*" allows any header but Authorization, without credentials) */
+                if (!cors_list_contains(acah, name) &&
+                    !(!credentials && cors_list_contains(acah, "*") && strcasecmp(name, "Authorization") != 0)) {
                     snprintf(err, err_len, "CORS preflight blocked: header %s not allowed", name);
                     platform_http_free_buffer(&resp);
                     return false;
@@ -1806,6 +1825,33 @@ static void copy_opt(JSContextHandle ctx, int argc, GCValue *argv, const char *p
 /* The bytes of a request body (NUL-terminated copy, length in *out_len):
  * a string as UTF-8, an ArrayBuffer or a view on one as is, any other
  * object as JSON. */
+/* The Content-Type a body brings when the request names none (Fetch,
+ * "extract a body"): text for a string, the form type for URLSearchParams,
+ * a Blob's own type, none for bytes (an ArrayBuffer or a view of one).
+ * Other objects go as JSON here (extract_body), so as application/json. */
+static const char *body_default_type(JSContextHandle ctx, GCValue body_val, char *buf, size_t cap)
+{
+    if (JS_IsUndefined(body_val) || JS_IsNull(body_val)) return NULL;
+    if (JS_IsString(body_val)) return "text/plain;charset=UTF-8";
+    if (!JS_IsObject(body_val)) return NULL;
+    size_t size = 0;
+    if (JS_GetArrayBuffer(ctx, &size, body_val)) return NULL;
+    GCValue ab = JS_GetPropertyStr(ctx, body_val, "buffer");
+    if (JS_IsObject(ab) && JS_GetArrayBuffer(ctx, &size, ab)) return NULL;
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue usp = JS_GetPropertyStr(ctx, global, "URLSearchParams");
+    if (JS_IsObject(usp) && JS_IsInstanceOf(ctx, body_val, usp) > 0)
+        return "application/x-www-form-urlencoded;charset=UTF-8";
+    GCValue blob = JS_GetPropertyStr(ctx, global, "Blob");
+    if (JS_IsObject(blob) && JS_IsInstanceOf(ctx, body_val, blob) > 0) {
+        const char *t = JS_ToCString(ctx, JS_GetPropertyStr(ctx, body_val, "type"));
+        if (!t || !t[0]) return NULL;
+        snprintf(buf, cap, "%s", t);
+        return buf;
+    }
+    return "application/json";
+}
+
 static char* extract_body(JSContextHandle ctx, GCValue body_val, size_t *out_len)
 {
     *out_len = 0;
@@ -2224,19 +2270,20 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
     // Extract POST body from fetch() arguments
     char *post_body = NULL;
     size_t post_body_len = 0;
-    
-    
-    
+    GCValue body_val = JS_UNDEFINED;        /* (its kind gives the default Content-Type) */
+
     // Priority 1: init.body
     if (!post_body && argc > 1 && JS_IsObject(argv[1])) {
         GCValue body_prop = JS_GetPropertyStr(ctx, argv[1], "body");
         post_body = extract_body(ctx, body_prop, &post_body_len);
+        if (post_body) body_val = body_prop;
     }
-    
+
     // Priority 2: Request.body
     if (!post_body && argc > 0 && JS_IsObject(argv[0])) {
         GCValue body_prop = JS_GetPropertyStr(ctx, argv[0], "body");
         post_body = extract_body(ctx, body_prop, &post_body_len);
+        if (post_body) body_val = body_prop;
     }
     
     // Resolve blob: URLs locally
@@ -2264,7 +2311,6 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
 
     // Standard HTTP(S) handling with CORS enforcement.
     if (url && is_http_url(url)) {
-        bool is_post = (strcasecmp(method, "POST") == 0);
         char origin[512];
         js_get_document_origin(ctx, origin, sizeof(origin));
         char request_origin[512];
@@ -2302,8 +2348,11 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
             if (strncasecmp(headers[i], "Referer:", 8) == 0) has_referer = true;
             if (strncasecmp(headers[i], "Cookie:", 7) == 0) has_cookie = true;
         }
-        if (is_post && !has_content_type) {
-            if (header_count < 24) headers[header_count++] = "Content-Type: application/json";
+        char ct_type[256], ct_header[300];
+        const char *ct = post_body && !has_content_type ? body_default_type(ctx, body_val, ct_type, sizeof(ct_type)) : NULL;
+        if (ct && header_count < 24) {
+            snprintf(ct_header, sizeof(ct_header), "Content-Type: %s", ct);
+            headers[header_count++] = ct_header;
         }
         if (header_count < 24) headers[header_count++] = "Accept: */*";
 

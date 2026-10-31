@@ -571,8 +571,7 @@ static void run_request(Client *c, const uint8_t *m, uint32_t len) {
     uint32_t nheaders = q.nheaders;
     /* The jar's cookies go with it unless it brings its own Cookie header
      * (empty: none), or it is a preflight (http_download.c). */
-    bool credentialed = _stricmp(method, "OPTIONS") != 0;
-    for (uint32_t i = 0; i < q.nheaders; i++)
+    bool credentialed = _stricmp(method, "OPTIONS") != 0;    for (uint32_t i = 0; i < q.nheaders; i++)
         if (!_strnicmp(headers[i], "Cookie:", 7)) credentialed = false;
     /* P10: the page's document is of the tab's site; else it goes there in
      * a tab of its own. */
@@ -598,7 +597,10 @@ static void run_request(Client *c, const uint8_t *m, uint32_t len) {
     NetCached cached = { 0 };
     char inm[300], ims[100];
     bool ok;
-    if (cacheable && net_cache_lookup(c->site, url, &cached) && cached.fresh) {
+    ULONGLONG t_start = GetTickCount64();
+    bool hit = cacheable && net_cache_lookup(c->site, url, headers, q.nheaders, &cached) && cached.fresh;
+    ULONGLONG t_lookup = GetTickCount64() - t_start;
+    if (hit) {
         b = cached.b;
         memset(&cached.b, 0, sizeof(cached.b));
         status = cached.status;
@@ -638,7 +640,7 @@ static void run_request(Client *c, const uint8_t *m, uint32_t len) {
         err[0] = 0;
     } else if (ok && cacheable) {
         if (status == 200 && !cached.fresh && !strcmp(final_url, url)) {
-            net_cache_store(c->site, url, status, &b);
+            net_cache_store(c->site, url, headers, q.nheaders, status, &b);
         }
     }
     net_cached_free(&cached);
@@ -663,8 +665,12 @@ static void run_request(Client *c, const uint8_t *m, uint32_t len) {
         ok = false;
         snprintf(err, sizeof(err), "%.500s", why);
     }
+    size_t body = b.size;
     reply(c, q.id, ok ? NET_OK : NET_FAILED, status, ok ? final_url : NULL, &b, err[0] ? err : "request failed");
     http_free_buffer(&b);
+    if (getenv("CYBER_NET_LOG") && body > 256 * 1024)
+        fprintf(stderr, "[net] %s %zu bytes: cache lookup %llu ms, queued after %llu ms: %.100s\n", hit ? "hit" : "miss", body,
+                t_lookup, GetTickCount64() - t_start, url);
 }
 
 /* The first job whose tab isn't at CLIENT_RUNNING_MAX (under g_jobs_lock). */

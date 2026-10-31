@@ -342,6 +342,7 @@ typedef struct PageObserver {
     HtmlPreloadScan *scan;
     HtmlPageStream *page;
     bool url_set;                       /* set_document_url done */
+    HttpRequestContext outer;           /* the thread's mode before the navigation */
 } PageObserver;
 
 static void (*g_load_progress)(void);
@@ -365,9 +366,16 @@ static void page_observe(void *user, const char *data, size_t len) {
         o->url_set = true;
         set_document_url(http_last_url());
     }
+    /* The parser runs inside the navigation's request, on its thread: what
+     * its scripts fetch is theirs, not the navigation's (whose mode would
+     * make each a document of its own). */
+    HttpRequestContext nav;
+    http_request_context_get(&nav);
+    http_request_context_set(o->outer.mode, o->outer.initiator);
     if (o->scan) html_preload_scan_feed(o->scan, data, len);
     if (o->page) html_page_stream_feed(o->page, data, len);
     if (o->page && g_load_progress) g_load_progress();
+    http_request_context_set(nav.mode, nav.initiator);
 }
 
 static char *fetch_start_page(const char *url, size_t *out_size, HtmlPageStream *page) {
@@ -376,7 +384,11 @@ static char *fetch_start_page(const char *url, size_t *out_size, HtmlPageStream 
     HttpBuffer buffer = {0};
     char error[512] = {0};
     /* Google's consent cookie only makes sense for Google properties; sending
-     * it to other sites is pointless, so include it just for YouTube. */
+     * it to other sites is pointless, so include it just for YouTube.  (Its
+     * Cookie header replaces the jar's: YouTube takes us for a new visitor
+     * every time, with other experiments and so other script URLs than the
+     * cache holds.  As a returning visitor it plays a pre-roll ad first,
+     * which stalls the player here: until that works, a new visitor.) */
     const bool send_google_consent = strstr(url, "youtube.") != NULL;
     const char *headers[16];
     int nheaders = 0;
@@ -401,6 +413,7 @@ static char *fetch_start_page(const char *url, size_t *out_size, HtmlPageStream 
     PageObserver obs = { ps && ps[0] == '0' ? NULL : html_preload_scan_begin(), page, false };
     HttpRequestContext was;
     http_request_context_get(&was);
+    obs.outer = was;
     http_request_context_set(HTTP_MODE_NAVIGATE, "");
     bool ok = obs.scan || obs.page
         ? http_get_to_memory_observed(url, headers, nheaders, &buffer, error, sizeof(error), page_observe, &obs)

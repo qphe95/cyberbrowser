@@ -254,6 +254,66 @@ static time_t cookie_parse_max_age(const char *val) {
     return time(NULL) + (time_t)ma;
 }
 
+/* An Expires date (RFC 6265 5.1.1, the cookie-date algorithm): tokens
+ * split by delimiters, the first of each kind taken (time, day of month,
+ * month, year), in any order and form ("Thu, 29-Apr-2027 01:10:12 GMT",
+ * "Sun Nov  6 08:49:37 1994", ...).  Seconds since 1970 (UTC; at least 1),
+ * or 0 when it does not parse. */
+static time_t cookie_parse_expires(const char *val) {
+    static const char months[] = "janfebmaraprmayjunjulaugsepoctnovdec";
+    int hour = -1, minute = 0, second = 0, day = -1, month = -1, year = -1;
+    const char *p = val;
+    while (*p) {
+        /* delimiter: %x09 / %x20-2F / %x3B-40 / %x5B-60 / %x7B-7E */
+        while (*p && !((*p >= '0' && *p <= ':') || (*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+                       (unsigned char)*p >= 0x7F || (*p >= 0 && *p < 0x09) || (*p > 0x09 && *p < 0x20)))
+            p++;
+        const char *t = p;
+        while (*p && ((*p >= '0' && *p <= ':') || (*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+                      (unsigned char)*p >= 0x7F || (*p >= 0 && *p < 0x09) || (*p > 0x09 && *p < 0x20)))
+            p++;
+        size_t n = (size_t)(p - t);
+        if (!n) continue;
+        /* (each production: so many digits, then the token's end or a non-digit) */
+        size_t d = 0;
+        while (d < n && isdigit((unsigned char)t[d])) d++;
+        if (hour < 0 && d >= 1 && d <= 2 && d < n && t[d] == ':') {
+            int a, b, c;
+            size_t e1 = d + 1, e2, e3;
+            for (e2 = e1; e2 < n && isdigit((unsigned char)t[e2]); e2++) {}
+            if (e2 - e1 >= 1 && e2 - e1 <= 2 && e2 < n && t[e2] == ':') {
+                for (e3 = e2 + 1; e3 < n && isdigit((unsigned char)t[e3]); e3++) {}
+                if (e3 - e2 - 1 >= 1 && e3 - e2 - 1 <= 2) {
+                    a = atoi(t); b = atoi(t + e1); c = atoi(t + e2 + 1);
+                    hour = a; minute = b; second = c;
+                    continue;
+                }
+            }
+        }
+        if (day < 0 && d >= 1 && d <= 2) { day = atoi(t); continue; }
+        if (month < 0 && n >= 3) {
+            char m[4] = { (char)tolower((unsigned char)t[0]), (char)tolower((unsigned char)t[1]),
+                          (char)tolower((unsigned char)t[2]), 0 };
+            const char *f = strstr(months, m);
+            if (f && (f - months) % 3 == 0) { month = (int)(f - months) / 3 + 1; continue; }
+        }
+        if (year < 0 && d >= 2 && d <= 4) { year = atoi(t); continue; }
+    }
+    if (year >= 70 && year <= 99) year += 1900;
+    else if (year >= 0 && year <= 69) year += 2000;
+    if (hour < 0 || day < 1 || day > 31 || month < 1 || year < 1601 || hour > 23 || minute > 59 || second > 59)
+        return 0;
+    /* days from 1970-01-01 (the civil-calendar formula) */
+    int y = year - (month <= 2);
+    long long era = (y >= 0 ? y : y - 399) / 400;
+    long long yoe = y - era * 400;
+    long long doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+    long long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    long long days = era * 146097 + doe - 719468;
+    long long t = days * 86400 + hour * 3600 + minute * 60 + second;
+    return t > 0 ? (time_t)t : 1;   /* (before 1970: in the past, deleted) */
+}
+
 static void cookie_remove_expired(void) {
     time_t now = time(NULL);
     HttpCookie **pp = &g_cookie_jar;
@@ -304,6 +364,7 @@ static void cookie_set_internal_unlocked(const char *url, const char *header, bo
     char domain[256] = {0};
     char path_attr[1024] = {0};
     time_t expires = 0;
+    bool has_max_age = false;
     bool secure = false, http_only = false;
     bool has_domain = false, has_path = false;
 
@@ -333,8 +394,10 @@ static void cookie_set_internal_unlocked(const char *url, const char *header, bo
             strncpy(path_attr, attr_val, sizeof(path_attr) - 1);
         } else if (strcasecmp(attr_name, "Max-Age") == 0) {
             expires = cookie_parse_max_age(attr_val);
+            has_max_age = true;
         } else if (strcasecmp(attr_name, "Expires") == 0) {
-            /* Expires parsing omitted; Max-Age is preferred. */
+            time_t e = cookie_parse_expires(attr_val);
+            if (e && !has_max_age) expires = e;       /* (Max-Age wins, wherever it is) */
         } else if (strcasecmp(attr_name, "Secure") == 0) {
             secure = true;
         } else if (strcasecmp(attr_name, "HttpOnly") == 0) {
