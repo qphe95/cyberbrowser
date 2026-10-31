@@ -637,6 +637,28 @@ bool css_layout_tree_build(LayoutContext *ctx, HtmlDocument *doc)
     return layout_tree_build(ctx, doc, false);
 }
 
+/* What pseudo box pair k was made from. */
+typedef struct LayoutPseudoPair {
+    int owner;
+    unsigned char side;
+    int n;
+    const CssDeclaration *const *decls;
+    const char *content;
+} LayoutPseudoPair;
+
+/* A pseudo box of the last layout, kept for the next: its element (store
+ * id) and side, its index then, what it was made from, its and its text's
+ * style slots and nodes (the text's string moves with it). */
+typedef struct LayoutParkedPseudo {
+    uint32_t owner_id;
+    unsigned char side, used;
+    int old_pe, n;
+    const CssDeclaration *const *decls;
+    const char *content;
+    LayoutStyle *slot_e, *slot_t;
+    HtmlNode e, t;
+} LayoutParkedPseudo;
+
 void css_layout_tree_free(LayoutContext *ctx)
 {
     if (!ctx) return;
@@ -678,6 +700,12 @@ void css_layout_tree_free(LayoutContext *ctx)
     for (int k = 0; k < ctx->pseudo_nodes_n; k++) free(ctx->pseudo_nodes[k].text_content);
     free(ctx->pseudo_nodes);
     free(ctx->pseudo_rec);
+    free(ctx->pseudo_pairs);
+    for (int j = 0; j < ctx->parked_n; j++) {
+        free((void *)ctx->parked[j].decls);
+        if (!ctx->parked[j].used) free(ctx->parked[j].t.text_content);
+    }
+    free(ctx->parked);
     memset(ctx, 0, sizeof(*ctx));
 }
 
@@ -8569,10 +8597,28 @@ static void layout_rebuild_orders(LayoutContext *ctx)
     layout_build_orders(ctx);
 }
 
-/* Back to the document-built tree: the pseudo boxes out of their elements'
- * children, their slots given back. */
-static void layout_pseudo_detach(LayoutContext *ctx)
+
+/* The parked boxes nobody took: their slots and strings given back. */
+static void layout_parked_release(LayoutContext *ctx)
 {
+    for (int j = 0; j < ctx->parked_n; j++) {
+        LayoutParkedPseudo *p = &ctx->parked[j];
+        free((void *)p->decls);
+        if (p->used) continue;
+        layout_slot_give(ctx, p->slot_e);
+        layout_slot_give(ctx, p->slot_t);
+        free(p->t.text_content);
+    }
+    free(ctx->parked);
+    ctx->parked = NULL;
+    ctx->parked_n = 0;
+}
+
+/* Back to the document-built tree: the pseudo boxes out of their elements'
+ * children, parked for the next layout (park) or their slots given back. */
+static void layout_pseudo_detach_ex(LayoutContext *ctx, bool park)
+{
+    layout_parked_release(ctx);
     int base = ctx->base_count, n = ctx->tree.count;
     if (base <= 0 || n <= base) return;
     LayoutNodeRef *nodes = ctx->tree.nodes;
@@ -8597,20 +8643,66 @@ static void layout_pseudo_detach(LayoutContext *ctx)
         nodes[owner].child_count = cnt;
     }
     layout_drop_text_caches(ctx);
-    for (int i = base; i < n; i++) layout_slot_give(ctx, ctx->slot[i]);
-    for (int k = 0; k < ctx->pseudo_nodes_n; k++) free(ctx->pseudo_nodes[k].text_content);
+    int pairs = ctx->pseudo_nodes_n / 2;
+    if (park && ctx->style_gen && ctx->pseudo_pairs && ctx->ids && pairs > 0 &&
+        (ctx->parked = (LayoutParkedPseudo *)calloc((size_t)pairs, sizeof(LayoutParkedPseudo)))) {
+        for (int j = 0; j < pairs; j++) {
+            const LayoutPseudoPair *pp = &ctx->pseudo_pairs[j];
+            LayoutParkedPseudo *p = &ctx->parked[j];
+            int pe = base + 2 * j;
+            p->owner_id = ctx->ids[pp->owner];
+            p->side = pp->side;
+            p->old_pe = pe;
+            p->n = pp->n;
+            if (pp->n) {
+                const CssDeclaration **ds = (const CssDeclaration **)malloc((size_t)pp->n * sizeof(*ds));
+                if (ds) memcpy(ds, pp->decls, (size_t)pp->n * sizeof(*ds));
+                else p->n = -1;   /* (matches nothing) */
+                p->decls = ds;
+            }
+            p->content = pp->content;
+            p->slot_e = ctx->slot[pe];
+            p->slot_t = ctx->slot[pe + 1];
+            p->e = ctx->pseudo_nodes[2 * j];
+            p->t = ctx->pseudo_nodes[2 * j + 1];
+        }
+        ctx->parked_n = pairs;
+        ctx->parked_gen = ctx->style_gen;
+    } else {
+        for (int i = base; i < n; i++) layout_slot_give(ctx, ctx->slot[i]);
+        for (int k = 0; k < ctx->pseudo_nodes_n; k++) free(ctx->pseudo_nodes[k].text_content);
+    }
     free(ctx->pseudo_nodes);
     ctx->pseudo_nodes = NULL;
     ctx->pseudo_nodes_n = 0;
+    free(ctx->pseudo_pairs);
+    ctx->pseudo_pairs = NULL;
     ctx->tree.count = base;
     layout_rebuild_orders(ctx);
+}
+
+static void layout_pseudo_detach(LayoutContext *ctx)
+{
+    layout_pseudo_detach_ex(ctx, true);
+}
+
+/* The parked box of element store id id on side side (-1: none). */
+static int layout_parked_find(const LayoutContext *ctx, const int *tab, int cap, uint32_t id, int side)
+{
+    if (!tab || !id) return -1;
+    uint32_t h = ((id * 2u + (uint32_t)side) * 2654435761u) & (uint32_t)(cap - 1);
+    for (int v; (v = tab[h]) != 0; h = (h + 1) & (uint32_t)(cap - 1)) {
+        const LayoutParkedPseudo *p = &ctx->parked[v - 1];
+        if (p->owner_id == id && p->side == side) return v - 1;
+    }
+    return -1;
 }
 
 static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
 {
     int base = ctx->tree.count;
     ctx->base_count = base;
-    if (!ctx->pseudo_rec) return;
+    if (!ctx->pseudo_rec) { layout_parked_release(ctx); return; }
     int m = 0;
     for (int i = 0; i < base; i++) {
         const PseudoRec *r = (const PseudoRec *)ctx->pseudo_rec[i];
@@ -8620,7 +8712,7 @@ static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
         if (!layout_pseudo_allowed(layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx))) continue;
         m += (r->side[0].content != NULL) + (r->side[1].content != NULL);
     }
-    if (m == 0) return;
+    if (m == 0) { layout_parked_release(ctx); return; }
     int n = base + 2 * m;
     LayoutNodeRef *nn = (LayoutNodeRef *)realloc(ctx->tree.nodes, (size_t)n * sizeof(LayoutNodeRef));
     if (!nn) return;
@@ -8629,7 +8721,8 @@ static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
     if (!nb) return;
     ctx->boxes = nb;
     HtmlNode *hn = (HtmlNode *)calloc((size_t)2 * m, sizeof(HtmlNode));
-    if (!hn) return;
+    LayoutPseudoPair *pairs = (LayoutPseudoPair *)calloc((size_t)m, sizeof(LayoutPseudoPair));
+    if (!hn || !pairs) { free(hn); free(pairs); layout_parked_release(ctx); return; }
     if (!layout_grow((void **)&ctx->slot, base, n, sizeof(LayoutStyle *), 0) ||
         !layout_grow((void **)&ctx->ids, base, n, sizeof(uint32_t), 0) ||
         !layout_grow((void **)&ctx->custom_props, base, n, sizeof(CssCustomProps *), 0) ||
@@ -8643,11 +8736,31 @@ static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
         !layout_grow((void **)&ctx->has_bits, base, n, 8, 0xFF) ||
         !layout_grow((void **)&ctx->flow_old, base, n, sizeof(int), 0xFF)) {
         free(hn);
+        free(pairs);
+        layout_parked_release(ctx);
         return;
     }
+    /* The boxes of the last layout this one may take back (same style set),
+     * by element and side. */
+    int ptab_cap = 0, *ptab = NULL;
+    if (ctx->parked_n && ctx->parked_gen == ctx->style_gen && ctx->style_left) {
+        ptab_cap = 16;
+        while (ptab_cap < 2 * ctx->parked_n) ptab_cap *= 2;
+        ptab = (int *)calloc((size_t)ptab_cap, sizeof(int));
+        for (int j = 0; ptab && j < ctx->parked_n; j++) {
+            const LayoutParkedPseudo *p = &ctx->parked[j];
+            if (!p->owner_id) continue;
+            uint32_t h = ((p->owner_id * 2u + p->side) * 2654435761u) & (uint32_t)(ptab_cap - 1);
+            while (ptab[h]) h = (h + 1) & (uint32_t)(ptab_cap - 1);
+            ptab[h] = j + 1;
+        }
+    }
+    int reused = 0;
     layout_drop_text_caches(ctx);
     ctx->pseudo_nodes = hn;
     ctx->pseudo_nodes_n = 2 * m;
+    free(ctx->pseudo_pairs);
+    ctx->pseudo_pairs = pairs;
     int k = 0;
     for (int owner = 0; owner < base; owner++) {
         const PseudoRec *r = (const PseudoRec *)ctx->pseudo_rec[owner];
@@ -8660,16 +8773,31 @@ static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
             if (!ps->content) continue;
             int pe = base + k, pt = pe + 1;
             HtmlNode *he = &hn[k], *ht = &hn[k + 1];
-            char text[1024];
-            layout_pseudo_text(ps->content, on, text, sizeof(text));
-            he->array_node.parent = he->array_node.first_child = he->array_node.next_sibling = he->array_node.prev_sibling = -1;
-            ht->array_node = he->array_node;
-            he->type = HTML_NODE_ELEMENT;
-            he->tag_name = side ? "::after" : "::before";
-            ht->type = HTML_NODE_TEXT;
-            ht->tag_name = "";
-            ht->text_content = strdup(text);
-            ht->text_len = ht->text_content ? strlen(ht->text_content) : 0;
+            pairs[k / 2] = (LayoutPseudoPair){ owner, (unsigned char)side, ps->n, ps->decls, ps->content };
+            /* The last layout's box, when what it depends on is as it was:
+             * its element's style slot left as it was (its attributes too,
+             * which attr() reads) and the same rules. */
+            int j = ptab && ctx->style_left[owner] ? layout_parked_find(ctx, ptab, ptab_cap, ctx->ids[owner], side) : -1;
+            LayoutParkedPseudo *pk = j >= 0 ? &ctx->parked[j] : NULL;
+            if (pk && (pk->used || pk->content != ps->content || pk->n != ps->n ||
+                       (ps->n && memcmp(pk->decls, ps->decls, (size_t)ps->n * sizeof(*ps->decls)) != 0)))
+                pk = NULL;
+            if (pk) {
+                pk->used = 1;
+                *he = pk->e;
+                *ht = pk->t;
+            } else {
+                char text[1024];
+                layout_pseudo_text(ps->content, on, text, sizeof(text));
+                he->array_node.parent = he->array_node.first_child = he->array_node.next_sibling = he->array_node.prev_sibling = -1;
+                ht->array_node = he->array_node;
+                he->type = HTML_NODE_ELEMENT;
+                he->tag_name = side ? "::after" : "::before";
+                ht->type = HTML_NODE_TEXT;
+                ht->tag_name = "";
+                ht->text_content = strdup(text);
+                ht->text_len = ht->text_content ? strlen(ht->text_content) : 0;
+            }
             LayoutNodeRef *E = &ctx->tree.nodes[pe], *T = &ctx->tree.nodes[pt], *O = &ctx->tree.nodes[owner];
             E->dom_node_idx = LAYOUT_PSEUDO_DOM0 + k;
             T->dom_node_idx = LAYOUT_PSEUDO_DOM0 + k + 1;
@@ -8694,15 +8822,29 @@ static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
             }
             O->child_count++;
             for (int x = pe; x <= pt; x++) {
-                ctx->slot[x] = layout_slot_take(ctx);
+                ctx->slot[x] = pk ? (x == pe ? pk->slot_e : pk->slot_t) : layout_slot_take(ctx);
                 memset(&ctx->boxes[x], 0, sizeof(LayoutBox));
                 ctx->boxes[x].s = ctx->slot[x];
                 ctx->custom_props[x] = ctx->custom_props[owner];
             }
             ctx->tree.count = pt + 1;   /* (layout_box_init reads the node) */
-            layout_pseudo_style(ctx, pe, owner, ps, em_defer);
-            layout_box_init(ctx, pt);
-            style_finish_box_em(em_defer, &ctx->boxes[pt], &ctx->boxes[pe], false);
+            if (pk) {
+                /* Its styles as they were.  The flow pass may reuse its
+                 * layout where it can find its record: the same index, or
+                 * (a tree built again) what flow_old maps it to. */
+                reused++;
+                if (ctx->flow_old) {
+                    ctx->flow_old[pe] = pk->old_pe;
+                    ctx->flow_old[pt] = pk->old_pe + 1;
+                    ctx->style_left[pe] = ctx->style_left[pt] = 1;
+                } else {
+                    ctx->style_left[pe] = ctx->style_left[pt] = pe == pk->old_pe;
+                }
+            } else {
+                layout_pseudo_style(ctx, pe, owner, ps, em_defer);
+                layout_box_init(ctx, pt);
+                style_finish_box_em(em_defer, &ctx->boxes[pt], &ctx->boxes[pe], false);
+            }
             k += 2;
         }
     }
@@ -8710,6 +8852,9 @@ static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
      * new order, and "none" stays past the end) */
     int target = ctx->has_target_first >= 0 && ctx->has_target_first < base && ctx->tree.preorder
                  ? ctx->tree.preorder[ctx->has_target_first] : -1;
+    free(ptab);
+    layout_parked_release(ctx);
+    if (g_css_log > 0) fprintf(stderr, "[css] pseudo boxes: %d (%d as they were)\n", m, reused);
     ctx->tree.count = n;
     layout_rebuild_orders(ctx);
     ctx->has_target_first = n;
@@ -15144,6 +15289,9 @@ static bool layout_tree_carry(LayoutContext *ctx, HtmlDocument *doc, bool prune)
     ctx->sc_global = old.sc_global;
     ctx->has_bits_gen = old.has_bits_gen;
     ctx->flow = old.flow;                    old.flow = NULL;
+    ctx->parked = old.parked;                old.parked = NULL;   /* (their slots are the pool's) */
+    ctx->parked_n = old.parked_n;            old.parked_n = 0;
+    ctx->parked_gen = old.parked_gen;
     ctx->flow_old = ctx->flow ? (int *)malloc(((size_t)n + 1) * sizeof(int)) : NULL;
     if (ctx->flow && !ctx->flow_old) { layout_flow_free(ctx->flow); ctx->flow = NULL; }
     /* Store id -> old index. */

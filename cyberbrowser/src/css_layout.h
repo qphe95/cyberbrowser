@@ -617,6 +617,14 @@ typedef struct LayoutContext {
     struct HtmlNode *pseudo_nodes;
     int pseudo_nodes_n;
     const void **pseudo_rec;
+    /* What each pseudo box (pair k: boxes base + 2k and its text) was made
+     * from; and, between a kept tree's layouts, the boxes it had (parked:
+     * their slots and nodes, by element and side) for the next to take back
+     * when nothing they depend on changed (style set parked_gen). */
+    struct LayoutPseudoPair *pseudo_pairs;
+    struct LayoutParkedPseudo *parked;
+    int parked_n;
+    uint64_t parked_gen;
 } LayoutContext;
 
 #define LAYOUT_HAS_SUBJECT 1
