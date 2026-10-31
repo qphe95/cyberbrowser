@@ -220,6 +220,15 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
 
     /* Background image URL, interned (lives for the process; "" none). */
     const char *background_image_url;
+    /* Its placement: no-repeat per axis (repeat otherwise); position as a
+     * fraction of the free room plus a length per axis; size kind 0 auto,
+     * 1 cover, 2 contain, 3 given (bg_size_w/h: px, or a fraction of the
+     * area when bg_size_pct has bit 0 / 1; < 0 auto); attached to the
+     * viewport (fixed). */
+    unsigned char bg_no_repeat_x, bg_no_repeat_y;
+    double bg_pos_xf, bg_pos_xpx, bg_pos_yf, bg_pos_ypx;
+    unsigned char bg_size_kind, bg_size_pct, bg_fixed;
+    double bg_size_w, bg_size_h;
 
     /* mask-image: an absolute image URL (mask_kind 1) or the text of a
      * linear-gradient(...) (mask_kind 2), interned (lives for the process);
@@ -339,6 +348,9 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * ancestors, computed after layout for painting. */
     double opacity;
     unsigned char opacity_set;
+    /* z-index (when z_index_set; auto otherwise). */
+    int z_index;
+    unsigned char z_index_set;
     /* display:-webkit-box (legacy), -webkit-box-orient:vertical, and
      * -webkit-line-clamp: a vertical legacy box lays out as a block whose
      * height is capped at line_clamp lines. */
@@ -658,6 +670,8 @@ const char *css_layout_box_text(const LayoutContext *ctx, int idx, const char *r
 
 /* Build a flat layout tree from a parsed HTML document. */
 bool css_layout_tree_build(LayoutContext *ctx, HtmlDocument *doc);
+/* A new document in this process: drop what is cached per element. */
+void css_layout_forget_document(void);
 
 /* Free resources held by a layout tree. */
 void css_layout_tree_free(LayoutContext *ctx);

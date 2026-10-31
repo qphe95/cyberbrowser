@@ -66,6 +66,8 @@ typedef struct Tab {
     bool started;               /* channel attached */
     Chan chan;                  /* side 0: the UI */
     bool has_frame;             /* it sent one to the GPU process */
+    bool nav_wait;              /* (a navigation in its process: frames are the old page's
+                                 * until it says it loads the new one) */
     bool shown;                 /* the GPU process presented one in its window */
     uint32_t scroll_seq;
     TuFrame frame;
@@ -248,6 +250,7 @@ static void navigate(Tab *t, const char *url) {
         t->start_ms = ui_now_ms();
         t->frame_ms = t->loaded_ms = t->last_frame_ms = 0;
         t->frames = 0;
+        t->nav_wait = true;
         t->state = ST_LOADING;
         t->title[0] = 0;
         update_tab(t);
@@ -536,6 +539,7 @@ static void from_tab(Tab *t, const ChanMsg *m) {
     static UiTabMsg u;
     switch (ui_tab_message(m->type, m->data, m->len, &u)) {
     case TU_FRAME:
+        if (t->nav_wait) return;   /* (the old page's) */
         t->frame = u.frame;
         t->last_frame_tick = GetTickCount();
         t->last_frame_ms = ui_now_ms();
@@ -551,6 +555,7 @@ static void from_tab(Tab *t, const ChanMsg *m) {
         update_tab(t);
         return;
     case TU_STATE:
+        t->nav_wait = false;
         t->state = u.state == TAB_LOADED ? ST_LOADED : u.state == TAB_LOAD_FAILED ? ST_FAILED : ST_LOADING;
         if (t->state == ST_LOADED && !t->loaded_ms) t->loaded_ms = ui_now_ms();
         InvalidateRect(g_wins[t->win].wnd, NULL, FALSE);
@@ -1198,7 +1203,7 @@ static bool script_command(void) {
      * then: it was sent before the page said so). */
     if (sscanf(g_cmd, "shotc %4095s", arg) == 1) {
         drain_all();
-        if (t && !t->has_frame && now - g_cmd_start < 3000) return false;
+        if (t && (!t->has_frame || !t->frames) && now - g_cmd_start < 3000) return false;
         /* (again until the content has a frame to read, for up to 3 s: the
          * first tab's may not be shown yet) */
         bool ok = save_content_shot(w, arg);

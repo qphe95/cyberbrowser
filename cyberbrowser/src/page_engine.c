@@ -906,7 +906,13 @@ bool page_load(void) {
         CP_SCOPE("fetch-start-page");
         html = fetch_start_page(start_url, &html_size, page_stream);
     }
-    if (!html) return false;
+    if (!html) {
+        /* (the stream ends with the page: left open, it would keep the
+         * next document in this process from streaming, and from being
+         * parsed as XML) */
+        if (page_stream) html_page_stream_finish(page_stream, NULL);
+        return false;
+    }
     g_html = html;
 
     /* Phase 3: execute page scripts, drain timers, dispatch lifecycle events,
@@ -1269,6 +1275,9 @@ bool page_engine_reset(void) {
     gc_cleanup();
     uint64_t t2 = gc_os_now_ns();
     dom_store_reset();
+    /* (the next document's store ids are the last one's again) */
+    css_layout_forget_document();
+    layout_api_invalidate();
     dom_api_reset();
     frame_api_reset();
     media_api_reset();

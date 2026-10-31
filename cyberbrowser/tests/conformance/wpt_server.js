@@ -108,6 +108,7 @@ ${meta.scripts.map(s => `<script src="${esc(s)}"></script>`).join('\n')}
 /* ---- reftests ---- */
 
 const REFTEST = !!process.env.REFTEST;
+const BLANK = '__blank__.html';
 /* A reftest's references (rel=match / mismatch, resolved) and fuzziness. */
 function refsOf(f) {
     const src = fs.readFileSync(path.join(root, f), 'utf8');
@@ -119,7 +120,9 @@ function refsOf(f) {
         if (!rel || !href) continue;
         const h = href[1] || href[2];
         const abs = new URL(h, origin + '/' + f);
-        refs.push({ kind: rel[1].toLowerCase(), url: abs.pathname.slice(1) + abs.search });
+        /* (about:blank: a blank page of the server's, BLANK, that can say it is ready) */
+        const url = abs.protocol === 'about:' ? BLANK : abs.pathname.slice(1) + abs.search;
+        refs.push({ kind: rel[1].toLowerCase(), url });
     }
     const fuzzy = [...src.matchAll(/<meta\s+name=["']?fuzzy["']?\s+content=["']([^"']*)["']/gi)].map(m => m[1]);
     return { refs, fuzzy };
@@ -301,6 +304,10 @@ http.createServer((req, res) => {
     if (w && fs.existsSync(path.join(root, `${w[1]}.${w[2]}.js`))) {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
         return res.end(wrapper(`${w[1]}.${w[2]}.js`, w[2]));
+    }
+    if (url.pathname === '/' + BLANK) {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        return res.end('<!DOCTYPE html><html><head></head><body>' + (REFTEST ? REFREADY : '') + '</body></html>');
     }
     if (PY[url.pathname]) {
         const [type, body] = PY[url.pathname](url);

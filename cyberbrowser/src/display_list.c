@@ -126,6 +126,72 @@ bool display_list_add_image(DisplayList *dl, float x, float y, float w, float h,
 
 static ImageCache *g_image_cache = NULL;
 
+static void emit_image(DisplayList *dl, float x, float y, float w, float h, int handle);
+static void dl_clip_range(DisplayList *dl, int from, const float c[4]);
+
+/* A box's background image (CSS Backgrounds §3): sized (background-size),
+ * placed in the padding box (or the viewport, fixed) by background-position
+ * and repeated per background-repeat, clipped to the border box (to area,
+ * when given: the canvas, for the root's). */
+static void emit_background_image(const LayoutContext *ctx, DisplayList *dl, const LayoutBox *box,
+                                  const float *area)
+{
+    const LayoutStyle *s = box->s;
+    int nw = 0, nh = 0;
+    if (!image_cache_natural_size(g_image_cache, s->background_image_url, &nw, &nh) || nw <= 0 || nh <= 0) {
+        image_cache_request(g_image_cache, s->background_image_url, 0, 0);
+        return;
+    }
+    double bx = box->x, by = box->y, bw = box->width, bh = box->height;
+    /* positioning area: the padding box (the viewport when fixed) */
+    double ax = bx + s->border_left, ay = by + s->border_top;
+    double aw = bw - s->border_left - s->border_right, ah = bh - s->border_top - s->border_bottom;
+    if (s->bg_fixed) { ax = 0.0; ay = 0.0; aw = ctx->viewport_width; ah = ctx->viewport_height; }
+    if (aw <= 0.0 || ah <= 0.0) return;
+    double tw = nw, th = nh;
+    if (s->bg_size_kind == 1 || s->bg_size_kind == 2) {
+        double sx = aw / nw, sy = ah / nh;
+        double k = s->bg_size_kind == 1 ? (sx > sy ? sx : sy) : (sx < sy ? sx : sy);
+        tw = nw * k;
+        th = nh * k;
+    } else if (s->bg_size_kind == 3) {
+        double w = s->bg_size_w, hgt = s->bg_size_h;
+        if (w >= 0.0 && (s->bg_size_pct & 1)) w *= aw;
+        if (hgt >= 0.0 && (s->bg_size_pct & 2)) hgt *= ah;
+        if (w >= 0.0 && hgt >= 0.0) { tw = w; th = hgt; }
+        else if (w >= 0.0) { tw = w; th = w * nh / nw; }
+        else if (hgt >= 0.0) { th = hgt; tw = hgt * nw / nh; }
+    }
+    if (tw <= 0.0 || th <= 0.0) return;
+    int handle = image_cache_request(g_image_cache, s->background_image_url, (int)ceil(tw), (int)ceil(th));
+    if (handle < 0) return;
+    double ox = ax + s->bg_pos_xf * (aw - tw) + s->bg_pos_xpx;
+    double oy = ay + s->bg_pos_yf * (ah - th) + s->bg_pos_ypx;
+    /* clip: the border box (and the viewport for a fixed one) */
+    float c[4] = { (float)bx, (float)by, (float)(bx + bw), (float)(by + bh) };
+    if (area) {
+        memcpy(c, area, sizeof(c));
+        bx = c[0]; by = c[1]; bw = c[2] - c[0]; bh = c[3] - c[1];
+    }
+    double x0 = ox, x1 = ox + tw, y0 = oy, y1 = oy + th;
+    if (!s->bg_no_repeat_x) {
+        x0 = ox - ceil((ox - bx) / tw) * tw;
+        x1 = bx + bw;
+    }
+    if (!s->bg_no_repeat_y) {
+        y0 = oy - ceil((oy - by) / th) * th;
+        y1 = by + bh;
+    }
+    double ntiles = ceil((x1 - x0) / tw) * ceil((y1 - y0) / th);
+    if (ntiles > 20000.0) return;   /* (a tiny image over a huge box) */
+    int from = dl->count;
+    for (double y = y0; y < y1 - 0.001; y += th)
+        for (double x = x0; x < x1 - 0.001; x += tw)
+            if (x + tw > c[0] && x < c[2] && y + th > c[1] && y < c[3])
+                emit_image(dl, (float)x, (float)y, (float)tw, (float)th, handle);
+    dl_clip_range(dl, from, c);
+}
+
 static void on_async_image_loaded(const char *url, void *user_data);
 
 void display_list_set_image_cache(ImageCache *cache)
@@ -1066,7 +1132,7 @@ static int canvas_background(LayoutContext *ctx, DisplayList *dl)
     int root = ctx->tree.root_idx;
     if (root < 0 || root >= ctx->tree.count || !ctx->doc) return -1;
     int src = -1;
-    if (ctx->boxes[root].s->background_color_a > 0.0f) {
+    if (ctx->boxes[root].s->background_color_a > 0.0f || ctx->boxes[root].s->background_image_url[0]) {
         src = root;
     } else {
         HtmlNode *rn = (HtmlNode *)po_array_payload(&ctx->doc->array, ctx->tree.nodes[root].dom_node_idx);
@@ -1074,7 +1140,9 @@ static int canvas_background(LayoutContext *ctx, DisplayList *dl)
         for (int c = ctx->tree.nodes[root].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
             HtmlNode *n = (HtmlNode *)po_array_payload(&ctx->doc->array, ctx->tree.nodes[c].dom_node_idx);
             if (!n || n->type != HTML_NODE_ELEMENT || !n->tag_name || strcasecmp(n->tag_name, "body") != 0) continue;
-            if (ctx->boxes[c].s->background_color_a > 0.0f && ctx->boxes[c].s->display != CSS_DISPLAY_NONE) src = c;
+            if ((ctx->boxes[c].s->background_color_a > 0.0f || ctx->boxes[c].s->background_image_url[0]) &&
+                ctx->boxes[c].s->display != CSS_DISPLAY_NONE)
+                src = c;
             break;
         }
     }
@@ -1087,11 +1155,120 @@ static int canvas_background(LayoutContext *ctx, DisplayList *dl)
         if (b->y + b->height > h) h = b->y + b->height;
     }
     const LayoutStyle *s = ctx->boxes[src].s;
-    if (!display_list_add_rect(dl, 0.0f, 0.0f, (float)ceil(w), (float)ceil(h), (float)s->background_color_r,
+    if (s->background_color_a > 0.0f &&
+        !display_list_add_rect(dl, 0.0f, 0.0f, (float)ceil(w), (float)ceil(h), (float)s->background_color_r,
                                (float)s->background_color_g, (float)s->background_color_b,
                                (float)s->background_color_a * (float)ctx->boxes[src].opacity_eff))
         return -2;
+    if (g_image_cache && s->background_image_url[0]) {
+        float area[4] = { 0.0f, 0.0f, (float)ceil(w), (float)ceil(h) };
+        emit_background_image(ctx, dl, &ctx->boxes[src], area);
+    }
     return src;
+}
+
+/* ---- Paint order (CSS 2.1 Appendix E, simplified) ----
+ * Each stacking context paints its own box, then its negative z-index
+ * stacking contexts, then its block-level descendants (backgrounds,
+ * borders), its floats, its inline-level content (an inline-block whole),
+ * then its positioned descendants with z-index auto or 0 in tree order, then
+ * the positive z-index ones.  A float, an atomic inline or a positioned box
+ * with z-index auto paints like a stacking context of its own (its positioned
+ * descendants with it: an approximation). */
+typedef struct { int *v; int n, cap; } PaintVec;
+
+static bool pv_push(PaintVec *p, int x)
+{
+    if (p->n == p->cap) {
+        int nc = p->cap ? p->cap * 2 : 16;
+        int *nv = (int *)realloc(p->v, (size_t)nc * sizeof(int));
+        if (!nv) return false;
+        p->v = nv;
+        p->cap = nc;
+    }
+    p->v[p->n++] = x;
+    return true;
+}
+
+static bool paint_is_context(const LayoutContext *ctx, int i)
+{
+    const LayoutBox *b = &ctx->boxes[i];
+    if (b->s->position == CSS_POSITION_FIXED || b->s->position == CSS_POSITION_STICKY) return true;
+    if (b->s->z_index_set) {
+        if (b->s->position != CSS_POSITION_STATIC) return true;
+        int p = ctx->tree.nodes[i].parent_idx;   /* (a flex or grid item) */
+        if (p >= 0 && (ctx->boxes[p].s->display == CSS_DISPLAY_FLEX || ctx->boxes[p].s->display == CSS_DISPLAY_GRID))
+            return true;
+    }
+    return b->s->opacity_set && b->s->opacity < 1.0;
+}
+
+typedef struct { PaintVec negs, blocks, floats, inlines, zeros, pos; } PaintLayers;
+
+/* A stacking context's descendants into its layers (an atomic inline in
+ * inlines as -(index + 2)). */
+static void paint_walk(const LayoutContext *ctx, int n, PaintLayers *L)
+{
+    for (int c = ctx->tree.nodes[n].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+        const LayoutBox *b = &ctx->boxes[c];
+        if (b->s->display == CSS_DISPLAY_NONE) continue;
+        bool sc = paint_is_context(ctx, c);
+        if (b->s->position != CSS_POSITION_STATIC || sc) {
+            int z = b->s->z_index_set ? b->s->z_index : 0;
+            if (z < 0 && sc) pv_push(&L->negs, c);
+            else if (z > 0 && sc) pv_push(&L->pos, c);
+            else pv_push(&L->zeros, c);
+            continue;
+        }
+        if (b->s->float_side != 0) { pv_push(&L->floats, c); continue; }
+        HtmlNode *dn = ctx->doc ? (HtmlNode *)po_array_payload(&ctx->doc->array, ctx->tree.nodes[c].dom_node_idx) : NULL;
+        bool text = dn && dn->type == HTML_NODE_TEXT;
+        if (text || (b->s->display == CSS_DISPLAY_INLINE && !b->s->inline_level)) {
+            pv_push(&L->inlines, c);
+            paint_walk(ctx, c, L);
+        } else if (b->s->display == CSS_DISPLAY_INLINE_BLOCK || b->s->inline_level) {
+            pv_push(&L->inlines, -(c + 2));
+        } else {
+            pv_push(&L->blocks, c);
+            paint_walk(ctx, c, L);
+        }
+    }
+}
+
+/* By z-index, tree order kept among equals. */
+static void paint_sort_z(const LayoutContext *ctx, PaintVec *p)
+{
+    for (int a = 1; a < p->n; a++) {
+        int x = p->v[a], zx = ctx->boxes[x].s->z_index, b = a - 1;
+        while (b >= 0 && ctx->boxes[p->v[b]].s->z_index > zx) { p->v[b + 1] = p->v[b]; b--; }
+        p->v[b + 1] = x;
+    }
+}
+
+static void paint_context(const LayoutContext *ctx, int root, PaintVec *out, int depth)
+{
+    pv_push(out, root);
+    if (depth > 200) {   /* (pathologically deep: its subtree in tree order) */
+        int e = subtree_end(ctx, root);
+        for (int k = root + 1; k < e; k++) pv_push(out, k);
+        return;
+    }
+    PaintLayers L;
+    memset(&L, 0, sizeof(L));
+    paint_walk(ctx, root, &L);
+    paint_sort_z(ctx, &L.negs);
+    paint_sort_z(ctx, &L.pos);
+    for (int k = 0; k < L.negs.n; k++) paint_context(ctx, L.negs.v[k], out, depth + 1);
+    for (int k = 0; k < L.blocks.n; k++) pv_push(out, L.blocks.v[k]);
+    for (int k = 0; k < L.floats.n; k++) paint_context(ctx, L.floats.v[k], out, depth + 1);
+    for (int k = 0; k < L.inlines.n; k++) {
+        int x = L.inlines.v[k];
+        if (x >= 0) pv_push(out, x);
+        else paint_context(ctx, -x - 2, out, depth + 1);
+    }
+    for (int k = 0; k < L.zeros.n; k++) paint_context(ctx, L.zeros.v[k], out, depth + 1);
+    for (int k = 0; k < L.pos.n; k++) paint_context(ctx, L.pos.v[k], out, depth + 1);
+    free(L.negs.v); free(L.blocks.v); free(L.floats.v); free(L.inlines.v); free(L.zeros.v); free(L.pos.v);
 }
 
 static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (*clip)[4])
@@ -1099,16 +1276,36 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
     bool dark_mode = document_is_dark_mode(ctx);
     TextShaper *default_font = display_list_get_default_font();
     int pending_box = -1, pending_from = 0;
-    /* Open masks: each covers its box's subtree, [i, end). */
-    int mask_end[64], mask_idx[64], nmask = 0;
+    /* Open masks: each covers its box's subtree, [start, end) of the layout
+     * indices.  Every such mask is also noted (reg_*), so a descendant
+     * painted after its subtree was left (a positioned one) opens it again. */
+    int mask_start[64], mask_end[64], mask_idx[64], nmask = 0;
+    enum { REG_MAX = 512 };
+    int reg_start[REG_MAX], reg_end[REG_MAX], reg_idx[REG_MAX], nreg = 0;
     int canvas_src = canvas_background(ctx, dl);
     if (canvas_src == -2) return false;
 
-    for (int i = 0; i < ctx->tree.count; i++) {
+    /* (kept from build to build on this thread) */
+    static __thread PaintVec order;
+    order.n = 0;
+    if (ctx->tree.root_idx >= 0) paint_context(ctx, ctx->tree.root_idx, &order, 0);
+
+    for (int k = 0; k < order.n; k++) {
+        int i = order.v[k];
         if (pending_box >= 0 && clip) dl_clip_range(dl, pending_from, clip[pending_box]);
-        while (nmask > 0 && mask_end[nmask - 1] <= i) {
+        while (nmask > 0 && !(mask_start[nmask - 1] <= i && i < mask_end[nmask - 1])) {
             nmask--;
             dl_add_mask_cmd(dl, DL_MASK_END, mask_idx[nmask], &dl->masks[mask_idx[nmask]]);
+        }
+        for (int r = 0; r < nreg && nmask < 64; r++) {
+            if (!(reg_start[r] < i && i < reg_end[r])) continue;
+            bool open = false;
+            for (int m = 0; m < nmask && !open; m++) open = mask_idx[m] == reg_idx[r];
+            if (open || !dl_add_mask_cmd(dl, DL_MASK_BEGIN, reg_idx[r], &dl->masks[reg_idx[r]])) continue;
+            mask_start[nmask] = reg_start[r];
+            mask_end[nmask] = reg_end[r];
+            mask_idx[nmask] = reg_idx[r];
+            nmask++;
         }
         pending_box = i;
         pending_from = dl->count;
@@ -1145,8 +1342,12 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             if (box_mask(box, &m)) {
                 int mi = dl_add_mask(dl, &m);
                 if (mi >= 0 && dl_add_mask_cmd(dl, DL_MASK_BEGIN, mi, &m)) {
+                    mask_start[nmask] = i;
                     mask_end[nmask] = subtree_end(ctx, i);
                     mask_idx[nmask] = mi;
+                    if (nreg < REG_MAX && mask_end[nmask] > i + 1) {
+                        reg_start[nreg] = i; reg_end[nreg] = mask_end[nmask]; reg_idx[nreg] = mi; nreg++;
+                    }
                     nmask++;
                 }
             }
@@ -1197,8 +1398,12 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             if (box_round_mask(box, &rm)) {
                 int mi = dl_add_mask(dl, &rm);
                 if (mi >= 0 && dl_add_mask_cmd(dl, DL_MASK_BEGIN, mi, &rm)) {
+                    mask_start[nmask] = i;
                     mask_end[nmask] = (box->s->overflow != 0 || is_replaced_tag(node)) ? subtree_end(ctx, i) : i + 1;
                     mask_idx[nmask] = mi;
+                    if (nreg < REG_MAX && mask_end[nmask] > i + 1) {
+                        reg_start[nreg] = i; reg_end[nreg] = mask_end[nmask]; reg_idx[nreg] = mi; nreg++;
+                    }
                     nmask++;
                 }
             }
@@ -1222,13 +1427,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                 return false;
         }
         if (!pieces && box->width >= 2.0f && box->height >= 2.0f && box->width * box->height >= 6.0f) {
-            /* Background image, stretched to the padding box. */
-            if (g_image_cache && box->s->background_image_url[0]) {
-                int handle = image_cache_request(g_image_cache, box->s->background_image_url,
-                                                 (int)ceil(box->width), (int)ceil(box->height));
-                emit_image(dl, (float)box->x, (float)box->y,
-                           (float)box->width, (float)box->height, handle);
-            }
+            if (g_image_cache && box->s->background_image_url[0] && i != canvas_src) emit_background_image(ctx, dl, box, NULL);
         }
 
         /* Replaced images: <img src="..."> */
@@ -1304,6 +1503,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     float ta = (float)box->s->color_a;
                     if (ta <= 0.0f) ta = 1.0f;
                     ta *= op;
+                    if (box->s->font_size > 0.0 && box->s->font_size < 0.5) ta = 0.0f;   /* (font-size 0) */
                     /* In dark mode, default-black text is invisible on dark
                      * backgrounds.  Render it white so labels are readable. */
                     if (dark_mode && tr < 0.1f && tg < 0.1f && tb < 0.1f) {
