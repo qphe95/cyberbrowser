@@ -34,10 +34,18 @@ typedef struct GlyphEntry {
     float    xadvance;
 } GlyphEntry;
 
+#define TS_SIZED_MAX 16
+
 struct TextShaper {
     uint8_t        *ttf_data;
     size_t          ttf_size;
     bool            ttf_mapped;    /* a view of the font file, not malloc()ed */
+    bool            ttf_borrowed;  /* the base shaper's (a size of it, below): not ours to release */
+    int             font_offset;
+    /* The same font rasterized at other sizes, for drawing text there
+     * (ts_draw_glyph): each with its own atlas and slot. */
+    struct TextShaper *sized[TS_SIZED_MAX];
+    int             nsized;
     int             slot;          /* font-registry slot (-1 = none) */
     int             embolden;      /* synthetic bold: extra pixels per glyph */
     stbtt_fontinfo  font;
@@ -317,6 +325,25 @@ static bool ts_add_glyph(DisplayList *dl, const TextShaper *owner, float x, floa
     return true;
 }
 
+static TextShaper *ts_sized(TextShaper *s, float px);
+
+/* Glyph ge of owner (codepoint cp) drawn with its pen at (pen_x, base_y),
+ * owner's size times scale: from owner rasterized at that size, where the
+ * glyph's box falls on the right pixels (a scaled bitmap was a pixel or
+ * more off at large sizes, and blurred), else owner's glyph scaled. */
+static bool ts_draw_glyph(DisplayList *dl, TextShaper *owner, const GlyphEntry *ge, uint32_t cp, float pen_x,
+                          float base_y, float scale, float r, float g, float b, float a)
+{
+    if (fabsf(scale - 1.0f) > 0.01f) {
+        TextShaper *v = ts_sized(owner, owner->size_pixels * scale);
+        GlyphEntry *vg = v ? ensure_glyph(v, cp) : NULL;
+        if (vg)
+            return ts_add_glyph(dl, v, pen_x + vg->xoff, base_y + vg->yoff, (float)vg->bw, (float)vg->bh, vg, r, g, b, a);
+    }
+    return ts_add_glyph(dl, owner, pen_x + ge->xoff * scale, base_y + ge->yoff * scale, (float)ge->bw * scale,
+                        (float)ge->bh * scale, ge, r, g, b, a);
+}
+
 TextShaper *text_shaper_create(const char *ttf_path, float size_pixels)
 {
     if (!ttf_path || size_pixels <= 0) return NULL;
@@ -365,6 +392,7 @@ static TextShaper *ts_create(uint8_t *data, size_t size, int font_index, float s
     TextShaper *s = (TextShaper *)calloc(1, sizeof(TextShaper));
     if (!s) { ts_release_data(data, mapped); return NULL; }
 
+    s->font_offset = offset;
     s->ttf_data = data;
     s->ttf_size = size;
     s->ttf_mapped = mapped;
@@ -410,6 +438,7 @@ static TextShaper *ts_create(uint8_t *data, size_t size, int font_index, float s
 void text_shaper_destroy(TextShaper *s)
 {
     if (!s) return;
+    for (int i = 0; i < s->nsized; i++) text_shaper_destroy(s->sized[i]);
     if (s->metric_pages) {
         for (int i = 0; i < TS_METRIC_PAGES; i++) free((void *)s->metric_pages[i]);
         free((void *)s->metric_pages);
@@ -417,8 +446,54 @@ void text_shaper_destroy(TextShaper *s)
     free((void *)s->kern);
     free(s->glyphs);
     free(s->atlas);
-    ts_release_data(s->ttf_data, s->ttf_mapped);
+    if (!s->ttf_borrowed) ts_release_data(s->ttf_data, s->ttf_mapped);
     free(s);
+}
+
+static int (*g_slot_alloc)(TextShaper *);
+
+void text_shaper_set_slot_allocator(int (*alloc)(TextShaper *)) { g_slot_alloc = alloc; }
+
+/* Base shaper s rasterized at px pixels (quantized to a quarter pixel): a
+ * shaper of its own on the same font bytes, with an atlas and a slot of its
+ * own (g_slot_alloc), made the first time; NULL when there is no room for
+ * another (drawing scales s's glyphs then). */
+static TextShaper *ts_sized(TextShaper *s, float px)
+{
+    if (!s || !g_slot_alloc || px < 4.0f || px > 512.0f) return NULL;
+    px = roundf(px * 4.0f) / 4.0f;
+    for (int i = 0; i < s->nsized; i++)
+        if (s->sized[i]->size_pixels == px) return s->sized[i]->slot >= 0 ? s->sized[i] : NULL;
+    if (s->nsized >= TS_SIZED_MAX) return NULL;
+    TextShaper *v = (TextShaper *)calloc(1, sizeof(TextShaper));
+    if (!v) return NULL;
+    v->ttf_data = s->ttf_data;
+    v->ttf_size = s->ttf_size;
+    v->ttf_mapped = s->ttf_mapped;
+    v->ttf_borrowed = true;
+    v->font_offset = s->font_offset;
+    v->slot = -1;
+    v->embolden = s->embolden ? (int)roundf((float)s->embolden * px / s->size_pixels) : 0;
+    if (s->embolden && v->embolden < 1) v->embolden = 1;
+    v->size_pixels = px;
+    v->atlas_w = TS_ATLAS_WIDTH;
+    v->atlas_h = TS_ATLAS_HEIGHT;
+    v->metric_pages = calloc(TS_METRIC_PAGES, sizeof(*v->metric_pages));
+    v->kern = calloc(TS_KERN_SLOTS, sizeof(*v->kern));
+    if (!v->metric_pages || !v->kern || !stbtt_InitFont(&v->font, v->ttf_data, v->font_offset)) {
+        text_shaper_destroy(v);
+        return NULL;
+    }
+    v->scale = stbtt_ScaleForMappingEmToPixels(&v->font, px);
+    int ascent, descent, line_gap;
+    stbtt_GetFontVMetrics(&v->font, &ascent, &descent, &line_gap);
+    v->ascent = (float)ascent * v->scale;
+    v->descent = (float)descent * v->scale;
+    v->line_gap = (float)line_gap * v->scale;
+    v->baseline = v->ascent;
+    s->sized[s->nsized++] = v;          /* (kept even without a slot: not tried again) */
+    if (g_slot_alloc(v) < 0) return NULL;
+    return v;
 }
 
 TextShaper *text_shaper_create_from_memory_ex(uint8_t *data, size_t size, int font_index, float size_pixels,
@@ -461,6 +536,24 @@ bool text_shaper_atlas_take_dirty(TextShaper *s, int *y0, int *y1)
     *y1 = s->dirty_y1 < s->atlas_h ? s->dirty_y1 : s->atlas_h;
     s->dirty_y0 = s->dirty_y1 = 0;
     return true;
+}
+
+/* The height of "x" and the advance of "0", as fractions of the em (CSS's
+ * ex and ch); 0 when the font has no such glyph. */
+float text_shaper_x_height(const TextShaper *s)
+{
+    int x0, y0, x1, y1;
+    if (!s || !stbtt_FindGlyphIndex(&s->font, 'x') || !stbtt_GetCodepointBox(&s->font, 'x', &x0, &y0, &x1, &y1))
+        return 0.0f;
+    return (float)y1 * s->scale / s->size_pixels;
+}
+
+float text_shaper_zero_advance(const TextShaper *s)
+{
+    int adv, lsb;
+    if (!s || !stbtt_FindGlyphIndex(&s->font, '0')) return 0.0f;
+    stbtt_GetCodepointHMetrics(&s->font, '0', &adv, &lsb);
+    return (float)adv * s->scale / s->size_pixels;
 }
 
 bool text_shaper_vmetrics(const TextShaper *s, float *ascent, float *descent, float *line_gap)
@@ -539,9 +632,7 @@ bool text_shaper_shape_to_display_list_scaled(const TextShaper *s,
         if (prev_glyph >= 0 && gs == s) {
             pen_x += (float)ts_kern(s, prev_glyph, ge->glyph_index) * s->scale * scale;
         }
-        float gx = pen_x + ge->xoff * scale;
-        float gy = pen_y + ge->yoff * scale;
-        if (!ts_add_glyph(dl, gs, gx, gy, (float)ge->bw * scale, (float)ge->bh * scale, ge, r, g, b, a))
+        if (!ts_draw_glyph(dl, gs, ge, cp, pen_x, pen_y, scale, r, g, b, a))
             return false;
         pen_x += ge->xadvance * scale;
         prev_glyph = gs == s ? ge->glyph_index : -1;
@@ -633,9 +724,7 @@ static bool ts_emit_span_glyphs(const TextShaper *s, const char *gp,
         if (*prev_glyph >= 0 && gs == s) {
             *pen_x += (float)ts_kern(s, *prev_glyph, ge->glyph_index) * s->scale * scale;
         }
-        float gx = *pen_x + ge->xoff * scale;
-        float gyy = gy + ge->yoff * scale;
-        if (!ts_add_glyph(dl, gs, gx, gyy, (float)ge->bw * scale, (float)ge->bh * scale, ge, r, g, b, a))
+        if (!ts_draw_glyph(dl, gs, ge, gc, *pen_x, gy, scale, r, g, b, a))
             return false;
         *pen_x += ge->xadvance * scale;
         *prev_glyph = gs == s ? ge->glyph_index : -1;
@@ -890,9 +979,7 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
                 if (prev_glyph >= 0 && gs == s) {
                     pen_x += (float)ts_kern(s, prev_glyph, ge->glyph_index) * s->scale * scale;
                 }
-                float gx = pen_x + ge->xoff * scale;
-                float gyy = gy + ge->yoff * scale;
-                if (!ts_add_glyph(dl, gs, gx, gyy, (float)ge->bw * scale, (float)ge->bh * scale, ge, r, g, b, a))
+                if (!ts_draw_glyph(dl, gs, ge, gc, pen_x, gy, scale, r, g, b, a))
                     return false;
                 pen_x += ge->xadvance * scale;
                 prev_glyph = gs == s ? ge->glyph_index : -1;

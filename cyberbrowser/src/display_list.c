@@ -230,6 +230,20 @@ static bool node_has_hidden_class(LayoutContext *ctx, int node_idx)
  * Emissions that bypass the size filters (text glyphs, <img>, background
  * images) must check this so hidden subtrees (scripts, off-screen menus,
  * head content) do not leak onto the page at the origin. */
+/* A box's rectangle on whole pixels, as browsers paint backgrounds and
+ * borders: each edge rounded (a 1.33 px wide box is a 1 px line, not 2 px
+ * with a faint one), and never less than a pixel when it has any size. */
+static void snap_rect(float *x, float *y, float *w, float *h)
+{
+    float x0 = roundf(*x), y0 = roundf(*y), x1 = roundf(*x + *w), y1 = roundf(*y + *h);
+    if (*w > 0.0f && x1 <= x0) x1 = x0 + 1.0f;
+    if (*h > 0.0f && y1 <= y0) y1 = y0 + 1.0f;
+    *x = x0;
+    *y = y0;
+    *w = x1 - x0;
+    *h = y1 - y0;
+}
+
 /* The backgrounds and borders of the pieces of split inline el (the left
  * edge on its first, the right on its last) that are placed against child
  * anchor (-1: those placed against el itself). */
@@ -248,6 +262,7 @@ static void paint_pieces(LayoutContext *ctx, DisplayList *dl, int el, int anchor
         float px = (float)(ab->x + pc->dx), py = (float)(ab->y + pc->dy);
         float pw = (float)pc->w, ph = (float)pc->h;
         if (pw <= 0.0f || ph <= 0.0f) continue;
+        snap_rect(&px, &py, &pw, &ph);
         if (box->s->background_color_a > 0.0f)
             display_list_add_rect(dl, px, py, pw, ph, (float)box->s->background_color_r,
                                   (float)box->s->background_color_g, (float)box->s->background_color_b,
@@ -423,6 +438,7 @@ static void emit_image_async(DisplayList *dl, const LayoutBox *box, const char *
     float cw = (float)(box->width - box->s->border_left - box->s->border_right - box->padding_left - box->padding_right);
     float ch = (float)(box->height - box->s->border_top - box->s->border_bottom - box->padding_top - box->padding_bottom);
     if (cw <= 0.0f || ch <= 0.0f) return;
+    snap_rect(&cx, &cy, &cw, &ch);      /* (on whole pixels, as a background is) */
     int handle = image_cache_request(g_image_cache, url, (int)ceilf(cw), (int)ceilf(ch));
     if (handle < 0) return;
     int img_w = 0, img_h = 0, chn = 0;
@@ -1158,12 +1174,14 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         /* Backgrounds paint first: under the borders, list marker and the
          * box's content. */
         /* (a color however thin: a 1px box is a line) */
-        if (!pieces && box->width > 0.0f && box->height > 0.0f && box->s->background_color_a > 0.0f &&
-            !display_list_add_rect(dl, (float)box->x, (float)box->y,
-                                   (float)box->width, (float)box->height,
-                                   (float)box->s->background_color_r, (float)box->s->background_color_g,
-                                   (float)box->s->background_color_b, (float)box->s->background_color_a * op))
-            return false;
+        if (!pieces && box->width > 0.0f && box->height > 0.0f && box->s->background_color_a > 0.0f) {
+            float bgx = (float)box->x, bgy = (float)box->y, bgw = (float)box->width, bgh = (float)box->height;
+            snap_rect(&bgx, &bgy, &bgw, &bgh);
+            if (!display_list_add_rect(dl, bgx, bgy, bgw, bgh, (float)box->s->background_color_r,
+                                       (float)box->s->background_color_g, (float)box->s->background_color_b,
+                                       (float)box->s->background_color_a * op))
+                return false;
+        }
         if (!pieces && box->width >= 2.0f && box->height >= 2.0f && box->width * box->height >= 6.0f) {
             /* Background image, stretched to the padding box. */
             if (g_image_cache && box->s->background_image_url[0]) {
@@ -1392,6 +1410,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             float br_a = (float)(box->s->border_color_set ? box->s->border_color_a : box->s->color_a) * op;
             float bx = (float)box->x, by = (float)box->y;
             float bw = (float)box->width, bh = (float)box->height;
+            snap_rect(&bx, &by, &bw, &bh);
             DisplayMask ring;
             if (box_round_mask(box, &ring)) {
                 /* Rounded: the border is the ring between the outer and the

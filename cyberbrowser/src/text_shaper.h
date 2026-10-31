@@ -29,6 +29,9 @@ TextShaper *text_shaper_create_from_mapped(uint8_t *view, size_t size, int font_
 /* Does the font carry variation axes (fvar)?  Only its default instance is
  * drawn. */
 bool text_shaper_is_variable(const TextShaper *shaper);
+/* Who gives a shaper made for another size (text drawn at it) a slot of its
+ * own: the font registry; -1 for none. */
+void text_shaper_set_slot_allocator(int (*alloc)(TextShaper *shaper));
 /* Font-registry slot whose atlas holds this shaper's glyphs (-1 = none). */
 void text_shaper_set_slot(TextShaper *shaper, int slot);
 int  text_shaper_slot(const TextShaper *shaper);
@@ -45,6 +48,11 @@ int            text_shaper_atlas_used_rows(const TextShaper *shaper);
 /* The rows [y0, y1) drawn into since the last call (false: none): what a
  * copy of the atlas elsewhere (the GPU process's) needs again. */
 bool           text_shaper_atlas_take_dirty(TextShaper *shaper, int *y0, int *y1);
+
+/* The height of "x" and the advance of "0" as fractions of the em (CSS's
+ * ex and ch units); 0 when the font has no such glyph. */
+float text_shaper_x_height(const TextShaper *shaper);
+float text_shaper_zero_advance(const TextShaper *shaper);
 
 /* Vertical metrics as fractions of the em (descent positive). */
 bool text_shaper_vmetrics(const TextShaper *shaper, float *ascent, float *descent,

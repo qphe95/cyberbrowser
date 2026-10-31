@@ -710,9 +710,27 @@ static double css_parse_length(const char *value, double parent_value, double vi
 /* Per-layout unit context: viewport size for vw/vh/vmin/vmax and the root
  * element's font size for rem (set when the root box is styled). */
 static double g_unit_vw = 1024.0, g_unit_vh = 768.0, g_unit_rem = 16.0;
+/* The element whose declarations are being applied (layout_apply_declaration):
+ * its font gives ex and ch. */
+static __thread const LayoutBox *t_unit_box;
+
+/* ex (the font's x-height) or ch (the advance of "0") in ems, for the
+ * element t_unit_box with its font as styled so far; 0.5 without one. */
+static double unit_font_ratio(bool ch)
+{
+    const LayoutBox *b = t_unit_box;
+    if (!b || !b->s->font_family || !b->s->font_family[0]) return 0.5;
+    TextShaper *f = font_registry_slot(font_registry_resolve(b->s->font_family, b->s->font_weight,
+                                                             b->s->font_italic != 0));
+    float r = f ? (ch ? text_shaper_zero_advance(f) : text_shaper_x_height(f)) : 0.0f;
+    return r > 0.0f ? (double)r : 0.5;
+}
+
 static double css_unit_factor(const char *unit, double parent_value, double font_size, bool *known)
 {
     *known = true;
+    if (strcasecmp(unit, "ex") == 0) return font_size * unit_font_ratio(false);
+    if (strcasecmp(unit, "ch") == 0) return font_size * unit_font_ratio(true);
     if (strcasecmp(unit, "%") == 0) return parent_value / 100.0;
     if (strcasecmp(unit, "vw") == 0) return g_unit_vw / 100.0;
     if (strcasecmp(unit, "vh") == 0) return g_unit_vh / 100.0;
@@ -2216,6 +2234,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     const char *prop = decl->property;
     const char *value = decl->value;
     if (!prop || !value) return;
+    t_unit_box = box;
 
     if (strcasecmp(prop, "font") == 0) {
         /* The shorthand as its longhands (each reset when not given). */
