@@ -25,6 +25,9 @@ static pthread_cond_t g_done = PTHREAD_COND_INITIALIZER;
 static FetchEntry *g_all;
 static FetchEntry *g_qhead, *g_qtail;
 static int g_threads = -1;      /* -1: pool not started */
+static int g_idle;              /* workers waiting for work */
+static int g_urgent_threads;    /* workers added for fetches that may not wait (prefetch first) */
+#define URGENT_THREADS_MAX 4
 static DomFetchFn g_fetcher = http_get_to_memory;
 static DomFetchStats g_stats;
 
@@ -64,7 +67,11 @@ static void *fetch_worker(void *arg) {
     (void)arg;
     pthread_mutex_lock(&g_mu);
     for (;;) {
-        while (!g_qhead) pthread_cond_wait(&g_work, &g_mu);
+        while (!g_qhead) {
+            g_idle++;
+            pthread_cond_wait(&g_work, &g_mu);
+            g_idle--;
+        }
         FetchEntry *e = g_qhead;
         g_qhead = e->qnext;
         if (!g_qhead) g_qtail = NULL;
@@ -122,6 +129,15 @@ static void prefetch(const char *url, bool first) {
             e->qnext = g_qhead;
             g_qhead = e;
             if (!g_qtail) g_qtail = e;
+            /* (a render-blocking stylesheet: every worker may be on a large
+             * script; one more starts it now) */
+            pthread_t t;
+            if (g_idle == 0 && g_urgent_threads < URGENT_THREADS_MAX &&
+                pthread_create(&t, NULL, fetch_worker, NULL) == 0) {
+                pthread_detach(t);
+                g_threads++;
+                g_urgent_threads++;
+            }
         } else {
             if (g_qtail) g_qtail->qnext = e; else g_qhead = e;
             g_qtail = e;
@@ -194,6 +210,15 @@ bool dom_fetch_ready(const char *url) {
     bool ready = e && e->state == 2;
     pthread_mutex_unlock(&g_mu);
     return ready;
+}
+
+bool dom_fetch_in_flight(const char *url) {
+    if (!url) return false;
+    pthread_mutex_lock(&g_mu);
+    FetchEntry *e = find_entry(url);
+    bool busy = e && e->state < 2;
+    pthread_mutex_unlock(&g_mu);
+    return busy;
 }
 
 bool dom_fetch_wait_all(int timeout_ms) {

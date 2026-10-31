@@ -3916,7 +3916,7 @@ void css_layout_install_prefetched_sheets(void)
 bool css_layout_stylesheets_pending(void)
 {
     for (int i = 0; i < g_sheet_prefetch_n; i++)
-        if (!dom_fetch_ready(g_sheet_prefetch[i])) return true;
+        if (dom_fetch_in_flight(g_sheet_prefetch[i])) return true;
     return false;
 }
 

@@ -36,6 +36,9 @@ void dom_fetch_set_wait_hook(void (*fn)(void));
 
 /* Has a queued fetch of `url` finished (dom_fetch_script would not wait)? */
 bool dom_fetch_ready(const char *url);
+/* Is a prefetch of `url` still downloading (queued or running; not one
+ * finished, taken, or never asked for)? */
+bool dom_fetch_in_flight(const char *url);
 /* Wait until every prefetch has finished downloading (at most timeout_ms);
  * false on timeout.  For CYBER_DET_TIME (det_clock.h). */
 bool dom_fetch_wait_all(int timeout_ms);
