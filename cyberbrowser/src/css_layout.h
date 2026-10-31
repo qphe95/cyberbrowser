@@ -605,6 +605,18 @@ typedef struct LayoutContext {
      * an element, for the :has() key sets of generation has_bits_gen. */
     signed char *has_bits;
     uint64_t has_bits_gen;
+
+    /* Pseudo-element boxes (::before / ::after): after the style pass, the
+     * boxes its elements' styles call for are added after the document's
+     * nodes (base_count of them), each a pseudo element node with one text
+     * node, linked in as its element's first or last child.  Their document
+     * nodes are the layout's own (pseudo_nodes), at document indices from
+     * LAYOUT_PSEUDO_DOM0 on.  pseudo_rec: what each element's style said
+     * (const struct PseudoRec *, per document-built node, this pass). */
+    int base_count;
+    struct HtmlNode *pseudo_nodes;
+    int pseudo_nodes_n;
+    const void **pseudo_rec;
 } LayoutContext;
 
 #define LAYOUT_HAS_SUBJECT 1
@@ -664,6 +676,11 @@ int css_layout_inline_style_reach(const LayoutContext *ctx, const LayoutAttrOwne
 /* A DOM text node's text as this layout sees it (generated content
  * included). */
 const char *css_layout_node_text(const LayoutContext *ctx, const HtmlNode *node);
+
+/* The document node of layout box idx: one of the document's, or (a pseudo
+ * element's box and its text) one of the layout's own; NULL for none. */
+#define LAYOUT_PSEUDO_DOM0 0x40000000
+struct HtmlNode *css_layout_box_node(const LayoutContext *ctx, int idx);
 
 /* The text a text box lays out and paints (white space processed). */
 const char *css_layout_box_text(const LayoutContext *ctx, int idx, const char *raw);

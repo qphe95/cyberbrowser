@@ -887,7 +887,21 @@ static void fine_timer(void) {
     if (set) set(10000, TRUE, &actual);   /* (100 ns units) */
 }
 
+/* A crash, in the tab's log: where, the module's base (addr2line takes the
+ * address less the base plus the image base) and the stack. */
+static LONG WINAPI tab_crash_filter(EXCEPTION_POINTERS *ep) {
+    fprintf(stderr, "[tab %u] crashed: exception 0x%08lX at %p (module base %p)\n", g_tab,
+            (unsigned long)ep->ExceptionRecord->ExceptionCode, ep->ExceptionRecord->ExceptionAddress,
+            (void *)GetModuleHandleA(NULL));
+    void *frames[32];
+    USHORT n = RtlCaptureStackBackTrace(0, 32, frames, NULL);
+    for (USHORT i = 0; i < n; i++) fprintf(stderr, "  #%2d %p\n", (int)i, frames[i]);
+    fflush(stderr);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 int main(int argc, char **argv) {
+    SetUnhandledExceptionFilter(tab_crash_filter);
     g_start_tick = GetTickCount64();
     fine_timer();
     det_clock_set_js_thread();

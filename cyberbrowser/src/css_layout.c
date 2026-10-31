@@ -159,7 +159,15 @@ typedef struct CssCustomProps {
 
 static inline HtmlNode* layout_node_dom(LayoutContext *ctx, int dom_idx)
 {
+    if (dom_idx >= LAYOUT_PSEUDO_DOM0)   /* (a pseudo element's box or its text) */
+        return dom_idx - LAYOUT_PSEUDO_DOM0 < ctx->pseudo_nodes_n ? &ctx->pseudo_nodes[dom_idx - LAYOUT_PSEUDO_DOM0] : NULL;
     return (HtmlNode*)po_array_payload(&ctx->doc->array, dom_idx);
+}
+
+HtmlNode *css_layout_box_node(const LayoutContext *ctx, int idx)
+{
+    if (!ctx || idx < 0 || idx >= ctx->tree.count || !ctx->doc) return NULL;
+    return layout_node_dom((LayoutContext *)ctx, ctx->tree.nodes[idx].dom_node_idx);
 }
 
 static const char* layout_node_attribute(HtmlNode *node, const char *name)
@@ -179,25 +187,6 @@ const char *css_layout_node_text(const LayoutContext *ctx, const HtmlNode *node)
         if (i >= 0 && i < ctx->text_gen_cap && ctx->text_gen[i]) return ctx->text_gen[i];
     }
     return node->text_content;
-}
-
-/* Replace document node dom_idx's text for this layout (copied). */
-static void layout_set_node_text(LayoutContext *ctx, int dom_idx, const char *text, size_t len)
-{
-    if (!ctx->doc || dom_idx < 0) return;
-    if (!ctx->text_gen) {
-        int cap = (int)po_array_count(&ctx->doc->array);
-        ctx->text_gen = (char **)calloc((size_t)cap + 1, sizeof(char *));
-        if (!ctx->text_gen) return;
-        ctx->text_gen_cap = cap;
-    }
-    if (dom_idx >= ctx->text_gen_cap) return;
-    char *t = (char *)malloc(len + 1);
-    if (!t) return;
-    memcpy(t, text, len);
-    t[len] = '\0';
-    free(ctx->text_gen[dom_idx]);
-    ctx->text_gen[dom_idx] = t;
 }
 
 static inline LayoutNodeRef* layout_node_ref(LayoutContext *ctx, int idx)
@@ -686,6 +675,9 @@ void css_layout_tree_free(LayoutContext *ctx)
     }
     for (int i = 0; ctx->pieces && i < ctx->pieces_n; i++) free(ctx->pieces[i].p);
     free(ctx->pieces);
+    for (int k = 0; k < ctx->pseudo_nodes_n; k++) free(ctx->pseudo_nodes[k].text_content);
+    free(ctx->pseudo_nodes);
+    free(ctx->pseudo_rec);
     memset(ctx, 0, sizeof(*ctx));
 }
 
@@ -4617,63 +4609,6 @@ trunc:
     return true;
 }
 
-/* Deepest-last non-whitespace text descendant of a DOM node, or -1. */
-static int layout_last_text_descendant(LayoutContext *ctx, int idx)
-{
-    HtmlDocument *doc = ctx->doc;
-    int result = -1;
-    for (int c = po_array_first_child(&doc->array, idx); c >= 0;
-         c = po_array_next_sibling(&doc->array, c)) {
-        int sub = layout_last_text_descendant(ctx, c);
-        if (sub >= 0) result = sub;
-        HtmlNode *n = (HtmlNode *)po_array_payload(&doc->array, c);
-        const char *t = css_layout_node_text(ctx, n);
-        if (n && n->type == HTML_NODE_TEXT && t && !layout_text_is_whitespace(t))
-            result = c;
-    }
-    return result;
-}
-
-/* Realize an ::after generated-content string by injecting it into the DOM
- * text adjacent to the element.  Preferred site: a whitespace-only text node
- * immediately after the element — replacing it keeps the generated text
- * outside nested <a> elements (matching the pseudo box's own formatting
- * context) and preserves the collapsed-space geometry the whitespace would
- * have produced.  Fallback: append to the element's last text descendant
- * (minified markup without inter-element whitespace). */
-static void layout_inject_generated_after(LayoutContext *ctx, int idx,
-                                          const char *content)
-{
-    if (!ctx->doc || !content || !content[0]) return;
-    int dom_idx = ctx->tree.nodes[idx].dom_node_idx;
-    int sib = po_array_next_sibling(&ctx->doc->array, dom_idx);
-    if (sib >= 0) {
-        HtmlNode *sn = (HtmlNode *)po_array_payload(&ctx->doc->array, sib);
-        const char *st = css_layout_node_text(ctx, sn);
-        if (sn && sn->type == HTML_NODE_TEXT && st && layout_text_is_whitespace(st)) {
-            layout_set_node_text(ctx, sib, content, strlen(content));
-            return;
-        }
-    }
-    int last = layout_last_text_descendant(ctx, dom_idx);
-    if (last >= 0) {
-        HtmlNode *tn = (HtmlNode *)po_array_payload(&ctx->doc->array, last);
-        const char *tt = css_layout_node_text(ctx, tn);
-        if (tn && tt) {
-            size_t tl = strlen(tt), cl = strlen(content);
-            /* Idempotency guard: skip when the content is already there. */
-            if (tl >= cl && strcmp(tt + tl - cl, content) == 0)
-                return;
-            char *nt = (char *)malloc(tl + cl + 1);
-            if (!nt) return;
-            memcpy(nt, tt, tl);
-            memcpy(nt + tl, content, cl + 1);
-            layout_set_node_text(ctx, last, nt, tl + cl);
-            free(nt);
-        }
-    }
-}
-
 /* ============================================================================
  * Style pass (PARALLEL_STYLE_LAYOUT.md §7)
  *
@@ -4684,6 +4619,25 @@ static void layout_inject_generated_after(LayoutContext *ctx, int idx,
  * (buckets + ancestor Bloom filter).  Generated ::after content is recorded
  * and realized after the pass, so the pass never writes the document.
  * ============================================================================ */
+
+/* What an element's ::before (side 0) and ::after (side 1) styles say: the
+ * value of the winning content declaration (NULL: no box, as for none or
+ * normal) and the other declarations of the rules that matched, in cascade
+ * order (importance, specificity, order).  Both point into the style set's
+ * rules.  Built in a style thread's arena; a cache entry's copy is in the
+ * cache's (owned). */
+typedef struct PseudoSide {
+    const char *content;
+    int n;
+    const CssDeclaration *const *decls;
+} PseudoSide;
+typedef struct PseudoRec {
+    PseudoSide side[2];
+    bool owned;
+} PseudoRec;
+
+static const PseudoRec *pseudo_rec_own(const PseudoRec *r);
+static const PseudoRec *pseudo_rec_copy(const PseudoRec *r);
 
 typedef struct StyleGenAfter {
     int pos;                    /* preorder position (merge order) */
@@ -4703,6 +4657,7 @@ typedef struct StyleShareEntry {
     bool bits_ready;
     bool has_after;
     char after[256];
+    const PseudoRec *pseudo;
 } StyleShareEntry;
 
 typedef struct StyleThread {
@@ -4822,6 +4777,7 @@ typedef struct StyleCacheEntry {
     unsigned char pruned_below;
     unsigned char has_after;
     char after[256];
+    const PseudoRec *pseudo;    /* its ::before / ::after (NULL: none) */
     uint32_t ver;               /* changes whenever style does (style slots note it) */
     LayoutStyle style;
 } StyleCacheEntry;
@@ -7003,6 +6959,7 @@ static void style_cache_set(StyleCacheEntry *e, StylePass *P, int idx, const cha
     e->has_after = after != NULL;
     if (after) memcpy(e->after, after, sizeof(e->after));
     else e->after[0] = '\0';
+    e->pseudo = pseudo_rec_own(ctx->pseudo_rec[idx]);
     e->style = *ctx->boxes[idx].s;
     e->ver = style_cache_next_ver();
     HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
@@ -7023,6 +6980,7 @@ static void style_cache_set_stale(StyleCacheEntry *e, StylePass *P, int idx, con
     e->pruned_below = old ? old->pruned_below : 0;
     e->has_after = 0;
     e->after[0] = '\0';
+    e->pseudo = NULL;
     e->ver = style_cache_next_ver();
 }
 
@@ -7094,8 +7052,10 @@ static bool style_cache_update(StylePass *P, const StyleGenAfter *gen, int gen_t
         if (e && P->key_ok[idx] && !P->out_changed[idx] &&
             e->has_after == (after[idx] != NULL) &&
             (!after[idx] || strncmp(e->after, after[idx], sizeof(e->after)) == 0)) {
-            /* Same result: record what its cascade read this time. */
+            /* Same result: record what its cascade read this time (and
+             * what its pseudo-elements' did). */
             if (P->match_hash) e->match_hash = P->match_hash[idx];
+            if (e->pseudo != ctx->pseudo_rec[idx]) e->pseudo = pseudo_rec_own(ctx->pseudo_rec[idx]);
             e->pruned_below = ctx->pruned && ctx->pruned[idx];
             style_slot_note(P, idx, (int)(e - g_sc.e), e, true);
             continue;
@@ -7225,6 +7185,7 @@ static void style_cache_store(StylePass *P, uint64_t global, const StyleGenAfter
             e->match_hash = old->match_hash;
             e->has_after = old->has_after;
             memcpy(e->after, old->after, sizeof(e->after));
+            e->pseudo = pseudo_rec_copy(old->pseudo);
             e->style = old->style;
             e->ver = old->ver;
             hn->hidden_hint = e->style.display == CSS_DISPLAY_NONE ? 1 : 2;
@@ -7239,6 +7200,7 @@ static void style_cache_store(StylePass *P, uint64_t global, const StyleGenAfter
             e->has_after = after[idx] != NULL;
             if (after[idx]) memcpy(e->after, after[idx], sizeof(e->after));
             else e->after[0] = '\0';
+            e->pseudo = pseudo_rec_copy((const PseudoRec *)ctx->pseudo_rec[idx]);
             /* (a slot left as it was holds its entry's style as blockified
              * and given fonts after the last pass: the entry carries over) */
             if (P->kept && P->kept[idx]) {
@@ -7290,25 +7252,175 @@ typedef struct InlineBlock { CssDeclaration *decls; int count; } InlineBlock;
 
 /* Winning ::after `content` string for an element (legacy cascade: highest
  * important, then specificity of the first matching branch, then order). */
+typedef struct { const CssDeclaration *d; int imp, spec, order; } PseudoDecl;
+
+/* Count a function's comma-separated arguments (between its parentheses). */
+static int css_fn_args(const char *open, const char *close)
+{
+    int n = 0, depth = 0;
+    bool any = false;
+    for (const char *p = open + 1; p < close; p++) {
+        if (*p == '(') depth++;
+        else if (*p == ')') depth--;
+        else if (*p == ',' && depth == 0) { n++; any = false; continue; }
+        if (!isspace((unsigned char)*p)) any = true;
+    }
+    return any || n ? n + 1 : 0;
+}
+
+/* Is a content value valid (CSS 2.1 §12.2): none, normal, or a list of
+ * strings, url(), counter(name[, style]), counters(name, string[, style]),
+ * attr(name) and the quote keywords? */
+static bool css_content_value_valid(const char *v)
+{
+    while (isspace((unsigned char)*v)) v++;
+    if (!strncasecmp(v, "none", 4) || !strncasecmp(v, "normal", 6)) return true;
+    int items = 0;
+    while (*v) {
+        while (isspace((unsigned char)*v)) v++;
+        if (!*v || *v == '!') break;
+        if (*v == '"' || *v == '\'') {
+            char q = *v++;
+            while (*v && *v != q) v += *v == '\\' && v[1] ? 2 : 1;
+            if (*v != q) return false;
+            v++;
+            items++;
+            continue;
+        }
+        const char *w = v;
+        while (*v && (isalnum((unsigned char)*v) || *v == '-' || *v == '_')) v++;
+        size_t wl = (size_t)(v - w);
+        if (!wl) return false;
+        if (*v == '(') {
+            const char *open = v;
+            int depth = 0;
+            for (; *v; v++) {
+                if (*v == '(') depth++;
+                else if (*v == ')' && --depth == 0) break;
+            }
+            if (*v != ')') return false;
+            int args = css_fn_args(open, v);
+            v++;
+            if (wl == 7 && !strncasecmp(w, "counter", 7)) { if (args < 1 || args > 2) return false; }
+            else if (wl == 8 && !strncasecmp(w, "counters", 8)) { if (args < 2 || args > 3) return false; }
+            else if (wl == 4 && !strncasecmp(w, "attr", 4)) { if (args != 1) return false; }
+            else if (!(wl == 3 && !strncasecmp(w, "url", 3))) return false;
+        } else if (!((wl == 10 && !strncasecmp(w, "open-quote", 10)) || (wl == 11 && !strncasecmp(w, "close-quote", 11)) ||
+                     (wl == 13 && !strncasecmp(w, "no-open-quote", 13)) || (wl == 14 && !strncasecmp(w, "no-close-quote", 14)))) {
+            return false;
+        }
+        items++;
+    }
+    return items > 0;
+}
+
+static int pseudo_decl_cmp(const void *a, const void *b)
+{
+    const PseudoDecl *x = (const PseudoDecl *)a, *y = (const PseudoDecl *)b;
+    if (x->imp != y->imp) return x->imp - y->imp;
+    if (x->spec != y->spec) return x->spec < y->spec ? -1 : 1;
+    return x->order < y->order ? -1 : x->order > y->order;
+}
+
+/* The element's PseudoRec from its ::before / ::after matches (NULL when
+ * neither makes a box), in T's arena. */
+static const PseudoRec *style_pseudo_rec(StylePass *P, StyleThread *T, const CssAfterMatch *am, int n)
+{
+    if (n <= 0) return NULL;
+    PseudoDecl stack[64];
+    PseudoDecl *all = n * 8 <= 64 ? stack : NULL;
+    int cap = all ? 64 : 0, cnt = 0;
+    PseudoRec *rec = NULL;
+    for (int side = 0; side < 2; side++) {
+        const char *content = NULL;
+        int bi = -1, bs = -1, bo = -1;
+        cnt = 0;
+        for (int i = 0; i < n; i++) {
+            if ((am[i].is_before ? 0 : 1) != side) continue;
+            const CssRule *rule = css_styleset_rule(P->set, am[i].rule);
+            for (int d = 0; d < rule->declaration_count; d++) {
+                const CssDeclaration *decl = &rule->declarations[d];
+                if (!decl->property || !decl->value) continue;
+                int imp = decl->important ? 1 : 0, order = css_styleset_rule_order(P->set, am[i].rule) + d;
+                if (strcasecmp(decl->property, "content") == 0) {
+                    if (!css_content_value_valid(decl->value)) continue;   /* (invalid: ignored) */
+                    if (imp < bi || (imp == bi && am[i].specificity < bs) ||
+                        (imp == bi && am[i].specificity == bs && order <= bo)) continue;
+                    bi = imp; bs = am[i].specificity; bo = order;
+                    content = decl->value;
+                    continue;
+                }
+                if (cnt == cap) {
+                    int nc = cap ? cap * 2 : 64;
+                    PseudoDecl *na = (PseudoDecl *)malloc((size_t)nc * sizeof(PseudoDecl));
+                    if (!na) break;
+                    if (cnt) memcpy(na, all, (size_t)cnt * sizeof(PseudoDecl));
+                    if (all != stack) free(all);
+                    all = na;
+                    cap = nc;
+                }
+                all[cnt++] = (PseudoDecl){ decl, imp, am[i].specificity, order };
+            }
+        }
+        if (content) {
+            const char *v = content;
+            while (isspace((unsigned char)*v)) v++;
+            if (!strncasecmp(v, "none", 4) || !strncasecmp(v, "normal", 6)) content = NULL;
+        }
+        if (!content) continue;
+        if (!rec) {
+            rec = (PseudoRec *)frame_arena_alloc(&T->arena, sizeof(PseudoRec));
+            if (!rec) break;
+            memset(rec, 0, sizeof(*rec));
+        }
+        qsort(all, (size_t)cnt, sizeof(PseudoDecl), pseudo_decl_cmp);
+        const CssDeclaration **ds = cnt ? (const CssDeclaration **)frame_arena_alloc(&T->arena, (size_t)cnt * sizeof(*ds)) : NULL;
+        for (int k = 0; ds && k < cnt; k++) ds[k] = all[k].d;
+        rec->side[side].content = content;
+        rec->side[side].n = ds ? cnt : 0;
+        rec->side[side].decls = ds;
+    }
+    if (all != stack) free(all);
+    return rec;
+}
+
+/* A PseudoRec the style cache can keep: its own copy, in its arena (copy:
+ * even of one it owns, which may be in the arena it retired). */
+static const PseudoRec *pseudo_rec_copy(const PseudoRec *r)
+{
+    if (!r) return NULL;
+    PseudoRec *c = (PseudoRec *)frame_arena_alloc(&g_sc.arena, sizeof(PseudoRec));
+    if (!c) return NULL;
+    *c = *r;
+    c->owned = true;
+    for (int side = 0; side < 2; side++) {
+        if (!r->side[side].n) continue;
+        size_t b = (size_t)r->side[side].n * sizeof(CssDeclaration *);
+        const CssDeclaration **ds = (const CssDeclaration **)frame_arena_alloc(&g_sc.arena, b);
+        if (!ds) { c->side[side].n = 0; c->side[side].decls = NULL; continue; }
+        memcpy(ds, r->side[side].decls, b);
+        c->side[side].decls = ds;
+    }
+    return c;
+}
+
+/* The same, keeping one it owns (an in-place update: same arena). */
+static const PseudoRec *pseudo_rec_own(const PseudoRec *r)
+{
+    return r && r->owned ? r : pseudo_rec_copy(r);
+}
+
 static bool style_after_content(StylePass *P, StyleThread *T, int dom, char out[256],
-                                double *pseudo_aspect)
+                                const PseudoRec **rec)
 {
     const CssAfterMatch *am = NULL;
     int n = css_style_match_after(P->set, P->sd, dom, T->scratch, &am);
+    *rec = style_pseudo_rec(P, T, am, n);
     bool after_set = false;
     int best_important = -1, best_spec = -1, best_order = -1;
     out[0] = '\0';
     for (int i = 0; i < n; i++) {
         const CssRule *rule = css_styleset_rule(P->set, am[i].rule);
-        /* Pseudo-element aspect boxes (e.g. .thumb::before{padding-top:56.25%})
-         * size the real element, since pseudo boxes are not generated. */
-        for (int d = 0; d < rule->declaration_count; d++) {
-            const CssDeclaration *decl = &rule->declarations[d];
-            if (!decl->property || !decl->value || strcasecmp(decl->property, "padding-top") != 0) continue;
-            if (!css_value_is_percent(decl->value)) continue;
-            double ratio = css_parse_percent_ratio(decl->value);
-            if (ratio > *pseudo_aspect) *pseudo_aspect = ratio;
-        }
         if (am[i].is_before) continue;
         int branch_spec = am[i].specificity;
         for (int d = 0; d < rule->declaration_count; d++) {
@@ -7409,6 +7521,13 @@ static bool layout_apply_wide_keyword(LayoutBox *box, const LayoutBox *parent,
             return true;
         }
         if (strcasecmp(prop, "flex-direction") == 0) { box->s->flex_direction = parent->s->flex_direction; return true; }
+        if (strcasecmp(prop, "display") == 0) {
+            box->s->display = parent->s->display;
+            box->s->inline_level = parent->s->inline_level;
+            box->s->table_role = parent->s->table_role;
+            box->s->table_caption = parent->s->table_caption;
+            return true;
+        }
         if (strcasecmp(prop, "box-sizing") == 0) { box->s->box_sizing = parent->s->box_sizing; return true; }
         if (strcasecmp(prop, "overflow") == 0) { box->s->overflow = parent->s->overflow; return true; }
     }
@@ -7606,6 +7725,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
             else layout_style_set(box, &ce->style);
             ctx->custom_props[idx] = ce->props;
             P->match_hash[idx] = ce->match_hash;
+            ctx->pseudo_rec[idx] = ce->pseudo;
             if (!parent && box->s->font_size > 0.0) g_unit_rem = box->s->font_size;
             if (ce->has_after) {
                 if (T->gen_n == T->gen_cap) {
@@ -7651,6 +7771,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
                 /* (a slot left as it was is past the last pass's blockification: its entry) */
                 layout_style_set(box, P->kept && P->kept[e->idx] ? &P->cached[e->idx]->style : layout_box(ctx, e->idx)->s);
                 ctx->custom_props[idx] = ctx->custom_props[e->idx];
+                ctx->pseudo_rec[idx] = e->pseudo;
                 P->cls[idx] = P->cls[e->idx];
                 if (e->has_after) {
                     if (T->gen_n == T->gen_cap) {
@@ -7753,20 +7874,11 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
         }
         const CssCustomProps *props = ctx->custom_props[idx];
 
-        /* Pseudo-element aspect ratios (e.g. .thumbnail:before{padding-top:56.25%})
-         * are applied to the real element since pseudo boxes are not rendered. */
-        for (int d = 0; d < count; d++) {
-            if (!css_style_rule_has_aspect_base(P->set, applied[d].rule)) continue;
-            const char *prop = applied[d].decl->property;
-            if (!prop || strcasecmp(prop, "padding-top") != 0) continue;
-            if (!css_style_aspect_base_matches(P->set, P->sd, applied[d].rule, dom)) continue;
-            double ratio = css_parse_percent_ratio(applied[d].decl->value);
-            if (ratio > box->s->aspect_ratio) box->s->aspect_ratio = ratio;
-        }
-
         char after_content[256];
         double pseudo_aspect = 0.0;
-        bool after_set = style_after_content(P, T, dom, after_content, &pseudo_aspect);
+        const PseudoRec *prec = NULL;
+        bool after_set = style_after_content(P, T, dom, after_content, &prec);
+        ctx->pseudo_rec[idx] = prec;
 
         /* Matched-properties cache: the cascade below is a function of the
          * declarations matched, the inline styles, the ::after content, the
@@ -7893,6 +8005,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
         if (P->reval_words && bits_ready)
             memcpy(e->bits, T->bits, (size_t)P->reval_words * sizeof(uint64_t));
         e->has_after = share_has_after;
+        e->pseudo = ctx->pseudo_rec[idx];
         if (share_has_after) memcpy(e->after, share_after, sizeof(e->after));
     }
     if (node && node->type == HTML_NODE_ELEMENT)
@@ -7904,7 +8017,13 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
 /* What the cascade leaves to the parent's final style: inheritance,
  * parent-relative sizes, em lengths against the final font size, used
  * border widths and blockification. */
+static void style_finish_box_em(bool em_defer, LayoutBox *box, const LayoutBox *parent, bool element);
 static void style_finish_box(StylePass *P, LayoutBox *box, const LayoutBox *parent, bool element)
+{
+    style_finish_box_em(P->em_defer, box, parent, element);
+}
+
+static void style_finish_box_em(bool em_defer, LayoutBox *box, const LayoutBox *parent, bool element)
 {
     /* Inheritance and parent-relative values: the parent is final. */
     if (!box->s->font_size_set && box->s->font_size_ratio <= 0.0 && parent) {
@@ -7955,7 +8074,7 @@ static void style_finish_box(StylePass *P, LayoutBox *box, const LayoutBox *pare
     }
     /* em-unit margins/paddings resolve against the element's own FINAL
      * font-size (CSS 2.1 §8.3/§8.4). */
-    if (P->em_defer && box->s->em_deferred) {
+    if (em_defer && box->s->em_deferred) {
         double fs = box->s->font_size > 0.0 ? box->s->font_size : 16.0;
         if (box->s->em_deferred & 0x01) box->s->margin_top     = box->s->margin_em[0] * fs;
         if (box->s->em_deferred & 0x02) box->s->margin_right   = box->s->margin_em[1] * fs;
@@ -8024,6 +8143,7 @@ static void style_copy_subtree(StylePass *P, StyleThread *T, int pos)
             else layout_style_set(box, &ce->style);
             ctx->custom_props[idx] = ce->props;
             P->match_hash[idx] = ce->match_hash;
+            ctx->pseudo_rec[idx] = ce->pseudo;
             if (ce->has_after) {
                 if (T->gen_n == T->gen_cap) {
                     T->gen_cap = T->gen_cap ? T->gen_cap * 2 : 16;
@@ -8303,6 +8423,300 @@ static const CssStyleSet *styleset_cached(uint64_t gen, double vw, double vh)
 
 static void layout_restyle_all(LayoutContext *ctx);
 
+/* ---- Pseudo-element boxes (::before, ::after) ----
+ * The style pass notes what each element's ::before and ::after styles say
+ * (ctx->pseudo_rec); then layout_pseudo_attach adds a box for each one that
+ * has content: a pseudo element node (tag "::before" / "::after") holding
+ * one text node, after the document-built nodes (base_count of them), linked
+ * in as the element's first or last child, styled from the element's final
+ * style and its pseudo rules.  Their document nodes are the layout's own
+ * (pseudo_nodes).  A kept tree drops them (layout_pseudo_detach) before its
+ * next style pass. */
+
+static void style_finish_box_em(bool em_defer, LayoutBox *box, const LayoutBox *parent, bool element);
+
+/* No ::before / ::after boxes: replaced and void elements. */
+static bool layout_pseudo_allowed(const HtmlNode *n)
+{
+    static const char *const none[] = {
+        "img", "input", "select", "textarea", "iframe", "video", "audio", "canvas", "embed", "object",
+        "br", "wbr", "svg", "math", "meter", "progress", NULL
+    };
+    if (!n || n->type != HTML_NODE_ELEMENT || !n->tag_name) return false;
+    for (int i = 0; none[i]; i++)
+        if (strcasecmp(n->tag_name, none[i]) == 0) return false;
+    return true;
+}
+
+/* A content value's text: strings, attr() of the element, quotes (counters
+ * and images give none yet). */
+static void layout_pseudo_text(const char *v, const HtmlNode *owner, char *out, size_t cap)
+{
+    size_t o = 0;
+    out[0] = 0;
+    while (*v) {
+        while (isspace((unsigned char)*v)) v++;
+        if (!*v) break;
+        const char *piece = NULL;
+        char buf[1024];
+        size_t tl = 0;
+        if (*v == '"' || *v == '\'') {
+            char q = *v;
+            tl = 1;
+            while (v[tl] && v[tl] != q) tl += v[tl] == '\\' && v[tl + 1] ? 2 : 1;
+            if (v[tl] == q) tl++;
+            if (tl < sizeof(buf)) {
+                char tok[1024];
+                memcpy(tok, v, tl);
+                tok[tl] = 0;
+                bool empty = false;
+                if (css_content_decode_string(tok, buf, sizeof(buf), &empty)) piece = buf;
+            }
+        } else {
+            int depth = 0;
+            while (v[tl] && (depth > 0 || !isspace((unsigned char)v[tl]))) {
+                if (v[tl] == '(') depth++;
+                else if (v[tl] == ')' && depth > 0) depth--;
+                tl++;
+            }
+            if (!strncasecmp(v, "attr(", 5)) {
+                char name[128];
+                size_t nl = 0;
+                const char *a = v + 5;
+                while (isspace((unsigned char)*a)) a++;
+                while (*a && *a != ')' && !isspace((unsigned char)*a) && nl + 1 < sizeof(name)) name[nl++] = *a++;
+                name[nl] = 0;
+                /* (attribute names match ignoring case in an HTML document only) */
+                bool html = !owner->store_id || dom_is_html_document(dom_owner(owner->store_id));
+                for (const HtmlAttribute *at = owner->attributes; at && !piece; at = at->next)
+                    if (at->name && (html ? !strcasecmp(at->name, name) : !strcmp(at->name, name))) piece = at->value;
+            } else if (!strncasecmp(v, "open-quote", tl) && tl == 10) {
+                piece = "\xE2\x80\x9C";
+            } else if (!strncasecmp(v, "close-quote", tl) && tl == 11) {
+                piece = "\xE2\x80\x9D";
+            }
+        }
+        if (piece) {
+            size_t pl = strlen(piece);
+            if (o + pl >= cap) pl = cap - 1 - o;
+            memcpy(out + o, piece, pl);
+            o += pl;
+            out[o] = 0;
+        }
+        v += tl ? tl : 1;
+    }
+}
+
+/* The style of pseudo box pe (side 0 ::before, 1 ::after) of element owner:
+ * its rules' declarations over the defaults, then what the element's final
+ * style gives it. */
+static void layout_pseudo_style(LayoutContext *ctx, int pe, int owner, const PseudoSide *ps, bool em_defer)
+{
+    LayoutBox *box = &ctx->boxes[pe], *ob = &ctx->boxes[owner];
+    layout_box_init(ctx, pe);
+    const CssCustomProps *props = ctx->custom_props[owner];
+    for (int d = 0; d < ps->n; d++) {
+        const CssDeclaration *src = ps->decls[d];
+        const char *prop = src->property;
+        if (!prop || (prop[0] == '-' && prop[1] == '-')) continue;
+        t_var_failed = false;
+        char *resolved = css_var_resolve(src->value, props);
+        CssDeclaration decl = *src;
+        decl.value = resolved ? resolved : src->value;
+        if (t_var_failed) layout_unset_property(box, decl.property);
+        else if (!layout_apply_wide_keyword(box, ob, decl.property, decl.value, ctx->viewport_width, ctx->base_url))
+            layout_apply_declaration(box, &decl, ctx->viewport_width, ctx->viewport_width, ctx->base_url);
+        free(resolved);
+    }
+    style_finish_box_em(em_defer, box, ob, true);
+    /* (a column or column group renders no content) */
+    if (box->s->table_role == 6) box->s->display = CSS_DISPLAY_NONE;
+}
+
+/* Grow a per-box array to n entries (+1), new ones zero (fill: their byte). */
+static bool layout_grow(void **p, int old_n, int n, size_t each, int fill)
+{
+    if (!*p) return true;
+    void *np = realloc(*p, ((size_t)n + 1) * each);
+    if (!np) return false;
+    memset((char *)np + (size_t)old_n * each, fill, ((size_t)(n - old_n) + 1) * each);
+    *p = np;
+    return true;
+}
+
+static void layout_drop_text_caches(LayoutContext *ctx)
+{
+    if (ctx->text_norm) {
+        for (int i = 0; i < ctx->tree.count; i++) free(ctx->text_norm[i]);
+        free(ctx->text_norm);
+        ctx->text_norm = NULL;
+    }
+    free(ctx->intrinsic_cache);
+    ctx->intrinsic_cache = NULL;
+    for (int i = 0; ctx->pieces && i < ctx->pieces_n; i++) free(ctx->pieces[i].p);
+    free(ctx->pieces);
+    ctx->pieces = NULL;
+    ctx->pieces_n = 0;
+}
+
+static bool layout_build_orders(LayoutContext *ctx);
+
+static void layout_rebuild_orders(LayoutContext *ctx)
+{
+    free(ctx->tree.preorder);
+    free(ctx->tree.postorder);
+    ctx->tree.preorder = ctx->tree.postorder = NULL;
+    layout_build_orders(ctx);
+}
+
+/* Back to the document-built tree: the pseudo boxes out of their elements'
+ * children, their slots given back. */
+static void layout_pseudo_detach(LayoutContext *ctx)
+{
+    int base = ctx->base_count, n = ctx->tree.count;
+    if (base <= 0 || n <= base) return;
+    LayoutNodeRef *nodes = ctx->tree.nodes;
+    for (int i = base; i < n; i++) {
+        int owner = nodes[i].parent_idx;
+        if (owner < 0 || owner >= base) continue;   /* (a pseudo box's text) */
+        int prev = -1, cnt = 0;
+        int c = nodes[owner].first_child_idx;
+        nodes[owner].first_child_idx = -1;
+        while (c >= 0) {
+            int next = nodes[c].next_sibling_idx;
+            if (c < base) {
+                nodes[c].prev_sibling_idx = prev;
+                nodes[c].next_sibling_idx = -1;
+                if (prev < 0) nodes[owner].first_child_idx = c;
+                else nodes[prev].next_sibling_idx = c;
+                prev = c;
+                cnt++;
+            }
+            c = next;
+        }
+        nodes[owner].child_count = cnt;
+    }
+    layout_drop_text_caches(ctx);
+    for (int i = base; i < n; i++) layout_slot_give(ctx, ctx->slot[i]);
+    for (int k = 0; k < ctx->pseudo_nodes_n; k++) free(ctx->pseudo_nodes[k].text_content);
+    free(ctx->pseudo_nodes);
+    ctx->pseudo_nodes = NULL;
+    ctx->pseudo_nodes_n = 0;
+    ctx->tree.count = base;
+    layout_rebuild_orders(ctx);
+}
+
+static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
+{
+    int base = ctx->tree.count;
+    ctx->base_count = base;
+    if (!ctx->pseudo_rec) return;
+    int m = 0;
+    for (int i = 0; i < base; i++) {
+        const PseudoRec *r = (const PseudoRec *)ctx->pseudo_rec[i];
+        if (!r) continue;
+        const LayoutBox *b = &ctx->boxes[i];
+        if (b->s->display == CSS_DISPLAY_NONE || b->s->skipped) continue;
+        if (!layout_pseudo_allowed(layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx))) continue;
+        m += (r->side[0].content != NULL) + (r->side[1].content != NULL);
+    }
+    if (m == 0) return;
+    int n = base + 2 * m;
+    LayoutNodeRef *nn = (LayoutNodeRef *)realloc(ctx->tree.nodes, (size_t)n * sizeof(LayoutNodeRef));
+    if (!nn) return;
+    ctx->tree.nodes = nn;
+    LayoutBox *nb = (LayoutBox *)realloc(ctx->boxes, (size_t)n * sizeof(LayoutBox));
+    if (!nb) return;
+    ctx->boxes = nb;
+    HtmlNode *hn = (HtmlNode *)calloc((size_t)2 * m, sizeof(HtmlNode));
+    if (!hn) return;
+    if (!layout_grow((void **)&ctx->slot, base, n, sizeof(LayoutStyle *), 0) ||
+        !layout_grow((void **)&ctx->ids, base, n, sizeof(uint32_t), 0) ||
+        !layout_grow((void **)&ctx->custom_props, base, n, sizeof(CssCustomProps *), 0) ||
+        !layout_grow((void **)&ctx->style_ok, base, n, 1, 0) ||
+        !layout_grow((void **)&ctx->style_left, base, n, 1, 0) ||
+        !layout_grow((void **)&ctx->pruned, base, n, 1, 0) ||
+        !layout_grow((void **)&ctx->has_flags, base, n, 1, 0) ||
+        !layout_grow((void **)&ctx->sc_key, base, n, sizeof(uint64_t), 0) ||
+        !layout_grow((void **)&ctx->sc_entry, base, n, sizeof(int), 0) ||
+        !layout_grow((void **)&ctx->slot_ver, base, n, sizeof(uint32_t), 0) ||
+        !layout_grow((void **)&ctx->has_bits, base, n, 8, 0xFF) ||
+        !layout_grow((void **)&ctx->flow_old, base, n, sizeof(int), 0xFF)) {
+        free(hn);
+        return;
+    }
+    layout_drop_text_caches(ctx);
+    ctx->pseudo_nodes = hn;
+    ctx->pseudo_nodes_n = 2 * m;
+    int k = 0;
+    for (int owner = 0; owner < base; owner++) {
+        const PseudoRec *r = (const PseudoRec *)ctx->pseudo_rec[owner];
+        if (!r) continue;
+        const LayoutBox *b = &ctx->boxes[owner];
+        HtmlNode *on = layout_node_dom(ctx, ctx->tree.nodes[owner].dom_node_idx);
+        if (b->s->display == CSS_DISPLAY_NONE || b->s->skipped || !layout_pseudo_allowed(on)) continue;
+        for (int side = 0; side < 2; side++) {
+            const PseudoSide *ps = &r->side[side];
+            if (!ps->content) continue;
+            int pe = base + k, pt = pe + 1;
+            HtmlNode *he = &hn[k], *ht = &hn[k + 1];
+            char text[1024];
+            layout_pseudo_text(ps->content, on, text, sizeof(text));
+            he->array_node.parent = he->array_node.first_child = he->array_node.next_sibling = he->array_node.prev_sibling = -1;
+            ht->array_node = he->array_node;
+            he->type = HTML_NODE_ELEMENT;
+            he->tag_name = side ? "::after" : "::before";
+            ht->type = HTML_NODE_TEXT;
+            ht->tag_name = "";
+            ht->text_content = strdup(text);
+            ht->text_len = ht->text_content ? strlen(ht->text_content) : 0;
+            LayoutNodeRef *E = &ctx->tree.nodes[pe], *T = &ctx->tree.nodes[pt], *O = &ctx->tree.nodes[owner];
+            E->dom_node_idx = LAYOUT_PSEUDO_DOM0 + k;
+            T->dom_node_idx = LAYOUT_PSEUDO_DOM0 + k + 1;
+            E->parent_idx = owner;
+            E->first_child_idx = pt;
+            E->child_count = 1;
+            T->parent_idx = pe;
+            T->first_child_idx = T->next_sibling_idx = T->prev_sibling_idx = -1;
+            T->child_count = 0;
+            if (side == 0) {
+                E->prev_sibling_idx = -1;
+                E->next_sibling_idx = O->first_child_idx;
+                if (O->first_child_idx >= 0) ctx->tree.nodes[O->first_child_idx].prev_sibling_idx = pe;
+                O->first_child_idx = pe;
+            } else {
+                int last = -1;
+                for (int c = O->first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) last = c;
+                E->prev_sibling_idx = last;
+                E->next_sibling_idx = -1;
+                if (last < 0) O->first_child_idx = pe;
+                else ctx->tree.nodes[last].next_sibling_idx = pe;
+            }
+            O->child_count++;
+            for (int x = pe; x <= pt; x++) {
+                ctx->slot[x] = layout_slot_take(ctx);
+                memset(&ctx->boxes[x], 0, sizeof(LayoutBox));
+                ctx->boxes[x].s = ctx->slot[x];
+                ctx->custom_props[x] = ctx->custom_props[owner];
+            }
+            ctx->tree.count = pt + 1;   /* (layout_box_init reads the node) */
+            layout_pseudo_style(ctx, pe, owner, ps, em_defer);
+            layout_box_init(ctx, pt);
+            style_finish_box_em(em_defer, &ctx->boxes[pt], &ctx->boxes[pe], false);
+            k += 2;
+        }
+    }
+    /* (the first :has() target is a preorder position: the same box's in the
+     * new order, and "none" stays past the end) */
+    int target = ctx->has_target_first >= 0 && ctx->has_target_first < base && ctx->tree.preorder
+                 ? ctx->tree.preorder[ctx->has_target_first] : -1;
+    ctx->tree.count = n;
+    layout_rebuild_orders(ctx);
+    ctx->has_target_first = n;
+    for (int k = 0; target >= 0 && ctx->tree.preorder && k < n; k++)
+        if (ctx->tree.preorder[k] == target) { ctx->has_target_first = k; break; }
+}
+
 static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
 {
     STAGE_BEGIN();
@@ -8503,6 +8917,9 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
         P.text_style_check = check_text != 0;
     }
     g_restyle_reused = g_restyle_recomputed = g_restyle_matched_same = 0;
+    free(ctx->pseudo_rec);
+    ctx->pseudo_rec = (const void **)calloc((size_t)n + 1, sizeof(void *));
+    if (!ctx->pseudo_rec) return;
     job_graph_run(job_new(style_root_job, NULL, &P, 0, 0));
     ctx->style_skipped = (int)atomic_load(&P.skipped_n);
     if (!ctx->style_ok) ctx->style_ok = (unsigned char *)malloc((size_t)n + 1);
@@ -8580,11 +8997,14 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
     free(P.cx_off);
     free(P.cx_cnt);
     free(P.cx_struct);
-    /* Realize the winning ::after strings (e.g. .hlist li::after " · "). */
-    for (int i = 0; i < gen_total; i++) layout_inject_generated_after(ctx, gen[i].idx, gen[i].text);
     free(gen);
-    layout_blockify(ctx);
+    /* The ::before / ::after boxes the styles call for, then (they are
+     * children like any other) blockification. */
     STAGE("merge");
+    layout_pseudo_attach(ctx, P.em_defer);
+    STAGE("pseudo boxes");
+    layout_blockify(ctx);
+    STAGE("blockify");
 
     uint64_t jobs = 0, steals = 0;
     job_last_stats(&jobs, &steals);
@@ -14789,6 +15209,8 @@ static bool layout_tree_keep(LayoutContext *ctx, HtmlDocument *doc, bool prune)
     bool keep = keep_env && ctx->doc == doc && ctx->tree.count > 0 && (prune || !ctx->pruned_n) &&
                 html_mirror_changes(doc, ctx->tree_seq, &ch, &nch);
     if (!keep) { css_layout_tree_free(ctx); return false; }
+    /* (its pseudo-element boxes come again after the style pass) */
+    layout_pseudo_detach(ctx);
 
     /* The elements whose attributes, and whose children, changed: where a
      * style pass on the kept tree starts (layout_apply_stylesheet). */
@@ -14885,10 +15307,31 @@ static void layout_keep_verify(LayoutContext *ctx, HtmlDocument *doc, CssStylesh
     if (!at) bad = -1;
     else {
         for (int i = 0; i < dn_count; i++) at[i] = -1;
-        for (int i = 0; i < fresh.tree.count; i++) at[fresh.tree.nodes[i].dom_node_idx] = i;
+        for (int i = 0; i < fresh.tree.count; i++) {
+            int d = fresh.tree.nodes[i].dom_node_idx;
+            if (d >= 0 && d < dn_count) at[d] = i;
+        }
         const size_t g0 = sizeof(LayoutStyle *);
         for (int i = 0; i < ctx->tree.count; i++) {
-            int j = at[ctx->tree.nodes[i].dom_node_idx];
+            int d = ctx->tree.nodes[i].dom_node_idx, j = d >= 0 && d < dn_count ? at[d] : -1;
+            if (d >= LAYOUT_PSEUDO_DOM0) {
+                /* A pseudo box: the fresh tree's of the same element and kind
+                 * (its text: under that one). */
+                int pe = i, txt = 0;
+                HtmlNode *pn = layout_node_dom(ctx, d);
+                if (pn && pn->type == HTML_NODE_TEXT) { pe = ctx->tree.nodes[i].parent_idx; txt = 1; }
+                HtmlNode *en = layout_node_dom(ctx, ctx->tree.nodes[pe].dom_node_idx);
+                int od = ctx->tree.nodes[ctx->tree.nodes[pe].parent_idx].dom_node_idx;
+                int jo = od >= 0 && od < dn_count ? at[od] : -1;
+                j = -1;
+                for (int c = jo >= 0 ? fresh.tree.nodes[jo].first_child_idx : -1; c >= 0 && en; c = fresh.tree.nodes[c].next_sibling_idx) {
+                    HtmlNode *cn = layout_node_dom(&fresh, fresh.tree.nodes[c].dom_node_idx);
+                    if (fresh.tree.nodes[c].dom_node_idx >= LAYOUT_PSEUDO_DOM0 && cn && cn->tag_name == en->tag_name) {
+                        j = txt ? fresh.tree.nodes[c].first_child_idx : c;
+                        break;
+                    }
+                }
+            }
             const LayoutBox *a = &ctx->boxes[i], *b = j >= 0 ? &fresh.boxes[j] : NULL;
             if ((a->flags & LAYOUT_STYLE_SKIPPED) || !b || (b->flags & LAYOUT_STYLE_SKIPPED)) continue;
             bool same_style = memcmp(a->s, b->s, sizeof(LayoutStyle)) == 0;

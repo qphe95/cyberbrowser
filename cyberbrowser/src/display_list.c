@@ -275,8 +275,7 @@ static bool node_or_ancestor_has_class(LayoutContext *ctx, int node_idx,
     if (node_idx < 0 || node_idx >= ctx->tree.count) return false;
     int idx = node_idx;
     while (idx >= 0) {
-        HtmlNode *node = (HtmlNode*)po_array_payload(&ctx->doc->array,
-                                                      ctx->tree.nodes[idx].dom_node_idx);
+        HtmlNode *node = css_layout_box_node(ctx, idx);
         if (node_has_class(node, needle)) return true;
         idx = ctx->tree.nodes[idx].parent_idx;
     }
@@ -1067,17 +1066,32 @@ static bool is_replaced_tag(const HtmlNode *n)
            strcasecmp(n->tag_name, "iframe") == 0;
 }
 
-/* One past the last layout index in box i's subtree (preorder numbering). */
+/* One past the last layout index in box i's subtree (preorder numbering of
+ * the document-built boxes; pseudo-element boxes, numbered after them, are
+ * in their element's subtree by mask_covers). */
 static int subtree_end(const LayoutContext *ctx, int i)
 {
+    int base = ctx->base_count > 0 && ctx->base_count < ctx->tree.count ? ctx->base_count : ctx->tree.count;
     int e = i;
     for (;;) {
         int c = ctx->tree.nodes[e].first_child_idx, last = -1;
-        for (; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) last = c;
+        for (; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx)
+            if (c < base || e >= base) last = c;
         if (last < 0) break;
         e = last;
     }
     return e + 1;
+}
+
+/* Is box i in the subtree [start, end) of a mask (a pseudo-element box: by
+ * the document-built box it hangs under)? */
+static bool mask_covers(const LayoutContext *ctx, int i, int start, int end)
+{
+    if (start <= i && i < end) return true;
+    int base = ctx->base_count;
+    if (base <= 0 || i < base || start >= base) return false;
+    while (i >= base) i = ctx->tree.nodes[i].parent_idx;
+    return start <= i && i < end;
 }
 
 static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (*clip)[4]);
@@ -1098,8 +1112,7 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                 memcpy(c, clip[p], sizeof(c));
                 LayoutBox *pb = &ctx->boxes[p];
                 /* overflow on <html>/<body> applies to the viewport. */
-                HtmlNode *pn = ctx->doc ? (HtmlNode *)po_array_payload(&ctx->doc->array,
-                                              ctx->tree.nodes[p].dom_node_idx) : NULL;
+                HtmlNode *pn = ctx->doc ? css_layout_box_node(ctx, p) : NULL;
                 bool viewport_box = pn && pn->type == HTML_NODE_ELEMENT && pn->tag_name &&
                     (strcasecmp(pn->tag_name, "html") == 0 || strcasecmp(pn->tag_name, "body") == 0);
                 if (pb->s->overflow != 0 && pb->s->display != CSS_DISPLAY_NONE && !viewport_box) {
@@ -1135,10 +1148,10 @@ static int canvas_background(LayoutContext *ctx, DisplayList *dl)
     if (ctx->boxes[root].s->background_color_a > 0.0f || ctx->boxes[root].s->background_image_url[0]) {
         src = root;
     } else {
-        HtmlNode *rn = (HtmlNode *)po_array_payload(&ctx->doc->array, ctx->tree.nodes[root].dom_node_idx);
+        HtmlNode *rn = css_layout_box_node(ctx, root);
         if (!rn || rn->type != HTML_NODE_ELEMENT || !rn->tag_name || strcasecmp(rn->tag_name, "html") != 0) return -1;
         for (int c = ctx->tree.nodes[root].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
-            HtmlNode *n = (HtmlNode *)po_array_payload(&ctx->doc->array, ctx->tree.nodes[c].dom_node_idx);
+            HtmlNode *n = css_layout_box_node(ctx, c);
             if (!n || n->type != HTML_NODE_ELEMENT || !n->tag_name || strcasecmp(n->tag_name, "body") != 0) continue;
             if ((ctx->boxes[c].s->background_color_a > 0.0f || ctx->boxes[c].s->background_image_url[0]) &&
                 ctx->boxes[c].s->display != CSS_DISPLAY_NONE)
@@ -1221,7 +1234,7 @@ static void paint_walk(const LayoutContext *ctx, int n, PaintLayers *L)
             continue;
         }
         if (b->s->float_side != 0) { pv_push(&L->floats, c); continue; }
-        HtmlNode *dn = ctx->doc ? (HtmlNode *)po_array_payload(&ctx->doc->array, ctx->tree.nodes[c].dom_node_idx) : NULL;
+        HtmlNode *dn = ctx->doc ? css_layout_box_node(ctx, c) : NULL;
         bool text = dn && dn->type == HTML_NODE_TEXT;
         if (text || (b->s->display == CSS_DISPLAY_INLINE && !b->s->inline_level)) {
             pv_push(&L->inlines, c);
@@ -1293,12 +1306,12 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
     for (int k = 0; k < order.n; k++) {
         int i = order.v[k];
         if (pending_box >= 0 && clip) dl_clip_range(dl, pending_from, clip[pending_box]);
-        while (nmask > 0 && !(mask_start[nmask - 1] <= i && i < mask_end[nmask - 1])) {
+        while (nmask > 0 && !mask_covers(ctx, i, mask_start[nmask - 1], mask_end[nmask - 1])) {
             nmask--;
             dl_add_mask_cmd(dl, DL_MASK_END, mask_idx[nmask], &dl->masks[mask_idx[nmask]]);
         }
         for (int r = 0; r < nreg && nmask < 64; r++) {
-            if (!(reg_start[r] < i && i < reg_end[r])) continue;
+            if (i == reg_start[r] || !mask_covers(ctx, i, reg_start[r], reg_end[r])) continue;
             bool open = false;
             for (int m = 0; m < nmask && !open; m++) open = mask_idx[m] == reg_idx[r];
             if (open || !dl_add_mask_cmd(dl, DL_MASK_BEGIN, reg_idx[r], &dl->masks[reg_idx[r]])) continue;
@@ -1331,8 +1344,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
 
         HtmlNode *node = NULL;
         if (ctx->doc) {
-            node = (HtmlNode *)po_array_payload(&ctx->doc->array,
-                                                ctx->tree.nodes[i].dom_node_idx);
+            node = css_layout_box_node(ctx, i);
         }
 
         /* mask-image: everything the box and its subtree paint goes through
