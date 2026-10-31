@@ -13,7 +13,8 @@
 // (here: it posts the page's subtests to /result), .any.html and
 // .window.html wrappers for .any.js and .window.js tests (window scope only),
 // <meta name=variant> variants, .headers files, and the common {{...}}
-// substitutions in .sub. files.  Python handlers (.py) are not run (404).
+// substitutions in .sub. files.  Python handlers (.py) are not run, but for
+// the few emulated in PY.
 // Reftests (rel=match / rel=mismatch) are counted in reftests.txt, not run.
 // (tests/conformance/failures.js lists what failed.)
 const http = require('http'), fs = require('fs'), path = require('path');
@@ -170,6 +171,14 @@ const types = { '.html': 'text/html', '.htm': 'text/html', '.xht': 'application/
     '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.otf': 'font/otf', '.webm': 'video/webm',
     '.mp4': 'video/mp4', '.wav': 'audio/wav', '.mp3': 'audio/mpeg', '.wasm': 'application/wasm' };
 
+/* Python handlers emulated: path -> (url) -> [content type, body]. */
+const escapeHtml = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;');
+const PY = {
+    /* a document whose <meta charset> is the label */
+    '/dom/nodes/encoding.py': url => ['text/html', `<!doctype html><meta charset="${escapeHtml(url.searchParams.get('label') || '')}">`],
+};
+
 http.createServer((req, res) => {
     if (process.env.TRACE) console.log(req.method + ' ' + req.url);
     const url = new URL(req.url, origin);
@@ -212,6 +221,11 @@ http.createServer((req, res) => {
     if (w && fs.existsSync(path.join(root, `${w[1]}.${w[2]}.js`))) {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
         return res.end(wrapper(`${w[1]}.${w[2]}.js`, w[2]));
+    }
+    if (PY[url.pathname]) {
+        const [type, body] = PY[url.pathname](url);
+        res.writeHead(200, { 'content-type': type });
+        return res.end(body);
     }
     const file = path.join(root, decodeURIComponent(url.pathname));
     if (!file.startsWith(root) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {

@@ -184,7 +184,7 @@ TEST(test_css_index_tables) {
     JSAtom box_class = JS_NewAtom(ctx, "box");
     GCValue by_class = css_get_elements_by_class_name(ctx, box_class);
     JS_FreeAtom(ctx, box_class);
-    ASSERT_TRUE(JS_IsArray(ctx, by_class));
+    ASSERT_TRUE(JS_IsObject(by_class));   /* (an HTMLCollection: array-like) */
     GCValue len_val = JS_GetPropertyStr(ctx, by_class, "length");
     uint32_t len = 0;
     JS_ToUint32(ctx, &len, len_val);

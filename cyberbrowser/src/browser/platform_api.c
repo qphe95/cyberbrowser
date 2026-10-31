@@ -53,6 +53,8 @@ void platform_api_install(JSContextHandle ctx, GCValue global, GCValue window)
 {
     platform_api_run(ctx, platform_api_js, "<platform_api>", global, window);
     traversal_install(ctx, global);
+    document_api_install(ctx, global);
+    node_namespaces_install(ctx, global);
     event_path_install(ctx, global);
     platform_api_run(ctx, dom_events_js, "<dom_events>", global, window);
     platform_api_run(ctx, form_controls_js, "<form_controls>", global, window);

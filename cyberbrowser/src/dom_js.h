@@ -16,11 +16,10 @@
 extern "C" {
 #endif
 
-/* nodeName: upper-case tag for elements ("DIV" when the element has no
- * name), "#text", "#comment", "#document", "#document-fragment". */
+/* nodeName: an element's qualified name (upper-cased for an HTML element in
+ * an HTML document; "DIV" when the element has no name), "#text",
+ * "#comment", "#document", "#document-fragment".  (localName: dom_store.h.) */
 const char *dom_node_name(NodeId id);
-/* localName: lower-case tag ("div" when the element has no name). */
-const char *dom_local_name(NodeId id);
 
 /* Navigation returning wrappers (JS_NULL when there is no node). */
 static inline GCValue dom_js_parent(JSContextHandle ctx, NodeId n) { return dom_js(ctx, dom_parent(n)); }

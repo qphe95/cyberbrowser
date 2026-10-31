@@ -5146,6 +5146,253 @@ TEST(test_text_encoding) {
     return true;
 }
 
+/* Elements' namespaces: createElementNS (names validated and split),
+ * createElement's lower-casing, Node's constants on instances, interfaces. */
+TEST(test_element_namespaces) {
+    JSContextHandle ctx = get_test_context();
+    if (!SAFE_VALID(ctx)) return false;
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg:linearGradient');"
+        "  var x = document.createElementNS(null, 'Foo'), h = document.createElement('DiV');"
+        "  return svg.namespaceURI === 'http://www.w3.org/2000/svg' && svg.prefix === 'svg' &&"
+        "    svg.localName === 'linearGradient' && svg.tagName === 'svg:linearGradient' && svg instanceof SVGElement &&"
+        "    x.namespaceURI === null && x.prefix === null && x.localName === 'Foo' && x.tagName === 'Foo' &&"
+        "    !(x instanceof HTMLElement) && x instanceof Element &&"
+        "    h.localName === 'div' && h.tagName === 'DIV' && h.namespaceURI === 'http://www.w3.org/1999/xhtml' &&"
+        "    h.ELEMENT_NODE === 1 && Node.prototype.DOCUMENT_POSITION_CONTAINS === 8 &&"
+        "    x.cloneNode().localName === 'Foo' && x.cloneNode().namespaceURI === null; })()",
+        false));
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ function err(f){ try { f(); return 'none'; } catch (e) { return e.name; } }"
+        "  var d = document;"
+        "  return err(function(){ d.createElement('1foo'); }) === 'InvalidCharacterError' &&"
+        "    err(function(){ d.createElement('f<oo'); }) === 'none' && err(function(){ d.createElement(''); }) === 'InvalidCharacterError' &&"
+        "    err(function(){ d.createElementNS(null, 'f:oo'); }) === 'NamespaceError' &&"
+        "    err(function(){ d.createElementNS('x', ':foo'); }) === 'InvalidCharacterError' &&"
+        "    err(function(){ d.createElementNS('x', 'xmlns'); }) === 'NamespaceError' &&"
+        "    err(function(){ d.createElementNS('http://www.w3.org/2000/xmlns/', 'xmlns'); }) === 'none' &&"
+        "    err(function(){ d.createElementNS('x', 'xml:a'); }) === 'NamespaceError' &&"
+        "    d.createElementNS(undefined, null).localName === 'null'; })()",
+        false));
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ var x = document.createElementNS('urn:x', 'p:item'), c = document.createElement('span');"
+        "  x.setAttribute('a', '1'); x.appendChild(c); document.body.appendChild(x);"
+        "  var ok = x.getAttribute('a') === '1' && x.firstChild === c && x.querySelector('span') === c &&"
+        "    typeof x.addEventListener === 'function' && x.parentNode === document.body && x.isConnected;"
+        "  x.remove(); return ok; })()",
+        false));
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ var p = document.createElement('div'); p.setAttribute('xmlns:q', 'urn:q');"
+        "  var a = document.createElementNS('urn:a', 'a:item'), b = document.createElementNS('urn:b', 'item'),"
+        "      s = document.createElementNS('http://www.w3.org/2000/svg', 'linearGradient'), t = document.createTextNode('t');"
+        "  p.appendChild(a); a.appendChild(b); b.appendChild(t); p.appendChild(s);"
+        "  var look = a.lookupNamespaceURI('a') === 'urn:a' && t.lookupNamespaceURI(null) === 'urn:b' &&"
+        "    b.lookupNamespaceURI('q') === 'urn:q' && b.lookupPrefix('urn:a') === 'a' && b.lookupPrefix('urn:q') === 'q' &&"
+        "    b.isDefaultNamespace('urn:b') && !a.isDefaultNamespace('urn:a') && a.lookupNamespaceURI('xml') ==="
+        "    'http://www.w3.org/XML/1998/namespace' && document.createDocumentFragment().lookupNamespaceURI('a') === null &&"
+        "    p.lookupNamespaceURI('') === p.lookupNamespaceURI(null);"
+        "  var tags = p.getElementsByTagNameNS('*', 'item').length === 2 && p.getElementsByTagNameNS('urn:b', '*')[0] === b &&"
+        "    p.getElementsByTagName('a:item')[0] === a && p.getElementsByTagName('LINEARGRADIENT').length === 0 &&"
+        "    p.getElementsByTagName('linearGradient')[0] === s && p.getElementsByTagName('*').length === 3 &&"
+        "    p.getElementsByTagName('item')[0] === b && document.getElementsByTagName('BODY')[0] === document.body &&"
+        "    p.getElementsByTagNameNS(null, '*').length === 0;"
+        "  return look && tags; })()",
+        false));
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ var X = 'http://www.w3.org/1999/xlink', h = document.createElement('div'),"
+        "      s = document.createElementNS('http://www.w3.org/2000/svg', 'svg'), w = document.createElement('div');"
+        "  h.setAttribute('Foo', '1'); s.setAttribute('Foo', '2');"
+        "  var names = h.getAttribute('FOO') === '1' && h.getAttributeNames()[0] === 'foo' &&"
+        "    s.getAttribute('foo') === null && s.getAttribute('Foo') === '2' && s.getAttributeNames()[0] === 'Foo';"
+        "  s.setAttributeNS(X, 'xlink:href', '#a'); var at = s.attributes[1];"
+        "  var ns = s.getAttributeNS(X, 'href') === '#a' && s.hasAttributeNS(X, 'href') && !s.hasAttributeNS(null, 'href') &&"
+        "    at.name === 'xlink:href' && at.prefix === 'xlink' && at.localName === 'href' && at.namespaceURI === X &&"
+        "    s.getAttribute('xlink:href') === '#a';"
+        "  s.removeAttributeNS(X, 'href'); ns = ns && !s.hasAttributeNS(X, 'href') && s.attributes.length === 1;"
+        "  function err(f){ try { f(); return 'none'; } catch (e) { return e.name; } }"
+        "  var errs = err(function(){ h.setAttribute('a b', ''); }) === 'InvalidCharacterError' &&"
+        "    err(function(){ h.setAttributeNS(null, 'p:a', ''); }) === 'NamespaceError' &&"
+        "    err(function(){ h.toggleAttribute('a>'); }) === 'InvalidCharacterError';"
+        "  w.innerHTML = '<svg viewBox=\"0 0 1 1\"><path d=\"M0\"/></svg>'; var v = w.firstChild;"
+        "  var svg = v.getAttribute('viewBox') === '0 0 1 1' && v.hasAttribute('viewBox') && v.namespaceURI === 'http://www.w3.org/2000/svg' &&"
+        "    w.innerHTML === '<svg viewBox=\"0 0 1 1\"><path d=\"M0\"></path></svg>';"
+        "  return names && ns && errs && svg; })()",
+        false));
+    return true;
+}
+
+/* XML documents (DOMParser): namespaces, entities, CDATA, PIs, comments,
+ * the doctype, white space outside the root, parsererror documents. */
+TEST(test_xml_parser) {
+    JSContextHandle ctx = get_test_context();
+    if (!SAFE_VALID(ctx)) return false;
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ var P = new DOMParser();"
+        "  var d = P.parseFromString('<?xml version=\"1.0\"?>\\n<!DOCTYPE r SYSTEM \"r.dtd\" [<!ENTITY x \"y\">]>\\n<!-- c -->\\n'"
+        "    + '<r xmlns=\"urn:d\" xmlns:p=\"urn:p\" a=\"1 &amp; 2\" p:b=\"&#x41;\">t&lt;<p:s/><![CDATA[<c>]]><?pi d?><Up/></r>\\n', 'application/xml');"
+        "  var r = d.documentElement, kids = r.childNodes;"
+        "  var ok1 = d instanceof XMLDocument && d.contentType === 'application/xml' && d.doctype.name === 'r' &&"
+        "    d.doctype.systemId === 'r.dtd' && d.childNodes.length === 3 && d.childNodes[1].nodeType === 8 &&"
+        "    r.namespaceURI === 'urn:d' && r.localName === 'r' && r.getAttribute('a') === '1 & 2' &&"
+        "    r.getAttributeNS('urn:p', 'b') === 'A' && r.attributes[3].prefix === 'p' && r.attributes[1].prefix === 'xmlns' &&"
+        "    r.getAttributeNS('http://www.w3.org/2000/xmlns/', 'p') === 'urn:p';"
+        "  var ok2 = kids.length === 5 && kids[0].data === 't<' && kids[1].namespaceURI === 'urn:p' && kids[1].prefix === 'p' &&"
+        "    kids[2].nodeType === 4 && kids[2].data === '<c>' && kids[3].nodeType === 7 && kids[3].target === 'pi' &&"
+        "    kids[3].data === 'd' && kids[4].tagName === 'Up' && r.textContent === 't<<c>';"
+        "  var bad = P.parseFromString('<a><b></a>', 'text/xml').documentElement;"
+        "  var ok3 = bad.localName === 'parsererror' && bad.namespaceURI === 'http://www.mozilla.org/newlayout/xml/parsererror.xml' &&"
+        "    P.parseFromString('<a>&nbsp;</a>', 'text/xml').documentElement.localName === 'parsererror' &&"
+        "    P.parseFromString('<p:a/>', 'text/xml').documentElement.localName === 'parsererror' &&"
+        "    P.parseFromString('<html xmlns=\"http://www.w3.org/1999/xhtml\"><body/></html>', 'application/xhtml+xml').documentElement.namespaceURI ==="
+        "    'http://www.w3.org/1999/xhtml';"
+        "  return ok1 && ok2 && ok3; })()",
+        false));
+    return true;
+}
+
+/* MutationObserver: options validated and implied, oldValue only when asked
+ * for, attributeFilter, childList records with their siblings. */
+TEST(test_mutation_observer_records) {
+    JSContextHandle ctx = get_test_context();
+    if (!SAFE_VALID(ctx)) return false;
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ var m = new MutationObserver(function(){}), d = document.createElement('div');"
+        "  function err(o){ try { m.observe(d, o); return 'none'; } catch (e) { return e.name; } }"
+        "  var opts = err({}) === 'TypeError' && err({childList: true, attributeOldValue: true, attributes: false}) === 'TypeError' &&"
+        "    err({childList: true, characterDataOldValue: true, characterData: false}) === 'TypeError' &&"
+        "    err({attributeFilter: ['id']}) === 'none';"
+        "  m.disconnect(); m.observe(d, {attributes: true}); d.id = 'a'; d.id = 'b';"
+        "  var r1 = m.takeRecords(); var noold = r1.length === 2 && r1[0].oldValue === null && r1[1].oldValue === null;"
+        "  m.disconnect(); m.observe(d, {attributeOldValue: true, attributeFilter: ['id']}); d.id = 'c'; d.title = 't'; d.setAttribute('lang', 'x');"
+        "  var r2 = m.takeRecords(); var old = r2.length === 1 && r2[0].oldValue === 'b' && r2[0].attributeName === 'id';"
+        "  m.disconnect(); var a = document.createElement('a'), b = document.createElement('b'), c = document.createElement('i');"
+        "  d.appendChild(a); d.appendChild(c); m.observe(d, {childList: true}); d.insertBefore(b, c); d.removeChild(a);"
+        "  var r3 = m.takeRecords(); var kids = r3.length === 2 && r3[0].addedNodes[0] === b && r3[0].previousSibling === a &&"
+        "    r3[0].nextSibling === c && r3[1].removedNodes[0] === a && r3[1].addedNodes.length === 0 && r3[1].nextSibling === b;"
+        "  m.disconnect(); return opts && noold && old && kids; })()",
+        false));
+    return true;
+}
+
+/* Pre-insertion validity (HierarchyRequestError, NotFoundError) and the
+ * ParentNode / ChildNode methods converting their arguments into a node. */
+TEST(test_insertion_validity) {
+    JSContextHandle ctx = get_test_context();
+    if (!SAFE_VALID(ctx)) return false;
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ function err(f){ try { f(); return 'none'; } catch (e) { return e.name; } }"
+        "  var d = document.implementation.createHTMLDocument('t'), dt = d.doctype, el = d.createElement('p');"
+        "  var errs = err(function(){ d.appendChild(d.createTextNode('x')); }) === 'HierarchyRequestError' &&"
+        "    err(function(){ d.appendChild(d.createElement('x')); }) === 'HierarchyRequestError' &&"
+        "    err(function(){ el.appendChild(dt); }) === 'HierarchyRequestError' &&"
+        "    err(function(){ el.appendChild(el); }) === 'HierarchyRequestError' &&"
+        "    err(function(){ el.insertBefore(d.createElement('i'), d.body); }) === 'NotFoundError' &&"
+        "    err(function(){ d.createTextNode('t').appendChild(el); }) === 'HierarchyRequestError' &&"
+        "    err(function(){ d.insertBefore(d.createElement('x'), dt); }) === 'HierarchyRequestError';"
+        "  var root = d.documentElement, nr = d.createElement('html');"
+        "  var rep = d.replaceChild(nr, root) === root && d.documentElement === nr && d.doctype === dt;"
+        "  var p = document.createElement('div'), a = document.createElement('a'), b = document.createElement('b');"
+        "  p.append(a, 'x', null); p.prepend(b); a.after(b, 'y'); b.before('z');"
+        "  var s1 = p.innerHTML === '<a></a>z<b></b>yxnull';"
+        "  b.replaceWith('q', a); var s2 = p.innerHTML === 'zq<a></a>yxnull';"
+        "  p.replaceChildren(b); var s3 = p.childNodes.length === 1 && p.firstChild === b;"
+        "  return errs && rep && s1 && s2 && s3 && Array.isArray(p.childNodes) === false && p.childNodes.length === 1; })()",
+        false));
+    return true;
+}
+
+/* Selectors: invalid ones throw (bad identifiers, unknown pseudo-classes and
+ * pseudo-elements), known ones parse; nth-of-type counts by type. */
+TEST(test_selector_validity) {
+    JSContextHandle ctx = get_test_context();
+    if (!SAFE_VALID(ctx)) return false;
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ function bad(q){ try { document.querySelector(q); return false; } catch (e) { return e.name === 'SyntaxError'; } }"
+        "  function ok(q){ try { document.querySelectorAll(q); return true; } catch (e) { return false; } }"
+        "  var p = document.createElement('div'); p.innerHTML = '<b></b><i></i><b></b><i></i><b></b>';"
+        "  var nth = p.querySelectorAll('b:nth-of-type(2n+1)').length === 2 && p.querySelector('i:nth-last-of-type(1)') === p.lastChild.previousSibling;"
+        "  var tt = false; try { document.querySelectorAll(); } catch (e) { tt = e instanceof TypeError; }"
+        "  return bad('.5cm') && bad('#1a') && bad(':example') && bad('div::example') && bad('1div') && bad('::-moz-x') &&"
+        "    ok('.-x') && ok('.\\\\31 a') && ok(':hover') && ok('a:focus-visible') && ok('::before') && ok('::-webkit-scrollbar') &&"
+        "    ok('p::slotted(span)') && ok(':host-context(div)') && ok('--x') && nth && tt; })()",
+        false));
+    return true;
+}
+
+/* CharacterData: the interfaces' chain, constructors, editing by UTF-16
+ * offsets, splitText and wholeText, null as data. */
+TEST(test_character_data) {
+    JSContextHandle ctx = get_test_context();
+    if (!SAFE_VALID(ctx)) return false;
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ var t = new Text('ab\\u{1F600}cd'), c = new Comment('x');"
+        "  var chain = t instanceof Text && t instanceof CharacterData && !(c instanceof Text) &&"
+        "    c instanceof CharacterData && c instanceof Comment && Object.getPrototypeOf(CDATASection.prototype) === Text.prototype;"
+        "  var len = t.length === 6 && t.substringData(2, 2) === '\\u{1F600}';"
+        "  t.replaceData(2, 2, '-'); t.insertData(0, '>'); t.appendData('<'); t.deleteData(1, 1);"
+        "  var edit = t.data === '>b-cd<';"
+        "  var e1 = ''; try { t.substringData(7, 1); } catch (e) { e1 = e.name; }"
+        "  var e2 = ''; try { t.insertData(0); } catch (e) { e2 = e.name; }"
+        "  t.data = null; var nul = t.data === '' && t.nodeValue === '';"
+        "  var p = document.createElement('p'), u = new Text('hello world'); p.appendChild(u);"
+        "  var tail = u.splitText(5);"
+        "  var split = u.data === 'hello' && tail.data === ' world' && u.nextSibling === tail && p.childNodes.length === 2 &&"
+        "    u.wholeText === 'hello world' && p.textContent === 'hello world';"
+        "  return chain && len && edit && e1 === 'IndexSizeError' && e2 === 'TypeError' && nul && split &&"
+        "    typeof CharacterData === 'function' && document.textContent === null; })()",
+        false));
+    return true;
+}
+
+/* DOMImplementation: createDocument (an XMLDocument), createDocumentType,
+ * createHTMLDocument; Document's getters over the store; PIs and CDATA. */
+TEST(test_dom_implementation) {
+    JSContextHandle ctx = get_test_context();
+    if (!SAFE_VALID(ctx)) return false;
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ var impl = document.implementation;"
+        "  var dt = impl.createDocumentType('svg:svg', '-//W3C//DTD SVG 1.1//EN', 'http://x/svg11.dtd');"
+        "  var x = impl.createDocument('http://www.w3.org/2000/svg', 'svg:svg', dt);"
+        "  var xml = x instanceof XMLDocument && x.contentType === 'image/svg+xml' && x.doctype === dt &&"
+        "    dt.name === 'svg:svg' && dt.publicId === '-//W3C//DTD SVG 1.1//EN' && dt.nodeName === 'svg:svg' &&"
+        "    dt.ownerDocument === x && x.documentElement.namespaceURI === 'http://www.w3.org/2000/svg' &&"
+        "    x.documentElement.ownerDocument === x && x.childNodes.length === 2 && x.body === null &&"
+        "    x.createElement('Foo').tagName === 'Foo' && x.createElement('foo').namespaceURI === null;"
+        "  var h = impl.createHTMLDocument('T'), h2 = impl.createHTMLDocument();"
+        "  var html = h.doctype.name === 'html' && h.title !== undefined && h.head.firstChild.textContent === 'T' &&"
+        "    h.body.localName === 'body' && h.documentElement.localName === 'html' && h2.head.childNodes.length === 0 &&"
+        "    h.contentType === 'text/html' && !(h instanceof XMLDocument) && h.createElement('Foo').tagName === 'FOO';"
+        "  var pi = x.createProcessingInstruction('xml-stylesheet', 'href=\"a\"'), cd = x.createCDATASection('c');"
+        "  var nodes = pi.target === 'xml-stylesheet' && pi.nodeType === 7 && pi.data === 'href=\"a\"' &&"
+        "    pi instanceof ProcessingInstruction && cd.nodeType === 4 && cd instanceof Text && cd.nodeName === '#cdata-section';"
+        "  function err(f){ try { f(); return 'none'; } catch (e) { return e.name; } }"
+        "  var errs = err(function(){ document.createCDATASection('a'); }) === 'NotSupportedError' &&"
+        "    err(function(){ x.createProcessingInstruction('1a', ''); }) === 'InvalidCharacterError' &&"
+        "    err(function(){ x.createProcessingInstruction('a', '?>'); }) === 'InvalidCharacterError' &&"
+        "    err(function(){ impl.createDocumentType('a>b', '', ''); }) === 'InvalidCharacterError';"
+        "  return xml && html && nodes && errs && impl === document.implementation && impl.hasFeature() === true &&"
+        "    new DOMParser().parseFromString('<a/>', 'text/xml').contentType === 'text/xml'; })()",
+        false));
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ var d = new DOMParser().parseFromString("
+        "    '<!-- c --><!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01//EN\" \"http://www.w3.org/TR/html4/strict.dtd\"><p>x', 'text/html');"
+        "  var t = document.createElement('template'); t.innerHTML = '<!doctype html><b>y</b>';"
+        "  return d.doctype && d.doctype.name === 'html' && d.doctype.publicId === '-//W3C//DTD HTML 4.01//EN' &&"
+        "    d.doctype.systemId === 'http://www.w3.org/TR/html4/strict.dtd' && d.doctype.nextSibling === d.documentElement &&"
+        "    d.doctype.ownerDocument === d && t.content.childNodes.length === 1 &&"
+        "    new DOMParser().parseFromString('<p><!doctype x>', 'text/html').doctype === null; })()",
+        false));
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ function cs(m){ return new DOMParser().parseFromString(m + '<p>x', 'text/html').characterSet; }"
+        "  return cs('<meta charset=\" Latin2 \">') === 'ISO-8859-2' && cs('<meta charset=utf-16le>') === 'UTF-8' &&"
+        "    cs('<meta charset=x-user-defined>') === 'windows-1252' && cs('<meta charset=hz-gb-2312>') === 'replacement' &&"
+        "    cs('<meta http-equiv=Content-Type content=\"text/html; charset=\\'sjis\\'\">') === 'Shift_JIS' &&"
+        "    cs('') === 'UTF-8' && cs('<meta charset=bogus>') === 'UTF-8' && document.characterSet === document.inputEncoding &&"
+        "    new TextDecoder('latin1').encoding === 'windows-1252'; })()",
+        false));
+    return true;
+}
+
 /* new Ctor() for a defined custom element is that element. */
 TEST(test_custom_element_new) {
     JSContextHandle ctx = get_test_context();
@@ -5443,6 +5690,13 @@ void run_browser_api_impl_tests(void) {
     RUN_TEST(test_dom_parsing_and_traversal);
     RUN_TEST(test_custom_element_new);
     RUN_TEST(test_text_encoding);
+    RUN_TEST(test_element_namespaces);
+    RUN_TEST(test_character_data);
+    RUN_TEST(test_selector_validity);
+    RUN_TEST(test_insertion_validity);
+    RUN_TEST(test_mutation_observer_records);
+    RUN_TEST(test_xml_parser);
+    RUN_TEST(test_dom_implementation);
     RUN_TEST(test_platform_timing_messaging_history_canvas);
     // RUN_TEST(test_js_extraction);
     // RUN_TEST(test_js_extraction_save_data);

@@ -225,6 +225,17 @@
                                          storageArea: nul() });
     eventClass('MessageEvent', Event, { data: nul(), origin: str(''), lastEventId: str(''),
                                              source: nul(), ports: function (v) { return arguments.length ? v : []; } });
+    eventClass('DeviceMotionEvent', Event, { acceleration: nul(), accelerationIncludingGravity: nul(), rotationRate: nul(),
+                                             interval: num(0) });
+    eventClass('DeviceOrientationEvent', Event, { alpha: nul(), beta: nul(), gamma: nul(), absolute: bool(false) });
+    /* (made by createEvent only, in browsers; a constructor here) */
+    eventClass('BeforeUnloadEvent', Event, { returnValue: str('') });
+    var TextEvent = eventClass('TextEvent', UIEvent, { data: str('') });
+    define(TextEvent.prototype, 'initTextEvent', function (type, bubbles, cancelable, view, data) {
+        this.initEvent(type, bubbles, cancelable);
+        st(this).view = view === undefined ? null : view;
+        st(this).data = data === undefined ? '' : String(data);
+    });
     expose('Event', Event);
 
     /* ---- EventTarget ---- */
@@ -543,10 +554,12 @@
     var createEventMap = {
         event: Event, events: Event, htmlevents: Event, svgevents: Event, customevent: CustomEvent,
         uievent: UIEvent, uievents: UIEvent, focusevent: FocusEvent, mouseevent: MouseEvent,
-        mouseevents: MouseEvent, keyboardevent: KeyboardEvent, wheelevent: WheelEvent,
+        mouseevents: MouseEvent, keyboardevent: KeyboardEvent,
         compositionevent: global.CompositionEvent, touchevent: global.TouchEvent,
         hashchangeevent: global.HashChangeEvent, messageevent: global.MessageEvent,
-        storageevent: global.StorageEvent, dragevent: global.DragEvent, errorevent: global.ErrorEvent
+        storageevent: global.StorageEvent, dragevent: global.DragEvent,
+        beforeunloadevent: global.BeforeUnloadEvent, devicemotionevent: global.DeviceMotionEvent,
+        deviceorientationevent: global.DeviceOrientationEvent, textevent: global.TextEvent
     };
     function createEvent(iface) {
         var C = createEventMap[String(iface).toLowerCase()];

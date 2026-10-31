@@ -407,6 +407,21 @@ static void imply_head_and_body(NodeId frag, NodeId head, NodeId body) {
 static bool populate_from_fragment(JSContextHandle ctx, GCValue js_doc, NodeId frag, bool page) {
     NodeId doc = dom_node_of(js_doc);
     if (dom_kind(doc) != DOM_K_DOCUMENT) return false;
+    /* The markup's doctype goes first (unless the document has one; before
+     * the rest is moved, implied head and body taking all of it). */
+    for (NodeId c = dom_first_child(frag); c; c = dom_next_sibling(c))
+        if (dom_kind(c) == DOM_K_DOCTYPE) {
+            bool have = false;
+            for (NodeId d = dom_first_child(doc); d && !have; d = dom_next_sibling(d)) have = dom_kind(d) == DOM_K_DOCTYPE;
+            dom_unlink(c);
+            if (have) {
+                dom_free_subtree(c);
+            } else {
+                g_dom.owner[dom_slot(c)] = dom_slot(doc);
+                dom_link_before(doc, c, dom_first_child(doc));
+            }
+            break;
+        }
     DomParseRoots roots = dom_parse_roots(frag);
     GCValue old_doc_element = JS_GetPropertyStr(ctx, js_doc, "documentElement");
     GCValue old_body_element = JS_GetPropertyStr(ctx, js_doc, "body");
@@ -586,7 +601,7 @@ GCValue html_doc_stream_step(HtmlDocStream *s, bool final) {
                 if (!observed) continue;
                 GCValue added = JS_NewArray(ctx);
                 JS_SetPropertyUint32(ctx, added, 0, dom_js(ctx, dom_id_of(k)));
-                mo_notify_child_list(ctx, dom_js(ctx, dom_id_of(p)), added, JS_NewArray(ctx));
+                mo_notify_child_list(ctx, dom_js(ctx, dom_id_of(p)), added, JS_NewArray(ctx), JS_NULL, JS_NULL);
             }
         }
     }
@@ -660,7 +675,6 @@ static GCValue new_js_document(JSContextHandle ctx) {
     GCValue js_doc = dom_js(ctx, d);
     JS_SetPropertyStr(ctx, js_doc, "nodeType", JS_NewInt32(ctx, 9));
     JS_SetPropertyStr(ctx, js_doc, "readyState", JS_NewString(ctx, "complete"));
-    JS_SetPropertyStr(ctx, js_doc, "characterSet", JS_NewString(ctx, "UTF-8"));
     JS_SetPropertyStr(ctx, js_doc, "contentType", JS_NewString(ctx, "text/html"));
     JS_SetPropertyStr(ctx, js_doc, "createElement",
         JS_NewCFunction(ctx, js_document_create_element, "createElement", 1));
@@ -674,8 +688,6 @@ static GCValue new_js_document(JSContextHandle ctx) {
         JS_NewCFunction(ctx, js_document_querySelector, "querySelector", 1));
     JS_SetPropertyStr(ctx, js_doc, "querySelectorAll",
         JS_NewCFunction(ctx, js_document_querySelectorAll, "querySelectorAll", 1));
-    JS_SetPropertyStr(ctx, js_doc, "getElementsByTagName",
-        JS_NewCFunction(ctx, js_document_get_elements_by_tag_name, "getElementsByTagName", 1));
     JS_SetPropertyStr(ctx, js_doc, "getElementsByClassName",
         JS_NewCFunction(ctx, js_document_getElementsByClassName, "getElementsByClassName", 1));
     return js_doc;

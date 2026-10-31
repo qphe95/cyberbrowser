@@ -39,6 +39,7 @@
 #include "js_quickjs.h"
 #include "platform.h"
 #include "url_whatwg.h"
+#include "xml_parse.h"
 
 extern JSContextHandle g_js_context;
 extern const char *g_cyber_start_url;
@@ -438,6 +439,61 @@ static void frame_fire(JSContextHandle ctx, GCValue target, const char *type) {
     js_event_target_dispatchEvent(ctx, target, 1, &ev);
 }
 
+/* The MIME type of a response's Content-Type (lower-cased; "" if none). */
+static void response_mime(const char *headers, char *out, size_t cap) {
+    out[0] = 0;
+    if (!headers) return;
+    for (const char *p = headers; *p; p++) {
+        if ((p == headers || p[-1] == '\n') && !strncasecmp(p, "content-type:", 13)) {
+            p += 13;
+            while (*p == ' ' || *p == '\t') p++;
+            size_t n = 0;
+            while (p[n] && p[n] != ';' && p[n] != '\r' && p[n] != '\n' && p[n] != ' ' && n + 1 < cap) {
+                out[n] = (char)(p[n] >= 'A' && p[n] <= 'Z' ? p[n] + 32 : p[n]);
+                n++;
+            }
+            out[n] = 0;
+            return;
+        }
+    }
+}
+
+/* Is it an XML MIME type (text/xml, application/xml, ...+xml)? */
+static bool xml_mime(const char *m) {
+    size_t n = strlen(m);
+    return !strcmp(m, "text/xml") || !strcmp(m, "application/xml") || (n > 4 && !strcmp(m + n - 4, "+xml"));
+}
+
+/* The frame's document as the XML document these bytes make (its realm's
+ * document emptied first; a parsererror root if not well-formed). */
+static void frame_load_xml(JSContextHandle ctx, const char *data, size_t n, const char *mime) {
+    GCValue doc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document");
+    NodeId d = dom_node_of(doc);
+    if (dom_kind(d) != DOM_K_DOCUMENT) return;
+    while (dom_first_child(d)) {
+        NodeId c = dom_first_child(d);
+        dom_unlink(c);
+    }
+    g_dom.flags[dom_slot(d)] |= DOMF_XML_DOCUMENT;
+    /* (its own documentElement, head and body were the skeleton's) */
+    static const char *const own[] = { "documentElement", "head", "body", "contentType" };
+    for (size_t i = 0; i < sizeof own / sizeof own[0]; i++) {
+        JSAtom a = JS_NewAtom(ctx, own[i]);
+        JS_DeleteProperty(ctx, doc, a, 0);
+        JS_FreeAtom(ctx, a);
+    }
+    JS_DefinePropertyValueStr(ctx, doc, "contentType", JS_NewString(ctx, mime), JS_PROP_CONFIGURABLE);
+    char err[256];
+    if (!dom_parse_xml(data ? data : "", data ? n : 0, d, err, sizeof err)) {
+        while (dom_first_child(d)) dom_unlink(dom_first_child(d));
+        static const char ns[] = "http://www.mozilla.org/newlayout/xml/parsererror.xml";
+        NodeId pe = dom_create_element_str("parsererror", 11, d);
+        dom_set_element_name(pe, dom_ns_of(ns, sizeof ns - 1), NULL, 0, "parsererror", 11);
+        dom_link_append(pe, dom_create_chardata(DOM_K_TEXT, err, strlen(err), d));
+        dom_link_append(d, pe);
+    }
+}
+
 /* Navigate f to f->url: a new realm and document with the page loaded. */
 static void frame_load(Frame *f) {
     char url[2048];
@@ -468,7 +524,11 @@ static void frame_load(Frame *f) {
     }
     frame_setup_window(f);
     JSContextHandle ctx = f->ctx;
-    HtmlPageStream *ps = html_page_stream_begin_frame(ctx, url);
+    char mime[128];
+    response_mime(fetched ? buf.headers : NULL, mime, sizeof mime);
+    HtmlPageStream *ps = NULL;
+    if (fetched && xml_mime(mime)) frame_load_xml(ctx, buf.data, buf.size, mime);
+    else ps = html_page_stream_begin_frame(ctx, url);
     if (ps) {
         if (fetched && buf.data && buf.size) html_page_stream_feed(ps, buf.data, buf.size);
         else if (!blank) platform_log(LOG_LEVEL_WARN, "frame", "could not fetch frame %s: %s", url, err);
@@ -582,12 +642,19 @@ static GCValue js_iframe_set_src(JSContextHandle ctx, GCValue this_val, int argc
     return JS_UNDEFINED;
 }
 
+bool g_frame_blank_now;
+
 /* A subtree was inserted into a connected tree (parsed, or by script):
- * each iframe in it with a src and no browsing context yet navigates. */
+ * each iframe in it without a browsing context yet navigates to its src, or
+ * to about:blank (at once when g_frame_blank_now; srcdoc aside). */
 void frame_api_on_connect(JSContextHandle ctx, NodeId subtree) {
     static CssAtom iframe_tag;
     if (!iframe_tag) iframe_tag = css_atom_intern("iframe", 6);
     if (!dom_valid(subtree)) return;
+    /* (only in a document with a browsing context: the realm's own, not one
+     * made by createHTMLDocument or DOMParser) */
+    NodeId realm_doc = dom_node_of(JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document"));
+    if (!realm_doc || dom_id_of(dom_tree_root_slot(dom_slot(subtree))) != realm_doc) return;
     for (NodeId n = subtree; n; ) {
         if (dom_kind(n) == DOM_K_ELEMENT && dom_tag(n) == iframe_tag && !frame_of_iframe(n)) {
             const char *src = dom_get_attr_str(n, "src");
@@ -597,6 +664,10 @@ void frame_api_on_connect(JSContextHandle ctx, NodeId subtree) {
                 free(base);
                 frame_navigate(ctx, n, abs ? abs : src);
                 free(abs);
+            } else if (!dom_get_attr_str(n, "srcdoc")) {
+                frame_navigate(ctx, n, "about:blank");
+                Frame *f = frame_of_iframe(n);
+                if (g_frame_blank_now && f && f->state == FRAME_PENDING) frame_load(f);
             }
         }
         /* Document order within the subtree. */

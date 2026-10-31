@@ -448,7 +448,7 @@ void js_cyber_ce_enqueue_upgrade_subtree(JSContextHandle ctx, GCValue root) {
     if (node_type != 1) return;
     cyber_ce_reaction_queue_push(ctx, root);
     GCValue child_nodes = JS_GetPropertyStr(ctx, root, "childNodes");
-    if (JS_IsArray(ctx, child_nodes)) {
+    if (JS_IsObject(child_nodes)) {
         GCValue len_val = JS_GetPropertyStr(ctx, child_nodes, "length");
         uint32_t len = 0;
         JS_ToUint32(ctx, &len, len_val);
@@ -2350,26 +2350,50 @@ GCValue js_mutation_observer_observe(JSContextHandle ctx, GCValue this_val, int 
         return JS_ThrowTypeError(ctx, "observe target must be a Node");
     }
 
-    bool child_list = false;
-    bool subtree = false;
-    bool character_data = false;
-    bool attributes = false;
-    if (argc >= 2 && JS_IsObject(argv[1])) {
-        GCValue v = JS_GetPropertyStr(ctx, argv[1], "childList");
-        child_list = JS_ToBool(ctx, v);
-        v = JS_GetPropertyStr(ctx, argv[1], "subtree");
-        subtree = JS_ToBool(ctx, v);
-        v = JS_GetPropertyStr(ctx, argv[1], "characterData");
-        character_data = JS_ToBool(ctx, v);
-        v = JS_GetPropertyStr(ctx, argv[1], "attributes");
-        attributes = JS_ToBool(ctx, v);
-    }
+    /* (MutationObserverInit: attributes and characterData are implied by
+     * their old-value and filter members when not given) */
+    GCValue o = argc >= 2 && JS_IsObject(argv[1]) ? argv[1] : JS_UNDEFINED;
+    GCValue v_attrs = JS_IsObject(o) ? JS_GetPropertyStr(ctx, o, "attributes") : JS_UNDEFINED;
+    GCValue v_cdata = JS_IsObject(o) ? JS_GetPropertyStr(ctx, o, "characterData") : JS_UNDEFINED;
+    GCValue v_aov = JS_IsObject(o) ? JS_GetPropertyStr(ctx, o, "attributeOldValue") : JS_UNDEFINED;
+    GCValue v_cov = JS_IsObject(o) ? JS_GetPropertyStr(ctx, o, "characterDataOldValue") : JS_UNDEFINED;
+    GCValue v_filter = JS_IsObject(o) ? JS_GetPropertyStr(ctx, o, "attributeFilter") : JS_UNDEFINED;
+    bool child_list = JS_IsObject(o) && JS_ToBool(ctx, JS_GetPropertyStr(ctx, o, "childList"));
+    bool subtree = JS_IsObject(o) && JS_ToBool(ctx, JS_GetPropertyStr(ctx, o, "subtree"));
+    bool attributes = JS_ToBool(ctx, v_attrs), character_data = JS_ToBool(ctx, v_cdata);
+    bool attr_old = JS_ToBool(ctx, v_aov), cdata_old = JS_ToBool(ctx, v_cov);
+    bool has_filter = !JS_IsUndefined(v_filter);
+    if (JS_IsUndefined(v_attrs) && (!JS_IsUndefined(v_aov) || has_filter)) attributes = true;
+    if (JS_IsUndefined(v_cdata) && !JS_IsUndefined(v_cov)) character_data = true;
+    if (!child_list && !attributes && !character_data)
+        return JS_ThrowTypeError(ctx, "Failed to execute 'observe' on 'MutationObserver': The options object must set at "
+                                      "least one of 'attributes', 'characterData', or 'childList' to true.");
+    if ((attr_old || has_filter) && !attributes)
+        return JS_ThrowTypeError(ctx, "Failed to execute 'observe' on 'MutationObserver': 'attributeOldValue' or "
+                                      "'attributeFilter' is present while 'attributes' is false.");
+    if (cdata_old && !character_data)
+        return JS_ThrowTypeError(ctx, "Failed to execute 'observe' on 'MutationObserver': 'characterDataOldValue' is "
+                                      "true while 'characterData' is false.");
 
     GCValue options = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, options, "childList", JS_NewBool(ctx, child_list));
     JS_SetPropertyStr(ctx, options, "subtree", JS_NewBool(ctx, subtree));
     JS_SetPropertyStr(ctx, options, "characterData", JS_NewBool(ctx, character_data));
     JS_SetPropertyStr(ctx, options, "attributes", JS_NewBool(ctx, attributes));
+    JS_SetPropertyStr(ctx, options, "attributeOldValue", JS_NewBool(ctx, attr_old));
+    JS_SetPropertyStr(ctx, options, "characterDataOldValue", JS_NewBool(ctx, cdata_old));
+    if (has_filter) {
+        /* (sequence<DOMString>) */
+        GCValue list = JS_NewArray(ctx);
+        uint32_t n = 0;
+        JS_ToUint32(ctx, &n, JS_GetPropertyStr(ctx, v_filter, "length"));
+        for (uint32_t i = 0; i < n; i++) {
+            GCValue s = JS_ToString(ctx, JS_GetPropertyUint32(ctx, v_filter, i));
+            if (JS_IsException(s)) return s;
+            JS_SetPropertyUint32(ctx, list, i, s);
+        }
+        JS_SetPropertyStr(ctx, options, "attributeFilter", list);
+    }
 
     /* One registration per target (observing the same node again replaces
      * its options); the observer joins the delivery registry on its first
@@ -2481,17 +2505,59 @@ static bool mo_node_contains(JSContextHandle ctx, GCValue ancestor, GCValue desc
 static bool mo_registration_interested(JSContextHandle ctx, GCValue ot, GCValue opts, GCValue target,
                                        const char *type);
 
-static bool mo_observer_interested(JSContextHandle ctx, GCValue observer, GCValue target, const char *type) {
+/* The options of the observer's registration interested in a change of
+ * this type at target (undefined: none). */
+static GCValue mo_interested_options(JSContextHandle ctx, GCValue observer, GCValue target, const char *type) {
     GCValue regs = JS_GetPropertyStr(ctx, observer, "__mo_regs");
-    if (!JS_IsArray(ctx, regs)) return false;
+    if (!JS_IsArray(ctx, regs)) return JS_UNDEFINED;
     GCValue len_val = JS_GetPropertyStr(ctx, regs, "length");
     uint32_t len = 0;
     JS_ToUint32(ctx, &len, len_val);
     for (uint32_t i = 0; i < len; i++) {
         GCValue r = JS_GetPropertyUint32(ctx, regs, i);
-        if (mo_registration_interested(ctx, JS_GetPropertyStr(ctx, r, "target"),
-                                       JS_GetPropertyStr(ctx, r, "options"), target, type))
-            return true;
+        GCValue opts = JS_GetPropertyStr(ctx, r, "options");
+        if (mo_registration_interested(ctx, JS_GetPropertyStr(ctx, r, "target"), opts, target, type)) return opts;
+    }
+    return JS_UNDEFINED;
+}
+
+static bool mo_observer_interested(JSContextHandle ctx, GCValue observer, GCValue target, const char *type) {
+    return !JS_IsUndefined(mo_interested_options(ctx, observer, target, type));
+}
+
+static bool mo_filter_allows(JSContextHandle ctx, GCValue opts, const char *name);
+
+/* Does any of the observer's registrations take this change (DOM "queue a
+ * mutation record" step 4: attributes through its filter)?  *want_old: does
+ * any that takes it ask for the old value (old_flag, its option)? */
+static bool mo_match(JSContextHandle ctx, GCValue observer, GCValue target, const char *type, const char *name,
+                     const char *old_flag, bool *want_old) {
+    *want_old = false;
+    GCValue regs = JS_GetPropertyStr(ctx, observer, "__mo_regs");
+    if (!JS_IsArray(ctx, regs)) return false;
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, JS_GetPropertyStr(ctx, regs, "length"));
+    bool any = false;
+    for (uint32_t i = 0; i < len; i++) {
+        GCValue r = JS_GetPropertyUint32(ctx, regs, i);
+        GCValue opts = JS_GetPropertyStr(ctx, r, "options");
+        if (!mo_registration_interested(ctx, JS_GetPropertyStr(ctx, r, "target"), opts, target, type)) continue;
+        if (name && !mo_filter_allows(ctx, opts, name)) continue;
+        any = true;
+        if (JS_ToBool(ctx, JS_GetPropertyStr(ctx, opts, old_flag))) *want_old = true;
+    }
+    return any;
+}
+
+/* Does a registration's attributeFilter (if any) let the name through? */
+static bool mo_filter_allows(JSContextHandle ctx, GCValue opts, const char *name) {
+    GCValue filter = JS_GetPropertyStr(ctx, opts, "attributeFilter");
+    if (!JS_IsArray(ctx, filter)) return true;
+    uint32_t n = 0;
+    JS_ToUint32(ctx, &n, JS_GetPropertyStr(ctx, filter, "length"));
+    for (uint32_t i = 0; i < n; i++) {
+        const char *s = JS_ToCString(ctx, JS_GetPropertyUint32(ctx, filter, i));
+        if (s && name && !strcmp(s, name)) return true;
     }
     return false;
 }
@@ -2547,6 +2613,8 @@ bool mo_child_list_observed(JSContextHandle ctx, GCValue target) {
 static GCValue mo_create_record_full(JSContextHandle ctx, GCValue target, GCValue added, GCValue removed,
                                 const char *type, const char *attr_name, const char *old_value) {
     GCValue record = JS_NewObject(ctx);
+    GCValue proto = JS_GetPropertyStr(ctx, JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "MutationRecord"), "prototype");
+    if (JS_IsObject(proto)) JS_SetPrototype(ctx, record, proto);
     JS_SetPropertyStr(ctx, record, "type", JS_NewString(ctx, type ? type : "childList"));
     JS_SetPropertyStr(ctx, record, "target", target);
     JS_SetPropertyStr(ctx, record, "addedNodes", added);
@@ -2598,7 +2666,8 @@ static void mo_push_record(JSContextHandle ctx, GCValue observer, GCValue record
 }
 
 
-void mo_notify_child_list(JSContextHandle ctx, GCValue target, GCValue added, GCValue removed) {
+void mo_notify_child_list(JSContextHandle ctx, GCValue target, GCValue added, GCValue removed, GCValue prev,
+                          GCValue next) {
     GCValue reg = mo_registry(ctx);
     GCValue len_val = JS_GetPropertyStr(ctx, reg, "length");
     uint32_t len = 0;
@@ -2607,6 +2676,8 @@ void mo_notify_child_list(JSContextHandle ctx, GCValue target, GCValue added, GC
         GCValue observer = JS_GetPropertyUint32(ctx, reg, i);
         if (mo_observer_interested(ctx, observer, target, "childList")) {
             GCValue record = mo_create_record_full(ctx, target, added, removed, "childList", NULL, NULL);
+            JS_SetPropertyStr(ctx, record, "previousSibling", JS_IsObject(prev) ? prev : JS_NULL);
+            JS_SetPropertyStr(ctx, record, "nextSibling", JS_IsObject(next) ? next : JS_NULL);
             mo_push_record(ctx, observer, record);
             mo_schedule_callback(ctx, observer);
         }
@@ -2620,9 +2691,11 @@ void mo_notify_character_data(JSContextHandle ctx, GCValue target, const char *o
     JS_ToUint32(ctx, &len, len_val);
     for (uint32_t i = 0; i < len; i++) {
         GCValue observer = JS_GetPropertyUint32(ctx, reg, i);
-        if (mo_observer_interested(ctx, observer, target, "characterData")) {
+        bool want_old;
+        if (mo_match(ctx, observer, target, "characterData", NULL, "characterDataOldValue", &want_old)) {
             GCValue empty = JS_NewArray(ctx);
-            GCValue record = mo_create_record_full(ctx, target, empty, empty, "characterData", NULL, old_value);
+            GCValue record = mo_create_record_full(ctx, target, empty, empty, "characterData", NULL,
+                                                   want_old ? old_value : NULL);
             mo_push_record(ctx, observer, record);
             mo_schedule_callback(ctx, observer);
         }
@@ -2636,9 +2709,11 @@ void mo_notify_attribute(JSContextHandle ctx, GCValue target, const char *name, 
     JS_ToUint32(ctx, &len, len_val);
     for (uint32_t i = 0; i < len; i++) {
         GCValue observer = JS_GetPropertyUint32(ctx, reg, i);
-        if (mo_observer_interested(ctx, observer, target, "attributes")) {
+        bool want_old;
+        if (mo_match(ctx, observer, target, "attributes", name ? name : "", "attributeOldValue", &want_old)) {
             GCValue empty = JS_NewArray(ctx);
-            GCValue record = mo_create_record_full(ctx, target, empty, empty, "attributes", name, old_value);
+            GCValue record = mo_create_record_full(ctx, target, empty, empty, "attributes", name,
+                                                   want_old ? old_value : NULL);
             mo_push_record(ctx, observer, record);
             mo_schedule_callback(ctx, observer);
         }

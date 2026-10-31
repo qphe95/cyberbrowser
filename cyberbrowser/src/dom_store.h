@@ -43,6 +43,8 @@ enum {
     DOM_K_FREE      = 0,
     DOM_K_ELEMENT   = 1,
     DOM_K_TEXT      = 3,
+    DOM_K_CDATA     = 4,    /* CDATASection (a Text) */
+    DOM_K_PI        = 7,    /* ProcessingInstruction: target as lname, data as text */
     DOM_K_COMMENT   = 8,
     DOM_K_DOCUMENT  = 9,
     DOM_K_DOCTYPE   = 10,
@@ -75,8 +77,10 @@ typedef struct DomStr {
 } DomStr;
 
 typedef struct DomAttr {
-    CssAtom name;
+    CssAtom name;       /* qualified name, lower-cased (matching, CSS) */
     DomStr value;
+    uint32_t ns;        /* namespace: its URI's dom_name id; 0 = none */
+    uint32_t qname;     /* qualified name as written (dom_name id) if it is not name's; 0 = name's */
 } DomAttr;
 
 /* A node's attribute list.  `blk` != 0: the array lives in an arena block
@@ -114,6 +118,10 @@ typedef struct DomStore {
     DomStr   *text;         /* text / comment data */
     DomAttrList *attrs;
     CssAtom  *id_atom;      /* atom of the id attribute (lower-cased), 0 = none */
+    uint32_t *ns;           /* element: namespace (DOM_NS_*, else a dom_name id); 0 = HTML's */
+    uint32_t *prefix;       /* element: namespace prefix (dom_name id), 0 = none */
+    uint32_t *lname;        /* element: local name as written (dom_name id) when it
+                               is not tag's (upper case in it), 0 = tag's */
     uint32_t *order;        /* creation sequence, for document-order ties */
 
     DomTreeRec *trees;
@@ -179,6 +187,14 @@ NodeId dom_create_element(CssAtom tag, NodeId owner);
 NodeId dom_create_element_str(const char *tag, size_t n, NodeId owner);
 NodeId dom_create_chardata(int kind, const char *s, size_t n, NodeId owner);
 NodeId dom_create_fragment(NodeId owner);
+const char *dom_name_str(uint32_t id);
+/* A DocumentType (its name, publicId and systemId: lname, prefix and ns as
+ * dom_name ids) and a ProcessingInstruction (its target: lname). */
+NodeId dom_create_doctype(const char *name, size_t nn, const char *pub, size_t pn, const char *sys, size_t sn,
+                          NodeId owner);
+static inline const char *dom_doctype_public_id(NodeId id) { return dom_name_str(dom_valid(id) ? g_dom.prefix[dom_slot(id)] : 0); }
+static inline const char *dom_doctype_system_id(NodeId id) { return dom_name_str(dom_valid(id) ? g_dom.ns[dom_slot(id)] : 0); }
+NodeId dom_create_pi(const char *target, size_t tn, const char *data, size_t dn, NodeId owner);
 /* Flags derived from the tag name (CE candidate, raw text, void). */
 uint16_t dom_tag_flags(CssAtom tag);
 
@@ -195,6 +211,10 @@ static inline NodeId dom_host(NodeId id) { return dom_valid(id) ? dom_id_of(g_do
 static inline NodeId dom_shadow_root(NodeId id) { return dom_valid(id) ? dom_id_of(g_dom.shadow[dom_slot(id)]) : DOM_NULL; }
 static inline NodeId dom_template_content(NodeId id) { return dom_valid(id) ? dom_id_of(g_dom.content[dom_slot(id)]) : DOM_NULL; }
 static inline NodeId dom_owner(NodeId id) { return dom_valid(id) ? dom_id_of(g_dom.owner[dom_slot(id)]) : DOM_NULL; }
+/* Is the kind a CharacterData's (Text, CDATASection, ProcessingInstruction, Comment)? */
+static inline bool dom_kind_is_chardata(int k) {
+    return k == DOM_K_TEXT || k == DOM_K_CDATA || k == DOM_K_PI || k == DOM_K_COMMENT;
+}
 /* Tag name as a string ("" for non-elements). */
 const char *dom_tag_name(NodeId id);
 /* Text / comment data ("" when none). */
@@ -219,6 +239,28 @@ static inline uint32_t dom_next_in_subtree(uint32_t n, uint32_t root) {
     return 0;
 }
 
+/* ---- names and namespaces ---- */
+/* Case-sensitive interned strings (namespace URIs, prefixes, local names
+ * with upper case), by id; ids are never 0.  Engine thread only. */
+uint32_t dom_name_intern(const char *s, size_t n);
+const char *dom_name_str(uint32_t id);
+/* Element namespaces (g_dom.ns): HTML's is 0, so elements are HTML elements
+ * unless set; the others are the dom_name ids of their URIs. */
+enum { DOM_NS_HTML = 0, DOM_NS_NULL = 1, DOM_NS_SVG = 2, DOM_NS_MATHML = 3, DOM_NS_XML = 4,
+       DOM_NS_XMLNS = 5, DOM_NS_XLINK = 6 };
+/* The namespace for a URI (NULL or "": DOM_NS_NULL); its URI (NULL for null). */
+uint32_t dom_ns_of(const char *uri, size_t n);
+const char *dom_ns_uri(uint32_t ns);
+static inline uint32_t dom_ns(NodeId id) { return dom_valid(id) ? g_dom.ns[dom_slot(id)] : DOM_NS_HTML; }
+/* An element's local name as written ("" for non-elements) and prefix (NULL: none). */
+const char *dom_local_name(NodeId id);
+const char *dom_prefix(NodeId id);
+/* Give an element a namespace, prefix (NULL: none) and local name (as written). */
+void dom_set_element_name(NodeId id, uint32_t ns, const char *prefix, size_t pn, const char *local, size_t ln);
+/* Is the document an XML document (not an HTML document)? */
+#define DOMF_XML_DOCUMENT (1u << 12)   /* (on document nodes) */
+static inline bool dom_is_html_document(NodeId doc) { return !(dom_flags(doc) & DOMF_XML_DOCUMENT); }
+
 /* ---- attributes ---- */
 int dom_attr_count(NodeId id);
 const DomAttr *dom_attr_at(NodeId id, int i);
@@ -229,6 +271,19 @@ const char *dom_get_attr_str(NodeId id, const char *name);
 void dom_set_attr(NodeId id, CssAtom name, const char *value, size_t n);
 void dom_set_attr_str(NodeId id, const char *name, const char *value);
 bool dom_remove_attr(NodeId id, CssAtom name);
+/* An attribute's qualified name as written, its local name and prefix
+ * (NULL: none; only a namespaced attribute has one). */
+const char *dom_attr_qualified_name(const DomAttr *a);
+const char *dom_attr_local_name(const DomAttr *a);
+const char *dom_attr_prefix(const DomAttr *a, size_t *len);
+/* The index of the first attribute whose qualified name (as written) is
+ * qn, or whose namespace and local name are these; -1 if none. */
+int dom_attr_index_qualified(NodeId id, const char *qn, size_t n);
+int dom_attr_index_ns(NodeId id, uint32_t ns, const char *local, size_t n);
+/* Set the value of attribute i, or (i < 0) add one named qn, in namespace
+ * ns (0: none).  Keeps the id atom; returns the attribute's index. */
+int dom_set_attr_at(NodeId id, int i, uint32_t ns, const char *qn, size_t qnl, const char *value, size_t n);
+void dom_remove_attr_at(NodeId id, int i);
 /* Does the class attribute contain `cls` (case-sensitive token match)? */
 bool dom_has_class(NodeId id, const char *cls, size_t n);
 

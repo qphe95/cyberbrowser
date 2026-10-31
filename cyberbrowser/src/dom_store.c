@@ -169,6 +169,9 @@ static void store_grow(uint32_t need) {
     GROW(attrs, DomAttrList);
     GROW(id_atom, CssAtom);
     GROW(order, uint32_t);
+    GROW(ns, uint32_t);
+    GROW(prefix, uint32_t);
+    GROW(lname, uint32_t);
     g_dom.cap = cap;
 }
 
@@ -208,6 +211,7 @@ uint32_t dom_alloc_slot(int kind, NodeId owner) {
     g_dom.attrs[s] = (DomAttrList){ NULL, 0, 0, 0 };
     g_dom.id_atom[s] = CSS_ATOM_NONE;
     g_dom.order[s] = ++g_dom.seq;
+    g_dom.ns[s] = g_dom.prefix[s] = g_dom.lname[s] = 0;
     g_dom.live++;
     return s;
 }
@@ -223,6 +227,7 @@ void dom_free_slot(uint32_t s) {
     if (!s || s >= g_dom.count || g_dom.kind[s] == DOM_K_FREE) return;
     dom_str_release(&g_dom.text[s]);
     attrs_release(&g_dom.attrs[s]);
+    g_dom.ns[s] = g_dom.prefix[s] = g_dom.lname[s] = 0;
     if (g_dom.tree[s]) {
         DomTreeRec *t = &g_dom.trees[g_dom.tree[s]];
         if (t->root == dom_id_of(s)) t->root = DOM_NULL;   /* the tree object outlives its root */
@@ -309,6 +314,21 @@ NodeId dom_create_fragment(NodeId owner) {
     return dom_id_of(dom_alloc_slot(DOM_K_FRAGMENT, owner));
 }
 
+NodeId dom_create_doctype(const char *name, size_t nn, const char *pub, size_t pn, const char *sys, size_t sn,
+                          NodeId owner) {
+    uint32_t slot = dom_alloc_slot(DOM_K_DOCTYPE, owner);
+    g_dom.lname[slot] = dom_name_intern(name, nn);
+    g_dom.prefix[slot] = dom_name_intern(pub, pn);
+    g_dom.ns[slot] = dom_name_intern(sys, sn);
+    return dom_id_of(slot);
+}
+
+NodeId dom_create_pi(const char *target, size_t tn, const char *data, size_t dn, NodeId owner) {
+    NodeId id = dom_create_chardata(DOM_K_PI, data, dn, owner);
+    g_dom.lname[dom_slot(id)] = dom_name_intern(target, tn);
+    return id;
+}
+
 /* ============================================================================
  * Reads
  * ============================================================================ */
@@ -317,6 +337,110 @@ const char *dom_tag_name(NodeId id) {
     if (!dom_valid(id)) return "";
     const char *s = css_atom_str(g_dom.tag[dom_slot(id)]);
     return s ? s : "";
+}
+
+/* ---- names and namespaces ---- */
+
+static struct {
+    char **s;
+    uint32_t n, cap;            /* ids 1..n-1 */
+    uint32_t *slot, mask;       /* open addressing: id, 0 = empty */
+} g_names;
+
+static uint32_t name_hash(const char *s, size_t n) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < n; i++) h = (h ^ (uint8_t)s[i]) * 16777619u;
+    return h;
+}
+
+uint32_t dom_name_intern(const char *s, size_t n) {
+    if (!g_names.slot) {
+        /* (the namespaces' fixed ids: DOM_NS_NULL is "", then SVG's ...) */
+        static const char *const fixed[] = { "", "http://www.w3.org/2000/svg", "http://www.w3.org/1998/Math/MathML",
+                                             "http://www.w3.org/XML/1998/namespace", "http://www.w3.org/2000/xmlns/",
+                                             "http://www.w3.org/1999/xlink" };
+        g_names.mask = 255;
+        g_names.slot = calloc(g_names.mask + 1, sizeof(uint32_t));
+        g_names.cap = 64;
+        g_names.s = calloc(g_names.cap, sizeof(char *));
+        g_names.n = 1;
+        for (size_t i = 0; i < sizeof fixed / sizeof fixed[0]; i++) dom_name_intern(fixed[i], strlen(fixed[i]));
+    }
+    uint32_t h = name_hash(s, n);
+    for (uint32_t i = h & g_names.mask;; i = (i + 1) & g_names.mask) {
+        uint32_t id = g_names.slot[i];
+        if (!id) break;
+        if (strlen(g_names.s[id]) == n && !memcmp(g_names.s[id], s, n)) return id;
+    }
+    if (g_names.n == g_names.cap) {
+        g_names.cap *= 2;
+        g_names.s = realloc(g_names.s, g_names.cap * sizeof(char *));
+    }
+    uint32_t id = g_names.n++;
+    g_names.s[id] = malloc(n + 1);
+    memcpy(g_names.s[id], s, n);
+    g_names.s[id][n] = 0;
+    if (g_names.n * 2 > g_names.mask) {
+        uint32_t m = g_names.mask * 2 + 1, *t = calloc(m + 1, sizeof(uint32_t));
+        for (uint32_t k = 1; k < g_names.n; k++) {
+            uint32_t j = name_hash(g_names.s[k], strlen(g_names.s[k])) & m;
+            while (t[j]) j = (j + 1) & m;
+            t[j] = k;
+        }
+        free(g_names.slot);
+        g_names.slot = t;
+        g_names.mask = m;
+    } else {
+        uint32_t j = h & g_names.mask;
+        while (g_names.slot[j]) j = (j + 1) & g_names.mask;
+        g_names.slot[j] = id;
+    }
+    return id;
+}
+
+const char *dom_name_str(uint32_t id) {
+    return id && id < g_names.n ? g_names.s[id] : "";
+}
+
+#define HTML_NS_URI "http://www.w3.org/1999/xhtml"
+
+uint32_t dom_ns_of(const char *uri, size_t n) {
+    if (!uri || !n) return DOM_NS_NULL;
+    if (n == sizeof HTML_NS_URI - 1 && !memcmp(uri, HTML_NS_URI, n)) return DOM_NS_HTML;
+    return dom_name_intern(uri, n);
+}
+
+const char *dom_ns_uri(uint32_t ns) {
+    return ns == DOM_NS_HTML ? HTML_NS_URI : ns == DOM_NS_NULL ? NULL : dom_name_str(ns);
+}
+
+const char *dom_local_name(NodeId id) {
+    if (dom_kind(id) != DOM_K_ELEMENT) return "";
+    uint32_t l = g_dom.lname[dom_slot(id)];
+    if (l) return dom_name_str(l);
+    CssAtom a = g_dom.tag[dom_slot(id)];
+    return a == CSS_ATOM_NONE || a == CSS_ATOM_EMPTY ? "div" : css_atom_str(a);
+}
+
+const char *dom_prefix(NodeId id) {
+    uint32_t p = dom_valid(id) ? g_dom.prefix[dom_slot(id)] : 0;
+    return p ? dom_name_str(p) : NULL;
+}
+
+void dom_set_element_name(NodeId id, uint32_t ns, const char *prefix, size_t pn, const char *local, size_t ln) {
+    if (dom_kind(id) != DOM_K_ELEMENT) return;
+    uint32_t s = dom_slot(id);
+    css_atom_reserve(1);
+    g_dom.tag[s] = css_atom_intern(local, ln);
+    /* (raw text and void are HTML elements' ways of parsing and serializing) */
+    uint16_t tf = dom_tag_flags(g_dom.tag[s]);
+    g_dom.flags[s] = (uint16_t)((g_dom.flags[s] & ~(DOMF_CE_CANDIDATE | DOMF_RAW_TEXT | DOMF_VOID)) |
+                                (ns == DOM_NS_HTML ? tf : tf & DOMF_CE_CANDIDATE));
+    g_dom.ns[s] = ns;
+    g_dom.prefix[s] = prefix ? dom_name_intern(prefix, pn) : 0;
+    bool upper = false;
+    for (size_t i = 0; i < ln && !upper; i++) upper = local[i] >= 'A' && local[i] <= 'Z';
+    g_dom.lname[s] = upper ? dom_name_intern(local, ln) : 0;
 }
 
 const char *dom_text(NodeId id, uint32_t *len) {
@@ -415,6 +539,7 @@ void dom_set_attr(NodeId id, CssAtom name, const char *value, size_t n) {
         attrs_make_owned(l, l->n + 1);
         l->a[l->n].name = name;
         l->a[l->n].value = (DomStr){ NULL, 0, 0 };
+        l->a[l->n].ns = l->a[l->n].qname = 0;
         l->n++;
     } else {
         dom_str_release(&l->a[i].value);
@@ -456,6 +581,95 @@ bool dom_remove_attr(NodeId id, CssAtom name) {
         return true;
     }
     return false;
+}
+
+const char *dom_attr_qualified_name(const DomAttr *a) {
+    if (a->qname) return dom_name_str(a->qname);
+    const char *s = css_atom_str(a->name);
+    return s ? s : "";
+}
+
+const char *dom_attr_local_name(const DomAttr *a) {
+    const char *q = dom_attr_qualified_name(a), *c = a->ns ? strchr(q, ':') : NULL;
+    return c ? c + 1 : q;
+}
+
+const char *dom_attr_prefix(const DomAttr *a, size_t *len) {
+    const char *q = dom_attr_qualified_name(a), *c = a->ns ? strchr(q, ':') : NULL;
+    if (len) *len = c ? (size_t)(c - q) : 0;
+    return c ? q : NULL;
+}
+
+int dom_attr_index_qualified(NodeId id, const char *qn, size_t n) {
+    if (!dom_valid(id)) return -1;
+    DomAttrList *l = &g_dom.attrs[dom_slot(id)];
+    /* (the parser lower-cases attribute names, SVG's viewBox too: on a
+     * foreign element one it made matches in any case) */
+    bool fold = g_dom.ns[dom_slot(id)] != DOM_NS_HTML;
+    for (int i = 0; i < l->n; i++) {
+        const char *q = dom_attr_qualified_name(&l->a[i]);
+        if (strlen(q) == n && (fold && !l->a[i].qname ? !strncasecmp(q, qn, n) : !memcmp(q, qn, n))) return i;
+    }
+    return -1;
+}
+
+int dom_attr_index_ns(NodeId id, uint32_t ns, const char *local, size_t n) {
+    if (!dom_valid(id)) return -1;
+    DomAttrList *l = &g_dom.attrs[dom_slot(id)];
+    for (int i = 0; i < l->n; i++) {
+        if (l->a[i].ns != ns) continue;
+        const char *ln = dom_attr_local_name(&l->a[i]);
+        if (strlen(ln) == n && !memcmp(ln, local, n)) return i;
+    }
+    return -1;
+}
+
+int dom_set_attr_at(NodeId id, int i, uint32_t ns, const char *qn, size_t qnl, const char *value, size_t n) {
+    if (!dom_valid(id)) return -1;
+    uint32_t s = dom_slot(id);
+    DomAttrList *l = &g_dom.attrs[s];
+    if (i < 0 || i >= l->n) {
+        if (l->n == 0xFFFF) return -1;
+        attrs_make_owned(l, l->n + 1);
+        i = l->n++;
+        css_atom_reserve(1);
+        l->a[i].name = css_atom_intern(qn, qnl);
+        l->a[i].value = (DomStr){ NULL, 0, 0 };
+        l->a[i].ns = ns;
+        const char *as = css_atom_str(l->a[i].name);
+        l->a[i].qname = as && strlen(as) == qnl && !memcmp(as, qn, qnl) ? 0 : dom_name_intern(qn, qnl);
+    } else {
+        attrs_make_owned(l, l->n);
+        dom_str_release(&l->a[i].value);
+    }
+    l->a[i].value = dom_str_dup(value, n);
+    /* (the id and class attributes are the ones in no namespace) */
+    const char *nm = l->a[i].ns ? NULL : css_atom_str(l->a[i].name);
+    if (nm && !strcmp(nm, "id")) {
+        if (n) { css_atom_reserve(1); g_dom.id_atom[s] = css_atom_intern(value, n); dom_id_index_note(s); }
+        else g_dom.id_atom[s] = CSS_ATOM_NONE;
+    }
+    if (nm && (!strcmp(nm, "id") || !strcmp(nm, "class"))) g_dom.class_version++;
+    dom_note_mutation(s, DOMF_DIRTY_ATTR);
+    g_dom.attr_version++;
+    return i;
+}
+
+void dom_remove_attr_at(NodeId id, int i) {
+    if (!dom_valid(id)) return;
+    uint32_t s = dom_slot(id);
+    DomAttrList *l = &g_dom.attrs[s];
+    if (i < 0 || i >= l->n) return;
+    attrs_make_owned(l, l->n);
+    const char *nm = l->a[i].ns ? NULL : css_atom_str(l->a[i].name);
+    bool idc = nm && (!strcmp(nm, "id") || !strcmp(nm, "class"));
+    if (nm && !strcmp(nm, "id")) g_dom.id_atom[s] = CSS_ATOM_NONE;
+    dom_str_release(&l->a[i].value);
+    memmove(&l->a[i], &l->a[i + 1], (size_t)(l->n - i - 1) * sizeof(DomAttr));
+    l->n--;
+    if (idc) g_dom.class_version++;
+    dom_note_mutation(s, DOMF_DIRTY_ATTR);
+    g_dom.attr_version++;
 }
 
 bool dom_has_class(NodeId id, const char *cls, size_t n) {

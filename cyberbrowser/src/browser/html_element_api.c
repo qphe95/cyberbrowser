@@ -153,39 +153,6 @@ static const char k_html_element_js[] =
 "  });\n"
 "})";
 
-/* CharacterData (Text and Comment share the prototype here): length and the
- * string editing methods over `data`; Text's splitText() and wholeText. */
-static const char k_character_data_js[] =
-"(function(P){\n"
-"  function method(name, fn) {\n"
-"    if (typeof P[name] === 'function') return;\n"
-"    Object.defineProperty(P, name, {configurable:true, writable:true, value:fn});\n"
-"  }\n"
-"  function check(node, off) {\n"
-"    off = off >>> 0;\n"
-"    if (off > node.data.length) throw new DOMException('Offset out of range', 'IndexSizeError');\n"
-"    return off;\n"
-"  }\n"
-"  if (!('length' in P)) Object.defineProperty(P, 'length', {configurable:true, enumerable:true,\n"
-"    get: function(){ return String(this.data).length; }});\n"
-"  method('appendData', function(s){ this.data = this.data + String(s); });\n"
-"  method('substringData', function(off, count){ off = check(this, off); return this.data.substr(off, count >>> 0); });\n"
-"  method('replaceData', function(off, count, s){ off = check(this, off); var d = this.data;\n"
-"    this.data = d.slice(0, off) + String(s) + d.slice(off + (count >>> 0)); });\n"
-"  method('insertData', function(off, s){ this.replaceData(off, 0, s); });\n"
-"  method('deleteData', function(off, count){ this.replaceData(off, count, ''); });\n"
-"  method('splitText', function(off){\n"
-"    off = check(this, off);\n"
-"    var tail = this.ownerDocument.createTextNode(this.data.slice(off));\n"
-"    this.data = this.data.slice(0, off);\n"
-"    if (this.parentNode) this.parentNode.insertBefore(tail, this.nextSibling);\n"
-"    return tail;\n"
-"  });\n"
-"  if (!('wholeText' in P)) Object.defineProperty(P, 'wholeText', {configurable:true, enumerable:true,\n"
-"    get: function(){ var s = this; while (s.previousSibling && s.previousSibling.nodeType === 3) s = s.previousSibling;\n"
-"      var out = ''; for (; s && s.nodeType === 3; s = s.nextSibling) out += s.data; return out; }});\n"
-"})";
-
 /* HTMLLinkElement reflected attributes.  Without them `link.href = url`
  * only set a JS property, the element had no href attribute, and its sheet
  * was never loaded (YouTube's player waits for link#player-css's load). */
@@ -408,9 +375,3 @@ void html_script_api_install(JSContextHandle ctx, GCValue script_proto)
     run_installer(ctx, k_script_js, sizeof(k_script_js) - 1, "<script_api>", script_proto);
 }
 
-void html_character_data_api_install(JSContextHandle ctx, GCValue character_data_proto)
-{
-    if (!JS_IsObject(character_data_proto)) return;
-    run_installer(ctx, k_character_data_js, sizeof(k_character_data_js) - 1, "<character_data_api>",
-                  character_data_proto);
-}

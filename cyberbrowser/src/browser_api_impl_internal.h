@@ -113,7 +113,22 @@ JSAtom dom_iterator_atom(JSContextHandle ctx);
 void dom_token_list_install(JSContextHandle ctx, GCValue global, GCValue window);
 /* URL, URLSearchParams (browser/url_classes.c); <a>/<area> URL attributes and baseURI. */
 void url_classes_install(JSContextHandle ctx, GCValue global);
+/* CharacterData and its node interfaces, DocumentType (character_data.c). */
+void character_data_install(JSContextHandle ctx, GCValue global, GCValue character_data_proto, GCValue node_proto);
+/* DOM "adopt": node's subtree becomes document doc's (dom_api.c). */
+void dom_api_adopt(JSContextHandle ctx, NodeId node, NodeId doc);
+/* Document.prototype's members, XMLDocument, DOMImplementation (document_api.c). */
+void document_api_install(JSContextHandle ctx, GCValue global);
+/* Node's namespace lookups, getElementsByTagName(NS) (node_namespaces.c). */
+void node_namespaces_install(JSContextHandle ctx, GCValue global);
+/* An XML document parsed from s (a parsererror one if not well-formed). */
+GCValue dom_new_xml_document(JSContextHandle ctx, const char *s, size_t n, const char *content_type);
+/* Does s match XML's Name production? */
+bool dom_xml_is_name(const char *s, size_t n);
+GCValue js_document_create_comment(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 /* TextEncoder and TextDecoder (encoding.c). */
+/* The name of the encoding a label names (Encoding Standard 4.2), or NULL. */
+const char *encoding_name_for_label(const char *s, size_t n);
 void encoding_install(JSContextHandle ctx, GCValue global);
 void url_hyperlinks_install(JSContextHandle ctx, GCValue global);
 /* __cyberEventPath for dom_events.js (browser/event_path.c). */
@@ -198,6 +213,8 @@ GCValue js_node_get_nodeType(JSContextHandle ctx, GCValue this_val, int argc, GC
 GCValue js_node_get_nodeName(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_get_tagName(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_get_localName(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_get_namespaceURI(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_get_prefix(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_get_firstElementChild(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_get_lastElementChild(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_get_nextElementSibling(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
@@ -225,6 +242,7 @@ GCValue js_element_remove_attribute(JSContextHandle ctx, GCValue this_val, int a
 GCValue js_element_has_attribute(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_toggle_attribute(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_set_attribute_ns(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_has_attribute_ns(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_get_attribute_ns(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_remove_attribute_ns(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_document_getElementById(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
@@ -263,10 +281,14 @@ GCValue js_node_getRootNode_real(JSContextHandle ctx, GCValue this_val, int argc
 GCValue js_mutation_observer_observe(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_mutation_observer_takeRecords(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_mutation_observer_disconnect(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
-void mo_notify_child_list(JSContextHandle ctx, GCValue target, GCValue added, GCValue removed);
+/* A childList change of target: added and removed are arrays; prev and next
+ * the siblings around them (null for none). */
+void mo_notify_child_list(JSContextHandle ctx, GCValue target, GCValue added, GCValue removed, GCValue prev,
+                          GCValue next);
 bool mo_child_list_observed(JSContextHandle ctx, GCValue target);
 bool mo_any_observing(JSContextHandle ctx);
 void mo_notify_character_data(JSContextHandle ctx, GCValue target, const char *old_value);
+/* old_value: NULL when the attribute was absent. */
 void mo_notify_attribute(JSContextHandle ctx, GCValue target, const char *name, const char *old_value);
 GCValue js_queue_microtask(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_create_document_fragment(JSContextHandle ctx);
@@ -474,6 +496,9 @@ void platform_api_install(JSContextHandle ctx, GCValue global, GCValue window);
 void webgpu_api_install(JSContextHandle ctx, GCValue global, GCValue window);
 void frame_api_install(JSContextHandle ctx, GCValue global);
 void frame_api_on_connect(JSContextHandle ctx, NodeId subtree);
+/* While set (a script's insertion), an iframe without src that connects
+ * gets its about:blank document and load event at once (HTML 4.8.5). */
+extern bool g_frame_blank_now;
 extern const JSCFunctionListEntry js_shadow_root_native_funcs[];
 extern const size_t js_shadow_root_native_funcs_count;
 void timer_install_rejection_tracker(JSRuntimeHandle rt);

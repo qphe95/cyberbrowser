@@ -148,7 +148,7 @@ GCValue js_document_create_text_node(JSContextHandle ctx, GCValue this_val, int 
 }
 
 // document.createComment() - returns a proper Comment node object
-static GCValue js_document_create_comment(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_document_create_comment(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     size_t len = 0;
     const char *text = argc >= 1 ? JS_ToCStringLen(ctx, &len, argv[0]) : NULL;
     if (!text) { text = ""; len = 0; }
@@ -157,77 +157,6 @@ static GCValue js_document_create_comment(JSContextHandle ctx, GCValue this_val,
     if (JS_IsNull(node)) return JS_NULL;
     dom_node_set_owner_document(ctx, node, this_val);
     return node;
-}
-
-// document.implementation.createHTMLDocument(title)
-static GCValue js_document_implementation_create_html_document(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)this_val;
-    const char *title_str = "";
-    if (argc >= 1) {
-        title_str = JS_ToCString(ctx, argv[0]);
-        if (!title_str) title_str = "";
-    }
-
-    GCValue doc = dom_js(ctx, dom_create_document());
-    if (!JS_IsObject(doc)) return JS_NULL;
-
-    JS_SetPropertyStr(ctx, doc, "nodeType", JS_NewInt32(ctx, DOM_NODE_TYPE_DOCUMENT));
-    JS_SetPropertyStr(ctx, doc, "nodeName", JS_NewString(ctx, "#document"));
-    JS_SetPropertyStr(ctx, doc, "contentType", JS_NewString(ctx, "text/html"));
-    JS_SetPropertyStr(ctx, doc, "readyState", JS_NewString(ctx, "complete"));
-    JS_SetPropertyStr(ctx, doc, "URL", JS_NewString(ctx, "about:blank"));
-    JS_SetPropertyStr(ctx, doc, "documentURI", JS_NewString(ctx, "about:blank"));
-    JS_SetPropertyStr(ctx, doc, "title", JS_NewString(ctx, title_str));
-    JS_SetPropertyStr(ctx, doc, "characterSet", JS_NewString(ctx, "UTF-8"));
-    JS_SetPropertyStr(ctx, doc, "charset", JS_NewString(ctx, "UTF-8"));
-    JS_SetPropertyStr(ctx, doc, "hidden", JS_FALSE);
-    JS_SetPropertyStr(ctx, doc, "visibilityState", JS_NewString(ctx, "visible"));
-
-    DEF_FUNC(ctx, doc, "createElement", js_document_create_element, 1);
-    DEF_FUNC(ctx, doc, "createElementNS", js_document_create_element_ns, 2);
-    DEF_FUNC(ctx, doc, "createTextNode", js_document_create_text_node, 1);
-    DEF_FUNC(ctx, doc, "createComment", js_document_create_comment, 1);
-    DEF_FUNC(ctx, doc, "createDocumentFragment", js_document_create_document_fragment, 0);
-    DEF_FUNC(ctx, doc, "createRange", js_document_create_range, 0);
-    DEF_FUNC(ctx, doc, "createTreeWalker", js_document_create_tree_walker, 3);
-    DEF_FUNC(ctx, doc, "importNode", js_document_import_node, 2);
-    DEF_FUNC(ctx, doc, "getElementById", js_document_getElementById, 1);
-    DEF_FUNC(ctx, doc, "querySelector", js_document_querySelector, 1);
-    DEF_FUNC(ctx, doc, "querySelectorAll", js_document_querySelectorAll, 1);
-    DEF_FUNC(ctx, doc, "getElementsByTagName", js_document_get_elements_by_tag_name, 1);
-    DEF_FUNC(ctx, doc, "getElementsByClassName", js_document_getElementsByClassName, 1);
-
-    // Build a minimal <html><head><title></title></head><body></body></html> tree.
-    GCValue html_tag = JS_NewString(ctx, "html");
-    GCValue head_tag = JS_NewString(ctx, "head");
-    GCValue body_tag = JS_NewString(ctx, "body");
-    GCValue title_tag = JS_NewString(ctx, "title");
-
-    GCValue html = js_document_create_element(ctx, doc, 1, &html_tag);
-    GCValue head = js_document_create_element(ctx, doc, 1, &head_tag);
-    GCValue body = js_document_create_element(ctx, doc, 1, &body_tag);
-    GCValue title_el = js_document_create_element(ctx, doc, 1, &title_tag);
-
-    GCValue title_text_arg = JS_NewString(ctx, title_str);
-    GCValue title_text = js_document_create_text_node(ctx, doc, 1, &title_text_arg);
-
-    GCValue append_args[1] = { [0 ... (1) - 1] = GC_UNDEFINED_INIT };
-    append_args[0] = title_text;
-    js_node_appendChild_real(ctx, title_el, 1, append_args);
-    append_args[0] = title_el;
-    js_node_appendChild_real(ctx, head, 1, append_args);
-    append_args[0] = body;
-    js_node_appendChild_real(ctx, html, 1, append_args);
-    append_args[0] = head;
-    js_node_appendChild_real(ctx, html, 1, append_args);
-    append_args[0] = html;
-    js_node_appendChild_real(ctx, doc, 1, append_args);
-
-    JS_SetPropertyStr(ctx, doc, "documentElement", html);
-    JS_SetPropertyStr(ctx, doc, "head", head);
-    JS_SetPropertyStr(ctx, doc, "body", body);
-
-    return doc;
 }
 
 GCValue js_false(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
@@ -1406,19 +1335,23 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, global, "Node", node_ctor);
     JS_SetPropertyStr(ctx, window, "Node", node_ctor);
 
-    // Standard Node type constants used by DOM polyfills such as webcomponents-sd.
-    JS_SetPropertyStr(ctx, node_ctor, "ELEMENT_NODE", JS_NewInt32(ctx, 1));
-    JS_SetPropertyStr(ctx, node_ctor, "ATTRIBUTE_NODE", JS_NewInt32(ctx, 2));
-    JS_SetPropertyStr(ctx, node_ctor, "TEXT_NODE", JS_NewInt32(ctx, 3));
-    JS_SetPropertyStr(ctx, node_ctor, "CDATA_SECTION_NODE", JS_NewInt32(ctx, 4));
-    JS_SetPropertyStr(ctx, node_ctor, "ENTITY_REFERENCE_NODE", JS_NewInt32(ctx, 5));
-    JS_SetPropertyStr(ctx, node_ctor, "ENTITY_NODE", JS_NewInt32(ctx, 6));
-    JS_SetPropertyStr(ctx, node_ctor, "PROCESSING_INSTRUCTION_NODE", JS_NewInt32(ctx, 7));
-    JS_SetPropertyStr(ctx, node_ctor, "COMMENT_NODE", JS_NewInt32(ctx, 8));
-    JS_SetPropertyStr(ctx, node_ctor, "DOCUMENT_NODE", JS_NewInt32(ctx, 9));
-    JS_SetPropertyStr(ctx, node_ctor, "DOCUMENT_TYPE_NODE", JS_NewInt32(ctx, 10));
-    JS_SetPropertyStr(ctx, node_ctor, "DOCUMENT_FRAGMENT_NODE", JS_NewInt32(ctx, 11));
-    JS_SetPropertyStr(ctx, node_ctor, "NOTATION_NODE", JS_NewInt32(ctx, 12));
+    // Node's constants (DOM 4.4), on the interface and its prototype (WebIDL:
+    // enumerable, read-only, not configurable).
+    {
+        static const struct { const char *name; int v; } node_consts[] = {
+            { "ELEMENT_NODE", 1 }, { "ATTRIBUTE_NODE", 2 }, { "TEXT_NODE", 3 }, { "CDATA_SECTION_NODE", 4 },
+            { "ENTITY_REFERENCE_NODE", 5 }, { "ENTITY_NODE", 6 }, { "PROCESSING_INSTRUCTION_NODE", 7 },
+            { "COMMENT_NODE", 8 }, { "DOCUMENT_NODE", 9 }, { "DOCUMENT_TYPE_NODE", 10 },
+            { "DOCUMENT_FRAGMENT_NODE", 11 }, { "NOTATION_NODE", 12 },
+            { "DOCUMENT_POSITION_DISCONNECTED", 0x01 }, { "DOCUMENT_POSITION_PRECEDING", 0x02 },
+            { "DOCUMENT_POSITION_FOLLOWING", 0x04 }, { "DOCUMENT_POSITION_CONTAINS", 0x08 },
+            { "DOCUMENT_POSITION_CONTAINED_BY", 0x10 }, { "DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC", 0x20 },
+        };
+        for (size_t i = 0; i < sizeof(node_consts) / sizeof(node_consts[0]); i++) {
+            JS_DefinePropertyValueStr(ctx, node_ctor, node_consts[i].name, JS_NewInt32(ctx, node_consts[i].v), JS_PROP_ENUMERABLE);
+            JS_DefinePropertyValueStr(ctx, node_proto, node_consts[i].name, JS_NewInt32(ctx, node_consts[i].v), JS_PROP_ENUMERABLE);
+        }
+    }
 
     // Note: event_target_proto is kept alive for adding methods below
     // It will be freed after we add methods to it
@@ -1858,6 +1791,8 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_element_get_attribute_names, "getAttributeNames", 0));
     JS_SetPropertyStr(ctx, html_element_proto, "matches",
         JS_NewCFunction(ctx, js_element_matches, "matches", 1));
+    JS_SetPropertyStr(ctx, html_element_proto, "webkitMatchesSelector",
+        JS_NewCFunction(ctx, js_element_matches, "webkitMatchesSelector", 1));
     JS_SetPropertyStr(ctx, html_element_proto, "closest",
         JS_NewCFunction(ctx, js_element_closest, "closest", 1));
     GCValue attr_getter_he = JS_NewCFunction(ctx, js_element_get_attributes, "get attributes", 0);
@@ -1886,6 +1821,16 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_DefinePropertyGetSet(ctx, element_proto, localName_atom,
         localName_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, localName_atom);
+    {
+        JSAtom a = JS_NewAtom(ctx, "namespaceURI");
+        JS_DefinePropertyGetSet(ctx, element_proto, a, JS_NewCFunction(ctx, js_element_get_namespaceURI, "get namespaceURI", 0),
+                                JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+        JS_FreeAtom(ctx, a);
+        a = JS_NewAtom(ctx, "prefix");
+        JS_DefinePropertyGetSet(ctx, element_proto, a, JS_NewCFunction(ctx, js_element_get_prefix, "get prefix", 0),
+                                JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+        JS_FreeAtom(ctx, a);
+    }
     
     // shadowRoot getter
     GCValue getter = JS_NewCFunction(ctx, js_element_get_shadow_root, "get shadowRoot", 0);
@@ -1928,6 +1873,8 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_element_get_attribute_names, "getAttributeNames", 0));
     JS_SetPropertyStr(ctx, element_proto, "matches",
         JS_NewCFunction(ctx, js_element_matches, "matches", 1));
+    JS_SetPropertyStr(ctx, element_proto, "webkitMatchesSelector",
+        JS_NewCFunction(ctx, js_element_matches, "webkitMatchesSelector", 1));
     JS_SetPropertyStr(ctx, element_proto, "closest",
         JS_NewCFunction(ctx, js_element_closest, "closest", 1));
     GCValue attr_getter = JS_NewCFunction(ctx, js_element_get_attributes, "get attributes", 0);
@@ -1941,6 +1888,8 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_element_set_attribute_ns, "setAttributeNS", 3));
     JS_SetPropertyStr(ctx, element_proto, "getAttributeNS",
         JS_NewCFunction(ctx, js_element_get_attribute_ns, "getAttributeNS", 2));
+    JS_SetPropertyStr(ctx, element_proto, "hasAttributeNS",
+        JS_NewCFunction(ctx, js_element_has_attribute_ns, "hasAttributeNS", 2));
     JS_SetPropertyStr(ctx, element_proto, "removeAttributeNS",
         JS_NewCFunction(ctx, js_element_remove_attribute_ns, "removeAttributeNS", 2));
     // click method
@@ -2097,7 +2046,9 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // Ensure document.createTextNode/createComment instances inherit from the
     // CharacterData prototype as well.
     JS_SetPropertyStr(ctx, global, "__cyber_character_data_proto", character_data_proto);
-    html_character_data_api_install(ctx, character_data_proto);
+    /* CharacterData, Text, Comment, CDATASection, ProcessingInstruction,
+     * DocumentType (character_data.c) */
+    character_data_install(ctx, global, character_data_proto, node_proto);
     
     // Do NOT free the prototypes here!
     // They are still referenced by:
@@ -2204,8 +2155,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     LOG_INFO("Document object created");
     DEF_PROP_INT(ctx, document, "nodeType", 9);
     DEF_PROP_STR(ctx, document, "readyState", "complete");
-    DEF_PROP_STR(ctx, document, "characterSet", "UTF-8");
-    DEF_PROP_STR(ctx, document, "charset", "UTF-8");
+    /* (characterSet, charset: Document.prototype's, document_api.c) */
     DEF_PROP_STR(ctx, document, "contentType", "text/html");
     DEF_PROP_STR(ctx, document, "referrer", "");
     GCValue doc_cookie_getter = JS_NewCFunction(ctx, js_document_cookie_getter, "get cookie", 0);
@@ -2279,13 +2229,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     DEF_FUNC(ctx, document, "dispatchEvent", js_event_target_dispatchEvent, 1);
     DEF_FUNC(ctx, document, "getComputedStyle", js_get_computed_style, 1);
     
-    // Create document.implementation with createHTMLDocument
-    GCValue doc_impl = JS_NewObject(ctx);
-    if (!JS_IsException(doc_impl)) {
-        JS_SetPropertyStr(ctx, doc_impl, "createHTMLDocument",
-            JS_NewCFunction(ctx, js_document_implementation_create_html_document, "createHTMLDocument", 1));
-        JS_SetPropertyStr(ctx, document, "implementation", doc_impl);
-    }
+    /* (document.implementation: Document.prototype's, document_api.c) */
     
     // Create documentElement as an actual Element instance with proper prototype
     // This must be done AFTER Element is defined in the dom_setup_js above

@@ -35,6 +35,7 @@ enum {
     SS_TAG, SS_UNIVERSAL, SS_ID, SS_CLASS, SS_ATTR,
     SS_NOT, SS_IS,
     SS_FIRST_CHILD, SS_LAST_CHILD, SS_ONLY_CHILD, SS_NTH_CHILD, SS_NTH_LAST_CHILD,
+    SS_NTH_OF_TYPE, SS_NTH_LAST_OF_TYPE,
     SS_FIRST_OF_TYPE, SS_LAST_OF_TYPE, SS_ONLY_OF_TYPE, SS_EMPTY, SS_ROOT, SS_SCOPE,
     SS_CHECKED, SS_DISABLED, SS_ENABLED,
     SS_ANY,          /* unsupported pseudo-class: matches */
@@ -146,6 +147,45 @@ static char *sp_ident(SelParser *sp, uint32_t *len) {
     return out;
 }
 
+/* Does an identifier start at p (CSS Syntax 4.3.9: a letter, '_', non-ASCII
+ * or an escape, after an optional '-'; or "--")? */
+static bool ident_start(const SelParser *sp) {
+    const char *p = sp->p;
+    if (p < sp->e && *p == '-') {
+        p++;
+        if (p < sp->e && *p == '-') return true;
+    }
+    if (p >= sp->e) return false;
+    unsigned char c = (unsigned char)*p;
+    return isalpha(c) || c == '_' || c >= 0x80 || (c == '\\' && p + 1 < sp->e && p[1] != '\n');
+}
+
+/* The pseudo-classes and pseudo-elements a selector may name (Selectors 4,
+ * HTML, CSS Scoping and Pseudo-Elements, and the -webkit- ones Chrome has);
+ * any other is invalid. */
+static bool known_name(const char *n, const char *const *list) {
+    for (; *list; list++)
+        if (!strcmp(n, *list)) return true;
+    return false;
+}
+static const char *const k_pseudo_classes[] = {
+    "active", "any-link", "autofill", "blank", "buffering", "checked", "closed", "current", "default", "defined",
+    "dir", "disabled", "empty", "enabled", "first", "first-child", "first-of-type", "focus", "focus-visible",
+    "focus-within", "fullscreen", "future", "has", "heading", "host", "host-context", "hover", "in-range", "indeterminate",
+    "invalid", "is", "lang", "last-child", "last-of-type", "left", "link", "local-link", "matches", "modal", "muted",
+    "not", "nth-child", "nth-col", "nth-last-child", "nth-last-col", "nth-last-of-type", "nth-of-type",
+    "only-child", "only-of-type", "open", "optional", "out-of-range", "past", "paused", "picture-in-picture",
+    "placeholder-shown", "playing", "popover-open", "read-only", "read-write", "required", "right", "root",
+    "scope", "seeking", "stalled", "state", "target", "target-within", "user-invalid", "user-valid", "valid",
+    "visited", "volume-locked", "where", "xr-overlay", "-webkit-any", "-webkit-any-link", "-webkit-autofill",
+    "-webkit-drag", "-webkit-full-screen", "-webkit-full-screen-ancestor", "-webkit-full-page-media",
+    NULL };
+static const char *const k_pseudo_elements[] = {
+    "after", "backdrop", "before", "cue", "cue-region", "details-content", "file-selector-button", "first-letter",
+    "first-line", "grammar-error", "highlight", "marker", "part", "picker", "placeholder", "scroll-marker",
+    "scroll-marker-group", "selection", "slotted", "spelling-error", "target-text", "view-transition",
+    "view-transition-group", "view-transition-image-pair", "view-transition-new", "view-transition-old", NULL };
+
 static SelList *parse_list(SelParser *sp, bool nested);
 
 static void add_simple(SelCompound *c, SelSimple s) {
@@ -227,10 +267,12 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
             s.kind = SS_UNIVERSAL;
         } else if (ch == '#') {
             sp->p++;
+            if (!ident_start(sp)) { sp->err = true; break; }
             s.kind = SS_ID;
             s.val = sp_ident(sp, &s.vlen);
         } else if (ch == '.') {
             sp->p++;
+            if (!ident_start(sp)) { sp->err = true; break; }
             s.kind = SS_CLASS;
             s.val = sp_ident(sp, &s.vlen);
         } else if (ch == '[') {
@@ -274,8 +316,7 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                         s.val[s.vlen++] = *sp->p++;
                     }
                     s.val[s.vlen] = '\0';
-                    if (sp->p >= sp->e) { sp->err = true; free(s.val); break; }
-                    sp->p++;
+                    if (sp->p < sp->e) sp->p++;     /* (the end of the input closes a string) */
                 } else {
                     s.val = sp_ident(sp, &s.vlen);
                     if (!s.val) break;
@@ -294,19 +335,34 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                     s.ci = legacy;
                 }
             }
-            if (sp->p >= sp->e || *sp->p != ']') { sp->err = true; free(s.val); break; }
-            sp->p++;
+            /* (and the end of the input the brackets: CSS Syntax 5.4.8) */
+            if (sp->p < sp->e && *sp->p != ']') { sp->err = true; free(s.val); break; }
+            if (sp->p < sp->e) sp->p++;
         } else if (ch == ':') {
             sp->p++;
             if (sp->p < sp->e && *sp->p == ':') {
                 sp->p++;
                 uint32_t nl = 0;
-                free(sp_ident(sp, &nl));
+                char *name = ident_start(sp) ? sp_ident(sp, &nl) : NULL;
+                if (!name) { sp->err = true; break; }
+                for (char *q = name; *q; q++) *q = (char)tolower((unsigned char)*q);
+                bool known = known_name(name, k_pseudo_elements) || !strncmp(name, "-webkit-", 8);
+                free(name);
+                if (!known) { sp->err = true; break; }
+                /* (functional ones: their arguments, to the ')') */
+                if (sp->p < sp->e && *sp->p == '(') {
+                    int depth = 0;
+                    for (; sp->p < sp->e; sp->p++) {
+                        if (*sp->p == '(') depth++;
+                        else if (*sp->p == ')' && !--depth) break;
+                    }
+                    if (sp->p < sp->e) sp->p++;     /* (the end of the input closes them) */
+                }
                 s.kind = SS_NEVER;
             } else {
                 uint32_t nl = 0;
-                char *name = sp_ident(sp, &nl);
-                if (!name) break;
+                char *name = ident_start(sp) ? sp_ident(sp, &nl) : NULL;
+                if (!name) { sp->err = true; break; }
                 for (char *q = name; *q; q++) *q = (char)tolower((unsigned char)*q);
                 const char *args = NULL;
                 size_t alen = 0;
@@ -314,7 +370,8 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                     sp->p++;
                     args = sp->p;
                     /* to the matching ')': brackets and strings inside must
-                     * close before it (an unclosed one spoils the whole) */
+                     * close before it (an unclosed one spoils the whole), but
+                     * the end of the input closes them all */
                     int depth = 1, square = 0;
                     char quote = 0;
                     while (sp->p < sp->e && depth) {
@@ -327,9 +384,9 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                         else if (c == ')') depth--;
                         if (depth) sp->p++;
                     }
-                    if (sp->p >= sp->e || square || quote) { sp->err = true; free(name); break; }
+                    if (sp->p < sp->e && (square || quote)) { sp->err = true; free(name); break; }
                     alen = (size_t)(sp->p - args);
-                    sp->p++;
+                    if (sp->p < sp->e) sp->p++;
                 }
                 if (strcmp(name, "not") == 0 || strcmp(name, "is") == 0 || strcmp(name, "where") == 0 ||
                     strcmp(name, "matches") == 0 || strcmp(name, "-webkit-any") == 0) {
@@ -345,6 +402,9 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                 } else if (strcmp(name, "nth-child") == 0 || strcmp(name, "nth-last-child") == 0) {
                     if (!args || !parse_nth(args, alen, &s.a, &s.b)) { sp->err = true; free(name); break; }
                     s.kind = name[4] == 'l' ? SS_NTH_LAST_CHILD : SS_NTH_CHILD;
+                } else if (strcmp(name, "nth-of-type") == 0 || strcmp(name, "nth-last-of-type") == 0) {
+                    if (!args || !parse_nth(args, alen, &s.a, &s.b)) { sp->err = true; free(name); break; }
+                    s.kind = name[4] == 'l' ? SS_NTH_LAST_OF_TYPE : SS_NTH_OF_TYPE;
                 } else if (strcmp(name, "first-child") == 0) s.kind = SS_FIRST_CHILD;
                 else if (strcmp(name, "last-child") == 0) s.kind = SS_LAST_CHILD;
                 else if (strcmp(name, "only-child") == 0) s.kind = SS_ONLY_CHILD;
@@ -359,10 +419,12 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                 else if (strcmp(name, "enabled") == 0) s.kind = SS_ENABLED;
                 else if (strcmp(name, "before") == 0 || strcmp(name, "after") == 0 ||
                          strcmp(name, "first-line") == 0 || strcmp(name, "first-letter") == 0) s.kind = SS_NEVER;
-                else s.kind = SS_ANY;
+                else if (known_name(name, k_pseudo_classes)) s.kind = SS_ANY;
+                else { sp->err = true; free(name); break; }
                 free(name);
             }
         } else if (ident_char((unsigned char)ch)) {
+            if (!ident_start(sp)) { sp->err = true; break; }
             uint32_t nl = 0;
             char *name = sp_ident(sp, &nl);
             if (!name) break;
@@ -571,10 +633,11 @@ static bool simple_ok(uint32_t s, const SelSimple *ss, uint32_t scope) {
     case SS_NOT: return !list_matches(ss->sub, s, scope);
     case SS_IS: return list_matches(ss->sub, s, scope);
     case SS_FIRST_CHILD: case SS_LAST_CHILD: case SS_ONLY_CHILD:
-    case SS_NTH_CHILD: case SS_NTH_LAST_CHILD:
+    case SS_NTH_CHILD: case SS_NTH_LAST_CHILD: case SS_NTH_OF_TYPE: case SS_NTH_LAST_OF_TYPE:
     case SS_FIRST_OF_TYPE: case SS_LAST_OF_TYPE: case SS_ONLY_OF_TYPE: {
         if (!g_dom.parent[s]) return false;
-        bool of_type = ss->kind == SS_FIRST_OF_TYPE || ss->kind == SS_LAST_OF_TYPE || ss->kind == SS_ONLY_OF_TYPE;
+        bool of_type = ss->kind == SS_FIRST_OF_TYPE || ss->kind == SS_LAST_OF_TYPE || ss->kind == SS_ONLY_OF_TYPE ||
+                       ss->kind == SS_NTH_OF_TYPE || ss->kind == SS_NTH_LAST_OF_TYPE;
         int before = 0, after = 0;
         for (uint32_t x = g_dom.prev[s]; x; x = g_dom.prev[x])
             if (g_dom.kind[x] == DOM_K_ELEMENT && (!of_type || g_dom.tag[x] == g_dom.tag[s])) before++;
@@ -584,7 +647,7 @@ static bool simple_ok(uint32_t s, const SelSimple *ss, uint32_t scope) {
         case SS_FIRST_CHILD: case SS_FIRST_OF_TYPE: return before == 0;
         case SS_LAST_CHILD: case SS_LAST_OF_TYPE: return after == 0;
         case SS_ONLY_CHILD: case SS_ONLY_OF_TYPE: return before == 0 && after == 0;
-        case SS_NTH_CHILD: return nth_ok(ss->a, ss->b, before + 1);
+        case SS_NTH_CHILD: case SS_NTH_OF_TYPE: return nth_ok(ss->a, ss->b, before + 1);
         default: return nth_ok(ss->a, ss->b, after + 1);
         }
     }

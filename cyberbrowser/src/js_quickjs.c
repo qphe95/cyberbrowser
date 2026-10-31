@@ -2528,92 +2528,154 @@ GCValue css_new_style_object(JSContextHandle ctx, GCValue el) {
 }
 
 // Document and Element stubs with createElement support
-/* document.createElementNS(namespace, qualifiedName): the element named
- * qualifiedName (the namespace is not kept). */
-GCValue js_document_create_element_ns(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    if (argc < 2) return JS_ThrowTypeError(ctx, "createElementNS requires 2 arguments");
-    return js_document_create_element(ctx, this_val, 1, &argv[1]);
+/* Names (DOM 1.4 "valid element local name", "valid namespace prefix"). */
+static bool ascii_ws_or_bad(unsigned char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r' || c == 0 || c == '/' || c == '>';
 }
 
-/* document.createElement(localName, options): options ({is}) is ignored. */
-GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    const char *tag = argc >= 1 ? JS_ToCString(ctx, argv[0]) : NULL;
-    
-    GCValue elem = JS_NULL;
-    
-    static int create_counter = 0;
-    if (tag) {
-        if (CYBER_ENV(CYBER_T_DUMP_BC))
-            fprintf(stderr, "[CE] createElement tag='%s'\n", tag);
-        if (CYBER_ENV(CYBER_T_PAGEFLOW) &&
-            (strstr(tag, "watch") || strstr(tag, "page-manager"))) {
-            static int pf_guard = 0;
-            fprintf(stderr, "[PAGEFLOW] createElement tag='%s'\n", tag);
-            fflush(stderr);
-            if (!pf_guard) {
-                pf_guard = 1;
-                const char *tj = "(function(){try{throw new Error('pf')}catch(e){return e.stack}})()";
-                GCValue st = JS_Eval(ctx, tj, strlen(tj), "<pf>", JS_EVAL_TYPE_GLOBAL);
-                const char *ss = JS_ToCString(ctx, st);
-                fprintf(stderr, "%s\n", ss ? ss : "?");
-                fflush(stderr);
-                pf_guard = 0;
-            }
-        }
-        NodeId owner = dom_node_of(this_val);
-        if (dom_kind(owner) != DOM_K_DOCUMENT) owner = g_dom_document;
-        NodeId el = dom_create_element_str(tag, strlen(tag), owner);
-        if (strcasecmp(tag, "template") == 0)
-            dom_set_template_content(el, dom_create_fragment(owner));
-        elem = dom_js(ctx, el);
-        if (!JS_IsObject(elem)) return JS_NULL;
-        if (strcasecmp(tag, "template") == 0) {
-            GCValue content = dom_js(ctx, dom_template_content(el));
-            if (JS_IsObject(content)) dom_node_set_owner_document(ctx, content, this_val);
-        }
-        (void)create_counter;
+static bool valid_element_local_name(const char *s, size_t n) {
+    if (!n) return false;
+    unsigned char c = (unsigned char)s[0];
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+        for (size_t i = 0; i < n; i++)
+            if (ascii_ws_or_bad((unsigned char)s[i])) return false;
+        return true;
     }
-    
-    // Set ownerDocument on newly created elements.
-    if (!JS_IsNull(elem) && !JS_IsUndefined(elem)) {
-        dom_node_set_owner_document(ctx, elem, this_val);
+    if (c != ':' && c != '_' && c < 0x80) return false;
+    for (size_t i = 1; i < n; i++) {
+        c = (unsigned char)s[i];
+        if (!(c >= 0x80 || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+              c == '-' || c == '.' || c == ':' || c == '_'))
+            return false;
+    }
+    return true;
+}
 
-        // Synchronously upgrade script-created custom elements when a definition
-        // is already registered.  Push a CEReactions stack frame so that nested
-        // constructors/insertions (e.g. Polymer stamping shadow DOM) queue their
-        // lifecycle callbacks instead of running them immediately; flush the
-        // reactions before popping the frame so connectedCallbacks run in the
-        // correct order.  A depth guard prevents runaway recursion when
-        // constructors stamp deep templates.
-        js_cyber_ce_push_stack(ctx);
-        if (tag && strchr(tag, '-')) {
-            GCValue global_obj = JS_GetGlobalObject(ctx);
-            GCValue customElements = JS_GetPropertyStr(ctx, global_obj, "customElements");
-            if (JS_IsObject(customElements)) {
-                GCValue get_fn = JS_GetPropertyStr(ctx, customElements, "get");
-                if (JS_IsFunction(ctx, get_fn)) {
-                    GCValue tag_val = JS_NewString(ctx, tag);
-                    GCValue ctor = JS_Call(ctx, get_fn, customElements, 1, &tag_val);
-                    if (!JS_IsException(ctor) && !JS_IsNull(ctor) && !JS_IsUndefined(ctor) && JS_IsFunction(ctx, ctor)) {
-                        GCValue upgraded = JS_GetPropertyStr(ctx, elem, "__CE_upgraded");
-                        if (!JS_ToBool(ctx, upgraded)) {
-                            if (js_cyber_ce_upgrade_depth() < 8) {
-                                js_cyber_upgrade_element(ctx, JS_UNDEFINED, 1, &elem);
-                            } else {
-                                js_cyber_ce_enqueue_upgrade(ctx, JS_UNDEFINED, 1, &elem);
-                                js_cyber_ce_schedule_flush(ctx);
-                            }
+static bool valid_namespace_prefix(const char *s, size_t n) {
+    if (!n) return false;
+    for (size_t i = 0; i < n; i++)
+        if (ascii_ws_or_bad((unsigned char)s[i])) return false;
+    return true;
+}
+
+/* The document a create method is called on (the page's if it is not one). */
+static NodeId this_document(GCValue this_val) {
+    NodeId d = dom_node_of(this_val);
+    return dom_kind(d) == DOM_K_DOCUMENT ? d : g_dom_document;
+}
+
+/* A new element of document this_val (DOM "create an element"): its
+ * template contents, ownerDocument, and a defined custom element's upgrade. */
+static GCValue create_element_named(JSContextHandle ctx, GCValue this_val, uint32_t ns, const char *prefix, size_t pn,
+                                    const char *local, size_t ln) {
+    NodeId owner = this_document(this_val);
+    NodeId el = dom_create_element_str(local, ln, owner);
+    bool exact = ns == DOM_NS_HTML && !prefix;
+    for (size_t i = 0; exact && i < ln; i++) exact = !(local[i] >= 'A' && local[i] <= 'Z');
+    if (!exact) dom_set_element_name(el, ns, prefix, pn, local, ln);
+    bool tmpl = ns == DOM_NS_HTML && ln == 8 && !memcmp(local, "template", 8);
+    if (tmpl) dom_set_template_content(el, dom_create_fragment(owner));
+    GCValue elem = dom_js(ctx, el);
+    if (!JS_IsObject(elem)) return JS_NULL;
+    if (tmpl) {
+        GCValue content = dom_js(ctx, dom_template_content(el));
+        if (JS_IsObject(content)) dom_node_set_owner_document(ctx, content, this_val);
+    }
+    dom_node_set_owner_document(ctx, elem, this_val);
+    // Synchronously upgrade script-created custom elements when a definition
+    // is already registered.  Push a CEReactions stack frame so that nested
+    // constructors/insertions (e.g. Polymer stamping shadow DOM) queue their
+    // lifecycle callbacks instead of running them immediately; flush the
+    // reactions before popping the frame so connectedCallbacks run in the
+    // correct order.  A depth guard prevents runaway recursion when
+    // constructors stamp deep templates.
+    js_cyber_ce_push_stack(ctx);
+    if (ns == DOM_NS_HTML && memchr(local, '-', ln)) {
+        GCValue global_obj = JS_GetGlobalObject(ctx);
+        GCValue customElements = JS_GetPropertyStr(ctx, global_obj, "customElements");
+        if (JS_IsObject(customElements)) {
+            GCValue get_fn = JS_GetPropertyStr(ctx, customElements, "get");
+            if (JS_IsFunction(ctx, get_fn)) {
+                GCValue tag_val = JS_NewStringLen(ctx, local, ln);
+                GCValue ctor = JS_Call(ctx, get_fn, customElements, 1, &tag_val);
+                if (!JS_IsException(ctor) && !JS_IsNull(ctor) && !JS_IsUndefined(ctor) && JS_IsFunction(ctx, ctor)) {
+                    GCValue upgraded = JS_GetPropertyStr(ctx, elem, "__CE_upgraded");
+                    if (!JS_ToBool(ctx, upgraded)) {
+                        if (js_cyber_ce_upgrade_depth() < 8) {
+                            js_cyber_upgrade_element(ctx, JS_UNDEFINED, 1, &elem);
+                        } else {
+                            js_cyber_ce_enqueue_upgrade(ctx, JS_UNDEFINED, 1, &elem);
+                            js_cyber_ce_schedule_flush(ctx);
                         }
                     }
-                    if (JS_IsException(ctor)) JS_GetException(ctx);
                 }
+                if (JS_IsException(ctor)) JS_GetException(ctx);
             }
         }
-        js_cyber_ce_flush_reactions(ctx, JS_UNDEFINED, 0, NULL);
-        js_cyber_ce_pop_stack(ctx);
     }
-    
+    js_cyber_ce_flush_reactions(ctx, JS_UNDEFINED, 0, NULL);
+    js_cyber_ce_pop_stack(ctx);
     return elem;
+}
+
+/* document.createElementNS(namespace, qualifiedName) (DOM "validate and
+ * extract"). */
+GCValue js_document_create_element_ns(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 2) return JS_ThrowTypeError(ctx, "Failed to execute 'createElementNS' on 'Document': 2 arguments required.");
+    size_t un = 0, qn = 0;
+    const char *uri = NULL;
+    if (!JS_IsNull(argv[0]) && !JS_IsUndefined(argv[0])) {
+        uri = JS_ToCStringLen(ctx, &un, argv[0]);
+        if (!uri) return JS_EXCEPTION;
+    }
+    const char *q = JS_ToCStringLen(ctx, &qn, argv[1]);
+    if (!q) return JS_EXCEPTION;
+    uint32_t ns = dom_ns_of(uri, un);
+    const char *colon = memchr(q, ':', qn), *local = q, *prefix = NULL;
+    size_t ln = qn, pn = 0;
+    if (colon) {
+        prefix = q;
+        pn = (size_t)(colon - q);
+        local = colon + 1;
+        ln = qn - pn - 1;
+        if (!valid_namespace_prefix(prefix, pn))
+            return throw_dom_exception(ctx, "InvalidCharacterError", "The namespace prefix is not valid.");
+    }
+    if (!valid_element_local_name(local, ln))
+        return throw_dom_exception(ctx, "InvalidCharacterError", "The local name is not valid.");
+    bool xmlns_name = (qn == 5 && !memcmp(q, "xmlns", 5)) || (pn == 5 && !memcmp(prefix, "xmlns", 5));
+    if ((prefix && ns == DOM_NS_NULL) || (pn == 3 && !memcmp(prefix, "xml", 3) && ns != DOM_NS_XML) ||
+        (xmlns_name && ns != DOM_NS_XMLNS) || (ns == DOM_NS_XMLNS && !xmlns_name))
+        return throw_dom_exception(ctx, "NamespaceError", "The namespace and qualified name do not go together.");
+    return create_element_named(ctx, this_val, ns, prefix, pn, local, ln);
+}
+
+/* document.createElement(localName, options): an HTML element (lower-cased in
+ * an HTML document), or in an XML document one in no namespace (unless the
+ * document is XHTML).  options ({is}) is ignored. */
+GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "Failed to execute 'createElement' on 'Document': 1 argument required.");
+    size_t n = 0;
+    const char *name = JS_ToCStringLen(ctx, &n, argv[0]);
+    if (!name) return JS_EXCEPTION;
+    if (!valid_element_local_name(name, n))
+        return throw_dom_exception(ctx, "InvalidCharacterError", "The tag name provided is not a valid name.");
+    NodeId doc = this_document(this_val);
+    uint32_t ns = DOM_NS_HTML;
+    if (!dom_is_html_document(doc)) {
+        GCValue ct = JS_GetPropertyStr(ctx, this_val, "contentType");
+        const char *t = JS_IsString(ct) ? JS_ToCString(ctx, ct) : NULL;
+        if (!t || strcmp(t, "application/xhtml+xml")) ns = DOM_NS_NULL;
+    }
+    char small[256], *low = NULL;
+    if (dom_is_html_document(doc)) {
+        low = n < sizeof small ? small : malloc(n + 1);
+        for (size_t i = 0; i < n; i++) low[i] = (char)(name[i] >= 'A' && name[i] <= 'Z' ? name[i] + 32 : name[i]);
+        name = low;
+    }
+    GCValue r = create_element_named(ctx, this_val, ns, NULL, 0, name, n);
+    if (low && low != small) free(low);
+    return r;
 }
 
 static GCValue js_document_get_element_by_id(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {

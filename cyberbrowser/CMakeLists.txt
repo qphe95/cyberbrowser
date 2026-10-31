@@ -76,6 +76,10 @@ set(BE_SOURCES
     src/browser/event_path.c
     src/browser/traversal.c
     src/browser/encoding.c
+    src/browser/character_data.c
+    src/browser/document_api.c
+    src/browser/node_namespaces.c
+    src/xml_parse.c
     src/browser/computed_style.c
     src/browser/service_worker_api.c
     src/browser/geolocation_api.c

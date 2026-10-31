@@ -22,6 +22,7 @@ enum {
     TK_TEXT,            /* text run, collapsed and decoded */
     TK_RAW,             /* raw content of the preceding raw-text start tag */
     TK_COMMENT,         /* comment (or bogus comment): text = its data */
+    TK_DOCTYPE,         /* "<!doctype ...>": text = what follows "doctype" */
     TK_MALFORMED,       /* "<" without a tag name, skipped */
 };
 enum { TKF_SELF_CLOSED = 1 };
@@ -42,7 +43,7 @@ typedef struct TokChunk {
     size_t len;
     size_t start, limit;        /* tokenize tokens that start in [start, limit) */
     size_t end;                 /* out: position after the last token */
-    bool doc_start;             /* skip a doctype at `start` */
+    bool doc_start;             /* (the input's start) */
     bool atoms_full;            /* out: the atom table ran out (redo serially) */
     bool overrun;               /* out: a speculative chunk ran past its slack */
     size_t full_len;            /* the real input length (len may be cut short) */
@@ -205,10 +206,16 @@ static DomStr tok_attr_value(TokChunk *c, const char *s, size_t n) {
 /* Raw-text tag atoms, interned before any job runs (dom_tag_flags() keeps an
  * engine-thread cache, so jobs must not call it). */
 static CssAtom g_raw_atoms[4];
+/* The names parsed_ns() looks for. */
+enum { FX_SVG, FX_MATH, FX_FOREIGNOBJECT, FX_DESC, FX_TITLE, FX_MI, FX_MO, FX_MN, FX_MS, FX_MTEXT, FX_ANNOTATION_XML, FX_N };
+static CssAtom g_fx[FX_N];
 static void init_raw_atoms(void) {
     if (g_raw_atoms[0]) return;
     static const char *const names[4] = { "script", "style", "textarea", "title" };
-    css_atom_reserve(4);
+    static const char *const fx[FX_N] = { "svg", "math", "foreignobject", "desc", "title", "mi", "mo", "mn", "ms",
+                                          "mtext", "annotation-xml" };
+    css_atom_reserve(4 + FX_N);
+    for (int i = 0; i < FX_N; i++) g_fx[i] = css_atom_intern(fx[i], strlen(fx[i]));
     for (int i = 0; i < 4; i++) g_raw_atoms[i] = css_atom_intern(names[i], strlen(names[i]));
 }
 static inline bool is_raw_atom(CssAtom a) {
@@ -291,6 +298,7 @@ static size_t tok_start_tag(TokChunk *c, size_t pos, bool serial) {
         }
         c->scratch[na].name = tok_atom(c, h + an, an_end - an, serial);
         c->scratch[na].value = tok_attr_value(c, h + vb, ve - vb);
+        c->scratch[na].ns = c->scratch[na].qname = 0;
         na++;
     }
     DomTok *t = tok_push(c);
@@ -336,11 +344,6 @@ static size_t tok_start_tag(TokChunk *c, size_t pos, bool serial) {
 static void tokenize(TokChunk *c, bool serial) {
     const char *h = c->html;
     size_t len = c->len, pos = c->start;
-    if (c->doc_start && pos + 9 <= len && strncasecmp(h + pos, "<!doctype", 9) == 0) {
-        pos += 9;
-        const char *gt = memchr(h + pos, '>', len - pos);
-        pos = gt ? (size_t)(gt - h) + 1 : len;
-    }
     while (pos < len && pos < c->limit) {
         if (h[pos] == '<') {
             if (pos + 4 <= len && memcmp(h + pos, "<!--", 4) == 0) {
@@ -366,15 +369,16 @@ static void tokenize(TokChunk *c, bool serial) {
             }
             if (pos + 1 < len && (h[pos + 1] == '!' || h[pos + 1] == '?')) {
                 /* Any other "<!...>" and "<?...>" is a bogus comment up to its
-                 * '>' (HTML §13.2.5.42; a doctype past the start is dropped). */
+                 * '>' (HTML §13.2.5.42); "<!doctype" is a doctype (the builder
+                 * drops one past the start). */
                 const char *gt = memchr(h + pos, '>', len - pos);
                 size_t from = pos, e = gt ? (size_t)(gt - h) : len;
                 pos = gt ? e + 1 : len;
                 size_t data = from + (h[from + 1] == '!' ? 2 : 1);
-                if (h[from + 1] == '!' && data + 7 <= len && strncasecmp(h + data, "doctype", 7) == 0)
-                    continue;
+                bool doctype = h[from + 1] == '!' && data + 7 <= len && strncasecmp(h + data, "doctype", 7) == 0;
+                if (doctype) data += 7;
                 DomTok *t = tok_push(c);
-                t->kind = TK_COMMENT;
+                t->kind = doctype ? TK_DOCTYPE : TK_COMMENT;
                 t->src = (uint32_t)from;
                 t->end = (uint32_t)pos;
                 t->text = dom_arena_str(&c->arena, h + data, e > data ? e - data : 0);
@@ -412,7 +416,7 @@ static void chunk_release_tokens(TokChunk *c, size_t from) {
         if (t->kind == TK_START) {
             for (int a = 0; a < t->nattr; a++) dom_str_release(&t->attrs[a].value);
             dom_block_release(t->attr_blk);
-        } else if (t->kind == TK_TEXT || t->kind == TK_RAW || t->kind == TK_COMMENT) {
+        } else if (t->kind == TK_TEXT || t->kind == TK_RAW || t->kind == TK_COMMENT || t->kind == TK_DOCTYPE) {
             dom_str_release(&t->text);
         }
     }
@@ -676,9 +680,48 @@ static uint32_t stream_parent(Builder *b, uint32_t parent, bool parent_fresh, ui
     return parent;
 }
 
+/* SVG's element names with upper case (HTML 13.2.6.5: the tokenizer
+ * lower-cases them). */
+static const char *const g_svg_names[] = {
+    "altGlyph", "altGlyphDef", "altGlyphItem", "animateColor", "animateMotion", "animateTransform", "clipPath",
+    "feBlend", "feColorMatrix", "feComponentTransfer", "feComposite", "feConvolveMatrix", "feDiffuseLighting",
+    "feDisplacementMap", "feDistantLight", "feDropShadow", "feFlood", "feFuncA", "feFuncB", "feFuncG", "feFuncR",
+    "feGaussianBlur", "feImage", "feMerge", "feMergeNode", "feMorphology", "feOffset", "fePointLight",
+    "feSpecularLighting", "feSpotLight", "feTile", "feTurbulence", "foreignObject", "glyphRef", "linearGradient",
+    "radialGradient", "textPath",
+};
+
+/* A parsed element's namespace: <svg> and <math> start foreign content, which
+ * their descendants are in, but for the children of SVG's and MathML's HTML
+ * integration and text integration points (HTML 13.2.6.5, simplified: no
+ * breakout of HTML tags). */
+static uint32_t parsed_ns(CssAtom tag, uint32_t parent) {
+    CssAtom svg = g_fx[FX_SVG], math = g_fx[FX_MATH], fo = g_fx[FX_FOREIGNOBJECT], desc = g_fx[FX_DESC],
+            title = g_fx[FX_TITLE], mi = g_fx[FX_MI], mo = g_fx[FX_MO], mn = g_fx[FX_MN], ms = g_fx[FX_MS],
+            mtext = g_fx[FX_MTEXT], ax = g_fx[FX_ANNOTATION_XML];
+    uint32_t pns = parent && g_dom.kind[parent] == DOM_K_ELEMENT ? g_dom.ns[parent] : DOM_NS_HTML;
+    CssAtom pt = parent ? g_dom.tag[parent] : CSS_ATOM_NONE;
+    if (pns == DOM_NS_SVG && pt != fo && pt != desc && pt != title) return DOM_NS_SVG;
+    if (pns == DOM_NS_MATHML && pt != mi && pt != mo && pt != mn && pt != ms && pt != mtext && pt != ax)
+        return tag == svg && pt == ax ? DOM_NS_SVG : DOM_NS_MATHML;
+    return tag == svg ? DOM_NS_SVG : tag == math ? DOM_NS_MATHML : DOM_NS_HTML;
+}
+
 static uint32_t build_element(Builder *b, DomTok *t, uint32_t parent, bool parent_fresh) {
     uint32_t s = dom_alloc_slot(DOM_K_ELEMENT, dom_id_of(b->owner));
     g_dom.tag[s] = t->tag;
+    uint32_t ns = parsed_ns(t->tag, parent);
+    if (ns != DOM_NS_HTML) {
+        g_dom.ns[s] = ns;
+        if (ns == DOM_NS_SVG) {
+            const char *tn = css_atom_str(t->tag);
+            for (size_t i = 0; tn && i < sizeof g_svg_names / sizeof g_svg_names[0]; i++)
+                if (!strcasecmp(tn, g_svg_names[i])) {
+                    g_dom.lname[s] = dom_name_intern(g_svg_names[i], strlen(g_svg_names[i]));
+                    break;
+                }
+        }
+    }
     g_dom.flags[s] = dom_tag_flags(t->tag) | ((t->flags & TKF_SELF_CLOSED) ? DOMF_SELF_CLOSED : 0);
     if (t->tag == g_raw_atoms[0]) g_dom.flags[s] |= DOMF_PARSER_SCRIPT;
     if (t->nattr) {
@@ -729,6 +772,50 @@ static void build_comment(Builder *b, DomTok *t, uint32_t parent, bool parent_fr
     t->text = (DomStr){ NULL, 0, 0 };
     parent = stream_parent(b, parent, parent_fresh, s);
     dom_link_append(dom_id_of(parent), dom_id_of(s));
+}
+
+/* A doctype token's name, public and system ids (HTML 13.2.5.53-68,
+ * simplified: quoted ids after PUBLIC or SYSTEM), as a DocumentType under
+ * the document being built: only before anything but comments. */
+static void build_doctype(Builder *b, DomTok *t) {
+    uint32_t parent = b->frag;
+    /* (streaming into a document: before the skeleton it may already have,
+     * unless it has a doctype; parsed into a fragment: only after comments) */
+    for (uint32_t c = g_dom.first[parent]; c; c = g_dom.next[c])
+        if (b->doc_mode ? g_dom.kind[c] == DOM_K_DOCTYPE : g_dom.kind[c] != DOM_K_COMMENT) return;
+    const char *s = t->text.s ? t->text.s : "";
+    size_t n = t->text.len, i = 0;
+#define WS(ch) ((ch) == ' ' || (ch) == '\t' || (ch) == '\n' || (ch) == '\f' || (ch) == '\r')
+    while (i < n && WS(s[i])) i++;
+    size_t ns = i;
+    while (i < n && !WS(s[i]) && s[i] != '>') i++;
+    char name[256];
+    size_t nn = i - ns < sizeof name ? i - ns : sizeof name - 1;
+    for (size_t k = 0; k < nn; k++) name[k] = (char)(s[ns + k] >= 'A' && s[ns + k] <= 'Z' ? s[ns + k] + 32 : s[ns + k]);
+    const char *ids[2] = { "", "" };
+    size_t idn[2] = { 0, 0 };
+    while (i < n && WS(s[i])) i++;
+    int which = -1;
+    if (n - i >= 6 && !strncasecmp(s + i, "public", 6)) which = 0;
+    else if (n - i >= 6 && !strncasecmp(s + i, "system", 6)) which = 1;
+    if (which >= 0) {
+        i += 6;
+        for (int k = which; k < 2; k++) {
+            while (i < n && WS(s[i])) i++;
+            if (i >= n || (s[i] != '"' && s[i] != '\'')) break;
+            char q = s[i++];
+            const char *e = memchr(s + i, q, n - i);
+            size_t l = e ? (size_t)(e - (s + i)) : n - i;
+            ids[k] = s + i;
+            idn[k] = l;
+            i += l + (e ? 1 : 0);
+        }
+    }
+#undef WS
+    NodeId dt = dom_create_doctype(name, nn, ids[0], idn[0], ids[1], idn[1], dom_id_of(b->owner));
+    uint32_t slot = dom_slot(dt);
+    parent = stream_parent(b, parent, false, slot);
+    dom_link_before(dom_id_of(parent), dt, dom_id_of(g_dom.first[parent]));
 }
 
 static CssAtom g_a_html, g_a_head, g_a_body, g_head_content[11];
@@ -1043,6 +1130,10 @@ static bool build_tokens(Builder *b, TokChunk *c, size_t *pi, size_t *detour) {
         case TK_COMMENT:
             if (top) build_comment(b, t, top, top_fresh);
             else if (b->keep_top_text) build_comment(b, t, b->frag, false);
+            break;
+        case TK_DOCTYPE:
+            /* (a document's, not a fragment's; at the start) */
+            if (!top && !b->keep_top_text && (!b->doc_mode || b->phase == DOC_INITIAL)) build_doctype(b, t);
             break;
         default:
             break;
