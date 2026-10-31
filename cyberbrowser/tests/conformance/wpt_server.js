@@ -16,8 +16,9 @@
 // substitutions in .sub. files.  Python handlers (.py) are not run, but for
 // the few emulated in PY.
 // Reftests (rel=match / rel=mismatch) are counted in reftests.txt; with
-// REFTEST=1 they are what runs instead: each test page and its references
-// are steps whose content the UI script saves (pages.txt's fourth column), a
+// REFTEST=1 they are what runs instead: each test page and reference (once,
+// however many tests share it) is a step whose content the UI script saves
+// (pages.txt's fourth column), a
 // script injected into them saying when they are ready (load, no
 // reftest-wait, fonts, two frames), and reftest_compare.js compares them.
 // (tests/conformance/failures.js lists what failed.)
@@ -123,16 +124,20 @@ function refsOf(f) {
     const fuzzy = [...src.matchAll(/<meta\s+name=["']?fuzzy["']?\s+content=["']([^"']*)["']/gi)].map(m => m[1]);
     return { refs, fuzzy };
 }
-const steps = [];                 /* { k, test, url, shot } */
+const steps = [];                 /* { k, url, shot }, one per page */
 const refInfo = {};
 if (REFTEST) {
     fs.mkdirSync(path.join(out, 'shots'), { recursive: true });
+    const seen = new Set();
     for (const t of reftests) {
         const info = refsOf(t);
         if (!info.refs.length) continue;
         refInfo[t] = info;
-        for (const u of [t, ...info.refs.map(r => r.url)])
-            steps.push({ k: steps.length + 1, test: t, url: u, shot: path.join(out, 'shots', `${steps.length + 1}.bmp`) });
+        for (const u of [t, ...info.refs.map(r => r.url)]) {
+            if (seen.has(u)) continue;
+            seen.add(u);
+            steps.push({ k: steps.length + 1, url: u, shot: path.join(out, 'shots', `${steps.length + 1}.bmp`) });
+        }
     }
     fs.writeFileSync(path.join(out, 'reftests.json'), JSON.stringify({ refInfo, steps }, null, 1));
 }

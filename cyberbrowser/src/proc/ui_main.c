@@ -1121,9 +1121,11 @@ static bool script_command(void) {
         SetWindowPos(w->wnd, NULL, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER);
         return true;
     }
-    /* shotc PATH: the content alone (shot: the window). */
+    /* shotc PATH: the content alone (shot: the window), once no new frame
+     * has come for 50 ms (one on its way when the page said it was ready). */
     if (sscanf(g_cmd, "shotc %4095s", arg) == 1) {
         drain_all();
+        if (t && t->has_frame && now - t->last_frame_tick < 50 && now - g_cmd_start < 3000) return false;
         /* (again until the content has a frame to read, for up to 3 s: the
          * first tab's may not be shown yet) */
         bool ok = save_content_shot(w, arg);

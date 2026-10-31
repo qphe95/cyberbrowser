@@ -55,9 +55,10 @@ function same(d, fuzzy) {
 }
 
 const results = {};
+const byUrl = new Map(steps.map(s => [s.url, s]));
 let k = 0;
 for (const [test, info] of Object.entries(refInfo)) {
-    const mine = steps.filter(s => s.test === test);
+    const mine = [test, ...info.refs.map(r => r.url)].map(u => byUrl.get(u));
     const shot = readBmp(mine[0].shot);
     const r = { page: test, status: 'OK', pass: 1, fail: 0, skip: 0, fails: [] };
     if (!shot) {

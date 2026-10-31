@@ -7,7 +7,8 @@
 #   tests/conformance/wpt_test.sh <build dir> <wpt> <results dir> <dir or file under wpt>...
 #
 # PORT (default 38527) is the server's; WPT_TIMEOUT_MULT scales testharness's
-# time limits (0.3: a test that hangs gives up after 3 s, not 10).  A run picks up where results.json in
+# time limits (0.3: a test that hangs gives up after 3 s, not 10); with
+# REFTEST=1, SHARDS (default 6) browsers run at once.  A run picks up where results.json in
 # <results dir> left off; it prints and writes summary.txt at the end, and
 # node tests/conformance/failures.js <results dir> lists what failed.
 build=$(cd "$1" && pwd)
@@ -29,26 +30,52 @@ head -1 "$out/server.log"
 # REFTEST=1, reftest pages and their references in an 800x600 viewport, each
 # saved (shotc) once it says it is ready or its time is up.
 W=$(cygpath -m "$out")
-{
+script() {   # <pages file>: the UI script for its pages
     echo "open about:blank"
     [ -n "$REFTEST" ] && echo "viewport 800 600"
     while read -r k url ms shot; do
         echo "go $url"
         if [ -n "$shot" ]; then
             echo "waitfile $W/step-$k.flag $ms"
-            echo "wait 100"
             echo "shotc $shot"
         else
             echo "waitfile $W/step-$k.flag $((ms + 5000))"
         fi
-    done < "$out/pages.txt"
-    echo "go http://127.0.0.1:$P/end"
-    echo "wait 2000"
+    done < "$1"
+    [ -z "$REFTEST" ] && echo "go http://127.0.0.1:$P/end" && echo "wait 2000"
     echo "quit"
-} > "$out/script.txt"
-(cd "$build" && rm -rf browser_data logs/* && CYBER_UI_SCRIPT="$W/script.txt" ./cb_coord.exe) 2> "$out/coord.txt"
+}
 mkdir -p "$out/logs"
-cp "$build"/logs/*.log "$out/logs/" 2> /dev/null
+if [ -n "$REFTEST" ]; then
+    # Reftest pages don't depend on one another: SHARDS browsers (default 6),
+    # each from its own copy of the build (its own browser_data and logs),
+    # take every SHARDS-th page.
+    n=${SHARDS:-6}
+    rm -f "$out"/pages-*.txt
+    awk -v n="$n" -v o="$out" '{ print > (o "/pages-" (NR % n) ".txt") }' "$out/pages.txt"
+    pids=
+    for i in $(seq 0 $((n - 1))); do
+        [ -s "$out/pages-$i.txt" ] || continue
+        d="$out/shard-$i"
+        mkdir -p "$d"
+        cp "$build"/*.exe "$d/"
+        cp "$build"/*.dll "$d/" 2> /dev/null
+        [ -d "$build/shaders" ] && cp -r "$build/shaders" "$d/"
+        script "$out/pages-$i.txt" > "$out/script-$i.txt"
+        (cd "$d" && rm -rf browser_data logs/* && CYBER_UI_SCRIPT="$W/script-$i.txt" ./cb_coord.exe) 2> "$out/coord-$i.txt" &
+        pids="$pids $!"
+    done
+    wait $pids
+    for i in $(seq 0 $((n - 1))); do
+        [ -d "$out/shard-$i/logs" ] || continue
+        mkdir -p "$out/logs/shard-$i"
+        cp "$out/shard-$i"/logs/*.log "$out/logs/shard-$i/" 2> /dev/null
+    done
+else
+    script "$out/pages.txt" > "$out/script.txt"
+    (cd "$build" && rm -rf browser_data logs/* && CYBER_UI_SCRIPT="$W/script.txt" ./cb_coord.exe) 2> "$out/coord.txt"
+    cp "$build"/logs/*.log "$out/logs/" 2> /dev/null
+fi
 kill $server 2> /dev/null
 [ -n "$REFTEST" ] && node "$dir/reftest_compare.js" "$out"
 
