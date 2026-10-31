@@ -271,6 +271,12 @@ static GlyphEntry *ensure_glyph(TextShaper *s, uint32_t codepoint)
         }
         uint8_t *dst = s->atlas + py * s->atlas_w + px;
         stbtt_MakeGlyphBitmap(&s->font, dst, gw, bh, s->atlas_w, s->scale, s->scale, glyph_index);
+        /* Coverage of a percent or less is none, as the contrast tables of
+         * other engines' text make it (an outline just past a pixel's edge
+         * would otherwise tint it). */
+        for (int y = 0; y < bh; y++)
+            for (int x = 0; x < gw; x++)
+                if (dst[y * s->atlas_w + x] <= 2) dst[y * s->atlas_w + x] = 0;
         /* Synthetic bold: smear each row right by `e` pixels (max filter). */
         for (int y = 0; e > 0 && y < bh; y++) {
             uint8_t *row = dst + y * s->atlas_w;

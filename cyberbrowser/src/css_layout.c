@@ -8457,6 +8457,16 @@ static double layout_flex_cross_total(const LayoutBox *box, double value, bool i
  */
 static LayoutContext *g_layout_ctx;   /* the layout in progress (keyword sizes) */
 
+static void layout_svg_size_in(const LayoutBox *b, HtmlNode *dom, double pcw, double pch,
+                               double *out_w, double *out_h);
+/* Replaced elements layout_svg_size sizes: <svg>, <canvas>, <iframe>. */
+static bool layout_is_svg_box(const HtmlNode *node)
+{
+    return node && node->type == HTML_NODE_ELEMENT && node->tag_name &&
+           (strcasecmp(node->tag_name, "svg") == 0 || strcasecmp(node->tag_name, "canvas") == 0 ||
+            strcasecmp(node->tag_name, "iframe") == 0);
+}
+
 static bool layout_is_img(const HtmlNode *node)
 {
     return node && node->type == HTML_NODE_ELEMENT && node->tag_name &&
@@ -8570,6 +8580,13 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
         /* used_total_width is already a border-box size */
         if (box->s->box_sizing == CSS_BOX_SIZING_CONTENT_BOX)
             used_content_width = used_total_width - layout_horizontal_border_padding(box);
+    } else if (width_auto && layout_is_svg_box(node)) {
+        /* <svg> / <canvas>: replaced, the same. */
+        double cw = 0.0, ch = 0.0;
+        layout_svg_size_in(box, node, parent_content_width, parent_content_height, &cw, &ch);
+        used_content_width = cw;
+        used_total_width = layout_content_to_total_width(box, cw);
+        width_auto = false;
     } else if (width_auto && layout_is_img(node)) {
         /* Replaced element: natural size / aspect ratio, not the
          * containing block width. */
@@ -8583,6 +8600,15 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
             ch_spec = parent_content_height * box->s->height_percent + box->s->height_pct_px;
             if (box->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX) ch_spec -= layout_vertical_border_padding(box);
             h_auto = false;
+        }
+        /* The width follows the height min/max-height leave (§10.4). */
+        if (!h_auto && (box->min_height > 0.0 || box->max_height >= 0.0)) {
+            if (box->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX) {
+                double vbp = layout_vertical_border_padding(box);
+                ch_spec = layout_clamp_size(ch_spec + vbp, box->min_height, box->max_height) - vbp;
+            } else {
+                ch_spec = layout_clamp_size(ch_spec, box->min_height, box->max_height);
+            }
         }
         double cw = 0.0, ch = 0.0;
         layout_img_size(g_layout_ctx, node, 0.0, true, ch_spec, h_auto, &cw, &ch);
@@ -8601,7 +8627,10 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
             /* Auto width fills the containing block content width; that is the
              * total border-box width before margins are applied. */
             used_total_width = parent_content_width - box->margin_left - box->margin_right;
-            if (used_total_width < 0.0) used_total_width = 0.0;
+            /* (at least its padding and border: the content width can't be
+             * negative, §10.3.3) */
+            double hbp = layout_horizontal_border_padding(box);
+            if (used_total_width < hbp) used_total_width = hbp;
         }
     } else if (box->s->box_sizing == CSS_BOX_SIZING_CONTENT_BOX) {
         used_total_width = layout_content_to_total_width(box, used_content_width);
@@ -8669,7 +8698,11 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
         height_auto = false;
     }
 
-    if (height_auto && layout_is_img(node)) {
+    if (height_auto && layout_is_svg_box(node)) {
+        double cw = 0.0, ch = 0.0;
+        layout_svg_size_in(box, node, parent_content_width, parent_content_height, &cw, &ch);
+        box->height = layout_content_to_total_height(box, ch);
+    } else if (height_auto && layout_is_img(node)) {
         /* Replaced element: height from the used width and aspect ratio. */
         double cw = box->width - layout_horizontal_border_padding(box);
         if (cw < 0.0) cw = 0.0;
@@ -9025,13 +9058,23 @@ static bool layout_is_replaced_form_element(const char *tag)
  * dimension, else 300x150 (CSS replaced-element defaults).  A <canvas> the
  * same, its natural size and ratio its bitmap's: the width and height
  * attributes, 300x150 by default (HTML 4.12.5). */
+static void layout_svg_size_in(const LayoutBox *b, HtmlNode *dom, double pcw, double pch,
+                               double *out_w, double *out_h);
 static void layout_svg_size(LayoutContext *ctx, int c, HtmlNode *dom, double *out_w, double *out_h)
 {
-    LayoutBox *b = layout_box(ctx, c);
     int p = ctx->tree.nodes[c].parent_idx;
     const LayoutBox *pb = p >= 0 ? layout_box(ctx, p) : NULL;
     double pcw = pb ? pb->width - layout_horizontal_border_padding(pb) : 0.0;
     double pch = pb && !layout_height_auto(pb) ? pb->height - layout_vertical_border_padding(pb) : 0.0;
+    layout_svg_size_in(layout_box(ctx, c), dom, pcw, pch, out_w, out_h);
+}
+
+/* The same against a given containing block (pch 0: an auto height).  An
+ * <svg>'s width/height attributes are its CSS width/height (SVG 2 §8.2), so a
+ * percentage one resolves like a CSS percentage. */
+static void layout_svg_size_in(const LayoutBox *b, HtmlNode *dom, double pcw, double pch,
+                               double *out_w, double *out_h)
+{
     double w = -1.0, h = -1.0;
     if (b->s->width_percent > 0.0) { if (pcw > 0.0) w = pcw * b->s->width_percent / 100.0 + b->s->width_pct_px; }
     else if (b->s->width_set) w = b->s->css_width;
@@ -9039,10 +9082,17 @@ static void layout_svg_size(LayoutContext *ctx, int c, HtmlNode *dom, double *ou
     else if (b->s->height_set) h = b->s->css_height;
     const char *wa = layout_node_attribute(dom, "width");
     const char *ha = layout_node_attribute(dom, "height");
-    if (w < 0.0 && wa && wa[0] && !strchr(wa, '%')) w = atof(wa);
-    if (h < 0.0 && ha && ha[0] && !strchr(ha, '%')) h = atof(ha);
+    bool canvas = dom->tag_name && strcasecmp(dom->tag_name, "canvas") == 0;
+    if (w < 0.0 && wa && wa[0]) {
+        if (!strchr(wa, '%')) w = atof(wa);
+        else if (!canvas && pcw > 0.0) w = pcw * atof(wa) / 100.0;
+    }
+    if (h < 0.0 && ha && ha[0]) {
+        if (!strchr(ha, '%')) h = atof(ha);
+        else if (!canvas && pch > 0.0) h = pch * atof(ha) / 100.0;
+    }
     double ratio = 0.0;   /* width / height */
-    if (dom->tag_name && strcasecmp(dom->tag_name, "canvas") == 0) {
+    if (canvas) {
         double aw = wa && wa[0] ? atof(wa) : 300.0, ah = ha && ha[0] ? atof(ha) : 150.0;
         if (aw < 0.0) aw = 300.0;
         if (ah < 0.0) ah = 150.0;
@@ -9294,8 +9344,11 @@ static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_ma
          strcasecmp(dom->tag_name, "video") == 0 || strcasecmp(dom->tag_name, "iframe") == 0 ||
          strcasecmp(dom->tag_name, "canvas") == 0 || strcasecmp(dom->tag_name, "svg") == 0))
         return hpb;
-    /* A definite (non-percentage) width is both intrinsic sizes. */
-    if (box->s->width_set && box->s->width_percent <= 0.0) {
+    /* A definite (non-percentage) width is both intrinsic sizes (an inline
+     * that isn't replaced has none, §10.3.1). */
+    if (box->s->width_set && box->s->width_percent <= 0.0 &&
+        !(box->s->display == CSS_DISPLAY_INLINE && !layout_is_img(dom) && !layout_is_svg_box(dom) &&
+          !layout_is_replaced_form_element(dom->tag_name))) {
         double t = box->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX ? box->s->css_width
                                                                 : box->s->css_width + hpb;
         return t < 0.0 ? 0.0 : t;
@@ -9432,6 +9485,17 @@ static double layout_shrink_to_fit(LayoutContext *ctx, int idx, double avail)
 static void layout_size_atomic_inline(LayoutContext *ctx, int c, double avail)
 {
     LayoutBox *child = layout_box(ctx, c);
+    HtmlNode *rd = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
+    if (layout_is_svg_box(rd)) {
+        /* Replaced: its own size, not shrink-to-fit (§10.3.10, §10.6.6). */
+        double sw = 0.0, sh = 0.0;
+        layout_svg_size(ctx, c, rd, &sw, &sh);
+        if (!(child->s->width_set || child->s->width_percent > 0.0 || child->s->width_keyword))
+            child->width = sw + layout_horizontal_border_padding(child);
+        if (layout_height_auto(child)) child->height = sh + layout_vertical_border_padding(child);
+        layout_update_content_sizes(child);
+        return;
+    }
     if (!(child->s->width_set || child->s->width_percent > 0.0 || child->s->width_keyword)) {
         double a = avail - child->margin_left - child->margin_right;
         if (a < 0.0) a = 0.0;
@@ -9837,7 +9901,9 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
              * used (shrink-to-fit) width comes from the widest in-flow child
              * extent (e.g. a fixed-width thumb frame inside). */
             child->x = content_left + child->margin_left;
-            child->y = cur.y + child->margin_top;
+            /* (below the margin of the block before it, which still collapses
+             * with what follows) */
+            child->y = cur.y + pending_mb + child->margin_top;
             if ((child->s->display == CSS_DISPLAY_OTHER || child->s->display == CSS_DISPLAY_GRID ||
                  table_is_table(child)) &&
                 !(child->s->width_set || child->s->width_percent > 0.0 || child->s->width_keyword)) {
@@ -10143,9 +10209,10 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                 if (from_img) {
                     child->width = iw;
                     child->height = ih;
-                } else if (dom && dom->type == HTML_NODE_ELEMENT && dom->tag_name &&
-                           (strcasecmp(dom->tag_name, "svg") == 0 || strcasecmp(dom->tag_name, "canvas") == 0)) {
+                } else if (layout_is_svg_box(dom)) {
                     layout_svg_size(ctx, c, dom, &child->width, &child->height);
+                    child->width += layout_horizontal_border_padding(child);
+                    child->height += layout_vertical_border_padding(child);
                 } else if (dom && layout_is_replaced_form_element(dom->tag_name)) {
                     if (child->width <= 0.0) child->width = 80.0;
                     if (child->height <= 0.0) child->height = 20.0;
@@ -10159,8 +10226,11 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                         child->width = iw;
                         child->height = line_adv;
                     } else {
-                        if (!child->s->width_set) child->width = 0.0;
-                        if (layout_height_auto(child)) child->height = 0.0;
+                        /* (width and height don't apply to an inline, §10.3.1, §10.6.1) */
+                        bool inl = child->s->display == CSS_DISPLAY_INLINE;
+                        if (inl) child->width = layout_horizontal_border_padding(child);
+                        else if (!child->s->width_set) child->width = 0.0;
+                        if (inl || layout_height_auto(child)) child->height = 0.0;
                     }
                 }
             }
@@ -10384,6 +10454,24 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                 cur.y += cur.line_box;
                 cur.line_box = 0.0;
                 cur.x = line_left;
+            }
+            if (is_img && !(box->s->white_space == 1 || box->s->white_space == 2)) {
+                /* An image too wide for a line that floats shorten, first on
+                 * it, goes down past them till it fits (§9.5). */
+                const FloatRec *fl = ctx->float_stack + t_float_base;
+                int nf = ctx->float_count - t_float_base;
+                for (int guard = 0; guard < 64; guard++) {
+                    layout_flow_line_geometry(fl, nf, cur.y, content_left, avail_width, &line_left, &line_avail);
+                    if (cur.x < line_left) cur.x = line_left;
+                    if (cur.x > line_left + 0.001 || span <= line_avail + 0.01 || line_avail >= avail_width - 0.01)
+                        break;
+                    double next = -1.0;
+                    for (int f = 0; f < nf; f++)
+                        if (fl[f].bottom > cur.y + 0.001 && (next < 0.0 || fl[f].bottom < next)) next = fl[f].bottom;
+                    if (next < 0.0) break;
+                    cur.y = next;
+                    cur.x = 0.0;
+                }
             }
             child->x = cur.x + child->margin_left;
             child->y = cur.y + vmt;
@@ -12406,7 +12494,9 @@ static int table_span_attr(LayoutContext *ctx, int c, const char *name)
 static double table_column_width(LayoutContext *ctx, int c)
 {
     LayoutBox *b = layout_box(ctx, c);
-    if (!(b->s->width_set && b->s->width_percent <= 0.0 && b->s->css_width >= 0.0)) return -1.0;
+    bool set = b->s->width_set && b->s->width_percent <= 0.0 && b->s->css_width >= 0.0;
+    /* (min-width alone: the column's least width) */
+    if (!set) return b->s->min_width > 0.0 ? b->s->min_width : -1.0;
     /* (min- and max-width apply to columns: max first, then min wins) */
     double w = b->s->css_width;
     if (b->s->max_width >= 0.0 && w > b->s->max_width) w = b->s->max_width;
@@ -12667,6 +12757,24 @@ static void table_distribute(const TableGrid *T, double W, double *w)
     }
 }
 
+/* A column box over columns [first, first + n) of the grid, from the top of
+ * the first row to the bottom of the last; past the grid's columns, none. */
+static void table_place_column(LayoutBox *b, const double *colx, int ncols, int first, int n, double hs,
+                               double top, double bottom)
+{
+    if (n <= 0 || first >= ncols) {
+        b->width = b->height = 0.0;
+    } else {
+        int last = first + n < ncols ? first + n : ncols;
+        b->x = colx[first];
+        b->y = top;
+        b->width = colx[last] - colx[first] - hs;
+        if (b->width < 0.0) b->width = 0.0;
+        b->height = bottom - top;
+    }
+    layout_update_content_sizes(b);
+}
+
 static void layout_table(LayoutContext *ctx, int idx)
 {
     LayoutBox *tb = layout_box(ctx, idx);
@@ -12771,6 +12879,15 @@ static void layout_table(LayoutContext *ctx, int idx)
         double need = layout_box(ctx, c->idx)->height - have;
         if (need > 0.0) T.rows[c->row + c->rs - 1].h += need;
     }
+    if (!layout_height_auto(tb) && T.nrows > 0) {
+        /* A table taller than its rows: they share the rest, by their heights
+         * (evenly when none has any). */
+        double sum = 0.0;
+        for (int r = 0; r < T.nrows; r++) sum += T.rows[r].h;
+        double extra = tb->height - layout_vertical_border_padding(tb) - (y - content_y) - T.vs * (T.nrows + 1) - sum;
+        for (int r = 0; extra > 0.0 && r < T.nrows; r++)
+            T.rows[r].h += sum > 0.0 ? extra * T.rows[r].h / sum : extra / T.nrows;
+    }
     y += T.vs;
     for (int r = 0; r < T.nrows; r++) {
         T.rows[r].y = y;
@@ -12818,6 +12935,31 @@ static void layout_table(LayoutContext *ctx, int idx)
         gb->width = row_w;
         gb->height = top < 0.0 ? 0.0 : bottom - top;
         layout_update_content_sizes(gb);
+    }
+    /* Column and column-group boxes span their columns' cells (their
+     * backgrounds paint under the rows', §17.5.1), counted as
+     * table_note_columns counts them. */
+    if (T.nrows > 0) {
+        double top = T.rows[0].y, bottom = T.rows[T.nrows - 1].y + T.rows[T.nrows - 1].h;
+        int col = 0;
+        for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+            LayoutBox *cb = layout_box(ctx, c);
+            if (cb->s->display == CSS_DISPLAY_NONE || cb->s->table_role != 6 || !layout_is_in_flow(cb) ||
+                table_skip_child(ctx, c))
+                continue;
+            int first = col;
+            bool inner = false;
+            for (int k = ctx->tree.nodes[c].first_child_idx; k >= 0; k = ctx->tree.nodes[k].next_sibling_idx) {
+                LayoutBox *kb = layout_box(ctx, k);
+                if (kb->s->display == CSS_DISPLAY_NONE || kb->s->table_role != 6) continue;
+                inner = true;
+                int n = table_span_attr(ctx, k, "span");
+                table_place_column(kb, colx, T.ncols, col, n, T.hs, top, bottom);
+                col += n;
+            }
+            if (!inner) col += table_span_attr(ctx, c, "span");
+            table_place_column(cb, colx, T.ncols, first, col - first, T.hs, top, bottom);
+        }
     }
 
     double content_h = rows_end - content_y;
@@ -13718,9 +13860,20 @@ static void layout_position_absolute_box(LayoutContext *ctx, int idx)
     bool has_bottom = (box->s->positioned_sides & LAYOUT_SIDE_BOTTOM) != 0;
     layout_resolve_insets(box, cb_w, cb_h);
 
-    layout_resolve_used_sizes(box, layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx),
-                              cb_w, cb_h);
+    HtmlNode *adom = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+    layout_resolve_used_sizes(box, adom, cb_w, cb_h);
     bool width_auto = !(box->s->width_set || box->s->width_percent > 0.0 || box->s->width_keyword);
+    if (layout_is_svg_box(adom)) {
+        /* A replaced element: its used size from its own, not shrink-to-fit
+         * (§10.3.8, §10.6.5), percentages against this containing block. */
+        double sw = 0.0, sh = 0.0;
+        layout_svg_size_in(box, adom, cb_w, cb_h,
+                           &sw, &sh);
+        if (width_auto) box->width = sw + layout_horizontal_border_padding(box);
+        if (layout_height_auto(box)) box->height = sh + layout_vertical_border_padding(box);
+        layout_update_content_sizes(box);
+        width_auto = false;
+    }
     double ml = (box->s->margin_auto & 8) ? 0.0 : box->margin_left;
     double mr = (box->s->margin_auto & 2) ? 0.0 : box->margin_right;
     double mt = (box->s->margin_auto & 1) ? 0.0 : box->margin_top;

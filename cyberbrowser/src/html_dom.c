@@ -2549,7 +2549,7 @@ static void mir_compose(NodeId s, int m, NodeList *out) {
 static void mir_reconcile(NodeId s, int m, bool child_svg);
 
 static void mir_tag_lower(NodeId s, char out[64]) {
-    const char *tag = dom_tag_name(s);
+    const char *tag = dom_local_name(s);   /* (svg, not svg:svg: what layout and selectors go by) */
     if (!tag || !tag[0]) tag = "div";
     snprintf(out, 64, "%s", tag);
     for (char *p = out; *p; p++) *p = (char)tolower((unsigned char)*p);
@@ -2569,7 +2569,7 @@ static int mir_build_element(NodeId s, int parent, bool in_svg) {
     int idx = html_document_add(g_mir.doc, parent, HTML_NODE_ELEMENT);
     if (idx < 0) { g_mir.unsupported = true; return -1; }
     HtmlNode *hn = po_array_payload(&g_mir.doc->array, idx);
-    const char *tag = dom_tag_name(s);
+    const char *tag = dom_local_name(s);
     hn->tag_name = in_svg && tag && tag[0] ? mir_intern(tag, strlen(tag)) : mir_intern(tag_lower, strlen(tag_lower));
     hn->store_id = s;
     mir_map_put(s, idx);

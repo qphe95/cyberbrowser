@@ -33,6 +33,10 @@ server=$!
 for i in $(seq 400); do [ -s "$out/server.log" ] && break; sleep 0.05; done
 mark server
 head -1 "$out/server.log"
+# (a server that could not start, its port taken say, would leave every page
+# to time out)
+sleep 0.2
+if ! kill -0 "$server" 2> /dev/null; then echo "the server stopped:" >&2; tail -5 "$out/server.log" >&2; exit 1; fi
 
 # Each page by its URL, then its answer (or its time up and 5 s more).  With
 # REFTEST=1, reftest pages and their references in an 800x600 viewport, each
@@ -75,7 +79,7 @@ if [ -n "$REFTEST" ]; then
         pids="$pids $!"
     done
     mark launch
-    wait $pids
+    [ -n "$pids" ] && wait $pids   # (none: every shot is there from before; a bare wait would wait for the server)
     mark browsers
     # Their logs, each folder renamed into the results (in one process: a
     # program started here costs tens of ms).
