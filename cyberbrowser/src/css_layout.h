@@ -450,7 +450,7 @@ typedef struct CssCustomProps CssCustomProps;
 /* A placed float, used to compute line insets while flowing inline content.
  * side: 1=left, 2=right. */
 typedef struct {
-    double left, right, bottom;
+    double left, right, top, bottom;   /* (margin box) */
     unsigned char side;
 } FloatRec;
 

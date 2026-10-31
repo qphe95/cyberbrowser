@@ -4251,6 +4251,7 @@ static const char *g_ua_stylesheet_css =
     "hr { display: block; margin: 0.5em 0; border-top: 1px solid #808080; }\n"
     "center { text-align: center; }\n"
     "caption { text-align: center; }\n"
+    "table { box-sizing: border-box; }\n"
     "mark { background-color: #ffff00; color: #000000; }\n"
     "button, input, select, textarea { font-size: 13.333px; line-height: normal; }\n"
     "button { padding: 1px 6px; border: 2px outset #767676; background-color: #efefef; box-sizing: border-box; text-align: center; }\n"
@@ -7119,6 +7120,8 @@ static bool layout_apply_wide_keyword(LayoutBox *box, const LayoutBox *parent,
     if (!inherit && !initial && !unset) return false;
     /* font-size's parser handles its keywords (initial = medium). */
     if (strcasecmp(prop, "font-size") == 0) return false;
+    /* (the font shorthand gives each longhand the keyword itself) */
+    if (strcasecmp(prop, "font") == 0) return false;
     bool inherited_prop = css_is_inherited(prop);
 
     /* Inherited properties: inheritance fills the value in (initial is
@@ -9007,7 +9010,7 @@ static void layout_float_insets(const FloatRec *floats, int n, double y,
 {
     double li = 0.0, ri = 0.0;
     for (int i = 0; i < n; i++) {
-        if (y < floats[i].bottom - 0.001) {
+        if (y < floats[i].bottom - 0.001 && y >= floats[i].top - 0.001) {
             if (floats[i].side == 1) {
                 if (floats[i].right > content_left && floats[i].left < content_right) {
                     double v = floats[i].right - content_left;
@@ -9195,6 +9198,15 @@ static bool layout_box_collapses_through(const LayoutBox *box)
     return true;
 }
 
+/* Two adjoining margins as one (§8.3.1): the larger when both are positive,
+ * the more negative when both are negative, else their sum. */
+static double layout_margin_collapse(double a, double b)
+{
+    if (a >= 0.0 && b >= 0.0) return a > b ? a : b;
+    if (a <= 0.0 && b <= 0.0) return a < b ? a : b;
+    return a + b;
+}
+
 static double layout_eff_margin_top(LayoutContext *ctx, int idx, int depth)
 {
     LayoutBox *box = layout_box(ctx, idx);
@@ -9207,7 +9219,7 @@ static double layout_eff_margin_top(LayoutContext *ctx, int idx, int depth)
          * establish a new block formatting context and has no height,
          * padding or border separating them (CSS 2.1 §8.3.1). */
         if (box->s->overflow != 0 || !layout_box_collapses_through(box)) return mt;
-        return mt > mb ? mt : mb;
+        return layout_margin_collapse(mt, mb);
     }
     if (box->s->overflow != 0) return mt;    /* BFC: no collapse with children */
     /* Flex/grid containers establish a flex/grid formatting context: their
@@ -9216,7 +9228,7 @@ static double layout_eff_margin_top(LayoutContext *ctx, int idx, int depth)
     if (box->padding_top > 0.0 || box->s->border_top > 0.0) return mt;
     if (!layout_box_is_block_level(layout_box(ctx, f))) return mt;
     double c = layout_eff_margin_top(ctx, f, depth + 1);
-    return mt > c ? mt : c;
+    return layout_margin_collapse(mt, c);
 }
 
 static double layout_eff_margin_bottom(LayoutContext *ctx, int idx, int depth)
@@ -9228,7 +9240,7 @@ static double layout_eff_margin_bottom(LayoutContext *ctx, int idx, int depth)
     layout_sig_children(ctx, idx, &f, &l);
     if (f < 0) {
         if (box->s->overflow != 0 || !layout_box_collapses_through(box)) return mb;
-        return mt > mb ? mt : mb;
+        return layout_margin_collapse(mt, mb);
     }
     if (box->s->overflow != 0) return mb;    /* BFC: no collapse with children */
     if (box->s->display == CSS_DISPLAY_FLEX || box->s->display == CSS_DISPLAY_GRID) return mb;
@@ -9236,7 +9248,7 @@ static double layout_eff_margin_bottom(LayoutContext *ctx, int idx, int depth)
     if (!layout_height_auto(box)) return mb;     /* explicit height blocks */
     if (!layout_box_is_block_level(layout_box(ctx, l))) return mb;
     double c = layout_eff_margin_bottom(ctx, l, depth + 1);
-    return mb > c ? mb : c;
+    return layout_margin_collapse(mb, c);
 }
 
 /* Position in-flow children in a block formatting context and recurse into
@@ -9628,7 +9640,7 @@ static bool layout_piece_start(LayoutContext *ctx, FlowPiece *fp, FlowCursor *cu
         return false;
     }
     LayoutBox *eb = layout_box(ctx, fp->el);
-    if (*pending_mb > 0.0) {
+    if (*pending_mb != 0.0) {
         cur->y += *pending_mb;
         *pending_mb = 0.0;
         *any_placed = true;
@@ -9926,26 +9938,57 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                            - (child->x + child->padding_left + child->s->border_left);
                 if (ext > used) used = ext;
             }
-            if (used > 0.0 && used < child->width) {
+            bool fw_auto = !(child->s->width_set || child->s->width_percent > 0.0 || child->s->width_keyword);
+            if (fw_auto && used > 0.0 && used < child->width) {
                 child->width = used + child->padding_left + child->padding_right
                               + child->s->border_left + child->s->border_right;
                 layout_update_content_sizes(child);
             }
 
+            /* Where it goes (§9.5.1): below what it clears and no higher than
+             * an earlier float; as far to its side as the floats already
+             * there leave room, else lower down, past them. */
             double content_right = content_left + avail_width;
+            double fy = child->y - child->margin_top;
+            const FloatRec *fl = ctx->float_stack + t_float_base;
+            int nf = ctx->float_count - t_float_base;
+            for (int fi = 0; fi < nf; fi++) {
+                bool match = child->s->clear == 3 || (child->s->clear && child->s->clear == fl[fi].side);
+                if (match && fl[fi].bottom > fy) fy = fl[fi].bottom;
+                if (fl[fi].top > fy) fy = fl[fi].top;
+            }
+            double mw = child->margin_left + child->width + child->margin_right;
+            double mh = child->margin_top + child->height + child->margin_bottom;
+            double fl_left = content_left, fl_right = content_right;
+            for (int guard = 0; guard < 64; guard++) {
+                fl_left = content_left;
+                fl_right = content_right;
+                double next = -1.0;
+                for (int fi = 0; fi < nf; fi++) {
+                    if (fl[fi].bottom <= fy + 0.001 || fl[fi].top >= fy + (mh > 0.0 ? mh : 0.001) - 0.001) continue;
+                    if (fl[fi].right <= content_left || fl[fi].left >= content_right) continue;
+                    if (fl[fi].side == 1 && fl[fi].right > fl_left) fl_left = fl[fi].right;
+                    if (fl[fi].side == 2 && fl[fi].left < fl_right) fl_right = fl[fi].left;
+                    if (next < 0.0 || fl[fi].bottom < next) next = fl[fi].bottom;
+                }
+                if (mw <= fl_right - fl_left + 0.01 || next < 0.0) break;
+                fy = next;
+            }
             double new_x = (child->s->float_side == 1)
-                ? content_left + child->margin_left
-                : content_right - child->margin_right - child->width;
-            double dx = new_x - child->x;
-            if (dx != 0.0) {
+                ? fl_left + child->margin_left
+                : fl_right - child->margin_right - child->width;
+            double dx = new_x - child->x, dy = fy + child->margin_top - child->y;
+            if (dx != 0.0 || dy != 0.0) {
                 child->x = new_x;
-                layout_offset_subtree(ctx, c, dx, 0.0);
+                child->y += dy;
+                layout_offset_subtree(ctx, c, dx, dy);
             }
 
             if (nfloats < (int)(sizeof(floats) / sizeof(floats[0]))) {
                 FloatRec rec;
                 rec.left = child->x - child->margin_left;
                 rec.right = child->x + child->width + child->margin_right;
+                rec.top = child->y - child->margin_top;
                 rec.bottom = child->y + child->height + child->margin_bottom;
                 rec.side = child->s->float_side;
                 floats[nfloats++] = rec;
@@ -10011,7 +10054,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                  * boxes), keep their children's margins inside (§8.3.1). */
                 gap = 0.0;
             } else {
-                gap = pending_mb > eff_mt ? pending_mb : eff_mt;
+                gap = layout_margin_collapse(pending_mb, eff_mt);
             }
 
             child->x = content_left + child->margin_left;
@@ -10044,8 +10087,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                  * single margin; the anchor does not move.  (A box that
                  * establishes a new BFC, e.g. overflow:hidden, never
                  * collapses through, §8.3.1.) */
-                double m = eff_mt > eff_mb ? eff_mt : eff_mb;
-                pending_mb = pending_mb > m ? pending_mb : m;
+                pending_mb = layout_margin_collapse(pending_mb, layout_margin_collapse(eff_mt, eff_mb));
             } else {
                 cur.y = child->y + child->height;
                 pending_mb = eff_mb;
@@ -10065,7 +10107,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
              * overlaps a left float. */
             if (cur.x < line_left) cur.x = line_left;
             HtmlNode *dom = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
-            if (pending_mb > 0.0 &&
+            if (pending_mb != 0.0 &&
                 !(dom && dom->type == HTML_NODE_TEXT && layout_text_is_whitespace(css_layout_node_text(ctx, dom)))) {
                 /* A line box after a block: the block's bottom margin no
                  * longer collapses with anything. */
@@ -10613,7 +10655,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                 }
             }
         }
-        if (box->padding_bottom > 0.0 || box->s->border_bottom > 0.0)
+        if (box->padding_bottom > 0.0 || box->s->border_bottom > 0.0 || layout_establishes_bfc(ctx, idx))
             max_bottom += pending_mb;
         /* Children that overflowed their line (e.g. tall replaced inline
          * content) can extend below the anchor; take them into account. */
@@ -10621,6 +10663,9 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
              c = ctx->tree.nodes[c].next_sibling_idx) {
             LayoutBox *child = layout_box(ctx, c);
             if (!layout_is_in_flow(child)) continue;
+            /* (blocks are in cur.y already, after their margins, which may
+             * be negative) */
+            if (layout_box_is_block_level(child) || child->height <= 0.0) continue;
             double bottom = child->y + child->height;
             if (bottom > max_bottom) max_bottom = bottom;
         }
@@ -10633,6 +10678,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
             double cap = content_top + box->s->line_clamp * layout_line_advance_box(box);
             if (max_bottom > cap) max_bottom = cap;
         }
+        if (max_bottom < content_top) max_bottom = content_top;   /* (no negative content height) */
         double total = max_bottom - box->y + box->padding_bottom + box->s->border_bottom;
         if (total < 0.0) total = 0.0;
         /* min/max-height clamps (content-box aware). */
@@ -13663,6 +13709,15 @@ static void layout_node_serial_impl(LayoutContext *ctx, int idx)
             layout_update_content_sizes(child);
             cx += child->width;
             layout_node_serial(ctx, c);
+            if (child->s->display == CSS_DISPLAY_INLINE && dom && dom->type == HTML_NODE_ELEMENT &&
+                !layout_is_img(dom) && child->wrap_cont_w <= 0.0 && fabs(child->height - line_adv) < 0.01) {
+                /* Its visual box, as the block flow gives a line's inlines:
+                 * the content area plus padding and border. */
+                double ca = layout_content_area_height(child);
+                child->y += (line_adv - ca) / 2.0 - child->padding_top - child->s->border_top;
+                child->height = ca + layout_vertical_border_padding(child);
+                layout_update_content_sizes(child);
+            }
         }
         return;
     }
@@ -13692,16 +13747,19 @@ static void layout_node_serial_impl(LayoutContext *ctx, int idx)
     layout_block_flow(ctx, idx);
 }
 
-/* Position the root box at the viewport origin and size it to the viewport. */
+/* The root box in the initial containing block (the viewport): its margins
+ * apply, its width fills what they leave, its height is its own or (auto)
+ * its content's, found by the flow (§10.1, §10.6.3). */
 static void layout_root(LayoutContext *ctx)
 {
     int root = ctx->tree.root_idx;
     if (root < 0) return;
     LayoutBox *box = layout_box(ctx, root);
-    box->x = 0.0;
-    box->y = 0.0;
-    box->width = ctx->viewport_width;
-    box->height = ctx->viewport_height;
+    layout_resolve_used_sizes(box, layout_node_dom(ctx, ctx->tree.nodes[root].dom_node_idx),
+                              ctx->viewport_width, ctx->viewport_height);
+    box->x = box->margin_left;
+    box->y = box->margin_top;
+    if (layout_height_auto(box)) box->height = 0.0;
     layout_update_content_sizes(box);
 }
 

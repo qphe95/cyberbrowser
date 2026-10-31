@@ -1057,6 +1057,43 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
     return ok;
 }
 
+/* The canvas's background (CSS Backgrounds §2.11.2): the root element's
+ * color, else (an HTML root without one) the body's, over the whole canvas,
+ * the viewport and all the document's boxes.  Returns the box it came from
+ * (its own background is not painted again), -1 for none, -2 on failure. */
+static int canvas_background(LayoutContext *ctx, DisplayList *dl)
+{
+    int root = ctx->tree.root_idx;
+    if (root < 0 || root >= ctx->tree.count || !ctx->doc) return -1;
+    int src = -1;
+    if (ctx->boxes[root].s->background_color_a > 0.0f) {
+        src = root;
+    } else {
+        HtmlNode *rn = (HtmlNode *)po_array_payload(&ctx->doc->array, ctx->tree.nodes[root].dom_node_idx);
+        if (!rn || rn->type != HTML_NODE_ELEMENT || !rn->tag_name || strcasecmp(rn->tag_name, "html") != 0) return -1;
+        for (int c = ctx->tree.nodes[root].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+            HtmlNode *n = (HtmlNode *)po_array_payload(&ctx->doc->array, ctx->tree.nodes[c].dom_node_idx);
+            if (!n || n->type != HTML_NODE_ELEMENT || !n->tag_name || strcasecmp(n->tag_name, "body") != 0) continue;
+            if (ctx->boxes[c].s->background_color_a > 0.0f && ctx->boxes[c].s->display != CSS_DISPLAY_NONE) src = c;
+            break;
+        }
+    }
+    if (src < 0) return -1;
+    double w = ctx->viewport_width, h = ctx->viewport_height;
+    for (int i = 0; i < ctx->tree.count; i++) {
+        const LayoutBox *b = &ctx->boxes[i];
+        if (!(b->flags & LAYOUT_HAS_LAYOUT) || b->s->display == CSS_DISPLAY_NONE) continue;
+        if (b->x + b->width > w) w = b->x + b->width;
+        if (b->y + b->height > h) h = b->y + b->height;
+    }
+    const LayoutStyle *s = ctx->boxes[src].s;
+    if (!display_list_add_rect(dl, 0.0f, 0.0f, (float)ceil(w), (float)ceil(h), (float)s->background_color_r,
+                               (float)s->background_color_g, (float)s->background_color_b,
+                               (float)s->background_color_a * (float)ctx->boxes[src].opacity_eff))
+        return -2;
+    return src;
+}
+
 static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (*clip)[4])
 {
     bool dark_mode = document_is_dark_mode(ctx);
@@ -1064,6 +1101,8 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
     int pending_box = -1, pending_from = 0;
     /* Open masks: each covers its box's subtree, [i, end). */
     int mask_end[64], mask_idx[64], nmask = 0;
+    int canvas_src = canvas_background(ctx, dl);
+    if (canvas_src == -2) return false;
 
     for (int i = 0; i < ctx->tree.count; i++) {
         if (pending_box >= 0 && clip) dl_clip_range(dl, pending_from, clip[pending_box]);
@@ -1174,7 +1213,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         /* Backgrounds paint first: under the borders, list marker and the
          * box's content. */
         /* (a color however thin: a 1px box is a line) */
-        if (!pieces && box->width > 0.0f && box->height > 0.0f && box->s->background_color_a > 0.0f) {
+        if (!pieces && i != canvas_src && box->width > 0.0f && box->height > 0.0f && box->s->background_color_a > 0.0f) {
             float bgx = (float)box->x, bgy = (float)box->y, bgw = (float)box->width, bgh = (float)box->height;
             snap_rect(&bgx, &bgy, &bgw, &bgh);
             if (!display_list_add_rect(dl, bgx, bgy, bgw, bgh, (float)box->s->background_color_r,
