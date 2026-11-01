@@ -122,6 +122,13 @@ CPU rasterization (src/raster_cpu.c, raster_page.c) reads the same pages.
   and -012 among those gained); the unit tests draw 200 sizes twice, in opposite orders, and get
   identical pixels.
 
+## Vertical alignment (part of step 5)
+
+Each glyph is rasterized with its outline's top and bottom on whole pixels (`strike_vsnap`: rounded
+from where they fall, the glyph scaled vertically by under a pixel to fit), as hinting does in other
+engines; advances and layout are unchanged.  Ahem's 0.8em ascent no longer leaves a partly covered
+edge row: css/CSS2 reftests 4468 -> 4554 pages passing, none lost.
+
 ## Checks
 
 - Unit tests (build-release/tests/cyberbrowser-tests.exe) for the atlas and strikes.

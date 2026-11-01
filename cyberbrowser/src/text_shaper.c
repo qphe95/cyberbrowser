@@ -161,6 +161,23 @@ static bool strike_grow(Strike *k)
     return true;
 }
 
+/* The vertical scale and shift that put glyph gi's outline top and bottom
+ * on whole pixels (rounded from where they fall at the strike's scale), as
+ * other engines' hinting does: an edge otherwise half covers a row (Ahem's
+ * 0.8em ascent at 16px is 12.8px).  The plain scale for a glyph with no
+ * height or one that would vanish. */
+static void strike_vsnap(const Strike *k, int gi, float *sy, float *shift)
+{
+    *sy = k->scale;
+    *shift = 0.0f;
+    int x0, y0, x1, y1;
+    if (!stbtt_GetGlyphBox(&k->face->font, gi, &x0, &y0, &x1, &y1) || y1 <= y0) return;
+    float top = roundf((float)y1 * k->scale), bot = roundf((float)y0 * k->scale);
+    if (top <= bot) return;
+    *sy = (top - bot) / (float)(y1 - y0);
+    *shift = (float)y1 * *sy - top;
+}
+
 /* Glyph gi of a strike: its box measured the first time. */
 static StrikeGlyph *strike_glyph(Strike *k, int gi)
 {
@@ -172,7 +189,9 @@ static StrikeGlyph *strike_glyph(Strike *k, int gi)
         if (g->glyph_index == gi) return g;
         if (g->glyph_index >= 0) continue;
         int ix0, iy0, ix1, iy1;
-        stbtt_GetGlyphBitmapBox(&k->face->font, gi, k->scale, k->scale, &ix0, &iy0, &ix1, &iy1);
+        float sy, shift;
+        strike_vsnap(k, gi, &sy, &shift);
+        stbtt_GetGlyphBitmapBoxSubpixel(&k->face->font, gi, k->scale, sy, 0.0f, shift, &ix0, &iy0, &ix1, &iy1);
         int gw = ix1 - ix0;
         g->glyph_index = gi;
         g->xoff = (int16_t)ix0;
@@ -205,7 +224,9 @@ static bool strike_place(Strike *k, StrikeGlyph *g, GaRect *r)
     int stride = glyph_atlas_page_size(g_atlas);
     uint8_t *dst = glyph_atlas_page_pixels(g_atlas, r->page) + (size_t)r->y * stride + r->x;
     int e = k->embolden, bw = g->bw, bh = g->bh, gw = bw - e;
-    stbtt_MakeGlyphBitmap(&k->face->font, dst, gw, bh, stride, k->scale, k->scale, g->glyph_index);
+    float sy, shift;
+    strike_vsnap(k, g->glyph_index, &sy, &shift);
+    stbtt_MakeGlyphBitmapSubpixel(&k->face->font, dst, gw, bh, stride, k->scale, sy, 0.0f, shift, g->glyph_index);
     /* Coverage of a percent or less is none, as the contrast tables of
      * other engines' text make it (an outline just past a pixel's edge
      * would otherwise tint it). */
