@@ -16647,8 +16647,15 @@ static void layout_position_absolute_box(LayoutContext *ctx, int idx)
         if ((box->s->margin_auto & 0xA) == 0xA) { ml += free_w / 2.0; }
         else if (box->s->margin_auto & 8) ml += free_w;
     }
-    if (has_left) box->x = cb_x + box->left + ml;
+    /* (rtl: over-constrained, left is the one ignored; neither set, the
+     * static position is against the parent's right content edge) */
+    bool cb_rtl = (anc >= 0 ? layout_box(ctx, anc) : layout_box(ctx, ctx->tree.root_idx))->s->direction == 1;
+    int sp = ctx->tree.nodes[idx].parent_idx;
+    const LayoutBox *spb = sp >= 0 ? layout_box(ctx, sp) : NULL;
+    if (has_left && !(has_right && cb_rtl && !(box->s->margin_auto & 0xA))) box->x = cb_x + box->left + ml;
     else if (has_right) box->x = cb_x + cb_w - box->right - mr - box->width;
+    else if (spb && spb->s->direction == 1)
+        box->x = spb->x + spb->s->border_left + spb->padding_left + spb->content_width - mr - box->width;
     else box->x = static_x + ml;
 
     /* ---- vertical (§10.6.4) ---- */
