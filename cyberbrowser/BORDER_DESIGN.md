@@ -2,7 +2,8 @@
 
 Status: steps 1 and 2 done (css/CSS2 5028 -> 5096 pages passing, none lost; the gpu_decode
 contracts are updated for mask kind 6 but `tools/prove.sh` was not rerun: Frama-C is not installed
-on the machine it was built on); steps 3 and 4 planned.
+on the machine it was built on); step 3 done (dashed / dotted: no css/CSS2 reftest uses them
+where they fail, so the count is unchanged); step 4 planned.
 
 ## Why
 

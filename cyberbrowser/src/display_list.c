@@ -382,6 +382,66 @@ static void border_band(DisplayList *dl, float bx, float by, float bw, float bh,
     dl_add_mask_cmd(dl, DL_MASK_END, mi, &m);
 }
 
+/* A dashed or dotted side (side as border_band's), inside its side mask so
+ * its corners join the neighbours: dashes 2 widths long with 1 width gaps
+ * (3 and 2 under 3px), dots a width across a width apart, as Blink draws
+ * them, the gaps stretched or shrunk so the side starts and ends with one;
+ * dots 3px and over round (a rounded-rectangle mask each). */
+static void border_dashes(DisplayList *dl, float bx, float by, float bw, float bh, const float bwid[4], int side,
+                          const float c[4], bool dotted, unsigned cuts)
+{
+    float t = bwid[side];
+    if (t <= 0.0f || c[3] <= 0.0f) return;
+    bool horiz = side == 0 || side == 2;
+    float sx = side == 1 ? bx + bw - t : bx, sy = side == 2 ? by + bh - t : by;
+    float len = horiz ? bw : bh;
+    float dash = dotted ? t : t * (t >= 3.0f ? 2.0f : 3.0f);
+    float gap = dotted ? t : t * (t >= 3.0f ? 1.0f : 2.0f);
+    int n = (int)floorf((len + gap) / (dash + gap) + 0.5f);
+    if (n < 1) n = 1;
+    float g = n > 1 ? (len - (float)n * dash) / (float)(n - 1) : 0.0f;
+    if (n == 1 || g < 0.0f) { n = 1; dash = len; g = 0.0f; }
+    DisplayMask m;
+    memset(&m, 0, sizeof(m));
+    m.kind = 6;
+    m.x = sx;
+    m.y = sy;
+    m.w = horiz ? bw : t;
+    m.h = horiz ? t : bh;
+    for (int k = 0; k < 4; k++) m.border[k] = bwid[k];
+    m.angle_deg = (float)side;
+    m.nstops = 2;
+    m.stop_pos[0] = 0.0f;
+    m.stop_pos[1] = 1.0f;
+    m.stop_alpha[0] = (cuts & 1) ? 1.0f : 0.0f;
+    m.stop_alpha[1] = (cuts & 2) ? 1.0f : 0.0f;
+    int mi = dl_add_mask(dl, &m);
+    if (mi < 0 || !dl_add_mask_cmd(dl, DL_MASK_BEGIN, mi, &m)) return;
+    bool round = dotted && t >= 3.0f && n > 1;
+    for (int i = 0; i < n; i++) {
+        float at = (float)i * (dash + g);
+        float x = horiz ? sx + at : sx, y = horiz ? sy : sy + at;
+        float w = horiz ? dash : t, h = horiz ? t : dash;
+        if (!round) {
+            display_list_add_rect(dl, x, y, w, h, c[0], c[1], c[2], c[3]);
+            continue;
+        }
+        DisplayMask d;
+        memset(&d, 0, sizeof(d));
+        d.kind = 3;
+        d.x = x;
+        d.y = y;
+        d.w = w;
+        d.h = h;
+        for (int k = 0; k < 4; k++) d.rx[k] = d.ry[k] = t * 0.5f;
+        int di = dl_add_mask(dl, &d);
+        if (di < 0 || !dl_add_mask_cmd(dl, DL_MASK_BEGIN, di, &d)) break;
+        display_list_add_rect(dl, x, y, w, h, c[0], c[1], c[2], c[3]);
+        dl_add_mask_cmd(dl, DL_MASK_END, di, &d);
+    }
+    dl_add_mask_cmd(dl, DL_MASK_END, mi, &m);
+}
+
 /* A border whose sides differ (in color or style) or are not solid: each
  * side through its own mask, in its style (CSS 2.1 section 8.5.3; double's
  * thirds and the 3D styles' shades as Blink draws them).  Sides indexed as
@@ -416,6 +476,8 @@ static void paint_border_sides(DisplayList *dl, const LayoutBox *box, float bx, 
             float third = floorf((t + 1.0f) / 3.0f);
             border_band(dl, bx, by, bw, bh, bwid, side, 0.0f, third / t, c, cuts);
             border_band(dl, bx, by, bw, bh, bwid, side, (t - third) / t, 1.0f, c, cuts);
+        } else if (st == CSS_BORDER_DASHED || st == CSS_BORDER_DOTTED) {
+            border_dashes(dl, bx, by, bw, bh, bwid, side, c, st == CSS_BORDER_DOTTED, cuts);
         } else if (st == CSS_BORDER_INSET || st == CSS_BORDER_OUTSET) {
             bool darker = top_left == (st == CSS_BORDER_INSET);
             border_band(dl, bx, by, bw, bh, bwid, side, 0.0f, 1.0f, darker ? dark : c, cuts);
@@ -440,9 +502,7 @@ static bool border_uniform(const LayoutBox *box, const float col[4][4])
     for (int k = 0; k < 4; k++) {
         if (w[k] <= 0.0) continue;
         int st = box->s->border_style[k];
-        if (st != CSS_BORDER_SOLID && !(st == CSS_BORDER_DOUBLE && w[k] < 3.0) &&
-            st != CSS_BORDER_DASHED && st != CSS_BORDER_DOTTED)
-            return false;
+        if (st != CSS_BORDER_SOLID && !(st == CSS_BORDER_DOUBLE && w[k] < 3.0)) return false;
         if (first < 0) first = k;
         else if (memcmp(col[k], col[first], sizeof(col[k])) != 0) return false;
     }
