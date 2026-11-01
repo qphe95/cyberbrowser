@@ -12,7 +12,7 @@
 
 #include "raster_cpu.h"
 #include "display_list.h"
-#include "font_registry.h"
+#include "glyph_atlas.h"
 
 typedef struct {
     uint8_t r, g, b;
@@ -97,8 +97,15 @@ static void draw_glyph(RGB *pixels, int img_width, int img_height,
 {
     /* Resample the atlas region into the destination rect (cmd->x/y/w/h) so
      * glyphs render at the scaled font size, not the 16px atlas size.
-     * Sampling at pixel centers keeps the nearest-neighbor lookup stable. */
+     * Sampling at pixel centers keeps the nearest-neighbor lookup stable,
+     * and sampling in the glyph's own texels (its corner plus an offset, not
+     * a texture coordinate) makes that lookup the same wherever in the atlas
+     * the glyph is. */
     if (cmd->w <= 0.0f || cmd->h <= 0.0f) return;
+    int rx = (int)lroundf(cmd->u.glyph.u0 * (float)atlas_w);
+    int ry = (int)lroundf(cmd->u.glyph.v0 * (float)atlas_h);
+    float rw = (cmd->u.glyph.u1 - cmd->u.glyph.u0) * (float)atlas_w;
+    float rh = (cmd->u.glyph.v1 - cmd->u.glyph.v0) * (float)atlas_h;
     int dx0 = (int)floorf(cmd->x);
     int dy0 = (int)floorf(cmd->y);
     int dx1 = (int)ceilf(cmd->x + cmd->w);
@@ -111,14 +118,12 @@ static void draw_glyph(RGB *pixels, int img_width, int img_height,
 
     for (int dy = dy0; dy < dy1; dy++) {
         float v = (dy + 0.5f - cmd->y) / cmd->h;
-        float av = cmd->u.glyph.v0 + v * (cmd->u.glyph.v1 - cmd->u.glyph.v0);
-        int sy = (int)floorf(av * (float)atlas_h);
+        int sy = ry + (int)floorf(v * rh);
         if (sy < 0) sy = 0;
         if (sy >= atlas_h) sy = atlas_h - 1;
         for (int dx = dx0; dx < dx1; dx++) {
             float u = (dx + 0.5f - cmd->x) / cmd->w;
-            float au = cmd->u.glyph.u0 + u * (cmd->u.glyph.u1 - cmd->u.glyph.u0);
-            int sx = (int)floorf(au * (float)atlas_w);
+            int sx = rx + (int)floorf(u * rw);
             if (sx < 0) sx = 0;
             if (sx >= atlas_w) sx = atlas_w - 1;
             uint8_t a8 = atlas[sy * atlas_w + sx];
@@ -258,11 +263,11 @@ void raster_display_list_with(const DisplayList *dl, const RasterResources *res,
         pixels[i].b = 255;
     }
 
-    /* Per-slot atlases, resolved when a glyph first references the slot. */
-    bool slot_seen[FONT_SLOTS_MAX] = {0};
-    const uint8_t *slot_atlas[FONT_SLOTS_MAX] = {0};
-    int slot_atlas_w[FONT_SLOTS_MAX] = {0};
-    int slot_atlas_h[FONT_SLOTS_MAX] = {0};
+    /* Glyph atlas pages, resolved when a glyph first references the page. */
+    bool slot_seen[GLYPH_ATLAS_MAX_PAGES] = {0};
+    const uint8_t *slot_atlas[GLYPH_ATLAS_MAX_PAGES] = {0};
+    int slot_atlas_w[GLYPH_ATLAS_MAX_PAGES] = {0};
+    int slot_atlas_h[GLYPH_ATLAS_MAX_PAGES] = {0};
 
     for (int i = 0; i < dl->count; i++) {
         const DisplayListCmd *cmd = &dl->cmds[i];
@@ -294,7 +299,7 @@ void raster_display_list_with(const DisplayList *dl, const RasterResources *res,
             }
         } else if (cmd->type == DL_GLYPH) {
             int slot = cmd->u.glyph.font_slot;
-            if (slot < FONT_SLOTS_MAX) {
+            if (slot < GLYPH_ATLAS_MAX_PAGES) {
                 if (!slot_seen[slot]) {
                     slot_seen[slot] = true;
                     if (!res->atlas || !res->atlas(res->user, slot, &slot_atlas[slot], &slot_atlas_w[slot],

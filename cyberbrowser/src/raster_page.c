@@ -1,6 +1,6 @@
 /*
  * raster_page.c - the CPU rasterizer with the page engine's resources
- * (raster_cpu.h): the font registry's atlases and the image cache's images.
+ * (raster_cpu.h): the text shaper's glyph atlas and the image cache's images.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,7 +8,6 @@
 
 #include "raster_cpu.h"
 #include "display_list.h"
-#include "font_registry.h"
 #include "text_shaper.h"
 #include "image_cache.h"
 #include "stb_image_write.h"
@@ -17,14 +16,12 @@ typedef struct {
     uint8_t r, g, b;
 } RGB;
 
-/* The page engine's resources: the font registry and the image cache. */
-static bool registry_atlas(void *user, int slot, const uint8_t **pixels, int *w, int *h) {
+/* The page engine's resources: the glyph atlas's pages and the image cache. */
+static bool page_atlas(void *user, int page, const uint8_t **pixels, int *w, int *h) {
     (void)user;
-    TextShaper *f = slot >= 0 && slot < FONT_SLOTS_MAX ? font_registry_slot(slot) : NULL;
-    if (!f) return false;
-    *pixels = text_shaper_atlas_pixels(f);
-    *w = text_shaper_atlas_width(f);
-    *h = text_shaper_atlas_height(f);
+    GlyphAtlas *a = text_shaper_glyph_atlas();
+    *pixels = glyph_atlas_page_pixels(a, page);
+    *w = *h = glyph_atlas_page_size(a);
     return *pixels != NULL;
 }
 
@@ -38,8 +35,9 @@ static bool cache_image(void *user, int handle, const uint8_t **pixels, int *w, 
 }
 
 void raster_display_list(const DisplayList *dl, uint8_t *rgb, int img_width, int img_height) {
-    RasterResources res = { registry_atlas, cache_image, NULL };
+    RasterResources res = { page_atlas, cache_image, NULL };
     raster_display_list_with(dl, &res, rgb, img_width, img_height);
+    text_shaper_frame_sent(dl);
 }
 
 bool render_display_list_to_jpg(const DisplayList *dl, const char *path,

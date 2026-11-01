@@ -196,23 +196,7 @@ static int add_slot_locked(TextShaper *s)
 {
     if (!s || g_nslots >= FONT_SLOTS_MAX) { text_shaper_destroy(s); return -1; }
     int slot = g_nslots++;
-    text_shaper_set_slot(s, slot);
     atomic_store(&g_slots[slot], s);
-    return slot;
-}
-
-/* A slot for a shaper the text shaper made for another size (its own; not
- * destroyed when there is none). */
-static int add_sized_slot(TextShaper *s)
-{
-    pthread_mutex_lock(&g_mu);
-    int slot = -1;
-    if (g_nslots < FONT_SLOTS_MAX) {
-        slot = g_nslots++;
-        text_shaper_set_slot(s, slot);
-        atomic_store(&g_slots[slot], s);
-    }
-    pthread_mutex_unlock(&g_mu);
     return slot;
 }
 
@@ -395,7 +379,6 @@ void font_registry_init(void)
     pthread_mutex_lock(&g_mu);
     if (g_inited) { pthread_mutex_unlock(&g_mu); return; }
     g_inited = true;
-    text_shaper_set_slot_allocator(add_sized_slot);
 #ifdef _WIN32
     char win[MAX_PATH];
     UINT n = GetWindowsDirectoryA(win, sizeof(win));

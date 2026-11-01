@@ -14,39 +14,17 @@
 #include "stb_truetype.h"
 #include "font_registry.h"
 
-#ifndef TS_ATLAS_WIDTH
-#define TS_ATLAS_WIDTH  1024
-#endif
-#ifndef TS_ATLAS_HEIGHT
-#define TS_ATLAS_HEIGHT 1024
-#endif
+#include "glyph_atlas.h"
 
-/* Pre-pack ASCII so common text has no runtime atlas cost. */
-#define TS_PREPACK_FIRST 32
-#define TS_PREPACK_LAST  126
-
-typedef struct GlyphEntry {
-    uint32_t codepoint;
-    int      glyph_index;
-    float    u0, v0, u1, v1;
-    int      bw, bh;
-    float    xoff, yoff;
-    float    xadvance;
-} GlyphEntry;
-
-#define TS_SIZED_MAX 16
+/* The tab's glyph atlas: pages of 1024 x 1024, 4 of them at most. */
+#define TS_ATLAS_PAGE   1024
+#define TS_ATLAS_BUDGET 4
 
 struct TextShaper {
     uint8_t        *ttf_data;
     size_t          ttf_size;
     bool            ttf_mapped;    /* a view of the font file, not malloc()ed */
-    bool            ttf_borrowed;  /* the base shaper's (a size of it, below): not ours to release */
     int             font_offset;
-    /* The same font rasterized at other sizes, for drawing text there
-     * (ts_draw_glyph): each with its own atlas and slot. */
-    struct TextShaper *sized[TS_SIZED_MAX];
-    int             nsized;
-    int             slot;          /* font-registry slot (-1 = none) */
     int             embolden;      /* synthetic bold: extra pixels per glyph */
     stbtt_fontinfo  font;
     float           size_pixels;
@@ -55,18 +33,6 @@ struct TextShaper {
     float           descent;
     float           line_gap;
     float           baseline;
-
-    uint8_t        *atlas;         /* made at the first glyph drawn */
-    int             atlas_w;
-    int             atlas_h;
-    int             pack_x;
-    int             pack_y;
-    int             pack_row_h;
-    int             dirty_y0, dirty_y1;  /* atlas rows drawn since text_shaper_atlas_take_dirty */
-
-    GlyphEntry     *glyphs;
-    int             glyph_count;
-    int             glyph_capacity;
 
     /* Thread-safe metrics (PARALLEL_STYLE_LAYOUT.md §8): measurement never
      * touches the atlas.  Both tables are insert-only and lock-free:
@@ -79,6 +45,35 @@ struct TextShaper {
 #define TS_METRIC_PAGES (0x110000 >> 8)
 #define TS_KERN_SLOTS   (1u << 15)
 #define TS_KERN_PROBES  16
+
+/* ---- Strikes (FONT_PIPELINE_DESIGN.md) ----
+ *
+ * A strike is a font drawn at one size (in quarter pixels) with its
+ * synthetic bold: per glyph drawn, the bitmap's box at that size and where
+ * the bitmap is in the glyph atlas (until evicted; drawn again then).
+ * Drawing happens on one thread (the display list's); measuring never comes
+ * here. */
+
+typedef struct {
+    int      glyph_index;   /* -1: a free cell of the table */
+    int16_t  xoff, yoff;
+    uint16_t bw, bh;
+    GaRef    ref;           /* id -1: not in the atlas */
+} StrikeGlyph;
+
+typedef struct Strike {
+    const TextShaper *face;
+    int          size_q;
+    int          embolden;
+    float        scale;
+    StrikeGlyph *glyphs;    /* open addressing by glyph index */
+    int          count, cap;
+    struct Strike *next;    /* in its hash bucket */
+} Strike;
+
+#define TS_STRIKE_BUCKETS 1024
+static Strike *g_strikes[TS_STRIKE_BUCKETS];
+static GlyphAtlas *g_atlas;
 
 static uint32_t utf8_decode(const char **ptr)
 {
@@ -107,51 +102,128 @@ static uint32_t utf8_decode(const char **ptr)
     return 0xFFFD; /* replacement character */
 }
 
-static GlyphEntry *find_glyph(TextShaper *s, uint32_t codepoint)
+static uint32_t strike_bucket(const TextShaper *s, int size_q)
 {
-    for (int i = 0; i < s->glyph_count; i++) {
-        if (s->glyphs[i].codepoint == codepoint) return &s->glyphs[i];
-    }
-    return NULL;
+    uint32_t h = (uint32_t)((uintptr_t)s >> 4) * 0x9E3779B1u ^ (uint32_t)size_q * 0x85EBCA6Bu;
+    return (h ^ h >> 16) & (TS_STRIKE_BUCKETS - 1);
 }
 
-static GlyphEntry *add_glyph(TextShaper *s)
+/* Font s at size_q / 4 pixels, made the first time. */
+static Strike *ts_strike(const TextShaper *s, int size_q)
 {
-    if (s->glyph_count >= s->glyph_capacity) {
-        int new_cap = s->glyph_capacity ? s->glyph_capacity * 2 : 256;
-        GlyphEntry *ng = (GlyphEntry *)realloc(s->glyphs, new_cap * sizeof(GlyphEntry));
-        if (!ng) return NULL;
-        s->glyphs = ng;
-        s->glyph_capacity = new_cap;
-    }
-    return &s->glyphs[s->glyph_count++];
+    uint32_t b = strike_bucket(s, size_q);
+    for (Strike *k = g_strikes[b]; k; k = k->next)
+        if (k->face == s && k->size_q == size_q) return k;
+    Strike *k = (Strike *)calloc(1, sizeof(Strike));
+    if (!k) return NULL;
+    float px = (float)size_q * 0.25f;
+    k->face = s;
+    k->size_q = size_q;
+    k->scale = stbtt_ScaleForMappingEmToPixels(&s->font, px);
+    k->embolden = s->embolden ? (int)roundf((float)s->embolden * px / s->size_pixels) : 0;
+    if (s->embolden && k->embolden < 1) k->embolden = 1;
+    k->next = g_strikes[b];
+    g_strikes[b] = k;
+    return k;
 }
 
-/* The glyph atlas, made when the first glyph is drawn (rendering only):
- * fonts that are measured but never drawn need none.  NULL when out of
- * memory. */
-static uint8_t *ts_atlas(TextShaper *s)
+static void strike_free_all(const TextShaper *s)
 {
-    if (!s->atlas) s->atlas = (uint8_t *)calloc(1, (size_t)s->atlas_w * (size_t)s->atlas_h);
-    return s->atlas;
+    for (int b = 0; b < TS_STRIKE_BUCKETS; b++) {
+        for (Strike **p = &g_strikes[b]; *p;) {
+            Strike *k = *p;
+            if (k->face == s) {
+                *p = k->next;
+                free(k->glyphs);
+                free(k);
+            } else {
+                p = &k->next;
+            }
+        }
+    }
 }
 
-static bool pack_bitmap(TextShaper *s, int bw, int bh, int *out_x, int *out_y)
+static bool strike_grow(Strike *k)
 {
-    if (bw <= 0 || bh <= 0) { *out_x = *out_y = 0; return true; }
-    if (!ts_atlas(s)) return false;
-    if (s->pack_x + bw > s->atlas_w) {
-        s->pack_x = 0;
-        s->pack_y += s->pack_row_h + 1;
-        s->pack_row_h = 0;
+    int cap = k->cap ? k->cap * 2 : 128;
+    StrikeGlyph *ng = (StrikeGlyph *)malloc((size_t)cap * sizeof(StrikeGlyph));
+    if (!ng) return false;
+    for (int i = 0; i < cap; i++) ng[i].glyph_index = -1;
+    for (int i = 0; i < k->cap; i++) {
+        if (k->glyphs[i].glyph_index < 0) continue;
+        uint32_t j = (uint32_t)k->glyphs[i].glyph_index * 0x9E3779B1u;
+        while (ng[j & (cap - 1)].glyph_index >= 0) j++;
+        ng[j & (cap - 1)] = k->glyphs[i];
     }
-    if (s->pack_y + bh > s->atlas_h) {
-        return false; /* atlas full */
+    free(k->glyphs);
+    k->glyphs = ng;
+    k->cap = cap;
+    return true;
+}
+
+/* Glyph gi of a strike: its box measured the first time. */
+static StrikeGlyph *strike_glyph(Strike *k, int gi)
+{
+    if (gi < 0) return NULL;
+    if (k->count * 2 >= k->cap && !strike_grow(k)) return NULL;
+    uint32_t j = (uint32_t)gi * 0x9E3779B1u;
+    for (;; j++) {
+        StrikeGlyph *g = &k->glyphs[j & (k->cap - 1)];
+        if (g->glyph_index == gi) return g;
+        if (g->glyph_index >= 0) continue;
+        int ix0, iy0, ix1, iy1;
+        stbtt_GetGlyphBitmapBox(&k->face->font, gi, k->scale, k->scale, &ix0, &iy0, &ix1, &iy1);
+        int gw = ix1 - ix0;
+        g->glyph_index = gi;
+        g->xoff = (int16_t)ix0;
+        g->yoff = (int16_t)iy0;
+        g->bw = (uint16_t)(gw > 0 ? gw + k->embolden : 0);
+        g->bh = (uint16_t)(iy1 > iy0 ? iy1 - iy0 : 0);
+        g->ref.id = -1;
+        g->ref.gen = 0;
+        k->count++;
+        return g;
     }
-    *out_x = s->pack_x;
-    *out_y = s->pack_y;
-    s->pack_x += bw + 1;
-    if (bh > s->pack_row_h) s->pack_row_h = bh;
+}
+
+static GlyphAtlas *ts_atlas(void)
+{
+    if (!g_atlas) g_atlas = glyph_atlas_create(TS_ATLAS_PAGE, TS_ATLAS_BUDGET);
+    return g_atlas;
+}
+
+/* Where glyph g's bitmap is in the atlas, rasterized into it if it is not
+ * there; false when it has none or there is no room. */
+static bool strike_place(Strike *k, StrikeGlyph *g, GaRect *r)
+{
+    if (g->bw == 0 || g->bh == 0 || !ts_atlas()) return false;
+    if (g->ref.id >= 0 && glyph_atlas_get(g_atlas, g->ref, r)) return true;
+    if (!glyph_atlas_alloc(g_atlas, g->bw, g->bh, &g->ref, r)) {
+        g->ref.id = -1;
+        return false;
+    }
+    int stride = glyph_atlas_page_size(g_atlas);
+    uint8_t *dst = glyph_atlas_page_pixels(g_atlas, r->page) + (size_t)r->y * stride + r->x;
+    int e = k->embolden, bw = g->bw, bh = g->bh, gw = bw - e;
+    stbtt_MakeGlyphBitmap(&k->face->font, dst, gw, bh, stride, k->scale, k->scale, g->glyph_index);
+    /* Coverage of a percent or less is none, as the contrast tables of
+     * other engines' text make it (an outline just past a pixel's edge
+     * would otherwise tint it). */
+    for (int y = 0; y < bh; y++)
+        for (int x = 0; x < gw; x++)
+            if (dst[y * stride + x] <= 2) dst[y * stride + x] = 0;
+    /* Synthetic bold: smear each row right by `e` pixels (max filter). */
+    for (int y = 0; e > 0 && y < bh; y++) {
+        uint8_t *row = dst + y * stride;
+        for (int x = bw - 1; x >= 0; x--) {
+            uint8_t m = 0;
+            for (int i = 0; i <= e; i++) {
+                int sx = x - i;
+                if (sx >= 0 && sx < gw && row[sx] > m) m = row[sx];
+            }
+            row[x] = m;
+        }
+    }
     return true;
 }
 
@@ -235,119 +307,108 @@ static int ts_kern(const TextShaper *s, int g1, int g2)
     return stbtt_GetGlyphKernAdvance(&s->font, g1, g2);   /* neighbourhood full */
 }
 
-static GlyphEntry *ensure_glyph(TextShaper *s, uint32_t codepoint)
+/* Record a glyph command drawing atlas rectangle r (none: a glyph without a
+ * bitmap). */
+static bool ts_add_glyph(DisplayList *dl, float x, float y, float w, float h, const GaRect *r, int gi, float cr,
+                         float cg, float cb, float ca)
 {
-    GlyphEntry *g = find_glyph(s, codepoint);
-    if (g) return g;
-
-    int glyph_index = stbtt_FindGlyphIndex(&s->font, (int)codepoint);
-    if (glyph_index == 0 && codepoint != ' ') {
-        /* Missing glyph; fall back to the replacement character. */
-        codepoint = 0xFFFD;
-        glyph_index = stbtt_FindGlyphIndex(&s->font, (int)codepoint);
-        if (find_glyph(s, codepoint)) return find_glyph(s, codepoint);
+    float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
+    if (r) {
+        float size = (float)glyph_atlas_page_size(g_atlas);
+        u0 = (float)r->x / size;
+        v0 = (float)r->y / size;
+        u1 = (float)(r->x + r->w) / size;
+        v1 = (float)(r->y + r->h) / size;
     }
-
-    int advance, lsb;
-    stbtt_GetGlyphHMetrics(&s->font, glyph_index, &advance, &lsb);
-
-    int ix0, iy0, ix1, iy1;
-    stbtt_GetGlyphBitmapBox(&s->font, glyph_index, s->scale, s->scale, &ix0, &iy0, &ix1, &iy1);
-    int gw = ix1 - ix0;
-    int bh = iy1 - iy0;
-    int e = gw > 0 ? s->embolden : 0;
-    int bw = gw + e;
-
-    int px, py;
-    if (!pack_bitmap(s, bw, bh, &px, &py)) return NULL;
-
-    if (gw > 0 && bh > 0) {
-        if (s->dirty_y1 <= s->dirty_y0) {
-            s->dirty_y0 = py;
-            s->dirty_y1 = py + bh;
-        } else {
-            if (py < s->dirty_y0) s->dirty_y0 = py;
-            if (py + bh > s->dirty_y1) s->dirty_y1 = py + bh;
-        }
-        uint8_t *dst = s->atlas + py * s->atlas_w + px;
-        stbtt_MakeGlyphBitmap(&s->font, dst, gw, bh, s->atlas_w, s->scale, s->scale, glyph_index);
-        /* Coverage of a percent or less is none, as the contrast tables of
-         * other engines' text make it (an outline just past a pixel's edge
-         * would otherwise tint it). */
-        for (int y = 0; y < bh; y++)
-            for (int x = 0; x < gw; x++)
-                if (dst[y * s->atlas_w + x] <= 2) dst[y * s->atlas_w + x] = 0;
-        /* Synthetic bold: smear each row right by `e` pixels (max filter). */
-        for (int y = 0; e > 0 && y < bh; y++) {
-            uint8_t *row = dst + y * s->atlas_w;
-            for (int x = bw - 1; x >= 0; x--) {
-                uint8_t m = 0;
-                for (int k = 0; k <= e; k++) {
-                    int sx = x - k;
-                    if (sx >= 0 && sx < gw && row[sx] > m) m = row[sx];
-                }
-                row[x] = m;
-            }
-        }
-    }
-
-    g = add_glyph(s);
-    if (!g) return NULL;
-    g->codepoint  = codepoint;
-    g->glyph_index = glyph_index;
-    g->u0 = (float)px / (float)s->atlas_w;
-    g->v0 = (float)py / (float)s->atlas_h;
-    g->u1 = (float)(px + bw) / (float)s->atlas_w;
-    g->v1 = (float)(py + bh) / (float)s->atlas_h;
-    g->bw = bw;
-    g->bh = bh;
-    g->xoff = (float)ix0;
-    g->yoff = (float)iy0;
-    g->xadvance = (float)advance * s->scale + (float)s->embolden;
-    return g;
-}
-
-/* The atlas entry for a codepoint from whichever font draws it (see
- * ts_metric_owned); *owner_out is that font. */
-static GlyphEntry *ensure_glyph_owned(const TextShaper *s, uint32_t codepoint, TextShaper **owner_out)
-{
-    int gi, owner;
-    float xa;
-    ts_metric_owned(s, codepoint, &gi, &xa, &owner);
-    TextShaper *o = ts_owner_shaper(s, owner);
-    if (!o) o = (TextShaper *)s;
-    *owner_out = o;
-    return ensure_glyph(o, codepoint);
-}
-
-/* Record a glyph command drawn from `owner`'s atlas. */
-static bool ts_add_glyph(DisplayList *dl, const TextShaper *owner, float x, float y, float w, float h,
-                         const GlyphEntry *ge, float r, float g, float b, float a)
-{
-    if (!display_list_add_glyph(dl, x, y, w, h, ge->u0, ge->v0, ge->u1, ge->v1,
-                                (uint32_t)ge->glyph_index, r, g, b, a))
-        return false;
-    dl->cmds[dl->count - 1].u.glyph.font_slot = (uint8_t)(owner->slot < 0 ? 0 : owner->slot);
+    if (!display_list_add_glyph(dl, x, y, w, h, u0, v0, u1, v1, (uint32_t)gi, cr, cg, cb, ca)) return false;
+    dl->cmds[dl->count - 1].u.glyph.font_slot = (uint8_t)(r ? r->page : 0);
     return true;
 }
 
-static TextShaper *ts_sized(TextShaper *s, float px);
-
-/* Glyph ge of owner (codepoint cp) drawn with its pen at (pen_x, base_y),
- * owner's size times scale: from owner rasterized at that size, where the
- * glyph's box falls on the right pixels (a scaled bitmap was a pixel or
- * more off at large sizes, and blurred), else owner's glyph scaled. */
-static bool ts_draw_glyph(DisplayList *dl, TextShaper *owner, const GlyphEntry *ge, uint32_t cp, float pen_x,
-                          float base_y, float scale, float r, float g, float b, float a)
+static int ts_size_q(float px)
 {
-    if (fabsf(scale - 1.0f) > 0.01f) {
-        TextShaper *v = ts_sized(owner, owner->size_pixels * scale);
-        GlyphEntry *vg = v ? ensure_glyph(v, cp) : NULL;
-        if (vg)
-            return ts_add_glyph(dl, v, pen_x + vg->xoff, base_y + vg->yoff, (float)vg->bw, (float)vg->bh, vg, r, g, b, a);
+    return (int)lroundf(px * 4.0f);
+}
+
+/* Glyph gi of font o drawn with its pen at (pen_x, base_y), o's size times
+ * scale: from o's strike at that size, where the glyph's box falls on the
+ * right pixels (a scaled bitmap was a pixel or more off at large sizes, and
+ * blurred), else (no room in the atlas, or a size past what a page holds)
+ * from o's strike at its loaded size, scaled. */
+static bool ts_draw_glyph(DisplayList *dl, const TextShaper *o, int gi, float pen_x, float base_y, float scale,
+                          float r, float g, float b, float a)
+{
+    float px = o->size_pixels * scale;
+    GaRect rc;
+    if (fabsf(scale - 1.0f) > 0.01f && px >= 4.0f && px <= 512.0f) {
+        Strike *k = ts_strike(o, ts_size_q(px));
+        StrikeGlyph *sg = k ? strike_glyph(k, gi) : NULL;
+        if (sg) {
+            bool placed = strike_place(k, sg, &rc);
+            if (placed || sg->bw == 0 || sg->bh == 0)
+                return ts_add_glyph(dl, pen_x + sg->xoff, base_y + sg->yoff, (float)sg->bw, (float)sg->bh,
+                                    placed ? &rc : NULL, gi, r, g, b, a);
+        }
     }
-    return ts_add_glyph(dl, owner, pen_x + ge->xoff * scale, base_y + ge->yoff * scale, (float)ge->bw * scale,
-                        (float)ge->bh * scale, ge, r, g, b, a);
+    Strike *k = ts_strike(o, ts_size_q(o->size_pixels));
+    StrikeGlyph *sg = k ? strike_glyph(k, gi) : NULL;
+    if (!sg) return true;
+    bool placed = strike_place(k, sg, &rc);
+    if (!placed && sg->bw && sg->bh) return true;          /* no room at all: not drawn */
+    return ts_add_glyph(dl, pen_x + (float)sg->xoff * scale, base_y + (float)sg->yoff * scale, (float)sg->bw * scale,
+                        (float)sg->bh * scale, placed ? &rc : NULL, gi, r, g, b, a);
+}
+
+/* Codepoint cp of s (or the fallback font that has it) drawn at the pen,
+ * kerned against the glyph before; the pen moves past it. */
+static bool ts_emit_glyph(const TextShaper *s, uint32_t cp, float *pen_x, float base_y, float scale, int *prev_glyph,
+                          float r, float g, float b, float a, DisplayList *dl)
+{
+    int gi, owner;
+    float xa;
+    ts_metric_owned(s, cp, &gi, &xa, &owner);
+    const TextShaper *gs = ts_owner_shaper(s, owner);
+    if (!gs) gs = s;
+    if (*prev_glyph >= 0 && owner == 0) *pen_x += (float)ts_kern(s, *prev_glyph, gi) * s->scale * scale;
+    if (!ts_draw_glyph(dl, gs, gi, *pen_x, base_y, scale, r, g, b, a)) return false;
+    *pen_x += xa * scale;
+    *prev_glyph = owner == 0 ? gi : -1;
+    return true;
+}
+
+GlyphAtlas *text_shaper_glyph_atlas(void)
+{
+    return g_atlas;
+}
+
+bool text_shaper_glyph_rect(const TextShaper *s, float size_px, uint32_t codepoint, GaRect *out)
+{
+    if (!s || !out) return false;
+    int gi, owner;
+    float xa;
+    ts_metric_owned(s, codepoint, &gi, &xa, &owner);
+    const TextShaper *o = ts_owner_shaper(s, owner);
+    Strike *k = o ? ts_strike(o, ts_size_q(size_px)) : NULL;
+    StrikeGlyph *g = k ? strike_glyph(k, gi) : NULL;
+    return g && strike_place(k, g, out);
+}
+
+void text_shaper_frame_uses(const DisplayList *dl)
+{
+    if (!g_atlas || !dl) return;
+    float size = (float)glyph_atlas_page_size(g_atlas);
+    for (int i = 0; i < dl->count; i++) {
+        const DisplayListCmd *c = &dl->cmds[i];
+        if (c->type == DL_GLYPH && c->u.glyph.v1 > c->u.glyph.v0)
+            glyph_atlas_touch(g_atlas, c->u.glyph.font_slot, (int)(c->u.glyph.v0 * size + 0.5f));
+    }
+}
+
+void text_shaper_frame_sent(const DisplayList *dl)
+{
+    if (!g_atlas) return;
+    text_shaper_frame_uses(dl);
+    glyph_atlas_frame_sent(g_atlas);
 }
 
 TextShaper *text_shaper_create(const char *ttf_path, float size_pixels)
@@ -402,11 +463,8 @@ static TextShaper *ts_create(uint8_t *data, size_t size, int font_index, float s
     s->ttf_data = data;
     s->ttf_size = size;
     s->ttf_mapped = mapped;
-    s->slot = -1;
     s->embolden = embolden > 0 ? embolden : 0;
     s->size_pixels = size_pixels;
-    s->atlas_w = TS_ATLAS_WIDTH;
-    s->atlas_h = TS_ATLAS_HEIGHT;
 
     if (!stbtt_InitFont(&s->font, s->ttf_data, offset)) {
         text_shaper_destroy(s);
@@ -430,76 +488,20 @@ static TextShaper *ts_create(uint8_t *data, size_t size, int font_index, float s
     s->descent  = (float)descent * s->scale;
     s->line_gap = (float)line_gap * s->scale;
     s->baseline = s->ascent;
-
-    /* Pre-pack ASCII so the atlas is immediately useful. */
-    for (uint32_t cp = TS_PREPACK_FIRST; cp <= TS_PREPACK_LAST; cp++) {
-        if (!ensure_glyph(s, cp)) {
-            /* Non-fatal: a few glyphs may not fit, but the rest work. */
-            break;
-        }
-    }
     return s;
 }
 
 void text_shaper_destroy(TextShaper *s)
 {
     if (!s) return;
-    for (int i = 0; i < s->nsized; i++) text_shaper_destroy(s->sized[i]);
+    strike_free_all(s);       /* (their atlas entries go when evicted) */
     if (s->metric_pages) {
         for (int i = 0; i < TS_METRIC_PAGES; i++) free((void *)s->metric_pages[i]);
         free((void *)s->metric_pages);
     }
     free((void *)s->kern);
-    free(s->glyphs);
-    free(s->atlas);
-    if (!s->ttf_borrowed) ts_release_data(s->ttf_data, s->ttf_mapped);
+    ts_release_data(s->ttf_data, s->ttf_mapped);
     free(s);
-}
-
-static int (*g_slot_alloc)(TextShaper *);
-
-void text_shaper_set_slot_allocator(int (*alloc)(TextShaper *)) { g_slot_alloc = alloc; }
-
-/* Base shaper s rasterized at px pixels (quantized to a quarter pixel): a
- * shaper of its own on the same font bytes, with an atlas and a slot of its
- * own (g_slot_alloc), made the first time; NULL when there is no room for
- * another (drawing scales s's glyphs then). */
-static TextShaper *ts_sized(TextShaper *s, float px)
-{
-    if (!s || !g_slot_alloc || px < 4.0f || px > 512.0f) return NULL;
-    px = roundf(px * 4.0f) / 4.0f;
-    for (int i = 0; i < s->nsized; i++)
-        if (s->sized[i]->size_pixels == px) return s->sized[i]->slot >= 0 ? s->sized[i] : NULL;
-    if (s->nsized >= TS_SIZED_MAX) return NULL;
-    TextShaper *v = (TextShaper *)calloc(1, sizeof(TextShaper));
-    if (!v) return NULL;
-    v->ttf_data = s->ttf_data;
-    v->ttf_size = s->ttf_size;
-    v->ttf_mapped = s->ttf_mapped;
-    v->ttf_borrowed = true;
-    v->font_offset = s->font_offset;
-    v->slot = -1;
-    v->embolden = s->embolden ? (int)roundf((float)s->embolden * px / s->size_pixels) : 0;
-    if (s->embolden && v->embolden < 1) v->embolden = 1;
-    v->size_pixels = px;
-    v->atlas_w = TS_ATLAS_WIDTH;
-    v->atlas_h = TS_ATLAS_HEIGHT;
-    v->metric_pages = calloc(TS_METRIC_PAGES, sizeof(*v->metric_pages));
-    v->kern = calloc(TS_KERN_SLOTS, sizeof(*v->kern));
-    if (!v->metric_pages || !v->kern || !stbtt_InitFont(&v->font, v->ttf_data, v->font_offset)) {
-        text_shaper_destroy(v);
-        return NULL;
-    }
-    v->scale = stbtt_ScaleForMappingEmToPixels(&v->font, px);
-    int ascent, descent, line_gap;
-    stbtt_GetFontVMetrics(&v->font, &ascent, &descent, &line_gap);
-    v->ascent = (float)ascent * v->scale;
-    v->descent = (float)descent * v->scale;
-    v->line_gap = (float)line_gap * v->scale;
-    v->baseline = v->ascent;
-    s->sized[s->nsized++] = v;          /* (kept even without a slot: not tried again) */
-    if (g_slot_alloc(v) < 0) return NULL;
-    return v;
 }
 
 TextShaper *text_shaper_create_from_memory_ex(uint8_t *data, size_t size, int font_index, float size_pixels,
@@ -511,37 +513,6 @@ TextShaper *text_shaper_create_from_memory_ex(uint8_t *data, size_t size, int fo
 TextShaper *text_shaper_create_from_mapped(uint8_t *view, size_t size, int font_index, float size_pixels)
 {
     return ts_create(view, size, font_index, size_pixels, 0, true);
-}
-
-const uint8_t *text_shaper_atlas_pixels(const TextShaper *s)
-{
-    return s ? ts_atlas((TextShaper *)s) : NULL;
-}
-
-int text_shaper_atlas_width(const TextShaper *s)
-{
-    return s ? s->atlas_w : 0;
-}
-
-int text_shaper_atlas_height(const TextShaper *s)
-{
-    return s ? s->atlas_h : 0;
-}
-
-int text_shaper_atlas_used_rows(const TextShaper *s)
-{
-    if (!s || !s->atlas) return 0;
-    int rows = s->pack_y + s->pack_row_h;
-    return rows < s->atlas_h ? rows : s->atlas_h;
-}
-
-bool text_shaper_atlas_take_dirty(TextShaper *s, int *y0, int *y1)
-{
-    if (!s || s->dirty_y1 <= s->dirty_y0) return false;
-    *y0 = s->dirty_y0;
-    *y1 = s->dirty_y1 < s->atlas_h ? s->dirty_y1 : s->atlas_h;
-    s->dirty_y0 = s->dirty_y1 = 0;
-    return true;
 }
 
 /* The height of "x" and the advance of "0", as fractions of the em (CSS's
@@ -632,16 +603,8 @@ bool text_shaper_shape_to_display_list_scaled(const TextShaper *s,
             prev_glyph = -1;
             continue;
         }
-        TextShaper *gs;
-        GlyphEntry *ge = ensure_glyph_owned(s, cp, &gs);
-        if (!ge) continue;
-        if (prev_glyph >= 0 && gs == s) {
-            pen_x += (float)ts_kern(s, prev_glyph, ge->glyph_index) * s->scale * scale;
-        }
-        if (!ts_draw_glyph(dl, gs, ge, cp, pen_x, pen_y, scale, r, g, b, a))
+        if (!ts_emit_glyph(s, cp, &pen_x, pen_y, scale, &prev_glyph, r, g, b, a, dl))
             return false;
-        pen_x += ge->xadvance * scale;
-        prev_glyph = gs == s ? ge->glyph_index : -1;
     }
     return true;
 }
@@ -724,16 +687,8 @@ static bool ts_emit_span_glyphs(const TextShaper *s, const char *gp,
         uint32_t gc = utf8_decode(&gp);
         if (gc == 0) break;
         if (gc < 0x20 && gc != ' ') continue; /* control chars: no glyph */
-        TextShaper *gs;
-        GlyphEntry *ge = ensure_glyph_owned(s, gc, &gs);
-        if (!ge) continue;
-        if (*prev_glyph >= 0 && gs == s) {
-            *pen_x += (float)ts_kern(s, *prev_glyph, ge->glyph_index) * s->scale * scale;
-        }
-        if (!ts_draw_glyph(dl, gs, ge, gc, *pen_x, gy, scale, r, g, b, a))
+        if (!ts_emit_glyph(s, gc, pen_x, gy, scale, prev_glyph, r, g, b, a, dl))
             return false;
-        *pen_x += ge->xadvance * scale;
-        *prev_glyph = gs == s ? ge->glyph_index : -1;
     }
     return true;
 }
@@ -971,25 +926,11 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
          * the CSS strut model: the em box is centered in the line box, so the
          * baseline sits at half-leading + ascent from the line top. */
         if (emit) {
-            const char *gp = word_start;
             float half_leading = (line_advance - s->size_pixels * scale) * 0.5f;
             if (half_leading < 0.0f) half_leading = 0.0f;
             float gy = pen_y + half_leading + s->baseline * scale;
-            while (gp < word_end) {
-                uint32_t gc = utf8_decode(&gp);
-                if (gc == 0) break;
-                if (gc < 0x20 && gc != ' ') continue; /* control chars: no glyph */
-                TextShaper *gs;
-                GlyphEntry *ge = ensure_glyph_owned(s, gc, &gs);
-                if (!ge) continue;
-                if (prev_glyph >= 0 && gs == s) {
-                    pen_x += (float)ts_kern(s, prev_glyph, ge->glyph_index) * s->scale * scale;
-                }
-                if (!ts_draw_glyph(dl, gs, ge, gc, pen_x, gy, scale, r, g, b, a))
-                    return false;
-                pen_x += ge->xadvance * scale;
-                prev_glyph = gs == s ? ge->glyph_index : -1;
-            }
+            if (!ts_emit_span_glyphs(s, word_start, word_end, &pen_x, gy, scale, &prev_glyph, r, g, b, a, dl))
+                return false;
         } else {
             pen_x += word_w;
         }
@@ -1056,16 +997,6 @@ bool text_shaper_wrap_shape(const TextShaper *s, const char *utf8,
                         scale, line_advance,
                         cont2_from_line, cont2_x, cont2_width,
                         true, r, g, b, a, dl, out);
-}
-
-void text_shaper_set_slot(TextShaper *s, int slot)
-{
-    if (s) s->slot = slot;
-}
-
-int text_shaper_slot(const TextShaper *s)
-{
-    return s ? s->slot : -1;
 }
 
 bool text_shaper_has_glyph(const TextShaper *s, uint32_t codepoint)

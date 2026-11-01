@@ -9,7 +9,6 @@
 #include "proto.h"
 #include "gpu_wire.h"
 #include "gpu_decode.h"
-#include "font_registry.h"
 #include "text_shaper.h"
 #include "image_cache.h"
 
@@ -151,30 +150,33 @@ uint32_t gpu_encode_frame(const DisplayList *dl, const GpuFrame *hdr, uint8_t **
 
 /* ---- resources ------------------------------------------------------------------ */
 
-static bool send_atlas(int slot, TextShaper *f, int y0, int y1) {
-    const uint8_t *px = text_shaper_atlas_pixels(f);
-    int w = text_shaper_atlas_width(f), h = text_shaper_atlas_height(f);
+/* Rows [y0, y1) of glyph atlas page `page`, sent as the font slot of that
+ * number (FONT_PIPELINE_DESIGN.md step 1: pages travel as slots). */
+static bool send_atlas(int page, int y0, int y1) {
+    GlyphAtlas *atlas = text_shaper_glyph_atlas();
+    const uint8_t *px = glyph_atlas_page_pixels(atlas, page);
+    int w = glyph_atlas_page_size(atlas), h = w;
     if (!px || w <= 0 || h <= 0) return true;
     if (y1 > h) y1 = h;
     if (y0 < 0) y0 = 0;
     if (y1 <= y0) y1 = y0 + 1 <= h ? y0 + 1 : h;   /* at least a row, so the slot exists there */
-    TgAtlas a = { (uint32_t)slot, (uint32_t)w, (uint32_t)h, (uint32_t)y0, (uint32_t)(y1 - y0) };
+    TgAtlas a = { (uint32_t)page, (uint32_t)w, (uint32_t)h, (uint32_t)y0, (uint32_t)(y1 - y0) };
     return big_send(&g_ch, TG_ATLAS, &a, sizeof(a), px + (size_t)y0 * w, (uint32_t)((size_t)(y1 - y0) * w), NULL, 0,
                     5000);
 }
 
-static bool send_font(int slot) {
-    if (slot < 0 || slot >= GPU_FONT_SLOTS) return true;
-    TextShaper *f = font_registry_slot(slot);
-    if (!f || !text_shaper_atlas_pixels(f)) return true;
-    int y0, y1;
-    if (!g_font_sent[slot]) {
+static bool send_page(int page) {
+    if (page < 0 || page >= GPU_FONT_SLOTS) return true;
+    GlyphAtlas *atlas = text_shaper_glyph_atlas();
+    if (!glyph_atlas_page_pixels(atlas, page)) return true;
+    int x0, y0, x1, y1;
+    if (!g_font_sent[page]) {
         /* Everything drawn so far; what is drawn after goes as dirty rows. */
-        text_shaper_atlas_take_dirty(f, &y0, &y1);
-        g_font_sent[slot] = true;
-        return send_atlas(slot, f, 0, text_shaper_atlas_used_rows(f));
+        glyph_atlas_take_dirty(atlas, page, &x0, &y0, &x1, &y1);
+        g_font_sent[page] = true;
+        return send_atlas(page, 0, glyph_atlas_page_used_rows(atlas, page));
     }
-    if (text_shaper_atlas_take_dirty(f, &y0, &y1)) return send_atlas(slot, f, y0, y1);
+    if (glyph_atlas_take_dirty(atlas, page, &x0, &y0, &x1, &y1)) return send_atlas(page, y0, y1);
     return true;
 }
 
@@ -202,7 +204,7 @@ bool gpu_client_send(const DisplayList *dl, const GpuFrame *hdr) {
         const DisplayListCmd *c = &dl->cmds[i];
         if (c->type == DL_GLYPH && c->u.glyph.font_slot < GPU_FONT_SLOTS && !slot_used[c->u.glyph.font_slot]) {
             slot_used[c->u.glyph.font_slot] = true;
-            if (!send_font(c->u.glyph.font_slot)) return false;
+            if (!send_page(c->u.glyph.font_slot)) return false;
         } else if (c->type == DL_IMAGE) {
             if (!send_image(c->u.image.image_handle)) return false;
         }
@@ -214,6 +216,7 @@ bool gpu_client_send(const DisplayList *dl, const GpuFrame *hdr) {
     if (!n) return false;
     bool ok = big_send(&g_ch, TG_FRAME, msg, n, NULL, 0, NULL, 0, 5000);
     free(msg);
+    if (ok) text_shaper_frame_sent(dl);
     return ok;
 }
 

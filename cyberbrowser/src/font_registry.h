@@ -11,8 +11,9 @@
  *    the platform's usual system fonts.
  *  - A per-glyph fallback chain covers characters the chosen font lacks.
  *
- * Every loaded font gets a slot (0..FONT_SLOTS_MAX-1); glyph commands carry
- * the slot whose atlas holds their bitmap. */
+ * Every loaded typeface (a face, or a synthetic-bold face) gets a slot
+ * (0..FONT_SLOTS_MAX-1); sizes are not slots: text draws at any size from
+ * the text shaper's strikes and glyph atlas. */
 
 #include <stdbool.h>
 #include <stddef.h>

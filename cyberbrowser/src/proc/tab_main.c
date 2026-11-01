@@ -39,6 +39,7 @@
 #include "dom_fetch.h"
 #include "code_cache.h"
 #include "gpu_client.h"
+#include "text_shaper.h"
 #include "http_download.h"
 #include "image_cache.h"
 #include "browser/storage_api.h"
@@ -168,6 +169,7 @@ static void paint(void) {
     if (g_content_height > origin && layer_h > g_content_height - origin) layer_h = g_content_height - origin;
     if (layer_h < g_height) layer_h = g_height;
     shift_frame(&f->dl, (float)origin, layer_h);
+    text_shaper_frame_uses(&f->dl);     /* (what scrolls into the layer later is on screen too) */
     GpuFrame hdr = { ++g_frame_no, g_width, layer_h, 0, 0, origin, g_height, g_scroll, g_scroll_seq, g_content_height };
     if (!gpu_client_send(&g_shifted, &hdr)) {
         fprintf(stderr, "[tab %u] the GPU process isn't answering\n", g_tab);

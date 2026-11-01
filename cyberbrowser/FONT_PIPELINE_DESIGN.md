@@ -1,7 +1,7 @@
 # Fonts and glyphs: typefaces, strikes and one glyph atlas
 
-Status: plan.  Replaces the per-size `TextShaper` copies and per-slot glyph atlases with the
-layering browsers use.
+Status: steps 1 and 2 done (see "As built"); steps 3-5 planned.  Replaces the per-size
+`TextShaper` copies and per-slot glyph atlases with the layering browsers use.
 
 ## Why
 
@@ -94,6 +94,33 @@ CPU rasterization (src/raster_cpu.c, raster_page.c) reads the same pages.
    contracts in gpu_input.h / gpu_decode.h and their proofs updated.
 5. Later, separately: vertical hinting or at least whole-pixel alignment of vertical stems (the
    Ahem edge rows), per-character fallback review, HarfBuzz-level shaping.
+
+## As built (steps 1 and 2)
+
+- src/glyph_atlas.c: each page is cut top to bottom into bands, shelves of one height class
+  (glyph height + 1, rounded up to 4 rows) or free.  A glyph goes on the first shelf of its class
+  with room, else on a shelf cut from the smallest free band.  Row 0 and column 0 of a page stay
+  empty and every glyph has an empty column right of it and row below, so each is framed by empty
+  texels: sampling just past its edge reads nothing wherever it sits (a glyph at column 0 used to
+  pick up its own first column through the edge clamp).
+- Allocation failing: evict the least recently used shelf stamped before the last frame sent
+  (cleared, marked dirty, merged with free neighbours), repeat; then add a page (budget 4); then
+  fail, and `ts_draw_glyph` draws the glyph from the font's loaded-size strike, scaled.
+- Frames: `text_shaper_frame_sent(dl)` (gpu_client_send after the frame goes, raster_display_list
+  after painting) stamps the shelves the display list's glyphs sit in and starts the next frame.
+  A display list sent again (tab_main shifts the kept one on scroll) names glyphs only by page and
+  rows, so stamping is by shelf (`glyph_atlas_touch`); tab_main also stamps the whole kept list,
+  not just the part in the layer, so scrolling never reaches an evicted glyph.
+- Strikes: hashed by (shaper, size in 1/4 px); a shaper is a face plus its synthetic bold, so that
+  is the (typeface, size, bold) key.  Sizes within 1% of the loaded size, or outside 4 .. 512 px,
+  draw the loaded size's strike scaled, as before; everything else draws at its exact (quarter
+  pixel) size.  Metrics, kerning and pen positions are unchanged: advances still come from the
+  lock-free metric tables.
+- raster_cpu.c samples a glyph in its own texels (its corner plus floor(u * w)) rather than through
+  a texture coordinate, so the same glyph draws the same anywhere in the atlas.
+- Result: css/CSS2 reftests 4206 -> 4235 pages passing, none lost (visudet/inline-block-baseline-011
+  and -012 among those gained); the unit tests draw 200 sizes twice, in opposite orders, and get
+  identical pixels.
 
 ## Checks
 

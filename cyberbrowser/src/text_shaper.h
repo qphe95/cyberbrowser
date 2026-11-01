@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "display_list.h"
+#include "glyph_atlas.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,25 +30,23 @@ TextShaper *text_shaper_create_from_mapped(uint8_t *view, size_t size, int font_
 /* Does the font carry variation axes (fvar)?  Only its default instance is
  * drawn. */
 bool text_shaper_is_variable(const TextShaper *shaper);
-/* Who gives a shaper made for another size (text drawn at it) a slot of its
- * own: the font registry; -1 for none. */
-void text_shaper_set_slot_allocator(int (*alloc)(TextShaper *shaper));
-/* Font-registry slot whose atlas holds this shaper's glyphs (-1 = none). */
-void text_shaper_set_slot(TextShaper *shaper, int slot);
-int  text_shaper_slot(const TextShaper *shaper);
 /* Does the font itself (no fallback) map this codepoint? */
 bool text_shaper_has_glyph(const TextShaper *shaper, uint32_t codepoint);
 void        text_shaper_destroy(TextShaper *shaper);
 
-/* Raw atlas access for GPU upload. */
-const uint8_t *text_shaper_atlas_pixels(const TextShaper *shaper);
-int            text_shaper_atlas_width(const TextShaper *shaper);
-int            text_shaper_atlas_height(const TextShaper *shaper);
-/* Rows 0 .. used - 1 hold every glyph drawn so far. */
-int            text_shaper_atlas_used_rows(const TextShaper *shaper);
-/* The rows [y0, y1) drawn into since the last call (false: none): what a
- * copy of the atlas elsewhere (the GPU process's) needs again. */
-bool           text_shaper_atlas_take_dirty(TextShaper *shaper, int *y0, int *y1);
+/* Glyphs are drawn from strikes (a font at one size, in quarter pixels)
+ * into one glyph atlas for all fonts (glyph_atlas.h); a glyph command's
+ * font_slot is its atlas page.  The atlas, NULL before the first glyph: */
+struct GlyphAtlas *text_shaper_glyph_atlas(void);
+/* Where codepoint's glyph at size_px is in the atlas, drawn there first if
+ * need be; false when it has no bitmap or there is no room (tests). */
+bool text_shaper_glyph_rect(const TextShaper *shaper, float size_px, uint32_t codepoint, GaRect *out);
+/* A display list on screen uses its glyphs in the current frame (one sent
+ * again names them only by atlas place). */
+void text_shaper_frame_uses(const DisplayList *dl);
+/* `dl` went to the screen (or was rasterized): the frame it makes is the
+ * last sent, whose glyphs are not evicted while it can be shown. */
+void text_shaper_frame_sent(const DisplayList *dl);
 
 /* The height of "x" and the advance of "0" as fractions of the em (CSS's
  * ex and ch units); 0 when the font has no such glyph. */

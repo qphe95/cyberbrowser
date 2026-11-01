@@ -799,9 +799,18 @@ bool vk_renderer_load_font(VulkanRenderer *r, const char *ttf_path, float size_p
         LOGE("Failed to load font: %s", ttf_path);
         return false;
     }
-    if (!upload_font_atlas(r, (uint8_t *)text_shaper_atlas_pixels(shaper),
-                           text_shaper_atlas_width(shaper),
-                           text_shaper_atlas_height(shaper))) {
+    /* Printable ASCII drawn into the glyph atlas; its first page goes up. */
+    DisplayList dl;
+    display_list_init(&dl);
+    char ascii[96];
+    for (int i = 0; i < 95; i++) ascii[i] = (char)(' ' + i);
+    ascii[95] = '\0';
+    text_shaper_shape_to_display_list(shaper, ascii, 0, 0, 1, 1, 1, 1, &dl);
+    display_list_free(&dl);
+    GlyphAtlas *atlas = text_shaper_glyph_atlas();
+    if (!glyph_atlas_page_pixels(atlas, 0) ||
+        !upload_font_atlas(r, glyph_atlas_page_pixels(atlas, 0), glyph_atlas_page_size(atlas),
+                           glyph_atlas_page_size(atlas))) {
         text_shaper_destroy(shaper);
         return false;
     }
