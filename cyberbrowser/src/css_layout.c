@@ -3176,6 +3176,8 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         box->s->text_decoration = deco;
         box->s->text_decoration_set = 1;
     } else if (strcasecmp(prop, "line-height") == 0) {
+        box->s->line_height_em = 0.0;
+        double em = 0.0;
         if (strncasecmp(value, "normal", 6) == 0) {
             box->s->line_height = 0.0; /* <=0 => normal (font metrics at layout) */
             box->s->line_height_ratio = 0.0;
@@ -3192,6 +3194,11 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                 } else if (css_value_is_percent(value)) {
                     box->s->line_height = css_parse_percent_ratio(value) * box->s->font_size;
                     box->s->line_height_ratio = 0.0;
+                    box->s->line_height_em = css_parse_percent_ratio(value);
+                } else if (css_token_is_em(value, &em)) {
+                    box->s->line_height = em * box->s->font_size;
+                    box->s->line_height_ratio = 0.0;
+                    box->s->line_height_em = em;
                 } else {
                     box->s->line_height_ratio = 0.0;
                     box->s->line_height = css_parse_length(value, parent_width, viewport_width,
@@ -7574,7 +7581,7 @@ static void layout_unset_property(LayoutBox *box, const char *prop)
     if (strcasecmp(prop, "font-size") == 0) { box->s->font_size_set = 0; box->s->font_size_ratio = 0.0; }
     else if (strcasecmp(prop, "color") == 0) box->s->color_set = 0;
     else if (strcasecmp(prop, "fill") == 0) box->s->fill_set = 0;
-    else if (strcasecmp(prop, "line-height") == 0) { box->s->line_height_set = 0; box->s->line_height = 0.0; box->s->line_height_ratio = 0.0; }
+    else if (strcasecmp(prop, "line-height") == 0) { box->s->line_height_set = 0; box->s->line_height = 0.0; box->s->line_height_ratio = 0.0; box->s->line_height_em = 0.0; }
     else if (strcasecmp(prop, "font-weight") == 0) box->s->font_weight_set = 0;
     else if (strcasecmp(prop, "font-style") == 0) box->s->font_italic_set = 0;
     else if (strcasecmp(prop, "font-family") == 0) box->s->font_family = "";
@@ -8207,6 +8214,11 @@ static void style_finish_box_em(bool em_defer, LayoutBox *box, const LayoutBox *
     if (box->s->line_height_ratio > 0.0) {
         double fs = box->s->font_size > 0.0 ? box->s->font_size : 16.0;
         box->s->line_height = box->s->line_height_ratio * fs;
+    }
+    /* An em / percentage line-height: of the element's final font-size. */
+    if (box->s->line_height_set && box->s->line_height_em > 0.0) {
+        box->s->line_height = box->s->line_height_em * box->s->font_size;
+        if (box->s->line_height <= 0.0) box->s->line_height = 1e-6;
     }
     /* em-unit margins/paddings resolve against the element's own FINAL
      * font-size (CSS 2.1 §8.3/§8.4). */

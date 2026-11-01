@@ -853,7 +853,6 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
                                                   limit, scale);
             if (bp && bp > word_start) {
                 float half_leading = (line_advance - s->size_pixels * scale) * 0.5f;
-                if (half_leading < 0.0f) half_leading = 0.0f;
                 float gy = pen_y + half_leading + s->baseline * scale;
                 if (emit) {
                     if (!ts_emit_span_glyphs(s, word_start, bp, &pen_x, gy,
@@ -889,7 +888,6 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
                                                   scale);
             if (bp && bp > word_start) {
                 float half_leading = (line_advance - s->size_pixels * scale) * 0.5f;
-                if (half_leading < 0.0f) half_leading = 0.0f;
                 float gy = pen_y + half_leading + s->baseline * scale;
                 if (emit) {
                     if (!ts_emit_span_glyphs(s, word_start, bp, &pen_x, gy,
@@ -948,7 +946,6 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
          * baseline sits at half-leading + ascent from the line top. */
         if (emit) {
             float half_leading = (line_advance - s->size_pixels * scale) * 0.5f;
-            if (half_leading < 0.0f) half_leading = 0.0f;
             float gy = pen_y + half_leading + s->baseline * scale;
             if (!ts_emit_span_glyphs(s, word_start, word_end, &pen_x, gy, scale, &prev_glyph, r, g, b, a, dl))
                 return false;

@@ -1608,7 +1608,6 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                         if (!(nlh > 0.5f * fs && nlh < 3.0f * fs)) nlh = (float)(fs * 1.5);
                         double lh = box->s->line_height > 0.0 ? box->s->line_height : nlh;
                         double half_leading = (lh - fs) * 0.5;
-                        if (half_leading < 0.0) half_leading = 0.0;
                         if (!text_shaper_shape_to_display_list_scaled(font,
                                                            run_text,
                                                            (float)box->x,

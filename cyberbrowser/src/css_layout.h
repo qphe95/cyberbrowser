@@ -183,6 +183,9 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * computed pixel value (CSS 2.1 §10.8.1): > 0 here means line_height
      * must be recomputed as ratio x own font-size once that is final. */
     double line_height_ratio;
+    /* An em or percentage line-height of this element (> 0: that many of
+     * its own final font-size, computed then; it inherits as pixels). */
+    double line_height_em;
 
     /* Specified margins, paddings, min/max sizes and insets in px (their
      * percentage parts are below): what the box's used values start from
