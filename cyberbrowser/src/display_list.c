@@ -447,10 +447,8 @@ static void border_dashes(DisplayList *dl, float bx, float by, float bw, float b
  * thirds and the 3D styles' shades as Blink draws them).  Sides indexed as
  * the style's (0 left, 1 right, 2 top, 3 bottom). */
 static void paint_border_sides(DisplayList *dl, const LayoutBox *box, float bx, float by, float bw, float bh,
-                               const float col[4][4])
+                               const float col[4][4], const float bwid[4])
 {
-    float bwid[4] = { (float)box->s->border_top, (float)box->s->border_right, (float)box->s->border_bottom,
-                      (float)box->s->border_left };
     static const int style_k[4] = { 2, 1, 3, 0 };   /* top, right, bottom, left -> style index */
     for (int side = 0; side < 4; side++) {
         int k = style_k[side];
@@ -495,14 +493,14 @@ static void paint_border_sides(DisplayList *dl, const LayoutBox *box, float bx, 
 
 /* Whether a box's border can be drawn as four plain rectangles: every side
  * with a width solid (or double too thin to show its gap) and one color. */
-static bool border_uniform(const LayoutBox *box, const float col[4][4])
+static bool border_uniform(const LayoutBox *box, const float col[4][4], const float bwid[4])
 {
-    const double w[4] = { box->s->border_left, box->s->border_right, box->s->border_top, box->s->border_bottom };
+    const float w[4] = { bwid[3], bwid[1], bwid[0], bwid[2] };   /* (as the style's: left, right, top, bottom) */
     int first = -1;
     for (int k = 0; k < 4; k++) {
-        if (w[k] <= 0.0) continue;
+        if (w[k] <= 0.0f) continue;
         int st = box->s->border_style[k];
-        if (st != CSS_BORDER_SOLID && !(st == CSS_BORDER_DOUBLE && w[k] < 3.0)) return false;
+        if (st != CSS_BORDER_SOLID && !(st == CSS_BORDER_DOUBLE && w[k] < 3.0f)) return false;
         if (first < 0) first = k;
         else if (memcmp(col[k], col[first], sizeof(col[k])) != 0) return false;
     }
@@ -1882,8 +1880,30 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             float bx = (float)box->x, by = (float)box->y;
             float bw = (float)box->width, bh = (float)box->height;
             snap_rect(&bx, &by, &bw, &bh);
+            /* The widths painted (top, right, bottom, left): none for a side
+             * styled none or hidden (a collapsed table's own border is room
+             * only), and a collapsed table's outer cells paint out past
+             * their boxes (border_out). */
+            static const int sk[4] = { 2, 1, 3, 0 };
+            float bwid[4], out[4];
+            const double used[4] = { box->s->border_top, box->s->border_right, box->s->border_bottom, box->s->border_left };
+            bool outward = false;
+            for (int q = 0; q < 4; q++) {
+                bool painted = box->s->border_style[sk[q]] >= CSS_BORDER_SOLID && used[q] > 0.0;
+                bwid[q] = painted ? (float)used[q] : 0.0f;
+                out[q] = painted ? box->s->border_out[sk[q]] : 0.0f;
+                if (out[q] > 0.0f) { bwid[q] += out[q]; outward = true; }
+            }
+            if (outward) {
+                bx -= out[3];
+                by -= out[0];
+                bw += out[1] + out[3];
+                bh += out[0] + out[2];
+            }
             DisplayMask ring;
-            if (box_round_mask(box, &ring)) {
+            if (bwid[0] <= 0.0f && bwid[1] <= 0.0f && bwid[2] <= 0.0f && bwid[3] <= 0.0f) {
+                /* (nothing painted) */
+            } else if (box_round_mask(box, &ring)) {
                 /* Rounded: the border is the ring between the outer and the
                  * inset rounded rectangles. */
                 ring.kind = 4;
@@ -1896,31 +1916,16 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     display_list_add_rect(dl, bx, by, bw, bh, br_r, br_g, br_b, br_a);
                     dl_add_mask_cmd(dl, DL_MASK_END, mi, &ring);
                 }
-            } else if (!border_uniform(box, col)) {
-                paint_border_sides(dl, box, bx, by, bw, bh, col);
+            } else if (!border_uniform(box, col, bwid)) {
+                paint_border_sides(dl, box, bx, by, bw, bh, col, bwid);
             } else {
-            if (box->s->border_top > 0.0) {
-                display_list_add_rect(dl, bx, by, bw, (float)box->s->border_top,
-                                      ct[0], ct[1], ct[2], ct[3]);
-            }
-            if (box->s->border_bottom > 0.0) {
-                display_list_add_rect(dl, bx, by + bh - (float)box->s->border_bottom,
-                                      bw, (float)box->s->border_bottom,
-                                      cb[0], cb[1], cb[2], cb[3]);
-            }
-            double mid_h = box->height - box->s->border_top - box->s->border_bottom;
-            if (mid_h < 0.0) mid_h = 0.0;
-            if (box->s->border_left > 0.0) {
-                display_list_add_rect(dl, bx, by + (float)box->s->border_top,
-                                      (float)box->s->border_left, (float)mid_h,
-                                      cl[0], cl[1], cl[2], cl[3]);
-            }
-            if (box->s->border_right > 0.0) {
-                display_list_add_rect(dl, bx + bw - (float)box->s->border_right,
-                                      by + (float)box->s->border_top,
-                                      (float)box->s->border_right, (float)mid_h,
-                                      cr[0], cr[1], cr[2], cr[3]);
-            }
+            if (bwid[0] > 0.0f) display_list_add_rect(dl, bx, by, bw, bwid[0], ct[0], ct[1], ct[2], ct[3]);
+            if (bwid[2] > 0.0f) display_list_add_rect(dl, bx, by + bh - bwid[2], bw, bwid[2], cb[0], cb[1], cb[2], cb[3]);
+            float mid_h = bh - bwid[0] - bwid[2];
+            if (mid_h < 0.0f) mid_h = 0.0f;
+            if (bwid[3] > 0.0f) display_list_add_rect(dl, bx, by + bwid[0], bwid[3], mid_h, cl[0], cl[1], cl[2], cl[3]);
+            if (bwid[1] > 0.0f)
+                display_list_add_rect(dl, bx + bw - bwid[1], by + bwid[0], bwid[1], mid_h, cr[0], cr[1], cr[2], cr[3]);
             }
         }
 

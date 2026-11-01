@@ -135,6 +135,17 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     uint32_t border_rgba[4];
     unsigned char border_color_set;
     unsigned char border_style[4];
+    /* The border as the cascade gave it (used widths, styles, colors): in a
+     * collapsing table the fields above are the resolved ones, written from
+     * these by layout_collapse_borders each layout. */
+    float border_spec_w[4];
+    uint32_t border_spec_rgba[4];
+    unsigned char border_spec_style[4], border_spec_cset;
+    unsigned char border_coll;   /* the fields above written by the collapse pass (the copy stands) */
+    /* A collapsed table's cell along its outside: how far past its box a
+     * side's border is painted (the table's share of that edge; the table
+     * itself paints none).  Indexed as border_style. */
+    float border_out[4];
 
     /* Resolved colors (RGBA, 0..1). */
     double color_r, color_g, color_b, color_a;

@@ -8638,7 +8638,12 @@ static void style_finish_box_em(bool em_defer, LayoutBox *box, const LayoutBox *
             unsigned char bit = (unsigned char)(1u << k);
             if (!(box->s->border_styled & bit)) *bw[k] = 0.0;
             else if (!(box->s->border_width_set & bit)) *bw[k] = 3.0;
+            if (box->s->border_coll) continue;   /* (a style finished again: its copy stands) */
+            box->s->border_spec_w[k] = (float)*bw[k];
+            box->s->border_spec_style[k] = box->s->border_style[k];
+            box->s->border_spec_rgba[k] = box->s->border_rgba[k];
         }
+        if (!box->s->border_coll) box->s->border_spec_cset = box->s->border_color_set;
     }
 
     /* Blockification (CSS 2.1 §9.7, Flexbox §4): floats, absolutely
@@ -10099,6 +10104,8 @@ static char *layout_text_transform(const char *s, int t, bool *in_word)
     return out;
 }
 
+static void layout_collapse_borders(LayoutContext *ctx);
+
 static void layout_text_transforms(LayoutContext *ctx)
 {
     int n = ctx->tree.count;
@@ -10590,6 +10597,7 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
     layout_counters(ctx);
     layout_text_transforms(ctx);
     layout_anon_tables(ctx, P.em_defer);
+    layout_collapse_borders(ctx);
     STAGE("pseudo boxes");
     layout_blockify(ctx);
     STAGE("blockify");
@@ -14755,6 +14763,7 @@ typedef struct {
     int ncaptions;
     double colspec[64];                /* the columns' (and column groups') widths; -1: auto */
     double colpct[64];                 /* their percentage widths (fractions; 0: none) */
+    int colbox[64], colgroup[64];      /* their column and column group boxes (-1: none) */
     int ncolspec;
     int ncols;
     double *cmin, *cmax, *cpct;
@@ -14856,6 +14865,8 @@ static void table_note_columns(LayoutContext *ctx, TableGrid *T, int c)
         double w = table_column_width(ctx, k);
         double pct = layout_box(ctx, k)->s->width_percent;
         for (int n = table_span_attr(ctx, k, "span"); n > 0 && T->ncolspec < 64; n--) {
+            T->colbox[T->ncolspec] = k;
+            T->colgroup[T->ncolspec] = c;
             T->colpct[T->ncolspec] = pct;
             T->colspec[T->ncolspec++] = w;
         }
@@ -14864,6 +14875,8 @@ static void table_note_columns(LayoutContext *ctx, TableGrid *T, int c)
     double w = table_column_width(ctx, c);
     double pct = layout_box(ctx, c)->s->width_percent;
     for (int n = table_span_attr(ctx, c, "span"); n > 0 && T->ncolspec < 64; n--) {
+        T->colbox[T->ncolspec] = c;
+        T->colgroup[T->ncolspec] = -1;
         T->colpct[T->ncolspec] = pct;
         T->colspec[T->ncolspec++] = w;
     }
@@ -14929,6 +14942,254 @@ static bool table_collect_children(LayoutContext *ctx, TableGrid *T, int parent,
     return true;
 }
 
+static bool table_place(LayoutContext *ctx, int idx, const LayoutBox *tb, TableGrid *T);
+
+/* ---- The collapsing border model (CSS 2.1 section 17.6.2) ----
+ * After the style pass, for each table with border-collapse: collapse,
+ * every edge of its grid takes the border that wins among the cells,
+ * rows, row groups, columns, column groups and the table along it
+ * (17.6.2.1): hidden over all, then the wider, then by style, then cell
+ * over row over row group over column over column group over table, then
+ * the one left of or above the other.  A cell's border on a side is then
+ * half its edge's (in that edge's style and color), the table's half its
+ * outer edges', and rows, row groups and columns have none of their own;
+ * the table has no padding.  Written from the cascade's border
+ * (border_spec_*) each time. */
+typedef struct { float w; unsigned char style, prio; uint32_t rgba; } CollEdge;
+
+static int coll_rank(int st)
+{
+    switch (st) {
+    case CSS_BORDER_DOUBLE: return 8;
+    case CSS_BORDER_SOLID: return 7;
+    case CSS_BORDER_DASHED: return 6;
+    case CSS_BORDER_DOTTED: return 5;
+    case CSS_BORDER_RIDGE: return 4;
+    case CSS_BORDER_OUTSET: return 3;
+    case CSS_BORDER_GROOVE: return 2;
+    case CSS_BORDER_INSET: return 1;
+    default: return 0;
+    }
+}
+
+/* Box b's side k (0 left, 1 right, 2 top, 3 bottom) offered to edge e at
+ * priority prio. */
+static void coll_offer(CollEdge *e, const LayoutBox *b, int k, int prio)
+{
+    if (!b || e->style == CSS_BORDER_HIDDEN) return;
+    int st = b->s->border_spec_style[k];
+    float w = b->s->border_spec_w[k];
+    if (st == CSS_BORDER_HIDDEN) {
+        e->style = CSS_BORDER_HIDDEN;
+        e->w = 0.0f;
+        return;
+    }
+    if (st <= CSS_BORDER_HIDDEN || w <= 0.0f) return;
+    bool wins = e->style == CSS_BORDER_NONE || w > e->w ||
+                (w == e->w && (coll_rank(st) > coll_rank(e->style) || (st == e->style && prio > e->prio)));
+    if (!wins) return;
+    e->w = w;
+    e->style = (unsigned char)st;
+    e->prio = (unsigned char)prio;
+    if (b->s->border_spec_cset & (1 << k)) {
+        e->rgba = b->s->border_spec_rgba[k];
+    } else {
+        double c[4] = { b->s->color_r, b->s->color_g, b->s->color_b, b->s->color_a };
+        uint32_t v = 0;
+        for (int i = 0; i < 4; i++) v = (v << 8) | (uint32_t)lround((c[i] < 0 ? 0 : c[i] > 1 ? 1 : c[i]) * 255.0);
+        e->rgba = v;
+    }
+}
+
+/* Box b's side k as its share of edge e: the box before the edge (left of
+ * or above it) floor(w / 2), the one after it the rest, so the two add up
+ * to the whole in whole pixels. */
+static void coll_set_side(LayoutBox *b, int k, const CollEdge *e, bool before)
+{
+    double *bw[4] = { &b->s->border_left, &b->s->border_right, &b->s->border_top, &b->s->border_bottom };
+    unsigned char bit = (unsigned char)(1 << k);
+    b->s->border_coll = 1;
+    b->s->border_out[k] = 0.0f;
+    bool shown = e && e->style >= CSS_BORDER_SOLID && e->w > 0.0f;
+    float half = shown ? floorf(e->w * 0.5f) : 0.0f;
+    *bw[k] = shown ? (before ? half : e->w - half) : 0.0;
+    b->s->border_style[k] = shown ? e->style : CSS_BORDER_NONE;
+    b->s->border_rgba[k] = shown ? e->rgba : 0;
+    if (shown) { b->s->border_styled |= bit; b->s->border_color_set |= bit; }
+    else { b->s->border_styled &= (unsigned char)~bit; b->s->border_color_set &= (unsigned char)~bit; }
+}
+
+/* What of a box's style the collapse pass writes, as one number. */
+static uint64_t coll_sig(const LayoutBox *b)
+{
+    const LayoutStyle *st = b->s;
+    uint64_t h = 1469598103934665603ull;
+    const void *parts[] = { &st->border_top, &st->border_right, &st->border_bottom, &st->border_left,
+                            &st->padding_top, &st->padding_right, &st->padding_bottom, &st->padding_left };
+    for (int i = 0; i < 8; i++) {
+        uint64_t v;
+        memcpy(&v, parts[i], sizeof(v));
+        h = (h ^ v) * 1099511628211ull;
+    }
+    for (int k = 0; k < 4; k++) {
+        uint32_t o;
+        memcpy(&o, &st->border_out[k], sizeof(o));
+        h = (h ^ ((uint64_t)st->border_rgba[k] << 8 | st->border_style[k]) ^ ((uint64_t)o << 40)) * 1099511628211ull;
+    }
+    return (h ^ st->border_color_set) * 1099511628211ull;
+}
+
+/* The boxes of a table the pass writes, with their styles' signatures
+ * before; those it changed lose their last layout (style_left). */
+typedef struct { int *idx; uint64_t *sig; int n, cap; } CollTouched;
+
+static void coll_note(LayoutContext *ctx, CollTouched *t, int i)
+{
+    if (i < 0) return;
+    if (t->n == t->cap) {
+        int nc = t->cap ? t->cap * 2 : 32;
+        int *ni = (int *)realloc(t->idx, (size_t)nc * sizeof(int));
+        if (!ni) return;
+        t->idx = ni;
+        uint64_t *ns = (uint64_t *)realloc(t->sig, (size_t)nc * sizeof(uint64_t));
+        if (!ns) return;
+        t->sig = ns;
+        t->cap = nc;
+    }
+    t->idx[t->n] = i;
+    t->sig[t->n++] = coll_sig(layout_box(ctx, i));
+}
+
+static void layout_collapse_table(LayoutContext *ctx, int idx)
+{
+    LayoutBox *tb = &ctx->boxes[idx];
+    TableGrid T;
+    if (!table_place(ctx, idx, tb, &T) || T.ncols <= 0 || T.nrows <= 0) { table_free(&T); return; }
+    CollTouched touched = { NULL, NULL, 0, 0 };
+    coll_note(ctx, &touched, idx);
+    for (int i = 0; i < T.ncells; i++) coll_note(ctx, &touched, T.cells[i].idx);
+    for (int r = 0; r < T.nrows; r++) coll_note(ctx, &touched, T.rows[r].idx);
+    for (int g = 0; g < T.ngroups; g++) coll_note(ctx, &touched, T.groups[g]);
+    for (int k = 0; k < T.ncolspec; k++) { coll_note(ctx, &touched, T.colbox[k]); coll_note(ctx, &touched, T.colgroup[k]); }
+    int R = T.nrows, C = T.ncols;
+    /* H[r][c]: the edge above row r in column c (r = R: the bottom);
+     * V[r][c]: the edge left of column c in row r (c = C: the right). */
+    CollEdge *H = (CollEdge *)calloc((size_t)(R + 1) * (size_t)C, sizeof(CollEdge));
+    CollEdge *V = (CollEdge *)calloc((size_t)R * (size_t)(C + 1), sizeof(CollEdge));
+    if (!H || !V) { free(H); free(V); free(touched.idx); free(touched.sig); table_free(&T); return; }
+#define HE(r, c) (&H[(size_t)(r) * (size_t)C + (size_t)(c)])
+#define VE(r, c) (&V[(size_t)(r) * (size_t)(C + 1) + (size_t)(c)])
+    for (int i = 0; i < T.ncells; i++) {
+        const TableCell *cl = &T.cells[i];
+        const LayoutBox *cb = layout_box(ctx, cl->idx);
+        int r1 = cl->row + cl->rs, c1 = cl->col + cl->cs;
+        for (int c = cl->col; c < c1 && c < C; c++) { coll_offer(HE(cl->row, c), cb, 2, 5); coll_offer(HE(r1, c), cb, 3, 5); }
+        for (int r = cl->row; r < r1 && r < R; r++) { coll_offer(VE(r, cl->col), cb, 0, 5); coll_offer(VE(r, c1), cb, 1, 5); }
+    }
+    for (int r = 0; r < R; r++) {
+        if (T.rows[r].idx < 0) continue;
+        const LayoutBox *rb = layout_box(ctx, T.rows[r].idx);
+        for (int c = 0; c < C; c++) { coll_offer(HE(r, c), rb, 2, 4); coll_offer(HE(r + 1, c), rb, 3, 4); }
+        coll_offer(VE(r, 0), rb, 0, 4);
+        coll_offer(VE(r, C), rb, 1, 4);
+    }
+    for (int g = 0; g < T.ngroups; g++) {
+        int first = -1, last = -1;
+        for (int r = 0; r < R; r++) if (T.rows[r].group == g) { if (first < 0) first = r; last = r; }
+        if (first < 0) continue;
+        const LayoutBox *gb = layout_box(ctx, T.groups[g]);
+        for (int c = 0; c < C; c++) { coll_offer(HE(first, c), gb, 2, 3); coll_offer(HE(last + 1, c), gb, 3, 3); }
+        for (int r = first; r <= last; r++) { coll_offer(VE(r, 0), gb, 0, 3); coll_offer(VE(r, C), gb, 1, 3); }
+    }
+    for (int pass = 0; pass < 2; pass++) {
+        /* (columns, then column groups: a group's edges are its first and
+         * last columns') */
+        for (int k = 0; k < T.ncolspec && k < C; k++) {
+            int b = pass == 0 ? T.colbox[k] : T.colgroup[k];
+            if (b < 0 || (pass == 1 && k > 0 && T.colgroup[k - 1] == b)) continue;
+            int k1 = k;
+            if (pass == 1) while (k1 + 1 < T.ncolspec && k1 + 1 < C && T.colgroup[k1 + 1] == b) k1++;
+            const LayoutBox *xb = layout_box(ctx, b);
+            int prio = pass == 0 ? 2 : 1;
+            for (int r = 0; r < R; r++) { coll_offer(VE(r, k), xb, 0, prio); coll_offer(VE(r, k1 + 1), xb, 1, prio); }
+            for (int c = k; c <= k1; c++) { coll_offer(HE(0, c), xb, 2, prio); coll_offer(HE(R, c), xb, 3, prio); }
+        }
+    }
+    for (int c = 0; c < C; c++) { coll_offer(HE(0, c), tb, 2, 0); coll_offer(HE(R, c), tb, 3, 0); }
+    for (int r = 0; r < R; r++) { coll_offer(VE(r, 0), tb, 0, 0); coll_offer(VE(r, C), tb, 1, 0); }
+
+    /* The cells: half of each of their edges. */
+    for (int i = 0; i < T.ncells; i++) {
+        const TableCell *cl = &T.cells[i];
+        LayoutBox *cb = layout_box(ctx, cl->idx);
+        int c1 = cl->col + cl->cs < C ? cl->col + cl->cs : C, r1 = cl->row + cl->rs < R ? cl->row + cl->rs : R;
+        coll_set_side(cb, 0, VE(cl->row, cl->col), false);
+        coll_set_side(cb, 1, VE(cl->row, c1), true);
+        coll_set_side(cb, 2, HE(cl->row, cl->col), false);
+        coll_set_side(cb, 3, HE(r1, cl->col), true);
+    }
+    /* Cells along the outside paint their edges whole: the table's share
+     * too, past their boxes. */
+    for (int i = 0; i < T.ncells; i++) {
+        const TableCell *cl = &T.cells[i];
+        LayoutBox *cb = layout_box(ctx, cl->idx);
+        int c1 = cl->col + cl->cs, r1 = cl->row + cl->rs;
+        const CollEdge *e;
+        if (cl->col == 0 && (e = VE(cl->row, 0))->style >= CSS_BORDER_SOLID) cb->s->border_out[0] = floorf(e->w * 0.5f);
+        if (c1 >= C && (e = VE(cl->row, C))->style >= CSS_BORDER_SOLID) cb->s->border_out[1] = e->w - floorf(e->w * 0.5f);
+        if (cl->row == 0 && (e = HE(0, cl->col))->style >= CSS_BORDER_SOLID) cb->s->border_out[2] = floorf(e->w * 0.5f);
+        if (r1 >= R && (e = HE(R, cl->col))->style >= CSS_BORDER_SOLID) cb->s->border_out[3] = e->w - floorf(e->w * 0.5f);
+    }
+    /* Rows, groups and columns: none of their own. */
+    for (int r = 0; r < R; r++)
+        if (T.rows[r].idx >= 0) for (int k = 0; k < 4; k++) coll_set_side(layout_box(ctx, T.rows[r].idx), k, NULL, false);
+    for (int g = 0; g < T.ngroups; g++) for (int k = 0; k < 4; k++) coll_set_side(layout_box(ctx, T.groups[g]), k, NULL, false);
+    for (int k = 0; k < T.ncolspec; k++) {
+        if (T.colbox[k] >= 0) for (int j = 0; j < 4; j++) coll_set_side(layout_box(ctx, T.colbox[k]), j, NULL, false);
+        if (T.colgroup[k] >= 0) for (int j = 0; j < 4; j++) coll_set_side(layout_box(ctx, T.colgroup[k]), j, NULL, false);
+    }
+    /* The table: half its outer edges (the widest along the top and
+     * bottom, the first row's at the sides), no padding. */
+    const CollEdge *top = HE(0, 0), *bot = HE(R, 0);
+    for (int c = 1; c < C; c++) {
+        if (HE(0, c)->w > top->w) top = HE(0, c);
+        if (HE(R, c)->w > bot->w) bot = HE(R, c);
+    }
+    coll_set_side(tb, 0, VE(0, 0), true);
+    coll_set_side(tb, 1, VE(0, C), false);
+    coll_set_side(tb, 2, top, true);
+    coll_set_side(tb, 3, bot, false);
+    /* (its border: room in the layout, painted by the cells) */
+    for (int k = 0; k < 4; k++) tb->s->border_style[k] = CSS_BORDER_NONE;
+    tb->s->padding_top = tb->s->padding_right = tb->s->padding_bottom = tb->s->padding_left = 0.0;
+    tb->s->em_deferred &= 0x0F;
+    tb->s->pct_sides &= 0x0F;
+    for (int sd = 0; sd < 4; sd++) tb->s->padding_pct[sd] = tb->s->padding_base[sd] = 0.0;
+#undef HE
+#undef VE
+    for (int i = 0; ctx->style_left && i < touched.n; i++)
+        if (coll_sig(layout_box(ctx, touched.idx[i])) != touched.sig[i]) ctx->style_left[touched.idx[i]] = 0;
+    free(touched.idx);
+    free(touched.sig);
+    free(H);
+    free(V);
+    table_free(&T);
+}
+
+static void layout_collapse_borders(LayoutContext *ctx)
+{
+    int n = 0;
+    for (int i = 0; i < ctx->tree.count; i++) {
+        const LayoutBox *b = &ctx->boxes[i];
+        if (!b->s->border_collapse || b->s->table_role != 1 || (b->flags & LAYOUT_STYLE_SKIPPED) ||
+            !table_is_table(b))
+            continue;
+        layout_collapse_table(ctx, i);
+        n++;
+    }
+    if (g_css_log > 0 && n) fprintf(stderr, "[css] collapsing-border tables: %d\n", n);
+}
+
 static bool table_grow_cols(TableGrid *T, int n)
 {
     if (n <= T->ncols) return true;
@@ -14951,7 +15212,7 @@ static bool table_grow_cols(TableGrid *T, int n)
 
 /* Collect the table, place its cells (colspan / rowspan) and compute the
  * column min / max widths.  False when it has no rows or cells. */
-static bool table_build(LayoutContext *ctx, int idx, const LayoutBox *tb, TableGrid *T)
+static bool table_place(LayoutContext *ctx, int idx, const LayoutBox *tb, TableGrid *T)
 {
     memset(T, 0, sizeof(*T));
     bool real = false;
@@ -15005,6 +15266,14 @@ static bool table_build(LayoutContext *ctx, int idx, const LayoutBox *tb, TableG
         if (c->cs < 1) c->cs = 1;
     }
 
+    return true;
+}
+
+/* Collect the table, place its cells (colspan / rowspan) and compute the
+ * column min / max widths.  False when it has no rows or cells. */
+static bool table_build(LayoutContext *ctx, int idx, const LayoutBox *tb, TableGrid *T)
+{
+    if (!table_place(ctx, idx, tb, T)) return false;
     /* A column's width is a fixed width for it (§17.5.2). */
     for (int k = 0; k < T->ncolspec && k < T->ncols; k++)
         if (T->colspec[k] >= 0.0) { T->cfixed[k] = 1; T->cmin[k] = T->cmax[k] = T->colspec[k]; }

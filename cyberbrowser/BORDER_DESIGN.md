@@ -3,7 +3,18 @@
 Status: steps 1 and 2 done (css/CSS2 5028 -> 5096 pages passing, none lost; the gpu_decode
 contracts are updated for mask kind 6 but `tools/prove.sh` was not rerun: Frama-C is not installed
 on the machine it was built on); step 3 done (dashed / dotted: no css/CSS2 reftest uses them
-where they fail, so the count is unchanged); step 4 planned.
+where they fail, so the count is unchanged); step 4 done (css/CSS2 5096 -> about 5165: two full
+runs of the same build gave 5161 and 5168, about ten collapsing-model pages passing in one run and
+failing in the other, each passing when run alone; the cause, something left over from earlier
+pages in the same tab or the timing of the screenshot, is not found yet).
+
+As built, step 4: a pass after the style pass (layout_collapse_borders) places each collapsing
+table's grid (table_place, split out of table_build), resolves its edges and writes the used
+borders from the cascade's (border_spec_*, kept by the style finish, border_coll marking a style the
+pass wrote).  An edge is split in whole pixels (floor(w / 2) to the box before it); the table keeps
+its half of the outer edges as room but paints none, the cells along the outside painting their
+edges whole (border_out).  Boxes whose collapsed borders changed lose their last layout
+(style_left), else the flow pass would reuse a layout from before the pass.
 
 ## Why
 
