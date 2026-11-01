@@ -1109,6 +1109,12 @@ int text_shaper_wrap_lines(const TextShaper *s, const char *utf8,
     return n;
 }
 
+float text_shaper_span_width(const TextShaper *s, const char *utf8, size_t start, size_t end, float scale)
+{
+    if (!s || !utf8 || end <= start) return 0.0f;
+    return ts_measure_span(s, utf8 + start, utf8 + end) * (scale > 0.0f ? scale : 1.0f);
+}
+
 bool text_shaper_shape_span(const TextShaper *s, const char *utf8, size_t start, size_t end,
                             float x, float y, float scale, bool rtl,
                             float r, float g, float b, float a, DisplayList *dl)

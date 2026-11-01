@@ -11343,6 +11343,38 @@ static int* layout_collect_flow_children(LayoutContext *ctx, int idx, int *out_c
     return kids;
 }
 
+/* The width of the collapsible white space a line ends with: it hangs (CSS
+ * Text 3 section 4.1.3), so alignment leaves it out.  From the last
+ * members back while they are text; white-space pre and pre-wrap keep
+ * theirs. */
+static double layout_line_hanging_space(LayoutContext *ctx, const int *members, int count)
+{
+    double hang = 0.0;
+    for (int i = count - 1; i >= 0; i--) {
+        int m = members[i];
+        HtmlNode *n = css_layout_box_node(ctx, m);
+        if (!n || n->type != HTML_NODE_TEXT) break;
+        const LayoutBox *b = layout_box(ctx, m);
+        if (b->s->white_space == 2 || b->s->white_space == 3) break;
+        TextShaper *font;
+        float scale, adv;
+        const char *t;
+        if (!css_layout_text_paint(ctx, m, &font, &scale, &adv, &t)) break;
+        size_t len = strlen(t), k = len;
+        while (k > 0 && (t[k - 1] == ' ' || t[k - 1] == '\t' || t[k - 1] == '\n')) k--;
+        if (k == len) break;
+        if (k == 0) {
+            hang += b->width;
+            continue;
+        }
+        text_shaper_set_spacing(b->s->letter_spacing, b->s->word_spacing, scale);
+        hang += text_shaper_span_width(font, t, k, len, scale);
+        text_shaper_set_spacing(0.0f, 0.0f, 1.0f);
+        break;
+    }
+    return hang;
+}
+
 /* Shift the inline runs of one finished line for text-align center/right.
  * `members` are the layout-tree indices of the inline children placed on the
  * line.  Lines containing a word-wrapped text box are left alone: their slack
@@ -11355,7 +11387,7 @@ static void layout_align_line(LayoutContext *ctx, const int *members, int count,
         if (layout_box(ctx, members[i])->wrap_cont_w > 0.0) return;
     }
     LayoutBox *last = layout_box(ctx, members[count - 1]);
-    double used = (last->x + last->width) - content_left;
+    double used = (last->x + last->width) - content_left - layout_line_hanging_space(ctx, members, count);
     double slack = avail_width - used;
     if (slack <= 0.5) return;
     double dx = (align == CSS_TEXT_ALIGN_CENTER) ? slack * 0.5 : slack;
@@ -12257,13 +12289,583 @@ static void layout_text_frags_build(LayoutContext *ctx, int idx)
     if (ls != stack) free(ls);
 }
 
+/* ---- The paragraph's text, levels, and its lines in visual order ----
+ * The paragraph is its inline content as code points in logical order: the
+ * text boxes' painted text, U+FFFC for an atomic inline, U+2029 for a block
+ * between, and around an inline box with unicode-bidi the controls it
+ * stands for (CSS Writing Modes 3 section 2.4.2).  UAX #9 gives each a
+ * level; a line is the fragments and atomic inlines the flow put on it, cut
+ * into runs of one level, which L2 puts in visual order from the line's
+ * start. */
+
+typedef struct {
+    uint32_t *cp;     /* code points */
+    int *box;         /* the text box or atomic inline of each (-1: a control) */
+    uint32_t *byte;   /* its byte offset in the box's painted text */
+    int n, cap;
+} BidiPara;
+
+static bool bidi_para_put(BidiPara *P, uint32_t cp, int box, uint32_t byte)
+{
+    if (P->n == P->cap) {
+        int nc = P->cap ? P->cap * 2 : 256;
+        uint32_t *a = (uint32_t *)realloc(P->cp, (size_t)nc * sizeof(uint32_t));
+        if (!a) return false;
+        P->cp = a;
+        int *b = (int *)realloc(P->box, (size_t)nc * sizeof(int));
+        if (!b) return false;
+        P->box = b;
+        uint32_t *c = (uint32_t *)realloc(P->byte, (size_t)nc * sizeof(uint32_t));
+        if (!c) return false;
+        P->byte = c;
+        P->cap = nc;
+    }
+    P->cp[P->n] = cp;
+    P->box[P->n] = box;
+    P->byte[P->n] = byte;
+    P->n++;
+    return true;
+}
+
+/* The next code point of p (UTF-8, as the shaper decodes it). */
+static uint32_t bidi_utf8_next(const unsigned char **pp, const unsigned char *e)
+{
+    const unsigned char *p = *pp;
+    uint32_t c = *p++;
+    int more = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : c >= 0xC0 ? 1 : 0;
+    if (more) c &= 0x3Fu >> more;
+    for (; more && p < e; more--) c = (c << 6) | (*p++ & 0x3F);
+    *pp = p;
+    return c;
+}
+
+static bool layout_is_replaced_tag(const char *t)
+{
+    static const char *const tags[] = { "img", "input", "video", "canvas", "iframe", "svg", "object", "embed",
+                                        "select", "textarea", "button", "audio", "meter", "progress", NULL };
+    for (int i = 0; tags[i]; i++)
+        if (!strcmp(t, tags[i])) return true;
+    return false;
+}
+
+/* The controls an inline box's unicode-bidi stands for, opening (or closing). */
+static int bidi_controls(const LayoutBox *b, bool open, uint32_t out[2])
+{
+    bool r = b->s->direction == 1;
+    switch (b->s->unicode_bidi) {
+    case 1: out[0] = open ? (r ? 0x202B : 0x202A) : 0x202C; return 1;
+    case 2: out[0] = open ? (r ? 0x2067 : 0x2066) : 0x2069; return 1;
+    case 3: out[0] = open ? (r ? 0x202E : 0x202D) : 0x202C; return 1;
+    case 4:
+        if (open) { out[0] = r ? 0x2067 : 0x2066; out[1] = r ? 0x202E : 0x202D; }
+        else { out[0] = 0x202C; out[1] = 0x2069; }
+        return 2;
+    case 5: out[0] = open ? 0x2068 : 0x2069; return 1;
+    default: return 0;
+    }
+}
+
+/* Block idx's inline content in logical order into P; items, the text
+ * boxes and atomic inlines met, in order. */
+static void bidi_para_collect(LayoutContext *ctx, int idx, BidiPara *P, int *items, int *item_cp, int *nitems)
+{
+    for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+        LayoutBox *cb = layout_box(ctx, c);
+        if (!layout_is_in_flow(cb) || cb->s->display == CSS_DISPLAY_NONE) continue;
+        HtmlNode *n = css_layout_box_node(ctx, c);
+        if (n && n->type == HTML_NODE_TEXT) {
+            TextShaper *font;
+            float scale, adv;
+            const char *t;
+            if (!css_layout_text_paint(ctx, c, &font, &scale, &adv, &t)) continue;
+            const unsigned char *p = (const unsigned char *)t, *e = p + strlen(t);
+            item_cp[*nitems] = P->n;
+            while (p < e) {
+                uint32_t off = (uint32_t)(p - (const unsigned char *)t);
+                bidi_para_put(P, bidi_utf8_next(&p, e), c, off);
+            }
+            items[(*nitems)++] = c;
+            continue;
+        }
+        bool inline_box = cb->s->display == CSS_DISPLAY_INLINE && !cb->s->block_in_inline &&
+                          !(n && n->type == HTML_NODE_ELEMENT && n->tag_name && layout_is_replaced_tag(n->tag_name));
+        if (inline_box) {
+            uint32_t ctl[2];
+            int k = bidi_controls(cb, true, ctl);
+            for (int i = 0; i < k; i++) bidi_para_put(P, ctl[i], -1, 0);
+            bidi_para_collect(ctx, c, P, items, item_cp, nitems);
+            k = bidi_controls(cb, false, ctl);
+            for (int i = 0; i < k; i++) bidi_para_put(P, ctl[i], -1, 0);
+        } else if (cb->s->inline_level || cb->s->display != CSS_DISPLAY_BLOCK) {
+            item_cp[*nitems] = P->n;
+            bidi_para_put(P, 0xFFFC, c, 0);
+            items[(*nitems)++] = c;
+        } else {
+            bidi_para_put(P, 0x2029, -1, 0);
+        }
+    }
+}
+
+/* One run of a line: a text fragment's bytes at one level, or an atomic
+ * inline (frag -1). */
+typedef struct {
+    int box, frag;
+    uint32_t start, end;
+    double x0, w, gap;   /* where the flow put it, its width, the space before it */
+    int cp0;             /* its first code point in the paragraph */
+    int item;            /* its item (-1: a control) */
+    unsigned char hang;  /* white space at the line's end: no room */
+    double lead, trail;  /* the edges (margin, border, padding) of the inline boxes it opens / closes */
+    unsigned char level;
+} BidiRun;
+
+/* A paragraph's inline boxes (its items' ancestors below the block), found
+ * by box index in a small open-addressed table: which items they begin and
+ * end at, and their content's extent before and after reordering, on one
+ * line (line -1: not one whole piece on one line). */
+typedef struct {
+    int box, first, last, line;
+    double o0, o1, n0, n1;
+} BidiAnc;
+
+typedef struct {
+    BidiAnc *a;
+    int n, cap, mask;
+    int *slot;
+} BidiAncs;
+
+static bool bidi_ancs_init(BidiAncs *A, int cap)
+{
+    int size = 16;
+    while (size < cap * 2) size *= 2;
+    A->a = (BidiAnc *)malloc((size_t)cap * sizeof(BidiAnc));
+    A->slot = (int *)malloc((size_t)size * sizeof(int));
+    A->n = 0;
+    A->cap = cap;
+    A->mask = size - 1;
+    if (!A->a || !A->slot) return false;
+    for (int i = 0; i < size; i++) A->slot[i] = -1;
+    return true;
+}
+
+/* Box's entry (added when add), or -1. */
+static int bidi_anc(BidiAncs *A, int box, bool add)
+{
+    for (unsigned h = ((unsigned)box * 2654435761u) & (unsigned)A->mask;; h = (h + 1) & (unsigned)A->mask) {
+        int k = A->slot[h];
+        if (k >= 0 && A->a[k].box == box) return k;
+        if (k >= 0) continue;
+        if (!add || A->n == A->cap) return -1;
+        BidiAnc *e = &A->a[A->n];
+        memset(e, 0, sizeof(*e));
+        e->box = box;
+        e->first = e->last = -1;
+        e->line = -2;
+        A->slot[h] = A->n;
+        return A->n++;
+    }
+}
+
+static int bidi_count_items(LayoutContext *ctx, int idx)
+{
+    int n = 0;
+    for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+        n++;
+        n += bidi_count_items(ctx, c);
+    }
+    return n;
+}
+
+/* The runs of block idx's paragraph reordered line by line: text fragments
+ * cut at level changes and placed in visual order, atomic inlines moved;
+ * a line holding wrapped text aligned here (the flow leaves those). */
+static void layout_bidi_reorder(LayoutContext *ctx, int idx)
+{
+    LayoutBox *blk = layout_box(ctx, idx);
+    BidiPara P = { 0 };
+    int maxitems = bidi_count_items(ctx, idx) + 1;
+    int *items = (int *)malloc((size_t)maxitems * sizeof(int));
+    int *first_cp = (int *)malloc((size_t)maxitems * sizeof(int));
+    if (!items || !first_cp) { free(items); free(first_cp); return; }
+    int nitems = 0;
+    /* (an override or plaintext on the block itself: around all of it) */
+    int nopen = blk->s->unicode_bidi == 3 || blk->s->unicode_bidi == 4 ? 1 : 0;
+    if (nopen) bidi_para_put(&P, blk->s->direction == 1 ? 0x202E : 0x202D, -1, 0);
+    bidi_para_collect(ctx, idx, &P, items, first_cp, &nitems);
+    if (nopen) bidi_para_put(&P, 0x202C, -1, 0);
+    if (P.n == 0 || nitems == 0) goto out;
+    /* (nothing right to left in it: every level even, nothing reversed) */
+    if (blk->s->direction != 1) {
+        bool rtl = false;
+        for (int i = 0; i < P.n && !rtl; i++) {
+            uint32_t c = P.cp[i];
+            if (c < 0x590) continue;
+            int k = bidi_class(c);
+            rtl = k == BIDI_R || k == BIDI_AL || k == BIDI_AN || k == BIDI_RLE || k == BIDI_RLO || k == BIDI_RLI ||
+                  k == BIDI_FSI;
+        }
+        if (!rtl) goto out;
+    }
+    uint8_t *lv = (uint8_t *)malloc((size_t)P.n);
+    if (!lv) goto out;
+    int para = bidi_resolve(P.cp, P.n, blk->s->unicode_bidi == 5 ? -1 : blk->s->direction, lv);
+    if (para < 0) { free(lv); goto out; }
+    /* (no odd level: nothing is reversed, every line stays as the flow put it) */
+    {
+        bool odd = false;
+        for (int i = 0; i < P.n && !odd; i++) odd = lv[i] & 1;
+        if (!odd) { free(lv); goto out; }
+    }
+
+    /* The lines: in logical order, a fragment after a box's first, or an
+     * item the flow put left of the one before, starts one. */
+    int cap = 64, nr = 0;
+    BidiRun *runs = (BidiRun *)malloc((size_t)cap * sizeof(BidiRun));
+    if (!runs) { free(lv); goto out; }
+    /* Each item's lead and trail: the left edges of the inline boxes it is
+     * the first content of, the right edges of those it is the last of. */
+    double *lead = (double *)calloc((size_t)nitems, sizeof(double)), *trail = (double *)calloc((size_t)nitems, sizeof(double));
+    BidiAncs A = { 0 };
+    if (!lead || !trail || !bidi_ancs_init(&A, maxitems)) {
+        free(lead); free(trail); free(A.a); free(A.slot); free(lv); free(runs); goto out;
+    }
+    for (int i = 0; i < nitems; i++)
+        for (int p = ctx->tree.nodes[items[i]].parent_idx; p >= 0 && p != idx; p = ctx->tree.nodes[p].parent_idx) {
+            int a = bidi_anc(&A, p, true);
+            if (a < 0) continue;
+            if (A.a[a].first < 0) A.a[a].first = i;
+            A.a[a].last = i;
+        }
+    for (int k = 0; k < A.n; k++) {
+        const LayoutBox *pb = layout_box(ctx, A.a[k].box);
+        lead[A.a[k].first] += pb->margin_left + pb->s->border_left + pb->padding_left;
+        trail[A.a[k].last] += pb->margin_right + pb->s->border_right + pb->padding_right;
+    }
+
+    int line = -1;
+    double prev_end = -1e30, prev_trail = 0.0, prev_top = -1e30;
+    int line_cap = 64;
+    int *line_start = (int *)malloc((size_t)line_cap * sizeof(int));   /* first run of each line */
+    int *line_cp0 = (int *)malloc((size_t)line_cap * sizeof(int)), *line_cp1 = (int *)malloc((size_t)line_cap * sizeof(int));
+    double *line_x = (double *)malloc((size_t)line_cap * sizeof(double));   /* where its first run with content starts (1e30: none) */
+    if (!line_start || !line_cp0 || !line_cp1 || !line_x) {
+        free(lv); free(runs); free(line_start); free(line_cp0); free(line_cp1); free(line_x); goto out;
+    }
+    for (int i = 0; i < nitems; i++) {
+        int b = items[i];
+        LayoutBox *bb = layout_box(ctx, b);
+        const LayoutTextFragList *fl = ctx->text_frags && b < ctx->text_frags_n ? &ctx->text_frags[b] : NULL;
+        HtmlNode *in = css_layout_box_node(ctx, b);
+        bool text = in && in->type == HTML_NODE_TEXT;
+        int nf = text ? (fl ? fl->n : 0) : 1;
+        for (int q = 0; q < nf; q++) {
+            double x0 = text ? bb->x + fl->f[q].dx : bb->x - bb->margin_left;
+            double w = text ? fl->f[q].w : bb->margin_left + bb->width + bb->margin_right;
+            /* (a new line: below the item before and back to the left; the
+             * flow overlaps boxes where it collapses a space between them) */
+            double top = text ? bb->y + fl->f[q].dy : bb->y - bb->margin_top;
+            /* (an empty run, a collapsed space: where the flow left it says
+             * nothing; it neither starts a line nor places one) */
+            bool empty = text && w <= 0.001;
+            if (line < 0 || (text && q > 0) || (!empty && x0 < prev_end - 0.5 && top > prev_top + 1.0)) {
+                if (++line == line_cap) {
+                    line_cap *= 2;
+                    line_start = (int *)realloc(line_start, (size_t)line_cap * sizeof(int));
+                    line_cp0 = (int *)realloc(line_cp0, (size_t)line_cap * sizeof(int));
+                    line_cp1 = (int *)realloc(line_cp1, (size_t)line_cap * sizeof(int));
+                    line_x = (double *)realloc(line_x, (size_t)line_cap * sizeof(double));
+                    if (!line_start || !line_cp0 || !line_cp1 || !line_x) { line = -1; break; }
+                }
+                line_start[line] = nr;
+                line_cp0[line] = -1;
+                line_x[line] = 1e30;
+            }
+            if (nr == cap) {
+                cap *= 2;
+                BidiRun *nrs = (BidiRun *)realloc(runs, (size_t)cap * sizeof(BidiRun));
+                if (!nrs) break;
+                runs = nrs;
+            }
+            BidiRun *r = &runs[nr++];
+            r->item = i;
+            r->box = b;
+            r->frag = text ? q : -1;
+            r->start = text ? fl->f[q].start : 0;
+            r->end = text ? fl->f[q].end : 0;
+            r->x0 = x0;
+            r->w = w;
+            r->lead = q == 0 ? lead[i] : 0.0;
+            r->trail = q == nf - 1 ? trail[i] : 0.0;
+            if (empty) {
+                r->gap = 0.0;
+            } else if (line_x[line] >= 1e29) {
+                r->gap = 0.0;
+                line_x[line] = x0 - r->lead;
+            } else {
+                r->gap = x0 - prev_end - prev_trail - r->lead;   /* (negative: the flow overlapped a collapsed space) */
+            }
+            if (!empty) {
+                prev_end = x0 + w;
+                prev_trail = r->trail;
+                prev_top = top;
+            }
+            /* (its code points) */
+            int c0 = first_cp[i], c1 = c0;
+            if (text) {
+                while (c0 < P.n && P.box[c0] == b && P.byte[c0] < r->start) c0++;
+                c1 = c0;
+                while (c1 < P.n && P.box[c1] == b && P.byte[c1] < r->end) c1++;
+            } else {
+                c1 = c0 + 1;
+            }
+            r->cp0 = c0;
+            if (line_cp0[line] < 0) line_cp0[line] = c0;
+            line_cp1[line] = c1;
+        }
+        if (line < 0) break;
+    }
+    int nlines = line + 1;
+
+    /* L1 per line, then each run cut where the level changes, and where the
+     * white space at the line's end starts: that hangs (takes no room, as
+     * the flow's trailing spaces do not in a browser). */
+    int *line_hang = (int *)malloc(((size_t)nlines + 1) * sizeof(int));
+    if (!line_hang) { free(lv); free(runs); free(line_start); free(line_cp0); free(line_cp1); goto out; }
+    for (int L = 0; L < nlines; L++) {
+        line_hang[L] = line_cp1[L];
+        if (line_cp0[L] < 0 || line_cp1[L] <= line_cp0[L]) continue;
+        bidi_line_levels(P.cp, line_cp0[L], line_cp1[L], para, lv);
+        for (int c = line_cp1[L] - 1; c >= line_cp0[L]; c--) {
+            uint32_t ch = P.cp[c];
+            int k = bidi_class(ch);
+            if (!(ch == ' ' || ch == '\t' || ch == '\n' || k == BIDI_BN || P.box[c] < 0)) break;
+            line_hang[L] = c;
+        }
+    }
+
+    /* (per item, its fragments in visual order) */
+    LayoutTextFragList *nf_lists = (LayoutTextFragList *)calloc((size_t)nitems, sizeof(LayoutTextFragList));
+    BidiRun *cut = NULL;
+    int ncut = 0, cutcap = 0;
+    uint8_t *clv = NULL;
+    int *order = NULL;
+    for (int L = 0; L < nlines && nf_lists; L++) {
+        int r0 = line_start[L], r1 = L + 1 < nlines ? line_start[L + 1] : nr;
+        ncut = 0;
+        bool wrapped = false;
+        int wbox = -1, wfrag = -1;
+        int ctl_c = line_cp0[L] >= 0 ? line_cp0[L] : 0;   /* (the controls not yet passed) */
+        for (int k = r0; k < r1; k++) {
+            BidiRun r = runs[k];
+            if (ncut + 64 >= cutcap) {
+                cutcap = cutcap ? cutcap * 2 : 128;
+                while (ncut + 64 >= cutcap) cutcap *= 2;
+                cut = (BidiRun *)realloc(cut, (size_t)cutcap * sizeof(BidiRun));
+                if (!cut) break;
+            }
+            /* (an isolate's or embedding's controls before it: zero-width
+             * runs at their levels, which keep runs apart when reordered) */
+            for (; ctl_c < r.cp0; ctl_c++) {
+                if (P.box[ctl_c] >= 0) continue;
+                if (ncut + 1 >= cutcap) {
+                    cutcap *= 2;
+                    cut = (BidiRun *)realloc(cut, (size_t)cutcap * sizeof(BidiRun));
+                    if (!cut) break;
+                }
+                BidiRun cr;
+                memset(&cr, 0, sizeof(cr));
+                cr.box = -1;
+                cr.item = -1;
+                cr.frag = -2;
+                cr.cp0 = ctl_c;
+                cr.level = lv[ctl_c];
+                cr.hang = ctl_c >= line_hang[L];
+                cut[ncut++] = cr;
+            }
+            if (!cut) break;
+            if (ctl_c <= r.cp0) ctl_c = r.cp0 + 1;
+            while (ctl_c < P.n && P.box[ctl_c] == r.box) ctl_c++;
+            if (r.frag < 0) {
+                r.level = lv[r.cp0];
+                r.hang = 0;
+                cut[ncut++] = r;
+                continue;
+            }
+            LayoutBox *bb = layout_box(ctx, r.box);
+            if (bb->wrap_cont_w > 0.0 && !wrapped) { wrapped = true; wbox = r.box; wfrag = r.frag; }
+            /* (the run's code points, by level) */
+            int c = r.cp0;
+            uint32_t seg = r.start;
+            int level = c < P.n && P.box[c] == r.box ? lv[c] : para;
+            bool hang = c >= line_hang[L];
+            bool first_piece = true;
+            for (;;) {
+                bool end = c >= P.n || P.box[c] != r.box || P.byte[c] >= r.end;
+                if (end || lv[c] != level || (c >= line_hang[L]) != hang) {
+                    uint32_t segend = end ? r.end : P.byte[c];
+                    if (segend > seg) {
+                        if (ncut + 1 >= cutcap) {
+                            cutcap *= 2;
+                            cut = (BidiRun *)realloc(cut, (size_t)cutcap * sizeof(BidiRun));
+                            if (!cut) break;
+                        }
+                        BidiRun pc = r;
+                        pc.start = seg;
+                        pc.end = segend;
+                        pc.level = (unsigned char)level;
+                        pc.gap = first_piece ? r.gap : 0.0;
+                        pc.lead = first_piece ? r.lead : 0.0;
+                        pc.trail = 0.0;
+                        pc.hang = hang;
+                        first_piece = false;
+                        cut[ncut++] = pc;
+                    }
+                    if (end) break;
+                    seg = P.byte[c];
+                    level = lv[c];
+                    hang = c >= line_hang[L];
+                }
+                c++;
+            }
+            if (!cut) break;
+            if (!first_piece) cut[ncut - 1].trail = r.trail;
+        }
+        if (!cut) break;
+        /* (a run that is the whole fragment keeps its width; a cut one is measured) */
+        for (int k = 0; k < ncut; k++) {
+            BidiRun *pc = &cut[k];
+            if (pc->frag < 0) continue;
+            const LayoutTextFrag *fr = &ctx->text_frags[pc->box].f[pc->frag];
+            if (pc->start == fr->start && pc->end == fr->end) continue;
+            TextShaper *font;
+            float scale, adv;
+            const char *t;
+            if (!css_layout_text_paint(ctx, pc->box, &font, &scale, &adv, &t)) continue;
+            const LayoutBox *bb = layout_box(ctx, pc->box);
+            text_shaper_set_spacing(bb->s->letter_spacing, bb->s->word_spacing, scale);
+            pc->w = text_shaper_span_width(font, t, pc->start, pc->end, scale);
+            text_shaper_set_spacing(0.0f, 0.0f, 1.0f);
+        }
+        double hang_w = 0.0;
+        for (int k = 0; k < ncut; k++)
+            if (cut[k].hang) {
+                hang_w += cut[k].w;
+                cut[k].w = 0.0;
+            }
+        clv = (uint8_t *)realloc(clv, (size_t)ncut + 1);
+        order = (int *)realloc(order, ((size_t)ncut + 1) * sizeof(int));
+        if (!clv || !order) break;
+        for (int k = 0; k < ncut; k++) clv[k] = cut[k].level;
+        bidi_reorder(clv, ncut, order);
+        double x = line_x[L] < 1e29 ? line_x[L] : runs[r0].x0 - runs[r0].lead, used = 0.0;
+        for (int k = 0; k < ncut; k++) used += cut[k].gap + cut[k].lead + cut[k].w + cut[k].trail;
+        /* (a line with wrapped text: aligned here, against the wrap's line) */
+        if (wrapped && blk->s->text_align != CSS_TEXT_ALIGN_LEFT) {
+            const LayoutBox *wb = layout_box(ctx, wbox);
+            double right;
+            if (wfrag == 0) right = wb->x + wb->wrap_first_w;
+            else if (wb->wrap_cont2_line > 1 && wfrag + 1 >= wb->wrap_cont2_line) right = wb->wrap_cont2_x + wb->wrap_cont2_w;
+            else right = wb->wrap_cont_x + wb->wrap_cont_w;
+            double slack = right - x - used;
+            if (slack > 0.5) x += blk->s->text_align == CSS_TEXT_ALIGN_CENTER ? slack * 0.5 : slack;
+        }
+        (void)hang_w;   /* (the flow aligned the other lines without it) */
+        for (int k = 0; k < ncut; k++) {
+            BidiRun *pc = &cut[order[k]];
+            if (pc->frag == -2) continue;
+            x += pc->gap + pc->lead;
+            if (pc->frag < 0) {
+                double dx = x - pc->x0;
+                if (fabs(dx) > 0.001) {
+                    LayoutBox *ab = layout_box(ctx, pc->box);
+                    ab->x += dx;
+                    layout_offset_subtree(ctx, pc->box, dx, 0.0);
+                }
+            } else {
+                const LayoutTextFrag *fr = &ctx->text_frags[pc->box].f[pc->frag];
+                LayoutTextFragList *dst = &nf_lists[pc->item];
+                LayoutTextFrag *nfr = (LayoutTextFrag *)realloc(dst->f, ((size_t)dst->n + 1) * sizeof(LayoutTextFrag));
+                if (nfr) {
+                    dst->f = nfr;
+                    LayoutTextFrag *o = &dst->f[dst->n++];
+                    *o = *fr;
+                    o->start = pc->start;
+                    o->end = pc->end;
+                    o->dx = x - layout_box(ctx, pc->box)->x;
+                    o->w = pc->w;
+                    o->level = pc->level;
+                }
+            }
+            if (!pc->hang) {
+                bool whole = pc->frag < 0 || (pc->start == ctx->text_frags[pc->box].f[pc->frag].start &&
+                                              pc->end == ctx->text_frags[pc->box].f[pc->frag].end);
+                for (int p = ctx->tree.nodes[pc->box].parent_idx; p >= 0 && p != idx; p = ctx->tree.nodes[p].parent_idx) {
+                    int a = bidi_anc(&A, p, false);
+                    if (a < 0) continue;
+                    BidiAnc *e = &A.a[a];
+                    if (e->line == -2) {
+                        e->line = L;
+                        e->o0 = e->n0 = 1e30;
+                        e->o1 = e->n1 = -1e30;
+                    } else if (e->line != L) {
+                        e->line = -1;
+                    }
+                    if (!whole) e->line = -1;
+                    double ox = pc->x0;
+                    if (ox < e->o0) e->o0 = ox;
+                    if (ox + pc->w > e->o1) e->o1 = ox + pc->w;
+                    if (x < e->n0) e->n0 = x;
+                    if (x + pc->w > e->n1) e->n1 = x + pc->w;
+                }
+            }
+            x += pc->w + pc->trail;
+        }
+    }
+    for (int k = 0; k < A.n; k++) {
+        const BidiAnc *e = &A.a[k];
+        if (e->line < 0 || fabs((e->n1 - e->n0) - (e->o1 - e->o0)) > 0.5) continue;
+        double d = e->n0 - e->o0;
+        if (fabs(d) > 0.001) layout_box(ctx, e->box)->x += d;
+    }
+    free(A.a);
+    free(A.slot);
+    if (nf_lists) {
+        for (int k = 0; k < nitems; k++) {
+            if (!nf_lists[k].f) continue;
+            free(ctx->text_frags[items[k]].f);
+            ctx->text_frags[items[k]] = nf_lists[k];
+        }
+        free(nf_lists);
+    }
+    free(cut);
+    free(clv);
+    free(order);
+    free(runs);
+    free(line_start);
+    free(line_cp0);
+    free(line_cp1);
+    free(line_x);
+    free(line_hang);
+    free(lead);
+    free(trail);
+    free(lv);
+out:
+    free(items);
+    free(first_cp);
+    free(P.cp);
+    free(P.box);
+    free(P.byte);
+}
+
 /* Block idx's paragraph, its lines placed: when it needs bidi, its text
- * boxes' fragments (and it is laid out again at the next pass, not reused,
- * as a split inline's block is). */
+ * boxes' fragments in visual order (and it is laid out again at the next
+ * pass, not reused, as a split inline's block is). */
 static void layout_bidi_paragraph(LayoutContext *ctx, int idx)
 {
     if (g_bidi_all < 0) g_bidi_all = getenv("CYBER_BIDI_ALL") != NULL;
-    if (!g_bidi_all && layout_box(ctx, idx)->s->direction != 1 && !layout_paragraph_walk(ctx, idx, NULL)) return;
+    bool needs = layout_box(ctx, idx)->s->direction == 1 || layout_box(ctx, idx)->s->unicode_bidi != 0 ||
+                 layout_paragraph_walk(ctx, idx, NULL);
+    if (!g_bidi_all && !needs) return;
     if (!ctx->text_frags) {
         ctx->text_frags = (LayoutTextFragList *)calloc((size_t)ctx->tree.count, sizeof(LayoutTextFragList));
         if (!ctx->text_frags) return;
@@ -12271,6 +12873,7 @@ static void layout_bidi_paragraph(LayoutContext *ctx, int idx)
     }
     layout_flow_noreuse_up(ctx, idx);
     layout_paragraph_walk(ctx, idx, layout_text_frags_build);
+    if (needs) layout_bidi_reorder(ctx, idx);
 }
 
 bool css_layout_text_paint(const LayoutContext *ctx, int idx, TextShaper **font, float *scale, float *line_adv,

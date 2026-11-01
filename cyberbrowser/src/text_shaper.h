@@ -128,6 +128,10 @@ int text_shaper_wrap_lines(const TextShaper *shaper, const char *utf8,
 /* DL_GLYPH commands for the bytes [start, end) of utf8 on one line: the pen
  * from x, the em box's top at y (a TsLine's x and y, made absolute).  rtl:
  * the code points drawn last first, mirrored (a right-to-left run). */
+/* The advance of the bytes [start, end) of utf8 on one line (the spacing
+ * text_shaper_set_spacing set included). */
+float text_shaper_span_width(const TextShaper *shaper, const char *utf8, size_t start, size_t end, float scale);
+
 bool text_shaper_shape_span(const TextShaper *shaper, const char *utf8, size_t start, size_t end,
                             float x, float y, float scale, bool rtl,
                             float r, float g, float b, float a, DisplayList *dl);

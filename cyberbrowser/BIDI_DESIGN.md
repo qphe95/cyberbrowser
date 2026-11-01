@@ -27,7 +27,30 @@ with newlines, clamped or ellipsised text, and text not laid out by the block fl
 CYBER_BIDI_ALL=1 (fragments for every paragraph): of 8,345 css/CSS2 screenshots one differs,
 white-space-processing-042, where the one-line path drew a tab as a .notdef box and fragments (as
 the wrapped path always did) draw nothing; YouTube and Wikipedia screenshots identical, YouTube's
-forced layouts 212 ms normally, 213 ms with every paragraph in fragments.  Steps 4-6 planned.
+forced layouts 212 ms normally, 213 ms with every paragraph in fragments.
+
+Step 4 done (css/CSS2 5322 -> 5374, none lost: bidi-text 40, css1 6, normal-flow 2, generated-content
+2, box-display 1, positioning 1).  layout_bidi_reorder, after the fragments: the paragraph's code
+points (text in logical order, U+FFFC per atomic inline, U+2029 per block, the controls each
+inline's unicode-bidi stands for, and the block's own override or plaintext around it all), its
+levels (bidi_resolve), its lines (from the fragments: a new one at a box's later fragment, or where
+an item is both left of and below the one before; empty runs, collapsed spaces the flow parked
+anywhere, neither start nor place one), L1 per line, runs cut at level changes and where the line's
+trailing white space starts, and the controls kept as zero-width runs so an isolate still separates
+what is around it; then L2, and x assigned from the line's start: each run with the edges (margin,
+border, padding) of the inline boxes it opens before it and those it closes after it, the space the
+flow left before it (negative where it overlapped boxes to collapse a space), its width; trailing
+white space hangs (no room).  Atomic inlines move with their subtree; an inline box whose content
+stays one piece on one line moves with it; a line holding wrapped text (which the flow does not
+align) is aligned here.  Fragments at odd levels are drawn right to left, mirrored.  A paragraph
+with nothing right to left in it (no R, AL or AN, no right-to-left control, a left-to-right block)
+is left as the flow placed it, before the algorithm runs: Wikipedia's prose paragraphs need bidi only
+for an isolate inside them.  Alongside, for every paragraph: a line's trailing collapsible white
+space no longer counts when it is aligned right or centered (layout_line_hanging_space; CSS Text 3
+section 4.1.3), as in browsers; Wikipedia's screenshot moves by a pixel or two on centered lines.
+YouTube's forced layouts 205 ms, Wikipedia's 363 ms (369 before).  Left for step 5: an inline box
+the reordering splits or reverses keeps its one box (backgrounds and borders where the flow put it,
+edges on the left-to-right sides).  Steps 5-6 planned.
 
 ## Why
 
