@@ -124,6 +124,7 @@ set(BE_SOURCES
     src/glyph_atlas.c
     src/css_charset.c
     src/css_tokenizer.c
+    src/bidi.c
     src/font_loader.c
     src/font_instance.c
     src/font_registry.c
