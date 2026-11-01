@@ -390,6 +390,14 @@ void text_shaper_set_spacing(float letter_px, float word_px, float scale)
     t_word_sp = word_px / scale;
 }
 
+/* The bidi controls (ALM, LRM, RLM, the embeddings, overrides and
+ * isolates): no glyph, no advance, invisible to kerning. */
+static inline bool ts_invisible(uint32_t cp)
+{
+    return cp == 0x061C || cp == 0x200E || cp == 0x200F || (cp >= 0x202A && cp <= 0x202E) ||
+           (cp >= 0x2066 && cp <= 0x2069);
+}
+
 /* The spacing after codepoint cp (at the loaded size). */
 static inline float ts_spacing(uint32_t cp)
 {
@@ -404,6 +412,7 @@ static inline float ts_spacing(uint32_t cp)
 static bool ts_emit_glyph(const TextShaper *s, uint32_t cp, float *pen_x, float base_y, float scale, int *prev_glyph,
                           float r, float g, float b, float a, DisplayList *dl)
 {
+    if (ts_invisible(cp)) return true;
     int gi, owner;
     float xa;
     ts_metric_owned(s, cp, &gi, &xa, &owner);
@@ -600,6 +609,7 @@ bool text_shaper_measure(const TextShaper *s, const char *utf8,
     uint32_t cp;
     while ((cp = utf8_decode(&p)) != 0) {
         if (cp == '\n') { x = 0; prev_glyph = -1; continue; }
+        if (ts_invisible(cp)) continue;
         int gi, owner;
         float xa;
         ts_metric_owned(s, cp, &gi, &xa, &owner);
@@ -659,6 +669,7 @@ static float ts_measure_span(const TextShaper *s, const char *start, const char 
         const char *save = p;
         uint32_t cp = utf8_decode(&p);
         if (cp == 0 || p > end) { p = save; break; }
+        if (ts_invisible(cp)) continue;
         int gi, owner;
         float xa;
         ts_metric_owned(s, cp, &gi, &xa, &owner);

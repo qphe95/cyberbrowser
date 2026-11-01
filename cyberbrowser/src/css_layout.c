@@ -9,6 +9,7 @@
 #include "css_layout.h"
 #include "css_parser.h"
 #include "css_props.h"
+#include "bidi.h"
 #include "browser_api_impl.h"
 #include "platform.h"
 #include "url_utils.h"
@@ -2934,6 +2935,11 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     } else if (strcasecmp(prop, "direction") == 0) {
         if (!strcasecmp(value, "rtl")) { box->s->direction = 1; box->s->direction_set = 1; }
         else if (!strcasecmp(value, "ltr")) { box->s->direction = 0; box->s->direction_set = 1; }
+    } else if (strcasecmp(prop, "unicode-bidi") == 0) {
+        static const char *const kw[] = { "normal", "embed", "isolate", "bidi-override", "isolate-override",
+                                          "plaintext" };
+        for (int i = 0; i < 6; i++)
+            if (!strcasecmp(value, kw[i])) box->s->unicode_bidi = (unsigned char)i;
     } else if (strcasecmp(prop, "float") == 0) {
         if (strcasecmp(value, "left") == 0) box->s->float_side = 1;
         else if (strcasecmp(value, "right") == 0) box->s->float_side = 2;
@@ -4846,6 +4852,12 @@ static const char *g_ua_stylesheet_css =
     "tt { font-family: monospace; }\n"
     "pre { display: block; font-family: monospace; margin: 1em 0; white-space: pre; }\n"
     "textarea { white-space: pre-wrap; }\n"
+    /* (HTML's bidirectional text rules; dir=auto is a hint, from the text) */
+    "bdi, output, [dir] { unicode-bidi: isolate; }\n"
+    "bdo, bdo[dir] { unicode-bidi: isolate-override; }\n"
+    "[dir=ltr i] { direction: ltr; }\n"
+    "[dir=rtl i] { direction: rtl; }\n"
+    "textarea[dir=auto i], pre[dir=auto i] { unicode-bidi: plaintext; }\n"
     "nobr { white-space: nowrap; }\n"
     "small { font-size: 0.833em; }\n"
     "sub { font-size: 0.833em; }\n"
@@ -8042,7 +8054,7 @@ static bool layout_apply_wide_keyword(LayoutBox *box, const LayoutBox *parent,
         { "flex-basis", "auto" }, { "flex", "0 1 auto" }, { "box-sizing", "content-box" },
         { "overflow", "visible" }, { "overflow-x", "visible" }, { "overflow-y", "visible" },
         { "aspect-ratio", "auto" }, { "opacity", "1" }, { "background-color", "transparent" },
-        { "z-index", "auto" }, { "order", "0" }, { "gap", "0" }, { "row-gap", "0" }, { "column-gap", "0" },
+        { "z-index", "auto" }, { "unicode-bidi", "normal" }, { "order", "0" }, { "gap", "0" }, { "row-gap", "0" }, { "column-gap", "0" },
     };
     if (strcasecmp(prop, "display") == 0) {
         box->s->display = CSS_DISPLAY_INLINE;
@@ -8089,6 +8101,47 @@ static void style_note_result(StylePass *P, int idx, const LayoutBox *box, const
 }
 
 static void style_finish_box(StylePass *P, LayoutBox *box, const LayoutBox *parent, bool element);
+
+/* The first strong character's direction in the text under DOM node dom
+ * (1 rtl, 0 ltr, -1 none), leaving out bdi, script, style and textarea
+ * elements and those with a dir attribute (HTML's dir=auto). */
+static int style_text_direction(LayoutContext *ctx, int dom)
+{
+    PreOrderCompactionArray *da = &ctx->doc->array;
+    for (int c = po_array_first_child(da, dom); c >= 0; c = po_array_next_sibling(da, c)) {
+        HtmlNode *n = layout_node_dom(ctx, c);
+        if (!n) continue;
+        if (n->type == HTML_NODE_TEXT && n->text_content) {
+            const unsigned char *p = (const unsigned char *)n->text_content, *e = p + n->text_len;
+            while (p < e) {
+                uint32_t cp = *p++;
+                int more = cp >= 0xF0 ? 3 : cp >= 0xE0 ? 2 : cp >= 0xC0 ? 1 : 0;
+                if (more) cp &= 0x3F >> more;
+                for (; more && p < e; more--) cp = (cp << 6) | (*p++ & 0x3F);
+                BidiClass k = bidi_class(cp);
+                if (k == BIDI_L) return 0;
+                if (k == BIDI_R || k == BIDI_AL) return 1;
+            }
+        } else if (n->type == HTML_NODE_ELEMENT) {
+            const char *t = n->tag_name ? n->tag_name : "";
+            if (!strcmp(t, "bdi") || !strcmp(t, "script") || !strcmp(t, "style") || !strcmp(t, "textarea") ||
+                layout_node_attribute(n, "dir"))
+                continue;
+            int r = style_text_direction(ctx, c);
+            if (r >= 0) return r;
+        }
+    }
+    return -1;
+}
+
+/* An element with dir=auto, or a bdi without dir: its direction from its
+ * text (1 rtl, 0 ltr, also when it has no strong character); else -1. */
+static int style_auto_direction(LayoutContext *ctx, int dom, HtmlNode *node)
+{
+    const char *d = layout_node_attribute(node, "dir");
+    if (d ? strcasecmp(d, "auto") != 0 : !(node->tag_name && !strcmp(node->tag_name, "bdi"))) return -1;
+    return style_text_direction(ctx, dom) == 1 ? 1 : 0;
+}
 
 static void hint_apply(LayoutContext *ctx, LayoutBox *box, const char *prop, const char *value)
 {
@@ -8387,6 +8440,9 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
         bool after_set = style_after_content(P, T, dom, after_content, &prec);
         ctx->pseudo_rec[idx] = prec;
 
+        /* (dir=auto: the direction its text gives, part of the cache key) */
+        int dir_auto = style_auto_direction(ctx, dom, node);
+
         /* Matched-properties cache: the cascade below is a function of the
          * declarations matched, the inline styles, the ::after content, the
          * aspect ratios found above, the root font size and the parent's
@@ -8411,6 +8467,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
             h = style_mix(h, &after_set, sizeof(after_set));
             if (after_set) h = style_mix(h, after_content, strnlen(after_content, sizeof(after_content)) + 1);
             h = style_mix(h, &pseudo_aspect, sizeof(pseudo_aspect));
+            h = style_mix(h, &dir_auto, sizeof(dir_auto));
             h = style_mix(h, &box->s->aspect_ratio, sizeof(box->s->aspect_ratio));
             h = style_mix(h, &g_unit_rem, sizeof(g_unit_rem));
             if (h == 0) h = 1;
@@ -8445,6 +8502,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
         }
 
         style_presentational_hints(ctx, box, idx, node);
+        if (dir_auto >= 0) hint_apply(ctx, box, "direction", dir_auto ? "rtl" : "ltr");
         /* font-size (and the font shorthand) first, the element's final
          * size worked out, so em lengths in any declaration resolve against
          * it (as the computed font-size is what they mean); then all, in

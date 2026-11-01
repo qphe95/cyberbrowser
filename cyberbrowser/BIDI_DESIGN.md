@@ -3,7 +3,16 @@
 Status: step 1 done (src/bidi.c, src/bidi_tables.h from Unicode 18.0.0 by tools/gen_bidi_tables.js,
 tests/test_bidi.c; unused by layout, css/CSS2 unchanged at 5321).  Unicode's conformance cases
 pass: all 91,707 of BidiCharacterTest.txt 18.0.0 (BIDI_CHAR_TEST=<path> with the bidi tests; the
-file is not committed, from https://www.unicode.org/Public/UCD/latest/ucd/).  Steps 2-6 planned.
+file is not committed, from https://www.unicode.org/Public/UCD/latest/ucd/).  Step 2 done (css/CSS2
+5321 -> 5322, none lost): `unicode-bidi` in the box style (LayoutStyle.unicode_bidi, not inherited,
+read by nothing yet); HTML's rules in the UA sheet (`bdi, output, [dir]` isolate, `bdo`
+isolate-override, `[dir=ltr i]` / `[dir=rtl i]` direction, `textarea` / `pre` `[dir=auto i]`
+plaintext); `dir=auto` and a `bdi` without `dir` take their direction from their text's first strong
+character (style_auto_direction, applied as a presentational hint and part of the style cache key);
+the shaper gives the bidi controls (ALM, LRM, RLM, U+202A-202E, U+2066-2069) no glyph and no
+advance.  A `dir=rtl` block's lines now align right.  YouTube's replay: layouts, forced layouts and
+the screenshot unchanged; its script's count of cached layout queries went 3856 -> 4120 already with
+step 1 alone (unused code), so with the binary, not with what step 2 does.  Steps 3-6 planned.
 
 ## Why
 

@@ -167,6 +167,9 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * center (as it is), 2 end; start and end follow direction (1: rtl,
      * inherited). */
     unsigned char text_align_how, direction, direction_set;
+    /* unicode-bidi (not inherited): 0 normal, 1 embed, 2 isolate,
+     * 3 bidi-override, 4 isolate-override, 5 plaintext */
+    unsigned char unicode_bidi;
     unsigned char table_layout_fixed;   /* table-layout: fixed */
     unsigned char table_group;          /* a row group: 0 body, 1 header, 2 footer */
     unsigned char flow_root;            /* display: flow-root (a block establishing a formatting context) */
