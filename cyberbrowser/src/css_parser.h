@@ -48,6 +48,7 @@ typedef struct CssStylesheet {
     CssRule *rules;
     int rule_count;
     int rule_capacity;
+    bool user_agent;    /* the user agent's: below every author rule in the cascade */
 } CssStylesheet;
 
 /* Parse a full stylesheet. Returns NULL on empty/invalid input. */

@@ -62,6 +62,11 @@ bool text_shaper_vmetrics(const TextShaper *shaper, float *ascent, float *descen
 float text_shaper_normal_line_height(const TextShaper *shaper, float font_size);
 
 /* Measure a UTF-8 string in pixels. */
+/* Letter and word spacing (CSS letter-spacing / word-spacing, in pixels of
+ * text drawn at scale) added to every advance this thread measures or draws
+ * after the call, until it is set again (0, 0: none). */
+void text_shaper_set_spacing(float letter_px, float word_px, float scale);
+
 bool text_shaper_measure(const TextShaper *shaper, const char *utf8,
                          float *out_width, float *out_height);
 

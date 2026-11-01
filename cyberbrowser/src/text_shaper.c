@@ -380,6 +380,25 @@ static bool ts_draw_glyph(DisplayList *dl, const TextShaper *o, int gi, float pe
                         (float)sg->bh * scale, placed ? &rc : NULL, gi, r, g, b, a);
 }
 
+/* letter-spacing and word-spacing at the loaded size (text_shaper_set_spacing). */
+static __thread float t_letter_sp, t_word_sp;
+
+void text_shaper_set_spacing(float letter_px, float word_px, float scale)
+{
+    if (scale <= 0.0f) scale = 1.0f;
+    t_letter_sp = letter_px / scale;
+    t_word_sp = word_px / scale;
+}
+
+/* The spacing after codepoint cp (at the loaded size). */
+static inline float ts_spacing(uint32_t cp)
+{
+    if (t_letter_sp == 0.0f && t_word_sp == 0.0f) return 0.0f;
+    bool word = cp == ' ' || cp == 0xA0 || cp == 0x1361 || cp == 0x10100 || cp == 0x10101 || cp == 0x1039F ||
+                cp == 0x1091F;
+    return t_letter_sp + (word ? t_word_sp : 0.0f);
+}
+
 /* Codepoint cp of s (or the fallback font that has it) drawn at the pen,
  * kerned against the glyph before; the pen moves past it. */
 static bool ts_emit_glyph(const TextShaper *s, uint32_t cp, float *pen_x, float base_y, float scale, int *prev_glyph,
@@ -392,7 +411,7 @@ static bool ts_emit_glyph(const TextShaper *s, uint32_t cp, float *pen_x, float 
     if (!gs) gs = s;
     if (*prev_glyph >= 0 && owner == 0) *pen_x += (float)ts_kern(s, *prev_glyph, gi) * s->scale * scale;
     if (!ts_draw_glyph(dl, gs, gi, *pen_x, base_y, scale, r, g, b, a)) return false;
-    *pen_x += xa * scale;
+    *pen_x += (xa + ts_spacing(cp)) * scale;
     *prev_glyph = owner == 0 ? gi : -1;
     return true;
 }
@@ -587,7 +606,7 @@ bool text_shaper_measure(const TextShaper *s, const char *utf8,
         if (prev_glyph >= 0 && owner == 0) {
             x += (float)ts_kern(s, prev_glyph, gi) * s->scale;
         }
-        x += xa;
+        x += xa + ts_spacing(cp);
         prev_glyph = owner == 0 ? gi : -1;
     }
     if (out_width)  *out_width  = x;
@@ -646,7 +665,7 @@ static float ts_measure_span(const TextShaper *s, const char *start, const char 
         if (prev_glyph >= 0 && owner == 0) {
             x += (float)ts_kern(s, prev_glyph, gi) * s->scale;
         }
-        x += xa;
+        x += xa + ts_spacing(cp);
         prev_glyph = owner == 0 ? gi : -1;
     }
     return x;

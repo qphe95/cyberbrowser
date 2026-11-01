@@ -576,6 +576,7 @@ typedef struct CRule {
     const CssRule *rule;
     int sheet, index;
     int32_t aspect;         /* list index, -1 = none */
+    bool ua;                /* from the user agent's sheet */
 } CRule;
 
 typedef struct CAfter {
@@ -1177,6 +1178,7 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
             cr->rule = rule;
             cr->sheet = s;
             cr->index = r;
+            cr->ua = sheet->user_agent;
             cr->aspect = -1;
             if (!rule->selector_text || !rule->selector_text[0]) continue;
             const char *sel = rule->selector_text;
@@ -1541,7 +1543,9 @@ int css_style_match(const CssStyleSet *S, const CssStyleDoc *D, int dom,
         for (int d = 0; d < rule->declaration_count; d++) {
             CssAppliedDecl a;
             a.decl = &rule->declarations[d];
-            a.specificity = t->rule_spec[g];
+            /* (the user agent's sheet below every author rule whatever its
+             * specificity: origin before specificity in the cascade) */
+            a.specificity = t->rule_spec[g] - (cr->ua ? (1 << 28) : 0);
             a.order = (int)((uint32_t)cr->sheet * 1000000u + (uint32_t)cr->index * 1000u + (uint32_t)d);
             a.important = rule->declarations[d].important;
             a.rule = g;

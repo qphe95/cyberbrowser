@@ -103,19 +103,26 @@ for (const [test, info] of Object.entries(refInfo)) {
         Object.assign(r, { status: 'MISSING', pass: 0, fail: 1 });
         r.fails.push('no screenshot of the test');
     }
+    /* A test's references are alternatives, as wptrunner takes them: it
+     * passes when any one of them holds. */
+    let held = false, missing = false;
+    const why = [];
     info.refs.forEach((ref, i) => {
-        if (!shot) return;
+        if (!shot || held) return;
         const rraw = readFile(mine[i + 1].shot);
-        if (!rraw) { Object.assign(r, { status: 'MISSING', pass: 0, fail: 1 }); r.fails.push('no screenshot of ' + ref.url); return; }
+        if (!rraw) { missing = true; why.push('no screenshot of ' + ref.url); return; }
         /* (the same bytes: the same pixels, without decoding either) */
         const d = raw.equals(rraw) ? { max: 0, count: 0 }
                 : diffRle(raw, rraw) || diff(shot.v, readBmp(mine[i + 1].shot));
         const ok = ref.kind === 'match' ? same(d, info.fuzzy) : d.count > 0;
-        if (!ok) {
-            Object.assign(r, { status: 'FAIL', pass: 0, fail: 1 });
-            r.fails.push(`${ref.kind} ${ref.url}: ${d.count === Infinity ? 'sizes differ' : `${d.count} pixels differ, by up to ${d.max}`}`);
-        }
+        if (ok) held = true;
+        else why.push(`${ref.kind} ${ref.url}: ${d.count === Infinity ? 'sizes differ' : `${d.count} pixels differ, by up to ${d.max}`}`);
     });
+    if (shot && !held) {
+        Object.assign(r, missing && why.length === info.refs.length ? { status: 'MISSING', pass: 0, fail: 1 }
+                                                                     : { status: 'FAIL', pass: 0, fail: 1 });
+        r.fails.push(...why);
+    }
     results[test] = r;
     k++;
 }

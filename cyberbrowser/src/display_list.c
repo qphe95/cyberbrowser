@@ -1549,6 +1549,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     TextShaper *font = display_list_get_font(fslot);
                     if (!font) font = default_font;
                     int from_cmd = dl->count;
+                    text_shaper_set_spacing(box->s->letter_spacing, box->s->word_spacing, scale);
                     /* The white-space processed text the layout measured. */
                     const char *run_text = css_layout_box_text(ctx, i, css_layout_node_text(ctx, node));
                     if (box->text_lead_skip && run_text[0] == ' ') run_text++;
@@ -1618,6 +1619,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                             return false;
                         }
                     }
+                    text_shaper_set_spacing(0.0f, 0.0f, 1.0f);
                     emit_text_decorations(dl, from_cmd, fs, box->s->text_decoration,
                                           tr, tg, tb, ta);
                     free(clamped);

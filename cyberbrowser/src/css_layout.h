@@ -143,6 +143,12 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     /* Text alignment for inline content (inherited like color). */
     CssTextAlign text_align;
     unsigned char text_align_set;
+    /* How text_align was given: 0 start (as initially), 1 left / right /
+     * center (as it is), 2 end; start and end follow direction (1: rtl,
+     * inherited). */
+    unsigned char text_align_how, direction, direction_set;
+    unsigned char table_layout_fixed;   /* table-layout: fixed */
+    unsigned char table_group;          /* a row group: 0 body, 1 header, 2 footer */
 
     /* CSS float/clear.  float_side: 0=none, 1=left, 2=right.
      * clear: 0=none, 1=left, 2=right, 3=both. */
@@ -220,6 +226,15 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     /* list-style for display:list-item markers. */
     unsigned char list_style_type;   /* 0=none, 1=disc, 2=circle, 3=square, 4=decimal */
     unsigned char list_style_type_set;
+    /* letter-spacing / word-spacing in px (0: normal) and text-transform
+     * (0 none, 1 uppercase, 2 lowercase, 3 capitalize); inherited. */
+    float letter_spacing, word_spacing;
+    unsigned char letter_spacing_set, word_spacing_set;
+    unsigned char text_transform, text_transform_set;
+    /* text-indent: px plus a fraction of the containing block's width;
+     * inherited. */
+    float text_indent, text_indent_pct;
+    unsigned char text_indent_set;
     /* counter-reset / -increment / -set as written (interned; NULL: none)
      * and quotes (inherited when not quotes_set; NULL: the UA's). */
     const char *counter_reset, *counter_increment, *counter_set;
@@ -385,7 +400,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * border-spacing (when border_spacing_set; else the cellspacing
      * attribute or 2px) and border-collapse: collapse (no spacing). */
     unsigned char table_role;
-    unsigned char border_spacing_set, border_collapse;
+    unsigned char border_spacing_set, border_collapse, border_collapse_set;   /* (border-collapse: inherited) */
     double border_spacing_h, border_spacing_v;
 } LayoutStyle;
 
