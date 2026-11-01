@@ -4312,8 +4312,11 @@ static const UrlSheet *url_sheet_get_ex(const char *url, const char *fallback_la
         else g_url_sheet_n++;
         g_url_sheet_next = (g_url_sheet_next + 1) % URL_SHEET_MAX;
         u->url = strdup(url);
-        u->text = css_sheet_decode(buffer.data, buffer.size, buffer.headers, buffer.headers_size, fallback_label,
-                                   &u->len, &u->enc);
+        /* (a response that is not CSS applies nothing) */
+        u->text = css_sheet_type_ok(buffer.headers, buffer.headers_size)
+                  ? css_sheet_decode(buffer.data, buffer.size, buffer.headers, buffer.headers_size, fallback_label,
+                                     &u->len, &u->enc)
+                  : NULL;
         if (!u->text) { u->text = strdup(""); u->len = 0; }
         u->hash = sheet_hash(u->text, u->len);
         static uint64_t s_fetches;
