@@ -1777,7 +1777,19 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                         }
                     }
                     if (clamped) run_text = clamped;
-                    if (box->wrap_cont_w > 0.0) {
+                    /* A paragraph that needs bidi: the fragments its layout
+                     * placed, line by line (BIDI_DESIGN.md). */
+                    const LayoutTextFragList *tfl =
+                        !clamped && ctx->text_frags && i < ctx->text_frags_n ? &ctx->text_frags[i] : NULL;
+                    if (tfl && tfl->n > 0) {
+                        for (int q = 0; q < tfl->n; q++) {
+                            const LayoutTextFrag *fr = &tfl->f[q];
+                            if (!text_shaper_shape_span(font, run_text, fr->start, fr->end, (float)(box->x + fr->dx),
+                                                        (float)(box->y + fr->dy), scale, (fr->level & 1) != 0, tr,
+                                                        tg, tb, ta, dl))
+                                return false;
+                        }
+                    } else if (box->wrap_cont_w > 0.0) {
                         /* Wrapped run: shape across lines using the wrap
                          * geometry recorded by the layout. */
                         float nlh = text_shaper_normal_line_height(font, (float)fs);

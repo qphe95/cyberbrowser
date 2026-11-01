@@ -108,6 +108,30 @@ char *text_shaper_truncate_lines(const TextShaper *shaper, const char *utf8, flo
  * fits. */
 char *text_shaper_truncate_width(const TextShaper *shaper, const char *utf8, float scale, float width);
 
+/* One line of a run as text_shaper_wrap_shape draws it: the bytes
+ * [start, end) of the text, drawn from x (the pen at the line's start)
+ * with the em box's top at y (the line's top plus the half-leading),
+ * advancing width. */
+typedef struct { uint32_t start, end; float x, y, width; } TsLine;
+
+/* The lines of utf8 wrapped as text_shaper_wrap_measure wraps it (same
+ * arguments), into lines[0, cap): how many there are (when more than cap,
+ * the first cap are stored). */
+int text_shaper_wrap_lines(const TextShaper *shaper, const char *utf8,
+                           float x, float y, float cont_x,
+                           float first_width, float cont_width,
+                           float scale, float line_advance,
+                           int cont2_from_line, float cont2_x,
+                           float cont2_width,
+                           TsLine *lines, int cap);
+
+/* DL_GLYPH commands for the bytes [start, end) of utf8 on one line: the pen
+ * from x, the em box's top at y (a TsLine's x and y, made absolute).  rtl:
+ * the code points drawn last first, mirrored (a right-to-left run). */
+bool text_shaper_shape_span(const TextShaper *shaper, const char *utf8, size_t start, size_t end,
+                            float x, float y, float scale, bool rtl,
+                            float r, float g, float b, float a, DisplayList *dl);
+
 bool text_shaper_wrap_shape(const TextShaper *shaper, const char *utf8,
                             float x, float y, float cont_x,
                             float first_width, float cont_width,

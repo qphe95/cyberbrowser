@@ -12,7 +12,22 @@ character (style_auto_direction, applied as a presentational hint and part of th
 the shaper gives the bidi controls (ALM, LRM, RLM, U+202A-202E, U+2066-2069) no glyph and no
 advance.  A `dir=rtl` block's lines now align right.  YouTube's replay: layouts, forced layouts and
 the screenshot unchanged; its script's count of cached layout queries went 3856 -> 4120 already with
-step 1 alone (unused code), so with the binary, not with what step 2 does.  Steps 3-6 planned.
+step 1 alone (unused code), so with the binary, not with what step 2 does.
+
+Step 3 done (css/CSS2 unchanged at 5322; every screenshot identical).  At the end of a block's flow
+(layout_bidi_paragraph), a paragraph that needs bidi (an rtl block, an inline with rtl or
+`unicode-bidi`, or text with a right-to-left letter or a bidi control, by a byte scan) gives each of
+its text boxes fragments (LayoutContext.text_frags: per line, the bytes, x and em-box top relative
+to the box, width, level), from the shaper's own line breaking (text_shaper_wrap_lines: the wrap
+walk records each line's first and last drawn byte at its three break points) or, unwrapped, one;
+the block is then not reused at the next pass, as a split inline's is.  Paint draws a box with
+fragments fragment by fragment (text_shaper_shape_span, which also draws right to left, mirrored,
+for step 4).  Left on the old path: text in split inlines (block_in_inline), an unwrapped `pre` run
+with newlines, clamped or ellipsised text, and text not laid out by the block flow.  Checked with
+CYBER_BIDI_ALL=1 (fragments for every paragraph): of 8,345 css/CSS2 screenshots one differs,
+white-space-processing-042, where the one-line path drew a tab as a .notdef box and fragments (as
+the wrapped path always did) draw nothing; YouTube and Wikipedia screenshots identical, YouTube's
+forced layouts 212 ms normally, 213 ms with every paragraph in fragments.  Steps 4-6 planned.
 
 ## Why
 

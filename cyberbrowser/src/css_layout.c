@@ -664,6 +664,8 @@ typedef struct LayoutParkedPseudo {
     HtmlNode e, t;
 } LayoutParkedPseudo;
 
+static void layout_text_frags_free(LayoutContext *ctx);
+
 void css_layout_tree_free(LayoutContext *ctx)
 {
     if (!ctx) return;
@@ -702,6 +704,7 @@ void css_layout_tree_free(LayoutContext *ctx)
     }
     for (int i = 0; ctx->pieces && i < ctx->pieces_n; i++) free(ctx->pieces[i].p);
     free(ctx->pieces);
+    layout_text_frags_free(ctx);
     for (int k = 0; k < ctx->pseudo_nodes_n; k++) free(ctx->pseudo_nodes[k].text_content);
     free(ctx->pseudo_nodes);
     free(ctx->anon_nodes);
@@ -1458,6 +1461,7 @@ static void layout_blockify(LayoutContext *ctx)
     const int *post = ctx->tree.postorder;
     for (int i = 0; ctx->pieces && i < ctx->pieces_n; i++) free(ctx->pieces[i].p);
     free(ctx->pieces);
+    layout_text_frags_free(ctx);
     ctx->pieces = NULL;
     ctx->pieces_n = 0;
     if (!post) return;
@@ -9372,11 +9376,20 @@ static void layout_drop_text_caches(LayoutContext *ctx)
     ctx->intrinsic_cache = NULL;
     for (int i = 0; ctx->pieces && i < ctx->pieces_n; i++) free(ctx->pieces[i].p);
     free(ctx->pieces);
+    layout_text_frags_free(ctx);
     ctx->pieces = NULL;
     ctx->pieces_n = 0;
 }
 
 static bool layout_build_orders(LayoutContext *ctx);
+
+static void layout_text_frags_free(LayoutContext *ctx)
+{
+    for (int i = 0; ctx->text_frags && i < ctx->text_frags_n; i++) free(ctx->text_frags[i].f);
+    free(ctx->text_frags);
+    ctx->text_frags = NULL;
+    ctx->text_frags_n = 0;
+}
 
 static void layout_rebuild_orders(LayoutContext *ctx)
 {
@@ -12134,6 +12147,155 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
 
 /* In rtl, the first line's indent is at its right end: aligned short of it. */
 #define RTL_FIRST_CUT (box->s->direction == 1 && !block_seen && cur.y == content_top ? indent0 : 0.0)
+/* ---- Bidi paragraphs (BIDI_DESIGN.md) ----
+ * A block's inline content is a paragraph; one that needs bidi has its
+ * text boxes painted from per-line fragments.  CYBER_BIDI_ALL=1 gives every
+ * paragraph fragments (to check they paint as the boxes' geometry does). */
+
+static int g_bidi_all = -1;
+
+/* Text that may need the bidi algorithm: a right-to-left letter or digit
+ * block (U+0590-08FF, U+FB1D-FDFF, U+FE70-FEFF, U+10800-10FFF,
+ * U+1E800-1EFFF) or a bidi control (ALM, LRM, RLM, U+202A-202E,
+ * U+2066-2069), by their UTF-8 bytes. */
+static bool layout_text_has_bidi(const char *t, size_t n)
+{
+    const unsigned char *p = (const unsigned char *)t, *e = p + n;
+    for (; p < e; p++) {
+        unsigned char c = *p;
+        if (c < 0xD6) continue;
+        if (c <= 0xDF) {
+            if (c > 0xD6 || (p + 1 < e && p[1] >= 0x90)) return true;   /* (U+0590-07FF) */
+        } else if (c == 0xE0) {
+            if (p + 1 < e && p[1] >= 0xA0 && p[1] <= 0xA3) return true;  /* (U+0800-08FF) */
+        } else if (c == 0xE2 && p + 2 < e) {
+            if (p[1] == 0x80 && (p[2] == 0x8E || p[2] == 0x8F || (p[2] >= 0xAA && p[2] <= 0xAE))) return true;
+            if (p[1] == 0x81 && p[2] >= 0xA6 && p[2] <= 0xA9) return true;
+        } else if (c == 0xEF && p + 1 < e) {
+            if ((p[1] >= 0xAC && p[1] <= 0xB7) || (p[1] >= 0xB9 && p[1] <= 0xBB)) return true;   /* (FB00-FDFF, FE40-FEFF) */
+        } else if (c == 0xF0 && p + 1 < e) {
+            if (p[1] == 0x90 && p + 2 < e && p[2] >= 0xA0) return true;   /* (U+10800-10FFF) */
+            if (p[1] == 0x9E && p + 2 < e && p[2] >= 0xA0) return true;   /* (U+1E800-1EFFF) */
+        }
+    }
+    return false;
+}
+
+/* The paragraph of block idx: each text box of its inline content (into
+ * inline elements, not into atomic inlines or blocks), to fn; whether
+ * anything in it needs bidi when fn is NULL. */
+static bool layout_paragraph_walk(LayoutContext *ctx, int idx, void (*fn)(LayoutContext *, int))
+{
+    for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+        LayoutBox *cb = layout_box(ctx, c);
+        if (!layout_is_in_flow(cb) || cb->s->display == CSS_DISPLAY_NONE) continue;
+        HtmlNode *n = css_layout_box_node(ctx, c);
+        if (n && n->type == HTML_NODE_TEXT) {
+            if (fn) {
+                fn(ctx, c);
+            } else {
+                const char *t = css_layout_box_text(ctx, c, css_layout_node_text(ctx, n));
+                if (t && layout_text_has_bidi(t, strlen(t))) return true;
+            }
+            continue;
+        }
+        if (cb->s->display != CSS_DISPLAY_INLINE || cb->s->block_in_inline) continue;
+        if (!fn && (cb->s->direction == 1 || cb->s->unicode_bidi != 0)) return true;
+        if (layout_paragraph_walk(ctx, c, fn) && !fn) return true;
+    }
+    return false;
+}
+
+/* Text box idx's fragments, one per line it paints (from its geometry, as
+ * painting it from that would). */
+static void layout_text_frags_build(LayoutContext *ctx, int idx)
+{
+    LayoutTextFragList *fl = &ctx->text_frags[idx];
+    fl->n = 0;
+    const LayoutBox *b = layout_box(ctx, idx);
+    TextShaper *font;
+    float scale, adv;
+    const char *text;
+    if (!css_layout_text_paint(ctx, idx, &font, &scale, &adv, &text)) return;
+    TsLine stack[16], *ls = stack;
+    int n;
+    if (b->wrap_cont_w > 0.0) {
+        text_shaper_set_spacing(b->s->letter_spacing, b->s->word_spacing, scale);
+        n = text_shaper_wrap_lines(font, text, (float)b->x, (float)b->y, (float)b->wrap_cont_x,
+                                   (float)b->wrap_first_w, (float)b->wrap_cont_w, scale, adv, b->wrap_cont2_line,
+                                   (float)b->wrap_cont2_x, (float)b->wrap_cont2_w, ls, 16);
+        if (n > 16 && (ls = (TsLine *)malloc((size_t)n * sizeof(TsLine))) != NULL)
+            n = text_shaper_wrap_lines(font, text, (float)b->x, (float)b->y, (float)b->wrap_cont_x,
+                                       (float)b->wrap_first_w, (float)b->wrap_cont_w, scale, adv,
+                                       b->wrap_cont2_line, (float)b->wrap_cont2_x, (float)b->wrap_cont2_w, ls, n);
+        text_shaper_set_spacing(0.0f, 0.0f, 1.0f);
+        if (!ls) return;
+    } else {
+        /* (one line: the em box centered in the line; a pre run with
+         * newlines is painted as before) */
+        if (strchr(text, '\n')) return;
+        double fs = b->s->font_size > 0.0 ? b->s->font_size : 16.0;
+        stack[0].start = 0;
+        stack[0].end = (uint32_t)strlen(text);
+        stack[0].x = (float)b->x;
+        stack[0].y = (float)(b->y + (adv - fs) * 0.5);
+        stack[0].width = (float)b->width;
+        n = 1;
+    }
+    fl->f = (LayoutTextFrag *)realloc(fl->f, (size_t)n * sizeof(LayoutTextFrag));
+    if (fl->f) {
+        for (int i = 0; i < n; i++) {
+            fl->f[i].start = ls[i].start;
+            fl->f[i].end = ls[i].end;
+            fl->f[i].dx = (double)ls[i].x - b->x;
+            fl->f[i].dy = (double)ls[i].y - b->y;
+            fl->f[i].w = ls[i].width;
+            fl->f[i].level = 0;
+        }
+        fl->n = n;
+    }
+    if (ls != stack) free(ls);
+}
+
+/* Block idx's paragraph, its lines placed: when it needs bidi, its text
+ * boxes' fragments (and it is laid out again at the next pass, not reused,
+ * as a split inline's block is). */
+static void layout_bidi_paragraph(LayoutContext *ctx, int idx)
+{
+    if (g_bidi_all < 0) g_bidi_all = getenv("CYBER_BIDI_ALL") != NULL;
+    if (!g_bidi_all && layout_box(ctx, idx)->s->direction != 1 && !layout_paragraph_walk(ctx, idx, NULL)) return;
+    if (!ctx->text_frags) {
+        ctx->text_frags = (LayoutTextFragList *)calloc((size_t)ctx->tree.count, sizeof(LayoutTextFragList));
+        if (!ctx->text_frags) return;
+        ctx->text_frags_n = ctx->tree.count;
+    }
+    layout_flow_noreuse_up(ctx, idx);
+    layout_paragraph_walk(ctx, idx, layout_text_frags_build);
+}
+
+bool css_layout_text_paint(const LayoutContext *ctx, int idx, TextShaper **font, float *scale, float *line_adv,
+                           const char **text)
+{
+    const LayoutBox *b = &ctx->boxes[idx];
+    HtmlNode *n = css_layout_box_node(ctx, idx);
+    const char *raw = n ? css_layout_node_text(ctx, n) : NULL;
+    if (!raw) return false;
+    const char *t = css_layout_box_text(ctx, idx, raw);
+    if (!t) return false;
+    if (b->text_lead_skip && t[0] == ' ') t++;
+    double fs = b->s->font_size > 0.0 ? b->s->font_size : 16.0;
+    TextShaper *f = display_list_get_font(layout_font_slot(b));
+    if (!f) f = display_list_get_default_font();
+    if (!f) return false;
+    float nlh = text_shaper_normal_line_height(f, (float)fs);
+    if (!(nlh > 0.5f * fs && nlh < 3.0f * fs)) nlh = (float)(fs * 1.5);
+    *font = f;
+    *scale = (float)(fs / 16.0);
+    *line_adv = b->s->line_height > 0.0 ? (float)b->s->line_height : nlh;
+    *text = t;
+    return true;
+}
+
 static void layout_block_flow_inner(LayoutContext *ctx, int idx)
 {
     LayoutBox *box = layout_box(ctx, idx);
@@ -13059,6 +13221,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
     free(piece_of);
 
     free(kids);
+    layout_bidi_paragraph(ctx, idx);
 
     /* Resolve auto height from the extent of the children (not when height
      * was explicitly assigned, even to zero).  cur.y is the anchor: the

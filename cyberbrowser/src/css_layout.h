@@ -483,6 +483,23 @@ typedef struct LayoutPieceList {
     int n, cap;
 } LayoutPieceList;
 
+/* One line's part of a text box in a paragraph that needs bidi
+ * (BIDI_DESIGN.md): the bytes [start, end) of the text it paints
+ * (css_layout_text_paint), drawn from dx with its em box's top at dy (both
+ * from the box's x and y, so they move with it), w wide; level its
+ * embedding level (odd: right to left).  Painted instead of the wrap the
+ * box's geometry gives. */
+typedef struct LayoutTextFrag {
+    uint32_t start, end;
+    double dx, dy, w;
+    unsigned char level;
+} LayoutTextFrag;
+
+typedef struct LayoutTextFragList {
+    LayoutTextFrag *f;
+    int n;
+} LayoutTextFragList;
+
 /* Flat node reference used by both passes. */
 typedef struct LayoutNodeRef {
     int dom_node_idx;       /* index into HtmlDocument's PreOrderCompactionArray */
@@ -558,6 +575,11 @@ typedef struct LayoutContext {
      * the tree has none. */
     LayoutPieceList *pieces;
     int pieces_n;
+
+    /* Per box, a text box's fragments when its paragraph needs bidi
+     * (n 0: painted from its geometry); NULL until one does. */
+    LayoutTextFragList *text_frags;
+    int text_frags_n;
 
     /* Per document node (index): its text with generated ::after content
      * realized, or NULL.  Layout never writes the document itself (it may
@@ -746,6 +768,14 @@ struct HtmlNode *css_layout_box_node(const LayoutContext *ctx, int idx);
 
 /* The text a text box lays out and paints (white space processed). */
 const char *css_layout_box_text(const LayoutContext *ctx, int idx, const char *raw);
+
+struct TextShaper;
+
+/* What text box idx is painted with: its font, scale (font-size / 16),
+ * line advance, and text (white space processed, a leading space layout
+ * dropped left out).  False when it has no text. */
+bool css_layout_text_paint(const LayoutContext *ctx, int idx, struct TextShaper **font, float *scale,
+                           float *line_adv, const char **text);
 
 /* Build a flat layout tree from a parsed HTML document. */
 bool css_layout_tree_build(LayoutContext *ctx, HtmlDocument *doc);

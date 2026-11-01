@@ -6,6 +6,7 @@
 #include <windows.h>
 #endif
 #include <stdlib.h>
+#include "bidi.h"
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
@@ -754,6 +755,32 @@ static void ts_note_line(int line, const char *start)
     if (t_line_starts && line >= 1 && line <= t_line_starts_cap) t_line_starts[line - 1] = start;
 }
 
+/* The lines ts_wrap_walk draws, recorded while text_shaper_wrap_lines asks
+ * for them: each opened at its first drawn byte and closed at the byte
+ * after its last. */
+static __thread TsLine *t_lines;
+static __thread int t_lines_cap, t_lines_n;
+static __thread const char *t_lines_base;
+static __thread float t_lines_em;   /* (line top to em box top: the half-leading) */
+
+static void ts_line_open(const char *start, float x, float y)
+{
+    if (!t_lines || t_lines_n >= t_lines_cap) return;
+    t_lines[t_lines_n].start = (uint32_t)(start - t_lines_base);
+    t_lines[t_lines_n].x = x;
+    t_lines[t_lines_n].y = y + t_lines_em;
+}
+
+static void ts_line_close(const char *end, float width)
+{
+    if (!t_lines) return;
+    if (t_lines_n < t_lines_cap) {
+        t_lines[t_lines_n].end = (uint32_t)(end - t_lines_base);
+        t_lines[t_lines_n].width = width;
+    }
+    t_lines_n++;
+}
+
 static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
                          float x, float y, float cont_x,
                          float first_width, float cont_width,
@@ -843,6 +870,10 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
 
     const char *word_start = utf8;
     const char *p = utf8;
+    if (t_lines) {
+        t_lines_em = (line_advance - s->size_pixels * scale) * 0.5f;
+        ts_line_open(utf8, x, y);
+    }
     for (;;) {
         /* A word ends after the next space (or at the string end). */
         uint32_t cp;
@@ -895,6 +926,7 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
                 if (used > max_width) max_width = used;
                 lines++;
                 ts_note_line(lines, bp);
+                ts_line_close(bp, used);
                 float cx = (cont2_from_line > 1 && lines >= cont2_from_line)
                          ? cont2_x : cont_x;
                 float cw = (cont2_from_line > 1 && lines >= cont2_from_line)
@@ -905,6 +937,7 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
                 limit = cw;
                 prev_glyph = -1;
                 word_start = bp;
+                ts_line_open(bp, cx, pen_y);
                 word_w = ts_measure_span(s, word_start, word_end) * scale;
                 /* fall through: emit the remainder on the fresh line */
             }
@@ -930,6 +963,7 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
                 if (used > max_width) max_width = used;
                 lines++;
                 ts_note_line(lines, bp);
+                ts_line_close(bp, used);
                 float cx = (cont2_from_line > 1 && lines >= cont2_from_line)
                          ? cont2_x : cont_x;
                 float cw = (cont2_from_line > 1 && lines >= cont2_from_line)
@@ -940,6 +974,7 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
                 limit = cw;
                 prev_glyph = -1;
                 word_start = bp;
+                ts_line_open(bp, cx, pen_y);
                 word_w = ts_measure_span(s, word_start, word_end) * scale;
                 /* fall through: emit the remainder on the fresh line */
             } else {
@@ -949,6 +984,7 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
             if (used > max_width) max_width = used;
             lines++;
             ts_note_line(lines, word_start);
+            ts_line_close(word_start, used);
             /* From cont2_from_line on, continuation lines use the second
              * geometry (e.g. full width below an expired float). */
             float cx = (cont2_from_line > 1 && lines >= cont2_from_line)
@@ -967,6 +1003,7 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
                 if (wc == ' ' || wc == '\t' || wc == '\n') word_start = ws;
                 else break;
             }
+            ts_line_open(word_start, cx, pen_y);
             word_w = ts_measure_span(s, word_start, word_end) * scale;
             }
         }
@@ -991,6 +1028,7 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
             if (used > max_width) max_width = used;
             lines++;
             ts_note_line(lines, p);
+            ts_line_close(p, used);
             float cx = (cont2_from_line > 1 && lines >= cont2_from_line)
                      ? cont2_x : cont_x;
             float cw = (cont2_from_line > 1 && lines >= cont2_from_line)
@@ -1000,11 +1038,13 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
             line_start_x = cx;
             limit = cw;
             prev_glyph = -1;
+            ts_line_open(p, cx, pen_y);
         }
     }
 
     float used = pen_x - line_start_x;
     if (used > max_width) max_width = used;
+    ts_line_close(utf8 + strlen(utf8), used);
 
     if (out) {
         out->lines = lines;
@@ -1045,6 +1085,57 @@ bool text_shaper_wrap_shape(const TextShaper *s, const char *utf8,
                         scale, line_advance,
                         cont2_from_line, cont2_x, cont2_width,
                         true, r, g, b, a, dl, out);
+}
+
+int text_shaper_wrap_lines(const TextShaper *s, const char *utf8,
+                           float x, float y, float cont_x,
+                           float first_width, float cont_width,
+                           float scale, float line_advance,
+                           int cont2_from_line, float cont2_x,
+                           float cont2_width,
+                           TsLine *lines, int cap)
+{
+    if (!s || !utf8) return 0;
+    t_lines = lines;
+    t_lines_cap = cap;
+    t_lines_n = 0;
+    t_lines_base = utf8;
+    TsWrapResult wr;
+    ts_wrap_walk(s, utf8, x, y, cont_x, first_width, cont_width, scale, line_advance,
+                 cont2_from_line, cont2_x, cont2_width, false, 0, 0, 0, 0, NULL, &wr);
+    int n = t_lines_n;
+    t_lines = NULL;
+    t_lines_cap = t_lines_n = 0;
+    return n;
+}
+
+bool text_shaper_shape_span(const TextShaper *s, const char *utf8, size_t start, size_t end,
+                            float x, float y, float scale, bool rtl,
+                            float r, float g, float b, float a, DisplayList *dl)
+{
+    if (!s || !utf8 || !dl || end <= start) return s && utf8 && dl;
+    if (scale <= 0.0f) scale = 1.0f;
+    float pen_x = x, gy = y + s->baseline * scale;
+    int prev_glyph = -1;
+    if (!rtl) return ts_emit_span_glyphs(s, utf8 + start, utf8 + end, &pen_x, gy, scale, &prev_glyph, r, g, b, a, dl);
+    /* (right to left: the code points last first, each mirrored) */
+    size_t cap = end - start;
+    uint32_t stackbuf[256], *cps = cap <= 256 ? stackbuf : (uint32_t *)malloc(cap * sizeof(uint32_t));
+    if (!cps) return false;
+    size_t n = 0;
+    for (const char *p = utf8 + start, *e = utf8 + end; p < e;) {
+        uint32_t c = utf8_decode(&p);
+        if (c == 0) break;
+        cps[n++] = c;
+    }
+    bool ok = true;
+    for (size_t i = n; i-- > 0 && ok;) {
+        uint32_t c = cps[i];
+        if (c < 0x20 && c != ' ') continue;
+        ok = ts_emit_glyph(s, bidi_mirror(c), &pen_x, gy, scale, &prev_glyph, r, g, b, a, dl);
+    }
+    if (cps != stackbuf) free(cps);
+    return ok;
 }
 
 bool text_shaper_has_glyph(const TextShaper *s, uint32_t codepoint)
