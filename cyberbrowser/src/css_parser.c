@@ -163,6 +163,7 @@ static bool css_declaration_add(CssRule *rule, const char *prop, size_t prop_len
     rule->declarations[rule->declaration_count].property = p;
     rule->declarations[rule->declaration_count].value = v;
     rule->declarations[rule->declaration_count].important = is_important;
+    rule->declarations[rule->declaration_count].invalid = 0;
     rule->declaration_count++;
     return true;
 }
@@ -332,6 +333,24 @@ static void str_put(Str *o, const char *p, size_t l)
     o->p[o->n] = 0;
 }
 
+/* A name (escapes resolved) as value text that reads back as the same
+ * token: a character that is not a name character, or a digit that would
+ * start it (ident), as a hex escape ("test\f oo"). */
+static void val_put_name(Str *o, const char *v, size_t l, bool ident)
+{
+    for (size_t i = 0; i < l; i++) {
+        unsigned char c = (unsigned char)v[i];
+        bool lead_digit = ident && c >= '0' && c <= '9' && (i == 0 || (i == 1 && v[0] == '-'));
+        if (k_name_char[c] && !lead_digit) {
+            str_put(o, v + i, 1);
+        } else {
+            char h[8];
+            snprintf(h, sizeof(h), "\\%x ", c);
+            str_put(o, h, strlen(h));
+        }
+    }
+}
+
 /* Value tokens [a, b) as text: the source when it is the same thing,
  * else each token rebuilt (white space one space, strings and urls
  * quoted). */
@@ -371,13 +390,14 @@ static char *decl_value_text(const CssTz *tz, const CssToken *t, int a, int b)
         const char *v = css_tok_val(&tz->arena, x, &vl);
         char num[64];
         switch (x->type) {
-        case CT_FUNCTION: str_put(&o, v, vl); str_put(&o, "(", 1); break;
-        case CT_AT_KEYWORD: str_put(&o, "@", 1); str_put(&o, v, vl); break;
-        case CT_HASH: str_put(&o, "#", 1); str_put(&o, v, vl); break;
+        case CT_FUNCTION: val_put_name(&o, v, vl, true); str_put(&o, "(", 1); break;
+        case CT_AT_KEYWORD: str_put(&o, "@", 1); val_put_name(&o, v, vl, true); break;
+        case CT_HASH: str_put(&o, "#", 1); val_put_name(&o, v, vl, false); break;
+        case CT_IDENT: val_put_name(&o, v, vl, true); break;
         case CT_DIMENSION:
             snprintf(num, sizeof(num), "%.10g", x->num);
             str_put(&o, num, strlen(num));
-            str_put(&o, v, vl);
+            val_put_name(&o, v, vl, true);
             break;
         case CT_STRING:
         case CT_URL:
@@ -510,6 +530,7 @@ static void sink_rule(void *ctx, char *prop, char *value, bool important)
     d->property = prop;
     d->value = value;
     d->important = important;
+    d->invalid = 0;
 }
 
 /* Parse a declaration block between { and }. pos should point just past '{'. */

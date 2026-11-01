@@ -3129,6 +3129,174 @@ bool css_supports_property(const char *prop, const char *value) {
     return ok;
 }
 
+/* ---- Values layout should ignore ----
+ * For the properties below, a value outside the property's grammar is
+ * dropped (the declaration before it stays), as CSS 2.1 section 4.2 says.
+ * Others are left to their layout parsers.  The common simple values are
+ * recognised without the grammar matcher, which costs microseconds. */
+
+typedef enum { VK_NONE, VK_COLOR, VK_LEN1, VK_LEN4, VK_GRAMMAR } ValueKind;
+
+static ValueKind value_kind(const char *p)
+{
+    typedef struct { const char *name; ValueKind kind; } Named;
+    static const Named k[] = {
+        { "background", VK_GRAMMAR }, { "background-color", VK_COLOR }, { "background-image", VK_GRAMMAR },
+        { "border-bottom-color", VK_COLOR }, { "border-color", VK_GRAMMAR }, { "border-left-color", VK_COLOR },
+        { "border-right-color", VK_COLOR }, { "border-top-color", VK_COLOR }, { "bottom", VK_LEN1 },
+        { "caret-color", VK_COLOR }, { "color", VK_COLOR }, { "column-rule-color", VK_COLOR },
+        { "font-family", VK_GRAMMAR }, { "font-size", VK_LEN1 }, { "height", VK_LEN1 }, { "left", VK_LEN1 },
+        { "letter-spacing", VK_LEN1 }, { "line-height", VK_LEN1 }, { "margin", VK_LEN4 },
+        { "margin-bottom", VK_LEN1 }, { "margin-left", VK_LEN1 }, { "margin-right", VK_LEN1 },
+        { "margin-top", VK_LEN1 }, { "max-height", VK_LEN1 }, { "max-width", VK_LEN1 }, { "min-height", VK_LEN1 },
+        { "min-width", VK_LEN1 }, { "outline-color", VK_COLOR }, { "padding", VK_LEN4 },
+        { "padding-bottom", VK_LEN1 }, { "padding-left", VK_LEN1 }, { "padding-right", VK_LEN1 },
+        { "padding-top", VK_LEN1 }, { "right", VK_LEN1 }, { "text-decoration-color", VK_COLOR },
+        { "text-indent", VK_LEN1 }, { "top", VK_LEN1 }, { "width", VK_LEN1 }, { "word-spacing", VK_LEN1 },
+    };
+    /* (sorted by name: past p's first letter, no match) */
+    for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+        if (k[i].name[0] < p[0]) continue;
+        if (k[i].name[0] > p[0]) break;
+        if (!strcmp(p, k[i].name)) return k[i].kind;
+    }
+    return VK_NONE;
+}
+
+/* The end of a plain number at s (sign, digits, at most one '.', a digit
+ * somewhere), or NULL. */
+static const char *simple_number_end(const char *s, const char *e)
+{
+    const char *p = s;
+    if (p < e && (*p == '+' || *p == '-')) p++;
+    bool digit = false, dot = false;
+    for (; p < e; p++) {
+        if (isdigit((unsigned char)*p)) digit = true;
+        else if (*p == '.' && !dot) dot = true;
+        else break;
+    }
+    return digit ? p : NULL;
+}
+
+/* A plain length or percentage token [s, e) (a bare number too: quirks
+ * pages write width: 100), or auto. */
+static bool simple_length(const char *s, const char *e)
+{
+    static const char *const units[] = { "px", "em", "rem", "ex", "ch", "%", "vw", "vh", "vmin", "vmax", "cm",
+                                         "mm", "in", "pt", "pc", "q", "lh", "rlh", "svh", "lvh", "dvh", "svw",
+                                         "lvw", "dvw", "vi", "vb", NULL };
+    size_t n = (size_t)(e - s);
+    if (n == 4 && !strncasecmp(s, "auto", 4)) return true;
+    const char *p = simple_number_end(s, e);
+    if (!p) return false;
+    if (p == e) return true;
+    for (int i = 0; units[i]; i++)
+        if ((size_t)(e - p) == strlen(units[i]) && !strncasecmp(p, units[i], (size_t)(e - p))) return true;
+    return false;
+}
+
+/* The value is 1 (max 1) or 1 - 4 (max 4) plain lengths: true when it is
+ * one of those, so known valid. */
+static bool simple_lengths(const char *v, int max)
+{
+    int n = 0;
+    const char *p = v;
+    for (;;) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        const char *s = p;
+        while (*p && *p != ' ') p++;
+        if (++n > max || !simple_length(s, p)) return false;
+        /* (a bare number only as the one value: margin: 10 0 is not one) */
+        if (max > 1 && simple_number_end(s, p) == p && strtod(s, NULL) != 0) return false;
+    }
+    return n > 0;
+}
+
+/* The keywords a one-length property takes besides auto: none (max-width,
+ * max-height), normal (line-height, letter-spacing, word-spacing). */
+static bool simple_length_keyword(const char *prop, const char *v)
+{
+    if (!strcasecmp(v, "none")) return !strncmp(prop, "max-", 4);
+    if (!strcasecmp(v, "normal"))
+        return !strcmp(prop, "line-height") || !strcmp(prop, "letter-spacing") || !strcmp(prop, "word-spacing");
+    return false;
+}
+
+/* The value is one calc() / min() / max() / clamp() (its insides not
+ * checked: the layout's math evaluator reads them). */
+static bool one_math_function(const char *v)
+{
+    static const char *const fns[] = { "calc(", "min(", "max(", "clamp(", NULL };
+    for (int i = 0; fns[i]; i++) {
+        size_t l = strlen(fns[i]);
+        if (strncasecmp(v, fns[i], l)) continue;
+        int d = 1;
+        const char *p = v + l;
+        for (; *p && d; p++) d += *p == '(' ? 1 : *p == ')' ? -1 : 0;
+        while (*p && isspace((unsigned char)*p)) p++;
+        return d == 0 && !*p;
+    }
+    return false;
+}
+
+/* A font-family list of plain names: quoted without escapes, or identifiers
+ * (none starting with a digit) with spaces between. */
+static bool simple_families(const char *v)
+{
+    const char *p = v;
+    for (;;) {
+        while (*p == ' ') p++;
+        if (*p == '"' || *p == '\'') {
+            char q = *p++;
+            for (; *p != q; p++)
+                if (!*p || *p == '\\' || *p == '\n') return false;
+            p++;
+        } else {
+            bool any = false, word_start = true;
+            for (; *p && *p != ','; p++) {
+                unsigned char c = (unsigned char)*p;
+                if (c == ' ') {
+                    word_start = true;
+                    continue;
+                }
+                if (!(isalpha(c) || c == '-' || c == '_' || c >= 0x80 || (isdigit(c) && !word_start))) return false;
+                any = true;
+                word_start = false;
+            }
+            if (!any) return false;
+        }
+        while (*p == ' ') p++;
+        if (!*p) return true;
+        if (*p != ',') return false;
+        p++;
+    }
+}
+
+bool css_value_invalid(const char *prop, const char *value)
+{
+    if (!prop || !value || (prop[0] == '-' && prop[1] == '-')) return false;
+    ValueKind k = value_kind(prop);
+    if (k == VK_NONE) return false;
+    while (isspace((unsigned char)*value)) value++;
+    if (css_is_wide_keyword(value, strlen(value)) || has_substitution(value)) return false;
+    double rgba[4];
+    if (k == VK_COLOR && css_color_parse(value, rgba)) return false;
+    if (k == VK_LEN1 || k == VK_LEN4) {
+        if (simple_lengths(value, k == VK_LEN1 ? 1 : 4)) return false;
+        if (k == VK_LEN1 && simple_length_keyword(prop, value)) return false;
+        if (k == VK_LEN1 && one_math_function(value)) return false;
+    }
+    if (!strcmp(prop, "font-family") && simple_families(value)) return false;
+    if (!strcmp(prop, "background") && (!strcasecmp(value, "none") || css_color_parse(value, rgba))) return false;
+    const CssPropDef *p = css_prop_find(prop, strlen(prop));
+    if (!p) return false;
+    char *s = css_prop_parse(p, value);
+    bool ok = s != NULL;
+    free(s);
+    return !ok;
+}
+
 /* condition: not <in-parens> | <in-parens> [and <in-parens>]* | <in-parens> [or <in-parens>]* */
 static int sup_cond(const Toks *ts, int b, int e, const char *src);
 

@@ -24,6 +24,7 @@ typedef struct CssDeclaration {
     char *property;
     char *value;
     bool important;
+    unsigned char invalid;  /* layout's cache of css_value_invalid: 0 not known yet, 1 valid, 2 invalid */
 } CssDeclaration;
 
 /* Forward declaration of the lazily-compiled selector representation. */

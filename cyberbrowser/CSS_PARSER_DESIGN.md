@@ -7,7 +7,27 @@ applies nothing).  Not done in it: the referring document's encoding as a sheet'
 (src/css_tokenizer.c, tests/test_css_tokenizer.c).  Step 3 done (css/CSS2 5234 -> 5252, none
 lost; parse time unchanged, below).  Step 4 done (css/CSS2 5252 -> 5271, none lost; parse
 time below the old parser's, below).  Step 5 done (css/CSS2 5271 -> 5294, none lost; parse
-time within noise of step 4's).  Step 6 planned.
+time within noise of step 4's).  Step 6 done (css/CSS2 5294 -> 5321, none lost; YouTube's forced
+layouts 217 -> 209 ms, noise).
+
+As built, step 6: not a new set of checks but the grammar matcher css_props.c already had (for
+@supports and the CSSOM), applied by layout: css_value_invalid(prop, value) is true for a value
+outside the grammar of a property checked (the color properties, background, background-image,
+border-color, font-family, box sizes and offsets, font-size, line-height, text-indent, letter- and
+word-spacing, margins and paddings), and layout_apply_declaration then ignores the declaration, so
+the one before it stays.  Unchecked properties, custom properties, wide keywords and values with
+var() are never invalid; a bare number stays a length (no quirks mode here to tell when it is one).
+The matcher costs microseconds, so the common values are recognised before it (a color
+css_color_parse reads, plain lengths, none / normal / auto, one calc() / min() / max() / clamp(),
+a plain font-family list), and the answer is cached on the declaration (CssDeclaration.invalid;
+the cascade's copies take it from the rule's declaration unless var() was substituted).  Checking
+all 69,280 declarations of YouTube's main sheet takes 7 ms; only applied ones are checked, once.
+On YouTube 6 declarations are dropped (min-width: none, margin: 10 0 -6, height: none, ...), as
+in Chrome.  Rebuilt values write a name's non-name characters as hex escapes (`test\f oo`), so
+they read back as the same token.
+
+Left: invalid values of the properties not checked (keywords of display, float, position and the
+rest) are still read by their layout parsers as before.
 
 As built, step 5: a prelude with an escape (or a comment) is read from tokens and its selector text
 rebuilt: identifiers with escapes resolved, any character that is not a name character (and a digit

@@ -2540,6 +2540,26 @@ static int bg_tokens(const char *p, char toks[][64], int max)
     return n;
 }
 
+/* Whether decl's value is one layout ignores (css_value_invalid), known
+ * once per declaration: the rule's declarations are shared and read-only
+ * but for this cache. */
+static bool layout_decl_invalid(const CssDeclaration *decl)
+{
+    unsigned char inv = __atomic_load_n(&decl->invalid, __ATOMIC_RELAXED);
+    if (!inv) {
+        inv = css_value_invalid(decl->property, decl->value) ? 2 : 1;
+        __atomic_store_n((unsigned char *)&decl->invalid, inv, __ATOMIC_RELAXED);
+    }
+    return inv == 2;
+}
+
+/* A copy of a rule's declaration to apply, its value maybe substituted
+ * (var()): its validity from the original's cache unless substituted. */
+static void layout_decl_copy_validity(CssDeclaration *copy, const CssDeclaration *orig, bool substituted)
+{
+    copy->invalid = substituted ? 0 : layout_decl_invalid(orig) ? 2 : 1;
+}
+
 static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                                      double parent_width, double viewport_width,
                                      const char *base_url)
@@ -2549,6 +2569,8 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     if (!prop || !value) return;
     t_unit_box = box;
     if (css_prop_non_negative(prop) && css_value_has_negative(value)) return;
+    /* (an invalid value is ignored: the declaration before it stays) */
+    if (layout_decl_invalid(decl)) return;
 
     if (strcasecmp(prop, "font") == 0) {
         /* The shorthand as its longhands (each reset when not given). */
@@ -8032,6 +8054,7 @@ static bool layout_apply_wide_keyword(LayoutBox *box, const LayoutBox *parent,
         CssDeclaration d = { 0 };
         d.property = (char *)initial_values[i].prop;
         d.value = (char *)initial_values[i].value;
+        d.invalid = 1;   /* (known valid) */
         layout_apply_declaration(box, &d, viewport_width, viewport_width, base_url);
         return true;
     }
@@ -8435,6 +8458,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
             char *resolved = css_var_resolve(applied[d].decl->value, props);
             CssDeclaration decl = *applied[d].decl;
             decl.value = resolved ? resolved : applied[d].decl->value;
+            layout_decl_copy_validity(&decl, applied[d].decl, resolved != NULL);
             if (t_var_failed) layout_unset_property(box, decl.property);
             else if (!layout_apply_wide_keyword(box, parent, decl.property, decl.value,
                                                 ctx->viewport_width, ctx->base_url))
@@ -8452,6 +8476,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
                 char *resolved = css_var_resolve(inl[b].decls[i].value, props);
                 CssDeclaration decl = inl[b].decls[i];
                 decl.value = resolved ? resolved : inl[b].decls[i].value;
+                if (resolved) decl.invalid = 0;
                 if (t_var_failed) layout_unset_property(box, decl.property);
                 else if (!layout_apply_wide_keyword(box, parent, decl.property, decl.value,
                                                     ctx->viewport_width, ctx->base_url))
@@ -9239,6 +9264,7 @@ static void layout_pseudo_style(LayoutContext *ctx, int pe, int owner, const Pse
         char *resolved = css_var_resolve(src->value, props);
         CssDeclaration decl = *src;
         decl.value = resolved ? resolved : src->value;
+        layout_decl_copy_validity(&decl, src, resolved != NULL);
         if (t_var_failed) layout_unset_property(box, decl.property);
         else if (!layout_apply_wide_keyword(box, ob, decl.property, decl.value, ctx->viewport_width, ctx->base_url))
             layout_apply_declaration(box, &decl, ctx->viewport_width, ctx->viewport_width, ctx->base_url);

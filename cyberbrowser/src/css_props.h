@@ -97,6 +97,11 @@ char *css_prop_compute(const CssPropDef *p, const char *value, const CssComputeE
 
 /* CSS.supports(property, value). */
 bool css_supports_property(const char *prop, const char *value);
+/* A value layout should ignore: outside the grammar of a property checked
+ * here (colors, backgrounds, box sizes and offsets, font-size, line-height,
+ * margins, paddings).  Other properties, custom ones, wide keywords and
+ * values with var() are never. */
+bool css_value_invalid(const char *prop, const char *value);
 /* CSS.supports(conditionText) / @supports conditions. */
 bool css_supports_condition(const char *cond);
 
