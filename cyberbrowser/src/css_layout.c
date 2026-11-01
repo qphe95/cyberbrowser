@@ -15181,8 +15181,9 @@ static void layout_collapse_borders(LayoutContext *ctx)
     int n = 0;
     for (int i = 0; i < ctx->tree.count; i++) {
         const LayoutBox *b = &ctx->boxes[i];
-        if (!b->s->border_collapse || b->s->table_role != 1 || (b->flags & LAYOUT_STYLE_SKIPPED) ||
-            !table_is_table(b))
+        /* (the style's skipped, not the box's flag: that is the last
+         * layout's until this one starts the box) */
+        if (!b->s->border_collapse || b->s->table_role != 1 || b->s->skipped || !table_is_table(b))
             continue;
         layout_collapse_table(ctx, i);
         n++;
