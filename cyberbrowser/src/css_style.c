@@ -1083,16 +1083,17 @@ static void rule_branch(Builder *b, const char *branch, void *ud)
 
 /* Legacy ::after branch parsing (layout_pseudo_branch_matches): the branch
  * must end with "::after" (or ":after"); the base before it is compiled. */
-static int32_t after_base_list(Builder *b, const char *branch, size_t blen, bool before)
+static int32_t after_base_list(Builder *b, const char *branch, size_t blen, int kind)
 {
+    static const char *const kw2[] = { "::after", "::before", "::first-letter" };
     char buf[512];
     if (blen == 0 || blen >= sizeof(buf)) return -1;
     memcpy(buf, branch, blen);
     buf[blen] = '\0';
-    const char *kw = before ? "::before" : "::after";
+    const char *kw = kw2[kind];
     char *pseudo = strstr(buf, kw);
     size_t kwlen = strlen(kw);
-    if (!pseudo) { kw = before ? ":before" : ":after"; pseudo = strstr(buf, kw); kwlen = strlen(kw); }
+    if (!pseudo) { kw = kw2[kind] + 1; pseudo = strstr(buf, kw); kwlen = strlen(kw); }
     if (!pseudo) return -1;
     char *tail = pseudo + kwlen;
     while (*tail && isspace((unsigned char)*tail)) tail++;
@@ -1214,7 +1215,7 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
             }
 
             /* ::after branches (naive comma split, as the legacy code did). */
-            if (strstr(sel, ":after") || strstr(sel, ":before")) {
+            if (strstr(sel, ":after") || strstr(sel, ":before") || strstr(sel, ":first-letter")) {
                 const char *bp = sel;
                 while (*bp) {
                     const char *comma = strchr(bp, ',');
@@ -1223,8 +1224,9 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
                     while (blen > 0 && isspace((unsigned char)bp[blen - 1])) blen--;
                     if (blen > 0) {
                         int32_t is_before = 0;
-                        int32_t li = after_base_list(&b, bp, blen, false);
-                        if (li < 0) { li = after_base_list(&b, bp, blen, true); is_before = 1; }
+                        int32_t li = after_base_list(&b, bp, blen, 0);
+                        if (li < 0) { li = after_base_list(&b, bp, blen, 1); is_before = 1; }
+                        if (li < 0) { li = after_base_list(&b, bp, blen, 2); is_before = 2; }
                         if (li >= 0) {
                             CAfter af = { g, 0, is_before };
                             if (blen < 512) {

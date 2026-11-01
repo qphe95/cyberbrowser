@@ -641,6 +641,7 @@ bool css_layout_tree_build(LayoutContext *ctx, HtmlDocument *doc)
 typedef struct LayoutPseudoPair {
     int owner;
     unsigned char side;
+    unsigned char no_park;      /* (::first-letter, or a box whose text it split) */
     int n;
     const CssDeclaration *const *decls;
     const char *content;
@@ -4553,6 +4554,7 @@ static bool css_var_is_self_reference(const char *prop, const char *val)
 }
 
 static bool layout_text_is_whitespace(const char *s);
+static bool layout_pseudo_allowed(const HtmlNode *n);
 
 /* Decode a CSS `content` value consisting solely of string literals into a
  * UTF-8 buffer.  Handles CSS hex escapes (up to 6 digits + optional trailing
@@ -4648,7 +4650,8 @@ trunc:
  * and realized after the pass, so the pass never writes the document.
  * ============================================================================ */
 
-/* What an element's ::before (side 0) and ::after (side 1) styles say: the
+/* What an element's ::before (side 0), ::after (side 1) and ::first-letter
+ * (side 2: content "" when any rule matched) styles say: the
  * value of the winning content declaration (NULL: no box, as for none or
  * normal) and the other declarations of the rules that matched, in cascade
  * order (importance, specificity, order).  Both point into the style set's
@@ -4660,7 +4663,7 @@ typedef struct PseudoSide {
     const CssDeclaration *const *decls;
 } PseudoSide;
 typedef struct PseudoRec {
-    PseudoSide side[2];
+    PseudoSide side[3];
     bool owned;
 } PseudoRec;
 
@@ -7359,12 +7362,14 @@ static const PseudoRec *style_pseudo_rec(StylePass *P, StyleThread *T, const Css
     PseudoDecl *all = n * 8 <= 64 ? stack : NULL;
     int cap = all ? 64 : 0, cnt = 0;
     PseudoRec *rec = NULL;
-    for (int side = 0; side < 2; side++) {
+    for (int side = 0; side < 3; side++) {
         const char *content = NULL;
         int bi = -1, bs = -1, bo = -1;
+        bool any = false;
         cnt = 0;
         for (int i = 0; i < n; i++) {
-            if ((am[i].is_before ? 0 : 1) != side) continue;
+            if ((am[i].is_before == 1 ? 0 : am[i].is_before == 2 ? 2 : 1) != side) continue;
+            any = true;
             const CssRule *rule = css_styleset_rule(P->set, am[i].rule);
             for (int d = 0; d < rule->declaration_count; d++) {
                 const CssDeclaration *decl = &rule->declarations[d];
@@ -7390,7 +7395,8 @@ static const PseudoRec *style_pseudo_rec(StylePass *P, StyleThread *T, const Css
                 all[cnt++] = (PseudoDecl){ decl, imp, am[i].specificity, order };
             }
         }
-        if (content) {
+        if (side == 2) content = any ? "" : NULL;   /* (::first-letter: a box when a rule matched) */
+        else if (content) {
             const char *v = content;
             while (isspace((unsigned char)*v)) v++;
             if (!strncasecmp(v, "none", 4) || !strncasecmp(v, "normal", 6)) content = NULL;
@@ -7421,7 +7427,7 @@ static const PseudoRec *pseudo_rec_copy(const PseudoRec *r)
     if (!c) return NULL;
     *c = *r;
     c->owned = true;
-    for (int side = 0; side < 2; side++) {
+    for (int side = 0; side < 3; side++) {
         if (!r->side[side].n) continue;
         size_t b = (size_t)r->side[side].n * sizeof(CssDeclaration *);
         const CssDeclaration **ds = (const CssDeclaration **)frame_arena_alloc(&g_sc.arena, b);
@@ -7549,6 +7555,7 @@ static bool layout_apply_wide_keyword(LayoutBox *box, const LayoutBox *parent,
             return true;
         }
         if (strcasecmp(prop, "flex-direction") == 0) { box->s->flex_direction = parent->s->flex_direction; return true; }
+        if (strcasecmp(prop, "float") == 0) { box->s->float_side = parent->s->float_side; return true; }
         if (strcasecmp(prop, "display") == 0) {
             box->s->display = parent->s->display;
             box->s->inline_level = parent->s->inline_level;
@@ -8463,6 +8470,165 @@ static void layout_restyle_all(LayoutContext *ctx);
 
 static void style_finish_box_em(bool em_defer, LayoutBox *box, const LayoutBox *parent, bool element);
 
+/* Unicode punctuation (general category P*), generated from Unicode data. */
+static const uint32_t k_punct_ranges[][2] = {
+    { 0x21, 0x23 }, { 0x25, 0x2A }, { 0x2C, 0x2F }, { 0x3A, 0x3B },
+    { 0x3F, 0x40 }, { 0x5B, 0x5D }, { 0x5F, 0x5F }, { 0x7B, 0x7B },
+    { 0x7D, 0x7D }, { 0xA1, 0xA1 }, { 0xA7, 0xA7 }, { 0xAB, 0xAB },
+    { 0xB6, 0xB7 }, { 0xBB, 0xBB }, { 0xBF, 0xBF }, { 0x37E, 0x37E },
+    { 0x387, 0x387 }, { 0x55A, 0x55F }, { 0x589, 0x58A }, { 0x5BE, 0x5BE },
+    { 0x5C0, 0x5C0 }, { 0x5C3, 0x5C3 }, { 0x5C6, 0x5C6 }, { 0x5F3, 0x5F4 },
+    { 0x609, 0x60A }, { 0x60C, 0x60D }, { 0x61B, 0x61B }, { 0x61D, 0x61F },
+    { 0x66A, 0x66D }, { 0x6D4, 0x6D4 }, { 0x700, 0x70D }, { 0x7F7, 0x7F9 },
+    { 0x830, 0x83E }, { 0x85E, 0x85E }, { 0x964, 0x965 }, { 0x970, 0x970 },
+    { 0x9FD, 0x9FD }, { 0xA76, 0xA76 }, { 0xAF0, 0xAF0 }, { 0xC77, 0xC77 },
+    { 0xC84, 0xC84 }, { 0xDF4, 0xDF4 }, { 0xE4F, 0xE4F }, { 0xE5A, 0xE5B },
+    { 0xF04, 0xF12 }, { 0xF14, 0xF14 }, { 0xF3A, 0xF3D }, { 0xF85, 0xF85 },
+    { 0xFD0, 0xFD4 }, { 0xFD9, 0xFDA }, { 0x104A, 0x104F }, { 0x10FB, 0x10FB },
+    { 0x1360, 0x1368 }, { 0x1400, 0x1400 }, { 0x166E, 0x166E }, { 0x169B, 0x169C },
+    { 0x16EB, 0x16ED }, { 0x1735, 0x1736 }, { 0x17D4, 0x17D6 }, { 0x17D8, 0x17DA },
+    { 0x1800, 0x180A }, { 0x1944, 0x1945 }, { 0x1A1E, 0x1A1F }, { 0x1AA0, 0x1AA6 },
+    { 0x1AA8, 0x1AAD }, { 0x1B4E, 0x1B4F }, { 0x1B5A, 0x1B60 }, { 0x1B7D, 0x1B7F },
+    { 0x1BFC, 0x1BFF }, { 0x1C3B, 0x1C3F }, { 0x1C7E, 0x1C7F }, { 0x1CC0, 0x1CC7 },
+    { 0x1CD3, 0x1CD3 }, { 0x2010, 0x2027 }, { 0x2030, 0x2043 }, { 0x2045, 0x2051 },
+    { 0x2053, 0x205E }, { 0x207D, 0x207E }, { 0x208D, 0x208E }, { 0x2308, 0x230B },
+    { 0x2329, 0x232A }, { 0x2768, 0x2775 }, { 0x27C5, 0x27C6 }, { 0x27E6, 0x27EF },
+    { 0x2983, 0x2998 }, { 0x29D8, 0x29DB }, { 0x29FC, 0x29FD }, { 0x2CF9, 0x2CFC },
+    { 0x2CFE, 0x2CFF }, { 0x2D70, 0x2D70 }, { 0x2E00, 0x2E2E }, { 0x2E30, 0x2E4F },
+    { 0x2E52, 0x2E5D }, { 0x3001, 0x3003 }, { 0x3008, 0x3011 }, { 0x3014, 0x301F },
+    { 0x3030, 0x3030 }, { 0x303D, 0x303D }, { 0x30A0, 0x30A0 }, { 0x30FB, 0x30FB },
+    { 0xA4FE, 0xA4FF }, { 0xA60D, 0xA60F }, { 0xA673, 0xA673 }, { 0xA67E, 0xA67E },
+    { 0xA6F2, 0xA6F7 }, { 0xA874, 0xA877 }, { 0xA8CE, 0xA8CF }, { 0xA8F8, 0xA8FA },
+    { 0xA8FC, 0xA8FC }, { 0xA92E, 0xA92F }, { 0xA95F, 0xA95F }, { 0xA9C1, 0xA9CD },
+    { 0xA9DE, 0xA9DF }, { 0xAA5C, 0xAA5F }, { 0xAADE, 0xAADF }, { 0xAAF0, 0xAAF1 },
+    { 0xABEB, 0xABEB }, { 0xFD3E, 0xFD3F }, { 0xFE10, 0xFE19 }, { 0xFE30, 0xFE52 },
+    { 0xFE54, 0xFE61 }, { 0xFE63, 0xFE63 }, { 0xFE68, 0xFE68 }, { 0xFE6A, 0xFE6B },
+    { 0xFF01, 0xFF03 }, { 0xFF05, 0xFF0A }, { 0xFF0C, 0xFF0F }, { 0xFF1A, 0xFF1B },
+    { 0xFF1F, 0xFF20 }, { 0xFF3B, 0xFF3D }, { 0xFF3F, 0xFF3F }, { 0xFF5B, 0xFF5B },
+    { 0xFF5D, 0xFF5D }, { 0xFF5F, 0xFF65 }, { 0x10100, 0x10102 }, { 0x1039F, 0x1039F },
+    { 0x103D0, 0x103D0 }, { 0x1056F, 0x1056F }, { 0x10857, 0x10857 }, { 0x1091F, 0x1091F },
+    { 0x1093F, 0x1093F }, { 0x10A50, 0x10A58 }, { 0x10A7F, 0x10A7F }, { 0x10AF0, 0x10AF6 },
+    { 0x10B39, 0x10B3F }, { 0x10B99, 0x10B9C }, { 0x10D6E, 0x10D6E }, { 0x10EAD, 0x10EAD },
+    { 0x10ED0, 0x10ED0 }, { 0x10F55, 0x10F59 }, { 0x10F86, 0x10F89 }, { 0x11047, 0x1104D },
+    { 0x110BB, 0x110BC }, { 0x110BE, 0x110C1 }, { 0x11140, 0x11143 }, { 0x11174, 0x11175 },
+    { 0x111C5, 0x111C8 }, { 0x111CD, 0x111CD }, { 0x111DB, 0x111DB }, { 0x111DD, 0x111DF },
+    { 0x11238, 0x1123D }, { 0x112A9, 0x112A9 }, { 0x113D4, 0x113D5 }, { 0x113D7, 0x113D8 },
+    { 0x1144B, 0x1144F }, { 0x1145A, 0x1145B }, { 0x1145D, 0x1145D }, { 0x114C6, 0x114C6 },
+    { 0x115C1, 0x115D7 }, { 0x11641, 0x11643 }, { 0x11660, 0x1166C }, { 0x116B9, 0x116B9 },
+    { 0x1173C, 0x1173E }, { 0x1183B, 0x1183B }, { 0x11944, 0x11946 }, { 0x119E2, 0x119E2 },
+    { 0x11A3F, 0x11A46 }, { 0x11A9A, 0x11A9C }, { 0x11A9E, 0x11AA2 }, { 0x11B00, 0x11B09 },
+    { 0x11BE1, 0x11BE1 }, { 0x11C41, 0x11C45 }, { 0x11C70, 0x11C71 }, { 0x11EF7, 0x11EF8 },
+    { 0x11F43, 0x11F4F }, { 0x11FFF, 0x11FFF }, { 0x12470, 0x12474 }, { 0x12FF1, 0x12FF2 },
+    { 0x16A6E, 0x16A6F }, { 0x16AF5, 0x16AF5 }, { 0x16B37, 0x16B3B }, { 0x16B44, 0x16B44 },
+    { 0x16D6D, 0x16D6F }, { 0x16E97, 0x16E9A }, { 0x16FE2, 0x16FE2 }, { 0x1BC9F, 0x1BC9F },
+    { 0x1DA87, 0x1DA8B }, { 0x1E5FF, 0x1E5FF }, { 0x1E95E, 0x1E95F },
+};
+
+static bool layout_is_punct(uint32_t cp)
+{
+    int lo = 0, hi = (int)(sizeof(k_punct_ranges) / sizeof(k_punct_ranges[0])) - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if (cp < k_punct_ranges[mid][0]) hi = mid - 1;
+        else if (cp > k_punct_ranges[mid][1]) lo = mid + 1;
+        else return true;
+    }
+    return false;
+}
+
+static uint32_t layout_utf8_next(const char **p)
+{
+    const unsigned char *s = (const unsigned char *)*p;
+    uint32_t c = s[0];
+    int n = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+    if (n > 1) c &= 0x3F >> (n - 1);
+    for (int i = 1; i < n; i++) {
+        if ((s[i] & 0xC0) != 0x80) { n = i; break; }
+        c = (c << 6) | (s[i] & 0x3F);
+    }
+    *p += n;
+    return c;
+}
+
+/* Replace document node dom_idx's text for this layout (copied). */
+static void layout_set_node_text(LayoutContext *ctx, int dom_idx, const char *text, size_t len)
+{
+    if (!ctx->doc || dom_idx < 0) return;
+    if (!ctx->text_gen) {
+        int cap = (int)po_array_count(&ctx->doc->array);
+        ctx->text_gen = (char **)calloc((size_t)cap + 1, sizeof(char *));
+        if (!ctx->text_gen) return;
+        ctx->text_gen_cap = cap;
+    }
+    if (dom_idx >= ctx->text_gen_cap) return;
+    char *t = (char *)malloc(len + 1);
+    if (!t) return;
+    memcpy(t, text, len);
+    t[len] = '\0';
+    free(ctx->text_gen[dom_idx]);
+    ctx->text_gen[dom_idx] = t;
+}
+
+static bool layout_text_is_whitespace(const char *s);
+static bool layout_pseudo_allowed(const HtmlNode *n);
+
+/* The text box an element's ::first-letter takes its letter from: the first
+ * in-flow text with more than white space, through inline and block
+ * descendants (-1: none, as when a replaced element or an inline-block
+ * comes first). */
+static int layout_first_letter_text(LayoutContext *ctx, int idx, int depth)
+{
+    if (depth > 32) return -1;
+    for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+        const LayoutBox *b = &ctx->boxes[c];
+        if (b->s->display == CSS_DISPLAY_NONE || b->s->float_side != 0 ||
+            b->s->position == CSS_POSITION_ABSOLUTE || b->s->position == CSS_POSITION_FIXED)
+            continue;
+        HtmlNode *n = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
+        if (!n) continue;
+        if (n->type == HTML_NODE_TEXT) {
+            const char *t = css_layout_node_text(ctx, n);
+            if (t && !layout_text_is_whitespace(t)) return c;
+            continue;
+        }
+        if (n->type != HTML_NODE_ELEMENT) continue;
+        if (!layout_pseudo_allowed(n) || b->s->display == CSS_DISPLAY_INLINE_BLOCK || b->s->inline_level)
+            return -1;
+        int r = layout_first_letter_text(ctx, c, depth + 1);
+        if (r != -1) return r;
+    }
+    return -1;
+}
+
+/* Where the first letter of text t is: [*from, *to) (leading white space,
+ * then punctuation, a letter and the punctuation after it); false for none. */
+static bool layout_first_letter_span(const char *t, size_t *from, size_t *to)
+{
+    const char *p = t;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\f') p++;
+    *from = (size_t)(p - t);
+    const char *q = p;
+    bool letter = false;
+    while (*q) {
+        const char *r = q;
+        uint32_t cp = layout_utf8_next(&r);
+        if (layout_is_punct(cp)) { q = r; continue; }
+        if (cp == ' ' || cp == '\t' || cp == '\n') break;
+        q = r;
+        letter = true;
+        break;
+    }
+    if (!letter) return false;
+    while (*q) {
+        const char *r = q;
+        uint32_t cp = layout_utf8_next(&r);
+        if (!layout_is_punct(cp)) break;
+        q = r;
+    }
+    *to = (size_t)(q - t);
+    return true;
+}
+
 /* No ::before / ::after boxes: replaced and void elements. */
 static bool layout_pseudo_allowed(const HtmlNode *n)
 {
@@ -8650,6 +8816,14 @@ static void layout_pseudo_detach_ex(LayoutContext *ctx, bool park)
             const LayoutPseudoPair *pp = &ctx->pseudo_pairs[j];
             LayoutParkedPseudo *p = &ctx->parked[j];
             int pe = base + 2 * j;
+            if (pp->no_park) {
+                /* (not to be taken back: its slots and string go now) */
+                layout_slot_give(ctx, ctx->slot[pe]);
+                layout_slot_give(ctx, ctx->slot[pe + 1]);
+                free(ctx->pseudo_nodes[2 * j + 1].text_content);
+                p->used = 1;
+                continue;
+            }
             p->owner_id = ctx->ids[pp->owner];
             p->side = pp->side;
             p->old_pe = pe;
@@ -8710,7 +8884,7 @@ static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
         const LayoutBox *b = &ctx->boxes[i];
         if (b->s->display == CSS_DISPLAY_NONE || b->s->skipped) continue;
         if (!layout_pseudo_allowed(layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx))) continue;
-        m += (r->side[0].content != NULL) + (r->side[1].content != NULL);
+        m += (r->side[0].content != NULL) + (r->side[1].content != NULL) + (r->side[2].content != NULL);
     }
     if (m == 0) { layout_parked_release(ctx); return; }
     int n = base + 2 * m;
@@ -8768,12 +8942,82 @@ static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
         const LayoutBox *b = &ctx->boxes[owner];
         HtmlNode *on = layout_node_dom(ctx, ctx->tree.nodes[owner].dom_node_idx);
         if (b->s->display == CSS_DISPLAY_NONE || b->s->skipped || !layout_pseudo_allowed(on)) continue;
-        for (int side = 0; side < 2; side++) {
+        for (int side = 0; side < 3; side++) {
             const PseudoSide *ps = &r->side[side];
             if (!ps->content) continue;
             int pe = base + k, pt = pe + 1;
+            if (side == 2) {
+                /* ::first-letter (block containers): a box with the first
+                 * letter of the first text, before that text, which goes on
+                 * with the rest. */
+                CssDisplay od = b->s->display;
+                if (od != CSS_DISPLAY_BLOCK && od != CSS_DISPLAY_LIST_ITEM && od != CSS_DISPLAY_INLINE_BLOCK &&
+                    !(od == CSS_DISPLAY_OTHER && (b->s->table_role == 4 || b->s->table_role == 5)))
+                    continue;
+                int t = layout_first_letter_text(ctx, owner, 0);
+                if (t < 0) continue;
+                HtmlNode *tn = layout_node_dom(ctx, ctx->tree.nodes[t].dom_node_idx);
+                const char *tt = tn ? css_layout_node_text(ctx, tn) : NULL;
+                size_t from = 0, to = 0;
+                if (!tt || !layout_first_letter_span(tt, &from, &to)) continue;
+                int par = ctx->tree.nodes[t].parent_idx;
+                pairs[k / 2] = (LayoutPseudoPair){ owner, 2, 1, ps->n, ps->decls, ps->content };
+                HtmlNode *he = &hn[k], *ht = &hn[k + 1];
+                he->array_node.parent = he->array_node.first_child = he->array_node.next_sibling = he->array_node.prev_sibling = -1;
+                ht->array_node = he->array_node;
+                he->type = HTML_NODE_ELEMENT;
+                he->tag_name = "::first-letter";
+                ht->type = HTML_NODE_TEXT;
+                ht->tag_name = "";
+                ht->text_content = (char *)malloc(to - from + 1);
+                if (ht->text_content) { memcpy(ht->text_content, tt + from, to - from); ht->text_content[to - from] = 0; }
+                ht->text_len = ht->text_content ? to - from : 0;
+                /* (the rest: a document text's for this layout, a pseudo box's its own) */
+                const char *rest = tt + to;
+                int td = ctx->tree.nodes[t].dom_node_idx;
+                if (td >= LAYOUT_PSEUDO_DOM0) {
+                    char *nt = strdup(rest);
+                    if (nt) { free(tn->text_content); tn->text_content = nt; tn->text_len = strlen(nt); }
+                    if (t >= base && t - base < 2 * (k / 2 + 1)) pairs[(t - base) / 2].no_park = 1;
+                } else {
+                    layout_set_node_text(ctx, td, rest, strlen(rest));
+                }
+                LayoutNodeRef *E = &ctx->tree.nodes[pe], *T = &ctx->tree.nodes[pt], *TN = &ctx->tree.nodes[t];
+                E->dom_node_idx = LAYOUT_PSEUDO_DOM0 + k;
+                T->dom_node_idx = LAYOUT_PSEUDO_DOM0 + k + 1;
+                E->parent_idx = par;
+                E->first_child_idx = pt;
+                E->child_count = 1;
+                T->parent_idx = pe;
+                T->first_child_idx = T->next_sibling_idx = T->prev_sibling_idx = -1;
+                T->child_count = 0;
+                E->prev_sibling_idx = TN->prev_sibling_idx;
+                E->next_sibling_idx = t;
+                if (TN->prev_sibling_idx >= 0) ctx->tree.nodes[TN->prev_sibling_idx].next_sibling_idx = pe;
+                else ctx->tree.nodes[par].first_child_idx = pe;
+                TN->prev_sibling_idx = pe;
+                ctx->tree.nodes[par].child_count++;
+                for (int x = pe; x <= pt; x++) {
+                    ctx->slot[x] = layout_slot_take(ctx);
+                    memset(&ctx->boxes[x], 0, sizeof(LayoutBox));
+                    ctx->boxes[x].s = ctx->slot[x];
+                    ctx->custom_props[x] = ctx->custom_props[par];
+                }
+                ctx->tree.count = pt + 1;
+                layout_pseudo_style(ctx, pe, par, ps, em_defer);
+                /* (inline, or a float) */
+                if (ctx->boxes[pe].s->float_side == 0) {
+                    ctx->boxes[pe].s->display = CSS_DISPLAY_INLINE;
+                    ctx->boxes[pe].s->inline_level = 0;
+                }
+                ctx->boxes[pe].s->position = CSS_POSITION_STATIC;
+                layout_box_init(ctx, pt);
+                style_finish_box_em(em_defer, &ctx->boxes[pt], &ctx->boxes[pe], false);
+                k += 2;
+                continue;
+            }
             HtmlNode *he = &hn[k], *ht = &hn[k + 1];
-            pairs[k / 2] = (LayoutPseudoPair){ owner, (unsigned char)side, ps->n, ps->decls, ps->content };
+            pairs[k / 2] = (LayoutPseudoPair){ owner, (unsigned char)side, 0, ps->n, ps->decls, ps->content };
             /* The last layout's box, when what it depends on is as it was:
              * its element's style slot left as it was (its attributes too,
              * which attr() reads) and the same rules. */
@@ -8854,6 +9098,8 @@ static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
                  ? ctx->tree.preorder[ctx->has_target_first] : -1;
     free(ptab);
     layout_parked_release(ctx);
+    n = base + k;
+    ctx->pseudo_nodes_n = k;
     if (g_css_log > 0) fprintf(stderr, "[css] pseudo boxes: %d (%d as they were)\n", m, reused);
     ctx->tree.count = n;
     layout_rebuild_orders(ctx);
