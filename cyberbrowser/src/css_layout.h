@@ -630,6 +630,12 @@ typedef struct LayoutContext {
     struct LayoutParkedPseudo *parked;
     int parked_n;
     uint64_t parked_gen;
+    /* Anonymous table boxes (CSS 2.1 section 17.2.1): added after the
+     * pseudo boxes, around the children they wrap; their document nodes
+     * are the layout's own (anon_nodes, at LAYOUT_ANON_DOM0 on).  Dropped
+     * with the pseudo boxes. */
+    struct HtmlNode *anon_nodes;
+    int anon_nodes_n;
 } LayoutContext;
 
 #define LAYOUT_HAS_SUBJECT 1
@@ -693,6 +699,7 @@ const char *css_layout_node_text(const LayoutContext *ctx, const HtmlNode *node)
 /* The document node of layout box idx: one of the document's, or (a pseudo
  * element's box and its text) one of the layout's own; NULL for none. */
 #define LAYOUT_PSEUDO_DOM0 0x40000000
+#define LAYOUT_ANON_DOM0 0x50000000
 struct HtmlNode *css_layout_box_node(const LayoutContext *ctx, int idx);
 
 /* The text a text box lays out and paints (white space processed). */

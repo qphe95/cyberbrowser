@@ -159,6 +159,8 @@ typedef struct CssCustomProps {
 
 static inline HtmlNode* layout_node_dom(LayoutContext *ctx, int dom_idx)
 {
+    if (dom_idx >= LAYOUT_ANON_DOM0)   /* (an anonymous table box) */
+        return dom_idx - LAYOUT_ANON_DOM0 < ctx->anon_nodes_n ? &ctx->anon_nodes[dom_idx - LAYOUT_ANON_DOM0] : NULL;
     if (dom_idx >= LAYOUT_PSEUDO_DOM0)   /* (a pseudo element's box or its text) */
         return dom_idx - LAYOUT_PSEUDO_DOM0 < ctx->pseudo_nodes_n ? &ctx->pseudo_nodes[dom_idx - LAYOUT_PSEUDO_DOM0] : NULL;
     return (HtmlNode*)po_array_payload(&ctx->doc->array, dom_idx);
@@ -701,6 +703,7 @@ void css_layout_tree_free(LayoutContext *ctx)
     free(ctx->pieces);
     for (int k = 0; k < ctx->pseudo_nodes_n; k++) free(ctx->pseudo_nodes[k].text_content);
     free(ctx->pseudo_nodes);
+    free(ctx->anon_nodes);
     free(ctx->pseudo_rec);
     free(ctx->pseudo_pairs);
     for (int j = 0; j < ctx->parked_n; j++) {
@@ -4654,7 +4657,6 @@ static bool css_content_decode_string(const char *value, char *out, size_t outsz
                         p++; nd++;
                     }
                     if (isspace((unsigned char)*p)) p++;  /* escape terminator */
-                    if (cp == 0xA0) cp = 0x20;  /* nbsp -> space */
                     /* encode cp as UTF-8 */
                     if (cp < 0x80) {
                         if (o + 1 >= outsz) goto trunc;
@@ -8837,6 +8839,23 @@ static bool layout_grow(void **p, int old_n, int n, size_t each, int fill)
     return true;
 }
 
+/* The per-box arrays grown from old_n to n boxes (the new ones cleared). */
+static bool layout_grow_box_arrays(LayoutContext *ctx, int old_n, int n)
+{
+    return layout_grow((void **)&ctx->slot, old_n, n, sizeof(LayoutStyle *), 0) &&
+           layout_grow((void **)&ctx->ids, old_n, n, sizeof(uint32_t), 0) &&
+           layout_grow((void **)&ctx->custom_props, old_n, n, sizeof(CssCustomProps *), 0) &&
+           layout_grow((void **)&ctx->style_ok, old_n, n, 1, 0) &&
+           layout_grow((void **)&ctx->style_left, old_n, n, 1, 0) &&
+           layout_grow((void **)&ctx->pruned, old_n, n, 1, 0) &&
+           layout_grow((void **)&ctx->has_flags, old_n, n, 1, 0) &&
+           layout_grow((void **)&ctx->sc_key, old_n, n, sizeof(uint64_t), 0) &&
+           layout_grow((void **)&ctx->sc_entry, old_n, n, sizeof(int), 0) &&
+           layout_grow((void **)&ctx->slot_ver, old_n, n, sizeof(uint32_t), 0) &&
+           layout_grow((void **)&ctx->has_bits, old_n, n, 8, 0xFF) &&
+           layout_grow((void **)&ctx->flow_old, old_n, n, sizeof(int), 0xFF);
+}
+
 static void layout_drop_text_caches(LayoutContext *ctx)
 {
     if (ctx->text_norm) {
@@ -8881,6 +8900,28 @@ static void layout_parked_release(LayoutContext *ctx)
 
 /* Back to the document-built tree: the pseudo boxes out of their elements'
  * children, parked for the next layout (park) or their slots given back. */
+/* Link the document-built boxes among c and its following siblings under
+ * owner (an added box: the document-built boxes in it, an anonymous
+ * table box's children). */
+static void layout_detach_keep(LayoutNodeRef *nodes, int base, int owner, int c, int *prev, int *cnt)
+{
+    while (c >= 0) {
+        int next = nodes[c].next_sibling_idx;
+        if (c < base) {
+            nodes[c].parent_idx = owner;
+            nodes[c].prev_sibling_idx = *prev;
+            nodes[c].next_sibling_idx = -1;
+            if (*prev < 0) nodes[owner].first_child_idx = c;
+            else nodes[*prev].next_sibling_idx = c;
+            *prev = c;
+            ++*cnt;
+        } else {
+            layout_detach_keep(nodes, base, owner, nodes[c].first_child_idx, prev, cnt);
+        }
+        c = next;
+    }
+}
+
 static void layout_pseudo_detach_ex(LayoutContext *ctx, bool park)
 {
     layout_parked_release(ctx);
@@ -8893,21 +8934,15 @@ static void layout_pseudo_detach_ex(LayoutContext *ctx, bool park)
         int prev = -1, cnt = 0;
         int c = nodes[owner].first_child_idx;
         nodes[owner].first_child_idx = -1;
-        while (c >= 0) {
-            int next = nodes[c].next_sibling_idx;
-            if (c < base) {
-                nodes[c].prev_sibling_idx = prev;
-                nodes[c].next_sibling_idx = -1;
-                if (prev < 0) nodes[owner].first_child_idx = c;
-                else nodes[prev].next_sibling_idx = c;
-                prev = c;
-                cnt++;
-            }
-            c = next;
-        }
+        layout_detach_keep(nodes, base, owner, c, &prev, &cnt);
         nodes[owner].child_count = cnt;
     }
     layout_drop_text_caches(ctx);
+    for (int i = base + ctx->pseudo_nodes_n; i < n; i++) layout_slot_give(ctx, ctx->slot[i]);
+    free(ctx->anon_nodes);
+    ctx->anon_nodes = NULL;
+    ctx->anon_nodes_n = 0;
+    n = base + ctx->pseudo_nodes_n;
     int pairs = ctx->pseudo_nodes_n / 2;
     if (park && ctx->style_gen && ctx->pseudo_pairs && ctx->ids && pairs > 0 &&
         (ctx->parked = (LayoutParkedPseudo *)calloc((size_t)pairs, sizeof(LayoutParkedPseudo)))) {
@@ -8996,18 +9031,7 @@ static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
     HtmlNode *hn = (HtmlNode *)calloc((size_t)2 * m, sizeof(HtmlNode));
     LayoutPseudoPair *pairs = (LayoutPseudoPair *)calloc((size_t)m, sizeof(LayoutPseudoPair));
     if (!hn || !pairs) { free(hn); free(pairs); layout_parked_release(ctx); return; }
-    if (!layout_grow((void **)&ctx->slot, base, n, sizeof(LayoutStyle *), 0) ||
-        !layout_grow((void **)&ctx->ids, base, n, sizeof(uint32_t), 0) ||
-        !layout_grow((void **)&ctx->custom_props, base, n, sizeof(CssCustomProps *), 0) ||
-        !layout_grow((void **)&ctx->style_ok, base, n, 1, 0) ||
-        !layout_grow((void **)&ctx->style_left, base, n, 1, 0) ||
-        !layout_grow((void **)&ctx->pruned, base, n, 1, 0) ||
-        !layout_grow((void **)&ctx->has_flags, base, n, 1, 0) ||
-        !layout_grow((void **)&ctx->sc_key, base, n, sizeof(uint64_t), 0) ||
-        !layout_grow((void **)&ctx->sc_entry, base, n, sizeof(int), 0) ||
-        !layout_grow((void **)&ctx->slot_ver, base, n, sizeof(uint32_t), 0) ||
-        !layout_grow((void **)&ctx->has_bits, base, n, 8, 0xFF) ||
-        !layout_grow((void **)&ctx->flow_old, base, n, sizeof(int), 0xFF)) {
+    if (!layout_grow_box_arrays(ctx, base, n)) {
         free(hn);
         free(pairs);
         layout_parked_release(ctx);
@@ -9583,6 +9607,161 @@ static void layout_counters(LayoutContext *ctx)
     free(cs.v);
 }
 
+/* ---- Anonymous table boxes (CSS 2.1 section 17.2.1) ----
+ * After the pseudo boxes, top down: a table's (or row group's) run of
+ * children that are not rows, row groups, captions or columns goes in an
+ * anonymous row; a row's run of non-cells in an anonymous cell; anywhere
+ * else a run of table parts goes in an anonymous table (inline-table in an
+ * inline).  White space that would collapse, out-of-flow and display:none
+ * children pass between a run's members without ending it. */
+static const char k_anon_table[] = "::table", k_anon_row[] = "::row", k_anon_cell[] = "::cell";
+
+static bool table_is_table(const LayoutBox *b);
+static bool layout_is_table_part(const LayoutBox *b);
+
+/* How a box's children are fixed: 0 not, 1 a table's, 2 a row group's,
+ * 3 a row's, 4 any other box's. */
+static int anon_parent_kind(const LayoutContext *ctx, int p)
+{
+    const LayoutBox *b = &ctx->boxes[p];
+    if (b->s->display == CSS_DISPLAY_NONE || b->s->skipped || b->s->display == CSS_DISPLAY_FLEX ||
+        b->s->display == CSS_DISPLAY_GRID)
+        return 0;
+    HtmlNode *n = layout_node_dom((LayoutContext *)ctx, ctx->tree.nodes[p].dom_node_idx);
+    if (!n || n->type != HTML_NODE_ELEMENT) return 0;
+    if (b->s->table_role == 1) return table_is_table(b) || b->s->inline_level ? 1 : 0;
+    if (b->s->table_role == 2) return 2;
+    if (b->s->table_role == 3) return 3;
+    if (b->s->table_role == 6) return 0;   /* (a column group: its columns) */
+    return 4;
+}
+
+/* Child c for a kind of parent: 0 passes (white space and the like), 1 in
+ * a run, 2 ends one. */
+static int anon_child_class(LayoutContext *ctx, int c, int kind)
+{
+    HtmlNode *n = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
+    const LayoutBox *b = &ctx->boxes[c];
+    if (!n) return 0;
+    if (n->type == HTML_NODE_TEXT) {
+        if (b->s->white_space == 2 || b->s->white_space == 3) return kind == 4 ? 2 : 1;
+        if (layout_text_is_whitespace(css_layout_node_text(ctx, n))) return 0;
+        return kind == 4 ? 2 : 1;
+    }
+    if (n->type != HTML_NODE_ELEMENT) return 0;
+    if (b->s->display == CSS_DISPLAY_NONE || b->s->position == CSS_POSITION_ABSOLUTE ||
+        b->s->position == CSS_POSITION_FIXED)
+        return 0;
+    int role = layout_is_table_part(b) ? b->s->table_role : 0;
+    if (kind == 1) return role == 2 || role == 3 || role == 5 || role == 6 ? 2 : 1;
+    if (kind == 2) return role == 3 || role == 6 ? 2 : 1;
+    if (kind == 3) return role == 4 ? 2 : 1;
+    return role >= 2 && role <= 6 ? 1 : 2;
+}
+
+typedef struct { int cap, anon_cap; bool em_defer; } AnonFix;
+
+/* A new box wrapping children first..last of p (role: the table part it
+ * is); -1 when out of memory. */
+static int anon_wrap(LayoutContext *ctx, AnonFix *F, int p, int first, int last, int role, bool inline_table)
+{
+    int w = ctx->tree.count;
+    if (w + 1 >= F->cap) {
+        int nc = w + w / 4 + 64;
+        LayoutNodeRef *nn = (LayoutNodeRef *)realloc(ctx->tree.nodes, (size_t)(nc + 1) * sizeof(LayoutNodeRef));
+        if (!nn) return -1;
+        ctx->tree.nodes = nn;
+        LayoutBox *nb = (LayoutBox *)realloc(ctx->boxes, (size_t)(nc + 1) * sizeof(LayoutBox));
+        if (!nb) return -1;
+        ctx->boxes = nb;
+        if (!layout_grow_box_arrays(ctx, w, nc)) return -1;
+        F->cap = nc;
+    }
+    if (ctx->anon_nodes_n == F->anon_cap) {
+        int nc = F->anon_cap ? F->anon_cap * 2 : 16;
+        HtmlNode *na = (HtmlNode *)realloc(ctx->anon_nodes, (size_t)nc * sizeof(HtmlNode));
+        if (!na) return -1;
+        ctx->anon_nodes = na;
+        F->anon_cap = nc;
+    }
+    int a = ctx->anon_nodes_n++;
+    HtmlNode *hn = &ctx->anon_nodes[a];
+    memset(hn, 0, sizeof(*hn));
+    hn->array_node.parent = hn->array_node.first_child = hn->array_node.next_sibling = hn->array_node.prev_sibling = -1;
+    hn->type = HTML_NODE_ELEMENT;
+    hn->tag_name = role == 1 ? k_anon_table : role == 3 ? k_anon_row : k_anon_cell;
+    LayoutNodeRef *N = ctx->tree.nodes, *W = &N[w];
+    W->dom_node_idx = LAYOUT_ANON_DOM0 + a;
+    W->parent_idx = p;
+    W->prev_sibling_idx = N[first].prev_sibling_idx;
+    W->next_sibling_idx = N[last].next_sibling_idx;
+    if (W->prev_sibling_idx >= 0) N[W->prev_sibling_idx].next_sibling_idx = w;
+    else N[p].first_child_idx = w;
+    if (W->next_sibling_idx >= 0) N[W->next_sibling_idx].prev_sibling_idx = w;
+    W->first_child_idx = first;
+    N[first].prev_sibling_idx = -1;
+    N[last].next_sibling_idx = -1;
+    int cnt = 0;
+    for (int c = first; c >= 0; c = N[c].next_sibling_idx) { N[c].parent_idx = w; cnt++; }
+    W->child_count = cnt;
+    N[p].child_count -= cnt - 1;
+    ctx->tree.count = w + 1;
+    ctx->slot[w] = layout_slot_take(ctx);
+    memset(&ctx->boxes[w], 0, sizeof(LayoutBox));
+    ctx->boxes[w].s = ctx->slot[w];
+    ctx->custom_props[w] = ctx->custom_props[p];
+    layout_box_init(ctx, w);
+    LayoutStyle *st = ctx->boxes[w].s;
+    st->display = inline_table ? CSS_DISPLAY_BLOCK : CSS_DISPLAY_OTHER;
+    st->inline_level = inline_table ? 1 : 0;
+    st->table_role = (unsigned char)role;
+    style_finish_box_em(F->em_defer, &ctx->boxes[w], &ctx->boxes[p], true);
+    return w;
+}
+
+static bool anon_fix(LayoutContext *ctx, AnonFix *F, int p, int depth)
+{
+    if (depth > 400 || ctx->boxes[p].s->display == CSS_DISPLAY_NONE) return true;
+    int kind = anon_parent_kind(ctx, p);
+    for (int c = kind ? ctx->tree.nodes[p].first_child_idx : -1; c >= 0;) {
+        if (anon_child_class(ctx, c, kind) != 1) { c = ctx->tree.nodes[c].next_sibling_idx; continue; }
+        int last = c;
+        for (int k = ctx->tree.nodes[c].next_sibling_idx; k >= 0; k = ctx->tree.nodes[k].next_sibling_idx) {
+            int cl = anon_child_class(ctx, k, kind);
+            if (cl == 2) break;
+            if (cl == 1) last = k;
+        }
+        int role = kind == 3 ? 4 : kind == 4 ? 1 : 3;
+        bool inl = kind == 4 && ctx->boxes[p].s->display == CSS_DISPLAY_INLINE;
+        int w = anon_wrap(ctx, F, p, c, last, role, inl);
+        if (w < 0) return false;
+        c = ctx->tree.nodes[w].next_sibling_idx;
+    }
+    for (int c = ctx->tree.nodes[p].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx)
+        if (ctx->tree.nodes[c].first_child_idx >= 0 && !anon_fix(ctx, F, c, depth + 1)) return false;
+    return true;
+}
+
+static void layout_anon_tables(LayoutContext *ctx, bool em_defer)
+{
+    int n = ctx->tree.count;
+    bool any = false;
+    for (int i = 0; i < n && !any; i++) any = ctx->boxes[i].s->table_role != 0;
+    if (!any || ctx->tree.root_idx < 0) return;
+    int target = ctx->has_target_first >= 0 && ctx->has_target_first < n && ctx->tree.preorder
+                 ? ctx->tree.preorder[ctx->has_target_first] : -1;
+    layout_drop_text_caches(ctx);
+    AnonFix F = { n + 1, 0, em_defer };
+    anon_fix(ctx, &F, ctx->tree.root_idx, 0);
+    if (ctx->tree.count == n) return;
+    if (g_css_log > 0) fprintf(stderr, "[css] anonymous table boxes: %d\n", ctx->tree.count - n);
+    layout_rebuild_orders(ctx);
+    n = ctx->tree.count;
+    ctx->has_target_first = n;
+    for (int k = 0; target >= 0 && ctx->tree.preorder && k < n; k++)
+        if (ctx->tree.preorder[k] == target) { ctx->has_target_first = k; break; }
+}
+
 static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
 {
     STAGE_BEGIN();
@@ -9869,6 +10048,7 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
     STAGE("merge");
     layout_pseudo_attach(ctx, P.em_defer);
     layout_counters(ctx);
+    layout_anon_tables(ctx, P.em_defer);
     STAGE("pseudo boxes");
     layout_blockify(ctx);
     STAGE("blockify");
@@ -10874,45 +11054,6 @@ static double layout_table_intrinsic(LayoutContext *ctx, int idx, bool want_max)
 static bool table_is_table(const LayoutBox *b);
 static bool table_skip_child(LayoutContext *ctx, int c);
 static void layout_table_box(LayoutContext *ctx, int idx, LayoutBox *tb);
-static __thread int t_anon_parent, t_anon_first, t_anon_last;
-/* Can kids[from..to] be laid out as an anonymous table here: some rows or
- * cells, and rows of cells only?  (A row's other content would need an
- * anonymous cell around it, which has no box to lay it out in.) */
-static bool layout_anon_row_ok(LayoutContext *ctx, int row)
-{
-    for (int k = ctx->tree.nodes[row].first_child_idx; k >= 0; k = ctx->tree.nodes[k].next_sibling_idx) {
-        if (table_skip_child(ctx, k)) continue;
-        const LayoutBox *kb = layout_box(ctx, k);
-        if (kb->s->display == CSS_DISPLAY_NONE) continue;
-        if (kb->s->table_role != 4) return false;
-    }
-    return true;
-}
-
-static bool layout_anon_table_run_ok(LayoutContext *ctx, const int *kids, int from, int to)
-{
-    bool body = false;
-    for (int i = from; i <= to; i++) {
-        int c = kids[i];
-        const LayoutBox *b = layout_box(ctx, c);
-        unsigned char role = b->s->table_role;
-        if (role == 4) body = true;
-        else if (role == 3) {
-            body = true;
-            if (!layout_anon_row_ok(ctx, c)) return false;
-        } else if (role == 2) {
-            body = true;
-            for (int k = ctx->tree.nodes[c].first_child_idx; k >= 0; k = ctx->tree.nodes[k].next_sibling_idx) {
-                if (table_skip_child(ctx, k)) continue;
-                const LayoutBox *kb = layout_box(ctx, k);
-                if (kb->s->display == CSS_DISPLAY_NONE) continue;
-                if (kb->s->table_role == 3) { if (!layout_anon_row_ok(ctx, k)) return false; }
-                else if (kb->s->table_role != 4) return false;
-            }
-        }
-    }
-    return body;
-}
 
 /* A table part (row group, row, cell, column, caption) in the flow. */
 static bool layout_is_table_part(const LayoutBox *b)
@@ -11475,57 +11616,6 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
             continue;
         }
 
-        if (box->s->table_role == 0 && !table_is_table(box) && layout_is_table_part(child)) {
-            /* Table parts outside a table: the run of them (white space
-             * between them left out) in an anonymous table (§17.2.1), a
-             * block of this flow. */
-            int j = i, last = c;
-            for (int k = i + 1; k < nkids && !(piece_of && piece_of[k] >= 0); k++) {
-                LayoutBox *kb = layout_box(ctx, kids[k]);
-                if (layout_is_table_part(kb)) { j = k; last = kids[k]; continue; }
-                if (!table_skip_child(ctx, kids[k])) break;
-            }
-            if (!layout_anon_table_run_ok(ctx, kids, i, j)) goto not_anon_table;
-            if (line_member_count > 0) {
-                layout_align_line(ctx, line_members, line_member_count,
-                                  content_left, avail_width, box->s->text_align);
-                line_member_count = 0;
-            }
-            if (cur.line_box > 0.0) {
-                cur.y += cur.line_box;
-                cur.line_box = 0.0;
-                pending_mb = 0.0;
-            }
-            cur.x = content_left;
-            cur.y += pending_mb;
-            pending_mb = 0.0;
-            LayoutBox tbox;
-            LayoutStyle tstyle = *layout_box_template()->s;
-            memset(&tbox, 0, sizeof(tbox));
-            tstyle.display = CSS_DISPLAY_OTHER;
-            tstyle.table_role = 1;
-            tstyle.font_size = box->s->font_size;
-            tbox.s = &tstyle;
-            tbox.x = content_left;
-            tbox.y = cur.y;
-            tbox.width = avail_width;
-            layout_update_content_sizes(&tbox);
-            int sp = t_anon_parent, sf = t_anon_first, sl = t_anon_last;
-            t_anon_parent = idx;
-            t_anon_first = c;
-            t_anon_last = last;
-            layout_table_box(ctx, idx, &tbox);
-            t_anon_parent = sp;
-            t_anon_first = sf;
-            t_anon_last = sl;
-            if (tbox.height > 0.0) {
-                cur.y = tbox.y + tbox.height;
-                any_placed = true;
-            }
-            i = j;
-            continue;
-        }
-not_anon_table:
 
         /* Resolve used sizes against this container's content box. */
         layout_resolve_used_sizes(child, layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx),
@@ -14212,18 +14302,11 @@ static void table_row_cells(LayoutContext *ctx, TableGrid *T, int row_box, int r
     }
 }
 
-/* An anonymous table (CSS 2.1 §17.2.1) around a run of table parts in a
- * block: its parent and the run's first and last children (parent -1:
- * none being laid out). */
-static __thread int t_anon_parent = -1, t_anon_first = -1, t_anon_last = -1;
-
 /* Rows and cells of a table or row group's children. */
 static bool table_collect_children(LayoutContext *ctx, TableGrid *T, int parent, int group, bool *real)
 {
     int anon = -1;   /* the anonymous row open for loose cells */
-    bool run = parent == t_anon_parent && group < 0;
-    for (int c = run ? t_anon_first : ctx->tree.nodes[parent].first_child_idx; c >= 0;
-         c = (run && c == t_anon_last) ? -1 : ctx->tree.nodes[c].next_sibling_idx) {
+    for (int c = ctx->tree.nodes[parent].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
         LayoutBox *cb = layout_box(ctx, c);
         if (!layout_is_in_flow(cb) || table_skip_child(ctx, c)) continue;
         unsigned char role = cb->s->display == CSS_DISPLAY_NONE ? 0 : cb->s->table_role;
@@ -14469,8 +14552,7 @@ static void layout_table(LayoutContext *ctx, int idx)
     layout_table_box(ctx, idx, layout_box(ctx, idx));
 }
 
-/* Table box tb of idx's children: idx's own box, or (an anonymous table
- * around a run of idx's children, t_anon_*) one of its own. */
+/* Table box tb (idx's own) of idx's children. */
 static void layout_table_box(LayoutContext *ctx, int idx, LayoutBox *tb)
 {
     TableGrid T;

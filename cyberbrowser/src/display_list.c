@@ -1069,17 +1069,34 @@ static bool is_replaced_tag(const HtmlNode *n)
 /* One past the last layout index in box i's subtree (preorder numbering of
  * the document-built boxes; pseudo-element boxes, numbered after them, are
  * in their element's subtree by mask_covers). */
+/* The last document-built child of e, looking into added boxes (an
+ * anonymous table box wraps document-built ones); -1 for none. */
+static int last_base_child(const LayoutContext *ctx, int e, int base)
+{
+    int last = -1;
+    for (int c = ctx->tree.nodes[e].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) last = c;
+    for (int c = last; c >= 0; c = ctx->tree.nodes[c].prev_sibling_idx) {
+        if (c < base) return c;
+        int b = last_base_child(ctx, c, base);
+        if (b >= 0) return b;
+    }
+    return -1;
+}
+
 static int subtree_end(const LayoutContext *ctx, int i)
 {
     int base = ctx->base_count > 0 && ctx->base_count < ctx->tree.count ? ctx->base_count : ctx->tree.count;
     int e = i;
-    for (;;) {
-        int c = ctx->tree.nodes[e].first_child_idx, last = -1;
-        for (; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx)
-            if (c < base || e >= base) last = c;
-        if (last < 0) break;
-        e = last;
+    if (i >= base) {
+        for (;;) {
+            int c = ctx->tree.nodes[e].first_child_idx, last = -1;
+            for (; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) last = c;
+            if (last < 0) break;
+            e = last;
+        }
+        return e + 1;
     }
+    for (int c; (c = last_base_child(ctx, e, base)) >= 0;) e = c;
     return e + 1;
 }
 
