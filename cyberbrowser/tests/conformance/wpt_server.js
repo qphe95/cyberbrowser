@@ -333,7 +333,9 @@ http.createServer((req, res) => {
     if (REFTEST && /^(text\/html|application\/xhtml\+xml)/.test(headers['content-type']) &&
         steps.some(st => '/' + st.url.split('?')[0] === url.pathname)) {
         /* (inside the root element, so XHTML stays well-formed) */
-        const text = data.toString('utf8'), end = text.toLowerCase().lastIndexOf('</html>');
+        /* (found in the text itself: lower-casing can change its length, 'İ' -> 'i̇') */
+        const text = data.toString('utf8'), ends = [...text.matchAll(/<\/html>/gi)];
+        const end = ends.length ? ends[ends.length - 1].index : -1;
         data = Buffer.from(end < 0 ? text + REFREADY : text.slice(0, end) + REFREADY + text.slice(end), 'utf8');
     }
     res.writeHead(200, headers);

@@ -761,6 +761,7 @@ static void for_each_branch(Builder *b, const char *selector, BranchFn fn, void 
         char quote_char = 0;
         while (i < len) {
             char c = selector[i];
+            if (c == '\\' && i + 1 < len) { i += 2; continue; }   /* (\X: one character) */
             if (!in_quote) {
                 if (c == '"' || c == '\'') { in_quote = true; quote_char = c; }
                 else if (c == '(') paren_depth++;

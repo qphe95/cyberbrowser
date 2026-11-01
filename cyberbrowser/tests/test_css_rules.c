@@ -3,6 +3,7 @@
  * after each kind of error recovery. */
 #include "test_runner.h"
 #include "css_parser.h"
+#include "css_selector_internal.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -106,6 +107,9 @@ TEST(test_css_rules_declarations) {
      * the next ;) */
     EXPECT_RULES("div{a:b; f:'Courier\n a:red; a:c}", "div{a:b;a:c;}");
     EXPECT_RULES("p{a:red url( { t ); b:c}", "p{b:c;}");
+    /* (url( written with escapes is still a url) */
+    EXPECT_RULES("p{a:\\url(x.png); b:U\\R\\l(y.png); c:\\000075 rl(z) url(w)}",
+                 "p{a:url(\"x.png\");b:url(\"y.png\");c:url(\"z\") url(\"w\");}");
     return true;
 }
 
@@ -123,6 +127,45 @@ TEST(test_css_rules_import_prefix) {
     const char *d = "@media print { } @import 'x';";
     css_sheet_item_skip(d, strlen(d), 0, &counts);
     ASSERT_TRUE(counts);
+    return true;
+}
+
+TEST(test_css_rules_selector_escapes) {
+    /* (escapes resolved; what would read as something else kept as \X) */
+    EXPECT_RULES("\\64\\69\\76{a:b}", "div{a:b;}");
+    EXPECT_RULES("di\\v{a:b}", "div{a:b;}");
+    EXPECT_RULES(".\\31st\\'Class\\27 /* c */ {a:b}", ".\\1st\\'Class\\'{a:b;}");
+    EXPECT_RULES("p\\.class#id{a:b} p.class\\#id{c:d}", "p\\.class#id{a:b;} p.class\\#id{c:d;}");
+    /* (a hex escape takes one white space after it) */
+    EXPECT_RULES(".css\\0031 p{a:b} .css\\0032 p{c:d}", ".css1p{a:b;} .css2p{c:d;}");
+    EXPECT_RULES(".-\\31ident{a:b} #-\\31ident{c:d}", ".-\\1ident{a:b;} #-\\1ident{c:d;}");
+    EXPECT_RULES("p[title=\"this is\\\n a test\"]{a:b}", "p[title=\"this is a test\"]{a:b;}");
+    /* (an escaped { is a name, so the prelude runs on to the next one) */
+    EXPECT_RULES("p \\{ a: b; \\} q{c:d} r{e:f}", "r{e:f;}");
+    return true;
+}
+
+TEST(test_css_rules_selector_invalid) {
+    EXPECT_RULES(".-1ident, .a{a:b} #-1ident, .b{a:b} .6x, .c{a:b} #6x, .d{a:b} .ok{c:d}", ".ok{c:d;}");
+    EXPECT_RULES("[1digit=\"true\"], div{a:b} [-1x], p{a:b} [ title ], q{c:d}", "[ title ], q{c:d;}");
+    EXPECT_RULES("a. {a:b} a.\\31 {c:d}", "a.\\1{c:d;}");
+    /* (the token path too: an escape elsewhere in the prelude) */
+    EXPECT_RULES(".\\61, .6x{a:b} .\\61, #6x{a:b} .\\61{c:d}", ".a{c:d;}");
+    return true;
+}
+
+/* Names in selector text read \X as the character X. */
+TEST(test_css_rules_selector_names) {
+    CssSelectorPart parts[CSS_MAX_SIMPLE_PARTS];
+    int n = css_sel_parse_chain(".\\1st\\'Class\\'", parts, CSS_MAX_SIMPLE_PARTS);
+    ASSERT_TRUE(n == 1 && parts[0].simple.class_count == 1);
+    ASSERT_TRUE(strcmp(parts[0].simple.classes[0], "1st'class'") == 0);
+    n = css_sel_parse_chain("p\\.class#a\\:b [x\\=y]", parts, CSS_MAX_SIMPLE_PARTS);
+    ASSERT_TRUE(n == 2);
+    ASSERT_TRUE(strcmp(parts[0].simple.tag, "p.class") == 0 && strcmp(parts[0].simple.id, "a:b") == 0);
+    ASSERT_TRUE(parts[1].simple.attr_count == 1 && strcmp(parts[1].simple.attrs[0], "x=y") == 0);
+    n = css_sel_parse_chain(".a\\ b", parts, CSS_MAX_SIMPLE_PARTS);
+    ASSERT_TRUE(n == 1 && strcmp(parts[0].simple.classes[0], "a b") == 0);
     return true;
 }
 
@@ -157,5 +200,8 @@ void run_css_rules_tests(void) {
     RUN_TEST(test_css_rules_top_level);
     RUN_TEST(test_css_rules_declarations);
     RUN_TEST(test_css_rules_import_prefix);
+    RUN_TEST(test_css_rules_selector_escapes);
+    RUN_TEST(test_css_rules_selector_invalid);
+    RUN_TEST(test_css_rules_selector_names);
     RUN_TEST(test_css_rules_ranges);
 }

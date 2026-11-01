@@ -70,13 +70,27 @@ static void css_str_tolower(char *s) {
     for (char *p = s; *p; p++) *p = (char)tolower((unsigned char)*p);
 }
 
-/* Copy at most dst_size-1 bytes, lowercasing. */
-static void css_strncpy_lower(char *dst, const char *src, size_t n, size_t dst_size) {
-    size_t i;
-    for (i = 0; i < n && i + 1 < dst_size && src[i]; i++) {
-        dst[i] = (char)tolower((unsigned char)src[i]);
+/* A selector name's end from i: up to one of the stop characters, an
+ * escaped character (\X) being part of the name. */
+static size_t css_sel_name_end(const char *s, size_t n, size_t i, const char *stop)
+{
+    while (i < n && !strchr(stop, s[i])) {
+        if (s[i] == '\\' && i + 1 < n) i++;
+        i++;
     }
-    dst[i] = '\0';
+    return i;
+}
+
+/* A selector name copied lowercase, \X read as X (at most dst_size-1
+ * bytes). */
+static void css_sel_name_copy(char *dst, const char *src, size_t n, size_t dst_size)
+{
+    size_t o = 0;
+    for (size_t i = 0; i < n && o + 1 < dst_size && src[i]; i++) {
+        if (src[i] == '\\' && i + 1 < n) i++;
+        dst[o++] = (char)tolower((unsigned char)src[i]);
+    }
+    dst[o] = '\0';
 }
 
 /* Convert a CSS property like "background-color" to "backgroundColor". */
@@ -326,6 +340,8 @@ static char *decl_value_text(const CssTz *tz, const CssToken *t, int a, int b)
     bool plain = true;
     for (int k = a; k < b && plain; k++) {
         if (t[k].flags & CT_F_ARENA) plain = false;
+        /* (a url whose url( was written with escapes: \75 rl() */
+        else if (t[k].type == CT_URL && strncasecmp(tz->s + t[k].start, "url(", 4) != 0) plain = false;
         else if (k + 1 < b && t[k].end != t[k + 1].start) plain = false;   /* (a comment between) */
     }
     if (plain) {
@@ -347,7 +363,7 @@ static char *decl_value_text(const CssTz *tz, const CssToken *t, int a, int b)
         /* (a comment between two tokens: they stay apart) */
         if (k > a && t[k - 1].end != x->start && t[k - 1].type != CT_WHITESPACE && o.n && o.p[o.n - 1] != ' ')
             str_put(&o, " ", 1);
-        if (!(x->flags & CT_F_ARENA)) {
+        if (!(x->flags & CT_F_ARENA) && x->type != CT_URL) {
             str_put(&o, tz->s + x->start, x->end - x->start);
             continue;
         }
@@ -638,18 +654,18 @@ static bool css_ident_starts(const char *s, size_t len, size_t i)
 {
     if (i >= len) return false;
     unsigned char c = (unsigned char)s[i];
-    if (isalpha(c) || c == '_' || c >= 0x80) return true;
+    if (c != '-' && k_name_char[c] == 2) return true;
     if (c == '\\') return i + 1 < len && s[i + 1] != '\n' && s[i + 1] != '\r' && s[i + 1] != '\f';
     if (c != '-' || i + 1 >= len) return false;
     unsigned char d = (unsigned char)s[i + 1];
-    if (isalpha(d) || d == '_' || d == '-' || d >= 0x80) return true;
+    if (k_name_char[d] == 2) return true;
     return d == '\\' && i + 2 < len && s[i + 2] != '\n' && s[i + 2] != '\r' && s[i + 2] != '\f';
 }
 
 /* The characters the text prelude scan looks at. */
 static const unsigned char k_prelude_special[256] = {
     ['{'] = 1, ['}'] = 1, ['('] = 1, [')'] = 1, ['['] = 1, [']'] = 1, ['"'] = 1, ['\''] = 1,
-    ['/'] = 1, ['\\'] = 1, [';'] = 1, ['@'] = 1, ['<'] = 1, ['>'] = 1, [','] = 1,
+    ['/'] = 1, ['\\'] = 1, [';'] = 1, ['@'] = 1, ['<'] = 1, ['>'] = 1, [','] = 1, ['.'] = 1, ['#'] = 1,
 };
 
 /* A selector's start at s[i] (white space skipped) that no selector has:
@@ -681,10 +697,22 @@ static bool css_prelude_fast(const char *s, size_t len, size_t pos, bool at, siz
             if (d) return false;
             *brace = i;
             return true;
-        case '(':
         case '[':
+            if (!at) {
+                /* (an attribute's name, maybe after a namespace) */
+                size_t j = i + 1;
+                while (j < len && css_is_space(s[j])) j++;
+                if (!(j < len && (s[j] == '*' || s[j] == '|')) && !css_ident_starts(s, len, j)) *bad = true;
+            }
+            /* fall through */
+        case '(':
             if (d == (int)sizeof(st)) return false;
             st[d++] = c == '(' ? ')' : ']';
+            break;
+        case '.':
+        case '#':
+            /* (a class or an id is an identifier: not .6x, #-1x) */
+            if (!at && !css_ident_starts(s, len, i + 1)) *bad = true;
             break;
         case ')':
         case ']':
@@ -795,25 +823,98 @@ static size_t css_tokens_skip_block(CssTz *tz)
     return tz->n;
 }
 
+/* An identifier's value in selector text: name characters as they are,
+ * any other (and a digit that would start it) as \X, which the selector
+ * parser reads as the character X. */
+static void sel_put_ident(Str *o, const char *v, size_t l)
+{
+    for (size_t i = 0; i < l; i++) {
+        unsigned char c = (unsigned char)v[i];
+        bool lead_digit = c >= '0' && c <= '9' && (i == 0 || (i == 1 && v[0] == '-'));
+        if (!k_name_char[c] || lead_digit) str_put(o, "\\", 1);
+        str_put(o, v + i, 1);
+    }
+}
+
+/* Token t of a prelude appended to selector text o. */
+static void sel_put_token(Str *o, const CssTz *tz, const CssToken *t)
+{
+    size_t vl;
+    const char *v = css_tok_val(&tz->arena, t, &vl);
+    switch (t->type) {
+    case CT_WHITESPACE:
+        if (o->n && o->p[o->n - 1] != ' ') str_put(o, " ", 1);
+        return;
+    case CT_IDENT:
+        sel_put_ident(o, v, vl);
+        return;
+    case CT_FUNCTION:
+        sel_put_ident(o, v, vl);
+        str_put(o, "(", 1);
+        return;
+    case CT_HASH:
+        str_put(o, "#", 1);
+        sel_put_ident(o, v, vl);
+        return;
+    case CT_STRING:
+        str_put(o, "\"", 1);
+        for (size_t i = 0; i < vl; i++) {
+            if (v[i] == '"' || v[i] == '\\') str_put(o, "\\", 1);
+            str_put(o, v + i, 1);
+        }
+        str_put(o, "\"", 1);
+        return;
+    default:
+        break;
+    }
+    str_put(o, tz->s + t->start, t->end - t->start);
+}
+
 /* A qualified rule's prelude from tokens, from pos.  *block: it ended at a
  * '{' (else at the '}' closing the enclosing block - nested - or at the
  * end); *pre_end where the prelude ends; *bad when it has what no
- * selector has.  Returns where the rule's block starts (after its '{'),
- * or where reading stopped. */
+ * selector has; *sel (when not NULL) its text from the tokens: escapes
+ * as \X, comments gone, white space one space.  Returns where the rule's
+ * block starts (after its '{'), or where reading stopped. */
 static size_t css_prelude_tokens(const char *s, size_t len, size_t pos, bool nested, bool *block,
-                                 size_t *pre_end, bool *bad)
+                                 size_t *pre_end, bool *bad, char **sel)
 {
     CssTz tz;
     css_tz_init(&tz, s, len, pos);
     Closers k = { { 0 }, 0 };
     CssToken t;
-    size_t end = len;
+    size_t end = len, prev_end = pos;
+    Str o = { NULL, 0, 0 };
+    str_put(&o, "", 0);
+    /* (after '.': an identifier; after '[': one, '*' or '|', white space
+     * first) */
+    enum { ANY, IDENT_NEXT, ATTR_NEXT } want = ANY;
     *block = false;
     *pre_end = len;
     while (css_tz_next(&tz, &t) && t.type != CT_EOF) {
         if (t.type == CT_BAD_STRING || t.type == CT_BAD_URL || t.type == CT_CDO || t.type == CT_CDC ||
             t.type == CT_SEMICOLON || t.type == CT_AT_KEYWORD)
             *bad = true;
+        if (!(k.d == 0 && (t.type == CT_LBRACE || (t.type == CT_RBRACE && nested)))) {
+            if (want == IDENT_NEXT && t.type != CT_IDENT) *bad = true;
+            if (want == ATTR_NEXT && t.type != CT_WHITESPACE && t.type != CT_IDENT &&
+                !(t.type == CT_DELIM && (t.delim == '*' || t.delim == '|')))
+                *bad = true;
+            if (want == IDENT_NEXT || t.type != CT_WHITESPACE) want = ANY;
+            if (t.type == CT_DELIM && t.delim == '.') want = IDENT_NEXT;
+            else if (t.type == CT_LBRACKET) want = ATTR_NEXT;
+            else if (t.type == CT_HASH && !(t.flags & CT_F_ID)) *bad = true;
+            /* (a number only in a function's argument: :nth-child(2n+1)) */
+            else if ((t.type == CT_NUMBER || t.type == CT_PERCENTAGE || t.type == CT_DIMENSION) &&
+                     (k.d == 0 || (k.d <= 64 && k.c[k.d - 1] == ']')))
+                *bad = true;
+            /* (a comment between two names keeps them apart) */
+            if (t.start != prev_end && t.type != CT_WHITESPACE && o.n && k_name_char[(unsigned char)o.p[o.n - 1]] &&
+                (k_name_char[(unsigned char)s[t.start]] || s[t.start] == '\\'))
+                str_put(&o, " ", 1);
+            sel_put_token(&o, &tz, &t);
+            prev_end = t.end;
+        }
         if (k.d) {
             if (t.type == CT_LBRACE || t.type == CT_RBRACE) *bad = true;
             if (!closers_close(&k, &t)) closers_open(&k, &t);
@@ -836,7 +937,14 @@ static size_t css_prelude_tokens(const char *s, size_t len, size_t pos, bool nes
         }
         closers_open(&k, &t);
     }
+    if (want != ANY) *bad = true;
     css_tz_free(&tz);
+    while (o.n && o.p[o.n - 1] == ' ') o.p[--o.n] = 0;
+    if (sel && o.p) {
+        size_t a = o.p[0] == ' ';
+        *sel = strdup(o.p + a);
+    }
+    free(o.p);
     return end;
 }
 
@@ -979,16 +1087,20 @@ static size_t css_rule_item(const char *s, size_t len, size_t pos, bool nested, 
     if (s[pos] == '@' && css_ident_starts(s, len, pos + 1)) return css_at_rule(s, len, pos, nested, sheet, cond, counts);
     size_t start = pos, pre_end, brace;
     bool block = true, bad = false, fast = css_prelude_fast(s, len, pos, false, &brace, &bad);
+    char *tsel = NULL;
     if (fast) {
         pre_end = brace;
         pos = brace + 1;
     } else {
         bad = false;
-        pos = css_prelude_tokens(s, len, pos, nested, &block, &pre_end, &bad);
-        if (!block) return pos;
+        pos = css_prelude_tokens(s, len, pos, nested, &block, &pre_end, &bad, &tsel);
+        if (!block) {
+            free(tsel);
+            return pos;
+        }
     }
-    char *sel = bad ? NULL : css_strndup_trim(s + start, pre_end - start);
-    if (sel && !fast && strstr(sel, "/*")) css_strip_comments(sel);
+    char *sel = bad ? NULL : fast ? css_strndup_trim(s + start, pre_end - start) : tsel;
+    if (sel != tsel) free(tsel);
     /* (the text scan has checked what css_prelude_invalid looks for) */
     if (!sel || (!fast && css_prelude_invalid(sel))) {
         free(sel);
@@ -1319,9 +1431,8 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
     } else if (s[i] != '.' && s[i] != '#' && s[i] != '[') {
         /* tag */
         size_t start = i;
-        while (i < n && s[i] != '.' && s[i] != '#' && s[i] != '[' &&
-               s[i] != ':') i++;
-        css_strncpy_lower(out->tag, s + start, i - start, sizeof(out->tag));
+        i = css_sel_name_end(s, n, i, ".#[:");
+        css_sel_name_copy(out->tag, s + start, i - start, sizeof(out->tag));
         out->has_tag = out->tag[0] != '\0';
         out->has_substantive = out->has_substantive || out->has_tag;
     }
@@ -1332,9 +1443,9 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
         if (s[i] == '.') {
             i++;
             size_t start = i;
-            while (i < n && s[i] != '.' && s[i] != '#' && s[i] != '[' && s[i] != ':') i++;
+            i = css_sel_name_end(s, n, i, ".#[:");
             if (out->class_count < CSS_MAX_CLASSES) {
-                css_strncpy_lower(out->classes[out->class_count], s + start, i - start,
+                css_sel_name_copy(out->classes[out->class_count], s + start, i - start,
                                   sizeof(out->classes[0]));
                 out->class_count++;
                 out->has_substantive = true;
@@ -1342,8 +1453,8 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
         } else if (s[i] == '#') {
             i++;
             size_t start = i;
-            while (i < n && s[i] != '.' && s[i] != '#' && s[i] != '[' && s[i] != ':') i++;
-            css_strncpy_lower(out->id, s + start, i - start, sizeof(out->id));
+            i = css_sel_name_end(s, n, i, ".#[:");
+            css_sel_name_copy(out->id, s + start, i - start, sizeof(out->id));
             out->has_id = out->id[0] != '\0';
             out->has_substantive = out->has_substantive || out->has_id;
         } else if (s[i] == ':') {
@@ -1363,9 +1474,7 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
             if (i + 1 < n && s[i] == '*' && s[i + 1] == '|') i += 2;
             else if (i + 1 < n && s[i] == '|' && s[i + 1] != '=') i++;
             size_t attr_start = i;
-            while (i < n && s[i] != '=' && s[i] != '~' && s[i] != '|' &&
-                   s[i] != '^' && s[i] != '$' && s[i] != '*' && s[i] != ']' &&
-                   !css_is_space(s[i])) i++;
+            i = css_sel_name_end(s, n, i, "=~|^$*] \t\n\r\f");
             size_t attr_end = i;
             while (i < n && css_is_space(s[i])) i++;
             int op = CSS_ATTR_OP_EXISTS;
@@ -1436,7 +1545,7 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
             }
             if (attr_end > attr_start && out->attr_count < CSS_MAX_ATTRS) {
                 int k = out->attr_count;
-                css_strncpy_lower(out->attrs[k], s + attr_start,
+                css_sel_name_copy(out->attrs[k], s + attr_start,
                                   attr_end - attr_start, sizeof(out->attrs[0]));
                 out->attr_ops[k] = (unsigned char)op;
                 out->attr_ci[k] = ci;
@@ -1777,6 +1886,7 @@ bool css_selector_matches(const char *selector, HtmlDocument *doc, HtmlNode *nod
         char quote_char = 0;
         while (i < len) {
             char c = selector[i];
+            if (c == '\\' && i + 1 < len) { i += 2; continue; }   /* (\X: one character) */
             if (!in_quote) {
                 if (c == '"' || c == '\'') { in_quote = true; quote_char = c; }
                 else if (c == '(') paren_depth++;
@@ -1821,6 +1931,7 @@ static CssCompiledSelector* css_compile_selector(const char *selector) {
         char quote_char = 0;
         while (i < len) {
             char c = selector[i];
+            if (c == '\\' && i + 1 < len) { i += 2; continue; }   /* (\X: one character) */
             if (!in_quote) {
                 if (c == '"' || c == '\'') { in_quote = true; quote_char = c; }
                 else if (c == '(') paren_depth++;
@@ -1993,6 +2104,7 @@ int css_specificity_from_selector_text_matching(const char *selector,
         char quote_char = 0;
         while (i < len) {
             char c = selector[i];
+            if (c == '\\' && i + 1 < len) { i += 2; continue; }   /* (\X: one character) */
             if (!in_quote) {
                 if (c == '"' || c == '\'') { in_quote = true; quote_char = c; }
                 else if (c == '(') paren_depth++;

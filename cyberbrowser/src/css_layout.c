@@ -3241,12 +3241,12 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             box->s->font_size_set = 1;
         }
     } else if (strcasecmp(prop, "font-family") == 0) {
-        /* Keep only the first comma-separated family name, stripped of quotes and whitespace. */
+        /* The whole list: font_registry_resolve takes the first family it
+         * has, so one it lacks falls through to the next (a generic last). */
         const char *p = value;
         while (*p && isspace((unsigned char)*p)) p++;
-        if (*p == '"' || *p == '\'') p++;
-        size_t len = 0;
-        while (p[len] && p[len] != ',' && p[len] != '"' && p[len] != '\'' && !isspace((unsigned char)p[len])) len++;
+        size_t len = strlen(p);
+        while (len && isspace((unsigned char)p[len - 1])) len--;
         box->s->font_family = layout_intern_or_empty(p, len);
     } else if (strcasecmp(prop, "font-weight") == 0) {
         int w = 400;

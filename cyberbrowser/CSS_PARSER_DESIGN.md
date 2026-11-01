@@ -6,7 +6,26 @@ applies nothing).  Not done in it: the referring document's encoding as a sheet'
 (at-charset-012), which needs the HTML parser to decode non-UTF-8 documents first.  Step 2 done
 (src/css_tokenizer.c, tests/test_css_tokenizer.c).  Step 3 done (css/CSS2 5234 -> 5252, none
 lost; parse time unchanged, below).  Step 4 done (css/CSS2 5252 -> 5271, none lost; parse
-time below the old parser's, below).  Steps 5-6 planned.
+time below the old parser's, below).  Step 5 done (css/CSS2 5271 -> 5294, none lost; parse
+time within noise of step 4's).  Step 6 planned.
+
+As built, step 5: a prelude with an escape (or a comment) is read from tokens and its selector text
+rebuilt: identifiers with escapes resolved, any character that is not a name character (and a digit
+that would start a name) written `\X`, strings re-quoted, white space one space.  The selector
+parser reads `\X` in tag, class, id and attribute names as the character X, and the comma splitters
+skip it.  A selector whose `.` or `#` is not followed by an identifier (`.6x`, `#-1x`), whose `[`
+is not followed by an attribute name (`[1digit]`), or with a number outside a function's argument,
+voids its rule, on the text path and the token path alike.  With these: a url token written
+`\url(` / `U\Rl(` is rebuilt as `url("...")`; font-family keeps the whole list (the font registry
+takes the first family it has: before, only the first name was kept, so a missing one fell back to
+sans-serif), unquoted names with their white space collapsed, `\"` inside a quoted name; and the
+test server's script injection, which used an index into the lower-cased text (`İ` lower-cases to
+two code units), no longer cuts an XHTML page with such characters.  YouTube's replay screenshot
+changes in one place: a heading whose first family is missing now uses the next one in its list.
+
+Left: case-sensitive-003 / 004 need `:lang()` (not supported) and case-insensitive pseudo-element
+names in the places that look for `:before` / `:after` as text; case-sensitive-007 needs XHTML's
+case-sensitive type selectors; escapes-002 / 009 / 011 / 014 - 016 are invalid values (step 6).
 
 As built, step 4: rule lists (css_rule_list, tests/test_css_rules.c) by CSS Syntax 5.4.1 - 5.4.3.
 A qualified rule's prelude runs to its `{` with brackets and strings nested (a `;` or a top-level

@@ -553,10 +553,14 @@ int font_registry_resolve(const char *family_list, int weight, bool italic)
         while (*p == ',' || isspace((unsigned char)*p)) p++;
         if (!*p) break;
         const char *st = p, *en;
-        if (*p == '"' || *p == '\'') {
+        bool quoted = *p == '"' || *p == '\'';
+        if (quoted) {
             char q = *p++;
             st = p;
-            while (*p && *p != q) p++;
+            while (*p && *p != q) {
+                if (*p == '\\' && p[1]) p++;   /* (\" inside: not the end) */
+                p++;
+            }
             en = p;
             if (*p) p++;
         } else {
@@ -566,6 +570,18 @@ int font_registry_resolve(const char *family_list, int weight, bool italic)
         }
         char name[FAMILY_MAX];
         lower_copy(name, sizeof(name), st, (size_t)(en - st));
+        if (!quoted) {
+            /* (an unquoted name is identifiers: white space between them is one space) */
+            size_t k = 0;
+            for (size_t i = 0; name[i]; i++) {
+                if (isspace((unsigned char)name[i])) {
+                    if (k && name[k - 1] != ' ') name[k++] = ' ';
+                } else {
+                    name[k++] = name[i];
+                }
+            }
+            name[k] = 0;
+        }
         if (name[0]) slot = resolve_name_locked(name, weight, italic, &pending);
         while (*p && *p != ',') p++;
     }
