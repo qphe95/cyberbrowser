@@ -217,6 +217,11 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     /* list-style for display:list-item markers. */
     unsigned char list_style_type;   /* 0=none, 1=disc, 2=circle, 3=square, 4=decimal */
     unsigned char list_style_type_set;
+    /* counter-reset / -increment / -set as written (interned; NULL: none)
+     * and quotes (inherited when not quotes_set; NULL: the UA's). */
+    const char *counter_reset, *counter_increment, *counter_set;
+    const char *quotes;
+    unsigned char quotes_set;
 
     /* Background image URL, interned (lives for the process; "" none). */
     const char *background_image_url;

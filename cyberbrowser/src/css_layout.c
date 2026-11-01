@@ -642,6 +642,7 @@ typedef struct LayoutPseudoPair {
     int owner;
     unsigned char side;
     unsigned char no_park;      /* (::first-letter, or a box whose text it split) */
+    unsigned char dynamic;      /* its content has counters or quotes (layout_counters) */
     int n;
     const CssDeclaration *const *decls;
     const char *content;
@@ -2248,6 +2249,40 @@ static void layout_apply_grid_declaration(LayoutBox *box, const char *prop, cons
 
 static void layout_unset_property(LayoutBox *box, const char *prop);
 
+/* A counter-reset / -increment / -set list: identifiers (not none or a
+ * CSS-wide keyword), each with an optional integer. */
+static bool layout_counter_list_valid(const char *v, size_t n)
+{
+    size_t i = 0;
+    int names = 0;
+    while (i < n) {
+        while (i < n && isspace((unsigned char)v[i])) i++;
+        if (i >= n) break;
+        size_t b = i;
+        bool num = isdigit((unsigned char)v[i]) ||
+                   ((v[i] == '+' || v[i] == '-') && i + 1 < n && isdigit((unsigned char)v[i + 1]));
+        if (!num && (isalpha((unsigned char)v[i]) || v[i] == '_' || v[i] == '-' || (unsigned char)v[i] >= 0x80)) {
+            while (i < n && (isalnum((unsigned char)v[i]) || v[i] == '_' || v[i] == '-' || (unsigned char)v[i] >= 0x80)) i++;
+            size_t l = i - b;
+            static const char *const bad[] = { "none", "inherit", "initial", "unset", "default", NULL };
+            for (int k = 0; bad[k]; k++)
+                if (l == strlen(bad[k]) && !strncasecmp(v + b, bad[k], l)) return false;
+            names++;
+            continue;
+        }
+        if (num) {
+            if (!names) return false;   /* (an integer follows a name) */
+            if (v[i] == '+' || v[i] == '-') i++;
+            if (i >= n || !isdigit((unsigned char)v[i])) return false;
+            while (i < n && isdigit((unsigned char)v[i])) i++;
+            if (i < n && !isspace((unsigned char)v[i])) return false;
+            continue;
+        }
+        return false;
+    }
+    return names > 0;
+}
+
 /* A negative number among a value's top-level tokens (not inside a
  * function such as calc(), which clamps instead). */
 static bool css_value_has_negative(const char *v)
@@ -3164,6 +3199,23 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             }
         }
         box->s->line_height_set = 1;
+    } else if (strcasecmp(prop, "counter-reset") == 0 || strcasecmp(prop, "counter-increment") == 0 ||
+               strcasecmp(prop, "counter-set") == 0) {
+        const char *v = value;
+        while (isspace((unsigned char)*v)) v++;
+        size_t vl = strlen(v);
+        while (vl && isspace((unsigned char)v[vl - 1])) vl--;
+        const char **dst = prop[8] == 'r' ? &box->s->counter_reset : prop[8] == 'i' ? &box->s->counter_increment
+                                                                                   : &box->s->counter_set;
+        if (vl == 4 && !strncasecmp(v, "none", 4)) *dst = NULL;
+        else if (layout_counter_list_valid(v, vl)) *dst = layout_intern(v, vl);
+    } else if (strcasecmp(prop, "quotes") == 0) {
+        const char *v = value;
+        while (isspace((unsigned char)*v)) v++;
+        size_t vl = strlen(v);
+        while (vl && isspace((unsigned char)v[vl - 1])) vl--;
+        box->s->quotes = vl == 4 && !strncasecmp(v, "none", 4) ? "" : layout_intern(v, vl);
+        box->s->quotes_set = 1;
     } else if (strcasecmp(prop, "list-style-type") == 0 ||
                strcasecmp(prop, "list-style") == 0) {
         unsigned char t = 0;
@@ -4505,6 +4557,7 @@ static const char *g_ua_stylesheet_css =
     "big { font-size: 1.17em; }\n"
     "ul { display: block; margin: 1em 0; padding-left: 40px; list-style-type: disc; }\n"
     "ol { display: block; margin: 1em 0; padding-left: 40px; list-style-type: decimal; }\n"
+    "ol, ul, menu { counter-reset: list-item; }\n"
     "li { display: list-item; }\n"
     "dl { display: block; margin: 1em 0; }\n"
     "dd { display: block; margin-left: 40px; }\n"
@@ -7302,6 +7355,33 @@ static int css_fn_args(const char *open, const char *close)
 /* Is a content value valid (CSS 2.1 §12.2): none, normal, or a list of
  * strings, url(), counter(name[, style]), counters(name, string[, style]),
  * attr(name) and the quote keywords? */
+/* counter(name[, style]) / counters(name, string[, style]) between the
+ * parentheses open..close: a name, then the string (counters), then an
+ * identifier. */
+static bool css_counter_args_ok(const char *open, const char *close, bool counters)
+{
+    const char *a = open + 1;
+    for (int k = 0; a < close; k++) {
+        while (a < close && isspace((unsigned char)*a)) a++;
+        bool str = *a == '"' || *a == '\'';
+        if (str) {
+            char q = *a++;
+            while (a < close && *a != q) a += *a == '\\' && a + 1 < close ? 2 : 1;
+            if (a < close) a++;
+        } else {
+            const char *b = a;
+            while (a < close && (isalnum((unsigned char)*a) || *a == '-' || *a == '_' || (unsigned char)*a >= 0x80)) a++;
+            if (a == b) return false;
+        }
+        bool want_str = counters && k == 1;
+        if (str != want_str) return false;
+        while (a < close && isspace((unsigned char)*a)) a++;
+        if (a < close && *a != ',') return false;
+        a++;
+    }
+    return true;
+}
+
 static bool css_content_value_valid(const char *v)
 {
     while (isspace((unsigned char)*v)) v++;
@@ -7332,8 +7412,11 @@ static bool css_content_value_valid(const char *v)
             if (*v != ')') return false;
             int args = css_fn_args(open, v);
             v++;
-            if (wl == 7 && !strncasecmp(w, "counter", 7)) { if (args < 1 || args > 2) return false; }
-            else if (wl == 8 && !strncasecmp(w, "counters", 8)) { if (args < 2 || args > 3) return false; }
+            if (wl == 7 && !strncasecmp(w, "counter", 7)) {
+                if (args < 1 || args > 2 || !css_counter_args_ok(open, v - 1, false)) return false;
+            } else if (wl == 8 && !strncasecmp(w, "counters", 8)) {
+                if (args < 2 || args > 3 || !css_counter_args_ok(open, v - 1, true)) return false;
+            }
             else if (wl == 4 && !strncasecmp(w, "attr", 4)) { if (args != 1) return false; }
             else if (!(wl == 3 && !strncasecmp(w, "url", 3))) return false;
         } else if (!((wl == 10 && !strncasecmp(w, "open-quote", 10)) || (wl == 11 && !strncasecmp(w, "close-quote", 11)) ||
@@ -7518,6 +7601,21 @@ static bool layout_apply_wide_keyword(LayoutBox *box, const LayoutBox *parent,
     /* (the font shorthand gives each longhand the keyword itself) */
     if (strcasecmp(prop, "font") == 0) return false;
     bool inherited_prop = css_is_inherited(prop);
+    if (!strcasecmp(prop, "counter-reset") || !strcasecmp(prop, "counter-increment") ||
+        !strcasecmp(prop, "counter-set")) {
+        const char **dst = prop[8] == 'r' ? &box->s->counter_reset : prop[8] == 'i' ? &box->s->counter_increment
+                                                                                   : &box->s->counter_set;
+        const char *src = !parent ? NULL : prop[8] == 'r' ? parent->s->counter_reset
+                                  : prop[8] == 'i' ? parent->s->counter_increment : parent->s->counter_set;
+        *dst = inherit ? src : NULL;
+        return true;
+    }
+    if (!strcasecmp(prop, "quotes")) {
+        /* (inherited: initial is the UA's) */
+        box->s->quotes = NULL;
+        box->s->quotes_set = initial;
+        return true;
+    }
 
     /* Inherited properties: inheritance fills the value in (initial is
      * approximated the same way). */
@@ -8099,6 +8197,7 @@ static void style_finish_box_em(bool em_defer, LayoutBox *box, const LayoutBox *
             box->s->line_height_ratio = parent->s->line_height_ratio;
         }
         if (!box->s->list_style_type_set) box->s->list_style_type = parent->s->list_style_type;
+        if (!box->s->quotes_set) box->s->quotes = parent->s->quotes;
         if (!box->s->white_space_set) box->s->white_space = parent->s->white_space;
     }
     /* Unitless line-height inherits as a ratio: recompute against the
@@ -8961,7 +9060,7 @@ static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
                 size_t from = 0, to = 0;
                 if (!tt || !layout_first_letter_span(tt, &from, &to)) continue;
                 int par = ctx->tree.nodes[t].parent_idx;
-                pairs[k / 2] = (LayoutPseudoPair){ owner, 2, 1, ps->n, ps->decls, ps->content };
+                pairs[k / 2] = (LayoutPseudoPair){ owner, 2, 1, 0, ps->n, ps->decls, ps->content };
                 HtmlNode *he = &hn[k], *ht = &hn[k + 1];
                 he->array_node.parent = he->array_node.first_child = he->array_node.next_sibling = he->array_node.prev_sibling = -1;
                 ht->array_node = he->array_node;
@@ -9017,11 +9116,12 @@ static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
                 continue;
             }
             HtmlNode *he = &hn[k], *ht = &hn[k + 1];
-            pairs[k / 2] = (LayoutPseudoPair){ owner, (unsigned char)side, 0, ps->n, ps->decls, ps->content };
+            bool dyn = strstr(ps->content, "counter") || strstr(ps->content, "quote");
+            pairs[k / 2] = (LayoutPseudoPair){ owner, (unsigned char)side, dyn, dyn, ps->n, ps->decls, ps->content };
             /* The last layout's box, when what it depends on is as it was:
              * its element's style slot left as it was (its attributes too,
              * which attr() reads) and the same rules. */
-            int j = ptab && ctx->style_left[owner] ? layout_parked_find(ctx, ptab, ptab_cap, ctx->ids[owner], side) : -1;
+            int j = ptab && !dyn && ctx->style_left[owner] ? layout_parked_find(ctx, ptab, ptab_cap, ctx->ids[owner], side) : -1;
             LayoutParkedPseudo *pk = j >= 0 ? &ctx->parked[j] : NULL;
             if (pk && (pk->used || pk->content != ps->content || pk->n != ps->n ||
                        (ps->n && memcmp(pk->decls, ps->decls, (size_t)ps->n * sizeof(*ps->decls)) != 0)))
@@ -9106,6 +9206,381 @@ static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
     ctx->has_target_first = n;
     for (int k = 0; target >= 0 && ctx->tree.preorder && k < n; k++)
         if (ctx->tree.preorder[k] == target) { ctx->has_target_first = k; break; }
+}
+
+/* ---- Counters and quotes (CSS 2.1 sections 12.3, 12.4) ----
+ * One walk in document order over the boxes (pseudo boxes included; not
+ * into display:none) with the counters in scope on a stack: a reset makes
+ * a counter for the element, its descendants and its following siblings
+ * (a sibling's reset of the same name replacing it), set and increment
+ * change the innermost (made at the element, at 0, when there is none).
+ * The text of pseudo boxes whose content has counter() / counters() /
+ * quotes is made here, quotes by their nesting across the document. */
+typedef struct { char name[64]; int value, level; } LayoutCounter;
+typedef struct { LayoutCounter *v; int n, cap; int quote_depth; } LayoutCounters;
+
+static LayoutCounter *ctr_find(LayoutCounters *c, const char *name)
+{
+    for (int i = c->n - 1; i >= 0; i--)
+        if (!strcmp(c->v[i].name, name)) return &c->v[i];
+    return NULL;
+}
+
+static LayoutCounter *ctr_push(LayoutCounters *c, const char *name, int value, int level)
+{
+    for (int i = c->n - 1; i >= 0 && c->v[i].level == level; i--)
+        if (!strcmp(c->v[i].name, name)) { c->v[i].value = value; return &c->v[i]; }
+    if (c->n == c->cap) {
+        int nc = c->cap ? c->cap * 2 : 32;
+        LayoutCounter *nv = (LayoutCounter *)realloc(c->v, (size_t)nc * sizeof(*nv));
+        if (!nv) return NULL;
+        c->v = nv;
+        c->cap = nc;
+    }
+    LayoutCounter *e = &c->v[c->n++];
+    snprintf(e->name, sizeof(e->name), "%s", name);
+    e->value = value;
+    e->level = level;
+    return e;
+}
+
+/* Apply a counter list (kind 0 reset, 1 set, 2 increment). */
+static void ctr_apply(LayoutCounters *c, const char *list, int kind, int level)
+{
+    const char *p = list;
+    while (p && *p) {
+        while (isspace((unsigned char)*p)) p++;
+        if (!*p) break;
+        char name[64];
+        size_t nl = 0;
+        while (*p && !isspace((unsigned char)*p) && nl + 1 < sizeof(name)) name[nl++] = *p++;
+        while (*p && !isspace((unsigned char)*p)) p++;
+        name[nl] = 0;
+        while (isspace((unsigned char)*p)) p++;
+        int num = kind == 2 ? 1 : 0;
+        if (*p == '+' || *p == '-' || isdigit((unsigned char)*p)) {
+            char *end = NULL;
+            long l = strtol(p, &end, 10);
+            num = (int)(l > 1000000000L ? 1000000000L : l < -1000000000L ? -1000000000L : l);
+            p = end;
+        }
+        if (kind == 0) { ctr_push(c, name, num, level); continue; }
+        LayoutCounter *e = ctr_find(c, name);
+        if (!e) e = ctr_push(c, name, 0, level);
+        if (!e) continue;
+        if (kind == 1) e->value = num;
+        else e->value += num;
+    }
+}
+
+/* A counter value in a counter style (CSS 2.1 list-style-type values). */
+static void ctr_format(int v, const char *style, char *out, size_t cap)
+{
+    out[0] = 0;
+    if (!style || !*style || !strcasecmp(style, "decimal")) { snprintf(out, cap, "%d", v); return; }
+    if (!strcasecmp(style, "none")) return;
+    if (!strcasecmp(style, "disc")) { snprintf(out, cap, "\xE2\x80\xA2"); return; }
+    if (!strcasecmp(style, "circle")) { snprintf(out, cap, "\xE2\x97\xA6"); return; }
+    if (!strcasecmp(style, "square")) { snprintf(out, cap, "\xE2\x96\xAA"); return; }
+    if (!strcasecmp(style, "decimal-leading-zero")) {
+        if (v >= 0 && v < 10) snprintf(out, cap, "0%d", v);
+        else if (v < 0 && v > -10) snprintf(out, cap, "-0%d", -v);
+        else snprintf(out, cap, "%d", v);
+        return;
+    }
+    bool upper = !strncasecmp(style, "upper-", 6);
+    if (!strcasecmp(style, "lower-roman") || !strcasecmp(style, "upper-roman")) {
+        if (v < 1 || v > 3999) { snprintf(out, cap, "%d", v); return; }
+        static const int val[] = { 1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1 };
+        static const char *const sym[] = { "m", "cm", "d", "cd", "c", "xc", "l", "xl", "x", "ix", "v", "iv", "i" };
+        size_t o = 0;
+        for (int i = 0; i < 13; i++)
+            while (v >= val[i] && o + 3 < cap) {
+                for (const char *q = sym[i]; *q; q++) out[o++] = upper ? (char)toupper((unsigned char)*q) : *q;
+                v -= val[i];
+            }
+        out[o] = 0;
+        return;
+    }
+    if (!strcasecmp(style, "lower-alpha") || !strcasecmp(style, "lower-latin") ||
+        !strcasecmp(style, "upper-alpha") || !strcasecmp(style, "upper-latin")) {
+        if (v < 1) { snprintf(out, cap, "%d", v); return; }
+        char tmp[16];
+        int t = 0;
+        while (v > 0 && t < 15) { v--; tmp[t++] = (char)((upper ? 'A' : 'a') + v % 26); v /= 26; }
+        size_t o = 0;
+        while (t > 0 && o + 1 < cap) out[o++] = tmp[--t];
+        out[o] = 0;
+        return;
+    }
+    if (!strcasecmp(style, "lower-greek")) {
+        static const char *const g[] = { "α", "β", "γ", "δ", "ε", "ζ", "η", "θ", "ι", "κ", "λ", "μ",
+                                         "ν", "ξ", "ο", "π", "ρ", "σ", "τ", "υ", "φ", "χ", "ψ", "ω" };
+        if (v < 1) { snprintf(out, cap, "%d", v); return; }
+        int digits[16], t = 0;
+        while (v > 0 && t < 16) { v--; digits[t++] = v % 24; v /= 24; }
+        size_t o = 0;
+        while (t > 0) {
+            const char *q = g[digits[--t]];
+            size_t l = strlen(q);
+            if (o + l >= cap) break;
+            memcpy(out + o, q, l);
+            o += l;
+        }
+        out[o] = 0;
+        return;
+    }
+    /* Additive systems. */
+    static const struct { int v; const char *s; } armenian[] = {
+        { 9000, "Ք" }, { 8000, "Փ" }, { 7000, "Ւ" }, { 6000, "Ց" }, { 5000, "Ր" }, { 4000, "Տ" }, { 3000, "Վ" },
+        { 2000, "Ս" }, { 1000, "Ռ" }, { 900, "Ջ" }, { 800, "Պ" }, { 700, "Չ" }, { 600, "Ո" }, { 500, "Շ" },
+        { 400, "Ն" }, { 300, "Յ" }, { 200, "Մ" }, { 100, "Ճ" }, { 90, "Ղ" }, { 80, "Ձ" }, { 70, "Հ" },
+        { 60, "Կ" }, { 50, "Ծ" }, { 40, "Խ" }, { 30, "Լ" }, { 20, "Ի" }, { 10, "Ժ" }, { 9, "Թ" }, { 8, "Ը" },
+        { 7, "Է" }, { 6, "Զ" }, { 5, "Ե" }, { 4, "Դ" }, { 3, "Գ" }, { 2, "Բ" }, { 1, "Ա" }, { 0, NULL }
+    };
+    static const struct { int v; const char *s; } georgian[] = {
+        { 10000, "ჵ" }, { 9000, "ჰ" }, { 8000, "ჯ" }, { 7000, "ჴ" }, { 6000, "ხ" }, { 5000, "ჭ" }, { 4000, "წ" },
+        { 3000, "ძ" }, { 2000, "ც" }, { 1000, "ჩ" }, { 900, "შ" }, { 800, "ყ" }, { 700, "ღ" }, { 600, "ქ" },
+        { 500, "ფ" }, { 400, "ჳ" }, { 300, "ტ" }, { 200, "ს" }, { 100, "რ" }, { 90, "ჟ" }, { 80, "პ" },
+        { 70, "ო" }, { 60, "ჲ" }, { 50, "ნ" }, { 40, "მ" }, { 30, "ლ" }, { 20, "კ" }, { 10, "ი" }, { 9, "თ" },
+        { 8, "ჱ" }, { 7, "ზ" }, { 6, "ვ" }, { 5, "ე" }, { 4, "დ" }, { 3, "გ" }, { 2, "ბ" }, { 1, "ა" }, { 0, NULL }
+    };
+    bool arm = !strcasecmp(style, "armenian") || !strcasecmp(style, "upper-armenian");
+    bool geo = !strcasecmp(style, "georgian");
+    if ((arm && v >= 1 && v <= 9999) || (geo && v >= 1 && v <= 19999)) {
+        size_t o = 0;
+        for (int i = 0; arm ? armenian[i].s != NULL : georgian[i].s != NULL; i++) {
+            int w = arm ? armenian[i].v : georgian[i].v;
+            const char *q = arm ? armenian[i].s : georgian[i].s;
+            while (v >= w) {
+                size_t l = strlen(q);
+                if (o + l >= cap) break;
+                memcpy(out + o, q, l);
+                o += l;
+                v -= w;
+            }
+        }
+        out[o] = 0;
+        return;
+    }
+    snprintf(out, cap, "%d", v);
+}
+
+/* The i-th string of a quotes value (0 open 1 close of pair p), else the
+ * UA's (curly double, then single). */
+static bool ctr_quote(const char *quotes, int pair, int close, char *out, size_t cap)
+{
+    out[0] = 0;
+    if (!quotes) {
+        static const char *const ua[] = { "\xE2\x80\x9C", "\xE2\x80\x9D", "\xE2\x80\x98", "\xE2\x80\x99" };
+        int p = pair > 1 ? 1 : pair;
+        snprintf(out, cap, "%s", ua[p * 2 + close]);
+        return true;
+    }
+    if (!*quotes) return false;   /* (none) */
+    /* The strings, in order: the last pair serves deeper levels. */
+    char strs[16][64];
+    int ns = 0;
+    const char *v = quotes;
+    while (*v && ns < 16) {
+        while (isspace((unsigned char)*v)) v++;
+        if (*v != '"' && *v != '\'') break;
+        char q = *v;
+        size_t tl = 1;
+        while (v[tl] && v[tl] != q) tl += v[tl] == '\\' && v[tl + 1] ? 2 : 1;
+        if (v[tl] == q) tl++;
+        char tok[256];
+        if (tl >= sizeof(tok)) break;
+        memcpy(tok, v, tl);
+        tok[tl] = 0;
+        bool empty = false;
+        if (!css_content_decode_string(tok, strs[ns], sizeof(strs[ns]), &empty)) strs[ns][0] = 0;
+        ns++;
+        v += tl;
+    }
+    if (ns < 2) return false;
+    int np = ns / 2, p = pair < np ? pair : np - 1;
+    snprintf(out, cap, "%s", strs[p * 2 + close]);
+    return true;
+}
+
+/* A content value's text with counters and quotes (cs). */
+static void layout_content_text(const char *v, const HtmlNode *owner, const char *quotes, LayoutCounters *cs,
+                                int level, char *out, size_t cap)
+{
+    size_t o = 0;
+    out[0] = 0;
+    while (*v) {
+        while (isspace((unsigned char)*v)) v++;
+        if (!*v) break;
+        char piece[1024];
+        piece[0] = 0;
+        size_t tl = 0;
+        if (*v == '"' || *v == '\'') {
+            char q = *v;
+            tl = 1;
+            while (v[tl] && v[tl] != q) tl += v[tl] == '\\' && v[tl + 1] ? 2 : 1;
+            if (v[tl] == q) tl++;
+            char tok[1024];
+            if (tl < sizeof(tok)) {
+                memcpy(tok, v, tl);
+                tok[tl] = 0;
+                bool empty = false;
+                if (!css_content_decode_string(tok, piece, sizeof(piece), &empty)) piece[0] = 0;
+            }
+        } else {
+            int depth = 0;
+            while (v[tl] && (depth > 0 || !isspace((unsigned char)v[tl]))) {
+                if (v[tl] == '(') depth++;
+                else if (v[tl] == ')' && depth > 0) depth--;
+                tl++;
+            }
+            bool counters = !strncasecmp(v, "counters(", 9);
+            if (counters || !strncasecmp(v, "counter(", 8)) {
+                /* name [, separator] [, style] */
+                const char *a = v + (counters ? 9 : 8), *end = v + tl;
+                char args[3][256];
+                int na = 0;
+                while (a < end && na < 3) {
+                    while (a < end && isspace((unsigned char)*a)) a++;
+                    const char *b = a;
+                    if (*a == '"' || *a == '\'') {
+                        char q = *a++;
+                        while (a < end && *a != q) a += *a == '\\' && a + 1 < end ? 2 : 1;
+                        if (a < end) a++;
+                    } else {
+                        while (a < end && *a != ',' && *a != ')') a++;
+                    }
+                    size_t l = (size_t)(a - b);
+                    while (l && isspace((unsigned char)b[l - 1])) l--;
+                    if (l >= sizeof(args[na])) l = sizeof(args[na]) - 1;
+                    memcpy(args[na], b, l);
+                    args[na][l] = 0;
+                    na++;
+                    while (a < end && *a != ',' && *a != ')') a++;
+                    if (a < end && *a == ',') a++;
+                    else break;
+                }
+                const char *name = na > 0 ? args[0] : "";
+                char sep[256] = "";
+                const char *style = NULL;
+                if (counters && na > 1) {
+                    bool empty = false;
+                    if (!css_content_decode_string(args[1], sep, sizeof(sep), &empty)) sep[0] = 0;
+                    if (na > 2) style = args[2];
+                } else if (!counters && na > 1) {
+                    style = args[1];
+                }
+                if (cs && !ctr_find(cs, name)) ctr_push(cs, name, 0, level);
+                size_t po = 0;
+                for (int i = 0; cs && i < cs->n; i++) {
+                    if (strcmp(cs->v[i].name, name)) continue;
+                    if (!counters) {
+                        /* (only the innermost) */
+                        LayoutCounter *e = ctr_find(cs, name);
+                        ctr_format(e->value, style, piece, sizeof(piece));
+                        po = strlen(piece);
+                        break;
+                    }
+                    char num[128];
+                    ctr_format(cs->v[i].value, style, num, sizeof(num));
+                    int w = snprintf(piece + po, sizeof(piece) - po, "%s%s", po ? sep : "", num);
+                    if (w > 0) po += (size_t)w;
+                    if (po >= sizeof(piece)) { po = sizeof(piece) - 1; break; }
+                }
+                piece[po] = 0;
+            } else if (!strncasecmp(v, "attr(", 5)) {
+                char name[128];
+                size_t nl = 0;
+                const char *a = v + 5;
+                while (isspace((unsigned char)*a)) a++;
+                while (*a && *a != ')' && !isspace((unsigned char)*a) && nl + 1 < sizeof(name)) name[nl++] = *a++;
+                name[nl] = 0;
+                bool html = !owner->store_id || dom_is_html_document(dom_owner(owner->store_id));
+                for (const HtmlAttribute *at = owner->attributes; at; at = at->next)
+                    if (at->name && (html ? !strcasecmp(at->name, name) : !strcmp(at->name, name))) {
+                        snprintf(piece, sizeof(piece), "%s", at->value ? at->value : "");
+                        break;
+                    }
+            } else if (tl == 10 && !strncasecmp(v, "open-quote", 10)) {
+                if (cs) {
+                    ctr_quote(quotes, cs->quote_depth, 0, piece, sizeof(piece));
+                    cs->quote_depth++;
+                } else {
+                    ctr_quote(quotes, 0, 0, piece, sizeof(piece));
+                }
+            } else if (tl == 11 && !strncasecmp(v, "close-quote", 11)) {
+                if (cs) {
+                    if (cs->quote_depth > 0) {
+                        cs->quote_depth--;
+                        ctr_quote(quotes, cs->quote_depth, 1, piece, sizeof(piece));
+                    }
+                } else {
+                    ctr_quote(quotes, 0, 1, piece, sizeof(piece));
+                }
+            } else if (tl == 13 && !strncasecmp(v, "no-open-quote", 13)) {
+                if (cs) cs->quote_depth++;
+            } else if (tl == 14 && !strncasecmp(v, "no-close-quote", 14)) {
+                if (cs && cs->quote_depth > 0) cs->quote_depth--;
+            }
+        }
+        size_t pl = strlen(piece);
+        if (o + pl >= cap) pl = cap - 1 - o;
+        memcpy(out + o, piece, pl);
+        o += pl;
+        out[o] = 0;
+        v += tl ? tl : 1;
+    }
+}
+
+static void layout_counters_walk(LayoutContext *ctx, int node, int level, LayoutCounters *cs, int depth)
+{
+    if (depth > 400) return;
+    int base = ctx->base_count;
+    for (int c = ctx->tree.nodes[node].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+        const LayoutBox *b = &ctx->boxes[c];
+        if (b->s->display == CSS_DISPLAY_NONE) continue;
+        if (b->s->counter_reset) ctr_apply(cs, b->s->counter_reset, 0, level);
+        if (b->s->counter_set) ctr_apply(cs, b->s->counter_set, 1, level);
+        if (b->s->counter_increment) ctr_apply(cs, b->s->counter_increment, 2, level);
+        if (b->s->display == CSS_DISPLAY_LIST_ITEM &&
+            !(b->s->counter_increment && strstr(b->s->counter_increment, "list-item")) &&
+            !(b->s->counter_set && strstr(b->s->counter_set, "list-item")))
+            ctr_apply(cs, "list-item", 2, level);
+        if (c >= base && base > 0 && ctx->pseudo_pairs && ((c - base) & 1) == 0) {
+            const LayoutPseudoPair *pp = &ctx->pseudo_pairs[(c - base) / 2];
+            if (pp->dynamic) {
+                HtmlNode *tn = &ctx->pseudo_nodes[c - base + 1];
+                HtmlNode *on = layout_node_dom(ctx, ctx->tree.nodes[pp->owner].dom_node_idx);
+                char text[1024];
+                layout_content_text(pp->content, on, b->s->quotes, cs, level + 1, text, sizeof(text));
+                char *nt = strdup(text);
+                if (nt) {
+                    free(tn->text_content);
+                    tn->text_content = nt;
+                    tn->text_len = strlen(nt);
+                }
+            }
+        }
+        layout_counters_walk(ctx, c, level + 1, cs, depth + 1);
+    }
+    while (cs->n > 0 && cs->v[cs->n - 1].level >= level) cs->n--;
+}
+
+/* Counters and quotes over the tree (only when some pseudo box needs them). */
+static void layout_counters(LayoutContext *ctx)
+{
+    int pairs = ctx->pseudo_nodes_n / 2;
+    bool any = false;
+    for (int j = 0; j < pairs && !any; j++) any = ctx->pseudo_pairs && ctx->pseudo_pairs[j].dynamic;
+    if (!any || ctx->tree.root_idx < 0) return;
+    LayoutCounters cs = { 0 };
+    const LayoutBox *rb = &ctx->boxes[ctx->tree.root_idx];
+    if (rb->s->counter_reset) ctr_apply(&cs, rb->s->counter_reset, 0, 0);
+    if (rb->s->counter_set) ctr_apply(&cs, rb->s->counter_set, 1, 0);
+    if (rb->s->counter_increment) ctr_apply(&cs, rb->s->counter_increment, 2, 0);
+    layout_counters_walk(ctx, ctx->tree.root_idx, 1, &cs, 0);
+    free(cs.v);
 }
 
 static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
@@ -9393,6 +9868,7 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
      * children like any other) blockification. */
     STAGE("merge");
     layout_pseudo_attach(ctx, P.em_defer);
+    layout_counters(ctx);
     STAGE("pseudo boxes");
     layout_blockify(ctx);
     STAGE("blockify");
