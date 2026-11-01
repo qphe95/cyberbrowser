@@ -476,10 +476,6 @@ static const LayoutBox *layout_box_template(void)
         box->s->line_height_set = 0;
         box->s->list_style_type = 0;
         box->s->list_style_type_set = 0;
-        box->s->border_color_r = 0.0;
-        box->s->border_color_g = 0.0;
-        box->s->border_color_b = 0.0;
-        box->s->border_color_a = 1.0;
         box->s->border_color_set = 0;
         box->s->background_image_url = "";
         box->s->color_r = 0.0;
@@ -1770,6 +1766,92 @@ static bool css_border_style_visible(const char *t)
     return css_border_style_keyword(t) && strcasecmp(t, "none") != 0 && strcasecmp(t, "hidden") != 0;
 }
 
+/* A border style keyword's CssBorderStyle, -1 for none of them. */
+static int css_border_style_code(const char *t)
+{
+    static const char *kw[] = { "none", "hidden", "solid", "dashed", "dotted", "double",
+                                "groove", "ridge", "inset", "outset", NULL };
+    while (isspace((unsigned char)*t)) t++;
+    size_t n = strlen(t);
+    while (n && isspace((unsigned char)t[n - 1])) n--;
+    for (int i = 0; kw[i]; i++)
+        if (strlen(kw[i]) == n && strncasecmp(t, kw[i], n) == 0) return i;
+    return -1;
+}
+
+static uint32_t css_pack_rgba(double r, double g, double b, double a)
+{
+    double c[4] = { r, g, b, a };
+    uint32_t v = 0;
+    for (int i = 0; i < 4; i++) {
+        double x = c[i] < 0.0 ? 0.0 : c[i] > 1.0 ? 1.0 : c[i];
+        v = (v << 8) | (uint32_t)lround(x * 255.0);
+    }
+    return v;
+}
+
+/* The next whitespace-separated value of *p (parentheses kept whole) into
+ * tok; false at the end. */
+static bool css_next_value(const char **p, char *tok, size_t cap)
+{
+    const char *q = *p;
+    while (*q && isspace((unsigned char)*q)) q++;
+    if (!*q) { *p = q; return false; }
+    size_t n = 0;
+    int depth = 0;
+    while (*q && (depth > 0 || !isspace((unsigned char)*q))) {
+        if (*q == '(') depth++;
+        else if (*q == ')' && depth > 0) depth--;
+        if (n + 1 < cap) tok[n++] = *q;
+        q++;
+    }
+    tok[n] = 0;
+    *p = q;
+    return true;
+}
+
+/* Sides (border_styled bits) set to a style code. */
+static void border_set_style(LayoutBox *box, int sides, int code)
+{
+    for (int k = 0; k < 4; k++) {
+        if (!(sides & (1 << k))) continue;
+        box->s->border_style[k] = (unsigned char)code;
+        if (code >= CSS_BORDER_SOLID) box->s->border_styled |= (unsigned char)(1 << k);
+        else box->s->border_styled &= (unsigned char)~(1 << k);
+    }
+}
+
+/* Sides set to a color value (currentColor: not set); false when it is
+ * none. */
+static bool border_set_color(LayoutBox *box, int sides, const char *v)
+{
+    while (isspace((unsigned char)*v)) v++;
+    bool current = strncasecmp(v, "currentcolor", 12) == 0;
+    double cr, cg, cb, ca;
+    if (!current && !css_parse_color(v, &cr, &cg, &cb, &ca)) return false;
+    uint32_t rgba = current ? 0 : css_pack_rgba(cr, cg, cb, ca);
+    for (int k = 0; k < 4; k++) {
+        if (!(sides & (1 << k))) continue;
+        box->s->border_rgba[k] = rgba;
+        if (current) box->s->border_color_set &= (unsigned char)~(1 << k);
+        else box->s->border_color_set |= (unsigned char)(1 << k);
+    }
+    return true;
+}
+
+/* The sides (border_styled bits) a 1-4 value list gives each of its values
+ * to, in CSS order top, right, bottom, left: for value i of n. */
+static int border_list_sides(int n, int i)
+{
+    static const int sides[4][4] = {
+        { 0x0F, 0, 0, 0 },          /* all */
+        { 0x0C, 0x03, 0, 0 },       /* top+bottom, left+right */
+        { 0x04, 0x03, 0x08, 0 },    /* top, left+right, bottom */
+        { 0x04, 0x02, 0x08, 0x01 }, /* top, right, bottom, left */
+    };
+    return n >= 1 && n <= 4 && i < n ? sides[n - 1][i] : 0;
+}
+
 static double css_border_width_value(const char *v, double pw, double vw, double fs)
 {
     if (strcasecmp(v, "thin") == 0) return 1.0;
@@ -2731,26 +2813,26 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         box->s->border_left = css_border_width_value(value, parent_width, viewport_width, box->s->font_size);
         box->s->border_width_set |= 1;
     } else if (strcasecmp(prop, "border-left-style") == 0) {
-        if (css_border_style_visible(value)) box->s->border_styled |= 1;
-        else box->s->border_styled &= (unsigned char)~1;
+        int code = css_border_style_code(value);
+        if (code >= 0) border_set_style(box, 1, code);
     } else if (strcasecmp(prop, "border-right-width") == 0) {
         box->s->border_right = css_border_width_value(value, parent_width, viewport_width, box->s->font_size);
         box->s->border_width_set |= 2;
     } else if (strcasecmp(prop, "border-right-style") == 0) {
-        if (css_border_style_visible(value)) box->s->border_styled |= 2;
-        else box->s->border_styled &= (unsigned char)~2;
+        int code = css_border_style_code(value);
+        if (code >= 0) border_set_style(box, 2, code);
     } else if (strcasecmp(prop, "border-top-width") == 0) {
         box->s->border_top = css_border_width_value(value, parent_width, viewport_width, box->s->font_size);
         box->s->border_width_set |= 4;
     } else if (strcasecmp(prop, "border-top-style") == 0) {
-        if (css_border_style_visible(value)) box->s->border_styled |= 4;
-        else box->s->border_styled &= (unsigned char)~4;
+        int code = css_border_style_code(value);
+        if (code >= 0) border_set_style(box, 4, code);
     } else if (strcasecmp(prop, "border-bottom-width") == 0) {
         box->s->border_bottom = css_border_width_value(value, parent_width, viewport_width, box->s->font_size);
         box->s->border_width_set |= 8;
     } else if (strcasecmp(prop, "border-bottom-style") == 0) {
-        if (css_border_style_visible(value)) box->s->border_styled |= 8;
-        else box->s->border_styled &= (unsigned char)~8;
+        int code = css_border_style_code(value);
+        if (code >= 0) border_set_style(box, 8, code);
     } else if (strcasecmp(prop, "flex-direction") == 0) {
         box->s->flex_direction = css_parse_flex_direction(value);
     } else if (strcasecmp(prop, "flex-wrap") == 0) {
@@ -3296,8 +3378,8 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                strcasecmp(prop, "border-right") == 0 ||
                strcasecmp(prop, "border-top") == 0 ||
                strcasecmp(prop, "border-bottom") == 0) {
-        /* Shorthand: scan tokens for a width (number+unit) and a color.
-         * Style keywords (solid/dashed/...) are accepted and ignored. */
+        /* Shorthand: a width, a style and a color, in any order; the parts
+         * left out are reset (width medium, style none, currentColor). */
         int sides = 0x0F;
         if (strstr(prop, "left")) sides = 0x01;
         else if (strstr(prop, "right")) sides = 0x02;
@@ -3305,50 +3387,42 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         else if (strstr(prop, "bottom")) sides = 0x08;
         const char *p = value;
         char token[256];
-        /* The shorthand resets omitted parts: style none, width medium. */
-        box->s->border_styled &= (unsigned char)~sides;
-        box->s->border_width_set &= (unsigned char)~sides;
-        while (*p) {
-            while (*p && isspace((unsigned char)*p)) p++;
-            if (!*p) break;
-            size_t tl = 0;
-            while (p[tl] && !isspace((unsigned char)p[tl])) tl++;
-            if (tl >= sizeof(token)) tl = sizeof(token) - 1;
-            memcpy(token, p, tl);
-            token[tl] = '\0';
-            p += tl;
-            if (css_border_style_keyword(token)) {
-                if (css_border_style_visible(token)) box->s->border_styled |= (unsigned char)sides;
+        int style = CSS_BORDER_NONE, nparts = 0;
+        double w = -1.0;
+        const char *color = NULL;
+        char color_buf[256];
+        bool ok = true;
+        while (ok && css_next_value(&p, token, sizeof(token))) {
+            nparts++;
+            int code = css_border_style_code(token);
+            if (code >= 0) { style = code; continue; }
+            double kw = !strcasecmp(token, "thin") ? 1.0 : !strcasecmp(token, "medium") ? 3.0
+                      : !strcasecmp(token, "thick") ? 5.0 : -1.0;
+            if (kw >= 0.0) { w = kw; continue; }
+            if (isdigit((unsigned char)token[0]) || token[0] == '.' ||
+                ((token[0] == '+' || token[0] == '-') && (isdigit((unsigned char)token[1]) || token[1] == '.'))) {
+                double v = css_parse_length(token, parent_width, viewport_width, box->s->font_size);
+                if (v < 0.0) ok = false;
+                else w = v;
                 continue;
             }
-            double w = css_parse_length(token, parent_width, viewport_width, box->s->font_size);
-            if (w >= 0.0 && (isdigit((unsigned char)token[0]) || token[0] == '.')) {
-                box->s->border_width_set |= (unsigned char)sides;
-                if (sides & 0x01) box->s->border_left = w;
-                if (sides & 0x02) box->s->border_right = w;
-                if (sides & 0x04) box->s->border_top = w;
-                if (sides & 0x08) box->s->border_bottom = w;
-                continue;
-            }
-            /* Border-width keywords. */
-            double kw = 0.0;
-            if (strcasecmp(token, "thin") == 0) kw = 1.0;
-            else if (strcasecmp(token, "medium") == 0) kw = 3.0;
-            else if (strcasecmp(token, "thick") == 0) kw = 5.0;
-            if (kw > 0.0) {
-                box->s->border_width_set |= (unsigned char)sides;
-                if (sides & 0x01) box->s->border_left = kw;
-                if (sides & 0x02) box->s->border_right = kw;
-                if (sides & 0x04) box->s->border_top = kw;
-                if (sides & 0x08) box->s->border_bottom = kw;
-                continue;
-            }
+            snprintf(color_buf, sizeof(color_buf), "%s", token);
+            color = color_buf;
+        }
+        if (ok && nparts > 0) {
             double cr, cg, cb, ca;
-            if (css_parse_color(token, &cr, &cg, &cb, &ca)) {
-                box->s->border_color_r = cr; box->s->border_color_g = cg;
-                box->s->border_color_b = cb; box->s->border_color_a = ca;
-                box->s->border_color_set = 1;
-            }
+            if (color && strncasecmp(color, "currentcolor", 12) != 0 && !css_parse_color(color, &cr, &cg, &cb, &ca))
+                ok = false;
+        }
+        if (ok && nparts > 0) {
+            if (w >= 0.0) box->s->border_width_set |= (unsigned char)sides;
+            else box->s->border_width_set &= (unsigned char)~sides;
+            if (sides & 0x01) box->s->border_left = w >= 0.0 ? w : 3.0;
+            if (sides & 0x02) box->s->border_right = w >= 0.0 ? w : 3.0;
+            if (sides & 0x04) box->s->border_top = w >= 0.0 ? w : 3.0;
+            if (sides & 0x08) box->s->border_bottom = w >= 0.0 ? w : 3.0;
+            border_set_style(box, sides, style);
+            border_set_color(box, sides, color ? color : "currentcolor");
         }
     } else if (strcasecmp(prop, "border-width") == 0) {
         layout_apply_shorthand_sides(box, value, parent_width, viewport_width,
@@ -3357,39 +3431,40 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         box->s->border_width_set = 0x0F;
     } else if (strcasecmp(prop, "border-style") == 0) {
         /* 1-4 values: top, right, bottom, left. */
-        int vis[4] = {0, 0, 0, 0}, n = 0;
+        int codes[4], n = 0;
         const char *p = value;
         char token[64];
-        while (*p && n < 4) {
-            while (*p && isspace((unsigned char)*p)) p++;
-            if (!*p) break;
-            size_t tl = 0;
-            while (p[tl] && !isspace((unsigned char)p[tl])) tl++;
-            size_t cl = tl < sizeof(token) ? tl : sizeof(token) - 1;
-            memcpy(token, p, cl);
-            token[cl] = '\0';
-            p += tl;
-            vis[n++] = css_border_style_visible(token);
+        bool ok = true;
+        while (css_next_value(&p, token, sizeof(token))) {
+            int code = n < 4 ? css_border_style_code(token) : -1;
+            if (code < 0) { ok = false; break; }
+            codes[n++] = code;
         }
-        if (n > 0) {
-            int t, r, b, l;
-            if (n == 1) t = r = b = l = vis[0];
-            else if (n == 2) { t = b = vis[0]; r = l = vis[1]; }
-            else if (n == 3) { t = vis[0]; r = l = vis[1]; b = vis[2]; }
-            else { t = vis[0]; r = vis[1]; b = vis[2]; l = vis[3]; }
-            box->s->border_styled = (unsigned char)((l ? 1 : 0) | (r ? 2 : 0) | (t ? 4 : 0) | (b ? 8 : 0));
-        }
+        for (int i = 0; ok && i < n; i++) border_set_style(box, border_list_sides(n, i), codes[i]);
     } else if (strcasecmp(prop, "border-color") == 0 ||
                strcasecmp(prop, "border-left-color") == 0 ||
                strcasecmp(prop, "border-right-color") == 0 ||
                strcasecmp(prop, "border-top-color") == 0 ||
                strcasecmp(prop, "border-bottom-color") == 0) {
-        /* Single border color slot: first color token wins per declaration. */
-        double cr, cg, cb, ca;
-        if (css_parse_color(value, &cr, &cg, &cb, &ca)) {
-            box->s->border_color_r = cr; box->s->border_color_g = cg;
-            box->s->border_color_b = cb; box->s->border_color_a = ca;
-            box->s->border_color_set = 1;
+        if (strcasecmp(prop, "border-color") == 0) {
+            char vals[4][128];
+            int n = 0;
+            const char *p = value;
+            char token[128];
+            bool ok = true;
+            while (css_next_value(&p, token, sizeof(token))) {
+                if (n == 4) { ok = false; break; }
+                snprintf(vals[n++], sizeof(vals[0]), "%s", token);
+            }
+            /* (all valid, or none applies) */
+            for (int i = 0; ok && i < n; i++) {
+                double cr, cg, cb, ca;
+                if (strncasecmp(vals[i], "currentcolor", 12) != 0 && !css_parse_color(vals[i], &cr, &cg, &cb, &ca)) ok = false;
+            }
+            for (int i = 0; ok && i < n; i++) border_set_color(box, border_list_sides(n, i), vals[i]);
+        } else {
+            int side = strstr(prop, "left") ? 1 : strstr(prop, "right") ? 2 : strstr(prop, "top") ? 4 : 8;
+            border_set_color(box, side, value);
         }
     }
 }
@@ -7790,6 +7865,45 @@ static bool layout_apply_wide_keyword(LayoutBox *box, const LayoutBox *parent,
     /* (the font shorthand gives each longhand the keyword itself) */
     if (strcasecmp(prop, "font") == 0) return false;
     bool inherited_prop = css_is_inherited(prop);
+    if (!strncasecmp(prop, "border", 6) && (prop[6] == 0 || prop[6] == '-')) {
+        /* Which sides (border_styled bits) and parts (1 width, 2 style, 4
+         * color) the property is. */
+        int sides = 0x0F, parts = 7;
+        const char *q = prop + 6;
+        static const struct { const char *name; int bit; } sn[] = {
+            { "-left", 1 }, { "-right", 2 }, { "-top", 4 }, { "-bottom", 8 } };
+        for (int i = 0; i < 4; i++) {
+            size_t l = strlen(sn[i].name);
+            if (!strncasecmp(q, sn[i].name, l) && (q[l] == 0 || q[l] == '-')) { sides = sn[i].bit; q += l; break; }
+        }
+        if (*q == 0) parts = 7;
+        else if (!strcasecmp(q, "-width")) parts = 1;
+        else if (!strcasecmp(q, "-style")) parts = 2;
+        else if (!strcasecmp(q, "-color")) parts = 4;
+        else parts = 0;   /* (border-radius, border-collapse, border-spacing, ...) */
+        if (parts) {
+            double *bw[4] = { &box->s->border_left, &box->s->border_right, &box->s->border_top, &box->s->border_bottom };
+            const double *pw[4] = { parent ? &parent->s->border_left : NULL, parent ? &parent->s->border_right : NULL,
+                                    parent ? &parent->s->border_top : NULL, parent ? &parent->s->border_bottom : NULL };
+            for (int k = 0; k < 4; k++) {
+                unsigned char bit = (unsigned char)(1 << k);
+                if (!(sides & bit)) continue;
+                bool from_parent = inherit && parent;
+                if (parts & 1) {
+                    *bw[k] = from_parent ? *pw[k] : 3.0;
+                    if (from_parent) box->s->border_width_set |= bit;
+                    else box->s->border_width_set &= (unsigned char)~bit;
+                }
+                if (parts & 2) border_set_style(box, bit, from_parent ? parent->s->border_style[k] : CSS_BORDER_NONE);
+                if (parts & 4) {
+                    box->s->border_rgba[k] = from_parent ? parent->s->border_rgba[k] : 0;
+                    if (from_parent && (parent->s->border_color_set & bit)) box->s->border_color_set |= bit;
+                    else box->s->border_color_set &= (unsigned char)~bit;
+                }
+            }
+            return true;
+        }
+    }
     if (!strcasecmp(prop, "counter-reset") || !strcasecmp(prop, "counter-increment") ||
         !strcasecmp(prop, "counter-set")) {
         const char **dst = prop[8] == 'r' ? &box->s->counter_reset : prop[8] == 'i' ? &box->s->counter_increment

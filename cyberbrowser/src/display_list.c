@@ -312,14 +312,33 @@ static void snap_rect(float *x, float *y, float *w, float *h)
 /* The backgrounds and borders of the pieces of split inline el (the left
  * edge on its first, the right on its last) that are placed against child
  * anchor (-1: those placed against el itself). */
+/* Border side k's color (k: 0 left, 1 right, 2 top, 3 bottom): its own,
+ * else currentColor; alpha times op. */
+static void border_side_color(const LayoutBox *box, int k, float op, float c[4])
+{
+    if (box->s->border_color_set & (1 << k)) {
+        uint32_t v = box->s->border_rgba[k];
+        c[0] = (float)((v >> 24) & 0xFF) / 255.0f;
+        c[1] = (float)((v >> 16) & 0xFF) / 255.0f;
+        c[2] = (float)((v >> 8) & 0xFF) / 255.0f;
+        c[3] = (float)(v & 0xFF) / 255.0f * op;
+    } else {
+        c[0] = (float)box->s->color_r;
+        c[1] = (float)box->s->color_g;
+        c[2] = (float)box->s->color_b;
+        c[3] = (float)box->s->color_a * op;
+    }
+}
+
 static void paint_pieces(LayoutContext *ctx, DisplayList *dl, int el, int anchor, float op)
 {
     const LayoutBox *box = &ctx->boxes[el];
     const LayoutPieceList *pieces = &ctx->pieces[el];
-    float br_r = (float)(box->s->border_color_set ? box->s->border_color_r : box->s->color_r);
-    float br_g = (float)(box->s->border_color_set ? box->s->border_color_g : box->s->color_g);
-    float br_b = (float)(box->s->border_color_set ? box->s->border_color_b : box->s->color_b);
-    float br_a = (float)(box->s->border_color_set ? box->s->border_color_a : box->s->color_a) * op;
+    float cl[4], cr[4], ct[4], cb[4];
+    border_side_color(box, 0, op, cl);
+    border_side_color(box, 1, op, cr);
+    border_side_color(box, 2, op, ct);
+    border_side_color(box, 3, op, cb);
     for (int q = 0; q < pieces->n; q++) {
         const LayoutPiece *pc = &pieces->p[q];
         if (pc->anchor != anchor) continue;
@@ -337,10 +356,10 @@ static void paint_pieces(LayoutContext *ctx, DisplayList *dl, int el, int anchor
         float brr = (pc->sides & 2) ? (float)box->s->border_right : 0.0f;
         float mid = ph - bt - bb;
         if (mid < 0.0f) mid = 0.0f;
-        if (bt > 0.0f) display_list_add_rect(dl, px, py, pw, bt, br_r, br_g, br_b, br_a);
-        if (bb > 0.0f) display_list_add_rect(dl, px, py + ph - bb, pw, bb, br_r, br_g, br_b, br_a);
-        if (bl > 0.0f) display_list_add_rect(dl, px, py + bt, bl, mid, br_r, br_g, br_b, br_a);
-        if (brr > 0.0f) display_list_add_rect(dl, px + pw - brr, py + bt, brr, mid, br_r, br_g, br_b, br_a);
+        if (bt > 0.0f) display_list_add_rect(dl, px, py, pw, bt, ct[0], ct[1], ct[2], ct[3]);
+        if (bb > 0.0f) display_list_add_rect(dl, px, py + ph - bb, pw, bb, cb[0], cb[1], cb[2], cb[3]);
+        if (bl > 0.0f) display_list_add_rect(dl, px, py + bt, bl, mid, cl[0], cl[1], cl[2], cl[3]);
+        if (brr > 0.0f) display_list_add_rect(dl, px + pw - brr, py + bt, brr, mid, cr[0], cr[1], cr[2], cr[3]);
     }
 }
 
@@ -1673,10 +1692,12 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
          * needs its border painted. */
         if (!pieces && (box->s->border_top > 0.0 || box->s->border_right > 0.0 ||
                         box->s->border_bottom > 0.0 || box->s->border_left > 0.0)) {
-            float br_r = (float)(box->s->border_color_set ? box->s->border_color_r : box->s->color_r);
-            float br_g = (float)(box->s->border_color_set ? box->s->border_color_g : box->s->color_g);
-            float br_b = (float)(box->s->border_color_set ? box->s->border_color_b : box->s->color_b);
-            float br_a = (float)(box->s->border_color_set ? box->s->border_color_a : box->s->color_a) * op;
+            float cl[4], cr[4], ct[4], cb[4];
+            border_side_color(box, 0, op, cl);
+            border_side_color(box, 1, op, cr);
+            border_side_color(box, 2, op, ct);
+            border_side_color(box, 3, op, cb);
+            float br_r = ct[0], br_g = ct[1], br_b = ct[2], br_a = ct[3];   /* (a rounded ring: one color) */
             float bx = (float)box->x, by = (float)box->y;
             float bw = (float)box->width, bh = (float)box->height;
             snap_rect(&bx, &by, &bw, &bh);
@@ -1697,25 +1718,25 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             } else {
             if (box->s->border_top > 0.0) {
                 display_list_add_rect(dl, bx, by, bw, (float)box->s->border_top,
-                                      br_r, br_g, br_b, br_a);
+                                      ct[0], ct[1], ct[2], ct[3]);
             }
             if (box->s->border_bottom > 0.0) {
                 display_list_add_rect(dl, bx, by + bh - (float)box->s->border_bottom,
                                       bw, (float)box->s->border_bottom,
-                                      br_r, br_g, br_b, br_a);
+                                      cb[0], cb[1], cb[2], cb[3]);
             }
             double mid_h = box->height - box->s->border_top - box->s->border_bottom;
             if (mid_h < 0.0) mid_h = 0.0;
             if (box->s->border_left > 0.0) {
                 display_list_add_rect(dl, bx, by + (float)box->s->border_top,
                                       (float)box->s->border_left, (float)mid_h,
-                                      br_r, br_g, br_b, br_a);
+                                      cl[0], cl[1], cl[2], cl[3]);
             }
             if (box->s->border_right > 0.0) {
                 display_list_add_rect(dl, bx + bw - (float)box->s->border_right,
                                       by + (float)box->s->border_top,
                                       (float)box->s->border_right, (float)mid_h,
-                                      br_r, br_g, br_b, br_a);
+                                      cr[0], cr[1], cr[2], cr[3]);
             }
             }
         }

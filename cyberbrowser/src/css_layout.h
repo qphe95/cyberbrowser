@@ -54,6 +54,12 @@ typedef enum {
     CSS_VISIBILITY_COLLAPSE
 } CssVisibility;
 
+/* border-*-style values (LayoutStyle.border_style). */
+typedef enum {
+    CSS_BORDER_NONE, CSS_BORDER_HIDDEN, CSS_BORDER_SOLID, CSS_BORDER_DASHED, CSS_BORDER_DOTTED,
+    CSS_BORDER_DOUBLE, CSS_BORDER_GROOVE, CSS_BORDER_RIDGE, CSS_BORDER_INSET, CSS_BORDER_OUTSET
+} CssBorderStyle;
+
 /* CSS flex-direction value. */
 typedef enum {
     CSS_FLEX_DIRECTION_ROW,
@@ -122,10 +128,13 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     /* Set when visibility was explicitly assigned (for inheritance). */
     unsigned char visibility_set;
     double border_top, border_right, border_bottom, border_left;
-    /* Border color (single slot; most real-world borders are uniform).
-     * Defaults to the text color (currentColor) when unset. */
-    double border_color_r, border_color_g, border_color_b, border_color_a;
+    /* Per side, indexed as border_styled's bits (0 left, 1 right, 2 top,
+     * 3 bottom): the color as packed RGBA (0xRRGGBBAA; bit k of
+     * border_color_set: given, else currentColor) and the style
+     * (CssBorderStyle). */
+    uint32_t border_rgba[4];
     unsigned char border_color_set;
+    unsigned char border_style[4];
 
     /* Resolved colors (RGBA, 0..1). */
     double color_r, color_g, color_b, color_a;
