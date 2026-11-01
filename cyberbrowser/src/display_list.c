@@ -1634,9 +1634,11 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             }
         }
 
-        /* An inline split around its blocks: its pieces' backgrounds and
-         * borders, not its own box's (those with a child paint before it). */
-        const LayoutPieceList *pieces = box->s->block_in_inline == 2 && ctx->pieces && i < ctx->pieces_n
+        /* An inline split around its blocks, or into pieces by bidi
+         * reordering: its pieces' backgrounds and borders, not its own box's
+         * (those with a child paint before it). */
+        const LayoutPieceList *pieces = ctx->pieces && i < ctx->pieces_n &&
+                                        (box->s->block_in_inline == 2 || ctx->pieces[i].n > 0)
                                         ? &ctx->pieces[i] : NULL;
         if (pieces) paint_pieces(ctx, dl, i, -1, op);
 

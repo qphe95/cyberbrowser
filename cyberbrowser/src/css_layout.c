@@ -1480,7 +1480,7 @@ static void layout_blockify(LayoutContext *ctx)
             CssDisplay pd = layout_box(ctx, p)->s->display;
             if (pd == CSS_DISPLAY_FLEX || pd == CSS_DISPLAY_GRID) promote = true;
         }
-        bool blocks = false, nested = false;
+        bool blocks = false, nested = false, br = false;
         for (int c = ctx->tree.nodes[i].first_child_idx; !promote && c >= 0;
              c = ctx->tree.nodes[c].next_sibling_idx) {
             LayoutBox *cb = layout_box(ctx, c);
@@ -1489,6 +1489,17 @@ static void layout_blockify(LayoutContext *ctx)
                 cb->s->position != CSS_POSITION_ABSOLUTE && cb->s->position != CSS_POSITION_FIXED &&
                 cb->s->float_side == 0)
                 blocks = true;
+            if (cb->s->display == CSS_DISPLAY_INLINE) {
+                HtmlNode *cn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
+                if (cn && cn->type == HTML_NODE_ELEMENT && strcasecmp(cn->tag_name, "br") == 0) br = true;
+            }
+        }
+        /* (a line break in an inline whose parent is a block: laid out in
+         * pieces too, one per line, so its children break where the <br>
+         * is and its edges go on its first and last lines) */
+        if (br && !nested && !blocks && !promote && p >= 0 && layout_box(ctx, p)->s->display != CSS_DISPLAY_INLINE) {
+            box->s->block_in_inline = 2;
+            split = true;
         }
         if (nested || blocks) {
             box->s->block_in_inline = nested ? 1 : 2;
@@ -11388,6 +11399,22 @@ static void layout_align_line(LayoutContext *ctx, const int *members, int count,
     }
     LayoutBox *last = layout_box(ctx, members[count - 1]);
     double used = (last->x + last->width) - content_left - layout_line_hanging_space(ctx, members, count);
+    /* (a split inline's piece that ends the line with its right edge: that
+     * edge's room is on the line too) */
+    int p = ctx->tree.nodes[members[count - 1]].parent_idx;
+    if (p >= 0 && ctx->pieces && p < ctx->pieces_n && ctx->pieces[p].n > 0) {
+        const LayoutBox *pb = layout_box(ctx, p);
+        double rpad = pb->padding_right + pb->s->border_right, end = content_left + used + rpad;
+        for (int q = 0; q < ctx->pieces[p].n; q++) {
+            const LayoutPiece *pc = &ctx->pieces[p].p[q];
+            if (!(pc->sides & 2)) continue;
+            const LayoutBox *ab = pc->anchor >= 0 ? layout_box(ctx, pc->anchor) : pb;
+            if (fabs(ab->x + pc->dx + pc->w - end) < 1.0) {
+                used += rpad + pb->margin_right;
+                break;
+            }
+        }
+    }
     double slack = avail_width - used;
     if (slack <= 0.5) return;
     double dx = (align == CSS_TEXT_ALIGN_CENTER) ? slack * 0.5 : slack;
@@ -12041,6 +12068,12 @@ typedef struct FlowPiece {
 
 static void layout_flow_noreuse_up(LayoutContext *ctx, int idx);
 
+static bool layout_is_br(LayoutContext *ctx, int idx)
+{
+    HtmlNode *n = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+    return n && n->type == HTML_NODE_ELEMENT && n->tag_name && strcasecmp(n->tag_name, "br") == 0;
+}
+
 /* The start of a piece in the flow: a line box (after a block, its bottom
  * margin no longer collapses), and the room its left edge takes.  True
  * when it starts its line. */
@@ -12138,7 +12171,11 @@ static void layout_piece_end(LayoutContext *ctx, FlowPiece *fp, FlowCursor *cur,
             ly = fp->start_y;
         }
         LayoutPiece pc;
-        pc.sides = (unsigned char)(((fp->sides & 1) && first_line ? 1 : 0) | ((fp->sides & 2) && last_line ? 2 : 0));
+        /* (its start edge on its first line, its end edge on its last: left
+         * and right, or right and left in a right-to-left inline) */
+        bool rtl = eb->s->direction == 1;
+        pc.sides = (unsigned char)(((fp->sides & 1) && (rtl ? last_line : first_line) ? 1 : 0) |
+                                   ((fp->sides & 2) && (rtl ? first_line : last_line) ? 2 : 0));
         double bx = x0 - ((pc.sides & 1) ? lpad : 0.0);
         double bw = x1 + ((pc.sides & 2) ? rpad : 0.0) - bx;
         double by = ly + (adv - ca) / 2.0 - eb->padding_top - eb->s->border_top;
@@ -12231,7 +12268,7 @@ static bool layout_paragraph_walk(LayoutContext *ctx, int idx, void (*fn)(Layout
             }
             continue;
         }
-        if (cb->s->display != CSS_DISPLAY_INLINE || cb->s->block_in_inline) continue;
+        if (cb->s->display != CSS_DISPLAY_INLINE) continue;
         if (!fn && (cb->s->direction == 1 || cb->s->unicode_bidi != 0)) return true;
         if (layout_paragraph_walk(ctx, c, fn) && !fn) return true;
     }
@@ -12387,9 +12424,11 @@ static void bidi_para_collect(LayoutContext *ctx, int idx, BidiPara *P, int *ite
             items[(*nitems)++] = c;
             continue;
         }
-        bool inline_box = cb->s->display == CSS_DISPLAY_INLINE && !cb->s->block_in_inline &&
+        bool inline_box = cb->s->display == CSS_DISPLAY_INLINE &&
                           !(n && n->type == HTML_NODE_ELEMENT && n->tag_name && layout_is_replaced_tag(n->tag_name));
-        if (inline_box) {
+        if (inline_box && n && n->type == HTML_NODE_ELEMENT && n->tag_name && !strcmp(n->tag_name, "br")) {
+            bidi_para_put(P, 0x2029, -1, 0);   /* (a forced break ends a paragraph) */
+        } else if (inline_box) {
             uint32_t ctl[2];
             int k = bidi_controls(cb, true, ctl);
             for (int i = 0; i < k; i++) bidi_para_put(P, ctl[i], -1, 0);
@@ -12422,11 +12461,32 @@ typedef struct {
 /* A paragraph's inline boxes (its items' ancestors below the block), found
  * by box index in a small open-addressed table: which items they begin and
  * end at, and their content's extent before and after reordering, on one
- * line (line -1: not one whole piece on one line). */
+ * line (line -1: not one whole piece on one line).  And for its pieces
+ * after reordering: its first and last line, its leftmost and rightmost
+ * run on the line being placed, the piece open there (where it starts, which
+ * edge it has), and the top of its text on its first line and on this one. */
 typedef struct {
     int box, first, last, line;
     double o0, o1, n0, n1;
+    int lfirst, llast, lm_line, lm, rm, ty_line, np;
+    bool open, has_base, keep;
+    unsigned char psides;
+    double ps, ty, base;
 } BidiAnc;
+
+/* A piece of a paragraph's inline box (entry a), in page coordinates. */
+typedef struct {
+    int a;
+    LayoutPiece pc;
+} BidiPieceRec;
+
+/* Whether box is in inline box anc (below block idx). */
+static bool bidi_in(LayoutContext *ctx, int box, int anc, int idx)
+{
+    for (int p = ctx->tree.nodes[box].parent_idx; p >= 0 && p != idx; p = ctx->tree.nodes[p].parent_idx)
+        if (p == anc) return true;
+    return false;
+}
 
 typedef struct {
     BidiAnc *a;
@@ -12461,6 +12521,7 @@ static int bidi_anc(BidiAncs *A, int box, bool add)
         e->box = box;
         e->first = e->last = -1;
         e->line = -2;
+        e->lfirst = e->llast = e->lm_line = e->ty_line = -1;
         A->slot[h] = A->n;
         return A->n++;
     }
@@ -12625,6 +12686,19 @@ static void layout_bidi_reorder(LayoutContext *ctx, int idx)
         if (line < 0) break;
     }
     int nlines = line + 1;
+    /* (each inline box's first and last line) */
+    for (int L = 0; L < nlines; L++) {
+        int r1 = L + 1 < nlines ? line_start[L + 1] : nr;
+        for (int k = line_start[L]; k < r1; k++)
+            for (int p = ctx->tree.nodes[runs[k].box].parent_idx; p >= 0 && p != idx; p = ctx->tree.nodes[p].parent_idx) {
+                int a = bidi_anc(&A, p, false);
+                if (a < 0) continue;
+                if (A.a[a].lfirst < 0) A.a[a].lfirst = L;
+                A.a[a].llast = L;
+            }
+    }
+    BidiPieceRec *bp = NULL;
+    int nbp = 0, bpcap = 0;
 
     /* L1 per line, then each run cut where the level changes, and where the
      * white space at the line's end starts: that hangs (takes no room, as
@@ -12770,10 +12844,58 @@ static void layout_bidi_reorder(LayoutContext *ctx, int idx)
             if (slack > 0.5) x += blk->s->text_align == CSS_TEXT_ALIGN_CENTER ? slack * 0.5 : slack;
         }
         (void)hang_w;   /* (the flow aligned the other lines without it) */
+        /* (each inline box's leftmost and rightmost run on the line) */
+        for (int k = 0; k < ncut; k++) {
+            const BidiRun *pc = &cut[order[k]];
+            if (pc->frag == -2 || pc->hang) continue;
+            for (int p = ctx->tree.nodes[pc->box].parent_idx; p >= 0 && p != idx; p = ctx->tree.nodes[p].parent_idx) {
+                int a = bidi_anc(&A, p, false);
+                if (a < 0) continue;
+                BidiAnc *e = &A.a[a];
+                if (e->lm_line != L) {
+                    e->lm_line = L;
+                    e->lm = k;
+                    e->open = false;
+                }
+                e->rm = k;
+            }
+        }
+        /* Placed left to right: an inline box's pieces are its stretches of
+         * visually adjacent runs; its left edge is on the leftmost run of its
+         * first line and its right edge on the rightmost of its last (the
+         * right edge first, the left last, when it is right to left: CSS 2.1
+         * section 8.6), opened outermost first and closed innermost first. */
         for (int k = 0; k < ncut; k++) {
             BidiRun *pc = &cut[order[k]];
             if (pc->frag == -2) continue;
-            x += pc->gap + pc->lead;
+            x += pc->gap;
+            int chain[64], nch = 0;
+            if (!pc->hang)
+                for (int p = ctx->tree.nodes[pc->box].parent_idx; p >= 0 && p != idx && nch < 64;
+                     p = ctx->tree.nodes[p].parent_idx) {
+                    int a = bidi_anc(&A, p, false);
+                    if (a >= 0) chain[nch++] = a;
+                }
+            double ty = pc->frag >= 0 ? layout_box(ctx, pc->box)->y + ctx->text_frags[pc->box].f[pc->frag].dy : 0.0;
+            for (int c = nch - 1; c >= 0; c--) {
+                BidiAnc *e = &A.a[chain[c]];
+                if (pc->frag >= 0 && e->ty_line != L) {
+                    e->ty_line = L;
+                    e->ty = ty;
+                    if (L == e->lfirst && !e->has_base) {
+                        e->has_base = true;
+                        e->base = ty;
+                    }
+                }
+                if (e->open) continue;
+                const LayoutBox *eb = layout_box(ctx, e->box);
+                bool left = k == e->lm && L == (eb->s->direction == 1 ? e->llast : e->lfirst);
+                if (left) x += eb->margin_left;
+                e->open = true;
+                e->ps = x;
+                e->psides = left ? 1 : 0;
+                if (left) x += eb->s->border_left + eb->padding_left;
+            }
             if (pc->frag < 0) {
                 double dx = x - pc->x0;
                 if (fabs(dx) > 0.001) {
@@ -12818,7 +12940,42 @@ static void layout_bidi_reorder(LayoutContext *ctx, int idx)
                     if (x + pc->w > e->n1) e->n1 = x + pc->w;
                 }
             }
-            x += pc->w + pc->trail;
+            x += pc->w;
+            if (nch == 0) continue;
+            int nx = k + 1;
+            while (nx < ncut && (cut[order[nx]].frag == -2 || cut[order[nx]].hang)) nx++;
+            for (int c = 0; c < nch; c++) {
+                BidiAnc *e = &A.a[chain[c]];
+                if (nx < ncut && bidi_in(ctx, cut[order[nx]].box, e->box, idx)) continue;
+                const LayoutBox *eb = layout_box(ctx, e->box);
+                bool right = k == e->rm && L == (eb->s->direction == 1 ? e->lfirst : e->llast);
+                if (right) x += eb->padding_right + eb->s->border_right;
+                if (nbp == bpcap) {
+                    bpcap = bpcap ? bpcap * 2 : 32;
+                    BidiPieceRec *nb = (BidiPieceRec *)realloc(bp, (size_t)bpcap * sizeof(BidiPieceRec));
+                    if (!nb) { bpcap = nbp; e->open = false; continue; }
+                    bp = nb;
+                }
+                BidiPieceRec *rec = &bp[nbp++];
+                rec->a = chain[c];
+                rec->pc.anchor = -1;
+                rec->pc.sides = (unsigned char)(e->psides | (right ? 2 : 0));
+                rec->pc.dx = e->ps;
+                rec->pc.w = x - e->ps;
+                if (e->lfirst == e->llast) {
+                    rec->pc.dy = eb->y;
+                    rec->pc.h = eb->height;
+                } else {
+                    /* (a line's piece: as tall as one line of it, as far down
+                     * from its first line's as its text) */
+                    double ca = layout_content_area_height(eb);
+                    rec->pc.dy = eb->y + (e->ty_line == L && e->has_base ? e->ty - e->base : 0.0);
+                    rec->pc.h = ca + eb->padding_top + eb->padding_bottom + eb->s->border_top + eb->s->border_bottom;
+                }
+                e->np++;
+                if (right) x += eb->margin_right;
+                e->open = false;
+            }
         }
     }
     for (int k = 0; k < A.n; k++) {
@@ -12827,6 +12984,40 @@ static void layout_bidi_reorder(LayoutContext *ctx, int idx)
         double d = e->n0 - e->o0;
         if (fabs(d) > 0.001) layout_box(ctx, e->box)->x += d;
     }
+    /* (an inline box in more than one piece, or on more than one line, is
+     * painted as its pieces; one split around blocks has its own) */
+    for (int k = 0; k < A.n; k++) {
+        BidiAnc *e = &A.a[k];
+        e->keep = !((e->np < 2 && e->lfirst == e->llast) || layout_box(ctx, e->box)->s->block_in_inline == 2);
+    }
+    for (int q = 0; q < nbp; q++) {
+        BidiAnc *e = &A.a[bp[q].a];
+        const LayoutBox *eb = layout_box(ctx, e->box);
+        if (!e->keep) continue;
+        if (!ctx->pieces) {
+            ctx->pieces = (LayoutPieceList *)calloc((size_t)ctx->tree.count, sizeof(LayoutPieceList));
+            if (!ctx->pieces) break;
+            ctx->pieces_n = ctx->tree.count;
+        }
+        if (e->box >= ctx->pieces_n) continue;
+        LayoutPieceList *pl = &ctx->pieces[e->box];
+        if (e->np >= 0) {   /* (its first piece here: the list starts over) */
+            pl->n = 0;
+            e->np = -1;
+        }
+        if (pl->n == pl->cap) {
+            int nc = pl->cap ? 2 * pl->cap : 4;
+            LayoutPiece *np = (LayoutPiece *)realloc(pl->p, (size_t)nc * sizeof(LayoutPiece));
+            if (!np) continue;
+            pl->p = np;
+            pl->cap = nc;
+        }
+        LayoutPiece pc = bp[q].pc;
+        pc.dx -= eb->x;
+        pc.dy -= eb->y;
+        pl->p[pl->n++] = pc;
+    }
+    free(bp);
     free(A.a);
     free(A.slot);
     if (nf_lists) {
@@ -12952,11 +13143,14 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                 bool ldeco = eb->margin_left != 0.0 || eb->padding_left != 0.0 || eb->s->border_left != 0.0;
                 bool rdeco = eb->margin_right != 0.0 || eb->padding_right != 0.0 || eb->s->border_right != 0.0;
                 bool first_piece = true;
+                bool rtl = eb->s->direction == 1;
                 for (int k = ctx->tree.nodes[el].first_child_idx;;) {
+                    /* (a piece: up to a block or a line break) */
                     int b = k, last = -1;
                     while (b >= 0) {
                         LayoutBox *bb = layout_box(ctx, b);
                         if (layout_is_in_flow(bb) && layout_box_is_block_level(bb) && bb->s->float_side == 0) break;
+                        if (layout_is_br(ctx, b)) break;
                         last = b;
                         b = ctx->tree.nodes[b].next_sibling_idx;
                     }
@@ -12964,7 +13158,10 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                     fp->el = el;
                     fp->first = last >= 0 ? k : -1;
                     fp->last = last;
-                    fp->sides = (unsigned char)((first_piece ? 1 : 0) | (b < 0 ? 2 : 0));
+                    /* (the start edge on the first piece, the end edge on the
+                     * last: the right edge first when right to left) */
+                    bool first_p = first_piece, last_p = b < 0;
+                    fp->sides = (unsigned char)(((rtl ? last_p : first_p) ? 1 : 0) | ((rtl ? first_p : last_p) ? 2 : 0));
                     fp->shown = !layout_inline_range_empty(ctx, fp->first, fp->last) ||
                                 ((fp->sides & 1) && ldeco) || ((fp->sides & 2) && rdeco);
                     items[n] = el;
@@ -13034,7 +13231,8 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
             if (piece_of[i] & 1) {
                 bool line_ends = i + 1 >= nkids ||
                                  (piece_of[i + 1] < 0 && layout_box_is_block_level(layout_box(ctx, kids[i + 1])) &&
-                                  layout_box(ctx, kids[i + 1])->s->float_side == 0);
+                                  layout_box(ctx, kids[i + 1])->s->float_side == 0) ||
+                                 (piece_of[i + 1] < 0 && layout_is_br(ctx, kids[i + 1]));
                 layout_piece_end(ctx, fp, &cur, line_ends);
             } else if (layout_piece_start(ctx, fp, &cur, &pending_mb, &any_placed, content_left, avail_width)) {
                 lead_x = cur.x;

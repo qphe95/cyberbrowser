@@ -50,7 +50,30 @@ space no longer counts when it is aligned right or centered (layout_line_hanging
 section 4.1.3), as in browsers; Wikipedia's screenshot moves by a pixel or two on centered lines.
 YouTube's forced layouts 205 ms, Wikipedia's 363 ms (369 before).  Left for step 5: an inline box
 the reordering splits or reverses keeps its one box (backgrounds and borders where the flow put it,
-edges on the left-to-right sides).  Steps 5-6 planned.
+edges on the left-to-right sides).
+
+Step 5 done (css/CSS2 5374 -> 5395, none lost: box 7, bidi-text 6, bidi-005 / 006, fonts 3, abspos 1,
+box-display 1, colors 1).  Three parts.  A `<br>` in an inline element did not break the line at all
+(the flow measures an inline element as its children's text run together, `<br>` skipped): an
+inline whose parent is not inline and that has a `<br>` child is now laid out in pieces like one
+split around blocks (block_in_inline 2: its children are items of the parent's flow), with a piece
+cut at each `<br>`.  Wikipedia's infobox has one (`;<br/>250 years ago`), so that line now breaks
+where it should.  A nested inline with a `<br>` (`<b><i>x<br>y</i></b>`) still does not break.
+Split pieces now put the right edge on the first piece and the left edge on the last when the
+inline is right to left (CSS 2.1 section 8.6), and a line's alignment counts the room of a piece's
+right edge that ends it.  In layout_bidi_reorder, the edges no longer follow the logical first and
+last item: after L2 each inline box's left edge goes before its leftmost run on its first line and
+its right edge after its rightmost run on its last (right edge on the first line and left edge on
+the last line when it is right to left), opened outermost first and closed innermost first; its
+pieces are its stretches of visually adjacent runs.  An inline in more than one piece, or on more
+than one line, gets them as its LayoutPieceList (anchored to itself) and paint draws its
+background and borders piece by piece, a border side only on the pieces that have that edge.  The
+bidi pass now also walks into split inlines, and a `<br>` is a paragraph separator (U+2029) there.
+YouTube's screenshot identical; replay layout times unchanged (YouTube about 220 ms and Wikipedia
+about 275 ms in both step 4 and step 5 builds, timed alternately).  Still failing in bidi-text:
+white space at the edges of reversed runs (bidi-003, white-space-collapsing-bidi-*: step 6), line
+breaking with bidi (bidi-breaking-*, line-breaking-bidi-*), and bidi-007..010 (float heights a pixel
+off, overflow).  Step 6 planned.
 
 ## Why
 
