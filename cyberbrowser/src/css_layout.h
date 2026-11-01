@@ -169,6 +169,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char text_align_how, direction, direction_set;
     unsigned char table_layout_fixed;   /* table-layout: fixed */
     unsigned char table_group;          /* a row group: 0 body, 1 header, 2 footer */
+    unsigned char flow_root;            /* display: flow-root (a block establishing a formatting context) */
 
     /* CSS float/clear.  float_side: 0=none, 1=left, 2=right.
      * clear: 0=none, 1=left, 2=right, 3=both. */

@@ -2580,6 +2580,8 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         box->s->webkit_box = (strcasecmp(value, "-webkit-box") == 0 || strcasecmp(value, "box") == 0) ? 1 :
                           strcasecmp(value, "-webkit-inline-box") == 0 ? 2 : 0;
         if (strcasecmp(value, "inline-table") == 0) box->s->display = CSS_DISPLAY_BLOCK;
+        box->s->flow_root = strcasecmp(value, "flow-root") == 0;
+        if (box->s->flow_root) box->s->display = CSS_DISPLAY_BLOCK;
         box->s->table_role = css_display_table_role(value);
         box->s->table_group = !strcasecmp(value, "table-header-group") ? 1 : !strcasecmp(value, "table-footer-group") ? 2 : 0;
     } else if (strncasecmp(prop, "grid", 4) == 0 || strcasecmp(prop, "justify-items") == 0 ||
@@ -11475,6 +11477,8 @@ static double layout_margin_collapse(double a, double b)
     return a + b;
 }
 
+static bool layout_establishes_bfc(LayoutContext *ctx, int idx);
+
 static double layout_eff_margin_top(LayoutContext *ctx, int idx, int depth)
 {
     LayoutBox *box = layout_box(ctx, idx);
@@ -11489,10 +11493,9 @@ static double layout_eff_margin_top(LayoutContext *ctx, int idx, int depth)
         if (box->s->overflow != 0 || !layout_box_collapses_through(box)) return mt;
         return layout_margin_collapse(mt, mb);
     }
-    if (box->s->overflow != 0) return mt;    /* BFC: no collapse with children */
-    /* Flex/grid containers establish a flex/grid formatting context: their
-     * margins never collapse with their items' margins. */
-    if (box->s->display == CSS_DISPLAY_FLEX || box->s->display == CSS_DISPLAY_GRID) return mt;
+    /* A box establishing a formatting context (overflow, flex, grid, a
+     * table cell, ...): no collapse with its children. */
+    if (layout_establishes_bfc(ctx, idx) && idx != ctx->tree.root_idx) return mt;
     if (box->padding_top > 0.0 || box->s->border_top > 0.0) return mt;
     if (!layout_box_is_block_level(layout_box(ctx, f))) return mt;
     double c = layout_eff_margin_top(ctx, f, depth + 1);
@@ -11510,8 +11513,7 @@ static double layout_eff_margin_bottom(LayoutContext *ctx, int idx, int depth)
         if (box->s->overflow != 0 || !layout_box_collapses_through(box)) return mb;
         return layout_margin_collapse(mt, mb);
     }
-    if (box->s->overflow != 0) return mb;    /* BFC: no collapse with children */
-    if (box->s->display == CSS_DISPLAY_FLEX || box->s->display == CSS_DISPLAY_GRID) return mb;
+    if (layout_establishes_bfc(ctx, idx) && idx != ctx->tree.root_idx) return mb;   /* (as above) */
     if (box->padding_bottom > 0.0 || box->s->border_bottom > 0.0) return mb;
     if (!layout_height_auto(box)) return mb;     /* explicit height blocks */
     if (!layout_box_is_block_level(layout_box(ctx, l))) return mb;
@@ -11827,6 +11829,10 @@ static bool layout_establishes_bfc(LayoutContext *ctx, int idx)
         CssDisplay pd = layout_box(ctx, p)->s->display;
         if (pd == CSS_DISPLAY_FLEX || pd == CSS_DISPLAY_GRID) return true;
     }
+    /* (flow-root, flex and grid containers, tables, table cells and
+     * captions) */
+    if (b->s->flow_root || b->s->display == CSS_DISPLAY_FLEX || b->s->display == CSS_DISPLAY_GRID) return true;
+    if (b->s->table_role == 1 || b->s->table_role == 4 || b->s->table_role == 5) return true;
     HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
     if (dn && dn->type == HTML_NODE_ELEMENT && dn->tag_name &&
         (strcasecmp(dn->tag_name, "td") == 0 || strcasecmp(dn->tag_name, "th") == 0))
@@ -12332,7 +12338,9 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                        box->padding_top <= 0.0 && box->s->border_top <= 0.0 &&
                        idx != ctx->tree.root_idx &&
                        box->s->display != CSS_DISPLAY_FLEX && box->s->display != CSS_DISPLAY_GRID &&
-                       box->s->position != CSS_POSITION_ABSOLUTE && box->s->position != CSS_POSITION_FIXED) {
+                       box->s->position != CSS_POSITION_ABSOLUTE && box->s->position != CSS_POSITION_FIXED &&
+                       !box->s->flow_root &&
+                       box->s->table_role != 1 && box->s->table_role != 4 && box->s->table_role != 5) {
                 /* Collapses out through this box (its parent applied it via
                  * layout_eff_margin_top).  The root element, and boxes that
                  * establish a new formatting context (absolutely positioned
@@ -12364,6 +12372,46 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                 child->x = content_left + avail_width - child->margin_right - child->width;
             }
             child->y = cur.y + gap;
+            /* A box that establishes a block formatting context (overflow
+             * other than visible, a table, flex or grid, flow-root) does not
+             * overlap the floats of this one (CSS 2.1 section 9.5): it goes
+             * beside them, an auto width narrowed to the room there, or
+             * down past them to where it fits. */
+            int nfl = ctx->float_count - t_float_base;
+            if (nfl > 0 && child->s->float_side == 0 &&
+                (child->s->overflow != 0 || child->s->flow_root || table_is_table(child) ||
+                 child->s->display == CSS_DISPLAY_FLEX || child->s->display == CSS_DISPLAY_GRID)) {
+                const FloatRec *fl = ctx->float_stack + t_float_base;
+                bool sized = child->s->width_set || child->s->width_percent > 0.0 || child->s->width_keyword;
+                bool auto_w = !sized && !table_is_table(child);
+                /* (an auto-width table fits where its min-content width does,
+                 * then shrinks to the room) */
+                double need = auto_w ? 0.0 : sized ? child->width : layout_intrinsic_width(ctx, c, false);
+                double y = child->y, lx = content_left, la = avail_width;
+                double content_right = content_left + avail_width;
+                for (int guard = 0; guard < 64; guard++) {
+                    layout_flow_line_geometry(fl, nfl, y, content_left, avail_width, &lx, &la);
+                    /* (a float edge only where a float intrudes: else the margin, a negative one too) */
+                    double left = lx > content_left + 0.01 && lx > content_left + child->margin_left ? lx : content_left + child->margin_left;
+                    double right = lx + la < content_right - 0.01 && lx + la < content_right - child->margin_right ? lx + la : content_right - child->margin_right;
+                    double room = right - left;
+                    if (la >= avail_width - 0.01 || (auto_w ? room > 0.0 : need <= room + 0.01)) break;
+                    double next = -1.0;
+                    for (int fi = 0; fi < nfl; fi++)
+                        if (fl[fi].bottom > y + 0.01 && (next < 0.0 || fl[fi].bottom < next)) next = fl[fi].bottom;
+                    if (next < 0.0) break;
+                    y = next;
+                }
+                if (la < avail_width - 0.01) {
+                    /* (a float edge only where a float intrudes: else the margin, a negative one too) */
+                    double left = lx > content_left + 0.01 && lx > content_left + child->margin_left ? lx : content_left + child->margin_left;
+                    double right = lx + la < content_right - 0.01 && lx + la < content_right - child->margin_right ? lx + la : content_right - child->margin_right;
+                    child->x = left;
+                    if ((auto_w || table_is_table(child)) && right - left < child->width)
+                        child->width = right - left > 0.0 ? right - left : 0.0;
+                }
+                child->y = y;
+            }
             layout_update_content_sizes(child);
 
             /* Recurse so the child's subtree (and thus its auto height) is final
