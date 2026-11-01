@@ -60,6 +60,11 @@ CssStylesheet* css_stylesheet_parse(const char *css, size_t len);
 CssStylesheet* css_stylesheet_parse_range(const char *css, size_t len,
                                           size_t start, size_t stop, size_t *end_pos);
 
+/* The top-level item of css at pos (after white space and comments): where
+ * it ends, and in *counts whether it is a valid style rule or an at-rule
+ * some browser knows (an @import after one is ignored). */
+size_t css_sheet_item_skip(const char *css, size_t len, size_t pos, bool *counts);
+
 /* Free a stylesheet and all owned strings. */
 void css_stylesheet_free(CssStylesheet *sheet);
 

@@ -57,6 +57,7 @@ extern void run_css_style_tests(void);
 extern void run_image_cache_tests(void);
 extern void run_glyph_atlas_tests(void);
 extern void run_css_tokenizer_tests(void);
+extern void run_css_rules_tests(void);
 extern void run_http_pool_tests(void);
 extern void run_dom_tests(void);
 /* Note: YouTube data tests run in separate executable (youtube-data-test) */
@@ -219,6 +220,7 @@ int main(int argc, char *argv[]) {
         { "image_cache", run_image_cache_tests },
         { "glyph_atlas", run_glyph_atlas_tests },
         { "css_tokenizer", run_css_tokenizer_tests },
+        { "css_rules", run_css_rules_tests },
         { "http_pool", run_http_pool_tests },
         { "dom", run_dom_tests },
     };

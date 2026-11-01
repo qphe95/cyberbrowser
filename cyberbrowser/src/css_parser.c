@@ -184,6 +184,12 @@ static const unsigned char k_decl_special[256] = {
     ['['] = 1, [']'] = 1, ['<'] = 1, ['/'] = 1, ['('] = 1, [')'] = 1, ['\n'] = 1, ['\r'] = 1, ['\f'] = 1,
 };
 
+/* Name characters (1), and those an identifier can start with (2: '-' is
+ * one when what follows is one too). */
+static const unsigned char k_name_char[256] = {
+    ['a' ... 'z'] = 2, ['A' ... 'Z'] = 2, ['_'] = 2, ['-'] = 2, [0x80 ... 0xff] = 2, ['0' ... '9'] = 1,
+};
+
 static bool css_decl_block_fast(const char *s, size_t len, size_t *pos, CssRule *rule) {
     size_t pos0 = *pos;
     int n0 = rule->declaration_count;
@@ -212,6 +218,14 @@ static bool css_decl_block_fast(const char *s, size_t len, size_t *pos, CssRule 
             (*pos)++;
         }
         size_t prop_end = *pos;
+        /* (a property that is not one identifier: the token path's) */
+        size_t pe = prop_end;
+        while (pe > prop_start && css_is_space(s[pe - 1])) pe--;
+        if (pe == prop_start || k_name_char[(unsigned char)s[prop_start]] != 2 ||
+            (s[prop_start] == '-' && (pe - prop_start < 2 || k_name_char[(unsigned char)s[prop_start + 1]] != 2)))
+            goto bail;
+        for (size_t i = prop_start + 1; i < pe; i++)
+            if (!k_name_char[(unsigned char)s[i]]) goto bail;
         if (*pos < len && s[*pos] == ':') {
             (*pos)++;
             /* Read value until ';' or '}', respecting quotes and balanced
@@ -263,7 +277,8 @@ bail:
  * and functions nest).  !important is the value's last two tokens, a !
  * and the identifier important.  An at-rule in a declaration list is
  * ignored with its block; anything else that is not a declaration is
- * skipped up to its semicolon.  Properties are their names with escapes
+ * skipped up to its semicolon, or through its {} block (a nested rule, not
+ * kept).  A declaration with a bad string or url in it is dropped.  Properties are their names with escapes
  * resolved, lower case; values the source text (trimmed), or rebuilt from
  * the tokens when an escape or a comment is in it. */
 
@@ -392,6 +407,9 @@ static void decl_finish(const CssTz *tz, const TokBuf *b, DeclSink sink, void *c
         }
     }
     if (e <= k) return;   /* (no value) */
+    /* (a bad string or url fits no property's grammar) */
+    for (int i = k; i < e; i++)
+        if (t[i].type == CT_BAD_STRING || t[i].type == CT_BAD_URL) return;
     size_t pl;
     const char *pv = css_tok_val(&tz->arena, &t[0], &pl);
     char *prop = (char *)malloc(pl + 1);
@@ -430,8 +448,9 @@ static size_t css_consume_declarations(const char *s, size_t len, size_t pos, bo
             else if (t.type == CT_LBRACKET && depth < 64) closers[depth++] = ']';
             else if (t.type == CT_LBRACE && depth < 64) closers[depth++] = '}';
             if (mode == DECL) tokbuf_push(&buf, &t);
-            /* (an at-rule ends with its block) */
-            if (mode == AT && depth == 0 && t.type == CT_RBRACE) mode = NONE;
+            /* (an at-rule ends with its block, and so does anything else
+             * that is not a declaration: it is read as a nested rule) */
+            if ((mode == AT || mode == SKIP) && depth == 0 && t.type == CT_RBRACE) mode = NONE;
             continue;
         }
         if (in_block && t.type == CT_RBRACE) {
@@ -551,31 +570,46 @@ static void css_strip_comments(char *s) {
     *o = '\0';
 }
 
-/* Read a selector until the first unquoted '{'. Returns NULL if none found. */
 /* A qualified rule's prelude that cannot be a selector list: a ';' or '@'
  * outside strings and brackets (CSS Syntax: a ';' does not end a prelude,
- * so "junk; .a { }" is one rule with an invalid selector). */
+ * so "junk; .a { }" is one rule with an invalid selector), an empty
+ * selector (a comma at either end, or two together), or one starting with
+ * what no compound starts with (a digit: "1badselector").  The selector
+ * parser takes the rest. */
 static bool css_prelude_invalid(const char *sel)
 {
+    const char *p = sel;
     char q = 0;
     int br = 0;
-    for (const char *p = sel; *p; p++) {
+    bool first = true;   /* at a selector's start */
+    for (;; p++) {
+        if (first) {
+            while (css_is_space(*p)) p++;
+            unsigned char c = (unsigned char)*p;
+            if (!c || c == ',') return true;
+            if (!(isalpha(c) || c >= 0x80 || strchr("_*.#[:|\\&-", c))) return true;
+            if (c == '-' && isdigit((unsigned char)p[1])) return true;
+            first = false;
+        }
+        char c = *p;
+        if (!c) return false;
         if (q) {
-            if (*p == '\\' && p[1]) p++;
-            else if (*p == q) q = 0;
-        } else if (*p == '\\' && p[1]) {
+            if (c == '\\' && p[1]) p++;
+            else if (c == q) q = 0;
+        } else if (c == '\\' && p[1]) {
             p++;
-        } else if (*p == '"' || *p == '\'') {
-            q = *p;
-        } else if (*p == '[' || *p == '(') {
+        } else if (c == '"' || c == '\'') {
+            q = c;
+        } else if (c == '(' || c == '[') {
             br++;
-        } else if ((*p == ']' || *p == ')') && br > 0) {
+        } else if ((c == ')' || c == ']') && br > 0) {
             br--;
-        } else if (br == 0 && (*p == ';' || *p == '@')) {
+        } else if (br == 0 && (c == ';' || c == '@')) {
             return true;
+        } else if (c == ',' && br == 0) {
+            first = true;
         }
     }
-    return false;
 }
 
 /* Consume a rule's declaration block (after its '{') without keeping it. */
@@ -587,161 +621,439 @@ static void css_skip_rule_block(const char *s, size_t len, size_t *pos)
     css_declarations_free(dummy.declarations, dummy.declaration_count);
 }
 
-static char* css_read_selector(const char *s, size_t len, size_t *pos) {
-    css_skip_space_and_comments(s, len, pos);
-    size_t start = *pos;
-    bool in_quote = false;
-    char quote_char = 0;
-    while (*pos < len) {
-        char c = s[*pos];
-        if (!in_quote) {
-            if (c == '"' || c == '\'') { in_quote = true; quote_char = c; }
-            else if (c == '{') break;
-            else if (c == '}') break; /* malformed */
-        } else {
-            if (c == quote_char) in_quote = false;
-            else if (c == '\\' && *pos + 1 < len) (*pos)++;
-        }
-        (*pos)++;
-    }
-    if (*pos >= len || s[*pos] != '{') return NULL;
-    char *sel = css_strndup_trim(s + start, *pos - start);
-    if (sel && strstr(sel, "/*")) css_strip_comments(sel);
-    return sel;
+/* ---- Rule lists (CSS Syntax 3 sections 5.4.1 - 5.4.3) ----
+ * A rule list holds qualified rules (a prelude, then a {} block: style
+ * rules) and at-rules (@name, a prelude, then ; or a block).  Brackets and
+ * strings nest in a prelude: a { or ; inside () or [] does not end it, and
+ * at the top level a } is part of one.  At the top level <!-- and --> are
+ * ignored, and so are <![CDATA[ and ]]> (which the XML parser takes out of
+ * an XHTML document's style; ours is an HTML parser).  In a block the }
+ * that closes it ends the list, and an at-rule it interrupts.  A prelude is
+ * read as text when it has none of what only the tokens read right
+ * (escapes, comments, unbalanced brackets, } ; @ <, --> and a newline in a
+ * string); else from tokens. */
+
+/* An identifier starts at s[i] (CSS Syntax 4.3.9). */
+static bool css_ident_starts(const char *s, size_t len, size_t i)
+{
+    if (i >= len) return false;
+    unsigned char c = (unsigned char)s[i];
+    if (isalpha(c) || c == '_' || c >= 0x80) return true;
+    if (c == '\\') return i + 1 < len && s[i + 1] != '\n' && s[i + 1] != '\r' && s[i + 1] != '\f';
+    if (c != '-' || i + 1 >= len) return false;
+    unsigned char d = (unsigned char)s[i + 1];
+    if (isalpha(d) || d == '_' || d == '-' || d >= 0x80) return true;
+    return d == '\\' && i + 2 < len && s[i + 2] != '\n' && s[i + 2] != '\r' && s[i + 2] != '\f';
 }
 
-/* Read an at-rule precondition: everything up to (not including) the next
- * '{' or ';' at paren depth 0, or a block-closing '}'.  Returns a malloc'd
- * trimmed string (possibly empty). */
-static char* css_read_at_condition(const char *s, size_t len, size_t *pos) {
-    css_skip_space_and_comments(s, len, pos);
-    size_t start = *pos;
-    int depth = 0;
-    char quote = 0;
-    while (*pos < len) {
-        char c = s[*pos];
-        if (quote) {
-            if (c == quote) quote = 0;
-            else if (c == '\\' && *pos + 1 < len) (*pos)++;
-        } else if (c == '"' || c == '\'') {
-            quote = c;
-        } else if (c == '(') {
-            depth++;
-        } else if (c == ')') {
-            if (depth > 0) depth--;
-        } else if (depth == 0 && (c == '{' || c == ';' || c == '}')) {
+/* The characters the text prelude scan looks at. */
+static const unsigned char k_prelude_special[256] = {
+    ['{'] = 1, ['}'] = 1, ['('] = 1, [')'] = 1, ['['] = 1, [']'] = 1, ['"'] = 1, ['\''] = 1,
+    ['/'] = 1, ['\\'] = 1, [';'] = 1, ['@'] = 1, ['<'] = 1, ['>'] = 1, [','] = 1,
+};
+
+/* A selector's start at s[i] (white space skipped) that no selector has:
+ * the list's end ('{') or a comma (an empty selector), or a character no
+ * compound starts with ("1badselector"). */
+static bool css_sel_start_bad(const char *s, size_t len, size_t i)
+{
+    while (i < len && css_is_space(s[i])) i++;
+    if (i >= len) return true;
+    unsigned char c = (unsigned char)s[i];
+    if (!(isalpha(c) || c >= 0x80 || strchr("_*.#[:|\\&-", c))) return true;
+    return c == '-' && i + 1 < len && isdigit((unsigned char)s[i + 1]);
+}
+
+/* A qualified rule's prelude from pos as text (at: an at-rule's, which a
+ * ';' also ends): true with *brace its '{' (or ';'), or false where the
+ * token path has to read it.  For a qualified rule *bad tells whether the
+ * selector list has a selector css_prelude_invalid turns down. */
+static bool css_prelude_fast(const char *s, size_t len, size_t pos, bool at, size_t *brace, bool *bad)
+{
+    char st[32];
+    int d = 0;
+    if (!at && css_sel_start_bad(s, len, pos)) *bad = true;
+    for (size_t i = pos; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (!k_prelude_special[c]) continue;
+        switch (c) {
+        case '{':
+            if (d) return false;
+            *brace = i;
+            return true;
+        case '(':
+        case '[':
+            if (d == (int)sizeof(st)) return false;
+            st[d++] = c == '(' ? ')' : ']';
+            break;
+        case ')':
+        case ']':
+            if (!d || st[d - 1] != (char)c) return false;
+            d--;
+            break;
+        case '"':
+        case '\'':
+            for (i++; i < len && s[i] != (char)c; i++)
+                if (s[i] == '\\' || s[i] == '\n' || s[i] == '\r' || s[i] == '\f') return false;
+            if (i >= len) return false;
+            break;
+        case '/':
+            if (i + 1 < len && s[i + 1] == '*') return false;
+            break;
+        case '>':
+            if (i >= pos + 2 && s[i - 1] == '-' && s[i - 2] == '-') return false;   /* (-->) */
+            break;
+        case ';':
+            if (!at || d) return false;
+            *brace = i;
+            return true;
+        case ',':
+            if (!at && !d && css_sel_start_bad(s, len, i + 1)) *bad = true;
+            break;
+        default:   /* \ } @ < */
+            return false;
+        }
+    }
+    return false;
+}
+
+/* A block from pos (just after its '{') as text, to the '}' that closes
+ * it: true with *end after it, or false where the tokens have to read it
+ * (an escape, a comment, a newline in a string, unbalanced brackets). */
+static bool css_block_skip_fast(const char *s, size_t len, size_t pos, size_t *end)
+{
+    char st[32];
+    int d = 1;
+    st[0] = '}';
+    for (size_t i = pos; i < len; i++) {
+        char c = s[i];
+        switch (c) {
+        case '{':
+        case '(':
+        case '[':
+            if (d == (int)sizeof(st)) return false;
+            st[d++] = c == '{' ? '}' : c == '(' ? ')' : ']';
+            break;
+        case '}':
+        case ')':
+        case ']':
+            if (st[d - 1] != c) return false;
+            if (--d == 0) {
+                *end = i + 1;
+                return true;
+            }
+            break;
+        case '"':
+        case '\'':
+            for (i++; i < len && s[i] != c; i++)
+                if (s[i] == '\\' || s[i] == '\n' || s[i] == '\r' || s[i] == '\f') return false;
+            if (i >= len) return false;
+            break;
+        case '\\':
+            return false;
+        case '/':
+            if (i + 1 < len && s[i + 1] == '*') return false;
+            break;
+        default:
             break;
         }
-        (*pos)++;
     }
-    return css_strndup_trim(s + start, *pos - start);
+    return false;
 }
 
-/* Parse an at-rule.  @media blocks are entered and their condition is
- * attached to every nested rule (ANDed with any enclosing @media condition).
- * Other block at-rules whose contents are style rules (@supports, @layer)
- * are entered unconditionally; at-rules whose contents are not style rules
- * (@font-face, @keyframes, @page) are skipped wholesale.  Statement at-rules
- * (@import, @charset) are skipped. */
-static void css_parse_at_rule(const char *s, size_t len, size_t *pos,
-                              CssStylesheet *sheet, const char *parent_cond) {
-    /* Skip '@' and identifier. */
-    (*pos)++;
-    size_t kw_start = *pos;
-    while (*pos < len && (isalnum((unsigned char)s[*pos]) || s[*pos] == '-')) (*pos)++;
-    size_t kw_len = *pos - kw_start;
-    bool is_media = (kw_len == 5 && strncasecmp(s + kw_start, "media", 5) == 0);
-    bool skip_block =
-        (kw_len == 9  && strncasecmp(s + kw_start, "font-face", 9) == 0) ||
-        (kw_len == 8  && strncasecmp(s + kw_start, "keyframes", 8) == 0) ||
-        (kw_len == 17 && strncasecmp(s + kw_start, "-webkit-keyframes", 17) == 0) ||
-        (kw_len == 4  && strncasecmp(s + kw_start, "page", 4) == 0);
+/* Closers of the blocks open in a prelude (past 64 deep, any closer). */
+typedef struct { char c[64]; int d; } Closers;
 
-    char *cond = css_read_at_condition(s, len, pos);
+static void closers_open(Closers *k, const CssToken *t)
+{
+    char c = t->type == CT_FUNCTION || t->type == CT_LPAREN ? ')' : t->type == CT_LBRACKET ? ']'
+           : t->type == CT_LBRACE ? '}' : 0;
+    if (!c) return;
+    if (k->d < 64) k->c[k->d] = c;
+    k->d++;
+}
 
-    if (*pos >= len || s[*pos] != '{') {
-        /* Statement form (@import, @charset, ...): skip until ';' or '}'. */
-        free(cond);
-        while (*pos < len && s[*pos] != ';' && s[*pos] != '}') (*pos)++;
-        if (*pos < len && s[*pos] == ';') (*pos)++;
-        return;
+/* t closes the innermost open block. */
+static bool closers_close(Closers *k, const CssToken *t)
+{
+    char c = t->type == CT_RPAREN ? ')' : t->type == CT_RBRACKET ? ']' : t->type == CT_RBRACE ? '}' : 0;
+    if (!c || !k->d || (k->d <= 64 && k->c[k->d - 1] != c)) return false;
+    k->d--;
+    return true;
+}
+
+/* Tokens from tz up to the } that closes the block just opened: the
+ * offset after it. */
+static size_t css_tokens_skip_block(CssTz *tz)
+{
+    Closers k = { { '}' }, 1 };
+    CssToken t;
+    while (css_tz_next(tz, &t) && t.type != CT_EOF) {
+        if (!closers_close(&k, &t)) closers_open(&k, &t);
+        if (!k.d) return t.end;
     }
-    (*pos)++; /* skip '{' */
+    return tz->n;
+}
 
-    if (skip_block) {
-        free(cond);
-        int depth = 1;
-        char quote = 0;
-        while (*pos < len && depth > 0) {
-            char c = s[*pos];
-            if (quote) {
-                if (c == quote) quote = 0;
-                else if (c == '\\' && *pos + 1 < len) (*pos)++;
-            } else if (c == '"' || c == '\'') {
-                quote = c;
-            } else if (c == '{') {
-                depth++;
-            } else if (c == '}') {
-                depth--;
-            }
-            (*pos)++;
+/* A qualified rule's prelude from tokens, from pos.  *block: it ended at a
+ * '{' (else at the '}' closing the enclosing block - nested - or at the
+ * end); *pre_end where the prelude ends; *bad when it has what no
+ * selector has.  Returns where the rule's block starts (after its '{'),
+ * or where reading stopped. */
+static size_t css_prelude_tokens(const char *s, size_t len, size_t pos, bool nested, bool *block,
+                                 size_t *pre_end, bool *bad)
+{
+    CssTz tz;
+    css_tz_init(&tz, s, len, pos);
+    Closers k = { { 0 }, 0 };
+    CssToken t;
+    size_t end = len;
+    *block = false;
+    *pre_end = len;
+    while (css_tz_next(&tz, &t) && t.type != CT_EOF) {
+        if (t.type == CT_BAD_STRING || t.type == CT_BAD_URL || t.type == CT_CDO || t.type == CT_CDC ||
+            t.type == CT_SEMICOLON || t.type == CT_AT_KEYWORD)
+            *bad = true;
+        if (k.d) {
+            if (t.type == CT_LBRACE || t.type == CT_RBRACE) *bad = true;
+            if (!closers_close(&k, &t)) closers_open(&k, &t);
+            continue;
         }
-        return;
+        if (t.type == CT_LBRACE) {
+            *block = true;
+            *pre_end = t.start;
+            end = t.end;
+            break;
+        }
+        if (t.type == CT_RBRACE) {
+            if (nested) {
+                *pre_end = end = t.start;
+                break;
+            }
+            *bad = true;
+        } else if (t.type == CT_RPAREN || t.type == CT_RBRACKET) {
+            *bad = true;
+        }
+        closers_open(&k, &t);
     }
+    css_tz_free(&tz);
+    return end;
+}
 
-    /* Effective condition for rules in this block: ANDed with any enclosing
-     * @media condition.  Non-@media blocks attach no condition (their rules
-     * apply unconditionally). */
+typedef enum { AT_SKIP, AT_MEDIA, AT_NEST } AtKind;
+
+/* What an at-rule's block holds: style rules under a media condition
+ * (@media), style rules (@supports, @layer, @container, ...: entered
+ * unconditionally), or else nothing kept. */
+static AtKind css_at_kind(const char *n, size_t l)
+{
+    static const char *const nest[] = { "supports", "layer", "container", "scope", "starting-style", "document",
+                                        "-moz-document" };
+    if (l == 5 && !strncasecmp(n, "media", 5)) return AT_MEDIA;
+    for (size_t i = 0; i < sizeof(nest) / sizeof(nest[0]); i++)
+        if (strlen(nest[i]) == l && !strncasecmp(n, nest[i], l)) return AT_NEST;
+    return AT_SKIP;
+}
+
+/* An at-rule some browser knows (an @import after one is ignored; after an
+ * unknown one, not). */
+static bool css_at_known(const char *n, size_t l)
+{
+    static const char *const known[] = { "media", "supports", "layer", "container", "scope", "starting-style",
+                                         "document", "-moz-document", "font-face", "keyframes",
+                                         "-webkit-keyframes", "page", "namespace", "counter-style", "property",
+                                         "font-feature-values", "font-palette-values", "view-transition" };
+    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++)
+        if (strlen(known[i]) == l && !strncasecmp(n, known[i], l)) return true;
+    return false;
+}
+
+static size_t css_rule_list(const char *s, size_t len, size_t pos, size_t stop, bool nested,
+                            CssStylesheet *sheet, const char *cond);
+
+/* The at-rule at pos (its '@').  Its style rules go to sheet (when not
+ * NULL) under cond.  *counts: it is one an @import cannot follow.  Returns
+ * where it ends. */
+static size_t css_at_rule(const char *s, size_t len, size_t pos, bool nested, CssStylesheet *sheet,
+                          const char *cond, bool *counts)
+{
+    /* (a plain name and prelude as text; else from tokens) */
+    char name[32];
+    size_t nl = 0, q = pos + 1;
+    while (q < len && (isalnum((unsigned char)s[q]) || s[q] == '-' || s[q] == '_')) {
+        if (nl < sizeof(name)) name[nl] = s[q];
+        nl++;
+        q++;
+    }
+    size_t pre = q, pre_end = len, end = len;
+    bool block = false;
+    bool unused = false;
+    bool fast = nl <= sizeof(name) && !(q < len && (s[q] == '\\' || (unsigned char)s[q] >= 0x80)) &&
+                css_prelude_fast(s, len, q, true, &pre_end, &unused);
+    if (fast) {
+        block = s[pre_end] == '{';
+        end = pre_end + 1;
+    } else {
+        CssTz tz;
+        css_tz_init(&tz, s, len, pos);
+        CssToken t;
+        if (!css_tz_next(&tz, &t) || t.type != CT_AT_KEYWORD) {
+            css_tz_free(&tz);
+            return pos + 1;
+        }
+        size_t vl;
+        const char *nv = css_tok_val(&tz.arena, &t, &vl);
+        nl = vl < sizeof(name) ? vl : sizeof(name);
+        memcpy(name, nv, nl);
+        if (vl > sizeof(name)) nl = 0;   /* (no at-rule known has so long a name) */
+        pre = t.end;
+        Closers k = { { 0 }, 0 };
+        while (css_tz_next(&tz, &t) && t.type != CT_EOF) {
+            if (k.d) {
+                if (!closers_close(&k, &t)) closers_open(&k, &t);
+                continue;
+            }
+            if (t.type == CT_SEMICOLON) {
+                pre_end = t.start;
+                end = t.end;
+                break;
+            }
+            if (t.type == CT_LBRACE) {
+                pre_end = t.start;
+                end = t.end;
+                block = true;
+                break;
+            }
+            if (t.type == CT_RBRACE && nested) {
+                pre_end = end = t.start;
+                break;
+            }
+            closers_open(&k, &t);
+        }
+        css_tz_free(&tz);
+    }
+    AtKind kind = css_at_kind(name, nl);
+    bool is_charset = nl == 7 && !strncasecmp(name, "charset", 7), is_import = nl == 6 && !strncasecmp(name, "import", 6),
+         is_layer = nl == 5 && !strncasecmp(name, "layer", 5);
+    if (counts) *counts = css_at_known(name, nl) && !is_charset && !is_import && !(is_layer && !block);
+    if (!block) return end;
+    if (kind == AT_SKIP || !sheet) {
+        size_t e;
+        if (css_block_skip_fast(s, len, end, &e)) return e;
+        CssTz tz;
+        css_tz_init(&tz, s, len, end);
+        end = css_tokens_skip_block(&tz);
+        css_tz_free(&tz);
+        return end;
+    }
     char *eff = NULL;
-    if (is_media) {
-        if (parent_cond && parent_cond[0] && cond && cond[0]) {
+    if (kind == AT_MEDIA) {
+        char *c = css_strndup_trim(s + pre, pre_end - pre);
+        if (c && strstr(c, "/*")) css_strip_comments(c);
+        if (cond && cond[0] && c && c[0]) {
             /* Each query list must match: joined by CSS_MEDIA_AND. */
-            size_t n = strlen(parent_cond) + strlen(cond) + 2;
+            size_t n = strlen(cond) + strlen(c) + 2;
             eff = (char *)malloc(n);
-            if (eff) snprintf(eff, n, "%s%c%s", parent_cond, CSS_MEDIA_AND, cond);
-        } else if (parent_cond && parent_cond[0]) {
-            eff = strdup(parent_cond);
+            if (eff) snprintf(eff, n, "%s%c%s", cond, CSS_MEDIA_AND, c);
         } else if (cond && cond[0]) {
             eff = strdup(cond);
+        } else if (c && c[0]) {
+            eff = strdup(c);
         }
+        free(c);
+    } else if (cond && cond[0]) {
+        eff = strdup(cond);
     }
-    free(cond);
-
-    /* Block-form at-rule: parse nested rules. */
-    while (*pos < len) {
-        css_skip_space_and_comments(s, len, pos);
-        if (*pos >= len) break;
-        if (s[*pos] == '}') { (*pos)++; break; }
-        if (s[*pos] == '@') {
-            css_parse_at_rule(s, len, pos, sheet, eff ? eff : "");
-            continue;
-        }
-        char *selector = css_read_selector(s, len, pos);
-        if (!selector) {
-            /* Could be malformed; try to recover. */
-            (*pos)++;
-            continue;
-        }
-        if (*pos >= len || s[*pos] != '{') {
-            free(selector);
-            continue;
-        }
-        (*pos)++; /* skip '{' */
-        if (css_prelude_invalid(selector)) {
-            free(selector);
-            css_skip_rule_block(s, len, pos);
-            continue;
-        }
-        CssRule *rule = css_stylesheet_add_rule(sheet);
-        if (!rule) {
-            free(selector);
-            break;
-        }
-        rule->selector_text = selector;
-        rule->media_query = (eff && eff[0]) ? strdup(eff) : NULL;
-        css_parse_declaration_block(s, len, pos, rule);
-    }
+    end = css_rule_list(s, len, end, len, true, sheet, eff ? eff : "");
     free(eff);
+    return end;
+}
+
+/* The qualified rule or at-rule at pos (white space and comments skipped):
+ * added to sheet unless NULL.  *counts: a valid style rule or a known
+ * at-rule.  Returns where it ends. */
+static size_t css_rule_item(const char *s, size_t len, size_t pos, bool nested, CssStylesheet *sheet,
+                            const char *cond, bool *counts)
+{
+    if (counts) *counts = false;
+    if (s[pos] == '@' && css_ident_starts(s, len, pos + 1)) return css_at_rule(s, len, pos, nested, sheet, cond, counts);
+    size_t start = pos, pre_end, brace;
+    bool block = true, bad = false, fast = css_prelude_fast(s, len, pos, false, &brace, &bad);
+    if (fast) {
+        pre_end = brace;
+        pos = brace + 1;
+    } else {
+        bad = false;
+        pos = css_prelude_tokens(s, len, pos, nested, &block, &pre_end, &bad);
+        if (!block) return pos;
+    }
+    char *sel = bad ? NULL : css_strndup_trim(s + start, pre_end - start);
+    if (sel && !fast && strstr(sel, "/*")) css_strip_comments(sel);
+    /* (the text scan has checked what css_prelude_invalid looks for) */
+    if (!sel || (!fast && css_prelude_invalid(sel))) {
+        free(sel);
+        css_skip_rule_block(s, len, &pos);
+        return pos;
+    }
+    if (counts) *counts = true;
+    CssRule *rule = sheet ? css_stylesheet_add_rule(sheet) : NULL;
+    if (!rule) {
+        free(sel);
+        css_skip_rule_block(s, len, &pos);
+        return pos;
+    }
+    rule->selector_text = sel;
+    rule->media_query = cond && cond[0] ? strdup(cond) : NULL;
+    css_parse_declaration_block(s, len, &pos, rule);
+    return pos;
+}
+
+/* At the top level: <!--, -->, <![CDATA[ or ]]> at pos, its length. */
+static size_t css_top_ignored(const char *s, size_t len, size_t pos)
+{
+    if (s[pos] == '<') {
+        if (len - pos >= 4 && !memcmp(s + pos, "<!--", 4)) return 4;
+        if (len - pos >= 9 && !memcmp(s + pos, "<![CDATA[", 9)) return 9;
+    } else if (s[pos] == '-') {
+        if (len - pos >= 3 && !memcmp(s + pos, "-->", 3)) return 3;
+    } else if (s[pos] == ']') {
+        if (len - pos >= 3 && !memcmp(s + pos, "]]>", 3)) return 3;
+    }
+    return 0;
+}
+
+/* Consume a list of rules from pos: nested, up to the } that closes its
+ * block (returning the offset after it); else the top level, items that
+ * start before stop.  Style rules go to sheet under the media condition
+ * cond. */
+static size_t css_rule_list(const char *s, size_t len, size_t pos, size_t stop, bool nested,
+                            CssStylesheet *sheet, const char *cond)
+{
+    while (pos < len && (nested || pos < stop)) {
+        css_skip_space_and_comments(s, len, &pos);
+        if (pos >= len) break;
+        if (nested) {
+            if (s[pos] == '}') return pos + 1;
+        } else {
+            size_t ig = css_top_ignored(s, len, pos);
+            if (ig) {
+                pos += ig;
+                continue;
+            }
+        }
+        pos = css_rule_item(s, len, pos, nested, sheet, cond, NULL);
+    }
+    return pos;
+}
+
+size_t css_sheet_item_skip(const char *css, size_t len, size_t pos, bool *counts)
+{
+    *counts = false;
+    css_skip_space_and_comments(css, len, &pos);
+    if (pos >= len) return len;
+    size_t ig = css_top_ignored(css, len, pos);
+    if (ig) return pos + ig;
+    return css_rule_item(css, len, pos, false, NULL, "", counts);
 }
 
 CssStylesheet* css_stylesheet_parse(const char *css, size_t len) {
@@ -767,44 +1079,7 @@ CssStylesheet* css_stylesheet_parse_range(const char *css, size_t len,
     CssStylesheet *sheet = (CssStylesheet*)calloc(1, sizeof(CssStylesheet));
     if (!sheet) return NULL;
     if (stop > len) stop = len;
-
-    size_t pos = start;
-    while (pos < stop) {
-        css_skip_space_and_comments(css, len, &pos);
-        if (pos >= len) break;
-
-        if (css[pos] == '@') {
-            css_parse_at_rule(css, len, &pos, sheet, "");
-            continue;
-        }
-        if (css[pos] == '}') { pos++; continue; }
-
-        char *selector = css_read_selector(css, len, &pos);
-        if (!selector) {
-            /* Could be malformed; try to recover. */
-            pos++;
-            continue;
-        }
-        if (pos >= len || css[pos] != '{') {
-            free(selector);
-            continue;
-        }
-        pos++; /* skip '{' */
-        if (css_prelude_invalid(selector)) {
-            free(selector);
-            css_skip_rule_block(css, len, &pos);
-            continue;
-        }
-
-        CssRule *rule = css_stylesheet_add_rule(sheet);
-        if (!rule) {
-            free(selector);
-            break;
-        }
-        rule->selector_text = selector;
-        css_parse_declaration_block(css, len, &pos, rule);
-    }
-
+    size_t pos = css_rule_list(css, len, start, stop, false, sheet, "");
     if (end_pos) *end_pos = pos;
     return sheet;   /* possibly with zero rules */
 }

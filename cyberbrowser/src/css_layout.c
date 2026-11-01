@@ -4469,11 +4469,21 @@ static void layout_sheet_imports(LayoutStyleSheetList *list, const char *text, s
             }
             if (end - p >= 4 && !memcmp(p, "<!--", 4)) { p += 4; continue; }
             if (end - p >= 3 && !memcmp(p, "-->", 3)) { p += 3; continue; }
+            if (end - p >= 9 && !memcmp(p, "<![CDATA[", 9)) { p += 9; continue; }
+            if (end - p >= 3 && !memcmp(p, "]]>", 3)) { p += 3; continue; }
             break;
         }
+        if (p >= end) break;
         bool charset = end - p >= 8 && !strncasecmp(p, "@charset", 8);
         if (!charset && !(end - p >= 8 && !strncasecmp(p, "@import", 7) &&
-                          (isspace((unsigned char)p[7]) || p[7] == '"' || p[7] == '\''))) break;
+                          (isspace((unsigned char)p[7]) || p[7] == '"' || p[7] == '\''))) {
+            /* (an invalid rule or an unknown at-rule before it: passed over) */
+            bool counts;
+            size_t e = css_sheet_item_skip(text, len, (size_t)(p - text), &counts);
+            if (counts || e <= (size_t)(p - text)) break;
+            p = text + e;
+            continue;
+        }
         p += charset ? 8 : 7;
         while (p < end && isspace((unsigned char)*p)) p++;
         char href[1024];

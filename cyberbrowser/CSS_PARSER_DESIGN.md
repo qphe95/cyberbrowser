@@ -5,7 +5,39 @@ Big5 decoded, tables from tools/gen_charset_tables.js; a sheet whose Content-Typ
 applies nothing).  Not done in it: the referring document's encoding as a sheet's fallback
 (at-charset-012), which needs the HTML parser to decode non-UTF-8 documents first.  Step 2 done
 (src/css_tokenizer.c, tests/test_css_tokenizer.c).  Step 3 done (css/CSS2 5234 -> 5252, none
-lost; parse time unchanged, below).  Steps 4-6 planned.
+lost; parse time unchanged, below).  Step 4 done (css/CSS2 5252 -> 5271, none lost; parse
+time below the old parser's, below).  Steps 5-6 planned.
+
+As built, step 4: rule lists (css_rule_list, tests/test_css_rules.c) by CSS Syntax 5.4.1 - 5.4.3.
+A qualified rule's prelude runs to its `{` with brackets and strings nested (a `;` or a top-level
+`}` is part of it, voiding the rule); `@` without an identifier after it starts a qualified rule;
+an at-rule ends at its `;` or block, or at the `}` closing the block it is in; @media, @supports,
+@layer, @container, @scope, @starting-style and @document blocks are rule lists (@media's condition
+attached as before), any other at-rule's block is skipped (so `@badAtRule screen { div {...} }`
+applies nothing); `<!--`, `-->`, and `<![CDATA[` / `]]>` (which an XML parser would have taken out
+of an XHTML document's style; ours parses it as HTML) are ignored at the top level only.  A
+selector list with an empty selector or one starting with a digit is dropped.  The @import scan
+(css_layout.c) passes over invalid rules and unknown at-rules (css_sheet_item_skip) as browsers do.
+In declaration lists: junk that is not a declaration ends at its `;` or with its `{}` block (read as
+a nested rule, not kept), a declaration with a bad string or url is dropped, and the text fast path
+leaves a property that is not one identifier to the tokens.  Preludes and at-rules are read as
+text when they have none of what only the tokens read right (escapes, comments, unbalanced
+brackets, `} ; @ <`, `-->`, a newline in a string); on YouTube's main sheet 2 of 21,400 preludes
+take the token path.  The text scan checks the selector starts itself, so the old second pass over
+each selector (css_prelude_invalid) runs only on the token path.  Same session, alternating runs:
+
+| sheet | old parser (HEAD) | step 4 |
+|---|---|---|
+| YouTube main (3.2 MB) | 10.95 - 11.31 ms | 10.10 - 10.41 ms |
+| YouTube second (550 KB) | 1.82 - 2.00 ms | 1.66 - 1.83 ms |
+| Wikipedia (210 KB) | 0.59 - 0.60 ms | 0.55 - 0.58 ms |
+
+Left for later steps: escapes in selectors (strings-000's `\` newline in an attribute value), and
+an invalid value falling back to the earlier declaration (matching-brackets-002, declarations-009
+#f, malformed-decl-007: step 6).  declarations-009 #c (`@media {...} color: red;` in a block,
+expected green) contradicts malformed-decl-block-001 #p3 (`@foo {color: red} color: green`,
+expected green) under any one rule for at-rules in declaration lists; CSS Syntax today ends the
+at-rule at its block, which #p3 follows.
 
 As built, step 3: the tokenizer also runs as a stream (css_tz_next, one token per call into the
 caller's token, no array; tested to give the array's tokens).  Declaration lists (rule blocks and
