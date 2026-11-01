@@ -5,6 +5,7 @@
  */
 
 #include "css_parser.h"
+#include "css_tokenizer.h"
 #include "dom_js.h"
 #include "browser/css_style_decl.h"
 #include "http_download.h"
@@ -152,13 +153,45 @@ static bool css_declaration_add(CssRule *rule, const char *prop, size_t prop_len
     return true;
 }
 
-/* Parse a declaration block between { and }. pos should point just past '{'. */
-static void css_parse_declaration_block(const char *s, size_t len, size_t *pos,
-                                        CssRule *rule) {
+/* A character that a plain declaration block never has outside a string:
+ * the token path (escapes, nested blocks, at-rules, brackets, comments,
+ * CDO / CDC) reads those. */
+static bool decl_complex_char(const char *s, size_t len, size_t i)
+{
+    char c = s[i];
+    return c == '\\' || c == '{' || c == '@' || c == '[' || c == ']' || c == '<' ||
+           (c == '/' && i + 1 < len && s[i + 1] == '*');
+}
+
+/* A ! that is the !important at a value's end (then white space and ; or }). */
+static bool decl_bang_important(const char *s, size_t len, size_t i)
+{
+    i++;
+    while (i < len && css_is_space(s[i])) i++;
+    if (i + 9 > len || strncasecmp(s + i, "important", 9) != 0) return false;
+    i += 9;
+    while (i < len && css_is_space(s[i])) i++;
+    return i >= len || s[i] == ';' || s[i] == '}';
+}
+
+/* The fast path for a declaration block between { and } (pos just past the
+ * '{'): plain declarations scanned as text.  False, with nothing added and
+ * pos as it was, on anything only the token path reads right. */
+/* The characters the fast path looks at; any other is part of a name or a
+ * value as it is. */
+static const unsigned char k_decl_special[256] = {
+    ['"'] = 1, ['\''] = 1, [':'] = 1, [';'] = 1, ['}'] = 1, ['{'] = 1, ['!'] = 1, ['\\'] = 1, ['@'] = 1,
+    ['['] = 1, [']'] = 1, ['<'] = 1, ['/'] = 1, ['('] = 1, [')'] = 1, ['\n'] = 1, ['\r'] = 1, ['\f'] = 1,
+};
+
+static bool css_decl_block_fast(const char *s, size_t len, size_t *pos, CssRule *rule) {
+    size_t pos0 = *pos;
+    int n0 = rule->declaration_count;
     while (*pos < len) {
-        css_skip_space_and_comments(s, len, pos);
+        css_skip_space(s, len, pos);
         if (*pos >= len) break;
         if (s[*pos] == '}') { (*pos)++; break; }
+        if (s[*pos] == ';') { (*pos)++; continue; }
 
         /* Read property until ':'. */
         size_t prop_start = *pos;
@@ -166,13 +199,15 @@ static void css_parse_declaration_block(const char *s, size_t len, size_t *pos,
         char quote_char = 0;
         while (*pos < len) {
             char c = s[*pos];
+            if (!k_decl_special[(unsigned char)c]) { (*pos)++; continue; }
             if (!in_quote) {
                 if (c == '"' || c == '\'') { in_quote = true; quote_char = c; }
                 else if (c == ':') break;
                 else if (c == '}' || c == ';') break;
+                else if (c == '!' || decl_complex_char(s, len, *pos)) goto bail;
             } else {
                 if (c == quote_char) in_quote = false;
-                else if (c == '\\' && *pos + 1 < len) (*pos)++;
+                else if (c == '\\' || c == '\n' || c == '\r' || c == '\f') goto bail;
             }
             (*pos)++;
         }
@@ -188,14 +223,17 @@ static void css_parse_declaration_block(const char *s, size_t len, size_t *pos,
             int paren_depth = 0;
             while (*pos < len) {
                 char c = s[*pos];
+                if (!k_decl_special[(unsigned char)c]) { (*pos)++; continue; }
                 if (!in_quote) {
                     if (c == '"' || c == '\'') { in_quote = true; quote_char = c; }
                     else if (c == '(') { paren_depth++; }
                     else if (c == ')') { if (paren_depth > 0) paren_depth--; }
                     else if (paren_depth == 0 && (c == ';' || c == '}')) break;
+                    else if (decl_complex_char(s, len, *pos) || (c == '!' && !decl_bang_important(s, len, *pos)))
+                        goto bail;
                 } else {
                     if (c == quote_char) in_quote = false;
-                    else if (c == '\\' && *pos + 1 < len) (*pos)++;
+                    else if (c == '\\' || c == '\n' || c == '\r' || c == '\f') goto bail;
                 }
                 (*pos)++;
             }
@@ -204,11 +242,247 @@ static void css_parse_declaration_block(const char *s, size_t len, size_t *pos,
                                 s + val_start, val_end - val_start);
             if (*pos < len && s[*pos] == ';') (*pos)++;
         } else {
-            /* Malformed declaration, skip to next ';' or '}'. */
-            while (*pos < len && s[*pos] != ';' && s[*pos] != '}') (*pos)++;
-            if (*pos < len && s[*pos] == ';') (*pos)++;
+            goto bail;   /* (a malformed declaration: the token path's recovery) */
         }
     }
+    return true;
+bail:
+    /* (back to where it began, for the token path) */
+    for (int i = n0; i < rule->declaration_count; i++) {
+        free(rule->declarations[i].property);
+        free(rule->declarations[i].value);
+    }
+    rule->declaration_count = n0;
+    *pos = pos0;
+    return false;
+}
+
+/* ---- Declaration lists (CSS Syntax 3 section 5.4.5), from tokens ----
+ * A declaration is an identifier, white space, a colon and its value: the
+ * component values up to a semicolon at its own nesting level (blocks
+ * and functions nest).  !important is the value's last two tokens, a !
+ * and the identifier important.  An at-rule in a declaration list is
+ * ignored with its block; anything else that is not a declaration is
+ * skipped up to its semicolon.  Properties are their names with escapes
+ * resolved, lower case; values the source text (trimmed), or rebuilt from
+ * the tokens when an escape or a comment is in it. */
+
+typedef struct { CssToken *t; int n, cap; } TokBuf;
+
+static bool tokbuf_push(TokBuf *b, const CssToken *t)
+{
+    if (b->n == b->cap) {
+        int nc = b->cap ? b->cap * 2 : 32;
+        CssToken *nt = (CssToken *)realloc(b->t, (size_t)nc * sizeof(CssToken));
+        if (!nt) return false;
+        b->t = nt;
+        b->cap = nc;
+    }
+    b->t[b->n++] = *t;
+    return true;
+}
+
+/* Where a declaration goes. */
+typedef void (*DeclSink)(void *ctx, char *prop, char *value, bool important);
+
+/* Append text to a growing string. */
+typedef struct { char *p; size_t n, cap; } Str;
+
+static void str_put(Str *o, const char *p, size_t l)
+{
+    if (o->n + l + 1 > o->cap) {
+        size_t nc = o->cap ? o->cap * 2 : 64;
+        while (nc < o->n + l + 1) nc *= 2;
+        char *np = (char *)realloc(o->p, nc);
+        if (!np) return;
+        o->p = np;
+        o->cap = nc;
+    }
+    memcpy(o->p + o->n, p, l);
+    o->n += l;
+    o->p[o->n] = 0;
+}
+
+/* Value tokens [a, b) as text: the source when it is the same thing,
+ * else each token rebuilt (white space one space, strings and urls
+ * quoted). */
+static char *decl_value_text(const CssTz *tz, const CssToken *t, int a, int b)
+{
+    bool plain = true;
+    for (int k = a; k < b && plain; k++) {
+        if (t[k].flags & CT_F_ARENA) plain = false;
+        else if (k + 1 < b && t[k].end != t[k + 1].start) plain = false;   /* (a comment between) */
+    }
+    if (plain) {
+        size_t l = t[b - 1].end - t[a].start;
+        char *v = (char *)malloc(l + 1);
+        if (!v) return NULL;
+        memcpy(v, tz->s + t[a].start, l);
+        v[l] = 0;
+        return v;
+    }
+    Str o = { NULL, 0, 0 };
+    str_put(&o, "", 0);
+    for (int k = a; k < b; k++) {
+        const CssToken *x = &t[k];
+        if (x->type == CT_WHITESPACE) {
+            if (o.n && o.p[o.n - 1] != ' ') str_put(&o, " ", 1);
+            continue;
+        }
+        /* (a comment between two tokens: they stay apart) */
+        if (k > a && t[k - 1].end != x->start && t[k - 1].type != CT_WHITESPACE && o.n && o.p[o.n - 1] != ' ')
+            str_put(&o, " ", 1);
+        if (!(x->flags & CT_F_ARENA)) {
+            str_put(&o, tz->s + x->start, x->end - x->start);
+            continue;
+        }
+        size_t vl;
+        const char *v = css_tok_val(&tz->arena, x, &vl);
+        char num[64];
+        switch (x->type) {
+        case CT_FUNCTION: str_put(&o, v, vl); str_put(&o, "(", 1); break;
+        case CT_AT_KEYWORD: str_put(&o, "@", 1); str_put(&o, v, vl); break;
+        case CT_HASH: str_put(&o, "#", 1); str_put(&o, v, vl); break;
+        case CT_DIMENSION:
+            snprintf(num, sizeof(num), "%.10g", x->num);
+            str_put(&o, num, strlen(num));
+            str_put(&o, v, vl);
+            break;
+        case CT_STRING:
+        case CT_URL:
+            if (x->type == CT_URL) str_put(&o, "url(", 4);
+            str_put(&o, "\"", 1);
+            for (size_t i = 0; i < vl; i++) {
+                if (v[i] == '"' || v[i] == '\\') str_put(&o, "\\", 1);
+                if (v[i] == '\n') { str_put(&o, "\\a ", 3); continue; }
+                str_put(&o, v + i, 1);
+            }
+            str_put(&o, "\"", 1);
+            if (x->type == CT_URL) str_put(&o, ")", 1);
+            break;
+        default: str_put(&o, v, vl); break;
+        }
+    }
+    return o.p;
+}
+
+/* One declaration's tokens (the first an identifier): to sink when it is
+ * one. */
+static void decl_finish(const CssTz *tz, const TokBuf *b, DeclSink sink, void *ctx)
+{
+    const CssToken *t = b->t;
+    int n = b->n, k = 1;
+    while (k < n && t[k].type == CT_WHITESPACE) k++;
+    if (k >= n || t[k].type != CT_COLON) return;
+    k++;
+    while (k < n && t[k].type == CT_WHITESPACE) k++;
+    int e = n;
+    while (e > k && t[e - 1].type == CT_WHITESPACE) e--;
+    bool important = false;
+    if (e > k && t[e - 1].type == CT_IDENT) {
+        size_t il;
+        const char *iv = css_tok_val(&tz->arena, &t[e - 1], &il);
+        int bang = e - 2;
+        while (bang >= k && t[bang].type == CT_WHITESPACE) bang--;
+        if (il == 9 && strncasecmp(iv, "important", 9) == 0 && bang >= k && t[bang].type == CT_DELIM &&
+            t[bang].delim == '!') {
+            important = true;
+            e = bang;
+            while (e > k && t[e - 1].type == CT_WHITESPACE) e--;
+        }
+    }
+    if (e <= k) return;   /* (no value) */
+    size_t pl;
+    const char *pv = css_tok_val(&tz->arena, &t[0], &pl);
+    char *prop = (char *)malloc(pl + 1);
+    char *value = decl_value_text(tz, t, k, e);
+    if (!prop || !value || !value[0]) { free(prop); free(value); return; }
+    memcpy(prop, pv, pl);
+    prop[pl] = 0;
+    css_str_tolower(prop);
+    sink(ctx, prop, value, important);
+}
+
+/* Consume a list of declarations from s at pos: up to the } that ends its
+ * block (in_block) or the end.  Returns the offset after it. */
+static size_t css_consume_declarations(const char *s, size_t len, size_t pos, bool in_block, DeclSink sink,
+                                       void *ctx)
+{
+    CssTz tz;
+    css_tz_init(&tz, s, len, pos);
+    TokBuf buf = { NULL, 0, 0 };
+    CssToken t;
+    size_t end = len;
+    /* Closers expected at each nesting level of the item being read. */
+    char closers[64];
+    int depth = 0;
+    enum { NONE, DECL, SKIP, AT } mode = NONE;
+    size_t mark = css_tz_arena_mark(&tz);
+    while (css_tz_next(&tz, &t)) {
+        if (t.type == CT_EOF) {
+            if (mode == DECL) decl_finish(&tz, &buf, sink, ctx);
+            break;
+        }
+        if (depth > 0) {
+            char c = t.type == CT_RPAREN ? ')' : t.type == CT_RBRACKET ? ']' : t.type == CT_RBRACE ? '}' : 0;
+            if (c && c == closers[depth - 1]) depth--;
+            else if ((t.type == CT_FUNCTION || t.type == CT_LPAREN) && depth < 64) closers[depth++] = ')';
+            else if (t.type == CT_LBRACKET && depth < 64) closers[depth++] = ']';
+            else if (t.type == CT_LBRACE && depth < 64) closers[depth++] = '}';
+            if (mode == DECL) tokbuf_push(&buf, &t);
+            /* (an at-rule ends with its block) */
+            if (mode == AT && depth == 0 && t.type == CT_RBRACE) mode = NONE;
+            continue;
+        }
+        if (in_block && t.type == CT_RBRACE) {
+            if (mode == DECL) decl_finish(&tz, &buf, sink, ctx);
+            end = t.end;
+            break;
+        }
+        if (t.type == CT_SEMICOLON) {
+            if (mode == DECL) decl_finish(&tz, &buf, sink, ctx);
+            mode = NONE;
+            buf.n = 0;
+            css_tz_arena_reset(&tz, mark);
+            continue;
+        }
+        if (mode == NONE) {
+            if (t.type == CT_WHITESPACE) continue;
+            mode = t.type == CT_IDENT ? DECL : t.type == CT_AT_KEYWORD ? AT : SKIP;
+            buf.n = 0;
+        }
+        if (t.type == CT_FUNCTION || t.type == CT_LPAREN) closers[depth++] = ')';   /* (depth is 0 here) */
+        else if (t.type == CT_LBRACKET) closers[depth++] = ']';
+        else if (t.type == CT_LBRACE) closers[depth++] = '}';
+        if (mode == DECL) tokbuf_push(&buf, &t);
+    }
+    free(buf.t);
+    css_tz_free(&tz);
+    return end;
+}
+
+static void sink_rule(void *ctx, char *prop, char *value, bool important)
+{
+    CssRule *rule = (CssRule *)ctx;
+    if (rule->declaration_count >= rule->declaration_capacity) {
+        int nc = rule->declaration_capacity ? rule->declaration_capacity * 2 : 4;
+        CssDeclaration *nd = (CssDeclaration *)realloc(rule->declarations, (size_t)nc * sizeof(CssDeclaration));
+        if (!nd) { free(prop); free(value); return; }
+        rule->declarations = nd;
+        rule->declaration_capacity = nc;
+    }
+    CssDeclaration *d = &rule->declarations[rule->declaration_count++];
+    d->property = prop;
+    d->value = value;
+    d->important = important;
+}
+
+/* Parse a declaration block between { and }. pos should point just past '{'. */
+static void css_parse_declaration_block(const char *s, size_t len, size_t *pos,
+                                        CssRule *rule) {
+    /* (the plain blocks of real sheets as text; the rest from tokens) */
+    if (css_decl_block_fast(s, len, pos, rule)) return;
+    *pos = css_consume_declarations(s, len, *pos, true, sink_rule, rule);
 }
 
 CssDeclaration* css_parse_inline_style(const char *style_attr, int *out_count) {
@@ -216,68 +490,11 @@ CssDeclaration* css_parse_inline_style(const char *style_attr, int *out_count) {
     *out_count = 0;
     size_t len = strlen(style_attr);
     if (len == 0) return NULL;
-
-    CssDeclaration *decls = NULL;
-    int count = 0;
-    int cap = 0;
-    size_t pos = 0;
-
-    while (pos < len) {
-        css_skip_space(style_attr, len, &pos);
-        if (pos >= len) break;
-
-        size_t prop_start = pos;
-        while (pos < len && style_attr[pos] != ':' && style_attr[pos] != ';') pos++;
-        size_t prop_end = pos;
-        if (pos < len && style_attr[pos] == ':') {
-            pos++;
-            css_skip_space(style_attr, len, &pos);
-            size_t val_start = pos;
-            int paren_depth = 0;
-            while (pos < len) {
-                char c = style_attr[pos];
-                if (c == '(') { paren_depth++; }
-                else if (c == ')') { if (paren_depth > 0) paren_depth--; }
-                else if (paren_depth == 0 && c == ';') break;
-                pos++;
-            }
-            size_t val_end = pos;
-
-            char *p = css_strndup_trim(style_attr + prop_start, prop_end - prop_start);
-            char *v = css_strndup_trim(style_attr + val_start, val_end - val_start);
-            if (p && v && p[0] && v[0]) {
-                css_str_tolower(p);
-                /* Strip !important from inline style values. */
-                bool is_imp = false;
-                size_t vlen = strlen(v);
-                if (vlen >= 10 && strncasecmp(v + vlen - 10, "!important", 10) == 0) {
-                    is_imp = true;
-                    v[vlen - 10] = '\0';
-                    size_t trimmed = vlen - 10;
-                    while (trimmed > 0 && css_is_space(v[trimmed - 1])) v[--trimmed] = '\0';
-                }
-                if (count >= cap) {
-                    cap = cap ? cap * 2 : 4;
-                    CssDeclaration *new_decls = (CssDeclaration*)realloc(decls, cap * sizeof(CssDeclaration));
-                    if (!new_decls) { free(p); free(v); break; }
-                    decls = new_decls;
-                }
-                decls[count].property = p;
-                decls[count].value = v;
-                decls[count].important = is_imp;
-                count++;
-            } else {
-                free(p); free(v);
-            }
-            if (pos < len && style_attr[pos] == ';') pos++;
-        } else {
-            while (pos < len && style_attr[pos] != ';') pos++;
-            if (pos < len && style_attr[pos] == ';') pos++;
-        }
-    }
-
-    *out_count = count;
-    return decls;
+    CssRule r;
+    memset(&r, 0, sizeof(r));
+    css_consume_declarations(style_attr, len, 0, false, sink_rule, &r);
+    *out_count = r.declaration_count;
+    return r.declarations;
 }
 
 void css_declarations_free(CssDeclaration *decls, int count) {

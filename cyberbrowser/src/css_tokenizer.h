@@ -62,6 +62,23 @@ typedef struct {
 bool css_tokenize(const char *s, size_t n, CssTokens *out);
 void css_tokens_free(CssTokens *ts);
 
+/* The tokenizer as a stream (no token array): css_tz_next gives the next
+ * token of s from start on, CT_EOF at the end.  Escaped values go to the
+ * stream's arena; css_tz_arena_mark / _reset let a caller drop the ones it
+ * is done with. */
+typedef struct {
+    const char *s;
+    size_t n, i;
+    CssTokens arena;            /* (only its arena is used) */
+    bool oom;
+} CssTz;
+
+void css_tz_init(CssTz *tz, const char *s, size_t n, size_t start);
+bool css_tz_next(CssTz *tz, CssToken *out);   /* false when out of memory */
+void css_tz_free(CssTz *tz);
+static inline size_t css_tz_arena_mark(const CssTz *tz) { return tz->arena.an; }
+static inline void css_tz_arena_reset(CssTz *tz, size_t mark) { tz->arena.an = mark; }
+
 /* A token's value (not NUL-terminated: len bytes). */
 static inline const char *css_tok_val(const CssTokens *ts, const CssToken *t, size_t *len)
 {

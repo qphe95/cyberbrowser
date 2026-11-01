@@ -13,6 +13,8 @@ typedef struct {
     size_t n, i;
     CssTokens *out;
     bool oom;
+    CssToken *one;      /* streaming: the token is written here, not appended */
+    bool got;
 } Tz;
 
 static bool is_newline(char c) { return c == '\n' || c == '\r' || c == '\f'; }
@@ -157,6 +159,13 @@ static void consume_name(Tz *z, uint32_t *val, uint32_t *len, uint8_t *flags)
 
 static CssToken *emit(Tz *z, int type, size_t start)
 {
+    if (z->one) {
+        memset(z->one, 0, sizeof(*z->one));
+        z->one->type = (uint8_t)type;
+        z->one->start = (uint32_t)start;
+        z->got = true;
+        return z->one;
+    }
     CssTokens *o = z->out;
     if (o->n == o->cap) {
         int nc = o->cap ? o->cap * 2 : 256;
@@ -212,7 +221,7 @@ static void consume_numeric(Tz *z, size_t start)
         uint32_t val = 0, len = 0;
         uint8_t fl = 0;
         consume_name(z, &val, &len, &fl);
-        t = &z->out->t[z->out->n - 1];
+        t = z->one ? z->one : &z->out->t[z->out->n - 1];
         t->val = val;
         t->val_len = len;
         t->flags |= fl;
@@ -428,106 +437,144 @@ static void delim(Tz *z, size_t start)
     t->end = (uint32_t)z->i;
 }
 
-bool css_tokenize(const char *s, size_t n, CssTokens *out)
+/* One token (comments skipped), emitted; false at the end of the input
+ * or out of memory. */
+static bool tz_step(Tz *z)
 {
-    Tz z = { s, n, 0, out, false };
-    out->src = s;
-    while (!z.oom) {
+    while (!z->oom) {
         /* Comments (section 4.3.2). */
-        if (at(&z, 0) == '/' && at(&z, 1) == '*') {
+        if (at(z, 0) == '/' && at(z, 1) == '*') {
             const char *e = NULL;
-            for (size_t k = z.i + 2; k + 1 < n; k++)
-                if (s[k] == '*' && s[k + 1] == '/') { e = s + k; break; }
-            z.i = e ? (size_t)(e - s) + 2 : n;
+            for (size_t k = z->i + 2; k + 1 < z->n; k++)
+                if (z->s[k] == '*' && z->s[k + 1] == '/') { e = z->s + k; break; }
+            z->i = e ? (size_t)(e - z->s) + 2 : z->n;
             continue;
         }
-        if (!more(&z, 0)) break;
-        size_t start = z.i;
-        char c = s[z.i];
+        if (!more(z, 0)) return false;
+        size_t start = z->i;
+        char c = z->s[z->i];
         if (is_ws(c)) {
-            while (more(&z, 0) && is_ws(s[z.i])) z.i++;
-            CssToken *t = emit(&z, CT_WHITESPACE, start);
-            if (t) t->end = (uint32_t)z.i;
-            continue;
+            while (more(z, 0) && is_ws(z->s[z->i])) z->i++;
+            CssToken *t = emit(z, CT_WHITESPACE, start);
+            if (t) t->end = (uint32_t)z->i;
+            return true;
         }
         switch (c) {
         case '"':
         case '\'':
-            z.i++;
-            consume_string(&z, c, start);
-            continue;
+            z->i++;
+            consume_string(z, c, start);
+            return true;
         case '#':
-            if (more(&z, 1) && (is_name((unsigned char)at(&z, 1)) || valid_escape(at(&z, 1), at(&z, 2), more(&z, 2)))) {
-                z.i++;
-                uint8_t fl = starts_ident(&z, 0) ? CT_F_ID : 0;
+            if (more(z, 1) && (is_name((unsigned char)at(z, 1)) || valid_escape(at(z, 1), at(z, 2), more(z, 2)))) {
+                z->i++;
+                uint8_t fl = starts_ident(z, 0) ? CT_F_ID : 0;
                 uint32_t val = 0, len = 0;
-                consume_name(&z, &val, &len, &fl);
-                CssToken *t = emit(&z, CT_HASH, start);
-                if (!t) break;
+                consume_name(z, &val, &len, &fl);
+                CssToken *t = emit(z, CT_HASH, start);
+                if (!t) return false;
                 t->val = val;
                 t->val_len = len;
                 t->flags = fl;
-                t->end = (uint32_t)z.i;
-                continue;
+                t->end = (uint32_t)z->i;
+                return true;
             }
-            delim(&z, start);
-            continue;
-        case '(': simple(&z, CT_LPAREN, start, 1); continue;
-        case ')': simple(&z, CT_RPAREN, start, 1); continue;
-        case '[': simple(&z, CT_LBRACKET, start, 1); continue;
-        case ']': simple(&z, CT_RBRACKET, start, 1); continue;
-        case '{': simple(&z, CT_LBRACE, start, 1); continue;
-        case '}': simple(&z, CT_RBRACE, start, 1); continue;
-        case ',': simple(&z, CT_COMMA, start, 1); continue;
-        case ':': simple(&z, CT_COLON, start, 1); continue;
-        case ';': simple(&z, CT_SEMICOLON, start, 1); continue;
+            delim(z, start);
+            return true;
+        case '(': simple(z, CT_LPAREN, start, 1); return true;
+        case ')': simple(z, CT_RPAREN, start, 1); return true;
+        case '[': simple(z, CT_LBRACKET, start, 1); return true;
+        case ']': simple(z, CT_RBRACKET, start, 1); return true;
+        case '{': simple(z, CT_LBRACE, start, 1); return true;
+        case '}': simple(z, CT_RBRACE, start, 1); return true;
+        case ',': simple(z, CT_COMMA, start, 1); return true;
+        case ':': simple(z, CT_COLON, start, 1); return true;
+        case ';': simple(z, CT_SEMICOLON, start, 1); return true;
         case '+':
         case '.':
-            if (starts_number(&z, 0)) { consume_numeric(&z, start); continue; }
-            delim(&z, start);
-            continue;
+            if (starts_number(z, 0)) { consume_numeric(z, start); return true; }
+            delim(z, start);
+            return true;
         case '-':
-            if (starts_number(&z, 0)) { consume_numeric(&z, start); continue; }
-            if (at(&z, 1) == '-' && at(&z, 2) == '>') { simple(&z, CT_CDC, start, 3); continue; }
-            if (starts_ident(&z, 0)) { consume_ident_like(&z, start); continue; }
-            delim(&z, start);
-            continue;
+            if (starts_number(z, 0)) { consume_numeric(z, start); return true; }
+            if (at(z, 1) == '-' && at(z, 2) == '>') { simple(z, CT_CDC, start, 3); return true; }
+            if (starts_ident(z, 0)) { consume_ident_like(z, start); return true; }
+            delim(z, start);
+            return true;
         case '<':
-            if (at(&z, 1) == '!' && at(&z, 2) == '-' && at(&z, 3) == '-') { simple(&z, CT_CDO, start, 4); continue; }
-            delim(&z, start);
-            continue;
+            if (at(z, 1) == '!' && at(z, 2) == '-' && at(z, 3) == '-') { simple(z, CT_CDO, start, 4); return true; }
+            delim(z, start);
+            return true;
         case '@':
-            if (starts_ident(&z, 1)) {
-                z.i++;
+            if (starts_ident(z, 1)) {
+                z->i++;
                 uint32_t val = 0, len = 0;
                 uint8_t fl = 0;
-                consume_name(&z, &val, &len, &fl);
-                CssToken *t = emit(&z, CT_AT_KEYWORD, start);
-                if (!t) break;
+                consume_name(z, &val, &len, &fl);
+                CssToken *t = emit(z, CT_AT_KEYWORD, start);
+                if (!t) return false;
                 t->val = val;
                 t->val_len = len;
                 t->flags = fl;
-                t->end = (uint32_t)z.i;
-                continue;
+                t->end = (uint32_t)z->i;
+                return true;
             }
-            delim(&z, start);
-            continue;
+            delim(z, start);
+            return true;
         case '\\':
-            if (valid_escape(c, at(&z, 1), more(&z, 1))) { consume_ident_like(&z, start); continue; }
-            delim(&z, start);   /* (a parse error) */
-            continue;
+            if (valid_escape(c, at(z, 1), more(z, 1))) { consume_ident_like(z, start); return true; }
+            delim(z, start);   /* (a parse error) */
+            return true;
         default:
             break;
         }
-        if (is_digit(c)) { consume_numeric(&z, start); continue; }
-        if (is_name_start((unsigned char)c)) { consume_ident_like(&z, start); continue; }
-        delim(&z, start);
+        if (is_digit(c)) { consume_numeric(z, start); return true; }
+        if (is_name_start((unsigned char)c)) { consume_ident_like(z, start); return true; }
+        delim(z, start);
+        return true;
     }
+    return false;
+}
+
+bool css_tokenize(const char *s, size_t n, CssTokens *out)
+{
+    Tz z = { s, n, 0, out, false, NULL, false };
+    out->src = s;
+    while (tz_step(&z)) {}
     if (z.oom) return false;
     CssToken *t = emit(&z, CT_EOF, n);
     if (!t) return false;
     t->end = (uint32_t)n;
     return true;
+}
+
+void css_tz_init(CssTz *tz, const char *s, size_t n, size_t start)
+{
+    memset(tz, 0, sizeof(*tz));
+    tz->s = s;
+    tz->n = n;
+    tz->i = start;
+    tz->arena.src = s;
+}
+
+bool css_tz_next(CssTz *tz, CssToken *out)
+{
+    Tz z = { tz->s, tz->n, tz->i, &tz->arena, false, out, false };
+    if (!tz_step(&z) && !z.oom) {
+        memset(out, 0, sizeof(*out));
+        out->type = CT_EOF;
+        out->start = out->end = (uint32_t)tz->n;
+    }
+    tz->i = z.i;
+    if (z.oom) tz->oom = true;
+    return !z.oom;
+}
+
+void css_tz_free(CssTz *tz)
+{
+    if (!tz) return;
+    free(tz->arena.arena);
+    memset(tz, 0, sizeof(*tz));
 }
 
 void css_tokens_free(CssTokens *ts)

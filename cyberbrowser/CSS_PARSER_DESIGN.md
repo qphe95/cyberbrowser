@@ -4,7 +4,29 @@ Status: step 1 done (css/CSS2 5218 -> 5234, none lost: the WHATWG single-byte en
 Big5 decoded, tables from tools/gen_charset_tables.js; a sheet whose Content-Type is not text/css
 applies nothing).  Not done in it: the referring document's encoding as a sheet's fallback
 (at-charset-012), which needs the HTML parser to decode non-UTF-8 documents first.  Step 2 done
-(src/css_tokenizer.c, tests/test_css_tokenizer.c; not used by the parser yet).  Steps 3-6 planned.
+(src/css_tokenizer.c, tests/test_css_tokenizer.c).  Step 3 done (css/CSS2 5234 -> 5252, none
+lost; parse time unchanged, below).  Steps 4-6 planned.
+
+As built, step 3: the tokenizer also runs as a stream (css_tz_next, one token per call into the
+caller's token, no array; tested to give the array's tokens).  Declaration lists (rule blocks and
+style attributes) are read from it by css_consume_declarations (section 5.4.5: declarations to their
+semicolon at their own nesting level, at-rules in a declaration list ignored with their block,
+anything else skipped to its semicolon, !important as the last ! and important tokens; values the
+source text, or rebuilt from the tokens when an escape or a comment is in them).  A rule block goes
+through the old text scanner first (css_decl_block_fast), which gives up, adding nothing, on
+anything only the token path reads right: an escape, `{`, `@`, `[`, `]`, `<`, a comment, a newline
+in a string, a `!` that is not a final !important, a declaration without a colon; then the block
+is read from tokens.  On YouTube's main sheet 142 blocks take the token path.  A table of the
+characters the scanner looks at keeps its loop at one check for any other.  Same build session,
+best of 5 per run, three runs each:
+
+| sheet | old parser | step 3 |
+|---|---|---|
+| YouTube main (3.2 MB) | 10.90 - 11.16 ms | 10.91 - 11.04 ms |
+| YouTube second (550 KB) | 1.87 - 1.97 ms | 1.84 - 1.94 ms |
+| Wikipedia (210 KB) | 0.59 ms | 0.62 - 0.63 ms |
+
+Without the fast path (every block from tokens) the YouTube sheet took 15 ms.
 
 Step 2's measurement (best of 5, one thread; CSS_TOK_BENCH=<files> with the css_tokenizer tests):
 

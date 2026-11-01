@@ -163,8 +163,39 @@ static void css_tok_bench(const char *list)
     }
 }
 
+/* The stream (css_tz_next) gives the tokens the array does. */
+TEST(test_css_tok_stream_matches) {
+    static const char *const cases[] = {
+        "div { color: green; } /* c */ .a\\:b{x:url( y )}", "\\64\\69\\76 #\\31 a 'q\\'q' \"bad\nx",
+        "@media (min-width: 1.5e1px) { p { width: -.5em } } <!-- -->", "url(a b) +.5% 10px#x", "a\\",
+    };
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        const char *s = cases[c];
+        size_t n = strlen(s);
+        CssTokens ts;
+        memset(&ts, 0, sizeof(ts));
+        ASSERT_TRUE(css_tokenize(s, n, &ts));
+        CssTz tz;
+        css_tz_init(&tz, s, n, 0);
+        for (int i = 0; i < ts.n; i++) {
+            CssToken t;
+            ASSERT_TRUE(css_tz_next(&tz, &t));
+            const CssToken *a = &ts.t[i];
+            ASSERT_TRUE(t.type == a->type && t.start == a->start && t.end == a->end && t.num == a->num &&
+                        t.delim == a->delim && t.val_len == a->val_len);
+            size_t la, lb;
+            const char *va = css_tok_val(&ts, a, &la), *vb = css_tok_val(&tz.arena, &t, &lb);
+            ASSERT_TRUE(la == lb && memcmp(va, vb, la) == 0);
+        }
+        css_tz_free(&tz);
+        css_tokens_free(&ts);
+    }
+    return true;
+}
+
 void run_css_tokenizer_tests(void) {
     printf("\n--- CSS tokenizer tests ---\n");
+    RUN_TEST(test_css_tok_stream_matches);
     const char *bench = getenv("CSS_TOK_BENCH");
     if (bench && *bench) css_tok_bench(bench);
     RUN_TEST(test_css_tok_rule);
