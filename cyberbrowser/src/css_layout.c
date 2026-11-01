@@ -27,6 +27,7 @@
 #include "job_system.h"
 #include "gc_platform.h"
 #include "url_whatwg.h"
+#include "css_charset.h"
 
 #include <pthread.h>
 #include <string.h>
@@ -4152,14 +4153,16 @@ static char* layout_resolve_url(const char *base_url, const char *href) {
 
 /* Fetched stylesheet texts, by URL, for the life of the process: a layout
  * (hit test, re-render) never re-downloads a sheet. */
-typedef struct UrlSheet { char *url; char *text; size_t len; uint64_t hash; uint64_t id; } UrlSheet;
+typedef struct UrlSheet { char *url; char *text; size_t len; uint64_t hash; uint64_t id; const char *enc; } UrlSheet;
 static uint64_t sheet_hash(const char *s, size_t n);
 #define URL_SHEET_MAX 64
 static UrlSheet g_url_sheets[URL_SHEET_MAX];
 static int g_url_sheet_n, g_url_sheet_next;
 
-/* The cached sheet for `url`, fetching it on first use (NULL on failure). */
-static const UrlSheet *url_sheet_get(const char *url) {
+/* The cached sheet for `url`, fetching it on first use (NULL on failure):
+ * its text as UTF-8, decoded from its bytes' encoding (fallback_label: the
+ * referrer's, when nothing in the response says). */
+static const UrlSheet *url_sheet_get_ex(const char *url, const char *fallback_label) {
     for (int i = 0; i < g_url_sheet_n; i++)
         if (strcmp(g_url_sheets[i].url, url) == 0) return &g_url_sheets[i];
 
@@ -4176,10 +4179,9 @@ static const UrlSheet *url_sheet_get(const char *url) {
         else g_url_sheet_n++;
         g_url_sheet_next = (g_url_sheet_next + 1) % URL_SHEET_MAX;
         u->url = strdup(url);
-        u->text = (char *)malloc(buffer.size + 1);
-        memcpy(u->text, buffer.data, buffer.size);
-        u->text[buffer.size] = '\0';
-        u->len = buffer.size;
+        u->text = css_sheet_decode(buffer.data, buffer.size, buffer.headers, buffer.headers_size, fallback_label,
+                                   &u->len, &u->enc);
+        if (!u->text) { u->text = strdup(""); u->len = 0; }
         u->hash = sheet_hash(u->text, u->len);
         static uint64_t s_fetches;
         u->id = ++s_fetches;
@@ -4191,6 +4193,10 @@ static const UrlSheet *url_sheet_get(const char *url) {
     }
     http_free_buffer(&buffer);
     return out;
+}
+
+static const UrlSheet *url_sheet_get(const char *url) {
+    return url_sheet_get_ex(url, NULL);
 }
 
 bool css_layout_fetch_stylesheet_url(const char *url) {
@@ -4290,10 +4296,119 @@ bool css_layout_stylesheets_pending(void)
     return false;
 }
 
-static void layout_fetch_stylesheet(LayoutStyleSheetList *list, const char *base_url, const char *href) {
+/* Queue a fetched sheet's text (borrowed while the cache has room). */
+static void layout_sheet_add_url(LayoutStyleSheetList *list, const UrlSheet *u)
+{
+    if (g_url_sheet_n < URL_SHEET_MAX) {
+        /* The cache cannot evict while it has room: borrow its text and
+         * hash instead of copying and rehashing megabytes per layout. */
+        SheetItem *it = layout_sheet_item_new(list);
+        it->text = u->text;
+        it->len = u->len;
+        it->hash = u->hash;
+        it->has_hash = true;
+        it->src = u->id;
+    } else {
+        layout_sheet_list_add_text(list, u->text, u->len, NULL);
+    }
+}
+
+/* The @import rules a sheet starts with (after any @charset): each sheet
+ * whose media list matches, fetched relative to base (enc: the importing
+ * sheet's encoding, for an imported sheet that names none), queued with its
+ * own imports before it; all before the importing sheet's rules. */
+static void layout_sheet_imports(LayoutStyleSheetList *list, const char *text, size_t len, const char *base,
+                                 const char *enc, int depth)
+{
+    if (!text || depth > 8) return;
+    const char *p = text, *end = text + len;
+    for (;;) {
+        for (;;) {
+            while (p < end && isspace((unsigned char)*p)) p++;
+            if (end - p >= 2 && p[0] == '/' && p[1] == '*') {
+                const char *c = p + 2;
+                while (c + 1 < end && !(c[0] == '*' && c[1] == '/')) c++;
+                p = c + 1 < end ? c + 2 : end;
+                continue;
+            }
+            if (end - p >= 4 && !memcmp(p, "<!--", 4)) { p += 4; continue; }
+            if (end - p >= 3 && !memcmp(p, "-->", 3)) { p += 3; continue; }
+            break;
+        }
+        bool charset = end - p >= 8 && !strncasecmp(p, "@charset", 8);
+        if (!charset && !(end - p >= 8 && !strncasecmp(p, "@import", 7) &&
+                          (isspace((unsigned char)p[7]) || p[7] == '"' || p[7] == '\''))) break;
+        p += charset ? 8 : 7;
+        while (p < end && isspace((unsigned char)*p)) p++;
+        char href[1024];
+        href[0] = 0;
+        if (!charset) {
+            const char *a = NULL, *b = NULL;
+            if (end - p >= 4 && !strncasecmp(p, "url(", 4)) {
+                a = p + 4;
+                while (a < end && isspace((unsigned char)*a)) a++;
+                if (a < end && (*a == '"' || *a == '\'')) {
+                    char q = *a++;
+                    b = a;
+                    while (b < end && *b != q) b++;
+                    p = b < end ? b + 1 : end;
+                    while (p < end && *p != ')') p++;
+                } else {
+                    b = a;
+                    while (b < end && *b != ')' && !isspace((unsigned char)*b)) b++;
+                    p = b;
+                    while (p < end && *p != ')') p++;
+                }
+                if (p < end) p++;
+            } else if (p < end && (*p == '"' || *p == '\'')) {
+                char q = *p++;
+                a = b = p;
+                while (b < end && *b != q) b++;
+                p = b < end ? b + 1 : end;
+            }
+            if (a && b > a && (size_t)(b - a) < sizeof(href)) {
+                memcpy(href, a, (size_t)(b - a));
+                href[b - a] = 0;
+            }
+        }
+        /* The media list: to the ';'. */
+        const char *ms = p;
+        int paren = 0;
+        while (p < end && !(*p == ';' && paren == 0)) {
+            if (*p == '(') paren++;
+            else if (*p == ')' && paren > 0) paren--;
+            else if (*p == '{') return;   /* (a block: not a statement) */
+            p++;
+        }
+        const char *me = p;
+        if (p < end) p++;
+        if (charset || !href[0]) continue;
+        while (ms < me && isspace((unsigned char)*ms)) ms++;
+        while (me > ms && isspace((unsigned char)me[-1])) me--;
+        if (me > ms) {
+            char media[512];
+            size_t ml = (size_t)(me - ms) < sizeof(media) - 1 ? (size_t)(me - ms) : sizeof(media) - 1;
+            memcpy(media, ms, ml);
+            media[ml] = 0;
+            if (!css_media_query_matches(media, g_unit_vw, g_unit_vh)) continue;
+        }
+        char *url = layout_resolve_url(base, href);
+        if (!url) continue;
+        const UrlSheet *u = url_sheet_get_ex(url, enc);
+        if (u) {
+            layout_sheet_imports(list, u->text, u->len, url, u->enc, depth + 1);
+            layout_sheet_add_url(list, u);
+        }
+        free(url);
+    }
+}
+
+static void layout_fetch_stylesheet(LayoutStyleSheetList *list, const char *base_url, const char *href,
+                                    const char *charset) {
     char *url = layout_resolve_url(base_url, href);
     if (!url) return;
-    const UrlSheet *u = url_sheet_get(url);
+    const UrlSheet *u = url_sheet_get_ex(url, charset);
+    if (u) layout_sheet_imports(list, u->text, u->len, url, u->enc, 0);
     if (u && g_url_sheet_n < URL_SHEET_MAX) {
         /* The cache cannot evict while it has room: borrow its text and
          * hash instead of copying and rehashing megabytes per layout. */
@@ -4366,6 +4481,7 @@ static void layout_collect_stylesheets_recursive(LayoutContext *ctx, int dom_idx
          * the document outlives the sheet list. */
         size_t len = node->text_len ? strnlen(node->text_content, node->text_len) : strlen(node->text_content);
         const char *host = layout_find_host_tag(ctx, dom_idx);
+        if (!host) layout_sheet_imports(list, node->text_content, len, base_url, NULL, 0);
         SheetItem *it = layout_sheet_item_new(list);
         it->text = node->text_content;
         it->len = len;
@@ -4374,12 +4490,14 @@ static void layout_collect_stylesheets_recursive(LayoutContext *ctx, int dom_idx
     } else if (strcasecmp(node->tag_name, "link") == 0) {
         const char *rel = NULL;
         const char *href = NULL;
+        const char *charset = NULL;
         for (HtmlAttribute *a = node->attributes; a; a = a->next) {
             if (strcasecmp(a->name, "rel") == 0) rel = a->value;
             else if (strcasecmp(a->name, "href") == 0) href = a->value;
+            else if (strcasecmp(a->name, "charset") == 0) charset = a->value;
         }
         if (rel && href && strcasecmp(rel, "stylesheet") == 0) {
-            layout_fetch_stylesheet(list, base_url, href);
+            layout_fetch_stylesheet(list, base_url, href, charset);
         }
     }
 

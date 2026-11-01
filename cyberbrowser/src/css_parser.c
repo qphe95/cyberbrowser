@@ -335,6 +335,41 @@ static void css_strip_comments(char *s) {
 }
 
 /* Read a selector until the first unquoted '{'. Returns NULL if none found. */
+/* A qualified rule's prelude that cannot be a selector list: a ';' or '@'
+ * outside strings and brackets (CSS Syntax: a ';' does not end a prelude,
+ * so "junk; .a { }" is one rule with an invalid selector). */
+static bool css_prelude_invalid(const char *sel)
+{
+    char q = 0;
+    int br = 0;
+    for (const char *p = sel; *p; p++) {
+        if (q) {
+            if (*p == '\\' && p[1]) p++;
+            else if (*p == q) q = 0;
+        } else if (*p == '\\' && p[1]) {
+            p++;
+        } else if (*p == '"' || *p == '\'') {
+            q = *p;
+        } else if (*p == '[' || *p == '(') {
+            br++;
+        } else if ((*p == ']' || *p == ')') && br > 0) {
+            br--;
+        } else if (br == 0 && (*p == ';' || *p == '@')) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Consume a rule's declaration block (after its '{') without keeping it. */
+static void css_skip_rule_block(const char *s, size_t len, size_t *pos)
+{
+    CssRule dummy;
+    memset(&dummy, 0, sizeof(dummy));
+    css_parse_declaration_block(s, len, pos, &dummy);
+    css_declarations_free(dummy.declarations, dummy.declaration_count);
+}
+
 static char* css_read_selector(const char *s, size_t len, size_t *pos) {
     css_skip_space_and_comments(s, len, pos);
     size_t start = *pos;
@@ -475,6 +510,11 @@ static void css_parse_at_rule(const char *s, size_t len, size_t *pos,
             continue;
         }
         (*pos)++; /* skip '{' */
+        if (css_prelude_invalid(selector)) {
+            free(selector);
+            css_skip_rule_block(s, len, pos);
+            continue;
+        }
         CssRule *rule = css_stylesheet_add_rule(sheet);
         if (!rule) {
             free(selector);
@@ -533,6 +573,11 @@ CssStylesheet* css_stylesheet_parse_range(const char *css, size_t len,
             continue;
         }
         pos++; /* skip '{' */
+        if (css_prelude_invalid(selector)) {
+            free(selector);
+            css_skip_rule_block(css, len, &pos);
+            continue;
+        }
 
         CssRule *rule = css_stylesheet_add_rule(sheet);
         if (!rule) {
