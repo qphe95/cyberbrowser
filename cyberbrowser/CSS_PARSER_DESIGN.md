@@ -3,8 +3,23 @@
 Status: step 1 done (css/CSS2 5218 -> 5234, none lost: the WHATWG single-byte encodings and
 Big5 decoded, tables from tools/gen_charset_tables.js; a sheet whose Content-Type is not text/css
 applies nothing).  Not done in it: the referring document's encoding as a sheet's fallback
-(at-charset-012), which needs the HTML parser to decode non-UTF-8 documents first.  Steps 2-6
-planned.
+(at-charset-012), which needs the HTML parser to decode non-UTF-8 documents first.  Step 2 done
+(src/css_tokenizer.c, tests/test_css_tokenizer.c; not used by the parser yet).  Steps 3-6 planned.
+
+Step 2's measurement (best of 5, one thread; CSS_TOK_BENCH=<files> with the css_tokenizer tests):
+
+| sheet | bytes | tokens | tokenize | today's whole parse |
+|---|---|---|---|---|
+| YouTube main | 3,213,960 | 516,153 | 8.77 ms | 10.97 ms |
+| YouTube second | 550,424 | 107,837 | 1.87 ms | 1.92 ms |
+| Wikipedia | 209,585 | 35,653 | 0.74 ms | 0.60 ms |
+
+Tokenizing into an array costs about what today's parse does in all, so a parser on top of the
+array would come out near twice today's time.  Most of it is writing the tokens (40 bytes each,
+whitespace included).  So steps 3 and 4 use the tokenizer as a stream: the parser pulls one token
+at a time (css_next_token on a small state, the arena kept for escaped values only), with no array,
+and the array API stays for tests.  The target stays: parse time within noise of today's on these
+sheets, measured with the same benchmark before step 3 lands.
 
 ## Why
 

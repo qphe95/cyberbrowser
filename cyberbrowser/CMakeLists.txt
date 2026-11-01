@@ -123,6 +123,7 @@ set(BE_SOURCES
     src/text_shaper.c
     src/glyph_atlas.c
     src/css_charset.c
+    src/css_tokenizer.c
     src/font_loader.c
     src/font_instance.c
     src/font_registry.c

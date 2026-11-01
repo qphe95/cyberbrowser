@@ -18,6 +18,7 @@ add_executable(cyberbrowser-tests
     test_css_style.c
     test_image_cache.c
     test_glyph_atlas.c
+    test_css_tokenizer.c
     test_http_pool.c
     test_dom.c
     legacy_html_parse.c
