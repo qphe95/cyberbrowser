@@ -54,7 +54,8 @@ typedef struct WireCmd {
 } WireCmd;
 
 typedef struct WireMask {
-    uint32_t kind;                  /* 1 image, 2 linear gradient, 3 rounded rect, 4 ring, 5 shadow */
+    uint32_t kind;                  /* 1 image, 2 linear gradient, 3 rounded rect, 4 ring, 5 shadow,
+                                       6 border side (angle: the side; stop_pos[0..1]: its band) */
     uint32_t image;                 /* kind 1: image id */
     int32_t x, y, w, h;             /* the masked box, 1/256 px */
     int32_t ix, iy, iw, ih;         /* the image's place; a shadow's caster */

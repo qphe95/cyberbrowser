@@ -33,6 +33,23 @@ float mask_alpha(Mask m, vec2 p) {
         return stop_alpha(m, n - 1);
     }
     if (kind == 3) return rrect_alpha(m.box, m.rx, m.ry, p);
+    if (kind == 6) {
+        // A border side, as raster_cpu.c's kind 6: turned to be the top one.
+        vec4 b = m.border;      // top, right, bottom, left
+        int side = int(m.misc.x + 0.5) & 3;
+        float u, v, len, a, c, t;
+        if (side == 0) { u = p.x - m.box.x; v = p.y - m.box.y; len = m.box.z; a = b[3]; c = b[1]; t = b[0]; }
+        else if (side == 2) { u = m.box.x + m.box.z - p.x; v = m.box.y + m.box.w - p.y; len = m.box.z; a = b[1]; c = b[3]; t = b[2]; }
+        else if (side == 3) { u = m.box.y + m.box.w - p.y; v = p.x - m.box.x; len = m.box.w; a = b[2]; c = b[0]; t = b[3]; }
+        else { u = p.y - m.box.y; v = m.box.x + m.box.z - p.x; len = m.box.w; a = b[0]; c = b[2]; t = b[1]; }
+        if (t <= 0.0) return 0.0;
+        float f0 = stop_pos(m, 0) * t, f1 = stop_pos(m, 1) * t;
+        float cov = clamp(v - f0 + 0.5, 0.0, 1.0) * clamp(f1 - v + 0.5, 0.0, 1.0);
+        // (an end not cut, stop_alpha 0 there: the side fills its corner)
+        if (stop_alpha(m, 0) > 0.5) cov *= clamp((a > 0.0 ? (u * t - v * a) / sqrt(a * a + t * t) : u) + 0.5, 0.0, 1.0);
+        if (stop_alpha(m, 1) > 0.5) cov *= clamp((c > 0.0 ? ((len - u) * t - v * c) / sqrt(c * c + t * t) : len - u) + 0.5, 0.0, 1.0);
+        return cov;
+    }
     if (kind == 4) {
         vec4 b = m.border;      // top, right, bottom, left
         vec4 irx = max(vec4(m.rx[0] - b[3], m.rx[1] - b[1], m.rx[2] - b[1], m.rx[3] - b[3]), 0.0);

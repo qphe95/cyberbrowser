@@ -1,6 +1,8 @@
 # Borders: per-side colors and styles, corner joins, the collapsing model
 
-Status: step 1 done (css/CSS2 5028 -> 5094 pages passing, none lost); steps 2-4 planned.
+Status: steps 1 and 2 done (css/CSS2 5028 -> 5096 pages passing, none lost; the gpu_decode
+contracts are updated for mask kind 6 but `tools/prove.sh` was not rerun: Frama-C is not installed
+on the machine it was built on); steps 3 and 4 planned.
 
 ## Why
 

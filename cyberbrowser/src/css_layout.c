@@ -4828,8 +4828,10 @@ static const char *g_ua_stylesheet_css =
     "table { box-sizing: border-box; }\n"
     "mark { background-color: #ffff00; color: #000000; }\n"
     "button, input, select, textarea { font-size: 13.333px; line-height: normal; }\n"
-    "button { padding: 1px 6px; border: 2px outset #767676; background-color: #efefef; box-sizing: border-box; text-align: center; }\n"
-    "input { padding: 1px 2px; border: 2px inset #767676; }\n"
+    /* (solid, not the outset / inset of HTML's sheet: controls are drawn
+     * flat, as browsers' native appearance draws them, not as 3D borders) */
+    "button { padding: 1px 6px; border: 2px solid #767676; background-color: #efefef; box-sizing: border-box; text-align: center; }\n"
+    "input { padding: 1px 2px; border: 2px solid #767676; }\n"
     "textarea { padding: 2px; border: 1px solid #767676; }\n"
     "select { border: 1px solid #767676; box-sizing: border-box; }\n";
 

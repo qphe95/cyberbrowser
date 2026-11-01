@@ -197,6 +197,14 @@ static float rrect_alpha(float x, float y, float w, float h, const float *rx, co
     return a < 0.0f ? 0.0f : a > 1.0f ? 1.0f : a;
 }
 
+/* How much of a pixel a half-plane covers, its centre at signed distance
+ * d inside it. */
+static float border_cov(float d)
+{
+    d += 0.5f;
+    return d < 0.0f ? 0.0f : d > 1.0f ? 1.0f : d;
+}
+
 /* Mask alpha at pixel centre (px, py): a linear gradient along the CSS
  * angle through the box, or an image's alpha (src: w x h x ch, NULL while
  * not decoded = transparent). */
@@ -221,6 +229,25 @@ static float mask_alpha_at(const DisplayMask *m, float px, float py,
     }
     if (m->kind == 3)
         return rrect_alpha(m->x, m->y, m->w, m->h, m->rx, m->ry, px, py);
+    if (m->kind == 6) {
+        /* A border side, turned to be the top one: u along it from its
+         * first corner, v in from its outer edge; a and c the widths of
+         * the sides at its two ends, t its own. */
+        const float *b = m->border;   /* top, right, bottom, left */
+        int side = (int)(m->angle_deg + 0.5f) & 3;
+        float u, v, len, a, c, t;
+        if (side == 0) { u = px - m->x; v = py - m->y; len = m->w; a = b[3]; c = b[1]; t = b[0]; }
+        else if (side == 2) { u = m->x + m->w - px; v = m->y + m->h - py; len = m->w; a = b[1]; c = b[3]; t = b[2]; }
+        else if (side == 3) { u = m->y + m->h - py; v = px - m->x; len = m->h; a = b[2]; c = b[0]; t = b[3]; }
+        else { u = py - m->y; v = m->x + m->w - px; len = m->h; a = b[0]; c = b[2]; t = b[1]; }
+        if (t <= 0.0f) return 0.0f;
+        float f0 = m->stop_pos[0] * t, f1 = m->stop_pos[1] * t;
+        float cov = border_cov(v - f0) * border_cov(f1 - v);
+        /* (an end not cut, stop_alpha 0 there: the side fills its corner) */
+        if (m->stop_alpha[0] > 0.5f) cov *= border_cov(a > 0.0f ? (u * t - v * a) / sqrtf(a * a + t * t) : u);
+        if (m->stop_alpha[1] > 0.5f) cov *= border_cov(c > 0.0f ? ((len - u) * t - v * c) / sqrtf(c * c + t * t) : len - u);
+        return cov;
+    }
     if (m->kind == 4) {
         /* Border ring: the rounded box minus its inset by the border
          * widths (inner radii shrink by the adjacent widths). */

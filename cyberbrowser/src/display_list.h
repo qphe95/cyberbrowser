@@ -39,7 +39,14 @@ typedef enum {
 typedef struct {
     float x, y, w, h;          /* the masked box (its border box) */
     int kind;                  /* 1 image, 2 linear gradient, 3 rounded rectangle,
-                                  4 rounded border ring (3 minus its inset by border[]) */
+                                  4 rounded border ring (3 minus its inset by border[]),
+                                  6 border side: (x, y, w, h) is the side's strip of a box
+                                  whose widths are border[], the side angle_deg (0 top,
+                                  1 right, 2 bottom, 3 left), covered from stop_pos[0] to
+                                  stop_pos[1] of its width (from the outer edge) and cut at
+                                  the corners by the diagonals to the inner corners: at its
+                                  first end (going clockwise) when stop_alpha[0] is 1, its
+                                  second when stop_alpha[1] is (else it fills the corner) */
     int image_handle;
     float ix, iy, iw, ih;
     int repeat;

@@ -67,7 +67,7 @@ static uint32_t rd_uv(const uint8_t *p) {
  */
 static void decode_mask(const uint8_t *p, const GpuClientRes *res, WireMask *m) {
     uint32_t kind = rd32(p);
-    m->kind = kind >= 1 && kind <= 5 ? kind : 0;
+    m->kind = kind >= 1 && kind <= 6 ? kind : 0;
     uint32_t image = rd32(p + 4);
     m->image = m->kind == 1 && image < GPU_MAX_IMAGES && res->image[image] ? image : GPU_NO_IMAGE;
     m->x = rd_coord(p + 8);
@@ -142,7 +142,7 @@ static WireCmd decode_cmd(const uint8_t *p) {
     ensures \result ==> type < WIRE_NTYPES;
     ensures \result && type == WIRE_GLYPH ==> ref < GPU_FONT_SLOTS && res->font[ref] != 0;
     ensures \result && type == WIRE_IMAGE ==> ref < GPU_MAX_IMAGES && res->image[ref] != 0;
-    ensures \result && type == WIRE_MASK_BEGIN ==> ref < nmasks && 1 <= masks[ref].kind <= 4;
+    ensures \result && type == WIRE_MASK_BEGIN ==> ref < nmasks && (1 <= masks[ref].kind <= 4 || masks[ref].kind == 6);
     ensures \result && type == WIRE_SHADOW ==> ref < nmasks && masks[ref].kind == 5;
  */
 static bool resolves(uint32_t type, uint32_t ref, const GpuClientRes *res, const WireMask *masks, uint32_t nmasks) {
@@ -156,7 +156,7 @@ static bool resolves(uint32_t type, uint32_t ref, const GpuClientRes *res, const
     case WIRE_IMAGE:
         return ref < GPU_MAX_IMAGES && res->image[ref];
     case WIRE_MASK_BEGIN:
-        return ref < nmasks && masks[ref].kind >= 1 && masks[ref].kind <= 4;
+        return ref < nmasks && ((masks[ref].kind >= 1 && masks[ref].kind <= 4) || masks[ref].kind == 6);
     case WIRE_SHADOW:
         return ref < nmasks && masks[ref].kind == 5;
     default:

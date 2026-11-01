@@ -330,6 +330,125 @@ static void border_side_color(const LayoutBox *box, int k, float op, float c[4])
     }
 }
 
+static int dl_add_mask(DisplayList *dl, const DisplayMask *m);
+static bool dl_add_mask_cmd(DisplayList *dl, DisplayListCmdType type, int mask_index, const DisplayMask *m);
+
+/* Blink's Color::Dark(): the shade of a 3D border style's darker sides
+ * (black's is a light gray, so it still shows). */
+static void border_dark(const float c[4], float out[4])
+{
+    if (c[0] == 0.0f && c[1] == 0.0f && c[2] == 0.0f) {
+        out[0] = out[1] = out[2] = (float)0xAB / 255.0f;
+    } else {
+        float v = c[0] > c[1] ? c[0] : c[1];
+        if (c[2] > v) v = c[2];
+        float k = v > 0.0f ? (v - 0.33f) / v : 0.0f;
+        if (k < 0.0f) k = 0.0f;
+        out[0] = c[0] * k;
+        out[1] = c[1] * k;
+        out[2] = c[2] * k;
+    }
+    out[3] = c[3];
+}
+
+/* One band of border side `side` (0 top 1 right 2 bottom 3 left) of the
+ * border box (bx, by, bw, bh) with widths bwid (top, right, bottom, left):
+ * f0..f1 of its width from the outer edge, in color c, its corners joined
+ * to the neighbouring sides along the diagonals (mask kind 6) at the ends
+ * cuts names (1 its first going clockwise, 2 its second); at the others it
+ * fills the corner. */
+static void border_band(DisplayList *dl, float bx, float by, float bw, float bh, const float bwid[4], int side,
+                        float f0, float f1, const float c[4], unsigned cuts)
+{
+    float t = bwid[side];
+    if (t <= 0.0f || f1 <= f0 || c[3] <= 0.0f) return;
+    DisplayMask m;
+    memset(&m, 0, sizeof(m));
+    m.kind = 6;
+    m.x = side == 1 ? bx + bw - t : bx;
+    m.y = side == 2 ? by + bh - t : by;
+    m.w = side == 0 || side == 2 ? bw : t;
+    m.h = side == 0 || side == 2 ? t : bh;
+    for (int k = 0; k < 4; k++) m.border[k] = bwid[k];
+    m.angle_deg = (float)side;
+    m.nstops = 2;
+    m.stop_pos[0] = f0;
+    m.stop_pos[1] = f1;
+    m.stop_alpha[0] = (cuts & 1) ? 1.0f : 0.0f;
+    m.stop_alpha[1] = (cuts & 2) ? 1.0f : 0.0f;
+    int mi = dl_add_mask(dl, &m);
+    if (mi < 0 || !dl_add_mask_cmd(dl, DL_MASK_BEGIN, mi, &m)) return;
+    display_list_add_rect(dl, m.x, m.y, m.w, m.h, c[0], c[1], c[2], c[3]);
+    dl_add_mask_cmd(dl, DL_MASK_END, mi, &m);
+}
+
+/* A border whose sides differ (in color or style) or are not solid: each
+ * side through its own mask, in its style (CSS 2.1 section 8.5.3; double's
+ * thirds and the 3D styles' shades as Blink draws them).  Sides indexed as
+ * the style's (0 left, 1 right, 2 top, 3 bottom). */
+static void paint_border_sides(DisplayList *dl, const LayoutBox *box, float bx, float by, float bw, float bh,
+                               const float col[4][4])
+{
+    float bwid[4] = { (float)box->s->border_top, (float)box->s->border_right, (float)box->s->border_bottom,
+                      (float)box->s->border_left };
+    static const int style_k[4] = { 2, 1, 3, 0 };   /* top, right, bottom, left -> style index */
+    for (int side = 0; side < 4; side++) {
+        int k = style_k[side];
+        float t = bwid[side];
+        if (t <= 0.0f) continue;
+        const float *c = col[k];
+        int st = box->s->border_style[k];
+        /* A solid side drawn first at a corner it shares with another
+         * solid side fills it, the later one is cut along the diagonal (no
+         * seam of the background between them, as Blink draws them); a
+         * corner with another style is cut on both sides. */
+        unsigned cuts = 0;
+        int ends[2] = { (side + 3) & 3, (side + 1) & 3 };
+        for (int e = 0; e < 2; e++) {
+            int n = ends[e];
+            bool solid = st == CSS_BORDER_SOLID && box->s->border_style[style_k[n]] == CSS_BORDER_SOLID;
+            if (!solid || n < side) cuts |= 1u << e;
+        }
+        bool top_left = side == 0 || side == 3;
+        float dark[4];
+        border_dark(c, dark);
+        if (st == CSS_BORDER_DOUBLE && t >= 3.0f) {
+            float third = floorf((t + 1.0f) / 3.0f);
+            border_band(dl, bx, by, bw, bh, bwid, side, 0.0f, third / t, c, cuts);
+            border_band(dl, bx, by, bw, bh, bwid, side, (t - third) / t, 1.0f, c, cuts);
+        } else if (st == CSS_BORDER_INSET || st == CSS_BORDER_OUTSET) {
+            bool darker = top_left == (st == CSS_BORDER_INSET);
+            border_band(dl, bx, by, bw, bh, bwid, side, 0.0f, 1.0f, darker ? dark : c, cuts);
+        } else if (st == CSS_BORDER_GROOVE || st == CSS_BORDER_RIDGE) {
+            /* (the outer half as inset for groove, outset for ridge; the
+             * inner half the other) */
+            bool outer_dark = top_left == (st == CSS_BORDER_GROOVE);
+            border_band(dl, bx, by, bw, bh, bwid, side, 0.0f, 0.5f, outer_dark ? dark : c, cuts);
+            border_band(dl, bx, by, bw, bh, bwid, side, 0.5f, 1.0f, outer_dark ? c : dark, cuts);
+        } else {
+            border_band(dl, bx, by, bw, bh, bwid, side, 0.0f, 1.0f, c, cuts);
+        }
+    }
+}
+
+/* Whether a box's border can be drawn as four plain rectangles: every side
+ * with a width solid (or double too thin to show its gap) and one color. */
+static bool border_uniform(const LayoutBox *box, const float col[4][4])
+{
+    const double w[4] = { box->s->border_left, box->s->border_right, box->s->border_top, box->s->border_bottom };
+    int first = -1;
+    for (int k = 0; k < 4; k++) {
+        if (w[k] <= 0.0) continue;
+        int st = box->s->border_style[k];
+        if (st != CSS_BORDER_SOLID && !(st == CSS_BORDER_DOUBLE && w[k] < 3.0) &&
+            st != CSS_BORDER_DASHED && st != CSS_BORDER_DOTTED)
+            return false;
+        if (first < 0) first = k;
+        else if (memcmp(col[k], col[first], sizeof(col[k])) != 0) return false;
+    }
+    return true;
+}
+
 static void paint_pieces(LayoutContext *ctx, DisplayList *dl, int el, int anchor, float op)
 {
     const LayoutBox *box = &ctx->boxes[el];
@@ -1698,6 +1817,8 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             border_side_color(box, 2, op, ct);
             border_side_color(box, 3, op, cb);
             float br_r = ct[0], br_g = ct[1], br_b = ct[2], br_a = ct[3];   /* (a rounded ring: one color) */
+            const float col[4][4] = { { cl[0], cl[1], cl[2], cl[3] }, { cr[0], cr[1], cr[2], cr[3] },
+                                      { ct[0], ct[1], ct[2], ct[3] }, { cb[0], cb[1], cb[2], cb[3] } };
             float bx = (float)box->x, by = (float)box->y;
             float bw = (float)box->width, bh = (float)box->height;
             snap_rect(&bx, &by, &bw, &bh);
@@ -1715,6 +1836,8 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     display_list_add_rect(dl, bx, by, bw, bh, br_r, br_g, br_b, br_a);
                     dl_add_mask_cmd(dl, DL_MASK_END, mi, &ring);
                 }
+            } else if (!border_uniform(box, col)) {
+                paint_border_sides(dl, box, bx, by, bw, bh, col);
             } else {
             if (box->s->border_top > 0.0) {
                 display_list_add_rect(dl, bx, by, bw, (float)box->s->border_top,
