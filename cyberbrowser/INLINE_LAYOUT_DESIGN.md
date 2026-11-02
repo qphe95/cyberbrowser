@@ -221,6 +221,28 @@ an earlier, noisier run that read 5 ms slower was bisected with each part switch
 part costing anything.  Left for the second part: blocks inside inline elements (an inline split
 around a block, block_in_inline 1 and 2), then 5f.
 
+Step 5e, second part: inlines split around blocks (block_in_inline 2; one holding such an inline,
+block_in_inline 1, is laid out as a block already).  The flow's items already flatten such an
+inline into pieces (a start item, its children up to a block, an end item; the block; the next
+piece); a run of inline content now goes up to the next block wherever it is, a child or one inside
+a split inline, and ifc_collect_run takes the run's items: each child as ifc_collect takes it, each
+piece as an element of its own (IfcEl.split) with its start edge only on the piece that has it and
+its end edge likewise.  A split inline's piece writes its border box per line to the inline's
+pieces (always: painting draws a split inline from them), placed against its child that holds the
+line's first content, as the flow's pieces are, which sets when painting draws it (the first try put
+them against the inline itself, painted before its blocks: a descender of the block above showed
+over the border, block-in-inline-insert-001a, -003, -004); that anchoring waits until the run's
+elements are placed.  The flow's own finishing then makes the inline's box around its pieces and
+blocks, as before.  An edge token exists when its side has any margin, border or padding, even if
+they add up to nothing (margin-right-114: border-right 200px, margin-right -200px, a piece of
+white space only, which must make a line).  css/CSS2 5553, none lost (normal-flow 9, visuren 4,
+box-display 1, linebox 1); the three replays identical.  Timing against the first part (9 rounds):
+Wikipedia 255 / 259 against 257 / 264 ms, YouTube 202 / 206 against 203 / 206.  The old inline path
+is now taken only by blocks with an inline child this path does not take (wbr, meter, progress, a
+pseudo-element other than ::before, ::after and ::first-letter, an inline with display other than
+inline) and blocks with line-clamp or ellipsis among block children; 5f decides those before the
+old path goes.
+
 Goal: lay out a block's inline content the way browsers do, from
 a per-paragraph list of items analysed once (text, white space, break opportunities, bidi levels,
 widths) and kept across layouts, so that right-to-left and mixed-direction text costs about what

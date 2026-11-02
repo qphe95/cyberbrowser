@@ -13474,6 +13474,8 @@ enum {
 
 typedef struct {
     int box, tok0, tok1;  /* an inline element and its tokens (its edges included) */
+    unsigned char split;  /* a piece of an inline split around blocks: its pieces per line, its box later */
+    int pc0;              /* (split: where its pieces start in the inline's list) */
 } IfcEl;
 
 typedef struct {
@@ -13622,10 +13624,10 @@ static bool ifc_is_float(const LayoutBox *b)
            (layout_is_block_flow(b->s->display) || b->s->display == CSS_DISPLAY_INLINE_BLOCK);
 }
 
-static bool ifc_inline_ok(LayoutContext *ctx, int p, bool top);
+static bool ifc_inline_ok(LayoutContext *ctx, int p);
 
-/* Whether child c (top: of the block itself) is what this path lays out. */
-static bool ifc_child_ok(LayoutContext *ctx, int c, bool top)
+/* Whether child c is what this path lays out. */
+static bool ifc_child_ok(LayoutContext *ctx, int c)
 {
     LayoutBox *cb = layout_box(ctx, c);
     if (cb->s->display == CSS_DISPLAY_NONE) return true;
@@ -13642,13 +13644,13 @@ static bool ifc_child_ok(LayoutContext *ctx, int c, bool top)
         (layout_is_replaced_tag(n->tag_name) && strcasecmp(n->tag_name, "object") != 0) ||
         !strcasecmp(n->tag_name, "img") || !strcasecmp(n->tag_name, "wbr") || layout_is_svg_box(n))
         return false;
-    return ifc_inline_ok(ctx, c, false);
+    return ifc_inline_ok(ctx, c);
 }
 
-static bool ifc_inline_ok(LayoutContext *ctx, int p, bool top)
+static bool ifc_inline_ok(LayoutContext *ctx, int p)
 {
     for (int c = ctx->tree.nodes[p].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx)
-        if (!ifc_child_ok(ctx, c, top)) return false;
+        if (!ifc_child_ok(ctx, c)) return false;
     return true;
 }
 
@@ -13662,16 +13664,17 @@ static bool ifc_is_block_child(const LayoutBox *b)
  * the flow's items), has each run of inline content between them laid out
  * on items: every one of those children what this path takes, and none of
  * line-clamp or text-overflow (which count the block's lines as one). */
-static bool ifc_runs_ok(LayoutContext *ctx, int idx, const int *kids, int nkids)
+static bool ifc_runs_ok(LayoutContext *ctx, int idx, const int *kids, const int *piece_of, int nkids)
 {
     if (g_ifc <= 0) return false;
     const LayoutBox *b = layout_box(ctx, idx);
     if (b->s->line_clamp || b->s->text_overflow_ellipsis) return false;
     bool block = false;
     for (int i = 0; i < nkids; i++) {
+        if (piece_of && piece_of[i] >= 0) continue;   /* (a split inline's piece starts or ends) */
         const LayoutBox *kb = layout_box(ctx, kids[i]);
         if (ifc_is_block_child(kb)) block = true;
-        else if (!ifc_child_ok(ctx, kids[i], true)) return false;
+        else if (!ifc_child_ok(ctx, kids[i])) return false;
     }
     return block;
 }
@@ -13684,7 +13687,15 @@ static bool ifc_eligible(LayoutContext *ctx, int idx)
     }
     if (!g_ifc) return false;
     if (ctx->tree.nodes[idx].first_child_idx < 0) return false;
-    return ifc_inline_ok(ctx, idx, true);
+    return ifc_inline_ok(ctx, idx);
+}
+
+/* Whether an inline box's left (or right) edge has any margin, border or
+ * padding. */
+static bool ifc_edge_deco(const LayoutBox *b, bool left)
+{
+    return left ? b->margin_left != 0.0 || b->s->border_left != 0.0 || b->padding_left != 0.0
+                : b->margin_right != 0.0 || b->s->border_right != 0.0 || b->padding_right != 0.0;
 }
 
 /* The tokens of p's inline content into I: its children from c0 up to stop
@@ -13810,15 +13821,23 @@ static void ifc_collect(LayoutContext *ctx, int p, int c0, int stop, IfcItems *I
             I->nel++;
             I->el[e].box = c;
             I->el[e].tok0 = I->n;
-            /* (its start edge is its right one when it is right to left) */
+            I->el[e].split = 0;
+            I->el[e].pc0 = 0;
+            /* (its start edge is its right one when it is right to left; an
+             * edge with any margin, border or padding is there, if only to
+             * make a line, even when they add up to nothing) */
             double lw = cb->margin_left + cb->s->border_left + cb->padding_left;
             double rw = cb->padding_right + cb->s->border_right + cb->margin_right;
+            bool ld = ifc_edge_deco(cb, true), rd = ifc_edge_deco(cb, false);
             if (cb->s->direction == 1) {
                 double sw = lw;
                 lw = rw;
                 rw = sw;
+                bool sd = ld;
+                ld = rd;
+                rd = sd;
             }
-            if (lw != 0.0) ifc_put(I, c, 0, 0, lw, IFC_OPEN);
+            if (ld) ifc_put(I, c, 0, 0, lw, IFC_OPEN);
             /* (the controls its unicode-bidi stands for: tokens of no width
              * at their place in the text, which keep runs apart) */
             uint32_t ctl[2];
@@ -13829,14 +13848,75 @@ static void ifc_collect(LayoutContext *ctx, int p, int c0, int stop, IfcItems *I
             }
             int inner = I->n;
             ifc_collect(ctx, c, ctx->tree.nodes[c].first_child_idx, -1, I, avail_width, pct_h);
-            if (I->n == inner && lw == 0.0 && rw == 0.0) ifc_put(I, c, 0, 0, 0.0, IFC_MARK);
-            if (rw != 0.0) ifc_put(I, c, 0, 0, rw, IFC_CLOSE);
+            if (I->n == inner && !ld && !rd) ifc_put(I, c, 0, 0, 0.0, IFC_MARK);
+            if (rd) ifc_put(I, c, 0, 0, rw, IFC_CLOSE);
             I->el[e].tok1 = I->n;
             nctl = I->gather ? bidi_controls(cb, false, ctl) : 0;
             for (int q = 0; q < nctl; q++) {
                 ifc_cp_put(I, ctl[q], 0);
                 if (ifc_put(I, -1, 0, 0, 0.0, IFC_CTL)) I->t[I->n - 1].cp0 = I->ncp - 1;
             }
+        }
+    }
+}
+
+/* A run of a block flow's items (layout_block_flow_inner): kids[i, j),
+ * with piece_of and fp for the pieces of inlines split around blocks. */
+typedef struct {
+    const int *kids, *piece_of;
+    const FlowPiece *fp;
+    int i, j;
+} IfcRun;
+
+/* The tokens of run R into I: each child as ifc_collect takes it; a split
+ * inline's piece as an element of its own (split), its start edge on the
+ * piece that has it, its end edge likewise. */
+static void ifc_collect_run(LayoutContext *ctx, const IfcRun *R, IfcItems *I, double avail_width, double pct_h)
+{
+    int open = -1;
+    for (int k = R->i; k < R->j; k++) {
+        int c = R->kids[k];
+        if (!(R->piece_of && R->piece_of[k] >= 0)) {
+            ifc_collect(ctx, ctx->tree.nodes[c].parent_idx, c, ctx->tree.nodes[c].next_sibling_idx, I, avail_width, pct_h);
+            continue;
+        }
+        const FlowPiece *fp = &R->fp[R->piece_of[k] / 2];
+        LayoutBox *eb = layout_box(ctx, fp->el);
+        bool rtl = eb->s->direction == 1;
+        double lw = eb->margin_left + eb->s->border_left + eb->padding_left;
+        double rw = eb->padding_right + eb->s->border_right + eb->margin_right;
+        bool has_start = rtl ? (fp->sides & 2) : (fp->sides & 1), has_end = rtl ? (fp->sides & 1) : (fp->sides & 2);
+        double sw = rtl ? rw : lw, ew = rtl ? lw : rw;
+        if (!(R->piece_of[k] & 1)) {
+            if (!fp->shown) {
+                /* (no line box: its white space and empty inlines nowhere) */
+                for (int q = fp->first; q >= 0; q = q == fp->last ? -1 : ctx->tree.nodes[q].next_sibling_idx) {
+                    LayoutBox *qb = layout_box(ctx, q);
+                    if (qb->s->float_side != 0) continue;
+                    qb->x = I->x0;
+                    qb->y = I->y0;
+                    qb->width = qb->height = 0.0;
+                    layout_update_content_sizes(qb);
+                }
+            }
+            if (I->nel == I->elcap) {
+                int nc = I->elcap ? I->elcap * 2 : 16;
+                IfcEl *ne = (IfcEl *)realloc(I->el, (size_t)nc * sizeof(IfcEl));
+                if (!ne) continue;
+                I->el = ne;
+                I->elcap = nc;
+            }
+            open = I->nel++;
+            I->el[open].box = fp->el;
+            I->el[open].tok0 = I->n;
+            I->el[open].tok1 = I->n;
+            I->el[open].split = 1;
+            I->el[open].pc0 = 0;
+            if (has_start && ifc_edge_deco(eb, !rtl)) ifc_put(I, fp->el, 0, 0, sw, IFC_OPEN);
+        } else {
+            if (has_end && ifc_edge_deco(eb, rtl)) ifc_put(I, fp->el, 0, 0, ew, IFC_CLOSE);
+            if (open >= 0) I->el[open].tok1 = I->n;
+            open = -1;
         }
     }
 }
@@ -14389,7 +14469,8 @@ static void ifc_ellipsis(LayoutContext *ctx, IfcItems *I, int a, int b, double l
  * children from c0 up to stop (a run of it between block children,
  * ifc_runs_ok): its lines from cur->y, the cursor left at the last line's
  * top with its height in line_box, as the flow's per-child path leaves it. */
-static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, double content_left, double avail_width, double indent0,
+static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcRun *run, double content_left,
+                       double avail_width, double indent0,
                        FlowCursor *cur, bool *any_placed, FloatRec *floats, int *nfloats, int fcap)
 {
     LayoutBox *blk = layout_box(ctx, idx);
@@ -14401,7 +14482,8 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, double con
     if (blk_ovr) ifc_cp_put(&I, blk->s->direction == 1 ? 0x202E : 0x202D, 0);
     I.x0 = content_left;
     I.y0 = cur->y;
-    ifc_collect(ctx, idx, c0, stop, &I, avail_width, layout_pct_base_height(ctx, idx));
+    if (run) ifc_collect_run(ctx, run, &I, avail_width, layout_pct_base_height(ctx, idx));
+    else ifc_collect(ctx, idx, c0, stop, &I, avail_width, layout_pct_base_height(ctx, idx));
     if (blk_ovr) ifc_cp_put(&I, 0x202C, 0);
     IfcBidi B;
     memset(&B, 0, sizeof(B));
@@ -14749,6 +14831,70 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, double con
     for (int e = 0; e < I.nel; e++) {
         IfcEl *el = &I.el[e];
         LayoutBox *eb = layout_box(ctx, el->box);
+        if (el->split) {
+            /* A piece of an inline split around blocks: its border box per
+             * line, placed against its child that holds the line's first
+             * content (painted with it, moved with it, as the flow's pieces
+             * are; against the inline itself, in page coordinates, when it
+             * holds none), the flow then making its own box around them and
+             * its blocks. */
+            LayoutPieceList *pl = ctx->pieces && el->box < ctx->pieces_n ? &ctx->pieces[el->box] : NULL;
+            double adv = layout_line_advance_box(eb), ca = layout_content_area_height(eb);
+            double h = ca + layout_vertical_border_padding(eb);
+            double top_off = (adv - ca) / 2.0 - eb->padding_top - eb->s->border_top;
+            int pc0 = pl ? pl->n : 0;
+            for (int L = 0; pl && L < nlines; L++) {
+                bool found = false;
+                for (int k = bidi ? B.el[e].head : -1; k >= 0; k = B.pc[k].next) {
+                    if (B.pc[k].line != L) continue;
+                    found = true;
+                    if (pl->n == pl->cap) {
+                        int nc = pl->cap ? pl->cap * 2 : 4;
+                        LayoutPiece *np = (LayoutPiece *)realloc(pl->p, (size_t)nc * sizeof(LayoutPiece));
+                        if (!np) break;
+                        pl->p = np;
+                        pl->cap = nc;
+                    }
+                    LayoutPiece *pc = &pl->p[pl->n++];
+                    pc->anchor = -1;
+                    pc->sides = B.pc[k].sides;
+                    pc->dx = B.pc[k].a;
+                    pc->dy = ltop[L] + top_off;
+                    pc->w = B.pc[k].z - B.pc[k].a;
+                    pc->h = h;
+                }
+                if (bidi || found) continue;
+                double a = 1e30, z = -1e30;
+                unsigned char sides = 0;
+                for (int q = el->tok0; q < el->tok1; q++) {
+                    const IfcTok *t = &I.t[q];
+                    if (t->line != L || t->drop || t->kind == IFC_CTL || t->kind == IFC_ABS || t->kind == IFC_FLOAT) continue;
+                    if (t->kind == IFC_SPACE && (q + 1 >= I.n || I.t[q + 1].line != L)) continue;
+                    if (t->kind == IFC_OPEN) sides |= 1;
+                    if (t->kind == IFC_CLOSE) sides |= 2;
+                    double l = ifc_tok_left(ctx, t), r = ifc_tok_right(ctx, t);
+                    if (l < a) a = l;
+                    if (r > z) z = r;
+                }
+                if (z < a) continue;
+                if (pl->n == pl->cap) {
+                    int nc = pl->cap ? pl->cap * 2 : 4;
+                    LayoutPiece *np = (LayoutPiece *)realloc(pl->p, (size_t)nc * sizeof(LayoutPiece));
+                    if (!np) break;
+                    pl->p = np;
+                    pl->cap = nc;
+                }
+                LayoutPiece *pc = &pl->p[pl->n++];
+                pc->anchor = -1;
+                pc->sides = sides;
+                pc->dx = a;
+                pc->dy = ltop[L] + top_off;
+                pc->w = z - a;
+                pc->h = h;
+            }
+            el->pc0 = pc0;
+            continue;
+        }
         double x0 = 1e30, x1 = -1e30, atom_h = 0.0;
         int L0 = -1, L1 = -1;
         bool has_text = false;
@@ -14863,6 +15009,37 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, double con
             }
         }
         layout_update_content_sizes(eb);
+    }
+    /* A split inline's pieces placed against the child holding their line's
+     * first content, now that its children are placed. */
+    for (int e = 0; e < I.nel; e++) {
+        const IfcEl *el = &I.el[e];
+        if (!el->split || !ctx->pieces || el->box >= ctx->pieces_n) continue;
+        LayoutPieceList *pl = &ctx->pieces[el->box];
+        const LayoutBox *eb = layout_box(ctx, el->box);
+        double top_off = (layout_line_advance_box(eb) - layout_content_area_height(eb)) / 2.0 - eb->padding_top -
+                         eb->s->border_top;
+        for (int q = el->pc0; q < pl->n; q++) {
+            LayoutPiece *pc = &pl->p[q];
+            if (pc->anchor >= 0) continue;
+            int L = -1;
+            for (int l = 0; l < nlines && L < 0; l++)
+                if (fabs(ltop[l] + top_off - pc->dy) < 0.01) L = l;
+            for (int k = el->tok0; L >= 0 && k < el->tok1; k++) {
+                const IfcTok *t = &I.t[k];
+                if (t->line != L || t->drop ||
+                    !(t->kind == IFC_WORD || t->kind == IFC_SPACE || t->kind == IFC_ATOM || t->kind == IFC_MARK))
+                    continue;
+                int a = t->box;
+                while (a >= 0 && ctx->tree.nodes[a].parent_idx != el->box) a = ctx->tree.nodes[a].parent_idx;
+                if (a < 0) break;
+                const LayoutBox *ab = layout_box(ctx, a);
+                pc->anchor = a;
+                pc->dx -= ab->x;
+                pc->dy -= ab->y;
+                break;
+            }
+        }
     }
     /* Absolutely positioned boxes: their static position (CSS 2.1 section
      * 10.3.7), relative to their parent, for the positioning pass: one
@@ -15045,15 +15222,49 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
     int nfloats = 0;
 
     if (ifc_done)
-        ifc_layout(ctx, idx, ctx->tree.nodes[idx].first_child_idx, -1, content_left, avail_width, indent0, &cur,
-                   &any_placed, floats, &nfloats, (int)(sizeof(floats) / sizeof(floats[0])));
+        ifc_layout(ctx, idx, ctx->tree.nodes[idx].first_child_idx, -1, NULL, content_left, avail_width, indent0,
+                   &cur, &any_placed, floats, &nfloats, (int)(sizeof(floats) / sizeof(floats[0])));
     /* (block children among the inline content: each run of it between
      * them on items, CYBER_IFC) */
-    bool ifc_runs = !ifc_done && !fpieces && ifc_runs_ok(ctx, idx, kids, nkids);
+    bool ifc_runs = !ifc_done && ifc_runs_ok(ctx, idx, kids, piece_of, nkids);
 
     for (int i = 0; !ifc_done && i < nkids; i++) {
         int c = kids[i];
         LayoutBox *child = layout_box(ctx, c);
+#define IFC_ITEM_BLOCK(k) (!(piece_of && piece_of[k] >= 0) && ifc_is_block_child(layout_box(ctx, kids[k])))
+        if (ifc_runs && !IFC_ITEM_BLOCK(i) && !(!(piece_of && piece_of[i] >= 0) && ifc_is_float(child))) {
+            /* A run of inline content up to the next block (a child, or one
+             * inside an inline split around it): on items when it holds more
+             * than white space (the flow's path skips that) */
+            int j = i;
+            bool content = false;
+            for (; j < nkids && !IFC_ITEM_BLOCK(j); j++) {
+                if (content) continue;
+                if (piece_of && piece_of[j] >= 0) {
+                    content = !(piece_of[j] & 1) && fpieces[piece_of[j] / 2].shown;
+                    continue;
+                }
+                HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[kids[j]].dom_node_idx);
+                if (!ifc_is_float(layout_box(ctx, kids[j])))
+                    content = !(dn && dn->type == HTML_NODE_TEXT && layout_text_is_whitespace(css_layout_node_text(ctx, dn)));
+            }
+            if (content) {
+                if (pending_mb != 0.0) {
+                    /* (a line box after a block: the block's bottom margin no
+                     * longer collapses with anything) */
+                    cur.y += pending_mb;
+                    pending_mb = 0.0;
+                    any_placed = true;
+                }
+                double ind = !block_seen && cur.y == content_top ? indent0 : 0.0;
+                IfcRun run = { kids, piece_of, fpieces, i, j };
+                ifc_layout(ctx, idx, c, j < nkids ? kids[j] : -1, piece_of ? &run : NULL, content_left, avail_width,
+                           ind, &cur, &any_placed, floats, &nfloats, (int)(sizeof(floats) / sizeof(floats[0])));
+                i = j - 1;
+                continue;
+            }
+        }
+#undef IFC_ITEM_BLOCK
         if (piece_of && piece_of[i] >= 0) {
             FlowPiece *fp = &fpieces[piece_of[i] / 2];
             if (piece_of[i] & 1) {
@@ -15069,33 +15280,6 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
             continue;
         }
 
-
-        if (ifc_runs && !ifc_is_block_child(child) && !ifc_is_float(child)) {
-            /* A run of inline content up to the next block child: on items
-             * when it holds more than white space (the flow's path skips
-             * that) */
-            int j = i;
-            bool content = false;
-            for (; j < nkids && !ifc_is_block_child(layout_box(ctx, kids[j])); j++) {
-                HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[kids[j]].dom_node_idx);
-                if (!content && !ifc_is_float(layout_box(ctx, kids[j])))
-                    content = !(dn && dn->type == HTML_NODE_TEXT && layout_text_is_whitespace(css_layout_node_text(ctx, dn)));
-            }
-            if (content) {
-                if (pending_mb != 0.0) {
-                    /* (a line box after a block: the block's bottom margin no
-                     * longer collapses with anything) */
-                    cur.y += pending_mb;
-                    pending_mb = 0.0;
-                    any_placed = true;
-                }
-                double ind = !block_seen && cur.y == content_top ? indent0 : 0.0;
-                ifc_layout(ctx, idx, c, j < nkids ? kids[j] : -1, content_left, avail_width, ind, &cur, &any_placed,
-                           floats, &nfloats, (int)(sizeof(floats) / sizeof(floats[0])));
-                i = j - 1;
-                continue;
-            }
-        }
 
         /* Resolve used sizes against this container's content box. */
         layout_resolve_used_sizes(child, layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx),
