@@ -13447,6 +13447,7 @@ typedef struct {
     unsigned char drop;   /* a space removed at a line's start */
     unsigned char nobrk;  /* a space that is not a break opportunity (nowrap) */
     unsigned char kept;   /* a space white-space keeps (pre-wrap): not removed at a line's ends */
+    unsigned char level;  /* its bidi level (a paragraph that needs bidi) */
     int line;
 } IfcTok;
 
@@ -13458,7 +13459,8 @@ enum {
     IFC_CLOSE,    /* its end edge */
     IFC_BR,       /* a forced line break */
     IFC_ATOM,     /* an atomic inline or image: its margin box, laid out already */
-    IFC_FLOAT     /* a float: placed where its line allows (no width on the line) */
+    IFC_FLOAT,    /* a float: placed where its line allows (no width on the line) */
+    IFC_CTL       /* a bidi control unicode-bidi stands for: no width, keeps runs apart when reordered */
 };
 
 typedef struct {
@@ -13530,7 +13532,7 @@ static bool ifc_is_atom(const LayoutBox *b, HtmlNode *n)
 /* Whether box p's in-flow children, and theirs inside inline elements, are
  * what this path lays out: text in any white-space, inline elements (and
  * ::before / ::after), line breaks, atomic inlines and images, and (top: the
- * block's own) floats; nothing that needs bidi, no ::first-letter box (its
+ * block's own) floats, in any direction; no ::first-letter box (its
  * own sizing, the flow's for now), no float or positioned box inside an
  * inline element. */
 static bool ifc_is_float(const LayoutBox *b)
@@ -13556,7 +13558,6 @@ static bool ifc_inline_ok(LayoutContext *ctx, int p, bool top)
             layout_is_replaced_tag(n->tag_name) ||
             !strcasecmp(n->tag_name, "img") || !strcasecmp(n->tag_name, "wbr") || layout_is_svg_box(n))
             return false;
-        if (cb->s->direction == 1 || cb->s->unicode_bidi != 0) return false;
         if (!ifc_inline_ok(ctx, c, false)) return false;
     }
     return true;
@@ -13572,8 +13573,7 @@ static bool ifc_eligible(LayoutContext *ctx, int idx)
     const LayoutBox *b = layout_box(ctx, idx);
     if (b->s->line_clamp || b->s->text_overflow_ellipsis) return false;
     if (ctx->tree.nodes[idx].first_child_idx < 0) return false;
-    if (!ifc_inline_ok(ctx, idx, true)) return false;
-    return !(b->s->direction == 1 || b->s->unicode_bidi != 0 || layout_paragraph_walk(ctx, idx, NULL));
+    return ifc_inline_ok(ctx, idx, true);
 }
 
 /* The tokens of p's inline content into I. */
@@ -13666,8 +13666,14 @@ static void ifc_collect(LayoutContext *ctx, int p, IfcItems *I, double avail_wid
             I->nel++;
             I->el[e].box = c;
             I->el[e].tok0 = I->n;
+            /* (its start edge is its right one when it is right to left) */
             double lw = cb->margin_left + cb->s->border_left + cb->padding_left;
             double rw = cb->padding_right + cb->s->border_right + cb->margin_right;
+            if (cb->s->direction == 1) {
+                double sw = lw;
+                lw = rw;
+                rw = sw;
+            }
             if (lw != 0.0) ifc_put(I, c, 0, 0, lw, IFC_OPEN);
             int inner = I->n;
             ifc_collect(ctx, c, I, avail_width, pct_h);
@@ -13880,6 +13886,324 @@ static void ifc_band_geometry(LayoutContext *ctx, double y, double h, double con
     if (*la < 0.0) *la = 0.0;
 }
 
+/* Bidi levels on I's tokens when block idx's paragraph needs bidi: UAX #9
+ * over its text as the bidi post-pass gathers it (bidi_para_collect), a
+ * word cut where its level changes, the controls unicode-bidi stands for as
+ * tokens of their own (in the word's place in the text, so they keep runs
+ * apart when a line is reordered).  Whether its lines are finished in visual
+ * order (something right to left in it), its level in *para. */
+static bool ifc_bidi_levels(LayoutContext *ctx, int idx, IfcItems *I, int *para)
+{
+    LayoutBox *blk = layout_box(ctx, idx);
+    if (!(blk->s->direction == 1 || blk->s->unicode_bidi != 0 || layout_paragraph_walk(ctx, idx, NULL))) return false;
+    bool rtl_el = false;   /* (an inline element right to left: its edges swap, levels or not) */
+    for (int e = 0; e < I->nel && !rtl_el; e++) rtl_el = layout_box(ctx, I->el[e].box)->s->direction == 1;
+    bump_reset();
+    BidiPara P = { 0 };
+    int maxitems = bidi_count_items(ctx, idx) + 1, nitems = 0;
+    int *items = (int *)bump_alloc((size_t)maxitems * sizeof(int));
+    int *item_cp = (int *)bump_alloc((size_t)maxitems * sizeof(int));
+    uint8_t *lv = NULL;
+    int *nmap = NULL;
+    IfcItems J = { 0 };
+    bool ok = false;
+    if (!items || !item_cp) goto out;
+    int nopen = blk->s->unicode_bidi == 3 || blk->s->unicode_bidi == 4 ? 1 : 0;
+    if (nopen) bidi_para_put(&P, blk->s->direction == 1 ? 0x202E : 0x202D, -1, 0);
+    bidi_para_collect(ctx, idx, &P, items, item_cp, &nitems);
+    if (nopen) bidi_para_put(&P, 0x202C, -1, 0);
+    if (P.n == 0) goto out;
+    if (blk->s->direction != 1 && !rtl_el) {
+        bool rtl = false;
+        for (int i = 0; i < P.n && !rtl; i++) {
+            uint32_t c = P.cp[i];
+            if (c < 0x590) continue;
+            int k = bidi_class(c);
+            rtl = k == BIDI_R || k == BIDI_AL || k == BIDI_AN || k == BIDI_RLE || k == BIDI_RLO || k == BIDI_RLI ||
+                  k == BIDI_FSI;
+        }
+        if (!rtl) goto out;
+    }
+    lv = (uint8_t *)bump_alloc((size_t)P.n);
+    if (!lv) goto out;
+    *para = bidi_levels_cached(P.cp, P.n, blk->s->unicode_bidi == 5 ? -1 : blk->s->direction, lv);
+    if (*para < 0) goto out;
+    if (!rtl_el && !(*para & 1)) {   /* (a right-to-left paragraph: its indent at the right) */
+        bool odd = false;
+        for (int i = 0; i < P.n && !odd; i++) odd = lv[i] & 1;
+        if (!odd) goto out;
+    }
+    /* (levels set in place; the tokens copied, from where it starts, only
+     * when a word is cut or a control goes in) */
+    int c = 0;   /* (the code points passed) */
+    int nbox = -2;
+    HtmlNode *nnode = NULL;
+#define IFC_COPY(q)                                                                  \
+    if (!nmap) {                                                                     \
+        nmap = (int *)malloc(((size_t)I->n + 1) * sizeof(int));                      \
+        J.cap = I->n + 16;                                                           \
+        J.t = (IfcTok *)malloc((size_t)J.cap * sizeof(IfcTok));                      \
+        if (!nmap || !J.t) goto out;                                                 \
+        for (int z = 0; z < (q); z++) nmap[z] = z;                                   \
+        memcpy(J.t, I->t, (size_t)(q) * sizeof(IfcTok));                            \
+        J.n = (q);                                                                   \
+        nmap[(q)] = (q);                                                             \
+    }
+    for (int q = 0; q < I->n; q++) {
+        IfcTok t = I->t[q];
+        if (nmap) nmap[q] = J.n;
+        HtmlNode *tn = NULL;
+        if (t.kind == IFC_WORD || t.kind == IFC_SPACE || t.kind == IFC_BR) {
+            if (t.box != nbox) {
+                nbox = t.box;
+                nnode = css_layout_box_node(ctx, t.box);
+            }
+            tn = nnode;
+        }
+        bool text = tn && tn->type == HTML_NODE_TEXT;
+        int f = -1;   /* (its first code point) */
+        if (text || t.kind == IFC_ATOM) {
+            int k = c;
+            while (k < P.n && !(P.box[k] == t.box && (t.kind == IFC_ATOM || P.byte[k] >= t.start))) k++;
+            if (k < P.n) {
+                for (; c < k; c++) {
+                    if (P.box[c] >= 0 || P.cp[c] == 0x2029) continue;
+                    IFC_COPY(q);
+                    if (!ifc_put(&J, -1, 0, 0, 0.0, IFC_CTL)) goto out;
+                    J.t[J.n - 1].level = lv[c];
+                }
+                f = k;
+            }
+        }
+        t.level = (unsigned char)(f >= 0 ? lv[f] : *para);
+        if (f >= 0 && text && t.kind == IFC_WORD) {
+            const char *tx = NULL;
+            uint32_t s0 = t.start;
+            int k = f;
+            uint8_t level = lv[f];
+            for (; k < P.n && P.box[k] == t.box && P.byte[k] < t.end; k++) {
+                if (lv[k] == level) continue;
+                IFC_COPY(q);
+                if (!tx) tx = css_layout_box_text(ctx, t.box, css_layout_node_text(ctx, tn));
+                if (!ifc_put(&J, t.box, s0, P.byte[k], ifc_width(ctx, t.box, tx, s0, P.byte[k]), IFC_WORD)) goto out;
+                J.t[J.n - 1].level = level;
+                s0 = P.byte[k];
+                level = lv[k];
+            }
+            if (s0 != t.start) {
+                t.start = s0;
+                t.w = ifc_width(ctx, t.box, tx, s0, t.end);
+            }
+            t.level = level;
+            c = k;
+        } else if (f >= 0) {
+            c = f + 1;
+            while (text && c < P.n && P.box[c] == t.box && P.byte[c] < t.end) c++;
+        }
+        if (nmap) {
+            if (!ifc_put(&J, 0, 0, 0, 0.0, 0)) goto out;
+            J.t[J.n - 1] = t;
+        } else {
+            I->t[q].level = t.level;
+        }
+    }
+#undef IFC_COPY
+    if (nmap) {
+        nmap[I->n] = J.n;
+        for (int e = 0; e < I->nel; e++) {
+            I->el[e].tok0 = nmap[I->el[e].tok0];
+            I->el[e].tok1 = nmap[I->el[e].tok1];
+        }
+        free(I->t);
+        I->t = J.t;
+        I->n = J.n;
+        I->cap = J.cap;
+        J.t = NULL;
+    }
+    ok = true;
+out:
+    free(J.t);
+    free(nmap);
+    bump_free(lv);
+    bump_free(items);
+    bump_free(item_cp);
+    bump_free(P.cp);
+    bump_free(P.box);
+    bump_free(P.byte);
+    return ok;
+}
+
+/* A paragraph's lines in visual order: per token its innermost inline
+ * element, per element its parent element and its state on the line being
+ * placed (whether it has something there, its leftmost and rightmost unit,
+ * the piece open), and the pieces placed, in page coordinates. */
+typedef struct {
+    int par, uline, lm_line, lm, rm, stamp, head, tail;   /* (head, tail: its pieces) */
+    bool open;
+    unsigned char sides;
+    double ps;
+} IfcBidiEl;
+
+typedef struct {
+    int e, line;
+    double a, z;   /* its border box's left and right */
+    unsigned char sides;
+    int next;      /* its element's next piece */
+} IfcBidiPiece;
+
+typedef struct {
+    int para, sc;
+    int *tel;
+    IfcBidiEl *el;
+    int *u, *order;
+    uint8_t *ulv;
+    IfcBidiPiece *pc;
+    int npc, pccap;
+} IfcBidi;
+
+static bool ifc_bidi_init(IfcBidi *B, const IfcItems *I)
+{
+    B->tel = (int *)malloc(((size_t)I->n + 1) * sizeof(int));
+    B->u = (int *)malloc(((size_t)I->n + 1) * sizeof(int));
+    B->order = (int *)malloc(((size_t)I->n + 1) * sizeof(int));
+    B->ulv = (uint8_t *)malloc((size_t)I->n + 1);
+    B->el = (IfcBidiEl *)calloc((size_t)I->nel + 1, sizeof(IfcBidiEl));
+    if (!B->tel || !B->u || !B->order || !B->ulv || !B->el) return false;
+    for (int q = 0; q < I->n; q++) B->tel[q] = -1;
+    /* (elements in the order they open: each inside the ones before whose
+     * tokens hold its own) */
+    for (int e = 0; e < I->nel; e++) {
+        const IfcEl *el = &I->el[e];
+        B->el[e].par = el->tok0 < el->tok1 ? B->tel[el->tok0] : -1;
+        B->el[e].uline = B->el[e].lm_line = B->el[e].head = B->el[e].tail = -1;
+        for (int q = el->tok0; q < el->tok1; q++) B->tel[q] = e;
+    }
+    return true;
+}
+
+static void ifc_bidi_free(IfcBidi *B)
+{
+    free(B->tel);
+    free(B->u);
+    free(B->order);
+    free(B->ulv);
+    free(B->el);
+    free(B->pc);
+}
+
+/* Whether element e's start (open) or end edge token is in tokens [t0, t1). */
+static bool ifc_edge_on(const IfcItems *I, int e, bool open, int t0, int t1)
+{
+    const IfcEl *el = &I->el[e];
+    int q = open ? el->tok0 : el->tok1 - 1;
+    return q >= t0 && q < t1 && q >= el->tok0 && q < el->tok1 && I->t[q].kind == (open ? IFC_OPEN : IFC_CLOSE) &&
+           I->t[q].box == el->box;
+}
+
+/* Line L, tokens [t0, t1), placed in visual order from x: its units (words,
+ * spaces kept, atomic inlines, breaks, marks, controls, and an edge of an
+ * element with nothing else on the line) at their levels, white space at
+ * its end back to the paragraph's (L1), reordered (L2); each inline
+ * element's pieces its stretches of adjacent units, its left edge on its
+ * leftmost unit of the line its left edge is on (its start edge's line when
+ * it is left to right, its end edge's when right to left) and its right
+ * edge likewise (CSS 2.1 section 8.6), opened outermost first and closed
+ * innermost first.  Returns where the line ends. */
+static double ifc_bidi_line(LayoutContext *ctx, IfcItems *I, IfcBidi *B, int t0, int t1, int L, double x)
+{
+#define IFC_UNIT(t) ((t)->kind == IFC_WORD || ((t)->kind == IFC_SPACE && !(t)->drop) || (t)->kind == IFC_ATOM || \
+                     (t)->kind == IFC_MARK || (t)->kind == IFC_BR || (t)->kind == IFC_CTL)
+    for (int q = t0; q < t1; q++)
+        if (IFC_UNIT(&I->t[q]))
+            for (int e = B->tel[q]; e >= 0; e = B->el[e].par) B->el[e].uline = L;
+    int nu = 0;
+    for (int q = t0; q < t1; q++) {
+        const IfcTok *t = &I->t[q];
+        bool unit = IFC_UNIT(t);
+        if (!unit && (t->kind == IFC_OPEN || t->kind == IFC_CLOSE) && B->tel[q] >= 0 && B->el[B->tel[q]].uline != L) {
+            /* (an edge of an element with nothing else here: once) */
+            unit = true;
+            B->el[B->tel[q]].uline = L;
+        }
+        if (unit) B->u[nu++] = q;
+    }
+#undef IFC_UNIT
+    if (nu == 0) return x;
+    for (int k = 0; k < nu; k++) {
+        const IfcTok *t = &I->t[B->u[k]];
+        bool own = t->kind == IFC_WORD || t->kind == IFC_SPACE || t->kind == IFC_ATOM || t->kind == IFC_CTL;
+        B->ulv[k] = own ? t->level : t->kind == IFC_BR ? (uint8_t)B->para : k > 0 ? B->ulv[k - 1] : (uint8_t)B->para;
+    }
+    for (int k = nu - 1; k >= 0; k--) {
+        int kind = I->t[B->u[k]].kind;
+        if (kind == IFC_WORD || kind == IFC_ATOM) break;
+        B->ulv[k] = (uint8_t)B->para;
+    }
+    bidi_reorder(B->ulv, nu, B->order);
+    for (int k = 0; k < nu; k++)
+        for (int e = B->tel[B->u[B->order[k]]]; e >= 0; e = B->el[e].par) {
+            IfcBidiEl *s = &B->el[e];
+            if (s->lm_line != L) {
+                s->lm_line = L;
+                s->lm = k;
+                s->open = false;
+            }
+            s->rm = k;
+        }
+    for (int k = 0; k < nu; k++) {
+        int q = B->u[B->order[k]];
+        IfcTok *t = &I->t[q];
+        int ch[64], nch = 0;
+        for (int e = B->tel[q]; e >= 0 && nch < 64; e = B->el[e].par) ch[nch++] = e;
+        for (int j = nch - 1; j >= 0; j--) {
+            IfcBidiEl *s = &B->el[ch[j]];
+            if (s->open) continue;
+            const LayoutBox *eb = layout_box(ctx, I->el[ch[j]].box);
+            bool left = k == s->lm && ifc_edge_on(I, ch[j], eb->s->direction != 1, t0, t1);
+            if (left) x += eb->margin_left;
+            s->open = true;
+            s->ps = x;
+            s->sides = left ? 1 : 0;
+            if (left) x += eb->s->border_left + eb->padding_left;
+        }
+        t->x = x;
+        if (t->kind == IFC_WORD || t->kind == IFC_SPACE || t->kind == IFC_ATOM) x += t->w;
+        B->sc++;
+        if (k + 1 < nu)
+            for (int e = B->tel[B->u[B->order[k + 1]]]; e >= 0; e = B->el[e].par) B->el[e].stamp = B->sc;
+        for (int j = 0; j < nch; j++) {
+            IfcBidiEl *s = &B->el[ch[j]];
+            if (s->stamp == B->sc) continue;
+            const LayoutBox *eb = layout_box(ctx, I->el[ch[j]].box);
+            bool right = k == s->rm && ifc_edge_on(I, ch[j], eb->s->direction == 1, t0, t1);
+            if (right) x += eb->padding_right + eb->s->border_right;
+            if (B->npc == B->pccap) {
+                int nc = B->pccap ? B->pccap * 2 : 16;
+                IfcBidiPiece *np = (IfcBidiPiece *)realloc(B->pc, (size_t)nc * sizeof(IfcBidiPiece));
+                if (np) {
+                    B->pc = np;
+                    B->pccap = nc;
+                }
+            }
+            if (B->npc < B->pccap) {
+                IfcBidiPiece *p = &B->pc[B->npc++];
+                p->e = ch[j];
+                p->line = L;
+                p->a = s->ps;
+                p->z = x;
+                p->sides = (unsigned char)(s->sides | (right ? 2 : 0));
+                p->next = -1;
+                if (s->tail >= 0) B->pc[s->tail].next = B->npc - 1;
+                else s->head = B->npc - 1;
+                s->tail = B->npc - 1;
+            }
+            if (right) x += eb->margin_right;
+            s->open = false;
+        }
+    }
+    return x;
+}
+
 /* Lay out block idx's inline content on items (when ifc_eligible): its
  * lines from cur->y, the cursor left at the last line's top with its height
  * in line_box, as the flow's per-child path leaves it. */
@@ -13892,6 +14216,9 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
     I.x0 = content_left;
     I.y0 = cur->y;
     ifc_collect(ctx, idx, &I, avail_width, layout_pct_base_height(ctx, idx));
+    IfcBidi B;
+    memset(&B, 0, sizeof(B));
+    bool bidi = ifc_bidi_levels(ctx, idx, &I, &B.para) && ifc_bidi_init(&B, &I);
     layout_flow_noreuse_up(ctx, idx);   /* (its fragments are not in the flow record yet) */
     if (!ctx->text_frags) {
         ctx->text_frags = (LayoutTextFragList *)calloc((size_t)ctx->tree.count, sizeof(LayoutTextFragList));
@@ -13899,7 +14226,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
     }
     bool any = false;   /* (anything that makes a line: a word, an edge, a break) */
     for (int k = 0; k < I.n && !any; k++)
-        any = I.t[k].kind != IFC_SPACE && I.t[k].kind != IFC_MARK && I.t[k].kind != IFC_FLOAT;
+        any = I.t[k].kind != IFC_SPACE && I.t[k].kind != IFC_MARK && I.t[k].kind != IFC_FLOAT && I.t[k].kind != IFC_CTL;
     /* (no line: its floats where the content starts) */
     for (int k = 0; !any && k < I.n; k++)
         if (I.t[k].kind == IFC_FLOAT) layout_place_float(ctx, I.t[k].box, content_left, avail_width, cur->y, floats, nfloats, fcap);
@@ -14035,7 +14362,9 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
          * after them too: their edges move back to the last word) */
         {
             int f0 = i;
-            while (f0 > t0 && (I.t[f0 - 1].kind == IFC_SPACE || I.t[f0 - 1].kind == IFC_CLOSE || I.t[f0 - 1].kind == IFC_MARK)) f0--;
+            while (f0 > t0 && (I.t[f0 - 1].kind == IFC_SPACE || I.t[f0 - 1].kind == IFC_CLOSE || I.t[f0 - 1].kind == IFC_MARK ||
+                               I.t[f0 - 1].kind == IFC_CTL))
+                f0--;
             if (f0 < i) {
                 double xx = I.t[f0].x;
                 for (int k = f0; k < i; k++) {
@@ -14047,18 +14376,37 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
                 x = xx;
             }
         }
-        /* (the line's end: its last word or edge, trailing spaces hang) */
-        double end = lx + (nlines == 0 ? indent0 : 0.0);
-        for (int k = i - 1; k >= t0; k--)
-            if (I.t[k].kind == IFC_WORD || I.t[k].kind == IFC_OPEN || I.t[k].kind == IFC_CLOSE || I.t[k].kind == IFC_ATOM) {
-                end = I.t[k].x + I.t[k].w;
-                break;
+        if (bidi) {
+            /* (in visual order, the first line's indent at the paragraph's
+             * start side) */
+            bool rl = B.para & 1;
+            int pc0 = B.npc;
+            double end = ifc_bidi_line(ctx, &I, &B, t0, i, nlines, lx + (nlines == 0 && !rl ? indent0 : 0.0));
+            double slack = lx + la - (nlines == 0 && rl ? indent0 : 0.0) - end;
+            if (blk->s->text_align != CSS_TEXT_ALIGN_LEFT && slack > 0.5) {
+                double dx = blk->s->text_align == CSS_TEXT_ALIGN_CENTER ? slack * 0.5 : slack;
+                for (int k = t0; k < i; k++) I.t[k].x += dx;
+                for (int k = pc0; k < B.npc; k++) {
+                    B.pc[k].a += dx;
+                    B.pc[k].z += dx;
+                }
+                end += dx;
             }
-        double slack = lx + la - end;
-        if (blk->s->text_align != CSS_TEXT_ALIGN_LEFT && slack > 0.5) {
-            double dx = blk->s->text_align == CSS_TEXT_ALIGN_CENTER ? slack * 0.5 : slack;
-            for (int k = t0; k < i; k++) I.t[k].x += dx;
-            x += dx;
+            x = end;
+        } else {
+            /* (the line's end: its last word or edge, trailing spaces hang) */
+            double end = lx + (nlines == 0 ? indent0 : 0.0);
+            for (int k = i - 1; k >= t0; k--)
+                if (I.t[k].kind == IFC_WORD || I.t[k].kind == IFC_OPEN || I.t[k].kind == IFC_CLOSE || I.t[k].kind == IFC_ATOM) {
+                    end = I.t[k].x + I.t[k].w;
+                    break;
+                }
+            double slack = lx + la - end;
+            if (blk->s->text_align != CSS_TEXT_ALIGN_LEFT && slack > 0.5) {
+                double dx = blk->s->text_align == CSS_TEXT_ALIGN_CENTER ? slack * 0.5 : slack;
+                for (int k = t0; k < i; k++) I.t[k].x += dx;
+                x += dx;
+            }
         }
         if (nlines == cap_lines) {
             cap_lines *= 2;
@@ -14083,6 +14431,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
     /* Text boxes: fragments per line (consecutive tokens of one box on one
      * line), the box around them; a break, a mark, where it is. */
     for (int k = 0; k < I.n;) {
+        if (I.t[k].kind == IFC_CTL) { k++; continue; }
         int b = I.t[k].box;
         int k1 = k;
         while (k1 < I.n && I.t[k1].box == b && I.t[k1].kind != IFC_OPEN && I.t[k1].kind != IFC_CLOSE) k1++;
@@ -14146,16 +14495,27 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
                         for (int q = kk0; q <= kk1; q++) {
                             if (I.t[q].drop || (I.t[q].kind != IFC_WORD && I.t[q].kind != IFC_SPACE)) continue;
                             LayoutTextFrag *fr = tf->n > 0 ? &tf->f[tf->n - 1] : NULL;
-                            if (!fr || I.t[q].line != I.t[q - 1].line || I.t[q - 1].drop ||
-                                (I.t[q - 1].kind != IFC_WORD && I.t[q - 1].kind != IFC_SPACE)) {
+                            const IfcTok *tq = &I.t[q], *tp = q > 0 ? &I.t[q - 1] : tq;
+                            /* (in visual order: one level, the token beside the
+                             * one before on the side its level reads from) */
+                            bool apart = bidi && fr && (tq->level != tp->level ||
+                                                        fabs((tq->level & 1) ? tq->x + tq->w - tp->x : tp->x + tp->w - tq->x) > 0.01);
+                            if (!fr || tq->line != tp->line || tp->drop || apart ||
+                                (tp->kind != IFC_WORD && tp->kind != IFC_SPACE)) {
                                 fr = &tf->f[tf->n++];
-                                fr->start = I.t[q].start;
-                                fr->dx = I.t[q].x - bb->x;
-                                fr->dy = ltop[I.t[q].line] + (adv - fs) * 0.5 - bb->y;
-                                fr->level = 0;
+                                fr->start = tq->start;
+                                fr->dx = tq->x - bb->x;
+                                fr->dy = ltop[tq->line] + (adv - fs) * 0.5 - bb->y;
+                                fr->level = bidi ? tq->level : 0;
+                                fr->w = 0.0;
                             }
-                            fr->end = I.t[q].end;
-                            fr->w = I.t[q].x + I.t[q].w - (bb->x + fr->dx);
+                            fr->end = tq->end;
+                            if (tq->x - bb->x < fr->dx) {
+                                fr->w += fr->dx - (tq->x - bb->x);   /* (right to left: it grows leftward) */
+                                fr->dx = tq->x - bb->x;
+                            } else {
+                                fr->w = tq->x + tq->w - (bb->x + fr->dx);
+                            }
                         }
                     }
                 }
@@ -14181,7 +14541,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
         bool has_text = false;
         for (int q = el->tok0; q < el->tok1; q++) {
             const IfcTok *t = &I.t[q];
-            if (t->drop) continue;
+            if (t->drop || t->kind == IFC_CTL) continue;
             if (t->kind == IFC_WORD || t->kind == IFC_SPACE) has_text = true;
             if (t->kind == IFC_ATOM) {
                 const LayoutBox *ab = layout_box(ctx, t->box);
@@ -14195,6 +14555,18 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
             if (t->kind == IFC_MARK) continue;
             if (L0 < 0) L0 = t->line;
             L1 = t->line;
+        }
+        /* (in visual order: around its pieces) */
+        int npc = 0;
+        for (int k = bidi ? B.el[e].head : -1; k >= 0; k = B.pc[k].next) {
+            if (npc++ == 0) {
+                x0 = 1e30;
+                x1 = -1e30;
+                L0 = B.pc[k].line;
+            }
+            if (B.pc[k].a < x0) x0 = B.pc[k].a;
+            if (B.pc[k].z > x1) x1 = B.pc[k].z;
+            L1 = B.pc[k].line;
         }
         if (x1 < x0) {
             int q = el->tok0 < I.n ? el->tok0 : I.n - 1;
@@ -14213,12 +14585,17 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
             /* (only atomic inlines: around them, as the flow sizes it from them) */
             eb->y = ltop[L0];
             eb->height = atom_h;
-        } else if (L0 == L1) {
+        } else if (L0 == L1 && npc <= 1) {
             eb->y = ltop[L0] + (adv - ca) / 2.0 - eb->padding_top - eb->s->border_top;
             eb->height = ca + vpb;
         } else {
-            eb->y = ltop[L0];
-            eb->height = ltop[L1] + adv - ltop[L0];
+            if (L0 == L1) {
+                eb->y = ltop[L0] + (adv - ca) / 2.0 - eb->padding_top - eb->s->border_top;
+                eb->height = ca + vpb;
+            } else {
+                eb->y = ltop[L0];
+                eb->height = ltop[L1] + adv - ltop[L0];
+            }
             bool deco = eb->s->background_color_a > 0.0f || eb->s->border_top > 0.0 || eb->s->border_bottom > 0.0 ||
                         eb->s->border_left > 0.0 || eb->s->border_right > 0.0 || eb->s->background_image_url[0];
             if (deco && !ctx->pieces) {
@@ -14226,7 +14603,23 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
                 ctx->pieces_n = ctx->pieces ? ctx->tree.count : 0;
             }
             LayoutPieceList *pl = deco && ctx->pieces && el->box < ctx->pieces_n ? &ctx->pieces[el->box] : NULL;
-            for (int L = L0; pl && L <= L1; L++) {
+            for (int k = bidi && pl ? B.el[e].head : -1; k >= 0; k = B.pc[k].next) {
+                if (pl->n == pl->cap) {
+                    int nc = pl->cap ? pl->cap * 2 : 4;
+                    LayoutPiece *np = (LayoutPiece *)realloc(pl->p, (size_t)nc * sizeof(LayoutPiece));
+                    if (!np) break;
+                    pl->p = np;
+                    pl->cap = nc;
+                }
+                LayoutPiece *pc = &pl->p[pl->n++];
+                pc->anchor = -1;
+                pc->sides = B.pc[k].sides;
+                pc->dx = B.pc[k].a - eb->x;
+                pc->dy = ltop[B.pc[k].line] + (adv - ca) / 2.0 - eb->padding_top - eb->s->border_top - eb->y;
+                pc->w = B.pc[k].z - B.pc[k].a;
+                pc->h = ca + vpb;
+            }
+            for (int L = L0; pl && !bidi && L <= L1; L++) {
                 double a = 1e30, z = -1e30;
                 unsigned char sides = 0;
                 for (int q = el->tok0; q < el->tok1; q++) {
@@ -14268,6 +14661,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
     free(lh);
     free(I.t);
     free(I.el);
+    ifc_bidi_free(&B);
 }
 
 static void layout_block_flow_inner(LayoutContext *ctx, int idx)
@@ -15121,7 +15515,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
     free(piece_of);
 
     free(kids);
-    layout_bidi_paragraph(ctx, idx);
+    if (!ifc_done) layout_bidi_paragraph(ctx, idx);   /* (on items: its lines placed in visual order already) */
 
     /* Resolve auto height from the extent of the children (not when height
      * was explicitly assigned, even to zero).  cur.y is the anchor: the

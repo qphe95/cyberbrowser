@@ -1,6 +1,6 @@
 # Inline layout on paragraph items
 
-Status: step 3a done, behind CYBER_IFC=1 (steps 1 and 2 measured and dropped, below).
+Status: steps 3a-3d and 4 done, behind CYBER_IFC=1 (steps 1 and 2 measured and dropped, below).
 
 Step 3a (css_layout.c, "Inline formatting on items"): a block whose in-flow content is only text
 and inline elements without left or right margin, border or padding, in white-space normal, with
@@ -94,7 +94,39 @@ between the two boxes.  Forced layouts as at 3c.
 
 Step 3 now covers what the flow's inline path does except: paragraphs that need bidi (step 4),
 ::first-letter, floats and positioned boxes inside inline elements, line-clamp and text-overflow
-ellipsis.  Those blocks keep taking the old path under the switch.  Goal: lay out a block's inline content the way browsers do, from
+ellipsis.  Those blocks keep taking the old path under the switch.
+
+Step 4 (ifc_bidi_levels, ifc_bidi_line): paragraphs that need bidi take the item path too, and the
+bidi post-pass is not called for a block laid out on items.  Levels: UAX #9 over the paragraph's
+text gathered as the post-pass gathers it (bidi_para_collect, the levels cache), set on the tokens
+in place; a word is cut where its level changes (each part measured), and the controls
+unicode-bidi stands for become zero-width tokens where they are in the text, so they keep runs
+apart when reordered.  A paragraph is finished in visual order when it has a right-to-left level,
+is right to left itself (its first line's indent at the right) or holds a right-to-left inline
+element (whose start edge is its right one).  Lines break as before; each is then placed from its
+start in visual order: its units (words, spaces kept, atomic inlines, breaks, marks, controls, and
+the edge of an element with nothing else on the line) at their levels, white space at its end
+back to the paragraph's (L1), reordered (L2); an inline element's pieces are its stretches of
+visually adjacent units, its left and right edges on the leftmost and rightmost unit of the lines
+CSS 2.1 section 8.6 puts them on; alignment on the visual extent.  Text fragments are per visual
+run with their level; an element split by reordering or across lines with a background or border
+gets a piece per stretch.  Under CYBER_IFC=1: css/CSS2 5500, none lost (bidi 6, floats 2, text 1);
+without it 5398, every screenshot as at 3d.  YouTube identical.  Wikipedia: the paragraphs that
+need bidi only for their isolated reference marks (`<sup>` with unicode-bidi: isolate) now come
+from the item path, which drops the stray leading spaces and orphaned brackets the post-pass left
+(" (2020)" in the infobox labels, "(4th" broken at the bracket); forced-RTL Wikipedia matches the
+old path but for the same bracket fixes and the infobox column widths of 3d.
+
+Timing, forced-RTL Wikipedia against plain (7 alternating rounds, min / median of the forced
+layouts): items 278 / 291 ms against 249 / 279; old path 294 / 307 against 262 / 266.  The gap is
+about the same (~30 ms); measured inside the item path over the replay's layouts (CPU, summed): the
+levels pass 28 ms (gathering the text again 5, matching tokens to code points 9, levels 11 of which
+half are cache misses since the cache is per thread, element setup 3), line finishing ~8 ms, and
+the blocks still on the old path 6 ms.  No single part closes it; what does is the paragraph data
+of the design: code points gathered and levels looked up while the tokens are made (one walk, no
+matching), and the levels cache shared between layout threads.  That is step 4b.
+
+Goal: lay out a block's inline content the way browsers do, from
 a per-paragraph list of items analysed once (text, white space, break opportunities, bidi levels,
 widths) and kept across layouts, so that right-to-left and mixed-direction text costs about what
 left-to-right does, line breaking never measures the same text twice, and the inline boxes a line
