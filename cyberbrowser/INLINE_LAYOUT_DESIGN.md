@@ -185,6 +185,25 @@ paint as the old truncation did; a test page with clamped and ellipsed blocks re
 both paths, the item path's text boxes now as wide as what shows).  Timing against 5b: Wikipedia
 251 / 260 against 251 / 260 ms, YouTube 198 / 208 against 200 / 213.
 
+Step 5d: a block with block children among its inline content (165 on Wikipedia, 46 on YouTube)
+has each run of inline content between them laid out on items (ifc_runs_ok: every inline child one
+this path takes, no line-clamp or ellipsis on the block, no inline split around a block in it):
+ifc_collect and ifc_layout take a range of children, and the flow's loop, at a run with more than
+white space (white space alone it skips as before), adds the pending bottom margin of the block
+before (a line box after it), gives the first line text-indent only before any block, lays the run
+out and goes on with the next block, the cursor left as the loop leaves it after a line; the bidi
+post-pass is not called for such a block (each run is a bidi paragraph of its own).  A line holding
+only an inline element's edges (an empty span with a border, or an empty element with vertical
+padding or border) now takes its height (CSS 2.1 section 9.4.2), which the references of the
+block-in-inline tests showed.  Two of those tests' references became right on items while the tests
+themselves (an inline split around a block, still the old path) were wrong in the same way the
+references had been: so the old path got two fixes, the pending bottom margin added before a line's
+room beside the floats is taken, and an atomic inline at a line's start where floats leave too
+little room moved down past them.  css/CSS2 5526, none lost (text 8, box-display 2, floats-clear 2,
+normal-flow 2, bidi-text 1, floats 1, margin-padding-clear 1); with CYBER_IFC=0 5400 (floats 2 more).
+The three replays identical.  Timing against 5c: Wikipedia 252 / 261 against 255 / 265 ms, YouTube
+204 / 211 against 200 / 211.
+
 Goal: lay out a block's inline content the way browsers do, from
 a per-paragraph list of items analysed once (text, white space, break opportunities, bidi levels,
 widths) and kept across layouts, so that right-to-left and mixed-direction text costs about what
