@@ -1,6 +1,6 @@
 # Inline layout on paragraph items
 
-Status: steps 3, 4 and 5a done: inline layout on items by default (CYBER_IFC=0: the old path; steps 1 and 2 measured and dropped, below).
+Status: steps 3, 4 and 5 done: all inline layout on items, the old inline path removed (steps 1 and 2 measured and dropped, below).
 
 Step 3a (css_layout.c, "Inline formatting on items"): a block whose in-flow content is only text
 and inline elements without left or right margin, border or padding, in white-space normal, with
@@ -257,6 +257,23 @@ inline that make no line box, and CYBER_IFC=0.  Second part: those handled witho
 old path removed (the inline branch of the per-child loop and its line alignment, layout_piece_start
 and _end, the inline element child layout in layout_node_serial with
 layout_inline_wrapped_children, the bidi post-pass, the wrap-geometry text painting, CYBER_IFC).
+
+Step 5f, second part: the old inline path removed.  Every run of inline content between block
+children goes to items; one that makes no line box (collapsible white space only, floats aside: pre
+and pre-wrap keep spaces, pre, pre-wrap and pre-line segment breaks) has its boxes placed nowhere
+(at the pen, no size, no fragments), as has a split inline's piece with no line box.  Gone: the
+per-child loop's inline branch with its line alignment (layout_align_line, the hanging space),
+layout_piece_start and _end, the inline element child layout in layout_node_serial (an inline box
+now lays out nothing of its own) with layout_inline_wrapped_children, the bidi post-pass
+(layout_bidi_paragraph and its paragraph record, reordering, fragment building and bump allocator),
+LayoutBox's wrap geometry and text_lead_skip, the display list's wrapped-text painting and its
+ancestor clamp and ellipsis truncation (fragments carry both), and CYBER_IFC; about 2,000 lines.
+The root element is blockified (CSS Display 3 section 2.7), which an inline root had relied on the
+removed child layout for.  css/CSS2 5553 with every screenshot as at the first part, the three
+replays identical, unit tests pass; timing against the first part (9 rounds): Wikipedia 236 / 245
+against 239 / 248 ms, YouTube 189 / 196 against 193 / 198.  The shaper's wrap walk
+(text_shaper_wrap_measure, _wrap_shape, _wrap_lines, _truncate_lines, _truncate_width) is now used
+only by unit tests.
 
 Goal: lay out a block's inline content the way browsers do, from
 a per-paragraph list of items analysed once (text, white space, break opportunities, bidi levels,

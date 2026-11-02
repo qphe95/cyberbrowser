@@ -445,20 +445,6 @@ typedef struct LayoutBox {
     double content_width, content_height;
     double baseline;
 
-    /* Word-wrap state for text boxes whose run wraps across lines.
-     * wrap_cont_w > 0 marks the box as wrapped: display emission wraps the
-     * text with first line width wrap_first_w, continuation lines starting at
-     * wrap_cont_x with width wrap_cont_w.  When a float below the run start
-     * stops intruding mid-wrap, wrap_cont2_line (>1) is the 1-based line
-     * number from which continuation lines instead use wrap_cont2_x /
-     * wrap_cont2_w (e.g. full width once the text passes the float). */
-    double wrap_first_w;
-    double wrap_cont_w;
-    double wrap_cont_x;
-    double wrap_cont2_x;
-    double wrap_cont2_w;
-    int    wrap_cont2_line;
-
     double min_width, max_width;
     double min_height, max_height;
     double top, left, right, bottom;
@@ -467,8 +453,6 @@ typedef struct LayoutBox {
     /* Set by layout_resolve_used_sizes when a percentage height could not
      * resolve (indefinite containing block): the used height is auto. */
     unsigned char height_pct_unresolved;
-    /* Text node whose collapsible leading space was dropped at a line start. */
-    unsigned char text_lead_skip;
     /* An absolutely positioned box's static position, from the line it is
      * on (inline layout on items), relative to its parent's box; used and
      * cleared by the absolute positioning pass. */

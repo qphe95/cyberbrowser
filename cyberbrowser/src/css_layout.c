@@ -495,12 +495,6 @@ static const LayoutBox *layout_box_template(void)
         box->s->flex_basis = -1.0;
         box->s->flex_basis_percent = 0.0;
         box->s->flex_grow = 0.0;
-        box->wrap_first_w = 0.0;
-        box->wrap_cont_w = 0.0;
-        box->wrap_cont_x = 0.0;
-        box->wrap_cont2_x = 0.0;
-        box->wrap_cont2_w = 0.0;
-        box->wrap_cont2_line = 0;
         box->s->font_slot = -1;
         box->s->margin_em[0] = box->s->margin_em[1] = box->s->margin_em[2] = box->s->margin_em[3] = 0.0;
         box->s->padding_em[0] = box->s->padding_em[1] = box->s->padding_em[2] = box->s->padding_em[3] = 0.0;
@@ -8759,16 +8753,18 @@ static void style_finish_box_em(bool em_defer, LayoutBox *box, const LayoutBox *
         if (!box->s->border_coll) box->s->border_spec_cset = box->s->border_color_set;
     }
 
-    /* Blockification (CSS 2.1 §9.7, Flexbox §4): floats, absolutely
-     * positioned boxes and flex/grid items have inline-level display values
-     * blockified.  The parent's display is final. */
+    /* Blockification (CSS 2.1 §9.7, Flexbox §4, CSS Display 3 §2.7): the
+     * root element, floats, absolutely positioned boxes and flex/grid items
+     * have inline-level display values blockified.  The parent's display is
+     * final. */
     if (box->s->display == CSS_DISPLAY_INLINE || box->s->display == CSS_DISPLAY_INLINE_BLOCK ||
         box->s->inline_level) {
         bool container_item = parent && (parent->s->display == CSS_DISPLAY_FLEX ||
                                          parent->s->display == CSS_DISPLAY_GRID);
-        if (container_item || box->s->float_side != 0 ||
+        bool root = !parent && element;
+        if (container_item || root || box->s->float_side != 0 ||
             box->s->position == CSS_POSITION_ABSOLUTE || box->s->position == CSS_POSITION_FIXED) {
-            box->s->abs_inline = !container_item && box->s->float_side == 0;
+            box->s->abs_inline = !container_item && !root && box->s->float_side == 0;
             if (box->s->display == CSS_DISPLAY_INLINE || box->s->display == CSS_DISPLAY_INLINE_BLOCK)
                 box->s->display = CSS_DISPLAY_BLOCK;
             box->s->inline_level = 0;
@@ -11247,12 +11243,6 @@ static bool layout_text_is_whitespace(const char *s)
     return true;
 }
 
-/* Collapsible white space (space, tab, segment break). */
-static bool layout_is_space_char(char c)
-{
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
-}
-
 /* Measure text at a given font size with the box's resolved font. */
 static bool layout_measure_text_styled(const LayoutBox *box, const char *text,
                                        double font_size,
@@ -11278,29 +11268,6 @@ static bool layout_measure_text_styled(const LayoutBox *box, const char *text,
 
 static inline bool layout_is_in_flow(const LayoutBox *box);
 
-/* Concatenate the text in a box (used to size inline elements): its
- * descendants in the flow (not floated, positioned or display:none ones). */
-static void layout_concat_box_text(LayoutContext *ctx, int idx, char *buf, size_t bufsz, size_t *len)
-{
-    for (int k = ctx->tree.nodes[idx].first_child_idx; k >= 0 && *len + 1 < bufsz;
-         k = ctx->tree.nodes[k].next_sibling_idx) {
-        const LayoutBox *kb = layout_box(ctx, k);
-        if (!layout_is_in_flow(kb) || kb->s->float_side != 0) continue;
-        HtmlNode *c = layout_node_dom(ctx, ctx->tree.nodes[k].dom_node_idx);
-        if (!c) continue;
-        const char *ct = c->type == HTML_NODE_TEXT ? css_layout_node_text(ctx, c) : NULL;
-        if (ct) {
-            size_t tl = strlen(ct);
-            if (*len + tl >= bufsz) tl = bufsz - 1 - *len;
-            memcpy(buf + *len, ct, tl);
-            *len += tl;
-            buf[*len] = '\0';
-        } else if (c->type == HTML_NODE_ELEMENT) {
-            layout_concat_box_text(ctx, k, buf, bufsz, len);
-        }
-    }
-}
-
 static void layout_node_serial(LayoutContext *ctx, int idx);
 static void layout_node_serial_impl(LayoutContext *ctx, int idx);
 
@@ -11315,11 +11282,6 @@ static void layout_offset_subtree(LayoutContext *ctx, int idx, double dx, double
         if (child->s->position == CSS_POSITION_FIXED) continue;
         child->x += dx;
         child->y += dy;
-        /* Wrapped text runs keep absolute continuation-line origins. */
-        if (child->wrap_cont_w > 0.0) {
-            child->wrap_cont_x += dx;
-            if (child->wrap_cont2_line > 1) child->wrap_cont2_x += dx;
-        }
         layout_offset_subtree(ctx, c, dx, dy);
     }
 }
@@ -11354,77 +11316,6 @@ static int* layout_collect_flow_children(LayoutContext *ctx, int idx, int *out_c
     if (n == 0) { free(kids); return NULL; }
     *out_count = n;
     return kids;
-}
-
-/* The width of the collapsible white space a line ends with: it hangs (CSS
- * Text 3 section 4.1.3), so alignment leaves it out.  From the last
- * members back while they are text; white-space pre and pre-wrap keep
- * theirs. */
-static double layout_line_hanging_space(LayoutContext *ctx, const int *members, int count)
-{
-    double hang = 0.0;
-    for (int i = count - 1; i >= 0; i--) {
-        int m = members[i];
-        HtmlNode *n = css_layout_box_node(ctx, m);
-        if (!n || n->type != HTML_NODE_TEXT) break;
-        const LayoutBox *b = layout_box(ctx, m);
-        if (b->s->white_space == 2 || b->s->white_space == 3) break;
-        TextShaper *font;
-        float scale, adv;
-        const char *t;
-        if (!css_layout_text_paint(ctx, m, &font, &scale, &adv, &t)) break;
-        size_t len = strlen(t), k = len;
-        while (k > 0 && (t[k - 1] == ' ' || t[k - 1] == '\t' || t[k - 1] == '\n')) k--;
-        if (k == len) break;
-        if (k == 0) {
-            hang += b->width;
-            continue;
-        }
-        text_shaper_set_spacing(b->s->letter_spacing, b->s->word_spacing, scale);
-        hang += text_shaper_span_width(font, t, k, len, scale);
-        text_shaper_set_spacing(0.0f, 0.0f, 1.0f);
-        break;
-    }
-    return hang;
-}
-
-/* Shift the inline runs of one finished line for text-align center/right.
- * `members` are the layout-tree indices of the inline children placed on the
- * line.  Lines containing a word-wrapped text box are left alone: their slack
- * is ~0 by construction, and the wrapped box cannot be partially shifted. */
-static void layout_align_line(LayoutContext *ctx, const int *members, int count,
-                              double content_left, double avail_width, CssTextAlign align)
-{
-    if (align == CSS_TEXT_ALIGN_LEFT || count <= 0) return;
-    for (int i = 0; i < count; i++) {
-        if (layout_box(ctx, members[i])->wrap_cont_w > 0.0) return;
-    }
-    LayoutBox *last = layout_box(ctx, members[count - 1]);
-    double used = (last->x + last->width) - content_left - layout_line_hanging_space(ctx, members, count);
-    /* (a split inline's piece that ends the line with its right edge: that
-     * edge's room is on the line too) */
-    int p = ctx->tree.nodes[members[count - 1]].parent_idx;
-    if (p >= 0 && ctx->pieces && p < ctx->pieces_n && ctx->pieces[p].n > 0) {
-        const LayoutBox *pb = layout_box(ctx, p);
-        double rpad = pb->padding_right + pb->s->border_right, end = content_left + used + rpad;
-        for (int q = 0; q < ctx->pieces[p].n; q++) {
-            const LayoutPiece *pc = &ctx->pieces[p].p[q];
-            if (!(pc->sides & 2)) continue;
-            const LayoutBox *ab = pc->anchor >= 0 ? layout_box(ctx, pc->anchor) : pb;
-            if (fabs(ab->x + pc->dx + pc->w - end) < 1.0) {
-                used += rpad + pb->margin_right;
-                break;
-            }
-        }
-    }
-    double slack = avail_width - used;
-    if (slack <= 0.5) return;
-    double dx = (align == CSS_TEXT_ALIGN_CENTER) ? slack * 0.5 : slack;
-    for (int i = 0; i < count; i++) {
-        LayoutBox *b = layout_box(ctx, members[i]);
-        b->x += dx;
-        layout_offset_subtree(ctx, members[i], dx, 0.0);
-    }
 }
 
 /* Record a placed float on the context stack (grows on demand). */
@@ -12066,12 +11957,11 @@ static bool layout_inline_range_empty(LayoutContext *ctx, int first, int last)
 
 /* A piece of a split inline in a block flow: the inline (el), the children
  * it has (first..last; first -1: none), which of its edges, whether it
- * makes a line box, and where its line started. */
+ * makes a line box. */
 typedef struct FlowPiece {
     int el, first, last;
     unsigned char sides;
     bool shown;
-    double start_x, start_y;
 } FlowPiece;
 
 static void layout_flow_noreuse_up(LayoutContext *ctx, int idx);
@@ -12080,131 +11970,6 @@ static bool layout_is_br(LayoutContext *ctx, int idx)
 {
     HtmlNode *n = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
     return n && n->type == HTML_NODE_ELEMENT && n->tag_name && strcasecmp(n->tag_name, "br") == 0;
-}
-
-/* The start of a piece in the flow: a line box (after a block, its bottom
- * margin no longer collapses), and the room its left edge takes.  True
- * when it starts its line. */
-static bool layout_piece_start(LayoutContext *ctx, FlowPiece *fp, FlowCursor *cur, double *pending_mb,
-                               bool *any_placed, double content_left, double avail_width)
-{
-    if (!fp->shown) {
-        /* (no line box: its white space and empty inlines are nowhere; its
-         * floats are items of the flow) */
-        for (int k = fp->first; k >= 0; k = ctx->tree.nodes[k].next_sibling_idx) {
-            LayoutBox *kb = layout_box(ctx, k);
-            if (kb->s->float_side != 0) {
-                if (k == fp->last) break;
-                continue;
-            }
-            kb->x = cur->x;
-            kb->y = cur->y;
-            kb->width = kb->height = 0.0;
-            layout_update_content_sizes(kb);
-            if (k == fp->last) break;
-        }
-        return false;
-    }
-    LayoutBox *eb = layout_box(ctx, fp->el);
-    if (*pending_mb != 0.0) {
-        cur->y += *pending_mb;
-        *pending_mb = 0.0;
-        *any_placed = true;
-    }
-    double line_left = content_left, line_avail = avail_width;
-    layout_flow_line_geometry(ctx->float_stack + t_float_base, ctx->float_count - t_float_base, cur->y,
-                              content_left, avail_width, &line_left, &line_avail);
-    if (cur->x < line_left) cur->x = line_left;
-    fp->start_x = cur->x;
-    fp->start_y = cur->y;
-    if (fp->sides & 1) cur->x += eb->margin_left + eb->s->border_left + eb->padding_left;
-    return fp->start_x <= line_left + 0.001;
-}
-
-/* The end of a piece: the room its right edge takes, and its border boxes,
- * one per line it is on, noted against their first child (which line
- * alignment and later moves carry), the inline's own box when it has
- * none.  line_ends: nothing follows it on its line (a trailing space of
- * its text hangs there, outside it). */
-static void layout_piece_end(LayoutContext *ctx, FlowPiece *fp, FlowCursor *cur, bool line_ends)
-{
-    if (!fp->shown) return;
-    int el = fp->el;
-    LayoutBox *eb = layout_box(ctx, el);
-    if (fp->sides & 2) cur->x += eb->padding_right + eb->s->border_right + eb->margin_right;
-    double adv = layout_line_advance_box(eb);
-    if (adv > cur->line_box) cur->line_box = adv;
-    double ca = layout_content_area_height(eb);
-    double lpad = eb->padding_left + eb->s->border_left, rpad = eb->padding_right + eb->s->border_right;
-    LayoutPieceList *pl = &ctx->pieces[el];
-    /* (lines: runs of children with the same top) */
-    int k = fp->first, nlines = 0;
-    for (;;) {
-        int anchor = -1, end = -1;
-        double x0 = 1e30, x1 = -1e30, ly = 0.0;
-        for (; k >= 0; k = k == fp->last ? -1 : ctx->tree.nodes[k].next_sibling_idx) {
-            const LayoutBox *kb = layout_box(ctx, k);
-            if (!layout_is_in_flow(kb) || (kb->width <= 0.0 && kb->height <= 0.0)) continue;
-            if (anchor >= 0 && fabs(kb->y - ly) > 0.5) break;
-            if (anchor < 0) { anchor = k; ly = kb->y; }
-            if (kb->x < x0) x0 = kb->x;
-            if (kb->x + kb->width > x1) { x1 = kb->x + kb->width; end = k; }
-        }
-        if (k < 0 && line_ends && end >= 0) {
-            const LayoutBox *eb2 = layout_box(ctx, end);
-            HtmlNode *tn = layout_node_dom(ctx, ctx->tree.nodes[end].dom_node_idx);
-            const char *t = tn && tn->type == HTML_NODE_TEXT ? css_layout_box_text(ctx, end, css_layout_node_text(ctx, tn)) : NULL;
-            size_t tl = t ? strlen(t) : 0;
-            double sw = 0.0;
-            double fs = eb2->s->font_size > 0.0 ? eb2->s->font_size : 16.0;
-            if (tl > 0 && t[tl - 1] == ' ' && eb2->s->white_space != 2 && eb2->s->white_space != 3 &&
-                eb2->wrap_cont_w <= 0.0 && layout_measure_text_styled(eb2, " ", fs, &sw, NULL))
-                x1 -= sw;
-        }
-        bool first_line = nlines == 0, last_line = k < 0;
-        /* (the line's top: where the piece started, or a text box on it; an
-         * inline box on it is placed in the line by its own leading) */
-        if (first_line) {
-            ly = fp->start_y;
-        } else {
-            for (int t = anchor; t >= 0; t = ctx->tree.nodes[t].first_child_idx) {
-                HtmlNode *tn = layout_node_dom(ctx, ctx->tree.nodes[t].dom_node_idx);
-                if (tn && tn->type == HTML_NODE_TEXT) { ly = layout_box(ctx, t)->y; break; }
-            }
-        }
-        if (anchor < 0) {
-            if (nlines > 0) break;
-            /* (nothing in it: its edges alone) */
-            x0 = x1 = fp->start_x + ((fp->sides & 1) ? eb->margin_left + lpad : 0.0);
-            ly = fp->start_y;
-        }
-        LayoutPiece pc;
-        /* (its start edge on its first line, its end edge on its last: left
-         * and right, or right and left in a right-to-left inline) */
-        bool rtl = eb->s->direction == 1;
-        pc.sides = (unsigned char)(((fp->sides & 1) && (rtl ? last_line : first_line) ? 1 : 0) |
-                                   ((fp->sides & 2) && (rtl ? first_line : last_line) ? 2 : 0));
-        double bx = x0 - ((pc.sides & 1) ? lpad : 0.0);
-        double bw = x1 + ((pc.sides & 2) ? rpad : 0.0) - bx;
-        double by = ly + (adv - ca) / 2.0 - eb->padding_top - eb->s->border_top;
-        double bh = ca + eb->padding_top + eb->padding_bottom + eb->s->border_top + eb->s->border_bottom;
-        const LayoutBox *ab = anchor >= 0 ? layout_box(ctx, anchor) : NULL;
-        pc.anchor = anchor;
-        pc.dx = bx - (ab ? ab->x : 0.0);
-        pc.dy = by - (ab ? ab->y : 0.0);
-        pc.w = bw;
-        pc.h = bh;
-        if (pl->n == pl->cap) {
-            int nc = pl->cap ? 2 * pl->cap : 4;
-            LayoutPiece *np = (LayoutPiece *)realloc(pl->p, (size_t)nc * sizeof(LayoutPiece));
-            if (!np) return;
-            pl->p = np;
-            pl->cap = nc;
-        }
-        pl->p[pl->n++] = pc;
-        nlines++;
-        if (k < 0) break;
-    }
 }
 
 /* Place float c of a block flow whose content box starts at content_left,
@@ -12326,14 +12091,7 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
     t_float_base = saved_base;
 }
 
-/* In rtl, the first line's indent is at its right end: aligned short of it. */
-#define RTL_FIRST_CUT (box->s->direction == 1 && !block_seen && cur.y == content_top ? indent0 : 0.0)
-/* ---- Bidi paragraphs (BIDI_DESIGN.md) ----
- * A block's inline content is a paragraph; one that needs bidi has its
- * text boxes painted from per-line fragments.  CYBER_BIDI_ALL=1 gives every
- * paragraph fragments (to check they paint as the boxes' geometry does). */
-
-static int g_bidi_all = -1;
+/* ---- Bidi paragraphs (BIDI_DESIGN.md) ---- */
 
 /* Text that may need the bidi algorithm: a right-to-left letter or digit
  * block (U+0590-08FF, U+FB1D-FDFF, U+FE70-FEFF, U+10800-10FFF,
@@ -12362,180 +12120,26 @@ static bool layout_text_has_bidi(const char *t, size_t n)
     return false;
 }
 
-/* The paragraph of block idx: each text box of its inline content (into
- * inline elements, not into atomic inlines or blocks), to fn; whether
- * anything in it needs bidi when fn is NULL. */
-static bool layout_paragraph_walk(LayoutContext *ctx, int idx, void (*fn)(LayoutContext *, int))
+/* Whether anything in the paragraph of block idx needs bidi: its text
+ * boxes (into inline elements, not into atomic inlines or blocks), or an
+ * inline element's direction or unicode-bidi. */
+static bool layout_paragraph_walk(LayoutContext *ctx, int idx)
 {
     for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
         LayoutBox *cb = layout_box(ctx, c);
         if (!layout_is_in_flow(cb) || cb->s->display == CSS_DISPLAY_NONE) continue;
         HtmlNode *n = css_layout_box_node(ctx, c);
         if (n && n->type == HTML_NODE_TEXT) {
-            if (fn) {
-                fn(ctx, c);
-            } else {
-                const char *t = css_layout_box_text(ctx, c, css_layout_node_text(ctx, n));
-                if (t && layout_text_has_bidi(t, strlen(t))) return true;
-            }
+            const char *t = css_layout_box_text(ctx, c, css_layout_node_text(ctx, n));
+            if (t && layout_text_has_bidi(t, strlen(t))) return true;
             continue;
         }
         if (cb->s->display != CSS_DISPLAY_INLINE) continue;
-        if (!fn && (cb->s->direction == 1 || cb->s->unicode_bidi != 0)) return true;
-        if (layout_paragraph_walk(ctx, c, fn) && !fn) return true;
+        if (cb->s->direction == 1 || cb->s->unicode_bidi != 0) return true;
+        if (layout_paragraph_walk(ctx, c)) return true;
     }
     return false;
 }
-
-/* Text box idx's fragments, one per line it paints (from its geometry, as
- * painting it from that would). */
-static void layout_text_frags_build(LayoutContext *ctx, int idx)
-{
-    LayoutTextFragList *fl = &ctx->text_frags[idx];
-    int had = fl->f ? fl->n : 0;   /* (its array holds at least this many) */
-    fl->n = 0;
-    const LayoutBox *b = layout_box(ctx, idx);
-    TextShaper *font = NULL;
-    float scale = 1.0f, adv = 0.0f;
-    const char *text;
-    TsLine stack[16], *ls = stack;
-    int n;
-    if (b->wrap_cont_w <= 0.0 && b->s->line_height > 0.0) {
-        /* (one line with a set line height: no font needed, the text as
-         * css_layout_text_paint gives it) */
-        HtmlNode *tn = css_layout_box_node(ctx, idx);
-        const char *raw = tn ? css_layout_node_text(ctx, tn) : NULL;
-        text = raw ? css_layout_box_text(ctx, idx, raw) : NULL;
-        if (!text) return;
-        if (b->text_lead_skip && text[0] == ' ') text++;
-        adv = (float)b->s->line_height;
-    } else if (!css_layout_text_paint(ctx, idx, &font, &scale, &adv, &text)) {
-        return;
-    }
-    if (b->wrap_cont_w > 0.0) {
-        text_shaper_set_spacing(b->s->letter_spacing, b->s->word_spacing, scale);
-        n = text_shaper_wrap_lines(font, text, (float)b->x, (float)b->y, (float)b->wrap_cont_x,
-                                   (float)b->wrap_first_w, (float)b->wrap_cont_w, scale, adv, b->wrap_cont2_line,
-                                   (float)b->wrap_cont2_x, (float)b->wrap_cont2_w, ls, 16);
-        if (n > 16 && (ls = (TsLine *)malloc((size_t)n * sizeof(TsLine))) != NULL)
-            n = text_shaper_wrap_lines(font, text, (float)b->x, (float)b->y, (float)b->wrap_cont_x,
-                                       (float)b->wrap_first_w, (float)b->wrap_cont_w, scale, adv,
-                                       b->wrap_cont2_line, (float)b->wrap_cont2_x, (float)b->wrap_cont2_w, ls, n);
-        text_shaper_set_spacing(0.0f, 0.0f, 1.0f);
-        if (!ls) return;
-    } else {
-        /* (one line: the em box centered in the line; a pre run with
-         * newlines is painted as before) */
-        size_t len = strlen(text);
-        if (memchr(text, '\n', len)) return;
-        double fs = b->s->font_size > 0.0 ? b->s->font_size : 16.0;
-        stack[0].start = 0;
-        stack[0].end = (uint32_t)len;
-        stack[0].x = (float)b->x;
-        stack[0].y = (float)(b->y + (adv - fs) * 0.5);
-        stack[0].width = (float)b->width;
-        n = 1;
-    }
-    if (n > had) {
-        LayoutTextFrag *g = (LayoutTextFrag *)realloc(fl->f, (size_t)n * sizeof(LayoutTextFrag));
-        if (!g) n = 0;
-        else fl->f = g;
-    }
-    if (fl->f) {
-        for (int i = 0; i < n; i++) {
-            fl->f[i].start = ls[i].start;
-            fl->f[i].end = ls[i].end;
-            fl->f[i].dx = (double)ls[i].x - b->x;
-            fl->f[i].dy = (double)ls[i].y - b->y;
-            fl->f[i].w = ls[i].width;
-            fl->f[i].level = 0;
-            fl->f[i].ellipsis = 0;
-        }
-        fl->n = n;
-    }
-    if (ls != stack) free(ls);
-}
-
-/* The bidi pass's working memory: a per-thread bump allocator, rewound at
- * the start of each paragraph and kept between them (one block once it has
- * grown to the largest paragraph's need).  Each allocation has a 16-byte
- * header with its size, so the last one can grow in place; freeing is a
- * no-op. */
-typedef struct BumpChunk {
-    struct BumpChunk *prev;
-    size_t cap, used, last;   /* (last: the offset of the newest allocation's header) */
-    size_t pad;
-} BumpChunk;
-
-static _Thread_local BumpChunk *t_bump;
-
-static void bump_reset(void)
-{
-    if (t_bump && t_bump->prev) {
-        size_t total = 0;
-        for (BumpChunk *c = t_bump; c;) {
-            BumpChunk *p = c->prev;
-            total += c->cap;
-            free(c);
-            c = p;
-        }
-        t_bump = (BumpChunk *)malloc(sizeof(BumpChunk) + total);
-        if (!t_bump) return;
-        t_bump->prev = NULL;
-        t_bump->cap = total;
-    }
-    if (t_bump) t_bump->used = t_bump->last = 0;
-}
-
-static void *bump_alloc(size_t n)
-{
-    size_t need = ((n + 15) & ~(size_t)15) + 16;
-    BumpChunk *c = t_bump;
-    if (!c || c->used + need > c->cap) {
-        size_t cap = c ? c->cap * 2 : 65536;
-        while (cap < need) cap *= 2;
-        BumpChunk *nc = (BumpChunk *)malloc(sizeof(BumpChunk) + cap);
-        if (!nc) return NULL;
-        nc->prev = c;
-        nc->cap = cap;
-        nc->used = nc->last = 0;
-        t_bump = c = nc;
-    }
-    unsigned char *base = (unsigned char *)(c + 1);
-    *(size_t *)(base + c->used) = n;
-    c->last = c->used;
-    c->used += need;
-    return base + c->last + 16;
-}
-
-static void *bump_calloc(size_t a, size_t b)
-{
-    void *p = bump_alloc(a * b);
-    if (p) memset(p, 0, a * b);
-    return p;
-}
-
-static void *bump_realloc(void *p, size_t n)
-{
-    if (!p) return bump_alloc(n);
-    unsigned char *h = (unsigned char *)p - 16;
-    size_t old = *(size_t *)h;
-    BumpChunk *c = t_bump;
-    unsigned char *base = (unsigned char *)(c + 1);
-    if (h == base + c->last) {
-        size_t need = ((n + 15) & ~(size_t)15) + 16;
-        if (c->last + need <= c->cap) {
-            *(size_t *)h = n;
-            c->used = c->last + need;
-            return p;
-        }
-    }
-    void *q = bump_alloc(n);
-    if (q) memcpy(q, p, old < n ? old : n);
-    return q;
-}
-
-static inline void bump_free(void *p) { (void)p; }
 
 /* Resolved levels by paragraph text: a paragraph laid out again with the
  * same code points and base direction takes its levels from here instead
@@ -12604,60 +12208,9 @@ static int bidi_levels_cached(const uint32_t *cp, int n, int base, uint8_t *lv)
     return para;
 }
 
-/* ---- The paragraph's text, levels, and its lines in visual order ----
- * The paragraph is its inline content as code points in logical order: the
- * text boxes' painted text, U+FFFC for an atomic inline, U+2029 for a block
- * between, and around an inline box with unicode-bidi the controls it
- * stands for (CSS Writing Modes 3 section 2.4.2).  UAX #9 gives each a
- * level; a line is the fragments and atomic inlines the flow put on it, cut
- * into runs of one level, which L2 puts in visual order from the line's
- * start. */
-
-typedef struct {
-    uint32_t *cp;     /* code points */
-    int *box;         /* the text box or atomic inline of each (-1: a control) */
-    uint32_t *byte;   /* its byte offset in the box's painted text */
-    int n, cap;
-} BidiPara;
-
-static bool bidi_para_put(BidiPara *P, uint32_t cp, int box, uint32_t byte)
-{
-    if (P->n == P->cap) {
-        int nc = P->cap ? P->cap * 2 : 256;
-        uint32_t *a = (uint32_t *)bump_realloc(P->cp, (size_t)nc * sizeof(uint32_t));
-        if (!a) return false;
-        P->cp = a;
-        int *b = (int *)bump_realloc(P->box, (size_t)nc * sizeof(int));
-        if (!b) return false;
-        P->box = b;
-        uint32_t *c = (uint32_t *)bump_realloc(P->byte, (size_t)nc * sizeof(uint32_t));
-        if (!c) return false;
-        P->byte = c;
-        P->cap = nc;
-    }
-    P->cp[P->n] = cp;
-    P->box[P->n] = box;
-    P->byte[P->n] = byte;
-    P->n++;
-    return true;
-}
-
-/* Room in P for more code points. */
-static bool bidi_para_reserve(BidiPara *P, int more)
-{
-    if (P->n + more <= P->cap) return true;
-    int nc = P->cap ? P->cap : 256;
-    while (nc < P->n + more) nc *= 2;
-    uint32_t *a = (uint32_t *)bump_realloc(P->cp, (size_t)nc * sizeof(uint32_t));
-    int *b = a ? (int *)bump_realloc(P->box, (size_t)nc * sizeof(int)) : NULL;
-    uint32_t *c = b ? (uint32_t *)bump_realloc(P->byte, (size_t)nc * sizeof(uint32_t)) : NULL;
-    if (a) P->cp = a;
-    if (b) P->box = b;
-    if (!c) return false;
-    P->byte = c;
-    P->cap = nc;
-    return true;
-}
+/* ---- The paragraph's text ----
+ * Around an inline box with unicode-bidi, the controls it stands for (CSS
+ * Writing Modes 3 section 2.4.2). */
 
 /* The next code point of p (UTF-8, as the shaper decodes it). */
 static uint32_t bidi_utf8_next(const unsigned char **pp, const unsigned char *e)
@@ -12669,15 +12222,6 @@ static uint32_t bidi_utf8_next(const unsigned char **pp, const unsigned char *e)
     for (; more && p < e; more--) c = (c << 6) | (*p++ & 0x3F);
     *pp = p;
     return c;
-}
-
-static bool layout_is_replaced_tag(const char *t)
-{
-    static const char *const tags[] = { "img", "input", "video", "canvas", "iframe", "svg", "object", "embed",
-                                        "select", "textarea", "button", "audio", "meter", "progress", NULL };
-    for (int i = 0; tags[i]; i++)
-        if (!strcmp(t, tags[i])) return true;
-    return false;
 }
 
 /* The controls an inline box's unicode-bidi stands for, opening (or closing). */
@@ -12694,56 +12238,6 @@ static int bidi_controls(const LayoutBox *b, bool open, uint32_t out[2])
         return 2;
     case 5: out[0] = open ? 0x2068 : 0x2069; return 1;
     default: return 0;
-    }
-}
-
-/* Block idx's inline content in logical order into P; items, the text
- * boxes and atomic inlines met, in order. */
-static void bidi_para_collect(LayoutContext *ctx, int idx, BidiPara *P, int *items, int *item_cp, int *nitems)
-{
-    for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
-        LayoutBox *cb = layout_box(ctx, c);
-        if (!layout_is_in_flow(cb) || cb->s->display == CSS_DISPLAY_NONE) continue;
-        HtmlNode *n = css_layout_box_node(ctx, c);
-        if (n && n->type == HTML_NODE_TEXT) {
-            /* (the text it paints, as css_layout_text_paint gives it) */
-            const char *raw = css_layout_node_text(ctx, n);
-            if (!raw) continue;
-            const char *t = css_layout_box_text(ctx, c, raw);
-            if (!t) continue;
-            if (cb->text_lead_skip && t[0] == ' ') t++;
-            const unsigned char *p = (const unsigned char *)t, *e = p + strlen(t);
-            item_cp[*nitems] = P->n;
-            if (!bidi_para_reserve(P, (int)(e - p))) continue;
-            while (p < e) {
-                uint32_t off = (uint32_t)(p - (const unsigned char *)t);
-                uint32_t cp = *p < 0x80 ? *p++ : bidi_utf8_next(&p, e);
-                P->cp[P->n] = cp;
-                P->box[P->n] = c;
-                P->byte[P->n] = off;
-                P->n++;
-            }
-            items[(*nitems)++] = c;
-            continue;
-        }
-        bool inline_box = cb->s->display == CSS_DISPLAY_INLINE &&
-                          !(n && n->type == HTML_NODE_ELEMENT && n->tag_name && layout_is_replaced_tag(n->tag_name));
-        if (inline_box && n && n->type == HTML_NODE_ELEMENT && n->tag_name && !strcmp(n->tag_name, "br")) {
-            bidi_para_put(P, 0x2029, -1, 0);   /* (a forced break ends a paragraph) */
-        } else if (inline_box) {
-            uint32_t ctl[2];
-            int k = bidi_controls(cb, true, ctl);
-            for (int i = 0; i < k; i++) bidi_para_put(P, ctl[i], -1, 0);
-            bidi_para_collect(ctx, c, P, items, item_cp, nitems);
-            k = bidi_controls(cb, false, ctl);
-            for (int i = 0; i < k; i++) bidi_para_put(P, ctl[i], -1, 0);
-        } else if (cb->s->inline_level || cb->s->display != CSS_DISPLAY_BLOCK) {
-            item_cp[*nitems] = P->n;
-            bidi_para_put(P, 0xFFFC, c, 0);
-            items[(*nitems)++] = c;
-        } else {
-            bidi_para_put(P, 0x2029, -1, 0);
-        }
     }
 }
 
@@ -12790,626 +12284,6 @@ typedef struct {
     int *slot;
 } BidiAncs;
 
-static bool bidi_ancs_init(BidiAncs *A, int cap)
-{
-    int size = 16;
-    while (size < cap * 2) size *= 2;
-    A->a = (BidiAnc *)bump_alloc((size_t)cap * sizeof(BidiAnc));
-    A->slot = (int *)bump_alloc((size_t)size * sizeof(int));
-    A->n = 0;
-    A->cap = cap;
-    A->mask = size - 1;
-    if (!A->a || !A->slot) return false;
-    for (int i = 0; i < size; i++) A->slot[i] = -1;
-    return true;
-}
-
-/* Box's entry (added when add), or -1. */
-static int bidi_anc(BidiAncs *A, int box, bool add)
-{
-    for (unsigned h = ((unsigned)box * 2654435761u) & (unsigned)A->mask;; h = (h + 1) & (unsigned)A->mask) {
-        int k = A->slot[h];
-        if (k >= 0 && A->a[k].box == box) return k;
-        if (k >= 0) continue;
-        if (!add || A->n == A->cap) return -1;
-        BidiAnc *e = &A->a[A->n];
-        memset(e, 0, sizeof(*e));
-        e->box = box;
-        e->first = e->last = -1;
-        e->line = -2;
-        e->lfirst = e->llast = e->lm_line = e->ty_line = -1;
-        A->slot[h] = A->n;
-        return A->n++;
-    }
-}
-
-/* An upper bound on the items and inline boxes of block idx's paragraph:
- * its children, and theirs inside inline boxes (not inside blocks or atomic
- * inlines, as bidi_para_collect goes). */
-static int bidi_count_items(LayoutContext *ctx, int idx)
-{
-    int n = 0;
-    for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
-        n++;
-        if (ctx->tree.nodes[c].first_child_idx >= 0 && layout_box(ctx, c)->s->display == CSS_DISPLAY_INLINE)
-            n += bidi_count_items(ctx, c);
-    }
-    return n;
-}
-
-/* The runs of block idx's paragraph reordered line by line: text fragments
- * cut at level changes and placed in visual order, atomic inlines moved;
- * a line holding wrapped text aligned here (the flow leaves those). */
-static void layout_bidi_reorder(LayoutContext *ctx, int idx)
-{
-    LayoutBox *blk = layout_box(ctx, idx);
-    bump_reset();
-    BidiPara P = { 0 };
-    int maxitems = bidi_count_items(ctx, idx) + 1;
-    int *items = (int *)bump_alloc((size_t)maxitems * sizeof(int));
-    int *first_cp = (int *)bump_alloc((size_t)maxitems * sizeof(int));
-    if (!items || !first_cp) { bump_free(items); bump_free(first_cp); return; }
-    int nitems = 0;
-    /* (an override or plaintext on the block itself: around all of it) */
-    int nopen = blk->s->unicode_bidi == 3 || blk->s->unicode_bidi == 4 ? 1 : 0;
-    if (nopen) bidi_para_put(&P, blk->s->direction == 1 ? 0x202E : 0x202D, -1, 0);
-    bidi_para_collect(ctx, idx, &P, items, first_cp, &nitems);
-    if (nopen) bidi_para_put(&P, 0x202C, -1, 0);
-    if (P.n == 0 || nitems == 0) goto out;
-    /* (nothing right to left in it: every level even, nothing reversed) */
-    if (blk->s->direction != 1) {
-        bool rtl = false;
-        for (int i = 0; i < P.n && !rtl; i++) {
-            uint32_t c = P.cp[i];
-            if (c < 0x590) continue;
-            int k = bidi_class(c);
-            rtl = k == BIDI_R || k == BIDI_AL || k == BIDI_AN || k == BIDI_RLE || k == BIDI_RLO || k == BIDI_RLI ||
-                  k == BIDI_FSI;
-        }
-        if (!rtl) goto out;
-    }
-    uint8_t *lv = (uint8_t *)bump_alloc((size_t)P.n);
-    if (!lv) goto out;
-    int para = bidi_levels_cached(P.cp, P.n, blk->s->unicode_bidi == 5 ? -1 : blk->s->direction, lv);
-    if (para < 0) { bump_free(lv); goto out; }
-    /* (no odd level: nothing is reversed, every line stays as the flow put it) */
-    {
-        bool odd = false;
-        for (int i = 0; i < P.n && !odd; i++) odd = lv[i] & 1;
-        if (!odd) { bump_free(lv); goto out; }
-    }
-    /* (reordered: its text boxes get their fragments, and it is laid out
-     * again at the next pass, not reused) */
-    layout_flow_noreuse_up(ctx, idx);
-    for (int i = 0; i < nitems; i++) {
-        HtmlNode *tn = css_layout_box_node(ctx, items[i]);
-        if (tn && tn->type == HTML_NODE_TEXT) layout_text_frags_build(ctx, items[i]);
-    }
-
-    /* The lines: in logical order, a fragment after a box's first, or an
-     * item the flow put left of the one before, starts one. */
-    int cap = 64, nr = 0;
-    BidiRun *runs = (BidiRun *)bump_alloc((size_t)cap * sizeof(BidiRun));
-    if (!runs) { bump_free(lv); goto out; }
-    /* Each item's lead and trail: the left edges of the inline boxes it is
-     * the first content of, the right edges of those it is the last of. */
-    double *lead = (double *)bump_calloc((size_t)nitems, sizeof(double)), *trail = (double *)bump_calloc((size_t)nitems, sizeof(double));
-    BidiAncs A = { 0 };
-    if (!lead || !trail || !bidi_ancs_init(&A, maxitems)) {
-        bump_free(lead); bump_free(trail); bump_free(A.a); bump_free(A.slot); bump_free(lv); bump_free(runs); goto out;
-    }
-    /* (each item's inline boxes, innermost first: chain[ch0[i], ch0[i + 1])) */
-    int *ch0 = (int *)bump_alloc(((size_t)nitems + 1) * sizeof(int));
-    int chcap = 64, chn = 0;
-    int *chain_all = (int *)bump_alloc((size_t)chcap * sizeof(int));
-    if (!ch0 || !chain_all) { bump_free(lv); goto out; }
-    for (int i = 0; i < nitems; i++) {
-        ch0[i] = chn;
-        for (int p = ctx->tree.nodes[items[i]].parent_idx; p >= 0 && p != idx; p = ctx->tree.nodes[p].parent_idx) {
-            int a = bidi_anc(&A, p, true);
-            if (a < 0) continue;
-            if (A.a[a].first < 0) A.a[a].first = i;
-            A.a[a].last = i;
-            if (chn == chcap) {
-                chcap *= 2;
-                chain_all = (int *)bump_realloc(chain_all, (size_t)chcap * sizeof(int));
-                if (!chain_all) { bump_free(lv); goto out; }
-            }
-            chain_all[chn++] = a;
-        }
-    }
-    ch0[nitems] = chn;
-    for (int k = 0; k < A.n; k++) {
-        const LayoutBox *pb = layout_box(ctx, A.a[k].box);
-        lead[A.a[k].first] += pb->margin_left + pb->s->border_left + pb->padding_left;
-        trail[A.a[k].last] += pb->margin_right + pb->s->border_right + pb->padding_right;
-    }
-
-    int line = -1;
-    double prev_end = -1e30, prev_trail = 0.0, prev_top = -1e30;
-    int line_cap = 64;
-    int *line_start = (int *)bump_alloc((size_t)line_cap * sizeof(int));   /* first run of each line */
-    int *line_cp0 = (int *)bump_alloc((size_t)line_cap * sizeof(int)), *line_cp1 = (int *)bump_alloc((size_t)line_cap * sizeof(int));
-    double *line_x = (double *)bump_alloc((size_t)line_cap * sizeof(double));   /* where its first run with content starts (1e30: none) */
-    if (!line_start || !line_cp0 || !line_cp1 || !line_x) {
-        bump_free(lv); bump_free(runs); bump_free(line_start); bump_free(line_cp0); bump_free(line_cp1); bump_free(line_x); goto out;
-    }
-    for (int i = 0; i < nitems; i++) {
-        int b = items[i];
-        LayoutBox *bb = layout_box(ctx, b);
-        const LayoutTextFragList *fl = ctx->text_frags && b < ctx->text_frags_n ? &ctx->text_frags[b] : NULL;
-        HtmlNode *in = css_layout_box_node(ctx, b);
-        bool text = in && in->type == HTML_NODE_TEXT;
-        int nf = text ? (fl ? fl->n : 0) : 1;
-        int cpos = first_cp[i];   /* (where the next fragment's code points are searched from) */
-        for (int q = 0; q < nf; q++) {
-            double x0 = text ? bb->x + fl->f[q].dx : bb->x - bb->margin_left;
-            double w = text ? fl->f[q].w : bb->margin_left + bb->width + bb->margin_right;
-            /* (a new line: below the item before and back to the left; the
-             * flow overlaps boxes where it collapses a space between them) */
-            double top = text ? bb->y + fl->f[q].dy : bb->y - bb->margin_top;
-            /* (an empty run, a collapsed space: where the flow left it says
-             * nothing; it neither starts a line nor places one) */
-            bool empty = text && w <= 0.001;
-            if (line < 0 || (text && q > 0) || (!empty && x0 < prev_end - 0.5 && top > prev_top + 1.0)) {
-                if (++line == line_cap) {
-                    line_cap *= 2;
-                    line_start = (int *)bump_realloc(line_start, (size_t)line_cap * sizeof(int));
-                    line_cp0 = (int *)bump_realloc(line_cp0, (size_t)line_cap * sizeof(int));
-                    line_cp1 = (int *)bump_realloc(line_cp1, (size_t)line_cap * sizeof(int));
-                    line_x = (double *)bump_realloc(line_x, (size_t)line_cap * sizeof(double));
-                    if (!line_start || !line_cp0 || !line_cp1 || !line_x) { line = -1; break; }
-                }
-                line_start[line] = nr;
-                line_cp0[line] = -1;
-                line_x[line] = 1e30;
-            }
-            if (nr == cap) {
-                cap *= 2;
-                BidiRun *nrs = (BidiRun *)bump_realloc(runs, (size_t)cap * sizeof(BidiRun));
-                if (!nrs) break;
-                runs = nrs;
-            }
-            BidiRun *r = &runs[nr++];
-            r->item = i;
-            r->box = b;
-            r->frag = text ? q : -1;
-            r->start = text ? fl->f[q].start : 0;
-            r->end = text ? fl->f[q].end : 0;
-            r->x0 = x0;
-            r->w = w;
-            r->lead = q == 0 ? lead[i] : 0.0;
-            r->trail = q == nf - 1 ? trail[i] : 0.0;
-            if (empty) {
-                r->gap = 0.0;
-            } else if (line_x[line] >= 1e29) {
-                r->gap = 0.0;
-                line_x[line] = x0 - r->lead;
-            } else {
-                r->gap = x0 - prev_end - prev_trail - r->lead;   /* (negative: the flow overlapped a collapsed space) */
-            }
-            if (!empty) {
-                prev_end = x0 + w;
-                prev_trail = r->trail;
-                prev_top = top;
-            }
-            /* (its code points) */
-            int c0 = cpos, c1 = c0;
-            if (text) {
-                while (c0 < P.n && P.box[c0] == b && P.byte[c0] < r->start) c0++;
-                c1 = c0;
-                while (c1 < P.n && P.box[c1] == b && P.byte[c1] < r->end) c1++;
-                cpos = c1;
-            } else {
-                c1 = c0 + 1;
-            }
-            r->cp0 = c0;
-            if (line_cp0[line] < 0) line_cp0[line] = c0;
-            line_cp1[line] = c1;
-        }
-        if (line < 0) break;
-    }
-    int nlines = line + 1;
-    /* (each inline box's first and last line) */
-    for (int L = 0; L < nlines; L++) {
-        int r1 = L + 1 < nlines ? line_start[L + 1] : nr;
-        for (int k = line_start[L]; k < r1; k++)
-            for (int q = ch0[runs[k].item]; q < ch0[runs[k].item + 1]; q++) {
-                int a = chain_all[q];
-                if (A.a[a].lfirst < 0) A.a[a].lfirst = L;
-                A.a[a].llast = L;
-            }
-    }
-    BidiPieceRec *bp = NULL;
-    int nbp = 0, bpcap = 0;
-
-    /* L1 per line, then each run cut where the level changes, and where the
-     * white space at the line's end starts: that hangs (takes no room, as
-     * the flow's trailing spaces do not in a browser). */
-    int *line_hang = (int *)bump_alloc(((size_t)nlines + 1) * sizeof(int));
-    if (!line_hang) { bump_free(lv); bump_free(runs); bump_free(line_start); bump_free(line_cp0); bump_free(line_cp1); goto out; }
-    for (int L = 0; L < nlines; L++) {
-        line_hang[L] = line_cp1[L];
-        if (line_cp0[L] < 0 || line_cp1[L] <= line_cp0[L]) continue;
-        bidi_line_levels(P.cp, line_cp0[L], line_cp1[L], para, lv);
-        for (int c = line_cp1[L] - 1; c >= line_cp0[L]; c--) {
-            uint32_t ch = P.cp[c];
-            int k = bidi_class(ch);
-            if (!(ch == ' ' || ch == '\t' || ch == '\n' || k == BIDI_BN || P.box[c] < 0)) break;
-            line_hang[L] = c;
-        }
-    }
-
-    /* (per item, its fragments in visual order) */
-    LayoutTextFragList *nf_lists = (LayoutTextFragList *)bump_calloc((size_t)nitems, sizeof(LayoutTextFragList));
-    BidiRun *cut = NULL;
-    int ncut = 0, cutcap = 0;
-    uint8_t *clv = NULL;
-    int *order = NULL;
-    for (int L = 0; L < nlines && nf_lists; L++) {
-        int r0 = line_start[L], r1 = L + 1 < nlines ? line_start[L + 1] : nr;
-        ncut = 0;
-        bool wrapped = false;
-        int wbox = -1, wfrag = -1;
-        int ctl_c = line_cp0[L] >= 0 ? line_cp0[L] : 0;   /* (the controls not yet passed) */
-        for (int k = r0; k < r1; k++) {
-            BidiRun r = runs[k];
-            if (ncut + 64 >= cutcap) {
-                cutcap = cutcap ? cutcap * 2 : 128;
-                while (ncut + 64 >= cutcap) cutcap *= 2;
-                cut = (BidiRun *)bump_realloc(cut, (size_t)cutcap * sizeof(BidiRun));
-                if (!cut) break;
-            }
-            /* (an isolate's or embedding's controls before it: zero-width
-             * runs at their levels, which keep runs apart when reordered) */
-            for (; ctl_c < r.cp0; ctl_c++) {
-                if (P.box[ctl_c] >= 0) continue;
-                if (ncut + 1 >= cutcap) {
-                    cutcap *= 2;
-                    cut = (BidiRun *)bump_realloc(cut, (size_t)cutcap * sizeof(BidiRun));
-                    if (!cut) break;
-                }
-                BidiRun cr;
-                memset(&cr, 0, sizeof(cr));
-                cr.box = -1;
-                cr.item = -1;
-                cr.frag = -2;
-                cr.cp0 = ctl_c;
-                cr.level = lv[ctl_c];
-                cr.hang = ctl_c >= line_hang[L];
-                cut[ncut++] = cr;
-            }
-            if (!cut) break;
-            if (ctl_c <= r.cp0) ctl_c = r.cp0 + 1;
-            while (ctl_c < P.n && P.box[ctl_c] == r.box) ctl_c++;
-            if (r.frag < 0) {
-                r.level = lv[r.cp0];
-                r.hang = 0;
-                cut[ncut++] = r;
-                continue;
-            }
-            LayoutBox *bb = layout_box(ctx, r.box);
-            if (bb->wrap_cont_w > 0.0 && !wrapped) { wrapped = true; wbox = r.box; wfrag = r.frag; }
-            /* (the run's code points, by level) */
-            int c = r.cp0;
-            uint32_t seg = r.start;
-            int level = c < P.n && P.box[c] == r.box ? lv[c] : para;
-            bool hang = c >= line_hang[L];
-            bool first_piece = true;
-            for (;;) {
-                bool end = c >= P.n || P.box[c] != r.box || P.byte[c] >= r.end;
-                if (end || lv[c] != level || (c >= line_hang[L]) != hang) {
-                    uint32_t segend = end ? r.end : P.byte[c];
-                    if (segend > seg) {
-                        if (ncut + 1 >= cutcap) {
-                            cutcap *= 2;
-                            cut = (BidiRun *)bump_realloc(cut, (size_t)cutcap * sizeof(BidiRun));
-                            if (!cut) break;
-                        }
-                        BidiRun pc = r;
-                        pc.start = seg;
-                        pc.end = segend;
-                        pc.level = (unsigned char)level;
-                        pc.gap = first_piece ? r.gap : 0.0;
-                        pc.lead = first_piece ? r.lead : 0.0;
-                        pc.trail = 0.0;
-                        pc.hang = hang;
-                        first_piece = false;
-                        cut[ncut++] = pc;
-                    }
-                    if (end) break;
-                    seg = P.byte[c];
-                    level = lv[c];
-                    hang = c >= line_hang[L];
-                }
-                c++;
-            }
-            if (!cut) break;
-            if (!first_piece) cut[ncut - 1].trail = r.trail;
-        }
-        if (!cut) break;
-        /* (a run that is the whole fragment keeps its width; a fragment cut
-         * in pieces has all but its longest measured, and that one is the
-         * rest of the fragment's width) */
-        for (int k = 0; k < ncut;) {
-            BidiRun *pc = &cut[k];
-            int k1 = k + 1;
-            if (pc->frag < 0) { k = k1; continue; }
-            const LayoutTextFrag *fr = &ctx->text_frags[pc->box].f[pc->frag];
-            while (k1 < ncut && cut[k1].box == pc->box && cut[k1].frag == pc->frag) k1++;
-            if (k1 - k < 2) { k = k1; continue; }
-            TextShaper *font;
-            float scale, adv;
-            const char *t;
-            if (!css_layout_text_paint(ctx, pc->box, &font, &scale, &adv, &t)) { k = k1; continue; }
-            int longest = k;
-            for (int q = k + 1; q < k1; q++)
-                if (cut[q].end - cut[q].start > cut[longest].end - cut[longest].start) longest = q;
-            const LayoutBox *bb = layout_box(ctx, pc->box);
-            text_shaper_set_spacing(bb->s->letter_spacing, bb->s->word_spacing, scale);
-            double rest = fr->w;
-            for (int q = k; q < k1; q++) {
-                if (q == longest) continue;
-                cut[q].w = text_shaper_span_width(font, t, cut[q].start, cut[q].end, scale);
-                rest -= cut[q].w;
-            }
-            text_shaper_set_spacing(0.0f, 0.0f, 1.0f);
-            cut[longest].w = rest > 0.0 ? rest : 0.0;
-            k = k1;
-        }
-        double hang_w = 0.0;
-        for (int k = 0; k < ncut; k++)
-            if (cut[k].hang) {
-                hang_w += cut[k].w;
-                cut[k].w = 0.0;
-            }
-        clv = (uint8_t *)bump_realloc(clv, (size_t)ncut + 1);
-        order = (int *)bump_realloc(order, ((size_t)ncut + 1) * sizeof(int));
-        if (!clv || !order) break;
-        for (int k = 0; k < ncut; k++) clv[k] = cut[k].level;
-        bidi_reorder(clv, ncut, order);
-        double x = line_x[L] < 1e29 ? line_x[L] : runs[r0].x0 - runs[r0].lead, used = 0.0;
-        for (int k = 0; k < ncut; k++) used += cut[k].gap + cut[k].lead + cut[k].w + cut[k].trail;
-        /* (a line with wrapped text: aligned here, against the wrap's line) */
-        if (wrapped && blk->s->text_align != CSS_TEXT_ALIGN_LEFT) {
-            const LayoutBox *wb = layout_box(ctx, wbox);
-            double right;
-            if (wfrag == 0) right = wb->x + wb->wrap_first_w;
-            else if (wb->wrap_cont2_line > 1 && wfrag + 1 >= wb->wrap_cont2_line) right = wb->wrap_cont2_x + wb->wrap_cont2_w;
-            else right = wb->wrap_cont_x + wb->wrap_cont_w;
-            double slack = right - x - used;
-            if (slack > 0.5) x += blk->s->text_align == CSS_TEXT_ALIGN_CENTER ? slack * 0.5 : slack;
-        }
-        (void)hang_w;   /* (the flow aligned the other lines without it) */
-        /* (each inline box's leftmost and rightmost run on the line) */
-        for (int k = 0; k < ncut; k++) {
-            const BidiRun *pc = &cut[order[k]];
-            if (pc->frag == -2 || pc->hang) continue;
-            for (int q = ch0[pc->item]; q < ch0[pc->item + 1]; q++) {
-                BidiAnc *e = &A.a[chain_all[q]];
-                if (e->lm_line != L) {
-                    e->lm_line = L;
-                    e->lm = k;
-                    e->open = false;
-                }
-                e->rm = k;
-            }
-        }
-        /* Placed left to right: an inline box's pieces are its stretches of
-         * visually adjacent runs; its left edge is on the leftmost run of its
-         * first line and its right edge on the rightmost of its last (the
-         * right edge first, the left last, when it is right to left: CSS 2.1
-         * section 8.6), opened outermost first and closed innermost first. */
-        for (int k = 0; k < ncut; k++) {
-            BidiRun *pc = &cut[order[k]];
-            if (pc->frag == -2) continue;
-            x += pc->gap;
-            const int *chain = chain_all + ch0[pc->item];
-            int nch = pc->hang ? 0 : ch0[pc->item + 1] - ch0[pc->item];
-            double ty = pc->frag >= 0 ? layout_box(ctx, pc->box)->y + ctx->text_frags[pc->box].f[pc->frag].dy : 0.0;
-            for (int c = nch - 1; c >= 0; c--) {
-                BidiAnc *e = &A.a[chain[c]];
-                if (pc->frag >= 0 && e->ty_line != L) {
-                    e->ty_line = L;
-                    e->ty = ty;
-                    if (L == e->lfirst && !e->has_base) {
-                        e->has_base = true;
-                        e->base = ty;
-                    }
-                }
-                if (e->open) continue;
-                const LayoutBox *eb = layout_box(ctx, e->box);
-                bool left = k == e->lm && L == (eb->s->direction == 1 ? e->llast : e->lfirst);
-                if (left) x += eb->margin_left;
-                e->open = true;
-                e->ps = x;
-                e->psides = left ? 1 : 0;
-                if (left) x += eb->s->border_left + eb->padding_left;
-            }
-            if (pc->frag < 0) {
-                double dx = x - pc->x0;
-                if (fabs(dx) > 0.001) {
-                    LayoutBox *ab = layout_box(ctx, pc->box);
-                    ab->x += dx;
-                    layout_offset_subtree(ctx, pc->box, dx, 0.0);
-                }
-            } else {
-                const LayoutTextFrag *fr = &ctx->text_frags[pc->box].f[pc->frag];
-                LayoutTextFragList *dst = &nf_lists[pc->item];
-                LayoutTextFrag *nfr = (LayoutTextFrag *)bump_realloc(dst->f, ((size_t)dst->n + 1) * sizeof(LayoutTextFrag));
-                if (nfr) {
-                    dst->f = nfr;
-                    LayoutTextFrag *o = &dst->f[dst->n++];
-                    *o = *fr;
-                    o->start = pc->start;
-                    o->end = pc->end;
-                    o->dx = x - layout_box(ctx, pc->box)->x;
-                    o->w = pc->w;
-                    o->level = pc->level;
-                }
-            }
-            if (!pc->hang) {
-                bool whole = pc->frag < 0 || (pc->start == ctx->text_frags[pc->box].f[pc->frag].start &&
-                                              pc->end == ctx->text_frags[pc->box].f[pc->frag].end);
-                for (int q = ch0[pc->item]; q < ch0[pc->item + 1]; q++) {
-                    BidiAnc *e = &A.a[chain_all[q]];
-                    if (e->line == -2) {
-                        e->line = L;
-                        e->o0 = e->n0 = 1e30;
-                        e->o1 = e->n1 = -1e30;
-                    } else if (e->line != L) {
-                        e->line = -1;
-                    }
-                    if (!whole) e->line = -1;
-                    double ox = pc->x0;
-                    if (ox < e->o0) e->o0 = ox;
-                    if (ox + pc->w > e->o1) e->o1 = ox + pc->w;
-                    if (x < e->n0) e->n0 = x;
-                    if (x + pc->w > e->n1) e->n1 = x + pc->w;
-                }
-            }
-            x += pc->w;
-            if (nch == 0) continue;
-            int nx = k + 1;
-            while (nx < ncut && (cut[order[nx]].frag == -2 || cut[order[nx]].hang)) nx++;
-            const int *nchain = nx < ncut ? chain_all + ch0[cut[order[nx]].item] : NULL;
-            int nnch = nx < ncut ? ch0[cut[order[nx]].item + 1] - ch0[cut[order[nx]].item] : 0;
-            for (int c = 0; c < nch; c++) {
-                BidiAnc *e = &A.a[chain[c]];
-                bool next_in = false;
-                for (int q = 0; q < nnch && !next_in; q++) next_in = nchain[q] == chain[c];
-                if (next_in) continue;
-                const LayoutBox *eb = layout_box(ctx, e->box);
-                bool right = k == e->rm && L == (eb->s->direction == 1 ? e->lfirst : e->llast);
-                if (right) x += eb->padding_right + eb->s->border_right;
-                if (nbp == bpcap) {
-                    bpcap = bpcap ? bpcap * 2 : 32;
-                    BidiPieceRec *nb = (BidiPieceRec *)bump_realloc(bp, (size_t)bpcap * sizeof(BidiPieceRec));
-                    if (!nb) { bpcap = nbp; e->open = false; continue; }
-                    bp = nb;
-                }
-                BidiPieceRec *rec = &bp[nbp++];
-                rec->a = chain[c];
-                rec->pc.anchor = -1;
-                rec->pc.sides = (unsigned char)(e->psides | (right ? 2 : 0));
-                rec->pc.dx = e->ps;
-                rec->pc.w = x - e->ps;
-                if (e->lfirst == e->llast) {
-                    rec->pc.dy = eb->y;
-                    rec->pc.h = eb->height;
-                } else {
-                    /* (a line's piece: as tall as one line of it, as far down
-                     * from its first line's as its text) */
-                    double ca = layout_content_area_height(eb);
-                    rec->pc.dy = eb->y + (e->ty_line == L && e->has_base ? e->ty - e->base : 0.0);
-                    rec->pc.h = ca + eb->padding_top + eb->padding_bottom + eb->s->border_top + eb->s->border_bottom;
-                }
-                e->np++;
-                if (right) x += eb->margin_right;
-                e->open = false;
-            }
-        }
-    }
-    for (int k = 0; k < A.n; k++) {
-        const BidiAnc *e = &A.a[k];
-        if (e->line < 0 || fabs((e->n1 - e->n0) - (e->o1 - e->o0)) > 0.5) continue;
-        double d = e->n0 - e->o0;
-        if (fabs(d) > 0.001) layout_box(ctx, e->box)->x += d;
-    }
-    /* (an inline box in more than one piece, or on more than one line, is
-     * painted as its pieces; one split around blocks has its own) */
-    for (int k = 0; k < A.n; k++) {
-        BidiAnc *e = &A.a[k];
-        e->keep = !((e->np < 2 && e->lfirst == e->llast) || layout_box(ctx, e->box)->s->block_in_inline == 2);
-    }
-    for (int q = 0; q < nbp; q++) {
-        BidiAnc *e = &A.a[bp[q].a];
-        const LayoutBox *eb = layout_box(ctx, e->box);
-        if (!e->keep) continue;
-        if (!ctx->pieces) {
-            ctx->pieces = (LayoutPieceList *)calloc((size_t)ctx->tree.count, sizeof(LayoutPieceList));
-            if (!ctx->pieces) break;
-            ctx->pieces_n = ctx->tree.count;
-        }
-        if (e->box >= ctx->pieces_n) continue;
-        LayoutPieceList *pl = &ctx->pieces[e->box];
-        if (e->np >= 0) {   /* (its first piece here: the list starts over) */
-            pl->n = 0;
-            e->np = -1;
-        }
-        if (pl->n == pl->cap) {
-            int nc = pl->cap ? 2 * pl->cap : 4;
-            LayoutPiece *np = (LayoutPiece *)realloc(pl->p, (size_t)nc * sizeof(LayoutPiece));
-            if (!np) continue;
-            pl->p = np;
-            pl->cap = nc;
-        }
-        LayoutPiece pc = bp[q].pc;
-        pc.dx -= eb->x;
-        pc.dy -= eb->y;
-        pl->p[pl->n++] = pc;
-    }
-    bump_free(bp);
-    bump_free(A.a);
-    bump_free(A.slot);
-    if (nf_lists) {
-        for (int k = 0; k < nitems; k++) {
-            if (!nf_lists[k].f) continue;
-            LayoutTextFragList *own = &ctx->text_frags[items[k]];
-            if (nf_lists[k].n > own->n) {
-                LayoutTextFrag *g = (LayoutTextFrag *)realloc(own->f, (size_t)nf_lists[k].n * sizeof(LayoutTextFrag));
-                if (!g) continue;
-                own->f = g;
-            }
-            memcpy(own->f, nf_lists[k].f, (size_t)nf_lists[k].n * sizeof(LayoutTextFrag));
-            own->n = nf_lists[k].n;
-        }
-        bump_free(nf_lists);
-    }
-    bump_free(cut);
-    bump_free(clv);
-    bump_free(order);
-    bump_free(runs);
-    bump_free(line_start);
-    bump_free(line_cp0);
-    bump_free(line_cp1);
-    bump_free(line_x);
-    bump_free(line_hang);
-    bump_free(lead);
-    bump_free(trail);
-    bump_free(lv);
-out:
-    bump_free(items);
-    bump_free(first_cp);
-    bump_free(P.cp);
-    bump_free(P.box);
-    bump_free(P.byte);
-}
-
-/* Block idx's paragraph, its lines placed: when it needs bidi and has
- * something reordered, its text boxes' fragments in visual order (and it is
- * laid out again at the next pass, not reused, as a split inline's block
- * is); left as the flow placed it otherwise.  CYBER_BIDI_ALL=1: fragments
- * for every paragraph. */
-static void layout_bidi_paragraph(LayoutContext *ctx, int idx)
-{
-    if (g_bidi_all < 0) g_bidi_all = getenv("CYBER_BIDI_ALL") != NULL;
-    bool needs = layout_box(ctx, idx)->s->direction == 1 || layout_box(ctx, idx)->s->unicode_bidi != 0 ||
-                 layout_paragraph_walk(ctx, idx, NULL);
-    if (!g_bidi_all && !needs) return;
-    if (!ctx->text_frags) {
-        ctx->text_frags = (LayoutTextFragList *)calloc((size_t)ctx->tree.count, sizeof(LayoutTextFragList));
-        if (!ctx->text_frags) return;
-        ctx->text_frags_n = ctx->tree.count;
-    }
-    if (needs) {
-        layout_bidi_reorder(ctx, idx);   /* (fragments only where it reorders) */
-    } else {
-        layout_flow_noreuse_up(ctx, idx);
-        layout_paragraph_walk(ctx, idx, layout_text_frags_build);
-    }
-}
-
 bool css_layout_text_paint(const LayoutContext *ctx, int idx, TextShaper **font, float *scale, float *line_adv,
                            const char **text)
 {
@@ -13419,7 +12293,6 @@ bool css_layout_text_paint(const LayoutContext *ctx, int idx, TextShaper **font,
     if (!raw) return false;
     const char *t = css_layout_box_text(ctx, idx, raw);
     if (!t) return false;
-    if (b->text_lead_skip && t[0] == ' ') t++;
     double fs = b->s->font_size > 0.0 ? b->s->font_size : 16.0;
     TextShaper *f = display_list_get_font(layout_font_slot(b));
     if (!f) f = display_list_get_default_font();
@@ -13433,17 +12306,17 @@ bool css_layout_text_paint(const LayoutContext *ctx, int idx, TextShaper **font,
     return true;
 }
 
-/* ---- Inline formatting on items (INLINE_LAYOUT_DESIGN.md, step 3) ----
- * A block whose content is only inline is laid out from a list of tokens
+/* ---- Inline formatting on items (INLINE_LAYOUT_DESIGN.md) ----
+ * A block's inline content is laid out from a list of tokens
  * (each text box cut into words and collapsible spaces, white space
  * collapsed across boxes as CSS Text 3 section 4.1.1 does), broken into
  * lines greedily at spaces, each line placed from its start (the float-free
  * room at its top) and aligned; each text box gets its fragments per line
  * (painted from them) and an outline around them, each inline element the
  * outline of its content (and pieces per line when it is on more than one).
- * On by default (CYBER_IFC=0: off); while it covers only part of what the flow does, a block it
- * cannot lay out (ifc_eligible) takes the flow's per-child path. */
-static int g_ifc = -1;
+ * A block whose content is only inline (ifc_eligible) is one run of it; in
+ * a block with block children, each run between them is one (the flow's
+ * per-child loop placing the blocks). */
 static bool layout_has_gen(LayoutContext *ctx, int i);
 
 typedef struct {
@@ -13650,36 +12523,27 @@ static bool ifc_inline_ok(LayoutContext *ctx, int p)
     return true;
 }
 
+/* Whether a text box's text makes no line box: white space only, none of
+ * it kept (pre and pre-wrap keep spaces; pre, pre-wrap and pre-line keep
+ * segment breaks). */
+static bool ifc_text_blank(const LayoutBox *b, const char *raw)
+{
+    if (!layout_text_is_whitespace(raw)) return false;
+    if (!raw) return true;
+    int ws = b->s->white_space;
+    if ((ws == 2 || ws == 3) && strpbrk(raw, " \t")) return false;
+    if (ws >= 2 && ws <= 4 && strchr(raw, '\n')) return false;
+    return true;
+}
+
 /* A block child of a flow: what ends a run of inline content. */
 static bool ifc_is_block_child(const LayoutBox *b)
 {
     return layout_box_is_block_level(b) && b->s->float_side == 0;
 }
 
-/* Whether block idx, with block children among its inline content (kids,
- * the flow's items), has each run of inline content between them laid out
- * on items: every one of those children what this path takes (line-clamp
- * counting the lines of the runs before, FlowCursor.lines). */
-static bool ifc_runs_ok(LayoutContext *ctx, const int *kids, const int *piece_of, int nkids)
-{
-    if (g_ifc <= 0) return false;
-    bool block = false;
-    for (int i = 0; i < nkids; i++) {
-        if (piece_of && piece_of[i] >= 0) continue;   /* (a split inline's piece starts or ends) */
-        const LayoutBox *kb = layout_box(ctx, kids[i]);
-        if (ifc_is_block_child(kb)) block = true;
-        else if (!ifc_child_ok(ctx, kids[i])) return false;
-    }
-    return block;
-}
-
 static bool ifc_eligible(LayoutContext *ctx, int idx)
 {
-    if (g_ifc < 0) {
-        const char *e = getenv("CYBER_IFC");
-        g_ifc = !(e && e[0] == '0');   /* (CYBER_IFC=0: the flow's per-child path for all) */
-    }
-    if (!g_ifc) return false;
     if (ctx->tree.nodes[idx].first_child_idx < 0) return false;
     return ifc_inline_ok(ctx, idx);
 }
@@ -13714,9 +12578,6 @@ static void ifc_collect(LayoutContext *ctx, int p, int c0, int stop, IfcItems *I
             ifc_put(I, c, 0, 0, 0.0, IFC_FLOAT);
             continue;
         }
-        cb->text_lead_skip = 0;
-        cb->wrap_first_w = cb->wrap_cont_w = cb->wrap_cont_x = cb->wrap_cont2_x = cb->wrap_cont2_w = 0.0;
-        cb->wrap_cont2_line = 0;
         int n0 = I->n;
         if (n->type == HTML_NODE_TEXT) {
             const char *raw = css_layout_node_text(ctx, n);
@@ -14485,7 +13346,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
     LayoutBox *blk = layout_box(ctx, idx);
     IfcItems I = { 0 };
     I.space_before = true;
-    I.gather = blk->s->direction == 1 || blk->s->unicode_bidi != 0 || layout_paragraph_walk(ctx, idx, NULL);
+    I.gather = blk->s->direction == 1 || blk->s->unicode_bidi != 0 || layout_paragraph_walk(ctx, idx);
     /* (an override on the block itself: around all of it) */
     bool blk_ovr = I.gather && (blk->s->unicode_bidi == 3 || blk->s->unicode_bidi == 4);
     if (blk_ovr) ifc_cp_put(&I, blk->s->direction == 1 ? 0x202E : 0x202D, 0);
@@ -15116,7 +13977,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
      * inline, between a start and an end item (piece_of 2k and 2k + 1 for
      * piece k) where its edges take room and its border boxes are noted.
      * piece_of[i]: -1 for any other item. */
-    /* (inline content on items, CYBER_IFC: no pieces set up, the
+    /* (only inline content: one run on items, no pieces set up, the
      * per-child loop not run) */
     bool ifc_done = ifc_eligible(ctx, idx);
     FlowPiece *fpieces = NULL;
@@ -15201,10 +14062,6 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
     }
     /* (laid out again each time: its pieces are not in the flow record) */
     if (fpieces) layout_flow_noreuse_up(ctx, idx);
-    /* Where a piece's left edge opened its line: white space after it is
-     * still at the line's start. */
-    double lead_x = -1e30, lead_y = -1e30;
-
     /* text-indent: the first line (before any block, and while the pen is
      * on the container's first line) starts this far in. */
     double indent0 = box->s->text_indent + box->s->text_indent_pct * avail_width;
@@ -15224,11 +14081,6 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
     double pending_mb = 0.0;
     bool any_placed = false;
 
-    /* text-align: indices of the inline runs on the current line; the line is
-     * shifted when it finishes (wrap, block child, or end of container). */
-    int *line_members = (nkids > 0) ? (int*)malloc((size_t)(nkids + extra) * sizeof(int)) : NULL;
-    int line_member_count = 0;
-
     /* Floats placed by this container's flow; inline lines shrink around them. */
     FloatRec floats[32];
     int nfloats = 0;
@@ -15236,18 +14088,14 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
     if (ifc_done)
         ifc_layout(ctx, idx, ctx->tree.nodes[idx].first_child_idx, -1, NULL, content_left, avail_width, indent0,
                    &cur, &any_placed, floats, &nfloats, (int)(sizeof(floats) / sizeof(floats[0])));
-    /* (block children among the inline content: each run of it between
-     * them on items, CYBER_IFC) */
-    bool ifc_runs = !ifc_done && ifc_runs_ok(ctx, kids, piece_of, nkids);
-
     for (int i = 0; !ifc_done && i < nkids; i++) {
         int c = kids[i];
         LayoutBox *child = layout_box(ctx, c);
 #define IFC_ITEM_BLOCK(k) (!(piece_of && piece_of[k] >= 0) && ifc_is_block_child(layout_box(ctx, kids[k])))
-        if (ifc_runs && !IFC_ITEM_BLOCK(i) && !(!(piece_of && piece_of[i] >= 0) && ifc_is_float(child))) {
+        if (!IFC_ITEM_BLOCK(i) && !(!(piece_of && piece_of[i] >= 0) && ifc_is_float(child))) {
             /* A run of inline content up to the next block (a child, or one
-             * inside an inline split around it): on items when it holds more
-             * than white space (the flow's path skips that) */
+             * inside an inline split around it): on items when it makes a
+             * line box (else nowhere, below) */
             int j = i;
             bool content = false;
             for (; j < nkids && !IFC_ITEM_BLOCK(j); j++) {
@@ -15257,8 +14105,9 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                     continue;
                 }
                 HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[kids[j]].dom_node_idx);
-                if (!ifc_is_float(layout_box(ctx, kids[j])))
-                    content = !(dn && dn->type == HTML_NODE_TEXT && layout_text_is_whitespace(css_layout_node_text(ctx, dn)));
+                const LayoutBox *jb = layout_box(ctx, kids[j]);
+                if (!ifc_is_float(jb))
+                    content = !(dn && dn->type == HTML_NODE_TEXT && ifc_text_blank(jb, css_layout_node_text(ctx, dn)));
             }
             if (content) {
                 if (pending_mb != 0.0) {
@@ -15278,35 +14127,41 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
         }
 #undef IFC_ITEM_BLOCK
         if (piece_of && piece_of[i] >= 0) {
+            /* (a split inline's piece with no line box: its white space and
+             * empty inlines nowhere, its floats items of the flow) */
             FlowPiece *fp = &fpieces[piece_of[i] / 2];
-            if (piece_of[i] & 1) {
-                bool line_ends = i + 1 >= nkids ||
-                                 (piece_of[i + 1] < 0 && layout_box_is_block_level(layout_box(ctx, kids[i + 1])) &&
-                                  layout_box(ctx, kids[i + 1])->s->float_side == 0) ||
-                                 (piece_of[i + 1] < 0 && layout_is_br(ctx, kids[i + 1]));
-                layout_piece_end(ctx, fp, &cur, line_ends);
-            } else if (layout_piece_start(ctx, fp, &cur, &pending_mb, &any_placed, content_left, avail_width)) {
-                lead_x = cur.x;
-                lead_y = cur.y;
+            for (int k = fp->first; !(piece_of[i] & 1) && k >= 0; k = ctx->tree.nodes[k].next_sibling_idx) {
+                LayoutBox *kb = layout_box(ctx, k);
+                if (kb->s->float_side == 0) {
+                    kb->x = cur.x;
+                    kb->y = cur.y;
+                    kb->width = kb->height = 0.0;
+                    layout_update_content_sizes(kb);
+                }
+                if (k == fp->last) break;
             }
             continue;
         }
 
-
         /* Resolve used sizes against this container's content box. */
         layout_resolve_used_sizes(child, layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx),
                                   avail_width, layout_pct_base_height(ctx, idx));
+
+        if (!ifc_is_float(child) && !layout_box_is_block_level(child)) {
+            /* (white space between blocks: nowhere) */
+            child->x = cur.x;
+            child->y = cur.y;
+            child->width = child->height = 0.0;
+            layout_update_content_sizes(child);
+            if (ctx->text_frags && c < ctx->text_frags_n) ctx->text_frags[c].n = 0;
+            continue;
+        }
 
         if (child->s->float_side != 0 && (layout_is_block_flow(child->s->display) ||
                                        child->s->display == CSS_DISPLAY_INLINE_BLOCK)) {
             /* Floated block: finish the pending inline line, then place at the
              * current cursor on its side; the vertical cursor does not
              * advance (following content flows around it). */
-            if (line_member_count > 0) {
-                layout_align_line(ctx, line_members, line_member_count,
-                                  content_left, avail_width - RTL_FIRST_CUT, box->s->text_align);
-                line_member_count = 0;
-            }
             cur.y += cur.line_box;
             cur.line_box = 0.0;
             cur.x = content_left;
@@ -15318,11 +14173,6 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
 
         if (layout_box_is_block_level(child)) {
             /* Block child: finish the pending inline line, then stack. */
-            if (line_member_count > 0) {
-                layout_align_line(ctx, line_members, line_member_count,
-                                  content_left, avail_width - RTL_FIRST_CUT, box->s->text_align);
-                line_member_count = 0;
-            }
             if (cur.line_box > 0.0) {
                 cur.y += cur.line_box;      /* drop any pending inline-line height */
                 cur.line_box = 0.0;
@@ -15455,501 +14305,8 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                 pending_mb = eff_mb;
                 any_placed = true;
             }
-        } else {
-            /* Inline-level child: measure with real glyph metrics so runs
-             * share lines like a browser; long text runs wrap across lines.
-             * Line geometry accounts for floats intruding at this height. */
-            HtmlNode *dom = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
-            if (pending_mb != 0.0 &&
-                !(dom && dom->type == HTML_NODE_TEXT && layout_text_is_whitespace(css_layout_node_text(ctx, dom)))) {
-                /* A line box after a block: the block's bottom margin no
-                 * longer collapses with anything (before the line's room is
-                 * taken: the floats beside it are those at its top). */
-                cur.y += pending_mb;
-                pending_mb = 0.0;
-                any_placed = true;
-            }
-            double line_left = content_left, line_avail = avail_width;
-            layout_flow_line_geometry(ctx->float_stack + t_float_base, ctx->float_count - t_float_base, cur.y,
-                                      content_left, avail_width,
-                                      &line_left, &line_avail);
-            /* The pen must never start left of the float-inset line edge:
-             * without this clamp the first line of a container (and any run
-             * right after a block boundary) is emitted at content_left and
-             * overlaps a left float. */
-            double line_start = line_left + (!block_seen && cur.y == content_top ? indent0 : 0.0);
-            if (cur.x < line_start) cur.x = line_start;
-            if (layout_box_is_atomic_inline(child) && dom && dom->type == HTML_NODE_ELEMENT &&
-                strcasecmp(dom->tag_name, "img") != 0) {
-                /* Atomic inline (inline-block / inline-flex): shrink-to-fit
-                 * width, laid out as its own formatting context, then placed
-                 * on the line as one unbreakable box. */
-                layout_size_atomic_inline(ctx, c, line_avail);
-                double aspan = child->margin_left + child->width + child->margin_right;
-                /* (at a line's start where floats leave it too little room:
-                 * down past them to where it fits, CSS 2.1 section 9.5) */
-                for (int guard = 0; guard < 32 && cur.x <= line_start + 0.001 &&
-                                    cur.x + aspan > line_left + line_avail + 0.01 && line_avail < avail_width - 0.01;
-                     guard++) {
-                    double next = -1.0;
-                    for (int fi = t_float_base; fi < ctx->float_count; fi++) {
-                        double fb = ctx->float_stack[fi].bottom;
-                        if (fb > cur.y + 0.01 && (next < 0.0 || fb < next)) next = fb;
-                    }
-                    if (next < 0.0) break;
-                    cur.y = next;
-                    layout_flow_line_geometry(ctx->float_stack + t_float_base, ctx->float_count - t_float_base, cur.y,
-                                              content_left, avail_width, &line_left, &line_avail);
-                    line_start = line_left;
-                    cur.x = line_start;
-                }
-                /* No soft wrap opportunity between atomics under nowrap / pre. */
-                bool line_nowrap = box->s->white_space == 1 || box->s->white_space == 2;
-                if (!line_nowrap && cur.x + aspan > line_left + line_avail + 0.01 && cur.x > line_start + 0.001) {
-                    if (line_member_count > 0) {
-                        layout_align_line(ctx, line_members, line_member_count,
-                                          line_left, line_avail - RTL_FIRST_CUT, box->s->text_align);
-                        line_member_count = 0;
-                    }
-                    cur.y += cur.line_box;
-                    cur.line_box = 0.0;
-                    cur.x = line_left;
-                }
-                child->x = cur.x + child->margin_left;
-                child->y = cur.y + child->margin_top;
-                layout_update_content_sizes(child);
-                layout_node_serial(ctx, c);
-                cur.x += aspan;
-                double ah = child->margin_top + child->height + child->margin_bottom;
-                if (ah > cur.line_box) cur.line_box = ah;
-                if (line_members) line_members[line_member_count++] = c;
-                continue;
-            }
-            double fs = child->s->font_size > 0.0 ? child->s->font_size : 16.0;
-            float scale = (float)(fs / 16.0);
-            double line_adv = layout_line_advance_box(child);
-            const char *text = NULL;
-            char concat[8192];
-            bool is_text_run = false;
-            bool is_whitespace_run = false;
-            bool is_img = false;
-            bool is_br = false;
-            child->text_lead_skip = 0;
-            /* Preserved segment breaks (pre, pre-wrap, pre-line) force line
-             * breaks: the run goes through the wrap path, whose shaper
-             * honours '\n'. */
-            bool keeps_nl = child->s->white_space >= 2 && child->s->white_space <= 4;
-            if (dom && dom->type == HTML_NODE_TEXT) {
-                /* (white space only: content where pre / pre-wrap keep its
-                 * spaces, or a kept segment break) */
-                const char *raw = css_layout_node_text(ctx, dom);
-                bool kept_spaces = (child->s->white_space == 2 || child->s->white_space == 3) && raw &&
-                                   strpbrk(raw, " \t");
-                if (!layout_text_is_whitespace(raw) || kept_spaces || (keeps_nl && raw && strchr(raw, '\n'))) {
-                    text = css_layout_box_text(ctx, c, css_layout_node_text(ctx, dom));
-                    bool at_start = cur.x <= line_start + 0.001 || (cur.x <= lead_x + 0.001 && cur.y == lead_y);
-                    if (text[0] == ' ' && at_start && child->s->white_space != 2 &&
-                        child->s->white_space != 3) {
-                        /* A collapsible space at the start of a line is removed. */
-                        text++;
-                        child->text_lead_skip = 1;
-                    }
-                    is_text_run = true;
-                } else {
-                    is_whitespace_run = true;
-                }
-            } else if (dom && dom->type == HTML_NODE_ELEMENT) {
-                if (strcasecmp(dom->tag_name, "img") == 0) {
-                    is_img = true;
-                } else if (strcasecmp(dom->tag_name, "br") == 0) {
-                    is_br = true;
-                } else {
-                    size_t cl = 0;
-                    concat[0] = '\0';
-                    layout_concat_box_text(ctx, c, concat, sizeof(concat), &cl);
-                    if (cl > 0 && !layout_text_is_whitespace(concat)) {
-                        text = concat;
-                        if (layout_is_space_char(text[0]) &&
-                            child->s->white_space != 2 && child->s->white_space != 3 &&
-                            (cur.x <= line_start + 0.001 || (cur.x <= lead_x + 0.001 && cur.y == lead_y))) {
-                            /* At the start of its line: its leading collapsible
-                             * space is removed (from its first text too). */
-                            while (layout_is_space_char(*text)) text++;
-                            child->text_lead_skip = 1;
-                        }
-                    } else if (cl > 0 && child->s->display == CSS_DISPLAY_INLINE &&
-                               layout_horizontal_border_padding(child) <= 0.0) {
-                        /* <span> </span> between inline content (YouTube's
-                         * hashtag separators) is a collapsible space. */
-                        HtmlNode *fc = html_node_first_child(ctx->doc, dom);
-                        if (fc && fc->type == HTML_NODE_TEXT && !html_node_next_sibling(ctx->doc, fc))
-                            is_whitespace_run = true;
-                    }
-                }
-            }
-
-            double tw = 0.0;
-            if (is_whitespace_run) {
-                /* Whitespace-only run: between inline content it collapses
-                 * to a single space; at block boundaries (line start) it
-                 * disappears entirely.  Handle it fully here so the generic
-                 * fallbacks cannot resurrect it as an 80x24 box. */
-                if (cur.x > line_start + 0.001 && !(cur.x <= lead_x + 0.001 && cur.y == lead_y)) {
-                    double sw = 0.0;
-                    if (!layout_measure_text_styled(child, " ", fs, &sw, NULL)) sw = fs * 0.3;
-                    child->width = sw;
-                    child->height = line_adv;
-                } else {
-                    child->width = 0.0;
-                    child->height = 0.0;
-                }
-            } else if (is_img) {
-                /* Replaced element: layout_resolve_used_sizes already sized
-                 * it from CSS, attributes and the natural size / ratio. */
-            } else if (text && layout_measure_text_styled(child, text, fs, &tw, NULL)) {
-                child->width = tw;
-                child->height = line_adv;
-                /* With preserved segment breaks the text's width is its
-                 * longest line, while the intrinsic width below lays the
-                 * children out on one line: a break between two children
-                 * (YouTube's description runs, "text\n\n" then "more") made it
-                 * larger and turned the forced breaks off. */
-                bool forced_breaks = keeps_nl && strchr(text, '\n');
-                if (!is_text_run && child->s->display == CSS_DISPLAY_INLINE && !forced_breaks) {
-                    /* Inline element: its max-content width also counts
-                     * atomic inline descendants and its own padding. */
-                    double iw = layout_intrinsic_width(ctx, c, true);
-                    if (iw > tw + 0.5) {
-                        double cap = line_avail - child->margin_left - child->margin_right;
-                        if (iw <= cap || layout_horizontal_border_padding(child) > 0.0) {
-                            child->width = iw;
-                            text = NULL;   /* not a plain text run: no wrapping */
-                        }
-                    }
-                }
-            } else if (!is_text_run || text == NULL) {
-                /* Element with no text content (e.g. <a><img></a>): size it
-                 * from a replaced <img> descendant when present, so captions
-                 * and following content don't overlap the image. */
-                double iw = 0.0, ih = 0.0;
-                bool from_img = dom && layout_first_img_size(ctx->doc, dom, &iw, &ih);
-                if (from_img) {
-                    child->width = iw;
-                    child->height = ih;
-                } else if (layout_is_svg_box(dom)) {
-                    layout_svg_size(ctx, c, dom, &child->width, &child->height);
-                    child->width += layout_horizontal_border_padding(child);
-                    child->height += layout_vertical_border_padding(child);
-                } else if (dom && layout_is_replaced_form_element(dom->tag_name)) {
-                    if (child->width <= 0.0) child->width = 80.0;
-                    if (child->height <= 0.0) child->height = 20.0;
-                } else {
-                    /* Inline element without text: size from atomic inline
-                     * descendants (icons in links); otherwise empty (anchor
-                     * span, empty <a>, ...) shrinks to zero. */
-                    double iw = (child->s->display == CSS_DISPLAY_INLINE)
-                        ? layout_intrinsic_width(ctx, c, true) : 0.0;
-                    if (iw > 0.0) {
-                        child->width = iw;
-                        child->height = line_adv;
-                    } else {
-                        /* (width and height don't apply to an inline, §10.3.1, §10.6.1) */
-                        bool inl = child->s->display == CSS_DISPLAY_INLINE;
-                        if (inl) child->width = layout_horizontal_border_padding(child);
-                        else if (!child->s->width_set) child->width = 0.0;
-                        if (inl || layout_height_auto(child)) child->height = 0.0;
-                    }
-                }
-            }
-            layout_update_content_sizes(child);
-
-            /* Vertical margins on non-replaced inline boxes have no effect
-             * (CSS 2.1 §8.4): they neither shift the box on its line nor
-             * inflate the line box.  Replaced elements (img, form controls)
-             * and inline-blocks keep their vertical margins. */
-            bool nonreplaced_inline =
-                child->s->display == CSS_DISPLAY_INLINE && !is_img &&
-                !(dom && dom->type == HTML_NODE_ELEMENT &&
-                  layout_is_replaced_form_element(dom->tag_name));
-            double vmt = nonreplaced_inline ? 0.0 : child->margin_top;
-            double vmb = nonreplaced_inline ? 0.0 : child->margin_bottom;
-
-            if (is_br) {
-                /* <br>: forced line break — finish the current line (its box
-                 * height defaults to one line when empty) and start a new one. */
-                if (line_member_count > 0) {
-                    layout_align_line(ctx, line_members, line_member_count,
-                                      line_left, line_avail - RTL_FIRST_CUT, box->s->text_align);
-                    line_member_count = 0;
-                }
-                double adv = cur.line_box > 0.0 ? cur.line_box : line_adv;
-                child->x = cur.x;
-                child->y = cur.y;
-                child->width = 0.0;
-                child->height = line_adv;
-                layout_update_content_sizes(child);
-                cur.y += adv;
-                cur.line_box = 0.0;
-                cur.x = line_left;
-                layout_node_serial(ctx, c);
-                continue;
-            }
-
-            double span = child->margin_left + child->width + child->margin_right;
-            double line_right = line_left + line_avail;
-            double remaining = line_right - cur.x;
-            /* A trailing collapsible space hangs past the line end. */
-            double trail = 0.0;
-            if (text && is_text_run && text[0] && text[strlen(text) - 1] == ' ') {
-                if (!layout_measure_text_styled(child, " ", fs, &trail, NULL)) trail = 0.0;
-            }
-            bool nowrap = child->s->white_space == 1 || child->s->white_space == 2;
-            bool hard_nl = keeps_nl && text && strchr(text, '\n') &&
-                           (is_text_run || child->s->display == CSS_DISPLAY_INLINE);
-            if (g_layout_debug & LDBG_INLINE) {
-                HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
-                fprintf(stderr, "[INL] idx=%d span=%.1f cur.x=%.1f line=[%.1f..%.1f] y=%.1f tag=%s type=%d\n",
-                        c, span, cur.x, line_left, line_right, cur.y,
-                        dn ? dn->tag_name : "?", dn ? (int)dn->type : -1);
-            }
-
-            /* Text run that doesn't fit on the current line: wrap it across
-             * lines, starting on the current one when it has useful room.
-             * Inline elements whose content is (concatenated) text — links,
-             * <b>, <span> — wrap the same way; the wrap geometry is later
-             * propagated to their text descendants for glyph emission. */
-            if (hard_nl || (text && !nowrap && span - trail > remaining + 0.01 && span > fs * 2.0)) {
-                double first_w = remaining;
-                /* pre: lines end only at newlines. */
-                double wrap_avail = hard_nl && nowrap ? 1e6 : line_avail;
-                if (hard_nl && nowrap) first_w = 1e6;
-                if (cur.x <= line_start + 0.001) {
-                    /* Already at the line start: use the full line. */
-                    cur.line_box = 0.0;
-                    cur.x = line_start;
-                    first_w = wrap_avail - (line_start - line_left);
-                } else {
-                    /* Split the run at a word boundary only when its first
-                     * word (with any leading spaces) fits in the remaining
-                     * sliver; otherwise push the whole run to the next
-                     * line.  Browsers split whenever a word fits.  A first
-                     * word that is itself too wide may still start the line
-                     * when a hyphen prefix of it fits (UAX #14 break-after-
-                     * hyphen), because the shaper will split it there. */
-                    const char *we = text;
-                    while (*we == ' ' || *we == '\t' || *we == '\n') we++;
-                    while (*we && *we != ' ' && *we != '\t' && *we != '\n') we++;
-                    char first_word[256];
-                    size_t fwlen = (size_t)(we - text);
-                    if (fwlen >= sizeof(first_word)) fwlen = sizeof(first_word) - 1;
-                    memcpy(first_word, text, fwlen);
-                    first_word[fwlen] = '\0';
-                    double fww = 0.0, fwh = 0.0;
-                    bool fw_ok = layout_measure_text_styled(child, first_word,
-                                                            fs, &fww, &fwh);
-                    if (fw_ok && fww > first_w + 0.001) {
-                        /* Try hyphen prefixes (longest first that fits). */
-                        char *last_hyphen = NULL;
-                        for (char *hp = first_word; *hp; hp++) {
-                            if (*hp == '-' && hp[1] &&
-                                ((hp[1] >= 'a' && hp[1] <= 'z') ||
-                                 (hp[1] >= 'A' && hp[1] <= 'Z') ||
-                                 (unsigned char)hp[1] >= 0x80))
-                                last_hyphen = hp;
-                        }
-                        while (last_hyphen) {
-                            char saved = last_hyphen[1];
-                            last_hyphen[1] = '\0';
-                            double pw = 0.0;
-                            bool ok = layout_measure_text_styled(child, first_word,
-                                                                 fs, &pw, NULL);
-                            if (ok && pw <= first_w + 0.001) { fw_ok = true; fww = pw; break; }
-                            last_hyphen[1] = saved;
-                            /* find an earlier hyphen */
-                            char *prev = NULL;
-                            for (char *hp = first_word; hp < last_hyphen; hp++) {
-                                if (*hp == '-' && hp[1] &&
-                                    ((hp[1] >= 'a' && hp[1] <= 'z') ||
-                                     (hp[1] >= 'A' && hp[1] <= 'Z') ||
-                                     (unsigned char)hp[1] >= 0x80))
-                                    prev = hp;
-                            }
-                            last_hyphen = prev;
-                        }
-                    }
-                    if (!fw_ok || fww > first_w + 0.001) {
-                        /* First word doesn't fit: finish the current line
-                         * first (alignment applies). */
-                        if (line_member_count > 0) {
-                            layout_align_line(ctx, line_members, line_member_count,
-                                              line_left, line_avail - RTL_FIRST_CUT, box->s->text_align);
-                            line_member_count = 0;
-                        }
-                        cur.y += cur.line_box;
-                        cur.line_box = 0.0;
-                        cur.x = line_left;
-                        first_w = wrap_avail;
-                    }
-                }
-                if (!hard_nl && span <= first_w) {
-                    /* Fits on the (possibly new) current line unwrapped. */
-                    child->x = cur.x + child->margin_left;
-                    child->y = cur.y + vmt;
-                    cur.x += span;
-                    double h = vmt + child->height + vmb;
-                    if (h > cur.line_box) cur.line_box = h;
-                } else {
-                    TextShaper *font = display_list_get_font(layout_font_slot(child));
-                    if (!font) font = display_list_get_default_font();
-                    /* When a float stops intruding partway through this
-                     * wrapped run, continuation lines below it change
-                     * geometry (typically widening to full width).  Find the
-                     * nearest float bottom below the run start and the line
-                     * geometry just under it; the shaper switches to it from
-                     * the first line whose top clears that bottom. */
-                    int cont2_line = 0;
-                    double cont2_x = 0.0, cont2_w = 0.0;
-                    double next_fb = 1e30;
-                    for (int fi = t_float_base; fi < ctx->float_count; fi++) {
-                        double fb = ctx->float_stack[fi].bottom;
-                        if (fb > cur.y + 0.001 && fb < next_fb) next_fb = fb;
-                    }
-                    if (next_fb < 1e29) {
-                        double g2l = content_left, g2a = avail_width;
-                        layout_flow_line_geometry(ctx->float_stack + t_float_base,
-                                                  ctx->float_count - t_float_base,
-                                                  next_fb + 0.01,
-                                                  content_left, avail_width,
-                                                  &g2l, &g2a);
-                        if (g2l != line_left || g2a != line_avail) {
-                            int k = (int)ceil((next_fb - 0.001 - cur.y)
-                                              / line_adv) + 1;
-                            if (k < 2) k = 2;
-                            cont2_line = k;
-                            cont2_x = g2l;
-                            cont2_w = g2a;
-                        }
-                    }
-                    TsWrapResult wr;
-                    text_shaper_set_spacing(child->s->letter_spacing, child->s->word_spacing, scale);
-                    bool wrapped = font && text_shaper_wrap_measure(font, text,
-                            (float)(cur.x + child->margin_left), (float)line_left,
-                            (float)first_w, (float)wrap_avail, scale, (float)line_adv,
-                            cont2_line, (float)cont2_x, (float)cont2_w, &wr);
-                    text_shaper_set_spacing(0.0f, 0.0f, 1.0f);
-                    if (wrapped) {
-                        child->x = cur.x + child->margin_left;
-                        child->y = cur.y + vmt;
-                        child->width = wr.max_width;
-                        child->height = wr.height;
-                        child->wrap_first_w = first_w;
-                        child->wrap_cont_w = wrap_avail;
-                        child->wrap_cont_x = line_left;
-                        child->wrap_cont2_x = cont2_x;
-                        child->wrap_cont2_w = cont2_w;
-                        child->wrap_cont2_line = cont2_line;
-                        layout_update_content_sizes(child);
-                        /* Continue after the wrapped text: cursor sits at the
-                         * end of its last line so following runs share it. */
-                        cur.y += vmt + wr.height - wr.line_advance;
-                        cur.x = wr.last_end_x + child->margin_right;
-                        cur.line_box = wr.line_advance + vmb;
-                    } else {
-                        child->x = cur.x + child->margin_left;
-                        child->y = cur.y + vmt;
-                        cur.x += span;
-                    }
-                }
-                if (line_members) line_members[line_member_count++] = c;
-                layout_node_serial(ctx, c);
-                continue;
-            }
-
-            if (is_whitespace_run && cur.x + span > line_right) {
-                /* Collapsible white space at the end of a line hangs: it
-                 * neither wraps nor opens a new line box. */
-                child->width = 0.0;
-                child->height = 0.0;
-                layout_update_content_sizes(child);
-                span = 0.0;
-            }
-            if (!(box->s->white_space == 1 || box->s->white_space == 2) &&
-                cur.x + span - trail > line_right + 0.01 && cur.x > line_start + 0.001) {
-                /* Finish the current line (alignment applies), then wrap. */
-                if (line_member_count > 0) {
-                    layout_align_line(ctx, line_members, line_member_count,
-                                      line_left, line_avail - RTL_FIRST_CUT, box->s->text_align);
-                    line_member_count = 0;
-                }
-                cur.y += cur.line_box;
-                cur.line_box = 0.0;
-                cur.x = line_left;
-            }
-            if (is_img && !(box->s->white_space == 1 || box->s->white_space == 2)) {
-                /* An image too wide for a line that floats shorten, first on
-                 * it, goes down past them till it fits (§9.5). */
-                const FloatRec *fl = ctx->float_stack + t_float_base;
-                int nf = ctx->float_count - t_float_base;
-                for (int guard = 0; guard < 64; guard++) {
-                    layout_flow_line_geometry(fl, nf, cur.y, content_left, avail_width, &line_left, &line_avail);
-                    if (cur.x < line_left) cur.x = line_left;
-                    if (cur.x > line_left + 0.001 || span <= line_avail + 0.01 || line_avail >= avail_width - 0.01)
-                        break;
-                    double next = -1.0;
-                    for (int f = 0; f < nf; f++)
-                        if (fl[f].bottom > cur.y + 0.001 && (next < 0.0 || fl[f].bottom < next)) next = fl[f].bottom;
-                    if (next < 0.0) break;
-                    cur.y = next;
-                    cur.x = 0.0;
-                }
-            }
-            child->x = cur.x + child->margin_left;
-            child->y = cur.y + vmt;
-            cur.x += span;
-            if (line_members) line_members[line_member_count++] = c;
-            layout_node_serial(ctx, c);
-            if (child->s->display == CSS_DISPLAY_INLINE && dom && dom->type == HTML_NODE_ELEMENT) {
-                /* Atomic inline descendants can be taller than one line. */
-                double bottom = child->y + child->height;
-                for (int k = ctx->tree.nodes[c].first_child_idx; k >= 0;
-                     k = ctx->tree.nodes[k].next_sibling_idx) {
-                    LayoutBox *kb = layout_box(ctx, k);
-                    if (!layout_is_in_flow(kb)) continue;
-                    double kbot = kb->y + kb->height +
-                                  (layout_box_is_atomic_inline(kb) ? kb->margin_bottom : 0.0);
-                    if (kbot > bottom) bottom = kbot;
-                }
-                /* The inline box keeps its own (font) height; the line box
-                 * grows around taller atomic content. */
-                if (bottom - cur.y > cur.line_box) cur.line_box = bottom - cur.y;
-            }
-            double h = vmt + child->height + vmb;
-            if (h > cur.line_box) cur.line_box = h;
-            if (child->s->display == CSS_DISPLAY_INLINE && dom && dom->type == HTML_NODE_ELEMENT &&
-                !is_img && !is_br && child->wrap_cont_w <= 0.0 &&
-                fabs(child->height - line_adv) < 0.01) {
-                /* Visual box of a one-line inline element: its content area
-                 * plus padding/border, centered by the half-leading. */
-                double ca = layout_content_area_height(child);
-                double vpb = layout_vertical_border_padding(child);
-                child->y += (line_adv - ca) / 2.0 - child->padding_top - child->s->border_top;
-                child->height = ca + vpb;
-                layout_update_content_sizes(child);
-            }
         }
     }
-
-    /* Finish the trailing inline line (alignment applies). */
-    if (line_member_count > 0) {
-        double line_left = content_left, line_avail = avail_width;
-        layout_flow_line_geometry(ctx->float_stack + t_float_base, ctx->float_count - t_float_base, cur.y,
-                                  content_left, avail_width,
-                                  &line_left, &line_avail);
-        layout_align_line(ctx, line_members, line_member_count,
-                          line_left, line_avail - RTL_FIRST_CUT, box->s->text_align);
-        line_member_count = 0;
-    }
-    free(line_members);
 
     cur.y += cur.line_box;  /* finish trailing inline line */
 
@@ -16003,7 +14360,6 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
     free(piece_of);
 
     free(kids);
-    if (!ifc_done && !ifc_runs) layout_bidi_paragraph(ctx, idx);   /* (on items: its lines placed in visual order already) */
 
     /* Resolve auto height from the extent of the children (not when height
      * was explicitly assigned, even to zero).  cur.y is the anchor: the
@@ -16101,7 +14457,6 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
         }
     }
 }
-#undef RTL_FIRST_CUT
 
 /* ---- Units: subtrees of already-placed boxes ---- */
 
@@ -18745,119 +17100,6 @@ static void layout_table_box(LayoutContext *ctx, int idx, LayoutBox *tb)
     table_free(&T);
 }
 
-/* Children of an inline box that the parent flow wrapped across lines (or
- * broke at preserved newlines) and that has several significant children
- * (YouTube's attributed strings: text spans and link spans in one pre-wrap
- * host).  Each run continues where the previous one ended: its first line
- * is the rest of the current line, continuation lines use the box's wrap
- * geometry. */
-static void layout_inline_wrapped_children(LayoutContext *ctx, int idx)
-{
-    LayoutBox *box = layout_box(ctx, idx);
-    double cont_x = box->wrap_cont_x, cont_w = box->wrap_cont_w;
-    double cx = box->x + box->padding_left + box->s->border_left;
-    double cy = box->y;   /* (an inline's vertical padding and border take no room) */
-    double line_start = cx;
-    double line_right = box->x + box->wrap_first_w;
-    for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0;
-         c = ctx->tree.nodes[c].next_sibling_idx) {
-        LayoutBox *child = layout_box(ctx, c);
-        if (child->s->display == CSS_DISPLAY_NONE) continue;
-        HtmlNode *dom = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
-        layout_resolve_used_sizes(child, dom, box->content_width, box->content_height);
-        double fs = child->s->font_size > 0.0 ? child->s->font_size : 16.0;
-        double line_adv = layout_line_advance_box(child);
-        bool keeps_nl = child->s->white_space >= 2 && child->s->white_space <= 4;
-        child->wrap_cont_w = 0.0;
-        child->wrap_cont2_line = 0;
-
-        const char *text = NULL;
-        char concat[8192];
-        if (dom && dom->type == HTML_NODE_TEXT) {
-            text = css_layout_box_text(ctx, c, css_layout_node_text(ctx, dom) ? css_layout_node_text(ctx, dom) : "");
-        } else if (dom && dom->type == HTML_NODE_ELEMENT && child->s->display == CSS_DISPLAY_INLINE &&
-                   strcasecmp(dom->tag_name, "img") != 0) {
-            size_t cl = 0;
-            concat[0] = '\0';
-            layout_concat_box_text(ctx, c, concat, sizeof(concat), &cl);
-            if (cl > 0) text = concat;
-        }
-        bool has_nl = text && keeps_nl && strchr(text, '\n');
-        if (text && layout_text_is_whitespace(text) && !has_nl) {
-            /* Collapsible space: one space between content, none at a line start. */
-            double sw = 0.0;
-            if (cx > line_start + 0.001 && !keeps_nl) {
-                if (!layout_measure_text_styled(child, " ", fs, &sw, NULL)) sw = fs * 0.3;
-            } else if (keeps_nl && !layout_measure_text_styled(child, text, fs, &sw, NULL)) {
-                sw = 0.0;
-            }
-            child->x = cx;
-            child->y = cy;
-            child->width = sw;
-            child->height = sw > 0.0 ? line_adv : 0.0;
-            layout_update_content_sizes(child);
-            cx += sw;
-            layout_node_serial(ctx, c);
-            continue;
-        }
-        if (text) {
-            double tw = 0.0;
-            layout_measure_text_styled(child, text, fs, &tw, NULL);
-            TextShaper *font = display_list_get_font(layout_font_slot(child));
-            if (!font) font = display_list_get_default_font();
-            TsWrapResult wr;
-            text_shaper_set_spacing(child->s->letter_spacing, child->s->word_spacing, (float)(fs / 16.0));
-            bool wrapped = font && (has_nl || cx + tw > line_right + 0.01) &&
-                text_shaper_wrap_measure(font, text, (float)cx, (float)cont_x,
-                                         (float)(line_right - cx), (float)cont_w,
-                                         (float)(fs / 16.0), (float)line_adv, 0, 0.0f, 0.0f, &wr);
-            text_shaper_set_spacing(0.0f, 0.0f, 1.0f);
-            if (wrapped) {
-                child->x = cx;
-                child->y = cy;
-                child->width = wr.max_width;
-                child->height = wr.height;
-                child->wrap_first_w = line_right - cx;
-                child->wrap_cont_w = cont_w;
-                child->wrap_cont_x = cont_x;
-                layout_update_content_sizes(child);
-                layout_node_serial(ctx, c);
-                if (wr.height > wr.line_advance + 0.01) {
-                    cy += wr.height - wr.line_advance;
-                    line_start = cont_x;
-                    line_right = cont_x + cont_w;
-                }
-                cx = wr.last_end_x;
-                continue;
-            }
-            child->x = cx;
-            child->y = cy;
-            child->width = tw;
-            child->height = line_adv;
-            layout_update_content_sizes(child);
-            cx += tw;
-            layout_node_serial(ctx, c);
-            continue;
-        }
-        /* Atomic inline, image, or empty element: place it, breaking first
-         * when it overflows a line that already has content. */
-        if (layout_box_is_atomic_inline(child) && dom && dom->type == HTML_NODE_ELEMENT &&
-            strcasecmp(dom->tag_name, "img") != 0)
-            layout_size_atomic_inline(ctx, c, cont_w);
-        double w = child->margin_left + child->width + child->margin_right;
-        if (cx + w > line_right + 0.01 && cx > line_start + 0.001) {
-            cy += line_adv;
-            cx = line_start = cont_x;
-            line_right = cont_x + cont_w;
-        }
-        child->x = cx + child->margin_left;
-        child->y = cy + child->margin_top;
-        layout_update_content_sizes(child);
-        layout_node_serial(ctx, c);
-        cx += w;
-    }
-}
-
 /* ---- Incremental flow ----
  *
  * On a kept tree, each call of the flow and absolute-positioning passes is
@@ -19084,10 +17326,6 @@ static void flow_shift(LayoutBox *b, double dx, double dy)
 {
     b->x += dx;
     b->y += dy;
-    if (b->wrap_cont_w > 0.0) {
-        b->wrap_cont_x += dx;
-        if (b->wrap_cont2_line > 1) b->wrap_cont2_x += dx;
-    }
 }
 
 /* (mx, my: how far the root moved after its call in the recorded layout;
@@ -19270,185 +17508,8 @@ static void layout_node_serial_impl(LayoutContext *ctx, int idx)
     LayoutBox *box = layout_box(ctx, idx);
 
     if (box->s->display == CSS_DISPLAY_NONE) return;
-    if (box->s->display == CSS_DISPLAY_INLINE) {
-        /* Inline boxes don't establish a block formatting context, but their
-         * inline children still need positions: flow them left-to-right,
-         * measuring text with real glyph metrics when the font is available
-         * so positions match the parent's measured width. */
-        double cx = box->x + box->padding_left + box->s->border_left;
-        double cy = box->y;   /* (its vertical padding and border take no room on the line) */
-        /* (it starts its line: its first text has no leading space) */
-        bool lead = box->text_lead_skip != 0;
-        /* If this inline box was word-wrapped by the block-flow inline branch
-         * and it has exactly one significant child (the common <a>text</a>
-         * case, possibly nested like <b><a>text</a></b>), propagate the wrap
-         * geometry down so the text leaf emits wrapped glyphs. */
-        int wrap_target = -1;
-        if (box->wrap_cont_w > 0.0) {
-            int sig_count = 0;
-            for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0;
-                 c = ctx->tree.nodes[c].next_sibling_idx) {
-                LayoutBox *child = layout_box(ctx, c);
-                if (child->s->display == CSS_DISPLAY_NONE) continue;
-                HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
-                if (dn && dn->type == HTML_NODE_TEXT &&
-                    layout_text_is_whitespace(css_layout_node_text(ctx, dn))) continue;
-                sig_count++;
-                wrap_target = c;
-            }
-            if (sig_count != 1) wrap_target = -1;
-            if (sig_count > 1) {
-                layout_inline_wrapped_children(ctx, idx);
-                return;
-            }
-        }
-        for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0;
-             c = ctx->tree.nodes[c].next_sibling_idx) {
-            LayoutBox *child = layout_box(ctx, c);
-            if (child->s->display == CSS_DISPLAY_NONE) continue;
-            HtmlNode *dom = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
-            layout_resolve_used_sizes(child, dom, box->content_width, box->content_height);
-            if (c == wrap_target) {
-                child->x = box->x;
-                child->y = box->y;
-                child->width = box->width;
-                child->height = box->height;
-                child->wrap_first_w = box->wrap_first_w;
-                child->wrap_cont_w = box->wrap_cont_w;
-                child->wrap_cont_x = box->wrap_cont_x;
-                child->wrap_cont2_x = box->wrap_cont2_x;
-                child->wrap_cont2_w = box->wrap_cont2_w;
-                child->wrap_cont2_line = box->wrap_cont2_line;
-                layout_update_content_sizes(child);
-                layout_node_serial(ctx, c);
-                continue;
-            }
-            if (layout_box_is_atomic_inline(child) && dom && dom->type == HTML_NODE_ELEMENT &&
-                strcasecmp(dom->tag_name, "img") != 0) {
-                layout_size_atomic_inline(ctx, c, 1e9);
-                child->x = cx + child->margin_left;
-                child->y = cy + child->margin_top;
-                layout_update_content_sizes(child);
-                layout_node_serial(ctx, c);
-                cx += child->margin_left + child->width + child->margin_right;
-                continue;
-            }
-            double fs = child->s->font_size > 0.0 ? child->s->font_size : 16.0;
-            double line_adv = layout_line_advance_box(child);
-            bool sized = false;
-            if (dom && dom->type == HTML_NODE_TEXT) {
-                if (layout_text_is_whitespace(css_layout_node_text(ctx, dom))) {
-                    /* Same contextual collapse as the block-flow inline branch:
-                     * a space between inline content, nothing at the start. */
-                    double content_left_i = box->x + box->padding_left + box->s->border_left;
-                    if (cx > content_left_i + 0.001) {
-                        double sw = 0.0;
-                        if (!layout_measure_text_styled(child, " ", fs, &sw, NULL)) sw = fs * 0.3;
-                        child->width = sw;
-                    } else {
-                        child->width = 0.0;
-                    }
-                    child->height = 0.0;
-                    sized = true;
-                } else {
-                    double tw = 0.0;
-                    const char *tt = css_layout_box_text(ctx, c, css_layout_node_text(ctx, dom));
-                    child->text_lead_skip = 0;
-                    if (lead && tt[0] == ' ' && child->s->white_space != 2 && child->s->white_space != 3) {
-                        tt++;
-                        child->text_lead_skip = 1;
-                    }
-                    lead = false;
-                    if (layout_measure_text_styled(child, tt, fs, &tw, NULL)) {
-                        child->width = tw;
-                        child->height = line_adv;
-                        sized = true;
-                    }
-                }
-            }
-            if (!sized) {
-                /* Direct <img> children get their attribute size; other
-                 * elements without text size from an <img> descendant. */
-                double iw = 0.0, ih = 0.0;
-                if (dom && dom->type == HTML_NODE_ELEMENT &&
-                    strcasecmp(dom->tag_name, "img") == 0) {
-                    /* Sized by layout_resolve_used_sizes (replaced element). */
-                    sized = true;
-                } else if (dom && layout_first_img_size(ctx->doc, dom, &iw, &ih)) {
-                    child->width = iw;
-                    child->height = ih;
-                    sized = true;
-                }
-            }
-            if (!sized && dom && dom->type == HTML_NODE_ELEMENT && dom->tag_name &&
-                strcasecmp(dom->tag_name, "canvas") == 0) {
-                layout_svg_size(ctx, c, dom, &child->width, &child->height);
-                sized = true;
-            }
-            if (dom && dom->type == HTML_NODE_ELEMENT && child->s->display == CSS_DISPLAY_INLINE) {
-                child->text_lead_skip = lead;
-                lead = false;
-            }
-            if (!sized && dom && dom->type == HTML_NODE_ELEMENT &&
-                child->s->display == CSS_DISPLAY_INLINE) {
-                /* Nested inline element: its max-content width (text, atomic
-                 * inline descendants and its own padding). */
-                double iw = layout_intrinsic_width(ctx, c, true);
-                if (iw > 0.0) {
-                    child->width = iw;
-                    child->height = line_adv;
-                    sized = true;
-                }
-            }
-            if (!sized && dom && dom->type == HTML_NODE_ELEMENT) {
-                /* Inline element with descendant text (<a>, <b>, <span>, ...):
-                 * measure its real text width, mirroring the block-flow
-                 * inline branch, instead of falling back to a fake size that
-                 * pushes following siblings out of the box (overlap). */
-                char concat[8192];
-                size_t cl = 0;
-                concat[0] = '\0';
-                layout_concat_box_text(ctx, c, concat, sizeof(concat), &cl);
-                if (cl > 0 && !layout_text_is_whitespace(concat)) {
-                    double tw = 0.0;
-                    if (layout_measure_text_styled(child, concat, fs, &tw, NULL)) {
-                        child->width = tw;
-                        child->height = line_adv;
-                        sized = true;
-                    }
-                }
-            }
-            if (!sized) {
-                /* Empty inline element with no text/img content and no
-                 * explicit size: shrink to zero (mirrors the block-flow
-                 * inline branch) instead of resurrecting a fake 80x20 box
-                 * that displaces following content. Replaced form elements
-                 * keep a small default size. */
-                if (dom && layout_is_replaced_form_element(dom->tag_name)) {
-                    if (child->width <= 0.0) child->width = 80.0;
-                    if (child->height <= 0.0) child->height = 20.0;
-                } else {
-                    if (child->width <= 0.0) child->width = 0.0;
-                    if (child->height <= 0.0) child->height = 0.0;
-                }
-            }
-            child->x = cx;
-            child->y = cy;
-            layout_update_content_sizes(child);
-            cx += child->width;
-            layout_node_serial(ctx, c);
-            if (child->s->display == CSS_DISPLAY_INLINE && dom && dom->type == HTML_NODE_ELEMENT &&
-                !layout_is_img(dom) && child->wrap_cont_w <= 0.0 && fabs(child->height - line_adv) < 0.01) {
-                /* Its visual box, as the block flow gives a line's inlines:
-                 * the content area plus padding and border. */
-                double ca = layout_content_area_height(child);
-                child->y += (line_adv - ca) / 2.0 - child->padding_top - child->s->border_top;
-                child->height = ca + layout_vertical_border_padding(child);
-                layout_update_content_sizes(child);
-            }
-        }
-        return;
-    }
+    /* (an inline box: laid out with its block's inline content) */
+    if (box->s->display == CSS_DISPLAY_INLINE) return;
 
     if (box->s->display == CSS_DISPLAY_FLEX) {
         layout_flex_container(ctx, idx);
@@ -20235,12 +18296,10 @@ static bool layout_geom_close(const LayoutBox *a, const LayoutBox *b)
            GEOM_NEAR(margin_top) && GEOM_NEAR(margin_right) && GEOM_NEAR(margin_bottom) && GEOM_NEAR(margin_left) &&
            GEOM_NEAR(padding_top) && GEOM_NEAR(padding_right) && GEOM_NEAR(padding_bottom) && GEOM_NEAR(padding_left) &&
            GEOM_NEAR(content_width) && GEOM_NEAR(content_height) && GEOM_NEAR(baseline) &&
-           GEOM_NEAR(wrap_first_w) && GEOM_NEAR(wrap_cont_w) && GEOM_NEAR(wrap_cont_x) && GEOM_NEAR(wrap_cont2_x) &&
-           GEOM_NEAR(wrap_cont2_w) && a->wrap_cont2_line == b->wrap_cont2_line &&
            GEOM_NEAR(min_width) && GEOM_NEAR(max_width) && GEOM_NEAR(min_height) && GEOM_NEAR(max_height) &&
            GEOM_NEAR(top) && GEOM_NEAR(left) && GEOM_NEAR(right) && GEOM_NEAR(bottom) &&
            a->flags == b->flags && a->height_pct_unresolved == b->height_pct_unresolved &&
-           a->text_lead_skip == b->text_lead_skip && GEOM_NEAR(opacity_eff);
+           GEOM_NEAR(opacity_eff);
 #undef GEOM_NEAR
 }
 

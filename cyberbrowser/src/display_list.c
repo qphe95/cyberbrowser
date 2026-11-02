@@ -1750,46 +1750,10 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     text_shaper_set_spacing(box->s->letter_spacing, box->s->word_spacing, scale);
                     /* The white-space processed text the layout measured. */
                     const char *run_text = css_layout_box_text(ctx, i, css_layout_node_text(ctx, node));
-                    if (box->text_lead_skip && run_text[0] == ' ') run_text++;
-                    /* -webkit-line-clamp / text-overflow: ellipsis on a near
-                     * ancestor cut the run and end it with an ellipsis. */
-                    char *clamped = NULL;
-                    /* (a box with fragments: its paragraph's layout made the
-                     * ellipsis, when the paragraph is the one clamped) */
-                    bool has_frags = ctx->text_frags && i < ctx->text_frags_n && ctx->text_frags[i].n > 0;
-                    int para_blk = ctx->tree.nodes[i].parent_idx;
-                    while (para_blk >= 0 && ctx->boxes[para_blk].s->display == CSS_DISPLAY_INLINE)
-                        para_blk = ctx->tree.nodes[para_blk].parent_idx;
-                    for (int a = ctx->tree.nodes[i].parent_idx, depth = 0; a >= 0 && depth < 6;
-                         a = ctx->tree.nodes[a].parent_idx, depth++) {
-                        const LayoutBox *ab = &ctx->boxes[a];
-                        if (has_frags && a == para_blk) break;
-                        if (ab->s->line_clamp && ab->s->webkit_box) {
-                            double top = ab->y + ab->s->border_top + ab->padding_top;
-                            float nlh0 = text_shaper_normal_line_height(font, (float)fs);
-                            double adv = box->s->line_height > 0.0 ? box->s->line_height
-                                       : (nlh0 > 0.5f * fs && nlh0 < 3.0f * fs ? nlh0 : fs * 1.5);
-                            int before = adv > 0.0 ? (int)floor((box->y - top) / adv + 0.01) : 0;
-                            int left = (int)ab->s->line_clamp - (before > 0 ? before : 0);
-                            if (left >= 1 && box->wrap_cont_w > 0.0)
-                                clamped = text_shaper_truncate_lines(font, run_text, (float)box->x,
-                                                                     (float)box->wrap_cont_x, (float)box->wrap_first_w,
-                                                                     (float)box->wrap_cont_w, scale, left);
-                            break;
-                        }
-                        if (ab->s->text_overflow_ellipsis && ab->s->overflow != 0 &&
-                            (ab->s->white_space == 1 || ab->s->white_space == 2)) {
-                            double right = ab->x + ab->width - ab->s->border_right - ab->padding_right;
-                            if (box->wrap_cont_w <= 0.0 && right > box->x)
-                                clamped = text_shaper_truncate_width(font, run_text, scale, (float)(right - box->x));
-                            break;
-                        }
-                    }
-                    if (clamped) run_text = clamped;
-                    /* A paragraph that needs bidi: the fragments its layout
-                     * placed, line by line (BIDI_DESIGN.md). */
+                    /* The fragments its paragraph's layout placed, line by line
+                     * (INLINE_LAYOUT_DESIGN.md), an ellipsis after one it cut. */
                     const LayoutTextFragList *tfl =
-                        !clamped && ctx->text_frags && i < ctx->text_frags_n ? &ctx->text_frags[i] : NULL;
+                        ctx->text_frags && i < ctx->text_frags_n ? &ctx->text_frags[i] : NULL;
                     if (tfl && tfl->n > 0) {
                         for (int q = 0; q < tfl->n; q++) {
                             const LayoutTextFrag *fr = &tfl->f[q];
@@ -1801,27 +1765,6 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                                 !text_shaper_shape_span(font, "\xE2\x80\xA6", 0, 3, (float)(box->x + fr->dx + fr->w),
                                                         (float)(box->y + fr->dy), scale, false, tr, tg, tb, ta, dl))
                                 return false;
-                        }
-                    } else if (box->wrap_cont_w > 0.0) {
-                        /* Wrapped run: shape across lines using the wrap
-                         * geometry recorded by the layout. */
-                        float nlh = text_shaper_normal_line_height(font, (float)fs);
-                        if (!(nlh > 0.5f * fs && nlh < 3.0f * fs)) nlh = (float)(fs * 1.5);
-                        float line_adv = box->s->line_height > 0.0
-                            ? (float)box->s->line_height : nlh;
-                        if (!text_shaper_wrap_shape(font,
-                                                    run_text,
-                                                    (float)box->x, (float)box->y,
-                                                    (float)box->wrap_cont_x,
-                                                    (float)box->wrap_first_w,
-                                                    (float)box->wrap_cont_w,
-                                                    scale, line_adv,
-                                                    box->wrap_cont2_line,
-                                                    (float)box->wrap_cont2_x,
-                                                    (float)box->wrap_cont2_w,
-                                                    tr, tg, tb, ta,
-                                                    dl, NULL)) {
-                            return false;
                         }
                     } else {
                         /* CSS strut model: center the em box in the line box;
@@ -1843,7 +1786,6 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     text_shaper_set_spacing(0.0f, 0.0f, 1.0f);
                     emit_text_decorations(dl, from_cmd, fs, box->s->text_decoration,
                                           tr, tg, tb, ta);
-                    free(clamped);
                 }
             }
         }
