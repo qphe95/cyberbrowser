@@ -4460,19 +4460,33 @@ static CssStyleSet *layout_styleset_get(LayoutStyleSheetList *list, double vw, d
     static int extend_env = -1, verify_env = -1;
     if (extend_env < 0) { const char *e = getenv("CSS_EXTEND"); extend_env = !(e && strcmp(e, "0") == 0); }
     if (verify_env < 0) verify_env = getenv("CSS_EXTEND_VERIFY") ? 1 : 0;
+    /* (a set whose sheets are all in the list, in order, wherever: the
+     * others are inserted, compiled alone) */
     int base = -1;
-    for (int i = 0; extend_env && i < STYLESET_CACHE_MAX; i++) {
+    int *remap = NULL, *cand = (int *)malloc(((size_t)list->count + 1) * sizeof(int));
+    for (int i = 0; extend_env && cand && i < STYLESET_CACHE_MAX; i++) {
         StyleSetEntry *c = &g_styleset_cache[i];
         if (!c->set || c->n > list->count || c->vw != vw || c->vh != vh) continue;
-        if (memcmp(c->sheets, list->entries, (size_t)c->n * sizeof(SheetEntry *)) != 0) continue;
-        if (base < 0 || c->n > g_styleset_cache[base].n) base = i;
+        if (base >= 0 && c->n <= g_styleset_cache[base].n) continue;
+        int k = 0;
+        for (int p = 0; p < list->count && k < c->n; p++)
+            if (list->entries[p] == c->sheets[k]) cand[k++] = p;
+        if (k < c->n) continue;
+        base = i;
+        int *t = remap;
+        remap = cand;
+        cand = t ? t : (int *)malloc(((size_t)list->count + 1) * sizeof(int));
+        if (!cand) break;
     }
+    free(cand);
     CssStyleSet *set;
     uint64_t base_gen = 0;
     int base_nrules = 0;
     if (base >= 0) {
         const CssStyleSet *from = g_styleset_cache[base].set;
-        set = css_styleset_extend(from, list->sheets, list->count, vw, vh);
+        set = css_styleset_extend_map(from, list->sheets, list->count, vw, vh, remap);
+        free(remap);
+        remap = NULL;
         base_gen = g_styleset_cache[base].gen;
         base_nrules = css_styleset_rule_count(from);
         if (g_css_log > 0)
@@ -4492,6 +4506,7 @@ static CssStyleSet *layout_styleset_get(LayoutStyleSheetList *list, double vw, d
             css_styleset_free(full);
         }
     } else {
+        free(remap);
         set = css_styleset_build(list->sheets, list->count, vw, vh);
     }
     /* The base was extended into this set: a page only adds sheets, so it

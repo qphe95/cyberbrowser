@@ -1136,20 +1136,29 @@ static void *dup_array(const void *src, size_t bytes)
 }
 
 /* Compile sheets[0..count): from scratch, or starting from `from`, built
- * from the same first from->nsheets sheets, compiling only the rest.  The
- * builder only appends, so both give the same tables. */
+ * from from->nsheets of them (its sheet k at sheets[remap[k]], or at k
+ * without a remap), compiling only the others and appending their rules.
+ * A rule's place in the cascade is its sheet's position and its index in
+ * it (cr->sheet, cr->index), not its slot, so a sheet inserted between
+ * others is appended like one added at the end; from's rules take their
+ * sheets' new positions. */
 static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *const *sheets, int count,
-                                     double vw, double vh)
+                                     double vw, double vh, const int *remap)
 {
     CssStyleSet *S = calloc(1, sizeof(*S));
     Builder b = {0};
     b.parts = malloc(sizeof(CssSelectorPart) * CSS_MAX_SIMPLE_PARTS);
-    int first = from ? from->nsheets : 0;
+    /* (the sheets from compiled: not compiled again) */
+    unsigned char *have = calloc((size_t)count + 1, 1);
+    for (int k = 0; from && k < from->nsheets; k++) {
+        int pos = remap ? remap[k] : k;
+        if (pos >= 0 && pos < count) have[pos] = 1;
+    }
 
     size_t est = 64;
     int nrules = from ? from->nrules : 0;
-    for (int s = first; s < count; s++) {
-        if (!sheets[s]) continue;
+    for (int s = 0; s < count; s++) {
+        if (have[s] || !sheets[s]) continue;
         nrules += sheets[s]->rule_count;
         for (int r = 0; r < sheets[s]->rule_count; r++)
             if (sheets[s]->rules[r].selector_text)
@@ -1167,6 +1176,8 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
     I32Vec rchains = {0};
     if (from) {
         memcpy(S->rules, from->rules, (size_t)from->nrules * sizeof(CRule));
+        if (remap)
+            for (int g0 = 0; g0 < from->nrules; g0++) S->rules[g0].sheet = remap[S->rules[g0].sheet];
         VEC_FROM(b.comps, from->comps, from->ncomps);
         VEC_FROM(b.chains, from->chains, from->nchains);
         VEC_FROM(b.lists, from->lists, from->nlists);
@@ -1182,9 +1193,9 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
     }
 
     int g = from ? from->nrules : 0;
-    for (int s = first; s < count; s++) {
+    for (int s = 0; s < count; s++) {
         CssStylesheet *sheet = sheets[s];
-        if (!sheet) continue;
+        if (have[s] || !sheet) continue;
         for (int r = 0; r < sheet->rule_count; r++, g++) {
             CssRule *rule = &sheet->rules[r];
             CRule *cr = &S->rules[g];
@@ -1324,13 +1335,14 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
     free(keys.v);
     free(akeys.v);
     free(b.parts);
+    free(have);
     return S;
 }
 
 CssStyleSet *css_styleset_build(CssStylesheet *const *sheets, int count,
                                 double vw, double vh)
 {
-    return styleset_compile(NULL, sheets, count, vw, vh);
+    return styleset_compile(NULL, sheets, count, vw, vh, NULL);
 }
 
 CssStyleSet *css_styleset_extend(const CssStyleSet *from, CssStylesheet *const *sheets, int count,
@@ -1338,7 +1350,15 @@ CssStyleSet *css_styleset_extend(const CssStyleSet *from, CssStylesheet *const *
 {
     if (!from || from->nsheets > count || from->vw != vw || from->vh != vh)
         return css_styleset_build(sheets, count, vw, vh);
-    return styleset_compile(from, sheets, count, vw, vh);
+    return styleset_compile(from, sheets, count, vw, vh, NULL);
+}
+
+CssStyleSet *css_styleset_extend_map(const CssStyleSet *from, CssStylesheet *const *sheets, int count,
+                                     double vw, double vh, const int *remap)
+{
+    if (!from || from->nsheets > count || from->vw != vw || from->vh != vh)
+        return css_styleset_build(sheets, count, vw, vh);
+    return styleset_compile(from, sheets, count, vw, vh, remap);
 }
 
 int css_styleset_sheet_count(const CssStyleSet *S) { return S->nsheets; }

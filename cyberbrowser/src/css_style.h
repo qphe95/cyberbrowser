@@ -57,6 +57,10 @@ CssStyleSet *css_styleset_build(CssStylesheet *const *sheets, int count,
 /* The same as css_styleset_build(sheets, count, ...) when `from` was built
  * from sheets' first css_styleset_sheet_count(from) entries (same
  * viewport): only the sheets after those are compiled. */
+/* The same with from's sheets anywhere in the list: its sheet k is
+ * sheets[remap[k]] (in order); the others are compiled and appended. */
+CssStyleSet *css_styleset_extend_map(const CssStyleSet *from, CssStylesheet *const *sheets, int count,
+                                     double vw, double vh, const int *remap);
 CssStyleSet *css_styleset_extend(const CssStyleSet *from, CssStylesheet *const *sheets, int count,
                                  double viewport_width, double viewport_height);
 int  css_styleset_sheet_count(const CssStyleSet *set);
