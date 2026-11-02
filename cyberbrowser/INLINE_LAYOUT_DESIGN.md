@@ -1,6 +1,6 @@
 # Inline layout on paragraph items
 
-Status: steps 3a-3d and 4 done, behind CYBER_IFC=1 (steps 1 and 2 measured and dropped, below).
+Status: steps 3, 4 and 5a done: inline layout on items by default (CYBER_IFC=0: the old path; steps 1 and 2 measured and dropped, below).
 
 Step 3a (css_layout.c, "Inline formatting on items"): a block whose in-flow content is only text
 and inline elements without left or right margin, border or padding, in white-space normal, with
@@ -141,6 +141,18 @@ layouts): levels 9 (resolving 5, hashing and copying hits 4), levels onto tokens
 8, element setup 3, gathering 4, and 5 for the blocks still on the old path (mixed block and inline
 content, ::first-letter); each is a few ms, and the larger cuts are the later steps (levels kept with
 the paragraph data across layouts, step 6; those blocks on items, step 5).
+
+Step 5a: the item path is the default (CYBER_IFC=0 turns it off); blocks it cannot take still go
+the old way.  Two fixes the unit tests and the Wikipedia replay found, which css/CSS2 did not: an
+atomic inline is a break opportunity only where the text around it wraps (not in nowrap or pre:
+test_layout_nowrap_atomic_inlines, YouTube's info row), in line breaking and in min-content; and in
+nowrap a collapsible space counts toward min-content only once content follows it (Wikipedia's
+Article / Talk tabs, a link then a newline in a nowrap list item, were 3.9 px too wide).  css/CSS2:
+5500 by default, none lost against step 4b under the switch (one failing page's screenshot changed,
+visudet/content-height-004, an inline-block in pre); 5398 with CYBER_IFC=0, every screenshot as
+before.  The three replays identical to 4b.  Timing, new default against CYBER_IFC=0 (alternating,
+min / median): Wikipedia 255 / 283 against 262 / 287 ms; YouTube 197 / 231 against 197 / 234 (15
+rounds).
 
 Goal: lay out a block's inline content the way browsers do, from
 a per-paragraph list of items analysed once (text, white space, break opportunities, bidi levels,
@@ -286,7 +298,16 @@ YouTube and Wikipedia replays, LTR and forced-RTL timing)
 5. **Switch.**  CYBER_IFC on by default, then the old inline path removed:
    layout_inline_wrapped_children, the concatenated-text measuring, the wrap-geometry paint path,
    the bidi post-pass, block_in_inline 2 pieces (a block inside an inline becomes a break between
-   paragraphs of items).  Intrinsic widths from the paragraph data.
+   paragraphs of items).  Intrinsic widths from the paragraph data.  In sub-steps, by what still
+   keeps blocks with inline content off the item path (counted on the replays: YouTube 1038 on items,
+   166 line-clamp or ellipsis, 118 with an absolutely positioned child, 46 with block children among
+   the inline ones; Wikipedia 15031 on items, 1185 abspos child, 165 block children, 20 an inline
+   replaced element such as an input): 5a the item path by default (CYBER_IFC=0 the old one), the
+   rest still on the old path; 5b absolutely positioned boxes in the paragraph (their static
+   position from the line); 5c line-clamp and text-overflow ellipsis; 5d inline content between
+   block children (each run of it a paragraph on items); 5e what remains (inline replaced elements,
+   ::first-letter, floats inside inline elements, blocks inside inline elements); 5f the old inline
+   path and the bidi post-pass removed.
 6. **Reuse.**  Fragments and pieces in the flow record; no paragraph kept from reuse.
 7. **Bidi step 6** (BIDI_DESIGN.md) on the new path: `plaintext` per paragraph, white space at bidi
    boundaries (now in the text), generated content in bidi, the static position of an inline

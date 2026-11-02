@@ -13438,7 +13438,7 @@ bool css_layout_text_paint(const LayoutContext *ctx, int idx, TextShaper **font,
  * room at its top) and aligned; each text box gets its fragments per line
  * (painted from them) and an outline around them, each inline element the
  * outline of its content (and pieces per line when it is on more than one).
- * CYBER_IFC=1 while it covers only part of what the flow does: a block it
+ * On by default (CYBER_IFC=0: off); while it covers only part of what the flow does, a block it
  * cannot lay out (ifc_eligible) takes the flow's per-child path. */
 static int g_ifc = -1;
 static bool layout_has_gen(LayoutContext *ctx, int i);
@@ -13624,7 +13624,7 @@ static bool ifc_eligible(LayoutContext *ctx, int idx)
 {
     if (g_ifc < 0) {
         const char *e = getenv("CYBER_IFC");
-        g_ifc = e && e[0] == '1';
+        g_ifc = !(e && e[0] == '0');   /* (CYBER_IFC=0: the flow's per-child path for all) */
     }
     if (!g_ifc) return false;
     const LayoutBox *b = layout_box(ctx, idx);
@@ -13715,6 +13715,8 @@ static void ifc_collect(LayoutContext *ctx, int p, IfcItems *I, double avail_wid
             layout_node_serial(ctx, c);
             ifc_cp_put(I, 0xFFFC, 0);
             ifc_put(I, c, 0, 0, cb->margin_left + cb->width + cb->margin_right, IFC_ATOM);
+            unsigned char pws = layout_box(ctx, p)->s->white_space;   /* (no break around it in nowrap or pre) */
+            I->t[I->n - 1].nobrk = pws == 1 || pws == 2;
             if (I->gather) I->t[I->n - 1].cp0 = I->ncp - 1;
             I->space_before = false;
         } else {
@@ -13771,6 +13773,7 @@ static void ifc_collect(LayoutContext *ctx, int p, IfcItems *I, double avail_wid
 typedef struct {
     bool want_max, space_before;
     double line, pending, run, best;
+    double run_sp;   /* (a nowrap space in the run: counted once content follows) */
     bool line_has;   /* (something on the line: a space after it counts) */
 } IfcIntr;
 
@@ -13785,7 +13788,13 @@ static void ifc_intr_content(IfcIntr *S, double w)
 static void ifc_intr_break(IfcIntr *S)
 {
     if (S->run > S->best) S->best = S->run;
-    S->run = 0.0;
+    S->run = S->run_sp = 0.0;
+}
+
+static void ifc_intr_run(IfcIntr *S, double w)
+{
+    S->run += S->run_sp + w;
+    S->run_sp = 0.0;
 }
 
 static void ifc_intr_walk(LayoutContext *ctx, int p, IfcIntr *S)
@@ -13823,7 +13832,7 @@ static void ifc_intr_walk(LayoutContext *ctx, int p, IfcIntr *S)
                         double w = ifc_width(ctx, c, t, i, j);
                         if (!wrap) {
                             ifc_intr_content(S, w);
-                            S->run += w;
+                            ifc_intr_run(S, w);
                         } else {
                             S->pending += w;
                             ifc_intr_break(S);
@@ -13836,7 +13845,7 @@ static void ifc_intr_walk(LayoutContext *ctx, int p, IfcIntr *S)
                             ifc_intr_break(S);
                         } else {
                             S->pending = w;
-                            S->run += w;
+                            S->run_sp = w;
                         }
                         S->space_before = true;
                     }
@@ -13844,7 +13853,7 @@ static void ifc_intr_walk(LayoutContext *ctx, int p, IfcIntr *S)
                     while (j < len && !ifc_space(t[j])) j++;
                     double w = ifc_width(ctx, c, t, i, j);
                     ifc_intr_content(S, w);
-                    S->run += w;
+                    ifc_intr_run(S, w);
                     S->space_before = false;
                 }
                 i = j;
@@ -13857,14 +13866,19 @@ static void ifc_intr_walk(LayoutContext *ctx, int p, IfcIntr *S)
             ifc_intr_break(S);
         } else if (ifc_is_atom(cb, n)) {
             double w = layout_intrinsic_contribution(ctx, c, S->want_max);
+            unsigned char pws = layout_box(ctx, p)->s->white_space;
             ifc_intr_content(S, w);
-            ifc_intr_break(S);
-            if (w > S->best && !S->want_max) S->best = w;
+            if (pws == 1 || pws == 2) {
+                ifc_intr_run(S, w);   /* (nowrap or pre: part of the run around it) */
+            } else {
+                ifc_intr_break(S);
+                if (w > S->best && !S->want_max) S->best = w;
+            }
             S->space_before = false;
         } else {
             double lw = cb->margin_left + cb->s->border_left + cb->padding_left;
             double rw = cb->padding_right + cb->s->border_right + cb->margin_right;
-            if (lw != 0.0) { ifc_intr_content(S, lw); S->run += lw; }
+            if (lw != 0.0) { ifc_intr_content(S, lw); ifc_intr_run(S, lw); }
             ifc_intr_walk(ctx, c, S);
             if (rw != 0.0) { S->line += rw; S->line_has = true; S->run += rw; }
         }
@@ -14336,14 +14350,17 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
             /* a group: up to the next space or break */
             int j = i;
             double ww = 0.0;
-            bool has_word = false, has_atom = false;
+            bool has_word = false, has_atom = false, atom_brk = false;
             while (j < I.n && !(I.t[j].kind == IFC_SPACE && !I.t[j].nobrk) && I.t[j].kind != IFC_BR && I.t[j].kind != IFC_FLOAT) {
-                /* (an atomic inline: a break opportunity before and after it) */
-                if (I.t[j].kind == IFC_ATOM && (has_word || has_atom)) break;
-                if (has_atom && I.t[j].kind != IFC_CLOSE) break;
+                /* (an atomic inline: a break opportunity before and after it,
+                 * where the text around it wraps) */
+                if (I.t[j].kind == IFC_ATOM && !I.t[j].nobrk && (has_word || has_atom)) break;
+                if (atom_brk && I.t[j].kind != IFC_CLOSE) break;
                 ww += I.t[j].w;
                 has_word = has_word || I.t[j].kind == IFC_WORD;
                 has_atom = has_atom || I.t[j].kind == IFC_ATOM;
+                if (I.t[j].kind == IFC_ATOM) atom_brk = !I.t[j].nobrk;
+                else if (I.t[j].kind != IFC_CLOSE) atom_brk = false;
                 j++;
             }
             has_word = has_word || has_atom;
@@ -14719,7 +14736,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
      * inline, between a start and an end item (piece_of 2k and 2k + 1 for
      * piece k) where its edges take room and its border boxes are noted.
      * piece_of[i]: -1 for any other item. */
-    /* (inline content on items, CYBER_IFC=1: no pieces set up, the
+    /* (inline content on items, CYBER_IFC: no pieces set up, the
      * per-child loop not run) */
     bool ifc_done = ifc_eligible(ctx, idx);
     FlowPiece *fpieces = NULL;
