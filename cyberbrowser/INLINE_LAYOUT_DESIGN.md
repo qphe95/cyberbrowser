@@ -58,7 +58,23 @@ the image with its 1 px border (the old path sized its span and link from the im
 inside its row (the old path gave its inline-block wrapper a 16.9 px text line, so the player drew
 across the row's border).  Forced layouts: YouTube within noise, Wikipedia about 5 ms slower (min
 262 against 254 ms), likely the word-by-word intrinsic widths; the cached widths of step 5 take that
-back.  Left for the second part: floats inside the paragraph.  Goal: lay out a block's inline content the way browsers do, from
+back.  Left for the second part: floats inside the paragraph.
+
+Step 3c, second part: floats that are the block's own children (floats deeper in, inside inline
+elements, still take the old path).  The flow's placement is one function now, layout_place_float,
+which both paths call (the old path's results unchanged).  A float is a token with no width on the
+line: placed at its line's top when it fits beside what the line holds (CSS 2.1 section 9.5.1; the
+line's tokens then start past a left float), else after the line, and once one waits for the line's
+end the floats after it on that line wait too (none above an earlier one).  A line that floats
+narrow too much for its first content goes down past them (section 9.5), and a line's room is
+checked over its whole height (ifc_band_geometry: every float overlapping any of it), the line built
+again once in that room when it is narrower.  The same band check now places a block that avoids
+floats (overflow, flow-root, a table, flex, grid) with a definite height, in the old path too: it
+went beside the floats at its top only (floats-wrap-top-below-bfc-001l, whose inline-block
+reference the new path now lays out right).  Under CYBER_IFC=1: css/CSS2 5466, none lost (floats 12
+of the fixes); without it 5398 (three floats pages fixed by the block placement, none lost, seven
+screenshots changed).  YouTube and Wikipedia screenshots unchanged in both modes.  Forced layouts:
+YouTube within noise; Wikipedia under the switch about 6 ms over the old path (min 256 against 250).  Goal: lay out a block's inline content the way browsers do, from
 a per-paragraph list of items analysed once (text, white space, break opportunities, bidi levels,
 widths) and kept across layouts, so that right-to-left and mixed-direction text costs about what
 left-to-right does, line breaking never measures the same text twice, and the inline boxes a line

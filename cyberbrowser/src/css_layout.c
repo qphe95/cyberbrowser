@@ -12205,6 +12205,110 @@ static void layout_piece_end(LayoutContext *ctx, FlowPiece *fp, FlowCursor *cur,
     }
 }
 
+/* Place float c of a block flow whose content box starts at content_left,
+ * avail_width wide (CSS 2.1 section 9.5.1): laid out at the full width (an
+ * auto width shrinking to fit), its top no higher than top, below what it
+ * clears and no higher than an earlier float, as far to its side as the
+ * floats there leave room, else lower down; noted in floats (cap of them)
+ * and on the float stack, so lines and later blocks shrink around it. */
+static void layout_place_float(LayoutContext *ctx, int c, double content_left, double avail_width, double top,
+                               FloatRec *floats, int *nfloats, int cap)
+{
+    LayoutBox *child = layout_box(ctx, c);
+    /* Lay out the float's subtree at the full available width; the
+     * used (shrink-to-fit) width comes from the widest in-flow child
+     * extent (e.g. a fixed-width thumb frame inside). */
+    child->x = content_left + child->margin_left;
+    /* (below the margin of the block before it, which still collapses
+     * with what follows) */
+    child->y = top + child->margin_top;
+    if (!(child->s->width_set || child->s->width_percent > 0.0 || child->s->width_keyword)) {
+        /* An auto-width float shrinks to fit (§10.3.5) before its
+         * layout: a caption wraps instead of widening a floated
+         * table, auto grid tracks don't stretch, and an empty float
+         * is only its padding and border. */
+        double a = avail_width - child->margin_left - child->margin_right;
+        if (a < 0.0) a = 0.0;
+        child->width = layout_shrink_to_fit(ctx, c, a);
+    }
+    layout_update_content_sizes(child);
+    layout_node_serial(ctx, c);
+
+    double used = 0.0;
+    for (int k = ctx->tree.nodes[c].first_child_idx; k >= 0;
+         k = ctx->tree.nodes[k].next_sibling_idx) {
+        LayoutBox *kc = layout_box(ctx, k);
+        if (!layout_is_in_flow(kc)) continue;
+        double ext = kc->x + kc->width + kc->margin_right
+                   - (child->x + child->padding_left + child->s->border_left);
+        if (ext > used) used = ext;
+    }
+    bool fw_auto = !(child->s->width_set || child->s->width_percent > 0.0 || child->s->width_keyword);
+    if (fw_auto && used > 0.0 && used < child->width) {
+        child->width = used + child->padding_left + child->padding_right
+                      + child->s->border_left + child->s->border_right;
+        layout_update_content_sizes(child);
+    }
+
+    /* Where it goes (§9.5.1): below what it clears and no higher than
+     * an earlier float; as far to its side as the floats already
+     * there leave room, else lower down, past them. */
+    double content_right = content_left + avail_width;
+    double fy = child->y - child->margin_top;
+    const FloatRec *fl = ctx->float_stack + t_float_base;
+    int nf = ctx->float_count - t_float_base;
+    for (int fi = 0; fi < nf; fi++) {
+        bool match = child->s->clear == 3 || (child->s->clear && child->s->clear == fl[fi].side);
+        if (match && fl[fi].bottom > fy) fy = fl[fi].bottom;
+        if (fl[fi].top > fy) fy = fl[fi].top;
+    }
+    double mw = child->margin_left + child->width + child->margin_right;
+    double mh = child->margin_top + child->height + child->margin_bottom;
+    double fl_left = content_left, fl_right = content_right;
+    for (int guard = 0; guard < 64; guard++) {
+        fl_left = content_left;
+        fl_right = content_right;
+        double next = -1.0;
+        for (int fi = 0; fi < nf; fi++) {
+            if (fl[fi].bottom <= fy + 0.001 || fl[fi].top >= fy + (mh > 0.0 ? mh : 0.001) - 0.001) continue;
+            if (fl[fi].right <= content_left || fl[fi].left >= content_right) continue;
+            if (fl[fi].side == 1 && fl[fi].right > fl_left) fl_left = fl[fi].right;
+            if (fl[fi].side == 2 && fl[fi].left < fl_right) fl_right = fl[fi].left;
+            if (next < 0.0 || fl[fi].bottom < next) next = fl[fi].bottom;
+        }
+        if (mw <= fl_right - fl_left + 0.01 || next < 0.0) break;
+        fy = next;
+    }
+    double new_x = (child->s->float_side == 1)
+        ? fl_left + child->margin_left
+        : fl_right - child->margin_right - child->width;
+    double dx = new_x - child->x, dy = fy + child->margin_top - child->y;
+    if (dx != 0.0 || dy != 0.0) {
+        child->x = new_x;
+        child->y += dy;
+        layout_offset_subtree(ctx, c, dx, dy);
+    }
+
+    if (*nfloats < cap) {
+        FloatRec rec;
+        rec.left = child->x - child->margin_left;
+        rec.right = child->x + child->width + child->margin_right;
+        rec.top = child->y - child->margin_top;
+        rec.bottom = child->y + child->height + child->margin_bottom;
+        rec.side = child->s->float_side;
+        floats[(*nfloats)++] = rec;
+        /* Also publish on the shared stack so descendant block flows
+         * (siblings' inline content) shrink around this float. */
+        layout_float_push(ctx, &rec);
+        if (g_layout_debug & LDBG_FLOAT) {
+            HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
+            fprintf(stderr, "[FLOAT] idx=%d side=%d left=%.0f right=%.0f bottom=%.0f (tag=%s class=%.40s)\n",
+                    c, rec.side, rec.left, rec.right, rec.bottom,
+                    dn ? dn->tag_name : "?", dn ? layout_node_attribute(dn, "class") : "");
+        }
+    }
+}
+
 static void layout_block_flow_inner(LayoutContext *ctx, int idx);
 
 static void layout_block_flow(LayoutContext *ctx, int idx)
@@ -13351,7 +13455,8 @@ enum {
     IFC_OPEN,     /* an inline element's start edge: margin, border, padding */
     IFC_CLOSE,    /* its end edge */
     IFC_BR,       /* a forced line break */
-    IFC_ATOM      /* an atomic inline or image: its margin box, laid out already */
+    IFC_ATOM,     /* an atomic inline or image: its margin box, laid out already */
+    IFC_FLOAT     /* a float: placed where its line allows (no width on the line) */
 };
 
 typedef struct {
@@ -13425,11 +13530,18 @@ static bool ifc_is_atom(const LayoutBox *b, HtmlNode *n)
  * white-space normal, nothing that needs bidi, no generated content or
  * pseudo-element box (::first-letter), no atomic inline or image (the
  * flow's path does those, for now). */
-static bool ifc_inline_ok(LayoutContext *ctx, int p)
+static bool ifc_is_float(const LayoutBox *b)
+{
+    return b->s->float_side != 0 && b->s->position != CSS_POSITION_ABSOLUTE && b->s->position != CSS_POSITION_FIXED &&
+           (layout_is_block_flow(b->s->display) || b->s->display == CSS_DISPLAY_INLINE_BLOCK);
+}
+
+static bool ifc_inline_ok(LayoutContext *ctx, int p, bool top)
 {
     for (int c = ctx->tree.nodes[p].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
         LayoutBox *cb = layout_box(ctx, c);
         if (cb->s->display == CSS_DISPLAY_NONE) continue;
+        if (top && ifc_is_float(cb)) continue;   /* (the block's own floats; floats deeper in, for now, not) */
         if (!layout_is_in_flow(cb)) return false;
         HtmlNode *n = css_layout_box_node(ctx, c);
         if (!n) return false;
@@ -13442,7 +13554,7 @@ static bool ifc_inline_ok(LayoutContext *ctx, int p)
             !strcasecmp(n->tag_name, "img") || !strcasecmp(n->tag_name, "wbr") || layout_is_svg_box(n))
             return false;
         if (cb->s->direction == 1 || cb->s->unicode_bidi != 0 || layout_has_gen(ctx, c)) return false;
-        if (!ifc_inline_ok(ctx, c)) return false;
+        if (!ifc_inline_ok(ctx, c, false)) return false;
     }
     return true;
 }
@@ -13457,7 +13569,7 @@ static bool ifc_eligible(LayoutContext *ctx, int idx)
     const LayoutBox *b = layout_box(ctx, idx);
     if (b->s->white_space != 0 || b->s->line_clamp || b->s->text_overflow_ellipsis || layout_has_gen(ctx, idx)) return false;
     if (ctx->tree.nodes[idx].first_child_idx < 0) return false;
-    if (!ifc_inline_ok(ctx, idx)) return false;
+    if (!ifc_inline_ok(ctx, idx, true)) return false;
     return !(b->s->direction == 1 || b->s->unicode_bidi != 0 || layout_paragraph_walk(ctx, idx, NULL));
 }
 
@@ -13469,6 +13581,11 @@ static void ifc_collect(LayoutContext *ctx, int p, IfcItems *I, double avail_wid
         if (cb->s->display == CSS_DISPLAY_NONE) continue;
         HtmlNode *n = css_layout_box_node(ctx, c);
         layout_resolve_used_sizes(cb, layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx), avail_width, pct_h);
+        if (ifc_is_float(cb)) {
+            /* (out of the line: the spaces around it collapse together) */
+            ifc_put(I, c, 0, 0, 0.0, IFC_FLOAT);
+            continue;
+        }
         cb->text_lead_skip = 0;
         cb->wrap_first_w = cb->wrap_cont_w = cb->wrap_cont_x = cb->wrap_cont2_x = cb->wrap_cont2_w = 0.0;
         cb->wrap_cont2_line = 0;
@@ -13566,6 +13683,12 @@ static void ifc_intr_walk(LayoutContext *ctx, int p, IfcIntr *S)
         LayoutBox *cb = layout_box(ctx, c);
         if (cb->s->display == CSS_DISPLAY_NONE) continue;
         HtmlNode *n = css_layout_box_node(ctx, c);
+        if (ifc_is_float(cb)) {
+            double w = layout_intrinsic_contribution(ctx, c, S->want_max);
+            if (S->want_max) S->line += w;
+            else if (w > S->best) S->best = w;
+            continue;
+        }
         if (n->type == HTML_NODE_TEXT) {
             const char *raw = css_layout_node_text(ctx, n);
             const char *t = raw ? css_layout_box_text(ctx, c, raw) : NULL;
@@ -13682,11 +13805,34 @@ static double ifc_tok_right(LayoutContext *ctx, const IfcTok *t)
     return t->kind == IFC_CLOSE ? t->x + t->w - layout_box(ctx, t->box)->margin_right : t->x + t->w;
 }
 
+/* The room a line from y, h tall, has beside the floats of this formatting
+ * context that overlap any of it (a point at y when h is 0). */
+static void ifc_band_geometry(LayoutContext *ctx, double y, double h, double content_left, double avail_width,
+                              double *lx, double *la)
+{
+    const FloatRec *fl = ctx->float_stack + t_float_base;
+    int n = ctx->float_count - t_float_base;
+    if (h <= 0.0) {
+        layout_flow_line_geometry(fl, n, y, content_left, avail_width, lx, la);
+        return;
+    }
+    double content_right = content_left + avail_width, li = 0.0, ri = 0.0;
+    for (int i = 0; i < n; i++) {
+        if (!(fl[i].top < y + h - 0.001 && fl[i].bottom > y + 0.001)) continue;
+        if (fl[i].right <= content_left || fl[i].left >= content_right) continue;
+        if (fl[i].side == 1 && fl[i].right - content_left > li) li = fl[i].right - content_left;
+        if (fl[i].side != 1 && content_right - fl[i].left > ri) ri = content_right - fl[i].left;
+    }
+    *lx = content_left + li;
+    *la = avail_width - li - ri;
+    if (*la < 0.0) *la = 0.0;
+}
+
 /* Lay out block idx's inline content on items (when ifc_eligible): its
  * lines from cur->y, the cursor left at the last line's top with its height
  * in line_box, as the flow's per-child path leaves it. */
 static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double avail_width, double indent0,
-                       FlowCursor *cur, bool *any_placed)
+                       FlowCursor *cur, bool *any_placed, FloatRec *floats, int *nfloats, int fcap)
 {
     LayoutBox *blk = layout_box(ctx, idx);
     IfcItems I = { 0 };
@@ -13699,22 +13845,60 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
         ctx->text_frags = (LayoutTextFragList *)calloc((size_t)ctx->tree.count, sizeof(LayoutTextFragList));
         ctx->text_frags_n = ctx->text_frags ? ctx->tree.count : 0;
     }
-    const FloatRec *fl = ctx->float_stack + t_float_base;
-    int nfl = ctx->float_count - t_float_base;
     bool any = false;   /* (anything that makes a line: a word, an edge, a break) */
-    for (int k = 0; k < I.n && !any; k++) any = I.t[k].kind != IFC_SPACE && I.t[k].kind != IFC_MARK;
+    for (int k = 0; k < I.n && !any; k++)
+        any = I.t[k].kind != IFC_SPACE && I.t[k].kind != IFC_MARK && I.t[k].kind != IFC_FLOAT;
+    /* (no line: its floats where the content starts) */
+    for (int k = 0; !any && k < I.n; k++)
+        if (I.t[k].kind == IFC_FLOAT) layout_place_float(ctx, I.t[k].box, content_left, avail_width, cur->y, floats, nfloats, fcap);
+    int *deferred = (int *)malloc(((size_t)I.n + 1) * sizeof(int));
+    int ndef = 0;
     int cap_lines = 16, nlines = 0;
     double *ltop = (double *)malloc((size_t)cap_lines * sizeof(double)), *lh = (double *)malloc((size_t)cap_lines * sizeof(double));
     double y = cur->y, last_x = content_left;
     int i = 0;
-    while (any && ltop && lh && i < I.n) {
+    double band_h = 0.0;   /* (a line tried again: the height of the floats' band it must clear) */
+    while (any && ltop && lh && deferred && i < I.n) {
         double lx = content_left, la = avail_width;
-        layout_flow_line_geometry(fl, nfl, y, content_left, avail_width, &lx, &la);
+        ifc_band_geometry(ctx, y, band_h, content_left, avail_width, &lx, &la);
         double x = lx + (nlines == 0 ? indent0 : 0.0);
         int t0 = i;
+        double restart = -1.0;
         bool word = false;   /* (a word on it: spaces after it are kept, a group that does not fit breaks) */
         while (i < I.n) {
             IfcTok *t = &I.t[i];
+            if (t->kind == IFC_FLOAT && t->drop) { i++; continue; }   /* (placed, the line started over) */
+            if (t->kind == IFC_FLOAT && ndef > 0) {
+                /* (after one that waits for the line's end: in order, not above it) */
+                t->drop = 1;
+                deferred[ndef++] = t->box;
+                i++;
+                continue;
+            }
+            if (t->kind == IFC_FLOAT) {
+                t->drop = 1;
+                /* A float at this line's top when it fits beside what the line
+                 * holds (CSS 2.1 section 9.5.1), the line then starting past a
+                 * left one; else after the line. */
+                int fc0 = ctx->float_count, nf0 = *nfloats;
+                layout_place_float(ctx, t->box, content_left, avail_width, y, floats, nfloats, fcap);
+                double lx2 = content_left, la2 = avail_width;
+                layout_flow_line_geometry(ctx->float_stack + t_float_base, ctx->float_count - t_float_base, y,
+                                          content_left, avail_width, &lx2, &la2);
+                double used = x - lx;
+                if (word && used > la2 + 0.01 && ctx->float_count > fc0) {
+                    ctx->float_count = fc0;
+                    *nfloats = nf0;
+                    deferred[ndef++] = t->box;
+                } else if (lx2 != lx) {
+                    for (int k = t0; k < i; k++) I.t[k].x += lx2 - lx;
+                    x += lx2 - lx;
+                }
+                lx = lx2;
+                la = la2;
+                i++;
+                continue;
+            }
             if (t->kind == IFC_BR) {
                 t->x = x;
                 t->line = nlines;
@@ -13740,7 +13924,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
             int j = i;
             double ww = 0.0;
             bool has_word = false, has_atom = false;
-            while (j < I.n && I.t[j].kind != IFC_SPACE && I.t[j].kind != IFC_BR) {
+            while (j < I.n && I.t[j].kind != IFC_SPACE && I.t[j].kind != IFC_BR && I.t[j].kind != IFC_FLOAT) {
                 /* (an atomic inline: a break opportunity before and after it) */
                 if (I.t[j].kind == IFC_ATOM && (has_word || has_atom)) break;
                 if (has_atom && I.t[j].kind != IFC_CLOSE) break;
@@ -13751,6 +13935,19 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
             }
             has_word = has_word || has_atom;
             if (word && x + ww > lx + la + 0.01) break;
+            /* (a line that floats narrow too much for its first content goes
+             * down past them, CSS 2.1 section 9.5) */
+            if (!word && x + ww > lx + la + 0.01 && la < avail_width - 0.01) {
+                double next = -1.0;
+                for (int fi = t_float_base; fi < ctx->float_count; fi++) {
+                    double fb = ctx->float_stack[fi].bottom;
+                    if (fb > y + 0.01 && (next < 0.0 || fb < next)) next = fb;
+                }
+                if (next > 0.0) {
+                    restart = next;
+                    break;
+                }
+            }
             for (int k = i; k < j; k++) {
                 I.t[k].x = x;
                 I.t[k].line = nlines;
@@ -13759,6 +13956,29 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
             word = word || has_word;
             i = j;
         }
+        if (restart > 0.0) {
+            /* (the line again, lower down: its spaces kept or dropped anew) */
+            for (int k = t0; k < i; k++)
+                if (I.t[k].kind != IFC_FLOAT) I.t[k].drop = 0;
+            i = t0;
+            y = restart;
+            band_h = 0.0;
+            continue;
+        }
+        /* (the line as tall as it is: the floats beside any of it narrow it;
+         * once, built again in that room) */
+        if (band_h <= 0.0) {
+            double h = ifc_line_height(ctx, idx, &I, t0, i), blx, bla;
+            ifc_band_geometry(ctx, y, h, content_left, avail_width, &blx, &bla);
+            if (h > 0.0 && (blx > lx + 0.01 || blx + bla < lx + la - 0.01)) {
+                for (int k = t0; k < i; k++)
+                    if (I.t[k].kind != IFC_FLOAT) I.t[k].drop = 0;
+                i = t0;
+                band_h = h;
+                continue;
+            }
+        }
+        band_h = 0.0;
         /* (spaces at the line's end are removed, the inline boxes that close
          * after them too: their edges move back to the last word) */
         {
@@ -13801,7 +14021,12 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
         y += lh[nlines];
         nlines++;
         last_x = x;
+        /* (floats that did not fit beside it: below it) */
+        for (int q = 0; q < ndef; q++) layout_place_float(ctx, deferred[q], content_left, avail_width, y, floats, nfloats, fcap);
+        ndef = 0;
     }
+    for (int q = 0; deferred && q < ndef; q++) layout_place_float(ctx, deferred[q], content_left, avail_width, y, floats, nfloats, fcap);
+    free(deferred);
     if (!ltop || !lh) nlines = 0;
     /* Text boxes: fragments per line (consecutive tokens of one box on one
      * line), the box around them; a break, a mark, where it is. */
@@ -13810,6 +14035,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
         int k1 = k;
         while (k1 < I.n && I.t[k1].box == b && I.t[k1].kind != IFC_OPEN && I.t[k1].kind != IFC_CLOSE) k1++;
         if (k1 == k) { k++; continue; }   /* (an edge: its element's, below) */
+        if (I.t[k].kind == IFC_FLOAT) { k = k1; continue; }   /* (placed already) */
         LayoutBox *bb = layout_box(ctx, b);
         HtmlNode *tn = css_layout_box_node(ctx, b);
         int L = nlines > 0 ? (I.t[k].line < nlines ? I.t[k].line : nlines - 1) : -1;
@@ -14127,7 +14353,9 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
     FloatRec floats[32];
     int nfloats = 0;
 
-    if (ifc_done) ifc_layout(ctx, idx, content_left, avail_width, indent0, &cur, &any_placed);
+    if (ifc_done)
+        ifc_layout(ctx, idx, content_left, avail_width, indent0, &cur, &any_placed, floats, &nfloats,
+                   (int)(sizeof(floats) / sizeof(floats[0])));
 
     for (int i = 0; !ifc_done && i < nkids; i++) {
         int c = kids[i];
@@ -14166,98 +14394,8 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
             cur.line_box = 0.0;
             cur.x = content_left;
 
-            /* Lay out the float's subtree at the full available width; the
-             * used (shrink-to-fit) width comes from the widest in-flow child
-             * extent (e.g. a fixed-width thumb frame inside). */
-            child->x = content_left + child->margin_left;
-            /* (below the margin of the block before it, which still collapses
-             * with what follows) */
-            child->y = cur.y + pending_mb + child->margin_top;
-            if (!(child->s->width_set || child->s->width_percent > 0.0 || child->s->width_keyword)) {
-                /* An auto-width float shrinks to fit (§10.3.5) before its
-                 * layout: a caption wraps instead of widening a floated
-                 * table, auto grid tracks don't stretch, and an empty float
-                 * is only its padding and border. */
-                double a = avail_width - child->margin_left - child->margin_right;
-                if (a < 0.0) a = 0.0;
-                child->width = layout_shrink_to_fit(ctx, c, a);
-            }
-            layout_update_content_sizes(child);
-            layout_node_serial(ctx, c);
-
-            double used = 0.0;
-            for (int k = ctx->tree.nodes[c].first_child_idx; k >= 0;
-                 k = ctx->tree.nodes[k].next_sibling_idx) {
-                LayoutBox *kc = layout_box(ctx, k);
-                if (!layout_is_in_flow(kc)) continue;
-                double ext = kc->x + kc->width + kc->margin_right
-                           - (child->x + child->padding_left + child->s->border_left);
-                if (ext > used) used = ext;
-            }
-            bool fw_auto = !(child->s->width_set || child->s->width_percent > 0.0 || child->s->width_keyword);
-            if (fw_auto && used > 0.0 && used < child->width) {
-                child->width = used + child->padding_left + child->padding_right
-                              + child->s->border_left + child->s->border_right;
-                layout_update_content_sizes(child);
-            }
-
-            /* Where it goes (§9.5.1): below what it clears and no higher than
-             * an earlier float; as far to its side as the floats already
-             * there leave room, else lower down, past them. */
-            double content_right = content_left + avail_width;
-            double fy = child->y - child->margin_top;
-            const FloatRec *fl = ctx->float_stack + t_float_base;
-            int nf = ctx->float_count - t_float_base;
-            for (int fi = 0; fi < nf; fi++) {
-                bool match = child->s->clear == 3 || (child->s->clear && child->s->clear == fl[fi].side);
-                if (match && fl[fi].bottom > fy) fy = fl[fi].bottom;
-                if (fl[fi].top > fy) fy = fl[fi].top;
-            }
-            double mw = child->margin_left + child->width + child->margin_right;
-            double mh = child->margin_top + child->height + child->margin_bottom;
-            double fl_left = content_left, fl_right = content_right;
-            for (int guard = 0; guard < 64; guard++) {
-                fl_left = content_left;
-                fl_right = content_right;
-                double next = -1.0;
-                for (int fi = 0; fi < nf; fi++) {
-                    if (fl[fi].bottom <= fy + 0.001 || fl[fi].top >= fy + (mh > 0.0 ? mh : 0.001) - 0.001) continue;
-                    if (fl[fi].right <= content_left || fl[fi].left >= content_right) continue;
-                    if (fl[fi].side == 1 && fl[fi].right > fl_left) fl_left = fl[fi].right;
-                    if (fl[fi].side == 2 && fl[fi].left < fl_right) fl_right = fl[fi].left;
-                    if (next < 0.0 || fl[fi].bottom < next) next = fl[fi].bottom;
-                }
-                if (mw <= fl_right - fl_left + 0.01 || next < 0.0) break;
-                fy = next;
-            }
-            double new_x = (child->s->float_side == 1)
-                ? fl_left + child->margin_left
-                : fl_right - child->margin_right - child->width;
-            double dx = new_x - child->x, dy = fy + child->margin_top - child->y;
-            if (dx != 0.0 || dy != 0.0) {
-                child->x = new_x;
-                child->y += dy;
-                layout_offset_subtree(ctx, c, dx, dy);
-            }
-
-            if (nfloats < (int)(sizeof(floats) / sizeof(floats[0]))) {
-                FloatRec rec;
-                rec.left = child->x - child->margin_left;
-                rec.right = child->x + child->width + child->margin_right;
-                rec.top = child->y - child->margin_top;
-                rec.bottom = child->y + child->height + child->margin_bottom;
-                rec.side = child->s->float_side;
-                floats[nfloats++] = rec;
-                /* Also publish on the shared stack so descendant block flows
-                 * (siblings' inline content) shrink around this float. */
-                layout_float_push(ctx, &rec);
-                if (g_layout_debug & LDBG_FLOAT) {
-                    HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
-                    fprintf(stderr, "[FLOAT] idx=%d side=%d left=%.0f right=%.0f bottom=%.0f (tag=%s class=%.40s)\n",
-                            c, rec.side, rec.left, rec.right, rec.bottom,
-                            dn ? dn->tag_name : "?", dn ? layout_node_attribute(dn, "class") : "");
-                }
-            }
+            layout_place_float(ctx, c, content_left, avail_width, cur.y + pending_mb, floats, &nfloats,
+                               (int)(sizeof(floats) / sizeof(floats[0])));
             continue;
         }
 
@@ -14355,8 +14493,10 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                 double need = auto_w ? 0.0 : sized ? child->width : layout_intrinsic_width(ctx, c, false);
                 double y = child->y, lx = content_left, la = avail_width;
                 double content_right = content_left + avail_width;
+                /* (a definite height: beside every float over all of it) */
+                double bh = child->s->height_set && child->s->height_percent <= 0.0 ? child->height : 0.0;
                 for (int guard = 0; guard < 64; guard++) {
-                    layout_flow_line_geometry(fl, nfl, y, content_left, avail_width, &lx, &la);
+                    ifc_band_geometry(ctx, y, bh, content_left, avail_width, &lx, &la);
                     /* (a float edge only where a float intrudes: else the margin, a negative one too) */
                     double left = lx > content_left + 0.01 && lx > content_left + child->margin_left ? lx : content_left + child->margin_left;
                     double right = lx + la < content_right - 0.01 && lx + la < content_right - child->margin_right ? lx + la : content_right - child->margin_right;
