@@ -354,6 +354,10 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * (inline-flex / inline-grid / inline-table; inline-block uses
      * CSS_DISPLAY_INLINE_BLOCK).  Cleared by blockification. */
     unsigned char inline_level;
+    /* Absolutely positioned (or fixed) and inline-level before
+     * blockification: its static position is where it would be on its line
+     * (CSS 2.1 section 10.3.7), not below it. */
+    unsigned char abs_inline;
     /* Block-in-inline, set by blockification: 2 for an inline element
      * with block-level children, split around them (its parent's flow lays
      * out the inline content between them as pieces of it, the blocks as
@@ -465,6 +469,11 @@ typedef struct LayoutBox {
     unsigned char height_pct_unresolved;
     /* Text node whose collapsible leading space was dropped at a line start. */
     unsigned char text_lead_skip;
+    /* An absolutely positioned box's static position, from the line it is
+     * on (inline layout on items), relative to its parent's box; used and
+     * cleared by the absolute positioning pass. */
+    unsigned char has_static;
+    double static_dx, static_dy;
     double opacity_eff;
 } LayoutBox;
 

@@ -8768,6 +8768,7 @@ static void style_finish_box_em(bool em_defer, LayoutBox *box, const LayoutBox *
                                          parent->s->display == CSS_DISPLAY_GRID);
         if (container_item || box->s->float_side != 0 ||
             box->s->position == CSS_POSITION_ABSOLUTE || box->s->position == CSS_POSITION_FIXED) {
+            box->s->abs_inline = !container_item && box->s->float_side == 0;
             if (box->s->display == CSS_DISPLAY_INLINE || box->s->display == CSS_DISPLAY_INLINE_BLOCK)
                 box->s->display = CSS_DISPLAY_BLOCK;
             box->s->inline_level = 0;
@@ -13465,7 +13466,8 @@ enum {
     IFC_BR,       /* a forced line break */
     IFC_ATOM,     /* an atomic inline or image: its margin box, laid out already */
     IFC_FLOAT,    /* a float: placed where its line allows (no width on the line) */
-    IFC_CTL       /* a bidi control unicode-bidi stands for: no width, keeps runs apart when reordered */
+    IFC_CTL,      /* a bidi control unicode-bidi stands for: no width, keeps runs apart when reordered */
+    IFC_ABS       /* an absolutely positioned box: no width, where its static position is */
 };
 
 typedef struct {
@@ -13544,6 +13546,7 @@ static bool ifc_put(IfcItems *I, int box, uint32_t a, uint32_t b, double w, int 
     k->start = a;
     k->end = b;
     k->w = w;
+    k->x = I->x0;   /* (where the content starts, for one on no line) */
     k->kind = (unsigned char)kind;
     if (I->gather) {
         k->cp0 = ifc_cp_upto(I, a);
@@ -13589,8 +13592,9 @@ static bool ifc_is_atom(const LayoutBox *b, HtmlNode *n)
 /* Whether box p's in-flow children, and theirs inside inline elements, are
  * what this path lays out: text in any white-space, inline elements (and
  * ::before / ::after), line breaks, atomic inlines and images, and (top: the
- * block's own) floats, in any direction; no ::first-letter box (its
- * own sizing, the flow's for now), no float or positioned box inside an
+ * block's own) floats, in any direction, absolutely positioned boxes at any
+ * depth (left out: placed after, from their static position); no
+ * ::first-letter box (its own sizing, the flow's for now), no float inside an
  * inline element. */
 static bool ifc_is_float(const LayoutBox *b)
 {
@@ -13603,8 +13607,8 @@ static bool ifc_inline_ok(LayoutContext *ctx, int p, bool top)
     for (int c = ctx->tree.nodes[p].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
         LayoutBox *cb = layout_box(ctx, c);
         if (cb->s->display == CSS_DISPLAY_NONE) continue;
+        if (!layout_is_in_flow(cb)) continue;   /* (absolutely positioned: placed after, from its static position) */
         if (top && ifc_is_float(cb)) continue;   /* (the block's own floats; floats deeper in, for now, not) */
-        if (!layout_is_in_flow(cb)) return false;
         HtmlNode *n = css_layout_box_node(ctx, c);
         if (!n) return false;
         if (ifc_is_atom(cb, n)) continue;   /* (what it holds is its own) */
@@ -13639,6 +13643,13 @@ static void ifc_collect(LayoutContext *ctx, int p, IfcItems *I, double avail_wid
     for (int c = ctx->tree.nodes[p].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
         LayoutBox *cb = layout_box(ctx, c);
         if (cb->s->display == CSS_DISPLAY_NONE) continue;
+        if (!layout_is_in_flow(cb)) {
+            /* (out of the line, the spaces around it collapsing together:
+             * where it is, for its static position) */
+            cb->has_static = 0;
+            ifc_put(I, c, 0, 0, 0.0, IFC_ABS);
+            continue;
+        }
         HtmlNode *n = css_layout_box_node(ctx, c);
         layout_resolve_used_sizes(cb, layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx), avail_width, pct_h);
         if (ifc_is_float(cb)) {
@@ -13801,7 +13812,7 @@ static void ifc_intr_walk(LayoutContext *ctx, int p, IfcIntr *S)
 {
     for (int c = ctx->tree.nodes[p].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
         LayoutBox *cb = layout_box(ctx, c);
-        if (cb->s->display == CSS_DISPLAY_NONE) continue;
+        if (!layout_is_in_flow(cb)) continue;
         HtmlNode *n = css_layout_box_node(ctx, c);
         if (ifc_is_float(cb)) {
             double w = layout_intrinsic_contribution(ctx, c, S->want_max);
@@ -14155,7 +14166,7 @@ static bool ifc_edge_on(const IfcItems *I, int e, bool open, int t0, int t1)
 static double ifc_bidi_line(LayoutContext *ctx, IfcItems *I, IfcBidi *B, int t0, int t1, int L, double x)
 {
 #define IFC_UNIT(t) ((t)->kind == IFC_WORD || ((t)->kind == IFC_SPACE && !(t)->drop) || (t)->kind == IFC_ATOM || \
-                     (t)->kind == IFC_MARK || (t)->kind == IFC_BR || (t)->kind == IFC_CTL)
+                     (t)->kind == IFC_MARK || (t)->kind == IFC_BR || (t)->kind == IFC_CTL || (t)->kind == IFC_ABS)
     for (int q = t0; q < t1; q++)
         if (IFC_UNIT(&I->t[q]))
             for (int e = B->tel[q]; e >= 0; e = B->el[e].par) B->el[e].uline = L;
@@ -14274,7 +14285,8 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
     }
     bool any = false;   /* (anything that makes a line: a word, an edge, a break) */
     for (int k = 0; k < I.n && !any; k++)
-        any = I.t[k].kind != IFC_SPACE && I.t[k].kind != IFC_MARK && I.t[k].kind != IFC_FLOAT && I.t[k].kind != IFC_CTL;
+        any = I.t[k].kind != IFC_SPACE && I.t[k].kind != IFC_MARK && I.t[k].kind != IFC_FLOAT && I.t[k].kind != IFC_CTL &&
+              I.t[k].kind != IFC_ABS;
     /* (no line: its floats where the content starts) */
     for (int k = 0; !any && k < I.n; k++)
         if (I.t[k].kind == IFC_FLOAT) layout_place_float(ctx, I.t[k].box, content_left, avail_width, cur->y, floats, nfloats, fcap);
@@ -14414,7 +14426,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
         {
             int f0 = i;
             while (f0 > t0 && (I.t[f0 - 1].kind == IFC_SPACE || I.t[f0 - 1].kind == IFC_CLOSE || I.t[f0 - 1].kind == IFC_MARK ||
-                               I.t[f0 - 1].kind == IFC_CTL))
+                               I.t[f0 - 1].kind == IFC_CTL || I.t[f0 - 1].kind == IFC_ABS))
                 f0--;
             if (f0 < i) {
                 double xx = I.t[f0].x;
@@ -14487,7 +14499,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
         int k1 = k;
         while (k1 < I.n && I.t[k1].box == b && I.t[k1].kind != IFC_OPEN && I.t[k1].kind != IFC_CLOSE) k1++;
         if (k1 == k) { k++; continue; }   /* (an edge: its element's, below) */
-        if (I.t[k].kind == IFC_FLOAT) { k = k1; continue; }   /* (placed already) */
+        if (I.t[k].kind == IFC_FLOAT || I.t[k].kind == IFC_ABS) { k = k1; continue; }   /* (placed already; placed after) */
         LayoutBox *bb = layout_box(ctx, b);
         HtmlNode *tn = css_layout_box_node(ctx, b);
         int L = nlines > 0 ? (I.t[k].line < nlines ? I.t[k].line : nlines - 1) : -1;
@@ -14592,7 +14604,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
         bool has_text = false;
         for (int q = el->tok0; q < el->tok1; q++) {
             const IfcTok *t = &I.t[q];
-            if (t->drop || t->kind == IFC_CTL) continue;
+            if (t->drop || t->kind == IFC_CTL || t->kind == IFC_ABS) continue;
             if (t->kind == IFC_WORD || t->kind == IFC_SPACE) has_text = true;
             if (t->kind == IFC_ATOM) {
                 const LayoutBox *ab = layout_box(ctx, t->box);
@@ -14701,6 +14713,35 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
             }
         }
         layout_update_content_sizes(eb);
+    }
+    /* Absolutely positioned boxes: their static position (CSS 2.1 section
+     * 10.3.7), relative to their parent, for the positioning pass: one
+     * inline-level before blockification where it is on its line, at the
+     * line's top; a block-level one at the content's left, below its line
+     * when something comes before it there. */
+    for (int k = 0; k < I.n; k++) {
+        if (I.t[k].kind != IFC_ABS) continue;
+        LayoutBox *ab = layout_box(ctx, I.t[k].box);
+        int p = ctx->tree.nodes[I.t[k].box].parent_idx;
+        if (p < 0) continue;
+        double sx = content_left, sy = cur->y;
+        if (nlines > 0) {
+            int L = I.t[k].line < nlines ? I.t[k].line : nlines - 1;
+            sy = ltop[L];
+            if (ab->s->abs_inline) {
+                sx = I.t[k].x;
+            } else {
+                for (int q = k - 1; q >= 0 && I.t[q].line == L; q--)
+                    if (I.t[q].kind == IFC_WORD || I.t[q].kind == IFC_ATOM || (I.t[q].kind == IFC_SPACE && !I.t[q].drop)) {
+                        sy = ltop[L] + lh[L];
+                        break;
+                    }
+            }
+        }
+        const LayoutBox *pb = layout_box(ctx, p);
+        ab->static_dx = sx - pb->x;
+        ab->static_dy = sy - pb->y;
+        ab->has_static = 1;
     }
     if (nlines > 0) {
         cur->y = ltop[nlines - 1];
@@ -19162,6 +19203,13 @@ static void layout_static_position(LayoutContext *ctx, int idx, double *sx, doub
     int p = ctx->tree.nodes[idx].parent_idx;
     if (p < 0) { *sx = 0.0; *sy = 0.0; return; }
     LayoutBox *P = layout_box(ctx, p);
+    LayoutBox *B = layout_box(ctx, idx);
+    if (B->has_static) {
+        /* (from the line it is on: inline layout on items) */
+        *sx = P->x + B->static_dx;
+        *sy = P->y + B->static_dy;
+        return;
+    }
     *sx = P->x + P->s->border_left + P->padding_left;
     *sy = P->y + P->s->border_top + P->padding_top;
     if (P->s->display == CSS_DISPLAY_FLEX || P->s->display == CSS_DISPLAY_GRID) return;
@@ -19185,6 +19233,7 @@ static void layout_position_absolute_box(LayoutContext *ctx, int idx)
     LayoutBox *box = layout_box(ctx, idx);
     double static_x, static_y;
     layout_static_position(ctx, idx, &static_x, &static_y);
+    box->has_static = 0;
 
     /* The containing block is the padding box of the nearest positioned
      * ancestor; fixed boxes use the viewport (scroll position 0). */

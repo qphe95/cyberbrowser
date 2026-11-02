@@ -154,6 +154,22 @@ before.  The three replays identical to 4b.  Timing, new default against CYBER_I
 min / median): Wikipedia 255 / 283 against 262 / 287 ms; YouTube 197 / 231 against 197 / 234 (15
 rounds).
 
+Step 5b: absolutely positioned (and fixed) boxes at any depth of the paragraph no longer keep it
+off the item path.  Each is a zero-width token (IFC_ABS) where it is in the content, out of the
+line (the spaces around it collapse together), and after the lines are placed it gets its static
+position (CSS 2.1 section 10.3.7), kept on its box relative to its parent (LayoutBox.static_dx /
+static_dy, so later shifts carry it) for the positioning pass, which uses it instead of guessing
+from the box before it, then clears it: one that was inline-level before blockification
+(LayoutStyle.abs_inline, set there) where it is on its line, at the line's top; a block-level one
+at the content's left edge, below its line when something comes before it there.  Tokens of a
+paragraph with no line now sit at the content's start, not at x 0 (abspos-inline-008 and
+toogle-abspos-on-relpos-inline-child, a relative span holding only an abspos box, which an earlier
+try lost).  css/CSS2 5509, none lost (abspos 3, normal-flow 3, positioning 1, floats 1, text 1).
+YouTube and Wikipedia identical; forced-RTL Wikipedia differs only where its list items' trailing
+space (the visual left of a right-to-left line) now hangs as it should, where the old path left a
+gap.  Timing against 5a (9 rounds, min / median): Wikipedia 256 / 262 against 257 / 267 ms,
+YouTube 205 / 217 against 205 / 228.
+
 Goal: lay out a block's inline content the way browsers do, from
 a per-paragraph list of items analysed once (text, white space, break opportunities, bidi levels,
 widths) and kept across layouts, so that right-to-left and mixed-direction text costs about what
