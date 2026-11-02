@@ -329,7 +329,29 @@ static void *scratch_get(size_t need)
     return t_scratch;
 }
 
+static int bidi_resolve_one(const uint32_t *cps, int n, int base_level, uint8_t *levels);
+
 int bidi_resolve(const uint32_t *cps, int n, int base_level, uint8_t *levels)
+{
+    /* P1: a paragraph ends after each paragraph separator; each is resolved
+     * on its own (a neutral before one does not see past it). */
+    int first = -1;
+    for (int s = 0; s < n || first < 0;) {
+        int e = s;
+        while (e < n) {
+            uint32_t c = cps[e++];
+            if (c == 0x2029 || c == 0x0A || c == 0x0D || c == 0x1C || c == 0x1D || c == 0x1E || c == 0x85) break;
+        }
+        int para = bidi_resolve_one(cps + s, e - s, base_level, levels + s);
+        if (para < 0) return para;
+        if (first < 0) first = para;
+        s = e;
+        if (e >= n) break;
+    }
+    return first;
+}
+
+static int bidi_resolve_one(const uint32_t *cps, int n, int base_level, uint8_t *levels)
 {
     if (n <= 0) return base_level < 0 ? 0 : base_level;
     size_t N = (size_t)n;
@@ -502,9 +524,19 @@ int bidi_resolve(const uint32_t *cps, int n, int base_level, uint8_t *levels)
         for (int k = 0; k < len; k++) t[k] = cls[seq[k]];
         resolve_sequence(cps, orig, seq, t, len, sos, eos, levels, pairs, ~0u);
     }
-    /* (what X9 removed: the level before it, for unbroken runs) */
-    for (int i = 0; i < n; i++)
-        if (is_removed(orig[i])) levels[i] = i > 0 ? levels[i - 1] : (uint8_t)para;
+    /* (what X9 removed: the level before it, for unbroken runs; an
+     * embedding or override initiator the level of what it starts, the
+     * next character's, so it goes with that, not before the run) */
+    for (int i = 0; i < n; i++) {
+        if (!is_removed(orig[i])) continue;
+        int c = orig[i];
+        if (c == BIDI_RLE || c == BIDI_LRE || c == BIDI_RLO || c == BIDI_LRO) {
+            int j = i + 1;
+            while (j < n && is_removed(orig[j])) j++;
+            if (j < n && orig[j] != BIDI_B) { levels[i] = levels[j]; continue; }
+        }
+        levels[i] = i > 0 ? levels[i - 1] : (uint8_t)para;
+    }
     return para;
 }
 

@@ -20,11 +20,13 @@ uint32_t bidi_mirror(uint32_t cp);
  * skipped, stopping at a paragraph separator): 0, 1, or -1 when none. */
 int bidi_first_strong_level(const uint32_t *cps, int n);
 
-/* The embedding level of each of cps[0, n), one paragraph (rules X1 - I2),
- * into levels[n].  base_level 0 or 1, or -1 for P2 / P3 (0 when no strong
+/* The embedding level of each of cps[0, n) (rules X1 - I2), into
+ * levels[n], each paragraph (P1: up to and including a paragraph separator)
+ * on its own.  base_level 0 or 1, or -1 for P2 / P3 (0 when no strong
  * character).  Characters X9 removes (embedding controls, BN) get the
- * level of the character before them.  Returns the paragraph level, or -1
- * when out of memory. */
+ * level of the character before them, an embedding or override initiator
+ * that of the one after.  Returns the first paragraph's level, or -1 when
+ * out of memory. */
 int bidi_resolve(const uint32_t *cps, int n, int base_level, uint8_t *levels);
 
 /* L1 on the line cps[start, end) of a resolved paragraph: segment and

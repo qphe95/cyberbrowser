@@ -839,6 +839,13 @@ bool css_layout_stylesheets_pending(void);
  * which also starts the downloads of the web fonts they declare. */
 void css_layout_install_prefetched_sheets(void);
 
+/* Box idx's client rects (CSSOM View getClientRects), up to max of them
+ * into out as x, y, width, height: an inline box one per line it is on (its
+ * pieces, else its text's fragments grouped by line, its start edge on the
+ * first and its end edge on the last), any other box its border box.  The
+ * number of them. */
+int css_layout_client_rects(const LayoutContext *ctx, int idx, double (*out)[4], int max);
+
 /* Access the resolved LayoutBox for a DOM node index, or NULL if not found. */
 LayoutBox* css_layout_box_for_node(LayoutContext *ctx, int dom_node_idx);
 

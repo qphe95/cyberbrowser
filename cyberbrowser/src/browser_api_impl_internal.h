@@ -432,6 +432,7 @@ extern const size_t js_performance_observer_proto_funcs_count;
 extern JSClassDef js_dom_rect_class_def;
 extern JSClassDef js_dom_rect_read_only_class_def;
 GCValue js_element_getBoundingClientRect(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_getClientRects(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_dom_rect_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
 GCValue js_dom_rect_read_only_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
 GCValue js_dom_rect_from_rect(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);

@@ -21,6 +21,11 @@ typedef struct {
 
 bool layout_query_element_box(JSContextHandle ctx, GCValue element, LayoutQueryBox *out);
 
+/* The element's client rects (getClientRects) from the cached layout, up to
+ * max as x, y, width, height: one per line an inline element is on, else
+ * its border box; none without a box. */
+int layout_query_client_rects(JSContextHandle ctx, GCValue element, double (*out)[4], int max);
+
 /* The element's used font size in px from the cached layout (computed
  * values for getComputedStyle when only a relative declaration is known). */
 bool layout_query_font_size(JSContextHandle ctx, GCValue element, double *px);

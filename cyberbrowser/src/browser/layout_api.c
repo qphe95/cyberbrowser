@@ -1522,6 +1522,12 @@ bool layout_query_element_box(JSContextHandle ctx, GCValue element, LayoutQueryB
     return true;
 }
 
+int layout_query_client_rects(JSContextHandle ctx, GCValue element, double (*out)[4], int max)
+{
+    int idx = lq_query(ctx, element);
+    return idx < 0 ? 0 : css_layout_client_rects(&g_lq_layout, idx, out, max);
+}
+
 static bool is_tag(NodeId id, const char *tag)
 {
     return id && dom_kind(id) == DOM_K_ELEMENT && strcasecmp(dom_tag_name(id), tag) == 0;

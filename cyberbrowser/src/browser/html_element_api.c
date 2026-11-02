@@ -16,7 +16,6 @@
  * - Reflected attributes per HTML: hidden, title, lang, dir, accessKey,
  *   draggable, translate, inert, tabIndex, contentEditable.
  * - insertAdjacentHTML / insertAdjacentElement / insertAdjacentText.
- * - getClientRects(): the border box as a one-entry list (empty with no box).
  * - checkVisibility(): false without a box or when visibility is hidden.
  * - scrollIntoView / scroll / scrollTo / scrollBy: no-ops (no scrolling).
  */
@@ -136,12 +135,6 @@ static const char k_html_element_js[] =
 "    adjacent(this, where, frag);\n"
 "  });\n"
 "\n"
-"  method('getClientRects', function(){\n"
-"    var r = this.getBoundingClientRect(), list = [];\n"
-"    if (r && (r.width > 0 || r.height > 0)) list.push(r);\n"
-"    list.item = function(i){ return this[i] || null; };\n"
-"    return list;\n"
-"  });\n"
 "  method('checkVisibility', function(opts){\n"
 "    var r = this.getBoundingClientRect();\n"
 "    if (!r || (r.width === 0 && r.height === 0 && this.getClientRects().length === 0 && !this.firstChild)) return false;\n"

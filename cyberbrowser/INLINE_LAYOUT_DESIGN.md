@@ -1,6 +1,6 @@
 # Inline layout on paragraph items
 
-Status: steps 3 to 6 done: all inline layout on items, the old inline path removed, fragments and pieces in the flow record (steps 1 and 2 measured and dropped, below).
+Status: steps 3 to 7 done: all inline layout on items, the old inline path removed, fragments and pieces in the flow record, bidi step 6 (steps 1 and 2 measured and dropped, below).
 
 Step 3a (css_layout.c, "Inline formatting on items"): a block whose in-flow content is only text
 and inline elements without left or right margin, border or padding, in white-space normal, with
@@ -294,6 +294,37 @@ text change: most of the page is still laid out again, its blocks beside floats 
 call with floats placed, and a box laid out with them is not a reuse root).  Forced layouts against
 5f (9 rounds): Wikipedia 236 / 244 against 237 / 245 ms, YouTube 191 / 198 against 192 / 200.
 
+Step 7: bidi step 6 (BIDI_DESIGN.md) on the item path.
+- White space: a run of text that is only bidi controls (Bidi_Control: ALM, LRM, RLM, U+202A-202E,
+  U+2066-2069) is as if not there for collapsing (ifc_bidi_controls_only), in layout and in the
+  intrinsic widths, so the spaces either side of it collapse (white-space-collapsing-bidi-001).
+- Levels (bidi.c): P1 at last, each paragraph (to and including a paragraph separator: a kept
+  newline, U+2029, ...) resolved on its own, where neutrals had looked past it (bidi-breaking-002);
+  an embedding or override initiator removed by X9 takes the level of what it starts, not of what
+  precedes it, so an inline that starts with RLO has no stray piece at the outer level (bidi-011).
+- U+2028 and U+2029 force a line break in any white-space (UAX #14 class BK; bidi-breaking-003).
+- unicode-bidi: plaintext: each line's paragraph its own level (P2, P3 over its paragraph), text-align
+  start and end from it.  unicode-bidi: inherit takes the parent's value (unicode-bidi-004).
+- A right-to-left table's columns from its right (table_span_x; direction-applies-to-013, -014).
+- An inline-level absolutely positioned box in a right-to-left block: its right edge at its static
+  position on the line (the right content edge when there is no line), no longer always the
+  block's right edge.
+- getClientRects natively (css_layout_client_rects): an inline element one rect per line (its
+  pieces, else its text's fragments and atomic inlines grouped by line, the content area tall, its
+  start edge on the first and end edge on the last); any other box its border box.
+- An invalid white-space value is ignored (it had reset to normal; bidi-breaking-002's
+  "white-space: pre; white-space: pre-lines").
+- Generated content already took part in bidi like any text (checked, nothing to change).
+css/CSS2 5553 -> 5560 (bidi-text 6, text 1), none lost; the other screenshots as at step 6 but
+bidi-003 and -004, still failing.  YouTube and Wikipedia replays identical; forced-RTL Wikipedia
+differs only by its now mirrored infobox tables (a right-to-left table, right).  Unit tests pass.
+Timing against step 6 (9 rounds, min / median): Wikipedia 236 / 249 against 237 / 246 ms, YouTube
+190 / 201 against 192 / 199, forced-RTL Wikipedia 259 / 269 against 262 / 270; forced RTL is still
+about 23 ms over left to right.  Still failing in bidi-text: bidi-003 and -004 (which of two
+collapsible spaces around a control is kept, and so on which side of a span's edge it shows),
+bidi-010, -010a, -010b (piece edges in nested overrides, a few pixels).  Found on the way: a CSS
+escape such as \5d0 in a content string parses as U+0005.
+
 Goal: lay out a block's inline content the way browsers do, from
 a per-paragraph list of items analysed once (text, white space, break opportunities, bidi levels,
 widths) and kept across layouts, so that right-to-left and mixed-direction text costs about what
@@ -452,7 +483,7 @@ YouTube and Wikipedia replays, LTR and forced-RTL timing)
    still keeps most of a page from reuse is floats.
 7. **Bidi step 6** (BIDI_DESIGN.md) on the new path: `plaintext` per paragraph, white space at bidi
    boundaries (now in the text), generated content in bidi, the static position of an inline
-   abspos box in a right-to-left line, getClientRects per fragment.
+   abspos box in a right-to-left line, getClientRects per fragment.  Done.
 
 Sizes: steps 1, 2, 4 and 6 are a few hundred lines each; step 3 is a rewrite of the inline flow
 (the per-child loop of layout_block_flow_inner is about 900 lines with many page-specific rules,

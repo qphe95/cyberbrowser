@@ -3952,6 +3952,36 @@ GCValue js_element_getBoundingClientRect(JSContextHandle ctx, GCValue this_val, 
     return obj;
 }
 
+static GCValue js_rect_list_item(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    uint32_t i = 0;
+    if (argc < 1 || JS_ToUint32(ctx, &i, argv[0]) < 0) return JS_NULL;
+    GCValue v = JS_GetPropertyUint32(ctx, this_val, i);
+    return JS_IsUndefined(v) ? JS_NULL : v;
+}
+
+// Element.prototype.getClientRects - one rect per line an inline element is
+// on, else its border box (none without a box), from the cached layout.
+GCValue js_element_getClientRects(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    double r[64][4];
+    int n = layout_query_client_rects(ctx, this_val, r, 64);
+    GCValue list = JS_NewArray(ctx);
+    for (int i = 0; i < n; i++) {
+        DOMRectDataHandle rect = dom_rect_create();
+        if (SAFE_IS_NULL(rect)) break;
+        SAFE_SET(rect, DOMRectDataHandle, x, r[i][0]);
+        SAFE_SET(rect, DOMRectDataHandle, y, r[i][1]);
+        SAFE_SET(rect, DOMRectDataHandle, width, r[i][2]);
+        SAFE_SET(rect, DOMRectDataHandle, height, r[i][3]);
+        dom_rect_compute_bounds(rect);
+        GCValue obj = JS_NewObjectClass(ctx, js_dom_rect_class_id);
+        JS_SetOpaqueHandle(obj, rect);
+        JS_SetPropertyUint32(ctx, list, (uint32_t)i, obj);
+    }
+    JS_SetPropertyStr(ctx, list, "item", JS_NewCFunction(ctx, js_rect_list_item, "item", 1));
+    return list;
+}
+
 // DOMRect constructor
 GCValue js_dom_rect_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
     DOMRectDataHandle rect = dom_rect_create();

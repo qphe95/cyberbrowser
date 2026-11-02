@@ -73,7 +73,7 @@ YouTube's screenshot identical; replay layout times unchanged (YouTube about 220
 about 275 ms in both step 4 and step 5 builds, timed alternately).  Still failing in bidi-text:
 white space at the edges of reversed runs (bidi-003, white-space-collapsing-bidi-*: step 6), line
 breaking with bidi (bidi-breaking-*, line-breaking-bidi-*), and bidi-007..010 (float heights a pixel
-off, overflow).  Step 6 planned.
+off, overflow).  Step 6 done on the item path (INLINE_LAYOUT_DESIGN.md, step 7).
 
 Speed of the right-to-left path (after step 5).  Measured on the Wikipedia replay with
 `*{direction:rtl!important}` injected, which puts every paragraph through the bidi pass (English

@@ -1904,6 +1904,9 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // getBoundingClientRect method
     JS_SetPropertyStr(ctx, element_proto, "getBoundingClientRect",
         JS_NewCFunction(ctx, js_element_getBoundingClientRect, "getBoundingClientRect", 0));
+    // getClientRects method
+    JS_SetPropertyStr(ctx, element_proto, "getClientRects",
+        JS_NewCFunction(ctx, js_element_getClientRects, "getClientRects", 0));
     // getElementsByTagName method
     JS_SetPropertyStr(ctx, element_proto, "getElementsByTagName",
         JS_NewCFunction(ctx, js_element_get_elements_by_tag_name, "getElementsByTagName", 1));
