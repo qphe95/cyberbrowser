@@ -126,6 +126,22 @@ the blocks still on the old path 6 ms.  No single part closes it; what does is t
 of the design: code points gathered and levels looked up while the tokens are made (one walk, no
 matching), and the levels cache shared between layout threads.  That is step 4b.
 
+Step 4b: a paragraph that needs bidi has its code points gathered while its tokens are made
+(ifc_collect: each text box's text decoded once, U+FFFC per atomic inline, U+2029 per `<br>`, the
+controls unicode-bidi stands for pushed with their zero-width tokens where they are), each token
+noting its code-point range, so levels go straight onto tokens and a word is cut only where its own
+range changes level; bidi_para_collect and the matching walk are gone from the item path.  The
+levels cache is shared by the layout threads (8192 slots, a lock per stripe of 64, 16 MB at most),
+where it was per thread and emptied at 8 MB.  Everything identical to step 4 (css/CSS2 5500 under
+the switch and 5398 without, all screenshots; the three replays).  Timing (9 alternating rounds,
+min / median): forced RTL 284 / 319 ms at step 4, 270 / 281 now; plain 245-252 / 262-265 in every
+build.  Cache hits went from about half to two thirds of the code points (the misses are the first
+layout's).  What is left of the gap, about 15-25 ms, is spread thin (CPU over the replay's
+layouts): levels 9 (resolving 5, hashing and copying hits 4), levels onto tokens 5, line finishing
+8, element setup 3, gathering 4, and 5 for the blocks still on the old path (mixed block and inline
+content, ::first-letter); each is a few ms, and the larger cuts are the later steps (levels kept with
+the paragraph data across layouts, step 6; those blocks on items, step 5).
+
 Goal: lay out a block's inline content the way browsers do, from
 a per-paragraph list of items analysed once (text, white space, break opportunities, bidi levels,
 widths) and kept across layouts, so that right-to-left and mixed-direction text costs about what

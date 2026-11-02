@@ -12536,8 +12536,11 @@ static inline void bump_free(void *p) { (void)p; }
 
 /* Resolved levels by paragraph text: a paragraph laid out again with the
  * same code points and base direction takes its levels from here instead
- * of running UAX #9 again.  Per thread, direct-mapped by a hash of the text
- * (the text itself compared on a hit); emptied when it holds 8 MB. */
+ * of running UAX #9 again.  Shared by the layout threads (a paragraph is
+ * laid out by whichever thread takes its subtree, which changes from one
+ * layout to the next), direct-mapped by a hash of the text (the text itself
+ * compared on a hit), a lock per stripe of slots; nothing more is kept once
+ * it holds 16 MB, an entry replaced frees its room. */
 typedef struct {
     uint64_t h;
     int n, base, para;
@@ -12545,9 +12548,11 @@ typedef struct {
     uint8_t *lv;
 } BidiLevelsEntry;
 
-#define BIDI_LEVELS_SLOTS 4096
-static _Thread_local BidiLevelsEntry *t_lvc;
-static _Thread_local size_t t_lvc_bytes;
+#define BIDI_LEVELS_SLOTS 8192
+#define BIDI_LEVELS_STRIPES 64
+static BidiLevelsEntry g_lvc[BIDI_LEVELS_SLOTS];
+static pthread_mutex_t g_lvc_mu[BIDI_LEVELS_STRIPES] = { [0 ... BIDI_LEVELS_STRIPES - 1] = PTHREAD_MUTEX_INITIALIZER };
+static _Atomic size_t g_lvc_bytes;
 
 static uint64_t bidi_text_hash(const uint32_t *cp, int n, int base)
 {
@@ -12556,44 +12561,43 @@ static uint64_t bidi_text_hash(const uint32_t *cp, int n, int base)
     return h;
 }
 
-static void bidi_levels_flush(void)
-{
-    for (int i = 0; t_lvc && i < BIDI_LEVELS_SLOTS; i++) {
-        free(t_lvc[i].cp);
-        t_lvc[i].cp = NULL;
-        t_lvc[i].lv = NULL;
-        t_lvc[i].n = 0;
-    }
-    t_lvc_bytes = 0;
-}
-
 /* The levels of P's text at base (-1: from its text), into lv: from the
  * cache, else resolved and kept.  The paragraph level, or -1. */
 static int bidi_levels_cached(const uint32_t *cp, int n, int base, uint8_t *lv)
 {
-    if (!t_lvc) t_lvc = (BidiLevelsEntry *)calloc(BIDI_LEVELS_SLOTS, sizeof(BidiLevelsEntry));
     uint64_t h = bidi_text_hash(cp, n, base);
-    BidiLevelsEntry *e = t_lvc ? &t_lvc[(h >> 20) & (BIDI_LEVELS_SLOTS - 1)] : NULL;
-    if (e && e->cp && e->h == h && e->n == n && e->base == base && memcmp(e->cp, cp, (size_t)n * sizeof(uint32_t)) == 0) {
+    unsigned slot = (unsigned)(h >> 20) & (BIDI_LEVELS_SLOTS - 1);
+    BidiLevelsEntry *e = &g_lvc[slot];
+    pthread_mutex_t *mu = &g_lvc_mu[slot & (BIDI_LEVELS_STRIPES - 1)];
+    pthread_mutex_lock(mu);
+    if (e->cp && e->h == h && e->n == n && e->base == base && memcmp(e->cp, cp, (size_t)n * sizeof(uint32_t)) == 0) {
         memcpy(lv, e->lv, (size_t)n);
-        return e->para;
+        int para = e->para;
+        pthread_mutex_unlock(mu);
+        return para;
     }
+    pthread_mutex_unlock(mu);
     int para = bidi_resolve(cp, n, base, lv);
-    if (!e || para < 0) return para;
+    if (para < 0) return para;
     size_t sz = (size_t)n * (sizeof(uint32_t) + 1);
-    if (t_lvc_bytes + sz > ((size_t)8 << 20)) bidi_levels_flush();
-    if (e->cp) t_lvc_bytes -= (size_t)e->n * (sizeof(uint32_t) + 1);
-    uint32_t *mem = (uint32_t *)realloc(e->cp, sz);
-    if (!mem) { free(e->cp); e->cp = NULL; e->n = 0; return para; }
-    e->cp = mem;
-    e->lv = (uint8_t *)(mem + n);
-    memcpy(e->cp, cp, (size_t)n * sizeof(uint32_t));
-    memcpy(e->lv, lv, (size_t)n);
-    e->h = h;
-    e->n = n;
-    e->base = base;
-    e->para = para;
-    t_lvc_bytes += sz;
+    pthread_mutex_lock(mu);
+    size_t old = e->cp ? (size_t)e->n * (sizeof(uint32_t) + 1) : 0;
+    if (atomic_load(&g_lvc_bytes) - old + sz <= ((size_t)16 << 20)) {
+        uint32_t *mem = (uint32_t *)realloc(e->cp, sz);
+        if (mem) {
+            e->cp = mem;
+            e->lv = (uint8_t *)(mem + n);
+            memcpy(e->cp, cp, (size_t)n * sizeof(uint32_t));
+            memcpy(e->lv, lv, (size_t)n);
+            e->h = h;
+            e->n = n;
+            e->base = base;
+            e->para = para;
+            atomic_fetch_add(&g_lvc_bytes, sz);
+            atomic_fetch_sub(&g_lvc_bytes, old);
+        }
+    }
+    pthread_mutex_unlock(mu);
     return para;
 }
 
@@ -13449,6 +13453,7 @@ typedef struct {
     unsigned char kept;   /* a space white-space keeps (pre-wrap): not removed at a line's ends */
     unsigned char level;  /* its bidi level (a paragraph that needs bidi) */
     int line;
+    int cp0, cp1;         /* its code points in the paragraph's (when gathered) */
 } IfcTok;
 
 enum {
@@ -13474,7 +13479,55 @@ typedef struct {
     int nel, elcap;
     bool space_before;    /* the last text was a collapsible space (or nothing yet) */
     double x0, y0;        /* where atomic inlines are laid out before their line is known */
+    /* The paragraph's code points, gathered when it needs bidi (as
+     * bidi_para_collect gathers them): the text boxes' text, U+FFFC per
+     * atomic inline, U+2029 per line break element, the controls
+     * unicode-bidi stands for; each with its byte in its text box. */
+    bool gather;
+    uint32_t *cp, *cbyte;
+    int ncp, cpcap;
+    const char *bt;       /* the text box being cut into tokens (NULL: none) */
+    uint32_t bcur;        /* its bytes gathered so far */
 } IfcItems;
+
+static bool ifc_cp_reserve(IfcItems *I, int more)
+{
+    if (I->ncp + more <= I->cpcap) return true;
+    int nc = I->cpcap ? I->cpcap : 256;
+    while (nc < I->ncp + more) nc *= 2;
+    uint32_t *a = (uint32_t *)realloc(I->cp, (size_t)nc * sizeof(uint32_t));
+    if (a) I->cp = a;
+    uint32_t *b = a ? (uint32_t *)realloc(I->cbyte, (size_t)nc * sizeof(uint32_t)) : NULL;
+    if (b) I->cbyte = b;
+    if (!a || !b) {
+        I->gather = false;   /* (out of memory: no bidi for it) */
+        return false;
+    }
+    I->cpcap = nc;
+    return true;
+}
+
+static void ifc_cp_put(IfcItems *I, uint32_t cp, uint32_t byte)
+{
+    if (!I->gather || !ifc_cp_reserve(I, 1)) return;
+    I->cp[I->ncp] = cp;
+    I->cbyte[I->ncp++] = byte;
+}
+
+/* The text box's code points up to byte to; the count gathered. */
+static int ifc_cp_upto(IfcItems *I, uint32_t to)
+{
+    if (!I->gather || !I->bt) return I->ncp;
+    const unsigned char *t = (const unsigned char *)I->bt;
+    while (I->bcur < to && I->gather) {
+        const unsigned char *p = t + I->bcur;
+        uint32_t off = I->bcur;
+        uint32_t c = *p < 0x80 ? *p++ : bidi_utf8_next(&p, t + to);
+        I->bcur = (uint32_t)(p - t);
+        ifc_cp_put(I, c, off);
+    }
+    return I->ncp;
+}
 
 static bool ifc_put(IfcItems *I, int box, uint32_t a, uint32_t b, double w, int kind)
 {
@@ -13492,6 +13545,10 @@ static bool ifc_put(IfcItems *I, int box, uint32_t a, uint32_t b, double w, int 
     k->end = b;
     k->w = w;
     k->kind = (unsigned char)kind;
+    if (I->gather) {
+        k->cp0 = ifc_cp_upto(I, a);
+        k->cp1 = ifc_cp_upto(I, b);
+    }
     return true;
 }
 
@@ -13602,6 +13659,10 @@ static void ifc_collect(LayoutContext *ctx, int p, IfcItems *I, double avail_wid
              * keep newlines as forced breaks; nowrap and pre do not wrap) */
             unsigned char ws = cb->s->white_space;
             bool keep_sp = ws == 2 || ws == 3, keep_nl = ws >= 2, wrap = ws != 1 && ws != 2;
+            if (I->gather && ifc_cp_reserve(I, (int)len)) {
+                I->bt = t;
+                I->bcur = 0;
+            }
             for (uint32_t i = 0; i < len;) {
                 uint32_t j = i;
                 if (keep_nl && t[i] == '\n') {
@@ -13636,9 +13697,13 @@ static void ifc_collect(LayoutContext *ctx, int p, IfcItems *I, double avail_wid
                 }
                 i = j;
             }
+            ifc_cp_upto(I, len);
             if (I->n == n0) ifc_put(I, c, 0, 0, 0.0, IFC_MARK);   /* (nothing of it kept: where it is) */
+            I->bt = NULL;
         } else if (ifc_is_br(n)) {
+            ifc_cp_put(I, 0x2029, 0);   /* (a forced break ends a bidi paragraph) */
             ifc_put(I, c, 0, 0, 0.0, IFC_BR);
+            if (I->gather) I->t[I->n - 1].cp0 = I->ncp - 1;
             I->space_before = true;
         } else if (ifc_is_atom(cb, n)) {
             /* (laid out here, at the content start: placed on its line later,
@@ -13648,7 +13713,9 @@ static void ifc_collect(LayoutContext *ctx, int p, IfcItems *I, double avail_wid
             cb->y = I->y0 + cb->margin_top;
             layout_update_content_sizes(cb);
             layout_node_serial(ctx, c);
+            ifc_cp_put(I, 0xFFFC, 0);
             ifc_put(I, c, 0, 0, cb->margin_left + cb->width + cb->margin_right, IFC_ATOM);
+            if (I->gather) I->t[I->n - 1].cp0 = I->ncp - 1;
             I->space_before = false;
         } else {
             /* (an inline split around a line break by layout_blockify: this
@@ -13675,11 +13742,24 @@ static void ifc_collect(LayoutContext *ctx, int p, IfcItems *I, double avail_wid
                 rw = sw;
             }
             if (lw != 0.0) ifc_put(I, c, 0, 0, lw, IFC_OPEN);
+            /* (the controls its unicode-bidi stands for: tokens of no width
+             * at their place in the text, which keep runs apart) */
+            uint32_t ctl[2];
+            int nctl = I->gather ? bidi_controls(cb, true, ctl) : 0;
+            for (int q = 0; q < nctl; q++) {
+                ifc_cp_put(I, ctl[q], 0);
+                if (ifc_put(I, -1, 0, 0, 0.0, IFC_CTL)) I->t[I->n - 1].cp0 = I->ncp - 1;
+            }
             int inner = I->n;
             ifc_collect(ctx, c, I, avail_width, pct_h);
             if (I->n == inner && lw == 0.0 && rw == 0.0) ifc_put(I, c, 0, 0, 0.0, IFC_MARK);
             if (rw != 0.0) ifc_put(I, c, 0, 0, rw, IFC_CLOSE);
             I->el[e].tok1 = I->n;
+            nctl = I->gather ? bidi_controls(cb, false, ctl) : 0;
+            for (int q = 0; q < nctl; q++) {
+                ifc_cp_put(I, ctl[q], 0);
+                if (ifc_put(I, -1, 0, 0, 0.0, IFC_CTL)) I->t[I->n - 1].cp0 = I->ncp - 1;
+            }
         }
     }
 }
@@ -13895,120 +13975,74 @@ static void ifc_band_geometry(LayoutContext *ctx, double y, double h, double con
 static bool ifc_bidi_levels(LayoutContext *ctx, int idx, IfcItems *I, int *para)
 {
     LayoutBox *blk = layout_box(ctx, idx);
-    if (!(blk->s->direction == 1 || blk->s->unicode_bidi != 0 || layout_paragraph_walk(ctx, idx, NULL))) return false;
+    if (!I->gather || I->ncp == 0) return false;
     bool rtl_el = false;   /* (an inline element right to left: its edges swap, levels or not) */
     for (int e = 0; e < I->nel && !rtl_el; e++) rtl_el = layout_box(ctx, I->el[e].box)->s->direction == 1;
-    bump_reset();
-    BidiPara P = { 0 };
-    int maxitems = bidi_count_items(ctx, idx) + 1, nitems = 0;
-    int *items = (int *)bump_alloc((size_t)maxitems * sizeof(int));
-    int *item_cp = (int *)bump_alloc((size_t)maxitems * sizeof(int));
-    uint8_t *lv = NULL;
-    int *nmap = NULL;
-    IfcItems J = { 0 };
-    bool ok = false;
-    if (!items || !item_cp) goto out;
-    int nopen = blk->s->unicode_bidi == 3 || blk->s->unicode_bidi == 4 ? 1 : 0;
-    if (nopen) bidi_para_put(&P, blk->s->direction == 1 ? 0x202E : 0x202D, -1, 0);
-    bidi_para_collect(ctx, idx, &P, items, item_cp, &nitems);
-    if (nopen) bidi_para_put(&P, 0x202C, -1, 0);
-    if (P.n == 0) goto out;
     if (blk->s->direction != 1 && !rtl_el) {
         bool rtl = false;
-        for (int i = 0; i < P.n && !rtl; i++) {
-            uint32_t c = P.cp[i];
+        for (int i = 0; i < I->ncp && !rtl; i++) {
+            uint32_t c = I->cp[i];
             if (c < 0x590) continue;
             int k = bidi_class(c);
             rtl = k == BIDI_R || k == BIDI_AL || k == BIDI_AN || k == BIDI_RLE || k == BIDI_RLO || k == BIDI_RLI ||
                   k == BIDI_FSI;
         }
-        if (!rtl) goto out;
+        if (!rtl) return false;
     }
-    lv = (uint8_t *)bump_alloc((size_t)P.n);
-    if (!lv) goto out;
-    *para = bidi_levels_cached(P.cp, P.n, blk->s->unicode_bidi == 5 ? -1 : blk->s->direction, lv);
+    uint8_t *lv = (uint8_t *)malloc((size_t)I->ncp);
+    int *nmap = NULL;
+    IfcItems J = { 0 };
+    bool ok = false;
+    if (!lv) return false;
+    *para = bidi_levels_cached(I->cp, I->ncp, blk->s->unicode_bidi == 5 ? -1 : blk->s->direction, lv);
     if (*para < 0) goto out;
     if (!rtl_el && !(*para & 1)) {   /* (a right-to-left paragraph: its indent at the right) */
         bool odd = false;
-        for (int i = 0; i < P.n && !odd; i++) odd = lv[i] & 1;
+        for (int i = 0; i < I->ncp && !odd; i++) odd = lv[i] & 1;
         if (!odd) goto out;
     }
-    /* (levels set in place; the tokens copied, from where it starts, only
-     * when a word is cut or a control goes in) */
-    int c = 0;   /* (the code points passed) */
-    int nbox = -2;
-    HtmlNode *nnode = NULL;
-#define IFC_COPY(q)                                                                  \
-    if (!nmap) {                                                                     \
-        nmap = (int *)malloc(((size_t)I->n + 1) * sizeof(int));                      \
-        J.cap = I->n + 16;                                                           \
-        J.t = (IfcTok *)malloc((size_t)J.cap * sizeof(IfcTok));                      \
-        if (!nmap || !J.t) goto out;                                                 \
-        for (int z = 0; z < (q); z++) nmap[z] = z;                                   \
-        memcpy(J.t, I->t, (size_t)(q) * sizeof(IfcTok));                            \
-        J.n = (q);                                                                   \
-        nmap[(q)] = (q);                                                             \
-    }
+    /* (each token its first code point's level; a word whose level changes
+     * cut there, the tokens then copied) */
+    int ncut = 0;
     for (int q = 0; q < I->n; q++) {
-        IfcTok t = I->t[q];
-        if (nmap) nmap[q] = J.n;
-        HtmlNode *tn = NULL;
-        if (t.kind == IFC_WORD || t.kind == IFC_SPACE || t.kind == IFC_BR) {
-            if (t.box != nbox) {
-                nbox = t.box;
-                nnode = css_layout_box_node(ctx, t.box);
-            }
-            tn = nnode;
-        }
-        bool text = tn && tn->type == HTML_NODE_TEXT;
-        int f = -1;   /* (its first code point) */
-        if (text || t.kind == IFC_ATOM) {
-            int k = c;
-            while (k < P.n && !(P.box[k] == t.box && (t.kind == IFC_ATOM || P.byte[k] >= t.start))) k++;
-            if (k < P.n) {
-                for (; c < k; c++) {
-                    if (P.box[c] >= 0 || P.cp[c] == 0x2029) continue;
-                    IFC_COPY(q);
-                    if (!ifc_put(&J, -1, 0, 0, 0.0, IFC_CTL)) goto out;
-                    J.t[J.n - 1].level = lv[c];
-                }
-                f = k;
-            }
-        }
-        t.level = (unsigned char)(f >= 0 ? lv[f] : *para);
-        if (f >= 0 && text && t.kind == IFC_WORD) {
-            const char *tx = NULL;
-            uint32_t s0 = t.start;
-            int k = f;
-            uint8_t level = lv[f];
-            for (; k < P.n && P.box[k] == t.box && P.byte[k] < t.end; k++) {
-                if (lv[k] == level) continue;
-                IFC_COPY(q);
-                if (!tx) tx = css_layout_box_text(ctx, t.box, css_layout_node_text(ctx, tn));
-                if (!ifc_put(&J, t.box, s0, P.byte[k], ifc_width(ctx, t.box, tx, s0, P.byte[k]), IFC_WORD)) goto out;
-                J.t[J.n - 1].level = level;
-                s0 = P.byte[k];
-                level = lv[k];
-            }
-            if (s0 != t.start) {
-                t.start = s0;
-                t.w = ifc_width(ctx, t.box, tx, s0, t.end);
-            }
-            t.level = level;
-            c = k;
-        } else if (f >= 0) {
-            c = f + 1;
-            while (text && c < P.n && P.box[c] == t.box && P.byte[c] < t.end) c++;
-        }
-        if (nmap) {
-            if (!ifc_put(&J, 0, 0, 0, 0.0, 0)) goto out;
-            J.t[J.n - 1] = t;
-        } else {
-            I->t[q].level = t.level;
-        }
+        IfcTok *t = &I->t[q];
+        bool own = t->kind == IFC_WORD || t->kind == IFC_SPACE || t->kind == IFC_BR || t->kind == IFC_ATOM || t->kind == IFC_CTL;
+        t->level = (unsigned char)(own && t->cp0 < I->ncp ? lv[t->cp0] : *para);
+        if (t->kind == IFC_WORD)
+            for (int k = t->cp0 + 1; k < t->cp1; k++)
+                if (lv[k] != lv[t->cp0]) { ncut++; break; }
     }
-#undef IFC_COPY
-    if (nmap) {
+    if (ncut) {
+        nmap = (int *)malloc(((size_t)I->n + 1) * sizeof(int));
+        if (!nmap) goto out;
+        for (int q = 0; q < I->n; q++) {
+            IfcTok t = I->t[q];
+            nmap[q] = J.n;
+            bool cut = false;
+            if (t.kind == IFC_WORD)
+                for (int k = t.cp0 + 1; k < t.cp1 && !cut; k++) cut = lv[k] != lv[t.cp0];
+            if (cut) {
+                const char *tx = css_layout_box_text(ctx, t.box, css_layout_node_text(ctx, css_layout_box_node(ctx, t.box)));
+                int k0 = t.cp0;
+                for (int k = t.cp0 + 1; k <= t.cp1; k++) {
+                    if (k < t.cp1 && lv[k] == lv[k0]) continue;
+                    uint32_t b0 = I->cbyte[k0], b1 = k < t.cp1 ? I->cbyte[k] : t.end;
+                    if (!ifc_put(&J, 0, 0, 0, 0.0, 0)) goto out;
+                    IfcTok *p = &J.t[J.n - 1];
+                    *p = t;
+                    p->start = b0;
+                    p->end = b1;
+                    p->cp0 = k0;
+                    p->cp1 = k;
+                    p->w = ifc_width(ctx, t.box, tx, b0, b1);
+                    p->level = lv[k0];
+                    k0 = k;
+                }
+            } else {
+                if (!ifc_put(&J, 0, 0, 0, 0.0, 0)) goto out;
+                J.t[J.n - 1] = t;
+            }
+        }
         nmap[I->n] = J.n;
         for (int e = 0; e < I->nel; e++) {
             I->el[e].tok0 = nmap[I->el[e].tok0];
@@ -14024,12 +14058,7 @@ static bool ifc_bidi_levels(LayoutContext *ctx, int idx, IfcItems *I, int *para)
 out:
     free(J.t);
     free(nmap);
-    bump_free(lv);
-    bump_free(items);
-    bump_free(item_cp);
-    bump_free(P.cp);
-    bump_free(P.box);
-    bump_free(P.byte);
+    free(lv);
     return ok;
 }
 
@@ -14213,9 +14242,14 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
     LayoutBox *blk = layout_box(ctx, idx);
     IfcItems I = { 0 };
     I.space_before = true;
+    I.gather = blk->s->direction == 1 || blk->s->unicode_bidi != 0 || layout_paragraph_walk(ctx, idx, NULL);
+    /* (an override on the block itself: around all of it) */
+    bool blk_ovr = I.gather && (blk->s->unicode_bidi == 3 || blk->s->unicode_bidi == 4);
+    if (blk_ovr) ifc_cp_put(&I, blk->s->direction == 1 ? 0x202E : 0x202D, 0);
     I.x0 = content_left;
     I.y0 = cur->y;
     ifc_collect(ctx, idx, &I, avail_width, layout_pct_base_height(ctx, idx));
+    if (blk_ovr) ifc_cp_put(&I, 0x202C, 0);
     IfcBidi B;
     memset(&B, 0, sizeof(B));
     bool bidi = ifc_bidi_levels(ctx, idx, &I, &B.para) && ifc_bidi_init(&B, &I);
@@ -14661,6 +14695,8 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
     free(lh);
     free(I.t);
     free(I.el);
+    free(I.cp);
+    free(I.cbyte);
     ifc_bidi_free(&B);
 }
 
