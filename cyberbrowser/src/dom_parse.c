@@ -749,15 +749,22 @@ static uint32_t build_element(Builder *b, DomTok *t, uint32_t parent, bool paren
         g_dom.attrs[s] = (DomAttrList){ t->attrs, t->nattr, t->nattr, t->attr_blk };
         t->attrs = NULL; t->nattr = 0; t->attr_blk = 0;      /* ownership moved */
         DomAttrList *l = &g_dom.attrs[s];
-        for (int i = 0; i < l->n; i++)
-            if (l->a[i].name == b->id_name) {
+        static CssAtom class_name;
+        if (!class_name) { css_atom_reserve(1); class_name = css_atom_intern("class", 5); }
+        bool seen_id = false, seen_class = false;
+        for (int i = 0; i < l->n && !(seen_id && seen_class); i++) {
+            if (l->a[i].name == b->id_name && !seen_id) {
+                seen_id = true;
                 if (l->a[i].value.len) {
                     css_atom_reserve(1);
                     g_dom.id_atom[s] = css_atom_intern(l->a[i].value.s, l->a[i].value.len);
                     dom_id_index_note(s);
                 }
-                break;
+            } else if (l->a[i].name == class_name && !seen_class) {
+                seen_class = true;
+                dom_cls_note(s, l->a[i].value.s, l->a[i].value.len);
             }
+        }
     }
     parent = stream_parent(b, parent, parent_fresh, s);
     dom_link_append(dom_id_of(parent), dom_id_of(s));

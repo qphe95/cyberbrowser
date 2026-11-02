@@ -243,10 +243,33 @@ void image_api_notify(JSContextHandle ctx, const char *url)
     static int dbg = -1;
     if (dbg < 0) dbg = getenv("CYBER_DEBUG_IMG") ? 1 : 0;
     int nimg = 0, nmatch = 0, nfired = 0;
+    /* (the URL's last path segment: an <img> whose src and srcset hold it
+     * nowhere, in text resolving cannot change, shows another image; only
+     * the rest have their URL resolved and compared) */
+    const char *q = url + strcspn(url, "?#");
+    const char *seg = q;
+    while (seg > url && seg[-1] != '/') seg--;
+    size_t seg_len = (size_t)(q - seg);
     for (uint32_t s = 1; s < g_dom.count; s++) {
         NodeId id = dom_id_of(s);
         if (!dom_valid(id) || !is_img(id)) continue;
         nimg++;
+        if (seg_len) {
+            bool maybe = false;
+            const char *raw[2] = { dom_get_attr_str(id, "src"), dom_get_attr_str(id, "srcset") };
+            for (int r = 0; r < 2 && !maybe; r++) {
+                const char *t = raw[r];
+                if (!t) continue;
+                /* (text resolving may rewrite: non-ASCII, escapes, white
+                 * space inside a src; srcset's spaces separate candidates) */
+                for (const char *p = t; *p && !maybe; p++)
+                    if ((unsigned char)*p >= 0x80 || *p == '\\' || *p == '%' || (r == 0 && (*p == ' ' || *p == '\t')))
+                        maybe = true;
+                for (const char *h = t; !maybe && (h = strchr(h, seg[0])) != NULL; h++)
+                    if (strncmp(h, seg, seg_len) == 0) maybe = true;
+            }
+            if (!maybe) continue;
+        }
         char *u = img_url_of(id);
         if (dbg == 1 && u) fprintf(stderr, "[IMG] cand w=%d c=%d %.100s\n", dom_has_wrapper(id), dom_is_connected(id), u);
         if (!dom_has_wrapper(id) || !dom_is_connected(id)) { free(u); continue; }

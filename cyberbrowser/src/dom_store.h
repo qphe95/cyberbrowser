@@ -97,6 +97,9 @@ typedef struct DomTreeRec {
     uint32_t wrappers;      /* nodes of this tree that have a wrapper */
 } DomTreeRec;
 
+/* An element's first class atoms, inline in its slot. */
+typedef struct DomCls4 { CssAtom a[4]; } DomCls4;
+
 typedef struct DomStore {
     uint32_t cap;           /* slots allocated (slot 0 is never used) */
     uint32_t count;         /* high-water mark: slots [1, count) were used */
@@ -118,6 +121,15 @@ typedef struct DomStore {
     DomStr   *text;         /* text / comment data */
     DomAttrList *attrs;
     CssAtom  *id_atom;      /* atom of the id attribute (lower-cased), 0 = none */
+    /* The class attribute's tokens as atoms (lower-cased), made when it is
+     * set: ncls low 7 bits their count (at most 127), bit 7 set when a token
+     * has an upper-case letter (an exact match then checks the string);
+     * cls the first 4, cls_more all of them when there are more (malloc'd);
+     * cls_bloom one bit per token (DOM_CLS_BIT). */
+    uint8_t  *ncls;
+    DomCls4  *cls;
+    CssAtom **cls_more;
+    uint64_t *cls_bloom;
     uint32_t *ns;           /* element: namespace (DOM_NS_*, else a dom_name id); 0 = HTML's */
     uint32_t *prefix;       /* element: namespace prefix (dom_name id), 0 = none */
     uint32_t *lname;        /* element: local name as written (dom_name id) when it
@@ -149,6 +161,16 @@ static inline bool dom_valid(NodeId id) {
     return s && s < g_dom.count && g_dom.kind[s] != DOM_K_FREE &&
            g_dom.gen[s] == (uint8_t)(id >> DOM_SLOT_BITS);
 }
+
+/* ---- class tokens (atoms) ---- */
+#define DOM_CLS_BIT(a) (1ull << (((uint32_t)(a) * 0x9E3779B1u) >> 26))
+static inline uint32_t dom_cls_count(uint32_t s) { return g_dom.ncls[s] & 127u; }
+static inline const CssAtom *dom_cls_atoms(uint32_t s) {
+    return (g_dom.ncls[s] & 127u) > 4 ? g_dom.cls_more[s] : g_dom.cls[s].a;
+}
+static inline bool dom_cls_upper(uint32_t s) { return (g_dom.ncls[s] & 128u) != 0; }
+/* Set slot s's class tokens from the class attribute's value (NULL: none). */
+void dom_cls_note(uint32_t s, const char *v, size_t n);
 
 /* ---- life cycle ---- */
 void dom_store_init(void);

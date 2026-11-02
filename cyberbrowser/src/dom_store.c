@@ -168,6 +168,10 @@ static void store_grow(uint32_t need) {
     GROW(text, DomStr);
     GROW(attrs, DomAttrList);
     GROW(id_atom, CssAtom);
+    GROW(ncls, uint8_t);
+    GROW(cls, DomCls4);
+    GROW(cls_more, CssAtom *);
+    GROW(cls_bloom, uint64_t);
     GROW(order, uint32_t);
     GROW(ns, uint32_t);
     GROW(prefix, uint32_t);
@@ -210,6 +214,9 @@ uint32_t dom_alloc_slot(int kind, NodeId owner) {
     g_dom.text[s] = (DomStr){ NULL, 0, 0 };
     g_dom.attrs[s] = (DomAttrList){ NULL, 0, 0, 0 };
     g_dom.id_atom[s] = CSS_ATOM_NONE;
+    g_dom.ncls[s] = 0;
+    g_dom.cls_more[s] = NULL;
+    g_dom.cls_bloom[s] = 0;
     g_dom.order[s] = ++g_dom.seq;
     g_dom.ns[s] = g_dom.prefix[s] = g_dom.lname[s] = 0;
     g_dom.live++;
@@ -227,6 +234,7 @@ void dom_free_slot(uint32_t s) {
     if (!s || s >= g_dom.count || g_dom.kind[s] == DOM_K_FREE) return;
     dom_str_release(&g_dom.text[s]);
     attrs_release(&g_dom.attrs[s]);
+    dom_cls_note(s, NULL, 0);
     g_dom.ns[s] = g_dom.prefix[s] = g_dom.lname[s] = 0;
     if (g_dom.tree[s]) {
         DomTreeRec *t = &g_dom.trees[g_dom.tree[s]];
@@ -553,6 +561,7 @@ void dom_set_attr(NodeId id, CssAtom name, const char *value, size_t n) {
         if (n) { css_atom_reserve(1); g_dom.id_atom[s] = css_atom_intern(value, n); dom_id_index_note(s); }
         else g_dom.id_atom[s] = CSS_ATOM_NONE;
     }
+    if (name == class_name) dom_cls_note(s, value, n);
     if (name == id_name || name == class_name) g_dom.class_version++;
     dom_note_mutation(s, DOMF_DIRTY_ATTR);
     g_dom.attr_version++;
@@ -575,6 +584,7 @@ bool dom_remove_attr(NodeId id, CssAtom name) {
         l->n--;
         const char *nm = css_atom_str(name);
         if (nm && strcmp(nm, "id") == 0) g_dom.id_atom[s] = CSS_ATOM_NONE;
+        if (nm && strcmp(nm, "class") == 0) dom_cls_note(s, NULL, 0);
         if (nm && (strcmp(nm, "id") == 0 || strcmp(nm, "class") == 0)) g_dom.class_version++;
         dom_note_mutation(s, DOMF_DIRTY_ATTR);
         g_dom.attr_version++;
@@ -649,6 +659,7 @@ int dom_set_attr_at(NodeId id, int i, uint32_t ns, const char *qn, size_t qnl, c
         if (n) { css_atom_reserve(1); g_dom.id_atom[s] = css_atom_intern(value, n); dom_id_index_note(s); }
         else g_dom.id_atom[s] = CSS_ATOM_NONE;
     }
+    if (nm && !strcmp(nm, "class")) dom_cls_note(s, value, n);
     if (nm && (!strcmp(nm, "id") || !strcmp(nm, "class"))) g_dom.class_version++;
     dom_note_mutation(s, DOMF_DIRTY_ATTR);
     g_dom.attr_version++;
@@ -664,12 +675,55 @@ void dom_remove_attr_at(NodeId id, int i) {
     const char *nm = l->a[i].ns ? NULL : css_atom_str(l->a[i].name);
     bool idc = nm && (!strcmp(nm, "id") || !strcmp(nm, "class"));
     if (nm && !strcmp(nm, "id")) g_dom.id_atom[s] = CSS_ATOM_NONE;
+    if (nm && !strcmp(nm, "class")) dom_cls_note(s, NULL, 0);
     dom_str_release(&l->a[i].value);
     memmove(&l->a[i], &l->a[i + 1], (size_t)(l->n - i - 1) * sizeof(DomAttr));
     l->n--;
     if (idc) g_dom.class_version++;
     dom_note_mutation(s, DOMF_DIRTY_ATTR);
     g_dom.attr_version++;
+}
+
+void dom_cls_note(uint32_t s, const char *v, size_t n) {
+    if ((g_dom.ncls[s] & 127u) > 4) free(g_dom.cls_more[s]);
+    g_dom.cls_more[s] = NULL;
+    g_dom.ncls[s] = 0;
+    g_dom.cls_bloom[s] = 0;
+    if (!v || !n) return;
+    /* (tokens split on ASCII white space; their count first, to size) */
+    uint32_t cnt = 0;
+    bool upper = false;
+    for (size_t i = 0; i < n;) {
+        while (i < n && (v[i] == ' ' || v[i] == '\t' || v[i] == '\n' || v[i] == '\f' || v[i] == '\r')) i++;
+        if (i == n) break;
+        cnt++;
+        while (i < n && !(v[i] == ' ' || v[i] == '\t' || v[i] == '\n' || v[i] == '\f' || v[i] == '\r')) {
+            if (v[i] >= 'A' && v[i] <= 'Z') upper = true;
+            i++;
+        }
+    }
+    if (cnt > 127) cnt = 127;
+    if (!cnt) return;
+    CssAtom *out = g_dom.cls[s].a;
+    if (cnt > 4) {
+        out = malloc(cnt * sizeof(CssAtom));
+        if (!out) return;
+        g_dom.cls_more[s] = out;
+    }
+    css_atom_reserve(cnt);
+    uint32_t k = 0;
+    uint64_t bloom = 0;
+    for (size_t i = 0; i < n && k < cnt;) {
+        while (i < n && (v[i] == ' ' || v[i] == '\t' || v[i] == '\n' || v[i] == '\f' || v[i] == '\r')) i++;
+        size_t b = i;
+        while (i < n && !(v[i] == ' ' || v[i] == '\t' || v[i] == '\n' || v[i] == '\f' || v[i] == '\r')) i++;
+        if (i == b) break;
+        CssAtom a = css_atom_intern(v + b, i - b);
+        out[k++] = a;
+        bloom |= DOM_CLS_BIT(a);
+    }
+    g_dom.ncls[s] = (uint8_t)(k | (upper ? 128u : 0u));
+    g_dom.cls_bloom[s] = bloom;
 }
 
 bool dom_has_class(NodeId id, const char *cls, size_t n) {

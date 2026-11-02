@@ -2575,6 +2575,190 @@ static void layout_decl_copy_validity(CssDeclaration *copy, const CssDeclaration
     copy->invalid = substituted ? 0 : layout_decl_invalid(orig) ? 2 : 1;
 }
 
+/* layout_apply_declaration's property names (DECL_NAMES[k] is key k)
+ * and a hash table of them, so a declaration's name is looked up once and
+ * compared as an integer instead of string by string down the chain. */
+static const char *const DECL_NAMES[] = {
+    "font",
+    "display",
+    "justify-items",
+    "justify-self",
+    "border-collapse",
+    "caption-side",
+    "visibility",
+    "clip",
+    "opacity",
+    "position",
+    "z-index",
+    "box-sizing",
+    "width",
+    "height",
+    "min-width",
+    "max-width",
+    "min-height",
+    "max-height",
+    "top",
+    "right",
+    "bottom",
+    "left",
+    "inset",
+    "margin",
+    "margin-left",
+    "margin-right",
+    "margin-top",
+    "margin-bottom",
+    "aspect-ratio",
+    "padding",
+    "padding-left",
+    "padding-right",
+    "padding-top",
+    "padding-bottom",
+    "border-left-width",
+    "border-left-style",
+    "border-right-width",
+    "border-right-style",
+    "border-top-width",
+    "border-top-style",
+    "border-bottom-width",
+    "border-bottom-style",
+    "flex-direction",
+    "flex-wrap",
+    "justify-content",
+    "align-items",
+    "transform",
+    "-webkit-transform",
+    "white-space",
+    "white-space-collapse",
+    "-webkit-box-orient",
+    "box-orient",
+    "-webkit-line-clamp",
+    "line-clamp",
+    "text-overflow",
+    "object-fit",
+    "align-self",
+    "order",
+    "flex-basis",
+    "flex-grow",
+    "flex-shrink",
+    "flex",
+    "gap",
+    "row-gap",
+    "column-gap",
+    "fill",
+    "color",
+    "text-align",
+    "table-layout",
+    "direction",
+    "unicode-bidi",
+    "float",
+    "clear",
+    "overflow",
+    "overflow-x",
+    "overflow-y",
+    "vertical-align",
+    "background-color",
+    "background",
+    "background-repeat",
+    "background-position",
+    "background-position-x",
+    "background-position-y",
+    "background-size",
+    "background-attachment",
+    "background-image",
+    "mask-image",
+    "-webkit-mask-image",
+    "mask",
+    "-webkit-mask",
+    "box-shadow",
+    "-webkit-box-shadow",
+    "border-radius",
+    "-webkit-border-radius",
+    "border-top-left-radius",
+    "border-top-right-radius",
+    "border-bottom-right-radius",
+    "border-bottom-left-radius",
+    "mask-size",
+    "-webkit-mask-size",
+    "mask-position",
+    "-webkit-mask-position",
+    "mask-repeat",
+    "-webkit-mask-repeat",
+    "font-size",
+    "font-family",
+    "font-weight",
+    "font-style",
+    "text-decoration",
+    "text-decoration-line",
+    "line-height",
+    "counter-reset",
+    "counter-increment",
+    "counter-set",
+    "letter-spacing",
+    "word-spacing",
+    "text-indent",
+    "text-transform",
+    "quotes",
+    "list-style-type",
+    "list-style",
+    "list-style-image",
+    "border",
+    "border-left",
+    "border-right",
+    "border-top",
+    "border-bottom",
+    "border-width",
+    "border-style",
+    "border-color",
+    "border-left-color",
+    "border-right-color",
+    "border-top-color",
+    "border-bottom-color",
+};
+#define NDECL_NAMES ((int)(sizeof(DECL_NAMES) / sizeof(DECL_NAMES[0])))
+#define DECL_HASH_SIZE 1024
+static int16_t g_decl_hash[DECL_HASH_SIZE];   /* key + 1, 0 = empty */
+static _Atomic int g_decl_ready;   /* 0 not built, 1 being built, 2 built */
+
+static uint32_t decl_name_hash(const char *s)
+{
+    uint32_t h = 2166136261u;
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + 32);
+        h = (h ^ c) * 16777619u;
+    }
+    return h;
+}
+
+static void decl_hash_init(void)
+{
+    for (int k = 0; k < NDECL_NAMES; k++) {
+        uint32_t h = decl_name_hash(DECL_NAMES[k]) & (DECL_HASH_SIZE - 1);
+        while (g_decl_hash[h]) h = (h + 1) & (DECL_HASH_SIZE - 1);
+        g_decl_hash[h] = (int16_t)(k + 1);
+    }
+}
+
+/* The key of property name prop (-1: none of them). */
+static int decl_key(const char *prop)
+{
+    if (atomic_load_explicit(&g_decl_ready, memory_order_acquire) != 2) {
+        int expect = 0;
+        if (atomic_compare_exchange_strong(&g_decl_ready, &expect, 1)) {
+            decl_hash_init();
+            atomic_store_explicit(&g_decl_ready, 2, memory_order_release);
+        } else {
+            while (atomic_load_explicit(&g_decl_ready, memory_order_acquire) != 2) {}
+        }
+    }
+    for (uint32_t h = decl_name_hash(prop) & (DECL_HASH_SIZE - 1);; h = (h + 1) & (DECL_HASH_SIZE - 1)) {
+        int k = g_decl_hash[h] - 1;
+        if (k < 0) return -1;
+        if (strcasecmp(DECL_NAMES[k], prop) == 0) return k;
+    }
+}
+#define PK(k) (pk == (k))
+
 static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                                      double parent_width, double viewport_width,
                                      const char *base_url)
@@ -2582,12 +2766,13 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     const char *prop = decl->property;
     const char *value = decl->value;
     if (!prop || !value) return;
+    int pk = decl_key(prop);   /* (the name's key: integer compares below) */
     t_unit_box = box;
     if (css_prop_non_negative(prop) && css_value_has_negative(value)) return;
     /* (an invalid value is ignored: the declaration before it stays) */
     if (layout_decl_invalid(decl)) return;
 
-    if (strcasecmp(prop, "font") == 0) {
+    if (PK(0)) {
         /* The shorthand as its longhands (each reset when not given). */
         const CssPropDef *p = css_prop_find("font", 4);
         const char **names;
@@ -2610,7 +2795,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         free(vals);
         return;
     }
-    if (strcasecmp(prop, "display") == 0) {
+    if (PK(1)) {
         box->s->display = css_parse_display(value);
         box->s->inline_level = css_display_is_inline_level(value) ? 1 : 0;
         box->s->table_caption = strcasecmp(value, "table-caption") == 0 ? 1 : 0;
@@ -2621,16 +2806,16 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         if (box->s->flow_root) box->s->display = CSS_DISPLAY_BLOCK;
         box->s->table_role = css_display_table_role(value);
         box->s->table_group = !strcasecmp(value, "table-header-group") ? 1 : !strcasecmp(value, "table-footer-group") ? 2 : 0;
-    } else if (strncasecmp(prop, "grid", 4) == 0 || strcasecmp(prop, "justify-items") == 0 ||
-               strcasecmp(prop, "justify-self") == 0 || strncasecmp(prop, "place-", 6) == 0 ||
-               strncasecmp(prop, "border-spacing", 14) == 0 || strcasecmp(prop, "border-collapse") == 0) {
+    } else if (strncasecmp(prop, "grid", 4) == 0 || PK(2) ||
+               PK(3) || strncasecmp(prop, "place-", 6) == 0 ||
+               strncasecmp(prop, "border-spacing", 14) == 0 || PK(4)) {
         layout_apply_grid_declaration(box, prop, value, parent_width, viewport_width);
-    } else if (strcasecmp(prop, "caption-side") == 0) {
+    } else if (PK(5)) {
         box->s->caption_side = !strcasecmp(value, "bottom") ? 2 : !strcasecmp(value, "top") ? 1 : 0;
-    } else if (strcasecmp(prop, "visibility") == 0) {
+    } else if (PK(6)) {
         box->s->visibility = css_parse_visibility(value);
         box->s->visibility_set = 1;
-    } else if (strcasecmp(prop, "clip") == 0) {
+    } else if (PK(7)) {
         /* The "visually hidden" pattern: clip:rect() with ~zero area
          * (e.g. clip:rect(1px,1px,1px,1px)).  Hide the box; descendants
          * inherit visibility. */
@@ -2653,7 +2838,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                 box->s->visibility_set = 1;
             }
         }
-    } else if (strcasecmp(prop, "opacity") == 0) {
+    } else if (PK(8)) {
         char *endp = NULL;
         double op = strtod(value, &endp);
         if (endp != value) {            /* invalid values are ignored */
@@ -2663,9 +2848,9 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             box->s->opacity = op;
             box->s->opacity_set = 1;
         }
-    } else if (strcasecmp(prop, "position") == 0) {
+    } else if (PK(9)) {
         box->s->position = css_parse_position(value);
-    } else if (strcasecmp(prop, "z-index") == 0) {
+    } else if (PK(10)) {
         /* auto, or an integer (anything else is invalid: ignored) */
         while (isspace((unsigned char)*value)) value++;
         char *end = NULL;
@@ -2680,9 +2865,9 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                 box->s->z_index = (int)(z > 1000000000L ? 1000000000L : z < -1000000000L ? -1000000000L : z);
             }
         }
-    } else if (strcasecmp(prop, "box-sizing") == 0) {
+    } else if (PK(11)) {
         box->s->box_sizing = css_parse_box_sizing(value);
-    } else if (strcasecmp(prop, "width") == 0) {
+    } else if (PK(12)) {
         box->s->width_keyword = 0;
         if (strstr(value, "min-content")) box->s->width_keyword = 1;
         else if (strstr(value, "max-content")) box->s->width_keyword = 2;
@@ -2700,7 +2885,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             box->s->css_width = l.pct > 0.0 ? 0.0 : l.px;
         }
         if (!box->s->width_keyword) box->s->width_set = (strcasecmp(value, "auto") != 0);
-    } else if (strcasecmp(prop, "height") == 0) {
+    } else if (PK(13)) {
         if (strstr(value, "-content")) {
             box->s->height_set = 0;
             box->s->height_percent = 0.0;
@@ -2714,27 +2899,27 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             box->s->css_height = l.pct > 0.0 ? 0.0 : l.px;
         }
         box->s->height_set = (strcasecmp(value, "auto") != 0);
-    } else if (strcasecmp(prop, "min-width") == 0) {
+    } else if (PK(14)) {
         box->s->min_width = layout_note_minmax(box, 0, value);
         if (strcasecmp(value, "auto") == 0) box->s->min_size_set &= (unsigned char)~1;
         else box->s->min_size_set |= 1;
-    } else if (strcasecmp(prop, "max-width") == 0) {
+    } else if (PK(15)) {
         box->s->max_width = layout_note_minmax(box, 1, value);
-    } else if (strcasecmp(prop, "min-height") == 0) {
+    } else if (PK(16)) {
         box->s->min_height = layout_note_minmax(box, 2, value);
         if (strcasecmp(value, "auto") == 0) box->s->min_size_set &= (unsigned char)~2;
         else box->s->min_size_set |= 2;
-    } else if (strcasecmp(prop, "max-height") == 0) {
+    } else if (PK(17)) {
         box->s->max_height = layout_note_minmax(box, 3, value);
-    } else if (strcasecmp(prop, "top") == 0) {
+    } else if (PK(18)) {
         layout_set_inset(box, 0, value, parent_width, viewport_width);
-    } else if (strcasecmp(prop, "right") == 0) {
+    } else if (PK(19)) {
         layout_set_inset(box, 1, value, parent_width, viewport_width);
-    } else if (strcasecmp(prop, "bottom") == 0) {
+    } else if (PK(20)) {
         layout_set_inset(box, 2, value, parent_width, viewport_width);
-    } else if (strcasecmp(prop, "left") == 0) {
+    } else if (PK(21)) {
         layout_set_inset(box, 3, value, parent_width, viewport_width);
-    } else if (strcasecmp(prop, "inset") == 0) {
+    } else if (PK(22)) {
         char vals[4][64]; int n = 0;
         const char *p = value;
         while (*p && n < 4) {
@@ -2751,7 +2936,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             for (int side = 0; side < 4; side++)
                 layout_set_inset(box, side, vals[map[n - 1][side]], parent_width, viewport_width);
         }
-    } else if (strcasecmp(prop, "margin") == 0) {
+    } else if (PK(23)) {
         double em4[4];
         unsigned fl = layout_apply_shorthand_sides(box, value, parent_width, viewport_width,
                                                    &box->s->margin_top, &box->s->margin_right,
@@ -2765,7 +2950,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                 box->s->em_deferred |= (unsigned char)(1u << i);
             }
         }
-    } else if (strcasecmp(prop, "margin-left") == 0) {
+    } else if (PK(24)) {
         double r;
         if (css_token_is_em(value, &r)) { box->s->margin_em[3] = r; box->s->em_deferred |= 0x08; }
         else box->s->em_deferred &= (unsigned char)~0x08;
@@ -2773,7 +2958,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         layout_note_side_pcts(box, value, false, 3);
         if (strcasecmp(value, "auto") == 0) box->s->margin_auto |= 8;
         else box->s->margin_auto &= (unsigned char)~8;
-    } else if (strcasecmp(prop, "margin-right") == 0) {
+    } else if (PK(25)) {
         double r;
         if (css_token_is_em(value, &r)) { box->s->margin_em[1] = r; box->s->em_deferred |= 0x02; }
         else box->s->em_deferred &= (unsigned char)~0x02;
@@ -2781,7 +2966,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         layout_note_side_pcts(box, value, false, 1);
         if (strcasecmp(value, "auto") == 0) box->s->margin_auto |= 2;
         else box->s->margin_auto &= (unsigned char)~2;
-    } else if (strcasecmp(prop, "margin-top") == 0) {
+    } else if (PK(26)) {
         double r;
         if (css_token_is_em(value, &r)) { box->s->margin_em[0] = r; box->s->em_deferred |= 0x01; }
         else box->s->em_deferred &= (unsigned char)~0x01;
@@ -2789,7 +2974,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         layout_note_side_pcts(box, value, false, 0);
         if (strcasecmp(value, "auto") == 0) box->s->margin_auto |= 1;
         else box->s->margin_auto &= (unsigned char)~1;
-    } else if (strcasecmp(prop, "margin-bottom") == 0) {
+    } else if (PK(27)) {
         double r;
         if (css_token_is_em(value, &r)) { box->s->margin_em[2] = r; box->s->em_deferred |= 0x04; }
         else box->s->em_deferred &= (unsigned char)~0x04;
@@ -2797,7 +2982,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         layout_note_side_pcts(box, value, false, 2);
         if (strcasecmp(value, "auto") == 0) box->s->margin_auto |= 4;
         else box->s->margin_auto &= (unsigned char)~4;
-    } else if (strcasecmp(prop, "aspect-ratio") == 0) {
+    } else if (PK(28)) {
         /* auto | <ratio> | auto && <ratio>; <ratio> = <number> [ / <number> ].
          * The "auto" fallback for replaced content is not modelled. */
         double w = 0.0, h = 1.0;
@@ -2813,7 +2998,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         }
         box->s->aspect_ratio = (w > 0.0 && h > 0.0) ? h / w : 0.0;
         box->s->aspect_ratio_prop = box->s->aspect_ratio > 0.0;
-    } else if (strcasecmp(prop, "padding") == 0) {
+    } else if (PK(29)) {
         double em4[4];
         unsigned fl = layout_apply_shorthand_sides(box, value, parent_width, viewport_width,
                                                    &box->s->padding_top, &box->s->padding_right,
@@ -2826,65 +3011,65 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                 box->s->em_deferred |= (unsigned char)(0x10u << i);
             }
         }
-    } else if (strcasecmp(prop, "padding-left") == 0) {
+    } else if (PK(30)) {
         double r;
         if (css_token_is_em(value, &r)) { box->s->padding_em[3] = r; box->s->em_deferred |= 0x80; }
         else box->s->em_deferred &= (unsigned char)~0x80;
         box->s->padding_left = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
         layout_note_side_pcts(box, value, true, 3);
-    } else if (strcasecmp(prop, "padding-right") == 0) {
+    } else if (PK(31)) {
         double r;
         if (css_token_is_em(value, &r)) { box->s->padding_em[1] = r; box->s->em_deferred |= 0x20; }
         else box->s->em_deferred &= (unsigned char)~0x20;
         box->s->padding_right = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
         layout_note_side_pcts(box, value, true, 1);
-    } else if (strcasecmp(prop, "padding-top") == 0) {
+    } else if (PK(32)) {
         double r;
         if (css_token_is_em(value, &r)) { box->s->padding_em[0] = r; box->s->em_deferred |= 0x10; }
         else box->s->em_deferred &= (unsigned char)~0x10;
         box->s->padding_top = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
         layout_note_side_pcts(box, value, true, 0);
-    } else if (strcasecmp(prop, "padding-bottom") == 0) {
+    } else if (PK(33)) {
         double r;
         if (css_token_is_em(value, &r)) { box->s->padding_em[2] = r; box->s->em_deferred |= 0x40; }
         else box->s->em_deferred &= (unsigned char)~0x40;
         box->s->padding_bottom = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
         layout_note_side_pcts(box, value, true, 2);
-    } else if (strcasecmp(prop, "border-left-width") == 0) {
+    } else if (PK(34)) {
         box->s->border_left = css_border_width_value(value, parent_width, viewport_width, box->s->font_size);
         box->s->border_width_set |= 1;
-    } else if (strcasecmp(prop, "border-left-style") == 0) {
+    } else if (PK(35)) {
         int code = css_border_style_code(value);
         if (code >= 0) border_set_style(box, 1, code);
-    } else if (strcasecmp(prop, "border-right-width") == 0) {
+    } else if (PK(36)) {
         box->s->border_right = css_border_width_value(value, parent_width, viewport_width, box->s->font_size);
         box->s->border_width_set |= 2;
-    } else if (strcasecmp(prop, "border-right-style") == 0) {
+    } else if (PK(37)) {
         int code = css_border_style_code(value);
         if (code >= 0) border_set_style(box, 2, code);
-    } else if (strcasecmp(prop, "border-top-width") == 0) {
+    } else if (PK(38)) {
         box->s->border_top = css_border_width_value(value, parent_width, viewport_width, box->s->font_size);
         box->s->border_width_set |= 4;
-    } else if (strcasecmp(prop, "border-top-style") == 0) {
+    } else if (PK(39)) {
         int code = css_border_style_code(value);
         if (code >= 0) border_set_style(box, 4, code);
-    } else if (strcasecmp(prop, "border-bottom-width") == 0) {
+    } else if (PK(40)) {
         box->s->border_bottom = css_border_width_value(value, parent_width, viewport_width, box->s->font_size);
         box->s->border_width_set |= 8;
-    } else if (strcasecmp(prop, "border-bottom-style") == 0) {
+    } else if (PK(41)) {
         int code = css_border_style_code(value);
         if (code >= 0) border_set_style(box, 8, code);
-    } else if (strcasecmp(prop, "flex-direction") == 0) {
+    } else if (PK(42)) {
         box->s->flex_direction = css_parse_flex_direction(value);
-    } else if (strcasecmp(prop, "flex-wrap") == 0) {
+    } else if (PK(43)) {
         box->s->flex_wrap = css_parse_flex_wrap(value);
-    } else if (strcasecmp(prop, "justify-content") == 0) {
+    } else if (PK(44)) {
         box->s->justify_content = css_parse_justify_content(value);
-    } else if (strcasecmp(prop, "align-items") == 0) {
+    } else if (PK(45)) {
         box->s->align_items = css_parse_align_items(value);
-    } else if (strcasecmp(prop, "transform") == 0 || strcasecmp(prop, "-webkit-transform") == 0) {
+    } else if (PK(46) || PK(47)) {
         css_parse_transform(box, value, parent_width, viewport_width);
-    } else if (strcasecmp(prop, "white-space") == 0 || strcasecmp(prop, "white-space-collapse") == 0) {
+    } else if (PK(48) || PK(49)) {
         unsigned char ws = 0;
         if (strcasecmp(value, "nowrap") == 0) ws = 1;
         else if (strcasecmp(value, "pre") == 0) ws = 2;
@@ -2894,52 +3079,52 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         else if (strcasecmp(value, "normal") != 0 && strcasecmp(value, "collapse") != 0) return;   /* (invalid: ignored) */
         box->s->white_space = ws;
         box->s->white_space_set = 1;
-    } else if (strcasecmp(prop, "-webkit-box-orient") == 0 || strcasecmp(prop, "box-orient") == 0) {
+    } else if (PK(50) || PK(51)) {
         box->s->box_orient_vertical = (strcasecmp(value, "vertical") == 0 ||
                                     strcasecmp(value, "block-axis") == 0) ? 1 : 0;
-    } else if (strcasecmp(prop, "-webkit-line-clamp") == 0 || strcasecmp(prop, "line-clamp") == 0) {
+    } else if (PK(52) || PK(53)) {
         int n = atoi(value);
         box->s->line_clamp = (unsigned char)(n > 0 && n < 255 ? n : 0);
-    } else if (strcasecmp(prop, "text-overflow") == 0) {
+    } else if (PK(54)) {
         box->s->text_overflow_ellipsis = strstr(value, "ellipsis") != NULL;
-    } else if (strcasecmp(prop, "object-fit") == 0) {
+    } else if (PK(55)) {
         box->s->object_fit = strcasecmp(value, "contain") == 0 ? 1 :
                           strcasecmp(value, "cover") == 0 ? 2 :
                           strcasecmp(value, "none") == 0 ? 3 :
                           strcasecmp(value, "scale-down") == 0 ? 4 : 0;
-    } else if (strcasecmp(prop, "align-self") == 0) {
+    } else if (PK(56)) {
         box->s->align_self = (strcasecmp(value, "auto") == 0 || strcasecmp(value, "normal") == 0)
             ? 0 : (unsigned char)(css_parse_align_items(value) + 1);
-    } else if (strcasecmp(prop, "order") == 0) {
+    } else if (PK(57)) {
         box->s->order = atoi(value);
-    } else if (strcasecmp(prop, "flex-basis") == 0) {
+    } else if (PK(58)) {
         css_parse_flex_basis(value, &box->s->flex_basis, &box->s->flex_basis_percent,
                              &box->s->flex_basis_pct_px, box->s->font_size);
-    } else if (strcasecmp(prop, "flex-grow") == 0) {
+    } else if (PK(59)) {
         box->s->flex_grow = strtod(value, NULL);
-    } else if (strcasecmp(prop, "flex-shrink") == 0) {
+    } else if (PK(60)) {
         box->s->flex_shrink = strtod(value, NULL);
-    } else if (strcasecmp(prop, "flex") == 0) {
+    } else if (PK(61)) {
         css_parse_flex_shorthand(value, &box->s->flex_grow, &box->s->flex_shrink, &box->s->flex_basis,
                                  &box->s->flex_basis_percent, &box->s->flex_basis_pct_px, box->s->font_size);
-    } else if (strcasecmp(prop, "gap") == 0) {
+    } else if (PK(62)) {
         css_parse_shorthand_1_or_2(value, parent_width, viewport_width,
                                    box->s->font_size, &box->s->gap_row, &box->s->gap_col);
-    } else if (strcasecmp(prop, "row-gap") == 0) {
+    } else if (PK(63)) {
         box->s->gap_row = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
-    } else if (strcasecmp(prop, "column-gap") == 0) {
+    } else if (PK(64)) {
         box->s->gap_col = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
-    } else if (strcasecmp(prop, "fill") == 0) {
+    } else if (PK(65)) {
         while (isspace((unsigned char)*value)) value++;
         if (strncasecmp(value, "currentcolor", 12) == 0) { box->s->fill_kind = 1; box->s->fill_set = 1; }
         else if (strncasecmp(value, "none", 4) == 0) { box->s->fill_kind = 3; box->s->fill_set = 1; }
         else if (css_parse_color(value, &box->s->fill_r, &box->s->fill_g, &box->s->fill_b, &box->s->fill_a)) {
             box->s->fill_kind = 2; box->s->fill_set = 1;
         }
-    } else if (strcasecmp(prop, "color") == 0) {
+    } else if (PK(66)) {
         if (css_parse_color(value, &box->s->color_r, &box->s->color_g, &box->s->color_b, &box->s->color_a))
             box->s->color_set = 1;
-    } else if (strcasecmp(prop, "text-align") == 0) {
+    } else if (PK(67)) {
         box->s->text_align_how = 1;
         if (strncasecmp(value, "center", 6) == 0) box->s->text_align = CSS_TEXT_ALIGN_CENTER;
         else if (strncasecmp(value, "right", 5) == 0) box->s->text_align = CSS_TEXT_ALIGN_RIGHT;
@@ -2947,28 +3132,28 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         else if (strncasecmp(value, "end", 3) == 0) box->s->text_align_how = 2;
         else box->s->text_align_how = 0;   /* (start, justify) */
         box->s->text_align_set = 1;
-    } else if (strcasecmp(prop, "table-layout") == 0) {
+    } else if (PK(68)) {
         box->s->table_layout_fixed = strcasecmp(value, "fixed") == 0;
-    } else if (strcasecmp(prop, "direction") == 0) {
+    } else if (PK(69)) {
         if (!strcasecmp(value, "rtl")) { box->s->direction = 1; box->s->direction_set = 1; }
         else if (!strcasecmp(value, "ltr")) { box->s->direction = 0; box->s->direction_set = 1; }
-    } else if (strcasecmp(prop, "unicode-bidi") == 0) {
+    } else if (PK(70)) {
         static const char *const kw[] = { "normal", "embed", "isolate", "bidi-override", "isolate-override",
                                           "plaintext" };
         for (int i = 0; i < 6; i++)
             if (!strcasecmp(value, kw[i])) box->s->unicode_bidi = (unsigned char)i;
-    } else if (strcasecmp(prop, "float") == 0) {
+    } else if (PK(71)) {
         if (strcasecmp(value, "left") == 0) box->s->float_side = 1;
         else if (strcasecmp(value, "right") == 0) box->s->float_side = 2;
         else box->s->float_side = 0;
-    } else if (strcasecmp(prop, "clear") == 0) {
+    } else if (PK(72)) {
         if (strcasecmp(value, "left") == 0) box->s->clear = 1;
         else if (strcasecmp(value, "right") == 0) box->s->clear = 2;
         else if (strcasecmp(value, "both") == 0) box->s->clear = 3;
         else box->s->clear = 0;
-    } else if (strcasecmp(prop, "overflow") == 0 ||
-               strcasecmp(prop, "overflow-x") == 0 ||
-               strcasecmp(prop, "overflow-y") == 0) {
+    } else if (PK(73) ||
+               PK(74) ||
+               PK(75)) {
         /* Any non-visible overflow establishes a new block formatting
          * context.  The axis distinction does not matter for margin
          * collapsing / float containment, so a single slot suffices. */
@@ -2976,13 +3161,13 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             /* For shorthand semantics: overflow:visible on one axis paired
              * with a non-visible value on the other computes to auto, but
              * tracking per-axis is overkill here. */
-            if (strcasecmp(prop, "overflow") == 0) box->s->overflow = 0;
+            if (PK(73)) box->s->overflow = 0;
         }
         else if (strcasecmp(value, "hidden") == 0) box->s->overflow = 1;
         else if (strcasecmp(value, "auto") == 0) box->s->overflow = 2;
         else if (strcasecmp(value, "scroll") == 0) box->s->overflow = 3;
         else if (strcasecmp(value, "clip") == 0) box->s->overflow = 1;
-    } else if (strcasecmp(prop, "vertical-align") == 0) {
+    } else if (PK(76)) {
         static const char *const kw[] = { "baseline", "middle", "top", "bottom", "sub", "super", "text-top",
                                           "text-bottom" };
         const char *v = value;
@@ -3008,13 +3193,13 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                 }
             }
         }
-    } else if (strcasecmp(prop, "background-color") == 0) {
+    } else if (PK(77)) {
         double cr, cg, cb, ca;
         if (css_parse_color(value, &cr, &cg, &cb, &ca)) {
             box->s->background_color_r = cr; box->s->background_color_g = cg;
             box->s->background_color_b = cb; box->s->background_color_a = ca;
         }
-    } else if (strcasecmp(prop, "background") == 0) {
+    } else if (PK(78)) {
         /* Shorthand: pull out the color and/or url() parts we support and
          * ignore the rest (position/repeat/size/attachment/origin).  Parse
          * colors into temporaries: css_parse_color clobbers on failure. */
@@ -3081,17 +3266,17 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                 }
             }
         }
-    } else if (strcasecmp(prop, "background-repeat") == 0) {
+    } else if (PK(79)) {
         char toks[4][64];
         int n = bg_tokens(value, toks, 4), axis = 0;
         box->s->bg_no_repeat_x = box->s->bg_no_repeat_y = 0;
         for (int i = 0; i < n && toks[i][0] != ','; i++) bg_repeat_token(box->s, toks[i], &axis);
-    } else if (strcasecmp(prop, "background-position") == 0) {
+    } else if (PK(80)) {
         char toks[8][64];
         int n = bg_tokens(value, toks, 8), m = 0;
         while (m < n && toks[m][0] != ',') m++;
         if (m) bg_set_position(box->s, toks, m > 4 ? 4 : m, viewport_width, box->s->font_size);
-    } else if (strcasecmp(prop, "background-position-x") == 0 || strcasecmp(prop, "background-position-y") == 0) {
+    } else if (PK(81) || PK(82)) {
         bool x = prop[20] == 'x' || prop[20] == 'X';
         double f = 0.0, px = 0.0;
         while (isspace((unsigned char)*value)) value++;
@@ -3101,14 +3286,14 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         else bg_value(value, 0.0, viewport_width, box->s->font_size, &f, &px);
         if (x) { box->s->bg_pos_xf = f; box->s->bg_pos_xpx = px; }
         else { box->s->bg_pos_yf = f; box->s->bg_pos_ypx = px; }
-    } else if (strcasecmp(prop, "background-size") == 0) {
+    } else if (PK(83)) {
         char toks[4][64];
         int n = bg_tokens(value, toks, 4), m = 0;
         while (m < n && toks[m][0] != ',') m++;
         if (m) bg_set_size(box->s, toks, m > 2 ? 2 : m, viewport_width, box->s->font_size);
-    } else if (strcasecmp(prop, "background-attachment") == 0) {
+    } else if (PK(84)) {
         box->s->bg_fixed = strncasecmp(value, "fixed", 5) == 0;
-    } else if (strcasecmp(prop, "background-image") == 0) {
+    } else if (PK(85)) {
         char url[1024];
         if (css_parse_url_value(value, url, sizeof(url)) && url[0]) {
             char *abs = layout_resolve_url(base_url, url);
@@ -3119,9 +3304,9 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         } else {
             box->s->background_image_url = "";
         }
-    } else if (strcasecmp(prop, "mask-image") == 0 || strcasecmp(prop, "-webkit-mask-image") == 0 ||
-               strcasecmp(prop, "mask") == 0 || strcasecmp(prop, "-webkit-mask") == 0) {
-        bool shorthand = strcasecmp(prop, "mask") == 0 || strcasecmp(prop, "-webkit-mask") == 0;
+    } else if (PK(86) || PK(87) ||
+               PK(88) || PK(89)) {
+        bool shorthand = PK(88) || PK(89);
         layout_parse_mask_image(box, value, base_url);
         if (shorthand) {
             /* The shorthand's other parts: repeat keywords and position. */
@@ -3131,7 +3316,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                 box->s->mask_pos_pct = 3;
             }
         }
-    } else if (strcasecmp(prop, "box-shadow") == 0 || strcasecmp(prop, "-webkit-box-shadow") == 0) {
+    } else if (PK(90) || PK(91)) {
         /* Comma-separated shadows; the first outer one is kept:
          * [inset] <x> <y> [<blur> [<spread>]] [<color>] in any order. */
         box->s->shadow_set = 0;
@@ -3188,7 +3373,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             box->s->shadow_spread = (float)len[3];
             box->s->shadow_r = (float)cr; box->s->shadow_g = (float)cg; box->s->shadow_b = (float)cb; box->s->shadow_a = (float)ca;
         }
-    } else if (strcasecmp(prop, "border-radius") == 0 || strcasecmp(prop, "-webkit-border-radius") == 0) {
+    } else if (PK(92) || PK(93)) {
         /* 1-4 values (horizontal radii; "/ vertical" part ignored). */
         char tok[4][128];
         int n = 0;
@@ -3219,12 +3404,12 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             box->s->radius[c] = (float)(v > 0.0 ? v : 0.0);
             if (pct) box->s->radius_pct |= (unsigned char)(1 << c);
         }
-    } else if (strcasecmp(prop, "border-top-left-radius") == 0 || strcasecmp(prop, "border-top-right-radius") == 0 ||
-               strcasecmp(prop, "border-bottom-right-radius") == 0 ||
-               strcasecmp(prop, "border-bottom-left-radius") == 0) {
-        int c = strcasecmp(prop, "border-top-left-radius") == 0 ? 0 :
-                strcasecmp(prop, "border-top-right-radius") == 0 ? 1 :
-                strcasecmp(prop, "border-bottom-right-radius") == 0 ? 2 : 3;
+    } else if (PK(94) || PK(95) ||
+               PK(96) ||
+               PK(97)) {
+        int c = PK(94) ? 0 :
+                PK(95) ? 1 :
+                PK(96) ? 2 : 3;
         char first[128];
         size_t k = 0;
         const char *p = value;
@@ -3242,13 +3427,13 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         box->s->radius[c] = (float)(v > 0.0 ? v : 0.0);
         if (pct) box->s->radius_pct |= (unsigned char)(1 << c);
         else box->s->radius_pct &= (unsigned char)~(1 << c);
-    } else if (strcasecmp(prop, "mask-size") == 0 || strcasecmp(prop, "-webkit-mask-size") == 0) {
+    } else if (PK(98) || PK(99)) {
         layout_parse_mask_size(box, value);
-    } else if (strcasecmp(prop, "mask-position") == 0 || strcasecmp(prop, "-webkit-mask-position") == 0) {
+    } else if (PK(100) || PK(101)) {
         layout_parse_mask_position(box, value);
-    } else if (strcasecmp(prop, "mask-repeat") == 0 || strcasecmp(prop, "-webkit-mask-repeat") == 0) {
+    } else if (PK(102) || PK(103)) {
         box->s->mask_no_repeat = strstr(value, "no-repeat") != NULL;
-    } else if (strcasecmp(prop, "font-size") == 0) {
+    } else if (PK(104)) {
         /* Absolute-size keywords (CSS2 table for 16px medium). */
         static const struct { const char *kw; double px; } kw_sizes[] = {
             { "xx-small", 9.0 }, { "x-small", 10.0 }, { "small", 13.33 },
@@ -3313,7 +3498,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             if (box->s->font_size <= 0.0) box->s->font_size = end != p && num == 0.0 ? 0.01 : 16.0;
             box->s->font_size_set = 1;
         }
-    } else if (strcasecmp(prop, "font-family") == 0) {
+    } else if (PK(105)) {
         /* The whole list: font_registry_resolve takes the first family it
          * has, so one it lacks falls through to the next (a generic last). */
         const char *p = value;
@@ -3321,7 +3506,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         size_t len = strlen(p);
         while (len && isspace((unsigned char)p[len - 1])) len--;
         box->s->font_family = layout_intern_or_empty(p, len);
-    } else if (strcasecmp(prop, "font-weight") == 0) {
+    } else if (PK(106)) {
         int w = 400;
         if (strncasecmp(value, "bold", 4) == 0) w = 700;
         else if (strncasecmp(value, "normal", 6) == 0) w = 400;
@@ -3333,12 +3518,12 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         }
         box->s->font_weight = w;
         box->s->font_weight_set = 1;
-    } else if (strcasecmp(prop, "font-style") == 0) {
+    } else if (PK(107)) {
         box->s->font_italic = (strncasecmp(value, "italic", 6) == 0 ||
                             strncasecmp(value, "oblique", 7) == 0) ? 1 : 0;
         box->s->font_italic_set = 1;
-    } else if (strcasecmp(prop, "text-decoration") == 0 ||
-               strcasecmp(prop, "text-decoration-line") == 0) {
+    } else if (PK(108) ||
+               PK(109)) {
         /* Token scan: underline / line-through / overline; "none" clears. */
         unsigned char deco = 0;
         if (strstr(value, "underline")) deco |= 1;
@@ -3346,7 +3531,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         if (strstr(value, "overline")) deco |= 4;
         box->s->text_decoration = deco;
         box->s->text_decoration_set = 1;
-    } else if (strcasecmp(prop, "line-height") == 0) {
+    } else if (PK(110)) {
         box->s->line_height_em = 0.0;
         double em = 0.0;
         if (strncasecmp(value, "normal", 6) == 0) {
@@ -3380,8 +3565,8 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             }
         }
         box->s->line_height_set = 1;
-    } else if (strcasecmp(prop, "counter-reset") == 0 || strcasecmp(prop, "counter-increment") == 0 ||
-               strcasecmp(prop, "counter-set") == 0) {
+    } else if (PK(111) || PK(112) ||
+               PK(113)) {
         const char *v = value;
         while (isspace((unsigned char)*v)) v++;
         size_t vl = strlen(v);
@@ -3390,7 +3575,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                                                                                    : &box->s->counter_set;
         if (vl == 4 && !strncasecmp(v, "none", 4)) *dst = NULL;
         else if (layout_counter_list_valid(v, vl)) *dst = layout_intern(v, vl);
-    } else if (strcasecmp(prop, "letter-spacing") == 0 || strcasecmp(prop, "word-spacing") == 0) {
+    } else if (PK(114) || PK(115)) {
         bool letter = prop[0] == 'l' || prop[0] == 'L';
         const char *v = value;
         while (isspace((unsigned char)*v)) v++;
@@ -3405,7 +3590,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         }
         if (ok && letter) { box->s->letter_spacing = px; box->s->letter_spacing_set = 1; }
         else if (ok) { box->s->word_spacing = px; box->s->word_spacing_set = 1; }
-    } else if (strcasecmp(prop, "text-indent") == 0) {
+    } else if (PK(116)) {
         const char *v = value;
         while (isspace((unsigned char)*v)) v++;
         char *end = NULL;
@@ -3422,7 +3607,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                 box->s->text_indent_set = 1;
             }
         }
-    } else if (strcasecmp(prop, "text-transform") == 0) {
+    } else if (PK(117)) {
         const char *v = value;
         while (isspace((unsigned char)*v)) v++;
         int t = -1;
@@ -3431,16 +3616,16 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         else if (!strcasecmp(v, "lowercase")) t = 2;
         else if (!strcasecmp(v, "capitalize")) t = 3;
         if (t >= 0) { box->s->text_transform = (unsigned char)t; box->s->text_transform_set = 1; }
-    } else if (strcasecmp(prop, "quotes") == 0) {
+    } else if (PK(118)) {
         const char *v = value;
         while (isspace((unsigned char)*v)) v++;
         size_t vl = strlen(v);
         while (vl && isspace((unsigned char)v[vl - 1])) vl--;
         box->s->quotes = vl == 4 && !strncasecmp(v, "none", 4) ? "" : layout_intern(v, vl);
         box->s->quotes_set = 1;
-    } else if (strcasecmp(prop, "list-style-type") == 0 ||
-               strcasecmp(prop, "list-style") == 0) {
-        bool shorthand = strcasecmp(prop, "list-style") == 0;
+    } else if (PK(119) ||
+               PK(120)) {
+        bool shorthand = PK(120);
         /* (the shorthand: an image by url(), the type disc when it names
          * none, and none for what none leaves) */
         const char *u = shorthand ? strstr(value, "url(") : NULL;
@@ -3464,7 +3649,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                 }
             }
         }
-    } else if (strcasecmp(prop, "list-style-image") == 0) {
+    } else if (PK(121)) {
         char url[1024];
         box->s->list_image = "";
         box->s->list_image_set = 1;
@@ -3475,11 +3660,11 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                 free(abs);
             }
         }
-    } else if (strcasecmp(prop, "border") == 0 ||
-               strcasecmp(prop, "border-left") == 0 ||
-               strcasecmp(prop, "border-right") == 0 ||
-               strcasecmp(prop, "border-top") == 0 ||
-               strcasecmp(prop, "border-bottom") == 0) {
+    } else if (PK(122) ||
+               PK(123) ||
+               PK(124) ||
+               PK(125) ||
+               PK(126)) {
         /* Shorthand: a width, a style and a color, in any order; the parts
          * left out are reset (width medium, style none, currentColor). */
         int sides = 0x0F;
@@ -3526,12 +3711,12 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             border_set_style(box, sides, style);
             border_set_color(box, sides, color ? color : "currentcolor");
         }
-    } else if (strcasecmp(prop, "border-width") == 0) {
+    } else if (PK(127)) {
         layout_apply_shorthand_sides(box, value, parent_width, viewport_width,
                                      &box->s->border_top, &box->s->border_right,
                                      &box->s->border_bottom, &box->s->border_left, NULL);
         box->s->border_width_set = 0x0F;
-    } else if (strcasecmp(prop, "border-style") == 0) {
+    } else if (PK(128)) {
         /* 1-4 values: top, right, bottom, left. */
         int codes[4], n = 0;
         const char *p = value;
@@ -3543,12 +3728,12 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             codes[n++] = code;
         }
         for (int i = 0; ok && i < n; i++) border_set_style(box, border_list_sides(n, i), codes[i]);
-    } else if (strcasecmp(prop, "border-color") == 0 ||
-               strcasecmp(prop, "border-left-color") == 0 ||
-               strcasecmp(prop, "border-right-color") == 0 ||
-               strcasecmp(prop, "border-top-color") == 0 ||
-               strcasecmp(prop, "border-bottom-color") == 0) {
-        if (strcasecmp(prop, "border-color") == 0) {
+    } else if (PK(129) ||
+               PK(130) ||
+               PK(131) ||
+               PK(132) ||
+               PK(133)) {
+        if (PK(129)) {
             char vals[4][128];
             int n = 0;
             const char *p = value;

@@ -275,6 +275,12 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
             if (!ident_start(sp)) { sp->err = true; break; }
             s.kind = SS_CLASS;
             s.val = sp_ident(sp, &s.vlen);
+            if (s.val && s.vlen) {
+                css_atom_reserve(1);
+                s.atom = css_atom_intern(s.val, s.vlen);
+                for (uint32_t k = 0; k < s.vlen; k++)
+                    if (s.val[k] >= 'A' && s.val[k] <= 'Z') { s.ci = 2; break; }   /* (upper case: checked exactly) */
+            }
         } else if (ch == '[') {
             sp->p++;
             sp_ws(sp);
@@ -625,9 +631,19 @@ static bool simple_ok(uint32_t s, const SelSimple *ss, uint32_t scope) {
         return v && n == ss->vlen && memcmp(v, ss->val, n) == 0;
     }
     case SS_CLASS: {
-        uint32_t n = 0;
-        const char *v = attr_val(s, g_a_class, &n);
-        return v && word_in(v, n, ss->val, ss->vlen, false);
+        /* (the element's class atoms: its bloom filter, then the atoms; an
+         * upper-case letter on either side, the string exactly) */
+        if (!ss->atom || !(g_dom.cls_bloom[s] & DOM_CLS_BIT(ss->atom))) return false;
+        const CssAtom *c = dom_cls_atoms(s);
+        uint32_t nc = dom_cls_count(s);
+        for (uint32_t k = 0; k < nc; k++) {
+            if (c[k] != ss->atom) continue;
+            if (ss->ci != 2 && !dom_cls_upper(s)) return true;
+            uint32_t n = 0;
+            const char *v = attr_val(s, g_a_class, &n);
+            return v && word_in(v, n, ss->val, ss->vlen, false);
+        }
+        return false;
     }
     case SS_ATTR: return attr_ok(s, ss);
     case SS_NOT: return !list_matches(ss->sub, s, scope);
@@ -741,22 +757,12 @@ typedef struct DomIndex {
 
 static DomIndex g_ix;
 
-/* Class tokens of element s as atoms (lower-cased; callers re-check case). */
+/* Class tokens of element s as atoms (lower-cased; callers re-check case),
+ * as the store keeps them. */
 static uint32_t class_atoms(uint32_t s, CssAtom *out, uint32_t max) {
-    uint32_t n = 0, len = 0;
-    const char *v = attr_val(s, g_a_class, &len);
-    if (!v) return 0;
-    size_t i = 0;
-    while (i < len && n < max) {
-        while (i < len && isspace((unsigned char)v[i])) i++;
-        size_t b = i;
-        while (i < len && !isspace((unsigned char)v[i])) i++;
-        if (i > b) {
-            CssAtom a = css_atom_find(v + b, i - b);
-            if (!a) { css_atom_reserve(1); a = css_atom_intern(v + b, i - b); }
-            out[n++] = a;
-        }
-    }
+    uint32_t n = dom_cls_count(s);
+    if (n > max) n = max;
+    memcpy(out, dom_cls_atoms(s), n * sizeof(CssAtom));
     return n;
 }
 
@@ -1014,7 +1020,7 @@ static void run_query(uint32_t scope, SelList *l, bool include_self, QueryOut *q
             }
             DomIndex *ix = index_for(dom_id_of(doc));
             if (kind == SS_CLASS) {
-                atom = css_atom_find(val, vlen);     /* the build interned every class token */
+                atom = css_atom_find(val, vlen);     /* (every class token is an atom) */
                 if (!atom) return;
             }
             uint32_t b = 0, e = 0;
