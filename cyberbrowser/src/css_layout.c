@@ -230,8 +230,9 @@ static bool style_is_font_size_prop(const char *prop);
 
 static bool layout_prune_root(HtmlDocument *doc, int i);
 /* Generation of the style set the last restyle's :has() rules (g_has) are
- * for. */
-static uint64_t g_has_gen;
+ * for, and a count bumped only when those rules change (a set extended by
+ * sheets with no :has() keeps them: a tree pruned against them holds). */
+static uint64_t g_has_gen, g_has_content;
 
 /* Map active DOM node indices to dense layout indices (*count of them).
  * With `prune`, the descendants of display:none elements are left out
@@ -600,7 +601,7 @@ static bool layout_tree_build_ex(LayoutContext *ctx, HtmlDocument *doc, bool pru
     double tb1 = layout_now_ms();
     ctx->pruned = pruned;
     for (int i = 0; pruned && i < count; i++) ctx->pruned_n += pruned[i];
-    ctx->prune_has_gen = g_has_gen;
+    ctx->prune_has_gen = g_has_content;
 
     bool ok = layout_build_nodes(ctx, map, count, carry);
     double tb2 = layout_now_ms();
@@ -10914,14 +10915,17 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
                  * rules only. */
                 uint64_t base_gen = 0;
                 int first = 0;
+                bool has_changed = false;
                 if (!(g_has_gen && styleset_base_of(set_gen, &base_gen, &first) && base_gen == g_has_gen)) {
                     has_free(&g_has);
                     ctx_features_free(&cf);
                     first = 0;
+                    has_changed = true;
                 }
                 for (int r = first, nr = css_styleset_rule_count(P.set); r < nr; r++) {
                     const CssRule *rule = css_styleset_rule(P.set, r);
                     if (!rule || !rule->selector_text) continue;
+                    if (!has_changed && strstr(rule->selector_text, ":has(")) has_changed = true;
                     has_scan_selector(&g_has, rule->selector_text);
                     ctx_scan_list(&cf, rule->selector_text, rule->selector_text + strlen(rule->selector_text), false);
                 }
@@ -10933,6 +10937,7 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
                             cf.s_fromend ? ", from end" : "", cf.s_empty ? ", empty" : "");
                 g_has_gen = set_gen;
                 g_has.gen = set_gen;
+                if (has_changed) g_has_content++;
                 if (g_css_log > 0 && g_has.any)
                     fprintf(stderr, "[css] :has() subjects: %d keys, %d ancestor keys%s%s%s\n", g_has.self.n, g_has.anc.n,
                             g_has.universal ? ", universal" : "", g_has.universal_deep ? " (deep)" : "",
@@ -18948,7 +18953,7 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
     /* A display:none guess that came out shown, or :has() rules other than
      * those the guesses were checked against: css_layout_run builds again. */
     if (ctx->pruned_n) {
-        bool failed_has = ctx->prune_has_gen != g_has_gen || ctx->has_target_first < ctx->tree.count;
+        bool failed_has = ctx->prune_has_gen != g_has_content || ctx->has_target_first < ctx->tree.count;
         bool failed = failed_has;
         for (int i = 0; !failed && i < ctx->tree.count; i++)
             failed = ctx->pruned[i] && ctx->boxes[i].s->display != CSS_DISPLAY_NONE;

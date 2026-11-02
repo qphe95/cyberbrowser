@@ -699,23 +699,35 @@ static int32_t compile_chain(Builder *b, const char *text, int32_t owner)
     ch.n = (uint16_t)count;
     ch.owner = owner;
     ch.spec = css_sel_chain_specificity(b->parts, count);
-    /* Where-lists are compiled after copying the parts, since compiling them
-     * reuses the parser scratch. */
-    CssSelectorPart *local = malloc(sizeof(CssSelectorPart) * (size_t)count);
-    memcpy(local, b->parts, sizeof(CssSelectorPart) * (size_t)count);
-    CComp *tmp = malloc(sizeof(CComp) * (size_t)count);
+    /* The compounds straight from the parser scratch; :where()/:is() and
+     * :has() arguments compile after, and compiling them reuses the
+     * scratch: only their text is kept (not a copy of every part). */
+    CComp tmp[CSS_MAX_SIMPLE_PARTS];
+    struct { int i; bool w, h; char comb; char where[160], has[160]; } sub[CSS_MAX_SIMPLE_PARTS];
+    int nsub = 0;
     for (int i = 0; i < count; i++) {
-        compile_comp(b, &local[i].simple, local[i].combinator, &tmp[i]);
+        const CssSimpleSelector *sp = &b->parts[i].simple;
+        compile_comp(b, sp, b->parts[i].combinator, &tmp[i]);
         if (tmp[i].never) ch.never = 1;
+        if (sp->where_active || sp->has_active) {
+            sub[nsub].i = i;
+            sub[nsub].w = sp->where_active;
+            sub[nsub].h = sp->has_active;
+            sub[nsub].comb = sp->has_comb;
+            if (sp->where_active) memcpy(sub[nsub].where, sp->where_arg, sizeof(sub[nsub].where));
+            if (sp->has_active) memcpy(sub[nsub].has, sp->has_arg, sizeof(sub[nsub].has));
+            nsub++;
+        }
     }
     /* The rightmost compound must not be a pseudo-element (it styles an
      * abstract box, so the legacy matcher never matches it). */
-    if (local[count - 1].simple.is_pseudo_element) ch.never = 1;
-    for (int i = 0; i < count; i++) {
-        if (local[i].simple.where_active) tmp[i].where = compile_list(b, local[i].simple.where_arg);
-        if (local[i].simple.has_active) {
-            tmp[i].has = compile_list(b, local[i].simple.has_arg);
-            tmp[i].has_comb = (uint8_t)local[i].simple.has_comb;
+    if (b->parts[count - 1].simple.is_pseudo_element) ch.never = 1;
+    for (int k = 0; k < nsub; k++) {
+        int i = sub[k].i;
+        if (sub[k].w) tmp[i].where = compile_list(b, sub[k].where);
+        if (sub[k].h) {
+            tmp[i].has = compile_list(b, sub[k].has);
+            tmp[i].has_comb = (uint8_t)sub[k].comb;
             if (tmp[i].has < 0) ch.never = 1;
         }
     }
@@ -741,8 +753,6 @@ static int32_t compile_chain(Builder *b, const char *text, int32_t owner)
     }
     ch.first = (uint32_t)b->comps.n;
     for (int i = 0; i < count; i++) VEC_PUSH(b->comps, tmp[i]);
-    free(tmp);
-    free(local);
     VEC_PUSH(b->chains, ch);
     return (int32_t)(b->chains.n - 1);
 }

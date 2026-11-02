@@ -1089,8 +1089,7 @@ static size_t css_at_rule(const char *s, size_t len, size_t pos, bool nested, Cs
         css_tz_free(&tz);
     }
     AtKind kind = css_at_kind(name, nl);
-    bool is_charset = nl == 7 && !strncasecmp(name, "charset", 7), is_import = nl == 6 && !strncasecmp(name, "import", 6),
-         is_layer = nl == 5 && !strncasecmp(name, "layer", 5);
+    bool is_charset = nl == 7 && !strncasecmp(name, "charset", 7), is_import = nl == 6 && !strncasecmp(name, "import", 6);
     /* (one that needs a block, @media; or @page;, is invalid: dropped, it
      * does not count; of the statements only @namespace does) */
     bool is_namespace = nl == 9 && !strncasecmp(name, "namespace", 9);
@@ -1463,8 +1462,26 @@ static void css_apply_pseudo(CssSimpleSelector *out,
      * constraints. */
 }
 
+/* An empty simple selector: its counts and flags zero, its strings empty.
+ * The arrays (some 6 KB) are read only up to their counts or under their
+ * flags, so they are not cleared: a compound is parsed tens of thousands
+ * of times when a large sheet compiles. */
+static void css_simple_reset(CssSimpleSelector *out) {
+    out->tag[0] = out->id[0] = out->not_tag[0] = out->not_id[0] = '\0';
+    out->where_arg[0] = out->has_arg[0] = '\0';
+    out->class_count = out->attr_count = 0;
+    out->has_tag = out->has_id = out->is_root = out->universal = false;
+    out->has_substantive = out->is_pseudo_element = out->requires_empty = false;
+    out->never_match = out->requires_link = false;
+    out->child_pos = out->type_pos = out->nth_kind = out->nth_a = out->nth_b = 0;
+    out->not_active = out->not_has_tag = out->not_has_id = false;
+    out->not_class_count = out->not_attr_count = 0;
+    out->where_active = out->has_active = false;
+    out->has_comb = 0;
+}
+
 static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector *out) {
-    memset(out, 0, sizeof(*out));
+    css_simple_reset(out);
     size_t i = 0;
     css_skip_space(s, n, &i);
     if (i >= n) return;
