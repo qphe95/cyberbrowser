@@ -75,6 +75,37 @@ white space at the edges of reversed runs (bidi-003, white-space-collapsing-bidi
 breaking with bidi (bidi-breaking-*, line-breaking-bidi-*), and bidi-007..010 (float heights a pixel
 off, overflow).  Step 6 planned.
 
+Speed of the right-to-left path (after step 5).  Measured on the Wikipedia replay with
+`*{direction:rtl!important}` injected, which puts every paragraph through the bidi pass (English
+text at level 2 in level-1 paragraphs: more reordering than a Hebrew or Arabic page has).  At step
+5 its forced layouts took 324 ms against 260 ms left to right (+25%), the bidi pass 112 ms of it.
+Changes, none changing what is laid out:
+- bidi_class: a 64 KB table for the BMP, filled from the ranges at first use, instead of a binary
+  search per character (it runs once in the algorithm and again per line for L1).
+- bidi_resolve: its twelve arrays carved from one per-thread block kept between calls instead of
+  twelve mallocs; a paragraph with no embedding, override or isolate control, no BN and no
+  paragraph separator skips X1-X10 (one isolating run sequence at the paragraph level), and one with
+  nothing of the other direction and no number returns at once; each W rule's pass is skipped when
+  the classes it acts on are absent; ASCII brackets are answered without the table search.
+- Resolved levels cached per thread by the paragraph's code points and base direction (hashed,
+  compared in full on a hit; emptied at 8 MB), so a paragraph laid out again does not run UAX #9
+  again.
+- The pass's working arrays (the paragraph text, runs, lines, cut runs, the inline-box table, new
+  fragments) from a per-thread bump allocator rewound per paragraph, about 25 mallocs fewer each.
+- Text gathered without the font lookup css_layout_text_paint does, ASCII decoded inline.
+- bidi_count_items counts only the paragraph (not into blocks), so `<body>` no longer walks the page.
+- Fragments are built only for a paragraph that is reordered (after the no-right-to-left and
+  no-odd-level checks), not for every paragraph that might need bidi; a paragraph left as the flow
+  placed it paints from its geometry, as it did before step 3, and is no longer kept from flow
+  reuse.  A one-line text box with a set line height gets its fragment without a font lookup, and a
+  box's fragment array is reallocated only when it grows.
+- A fragment cut in pieces has all but its longest piece measured; that one is the rest of the
+  fragment's width (it was the trailing space piece, measured on almost every wrapped line).
+- Each item's chain of inline boxes is found once (it was looked up in the hash table four times per
+  run), and a box's fragments search the paragraph's code points from where the last one ended.
+Result: the bidi pass on that page 112 ms -> 46 ms; on the plain left-to-right page 13 ms -> 6 ms
+(the paragraphs with an isolate and nothing right to left no longer build fragments).
+
 ## Why
 
 css/CSS2 has 105 failing pages that use right-to-left or bidi features: most of bidi-text (60),

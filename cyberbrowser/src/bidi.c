@@ -8,7 +8,7 @@
 #include <string.h>
 #include "bidi_tables.h"
 
-BidiClass bidi_class(uint32_t cp)
+static BidiClass bidi_class_search(uint32_t cp)
 {
     int lo = 0, hi = (int)(sizeof(k_bidi_ranges) / sizeof(k_bidi_ranges[0])) - 1;
     while (lo <= hi) {
@@ -18,6 +18,29 @@ BidiClass bidi_class(uint32_t cp)
         else return (BidiClass)k_bidi_ranges[mid].cls;
     }
     return BIDI_L;
+}
+
+/* The classes of the BMP, one byte each, filled from the ranges at first
+ * use (threads that race fill it with the same bytes). */
+static uint8_t g_bmp_class[0x10000];
+static volatile int g_bmp_ready;
+
+static void bmp_class_fill(void)
+{
+    memset(g_bmp_class, BIDI_L, sizeof(g_bmp_class));
+    for (size_t r = 0; r < sizeof(k_bidi_ranges) / sizeof(k_bidi_ranges[0]); r++) {
+        if (k_bidi_ranges[r].lo > 0xFFFF) break;
+        uint32_t hi = k_bidi_ranges[r].hi > 0xFFFF ? 0xFFFF : k_bidi_ranges[r].hi;
+        memset(g_bmp_class + k_bidi_ranges[r].lo, k_bidi_ranges[r].cls, hi - k_bidi_ranges[r].lo + 1);
+    }
+    g_bmp_ready = 1;
+}
+
+BidiClass bidi_class(uint32_t cp)
+{
+    if (cp > 0xFFFF) return bidi_class_search(cp);
+    if (!g_bmp_ready) bmp_class_fill();
+    return (BidiClass)g_bmp_class[cp];
 }
 
 uint32_t bidi_mirror(uint32_t cp)
@@ -35,6 +58,17 @@ uint32_t bidi_mirror(uint32_t cp)
 /* cp's paired bracket type (1 open, 2 close, 0 none) and its pair. */
 static int bracket_of(uint32_t cp, uint32_t *pair)
 {
+    if (cp < 0x80) {
+        switch (cp) {
+        case '(': *pair = ')'; return 1;
+        case ')': *pair = '('; return 2;
+        case '[': *pair = ']'; return 1;
+        case ']': *pair = '['; return 2;
+        case '{': *pair = '}'; return 1;
+        case '}': *pair = '{'; return 2;
+        default: return 0;
+        }
+    }
     int lo = 0, hi = (int)(sizeof(k_bidi_brackets) / sizeof(k_bidi_brackets[0])) - 1;
     while (lo <= hi) {
         int mid = (lo + hi) / 2;
@@ -125,8 +159,8 @@ static int strong_dir(int t)
 
 static bool is_ni(int t)
 {
-    return t == BIDI_B || t == BIDI_S || t == BIDI_WS || t == BIDI_ON || t == BIDI_LRI || t == BIDI_RLI ||
-           t == BIDI_FSI || t == BIDI_PDI;
+    return (1u << t) & ((1u << BIDI_B) | (1u << BIDI_S) | (1u << BIDI_WS) | (1u << BIDI_ON) | (1u << BIDI_LRI) |
+                        (1u << BIDI_RLI) | (1u << BIDI_FSI) | (1u << BIDI_PDI));
 }
 
 typedef struct { int open, close; } BracketPair;
@@ -136,36 +170,40 @@ static int pair_cmp(const void *a, const void *b)
     return ((const BracketPair *)a)->open - ((const BracketPair *)b)->open;
 }
 
+#define HAS(k) (seen & (1u << (k)))
+
 /* W1 - I2 on one isolating run sequence: pos[0, m) its characters, t
- * their types (changed in place), sos / eos its edge types. */
+ * their types (changed in place), sos / eos its edge types; seen, a mask of
+ * the classes that may be in it (a rule with nothing to act on is
+ * skipped). */
 static void resolve_sequence(const uint32_t *cps, const uint8_t *orig, const int *pos, uint8_t *t, int m, int sos,
-                             int eos, uint8_t *levels, BracketPair *pairs)
+                             int eos, uint8_t *levels, BracketPair *pairs, unsigned seen)
 {
     int level = levels[pos[0]];
     int e = level & 1 ? BIDI_R : BIDI_L;
 
     /* W1: NSM takes the type before it (ON after an isolate control) */
-    for (int k = 0; k < m; k++) {
+    for (int k = 0; HAS(BIDI_NSM) && k < m; k++) {
         if (t[k] != BIDI_NSM) continue;
         if (k == 0) t[k] = (uint8_t)sos;
         else t[k] = is_isolate_init(t[k - 1]) || t[k - 1] == BIDI_PDI ? BIDI_ON : t[k - 1];
     }
     /* W2: EN after AL is AN; W3: AL is R */
     int last = sos;
-    for (int k = 0; k < m; k++) {
+    for (int k = 0; HAS(BIDI_AL) && HAS(BIDI_EN) && k < m; k++) {
         if (t[k] == BIDI_L || t[k] == BIDI_R || t[k] == BIDI_AL) last = t[k];
         else if (t[k] == BIDI_EN && last == BIDI_AL) t[k] = BIDI_AN;
     }
-    for (int k = 0; k < m; k++)
+    for (int k = 0; HAS(BIDI_AL) && k < m; k++)
         if (t[k] == BIDI_AL) t[k] = BIDI_R;
     /* W4: one separator between two numbers of its kind */
-    for (int k = 1; k + 1 < m; k++) {
+    for (int k = 1; (HAS(BIDI_EN) || HAS(BIDI_AN)) && (HAS(BIDI_ES) || HAS(BIDI_CS)) && k + 1 < m; k++) {
         if (t[k] == BIDI_ES && t[k - 1] == BIDI_EN && t[k + 1] == BIDI_EN) t[k] = BIDI_EN;
         else if (t[k] == BIDI_CS && t[k - 1] == t[k + 1] && (t[k - 1] == BIDI_EN || t[k - 1] == BIDI_AN))
             t[k] = t[k - 1];
     }
     /* W5: terminators next to European numbers */
-    for (int k = 0; k < m;) {
+    for (int k = 0; HAS(BIDI_ET) && HAS(BIDI_EN) && k < m;) {
         if (t[k] != BIDI_ET) {
             k++;
             continue;
@@ -177,11 +215,11 @@ static void resolve_sequence(const uint32_t *cps, const uint8_t *orig, const int
         k = j;
     }
     /* W6: other separators and terminators are neutral */
-    for (int k = 0; k < m; k++)
+    for (int k = 0; (HAS(BIDI_ES) || HAS(BIDI_ET) || HAS(BIDI_CS)) && k < m; k++)
         if (t[k] == BIDI_ES || t[k] == BIDI_ET || t[k] == BIDI_CS) t[k] = BIDI_ON;
     /* W7: EN after L is L */
     last = sos;
-    for (int k = 0; k < m; k++) {
+    for (int k = 0; HAS(BIDI_EN) && k < m; k++) {
         if (t[k] == BIDI_L || t[k] == BIDI_R) last = t[k];
         else if (t[k] == BIDI_EN && last == BIDI_L) t[k] = BIDI_L;
     }
@@ -191,7 +229,7 @@ static void resolve_sequence(const uint32_t *cps, const uint8_t *orig, const int
     {
         struct { uint32_t close; int k; } st[63];
         int sp = 0;
-        for (int k = 0; k < m; k++) {
+        for (int k = 0; HAS(BIDI_ON) && k < m; k++) {
             if (t[k] != BIDI_ON) continue;
             uint32_t pair;
             int type = bracket_of(cps[pos[k]], &pair);
@@ -273,20 +311,72 @@ static void resolve_sequence(const uint32_t *cps, const uint8_t *orig, const int
     }
 }
 
+/* The working arrays of bidi_resolve, carved from one block per thread
+ * that grows as paragraphs do and is kept between calls. */
+static _Thread_local unsigned char *t_scratch;
+static _Thread_local size_t t_scratch_cap;
+
+static void *scratch_get(size_t need)
+{
+    if (need > t_scratch_cap) {
+        size_t cap = t_scratch_cap ? t_scratch_cap : 4096;
+        while (cap < need) cap *= 2;
+        unsigned char *p = (unsigned char *)realloc(t_scratch, cap);
+        if (!p) return NULL;
+        t_scratch = p;
+        t_scratch_cap = cap;
+    }
+    return t_scratch;
+}
+
 int bidi_resolve(const uint32_t *cps, int n, int base_level, uint8_t *levels)
 {
     if (n <= 0) return base_level < 0 ? 0 : base_level;
-    uint8_t *orig = malloc((size_t)n), *cls = malloc((size_t)n), *t = malloc((size_t)n);
-    int *match = malloc((size_t)n * sizeof(int)), *tmp = malloc((size_t)n * sizeof(int));
-    int *idx = malloc((size_t)n * sizeof(int)), *run_of = malloc((size_t)n * sizeof(int));
-    int *runs = malloc(((size_t)n + 1) * sizeof(int)), *seq = malloc((size_t)n * sizeof(int));
-    uint8_t *linked = calloc((size_t)n + 1, 1);
-    uint8_t *elev = malloc((size_t)n);   /* (the explicit levels, X1 - X8: what sos / eos compare) */
-    BracketPair *pairs = malloc((size_t)n * sizeof(BracketPair));
+    size_t N = (size_t)n;
+    unsigned char *mem = (unsigned char *)scratch_get(N * sizeof(BracketPair) + (6 * N + 1) * sizeof(int) + 5 * N + 1);
+    if (!mem) return base_level < 0 ? 0 : base_level;
+    BracketPair *pairs = (BracketPair *)mem;
+    int *match = (int *)(pairs + N), *tmp = match + N, *idx = tmp + N, *run_of = idx + N, *seq = run_of + N;
+    int *runs = seq + N;   /* (n + 1) */
+    uint8_t *orig = (uint8_t *)(runs + N + 1), *cls = orig + N, *t = cls + N;
+    uint8_t *elev = t + N;   /* (the explicit levels, X1 - X8: what sos / eos compare) */
+    uint8_t *linked = elev + N;   /* (n + 1) */
+    memset(linked, 0, N + 1);
     int para = -1;
-    if (!orig || !cls || !t || !match || !tmp || !idx || !run_of || !runs || !seq || !linked || !pairs || !elev) goto done;
 
-    for (int i = 0; i < n; i++) orig[i] = cls[i] = (uint8_t)bidi_class(cps[i]);
+    /* (explicit: an embedding, override or isolate control, or a paragraph
+     * separator; without one every character is at the paragraph level and
+     * the paragraph is one isolating run sequence) */
+    unsigned explicit_mask = (1u << BIDI_RLE) | (1u << BIDI_LRE) | (1u << BIDI_RLO) | (1u << BIDI_LRO) |
+                             (1u << BIDI_PDF) | (1u << BIDI_RLI) | (1u << BIDI_LRI) | (1u << BIDI_FSI) |
+                             (1u << BIDI_PDI) | (1u << BIDI_B) | (1u << BIDI_BN);
+    unsigned seen = 0;
+    for (int i = 0; i < n; i++) {
+        uint32_t c = cps[i];
+        uint8_t k = c <= 0xFFFF && g_bmp_ready ? g_bmp_class[c] : (uint8_t)bidi_class(c);
+        orig[i] = cls[i] = k;
+        seen |= 1u << k;
+    }
+    if (!(seen & explicit_mask)) {
+        para = base_level >= 0 ? base_level : -1;
+        if (para < 0) {
+            para = 0;
+            for (int i = 0; i < n; i++) {
+                if (orig[i] == BIDI_L) break;
+                if (orig[i] == BIDI_R || orig[i] == BIDI_AL) { para = 1; break; }
+            }
+        }
+        memset(levels, para, N);
+        /* (nothing strong of the other direction, no number: every level is the paragraph's) */
+        unsigned other = para & 1 ? (1u << BIDI_L) | (1u << BIDI_EN) | (1u << BIDI_AN)
+                                   : (1u << BIDI_R) | (1u << BIDI_AL) | (1u << BIDI_EN) | (1u << BIDI_AN);
+        if (!(seen & other)) return para;
+        for (int i = 0; i < n; i++) seq[i] = i;
+        memcpy(t, cls, N);
+        int e = para & 1 ? BIDI_R : BIDI_L;
+        resolve_sequence(cps, orig, seq, t, n, e, e, levels, pairs, seen);
+        return para;
+    }
     match_isolates(orig, n, match, tmp);
     para = base_level >= 0 ? base_level : first_strong(orig, match, 0, n);
     if (para < 0) para = 0;
@@ -410,25 +500,11 @@ int bidi_resolve(const uint32_t *cps, int n, int base_level, uint8_t *levels)
         int sos = (lv > prev ? lv : prev) & 1 ? BIDI_R : BIDI_L;
         int eos = (lv > next ? lv : next) & 1 ? BIDI_R : BIDI_L;
         for (int k = 0; k < len; k++) t[k] = cls[seq[k]];
-        resolve_sequence(cps, orig, seq, t, len, sos, eos, levels, pairs);
+        resolve_sequence(cps, orig, seq, t, len, sos, eos, levels, pairs, ~0u);
     }
     /* (what X9 removed: the level before it, for unbroken runs) */
     for (int i = 0; i < n; i++)
         if (is_removed(orig[i])) levels[i] = i > 0 ? levels[i - 1] : (uint8_t)para;
-
-done:
-    free(orig);
-    free(cls);
-    free(t);
-    free(match);
-    free(tmp);
-    free(idx);
-    free(run_of);
-    free(runs);
-    free(seq);
-    free(linked);
-    free(elev);
-    free(pairs);
     return para;
 }
 
