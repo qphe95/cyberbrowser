@@ -38,7 +38,27 @@ margin-padding-clear 2, ui 2, normal-flow 1, positioning 1), two lost: normal-fl
 border-line-break and -padding-line-break, laid out right (the final "xx" starts its line at 0, the
 space before it removed there) against a reference that uses an inline-block, which the old path
 lays out with that space kept; they come back when 3c takes inline-blocks.  YouTube and Wikipedia
-screenshots as in 3a; forced layouts within noise.  Without the switch every screenshot identical.  Goal: lay out a block's inline content the way browsers do, from
+screenshots as in 3a; forced layouts within noise.  Without the switch every screenshot identical.
+
+Step 3c, first part: atomic inlines (inline-block, inline-flex, inline-grid, inline-table, controls)
+and inline images.  Each is sized as the flow sizes it (layout_size_atomic_inline; an image by
+layout_resolve_used_sizes) and laid out once at the content start, then moved with its subtree
+(layout_offset_subtree) to its place: its margin box at its line's top, as the flow places it, the
+line as tall as that margin box.  A break opportunity before and after it; the edges of the inline
+elements around it stay with it.  An inline element holding only atomic inlines is outlined around
+them at the line's top, as the flow sizes it.  An image with display: block is a block, not an atom.
+Intrinsic widths of a block this path lays out come from the same words and edges (ifc_intrinsic:
+max-content the widest line between forced breaks without its end spaces, min-content the widest
+run without a break opportunity or atomic inline), so shrink-to-fit sizes and line breaking agree;
+the old block branch made an abspos box too narrow for "a <inline-table> d" (tables/
+table-anonymous-objects-178, -180).  Under CYBER_IFC=1: css/CSS2 5441, none lost (3b's two back).
+YouTube's screenshot identical.  Wikipedia's infobox changes, both right: the flag's line is 68 px,
+the image with its 1 px border (the old path sized its span and link from the image's natural
+125x66, so the line was short and the centring 1 px off), and the anthem's audio player (30 px) is
+inside its row (the old path gave its inline-block wrapper a 16.9 px text line, so the player drew
+across the row's border).  Forced layouts: YouTube within noise, Wikipedia about 5 ms slower (min
+262 against 254 ms), likely the word-by-word intrinsic widths; the cached widths of step 5 take that
+back.  Left for the second part: floats inside the paragraph.  Goal: lay out a block's inline content the way browsers do, from
 a per-paragraph list of items analysed once (text, white space, break opportunities, bidi levels,
 widths) and kept across layouts, so that right-to-left and mixed-direction text costs about what
 left-to-right does, line breaking never measures the same text twice, and the inline boxes a line

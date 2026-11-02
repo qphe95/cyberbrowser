@@ -11785,6 +11785,9 @@ static bool layout_is_table_part(const LayoutBox *b)
            b->s->float_side == 0 && b->s->position != CSS_POSITION_ABSOLUTE && b->s->position != CSS_POSITION_FIXED;
 }
 
+static bool ifc_eligible(LayoutContext *ctx, int idx);
+static double ifc_intrinsic(LayoutContext *ctx, int idx, bool want_max);
+
 static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_max)
 {
     LayoutBox *box = layout_box(ctx, idx);
@@ -11859,6 +11862,9 @@ static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_ma
         content = layout_grid_intrinsic(ctx, idx, want_max);
     } else if (table_is_table(box) && (content = layout_table_intrinsic(ctx, idx, want_max)) >= 0.0) {
         /* (a table without rows or cells is sized as a block) */
+    } else if (ifc_eligible(ctx, idx)) {
+        /* (inline content laid out on items: its widths from the same words) */
+        content = ifc_intrinsic(ctx, idx, want_max);
     } else {
         content = 0.0;
         /* Block / inline formatting: inline-level children accumulate along
@@ -13344,7 +13350,8 @@ enum {
     IFC_MARK,     /* where a box with nothing kept is */
     IFC_OPEN,     /* an inline element's start edge: margin, border, padding */
     IFC_CLOSE,    /* its end edge */
-    IFC_BR        /* a forced line break */
+    IFC_BR,       /* a forced line break */
+    IFC_ATOM      /* an atomic inline or image: its margin box, laid out already */
 };
 
 typedef struct {
@@ -13357,6 +13364,7 @@ typedef struct {
     IfcEl *el;
     int nel, elcap;
     bool space_before;    /* the last text was a collapsible space (or nothing yet) */
+    double x0, y0;        /* where atomic inlines are laid out before their line is known */
 } IfcItems;
 
 static bool ifc_put(IfcItems *I, int box, uint32_t a, uint32_t b, double w, int kind)
@@ -13399,6 +13407,19 @@ static bool ifc_is_br(HtmlNode *n)
     return n && n->type == HTML_NODE_ELEMENT && n->tag_name && !strcasecmp(n->tag_name, "br");
 }
 
+static bool ifc_is_img(HtmlNode *n)
+{
+    return n && n->type == HTML_NODE_ELEMENT && n->tag_name && !strcasecmp(n->tag_name, "img");
+}
+
+/* A box this path places whole on a line: an atomic inline (inline-block,
+ * inline-flex, inline-grid, inline-table, a control) or an inline image. */
+static bool ifc_is_atom(const LayoutBox *b, HtmlNode *n)
+{
+    return n && n->type == HTML_NODE_ELEMENT &&
+           (layout_box_is_atomic_inline(b) || (ifc_is_img(n) && b->s->display == CSS_DISPLAY_INLINE));
+}
+
 /* Whether box idx's in-flow children, and theirs inside inline elements,
  * are what this path lays out: text, inline elements, line breaks; in
  * white-space normal, nothing that needs bidi, no generated content or
@@ -13412,6 +13433,7 @@ static bool ifc_inline_ok(LayoutContext *ctx, int p)
         if (!layout_is_in_flow(cb)) return false;
         HtmlNode *n = css_layout_box_node(ctx, c);
         if (!n) return false;
+        if (ifc_is_atom(cb, n)) continue;   /* (what it holds is its own) */
         if (cb->s->white_space != 0) return false;
         if (n->type == HTML_NODE_TEXT) continue;
         if (n->type != HTML_NODE_ELEMENT || cb->s->display != CSS_DISPLAY_INLINE || cb->s->block_in_inline == 1) return false;
@@ -13476,6 +13498,16 @@ static void ifc_collect(LayoutContext *ctx, int p, IfcItems *I, double avail_wid
         } else if (ifc_is_br(n)) {
             ifc_put(I, c, 0, 0, 0.0, IFC_BR);
             I->space_before = true;
+        } else if (ifc_is_atom(cb, n)) {
+            /* (laid out here, at the content start: placed on its line later,
+             * moved with what it holds) */
+            if (!ifc_is_img(n)) layout_size_atomic_inline(ctx, c, avail_width);
+            cb->x = I->x0 + cb->margin_left;
+            cb->y = I->y0 + cb->margin_top;
+            layout_update_content_sizes(cb);
+            layout_node_serial(ctx, c);
+            ifc_put(I, c, 0, 0, cb->margin_left + cb->width + cb->margin_right, IFC_ATOM);
+            I->space_before = false;
         } else {
             /* (an inline split around a line break by layout_blockify: this
              * path lays it out, its pieces are this path's) */
@@ -13502,6 +13534,92 @@ static void ifc_collect(LayoutContext *ctx, int p, IfcItems *I, double avail_wid
             I->el[e].tok1 = I->n;
         }
     }
+}
+
+/* Intrinsic widths over p's inline content, as the line breaker sees it:
+ * max-content the widest line between forced breaks (no spaces at its
+ * ends), min-content the widest run without a break opportunity (a word
+ * with the edges joined to it, an atomic inline). */
+typedef struct {
+    bool want_max, space_before;
+    double line, pending, run, best;
+    bool line_has;   /* (something on the line: a space after it counts) */
+} IfcIntr;
+
+static void ifc_intr_content(IfcIntr *S, double w)
+{
+    if (S->line_has) S->line += S->pending;
+    S->pending = 0.0;
+    S->line += w;
+    S->line_has = true;
+}
+
+static void ifc_intr_break(IfcIntr *S)
+{
+    if (S->run > S->best) S->best = S->run;
+    S->run = 0.0;
+}
+
+static void ifc_intr_walk(LayoutContext *ctx, int p, IfcIntr *S)
+{
+    for (int c = ctx->tree.nodes[p].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+        LayoutBox *cb = layout_box(ctx, c);
+        if (cb->s->display == CSS_DISPLAY_NONE) continue;
+        HtmlNode *n = css_layout_box_node(ctx, c);
+        if (n->type == HTML_NODE_TEXT) {
+            const char *raw = css_layout_node_text(ctx, n);
+            const char *t = raw ? css_layout_box_text(ctx, c, raw) : NULL;
+            uint32_t len = t ? (uint32_t)strlen(t) : 0;
+            for (uint32_t i = 0; i < len;) {
+                uint32_t j = i;
+                if (ifc_space(t[i])) {
+                    while (j < len && ifc_space(t[j])) j++;
+                    if (!S->space_before) {
+                        S->pending = ifc_width(ctx, c, " ", 0, 1);
+                        S->space_before = true;
+                        ifc_intr_break(S);
+                    }
+                } else {
+                    while (j < len && !ifc_space(t[j])) j++;
+                    double w = ifc_width(ctx, c, t, i, j);
+                    ifc_intr_content(S, w);
+                    S->run += w;
+                    S->space_before = false;
+                }
+                i = j;
+            }
+        } else if (ifc_is_br(n)) {
+            if (S->line > S->best && S->want_max) S->best = S->line;
+            S->line = S->pending = 0.0;
+            S->line_has = false;
+            S->space_before = true;
+            ifc_intr_break(S);
+        } else if (ifc_is_atom(cb, n)) {
+            double w = layout_intrinsic_contribution(ctx, c, S->want_max);
+            ifc_intr_content(S, w);
+            ifc_intr_break(S);
+            if (w > S->best && !S->want_max) S->best = w;
+            S->space_before = false;
+        } else {
+            double lw = cb->margin_left + cb->s->border_left + cb->padding_left;
+            double rw = cb->padding_right + cb->s->border_right + cb->margin_right;
+            if (lw != 0.0) { ifc_intr_content(S, lw); S->run += lw; }
+            ifc_intr_walk(ctx, c, S);
+            if (rw != 0.0) { S->line += rw; S->line_has = true; S->run += rw; }
+        }
+    }
+}
+
+static double ifc_intrinsic(LayoutContext *ctx, int idx, bool want_max)
+{
+    IfcIntr S;
+    memset(&S, 0, sizeof(S));
+    S.want_max = want_max;
+    S.space_before = true;
+    ifc_intr_walk(ctx, idx, &S);
+    if (want_max) return S.line > S.best ? S.line : S.best;
+    ifc_intr_break(&S);
+    return S.best;
 }
 
 /* The height a token's line takes from it, as the flow's line box takes it
@@ -13539,6 +13657,12 @@ static double ifc_line_height(LayoutContext *ctx, int idx, const IfcItems *I, in
             double a = ifc_tok_adv(ctx, idx, t->box);
             if (a > br) br = a;
         }
+        if (t->kind == IFC_ATOM) {
+            const LayoutBox *ab = layout_box(ctx, t->box);
+            double a = ab->margin_top + ab->height + ab->margin_bottom;
+            if (a > h) h = a;
+            continue;
+        }
         if (!(t->kind == IFC_WORD || (t->kind == IFC_SPACE && !t->drop))) continue;
         double a = ifc_tok_adv(ctx, idx, t->box);
         if (a > h) h = a;
@@ -13567,6 +13691,8 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
     LayoutBox *blk = layout_box(ctx, idx);
     IfcItems I = { 0 };
     I.space_before = true;
+    I.x0 = content_left;
+    I.y0 = cur->y;
     ifc_collect(ctx, idx, &I, avail_width, layout_pct_base_height(ctx, idx));
     layout_flow_noreuse_up(ctx, idx);   /* (its fragments are not in the flow record yet) */
     if (!ctx->text_frags) {
@@ -13613,12 +13739,17 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
             /* a group: up to the next space or break */
             int j = i;
             double ww = 0.0;
-            bool has_word = false;
+            bool has_word = false, has_atom = false;
             while (j < I.n && I.t[j].kind != IFC_SPACE && I.t[j].kind != IFC_BR) {
+                /* (an atomic inline: a break opportunity before and after it) */
+                if (I.t[j].kind == IFC_ATOM && (has_word || has_atom)) break;
+                if (has_atom && I.t[j].kind != IFC_CLOSE) break;
                 ww += I.t[j].w;
                 has_word = has_word || I.t[j].kind == IFC_WORD;
+                has_atom = has_atom || I.t[j].kind == IFC_ATOM;
                 j++;
             }
+            has_word = has_word || has_atom;
             if (word && x + ww > lx + la + 0.01) break;
             for (int k = i; k < j; k++) {
                 I.t[k].x = x;
@@ -13647,7 +13778,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
         /* (the line's end: its last word or edge, trailing spaces hang) */
         double end = lx + (nlines == 0 ? indent0 : 0.0);
         for (int k = i - 1; k >= t0; k--)
-            if (I.t[k].kind == IFC_WORD || I.t[k].kind == IFC_OPEN || I.t[k].kind == IFC_CLOSE) {
+            if (I.t[k].kind == IFC_WORD || I.t[k].kind == IFC_OPEN || I.t[k].kind == IFC_CLOSE || I.t[k].kind == IFC_ATOM) {
                 end = I.t[k].x + I.t[k].w;
                 break;
             }
@@ -13683,6 +13814,18 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
         HtmlNode *tn = css_layout_box_node(ctx, b);
         int L = nlines > 0 ? (I.t[k].line < nlines ? I.t[k].line : nlines - 1) : -1;
         double top = L >= 0 ? ltop[L] : cur->y;
+        if (I.t[k].kind == IFC_ATOM) {
+            /* (its margin box at the line's top, as the flow places it) */
+            double dx = I.t[k].x + bb->margin_left - bb->x, dy = top + bb->margin_top - bb->y;
+            if (dx != 0.0 || dy != 0.0) {
+                bb->x += dx;
+                bb->y += dy;
+                layout_offset_subtree(ctx, b, dx, dy);
+            }
+            layout_update_content_sizes(bb);
+            k = k1;
+            continue;
+        }
         if (I.t[k].kind == IFC_BR) {
             bb->x = I.t[k].x;
             bb->y = top;
@@ -13754,11 +13897,17 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
     for (int e = 0; e < I.nel; e++) {
         IfcEl *el = &I.el[e];
         LayoutBox *eb = layout_box(ctx, el->box);
-        double x0 = 1e30, x1 = -1e30;
+        double x0 = 1e30, x1 = -1e30, atom_h = 0.0;
         int L0 = -1, L1 = -1;
+        bool has_text = false;
         for (int q = el->tok0; q < el->tok1; q++) {
             const IfcTok *t = &I.t[q];
             if (t->drop) continue;
+            if (t->kind == IFC_WORD || t->kind == IFC_SPACE) has_text = true;
+            if (t->kind == IFC_ATOM) {
+                const LayoutBox *ab = layout_box(ctx, t->box);
+                if (ab->margin_top + ab->height + ab->margin_bottom > atom_h) atom_h = ab->margin_top + ab->height + ab->margin_bottom;
+            }
             /* (a space that ends a line hangs outside) */
             if (t->kind == IFC_SPACE && (q + 1 >= I.n || I.t[q + 1].line != t->line)) continue;
             double a = ifc_tok_left(ctx, t), z = ifc_tok_right(ctx, t);
@@ -13781,6 +13930,10 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
             int q = el->tok0 < I.n ? el->tok0 : -1;
             eb->y = q >= 0 && nlines > 0 ? ltop[I.t[q].line < nlines ? I.t[q].line : nlines - 1] : cur->y;
             eb->height = 0.0;
+        } else if (L0 == L1 && !has_text && atom_h > 0.0) {
+            /* (only atomic inlines: around them, as the flow sizes it from them) */
+            eb->y = ltop[L0];
+            eb->height = atom_h;
         } else if (L0 == L1) {
             eb->y = ltop[L0] + (adv - ca) / 2.0 - eb->padding_top - eb->s->border_top;
             eb->height = ca + vpb;
