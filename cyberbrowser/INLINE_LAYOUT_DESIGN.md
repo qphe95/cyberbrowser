@@ -1,6 +1,6 @@
 # Inline layout on paragraph items
 
-Status: steps 3, 4 and 5 done: all inline layout on items, the old inline path removed (steps 1 and 2 measured and dropped, below).
+Status: steps 3 to 6 done: all inline layout on items, the old inline path removed, fragments and pieces in the flow record (steps 1 and 2 measured and dropped, below).
 
 Step 3a (css_layout.c, "Inline formatting on items"): a block whose in-flow content is only text
 and inline elements without left or right margin, border or padding, in white-space normal, with
@@ -275,6 +275,25 @@ against 239 / 248 ms, YouTube 189 / 196 against 193 / 198.  The shaper's wrap wa
 (text_shaper_wrap_measure, _wrap_shape, _wrap_lines, _truncate_lines, _truncate_width) is now used
 only by unit tests.
 
+Step 6: fragments and pieces in the flow record.  At the end of a layout the record copies every
+box's text fragments and pieces into two pools (LayoutFlowBuf fpool and ppool, frag0 / frag_n and
+pc0 / pc_n per box); a subtree taken from the record gets them back (flow_reuse_lines), unchanged,
+since both are relative to their box (a piece to its anchor, found again as the child at the same
+place, else placed against its inline's box).  layout_flow_noreuse_up is gone: a block laid out on
+items, and its ancestors, can be reused like any other.  The per-box fragment and piece lists are
+allocated before the flow's jobs (they run in parallel; the lazy allocation inside them could race).
+Reuse then met table cells whose row is anonymous: a row moves a cell's content (vertical-align)
+after the cell's call, so a cell taken from the record had its content moved twice (Wikipedia's
+infobox, 11 px).  Reuse already refused a cell under a tr; it now refuses any box with the cell role
+or under a row (flow_parent_is_row).  Keep-verify compares fragments and pieces too
+(layout_lines_same).  css/CSS2 5553 with every screenshot as at 5f, the three replays identical with
+keep-verify clean, also over CYBER_LAYOUT_BENCH's layouts (20 on Wikipedia, 46 on YouTube); unit
+tests pass.  Reuse on Wikipedia's layout benchmark (20 rounds of each scenario) went from 140 boxes
+to about 50,000 (some 2,500 of its 45,810 per layout), the flow phase 20.9 -> 20.1 ms median for a
+text change: most of the page is still laid out again, its blocks beside floats (flow_try refuses a
+call with floats placed, and a box laid out with them is not a reuse root).  Forced layouts against
+5f (9 rounds): Wikipedia 236 / 244 against 237 / 245 ms, YouTube 191 / 198 against 192 / 200.
+
 Goal: lay out a block's inline content the way browsers do, from
 a per-paragraph list of items analysed once (text, white space, break opportunities, bidi levels,
 widths) and kept across layouts, so that right-to-left and mixed-direction text costs about what
@@ -429,7 +448,8 @@ YouTube and Wikipedia replays, LTR and forced-RTL timing)
    block children (each run of it a paragraph on items); 5e what remains (inline replaced elements,
    ::first-letter, floats inside inline elements, blocks inside inline elements); 5f the old inline
    path and the bidi post-pass removed.
-6. **Reuse.**  Fragments and pieces in the flow record; no paragraph kept from reuse.
+6. **Reuse.**  Fragments and pieces in the flow record; no paragraph kept from reuse.  Done; what
+   still keeps most of a page from reuse is floats.
 7. **Bidi step 6** (BIDI_DESIGN.md) on the new path: `plaintext` per paragraph, white space at bidi
    boundaries (now in the text), generated content in bidi, the static position of an inline
    abspos box in a right-to-left line, getClientRects per fragment.

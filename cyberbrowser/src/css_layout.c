@@ -11964,7 +11964,6 @@ typedef struct FlowPiece {
     bool shown;
 } FlowPiece;
 
-static void layout_flow_noreuse_up(LayoutContext *ctx, int idx);
 
 static bool layout_is_br(LayoutContext *ctx, int idx)
 {
@@ -13358,11 +13357,6 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
     IfcBidi B;
     memset(&B, 0, sizeof(B));
     bool bidi = ifc_bidi_levels(ctx, idx, &I, &B.para) && ifc_bidi_init(&B, &I);
-    layout_flow_noreuse_up(ctx, idx);   /* (its fragments are not in the flow record yet) */
-    if (!ctx->text_frags) {
-        ctx->text_frags = (LayoutTextFragList *)calloc((size_t)ctx->tree.count, sizeof(LayoutTextFragList));
-        ctx->text_frags_n = ctx->text_frags ? ctx->tree.count : 0;
-    }
     bool any = false;   /* (anything that makes a line: a word, an edge, a break) */
     for (int k = 0; k < I.n && !any; k++)
         any = I.t[k].kind != IFC_SPACE && I.t[k].kind != IFC_MARK && I.t[k].kind != IFC_FLOAT && I.t[k].kind != IFC_CTL &&
@@ -13829,10 +13823,6 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
             }
             bool deco = eb->s->background_color_a > 0.0f || eb->s->border_top > 0.0 || eb->s->border_bottom > 0.0 ||
                         eb->s->border_left > 0.0 || eb->s->border_right > 0.0 || eb->s->background_image_url[0];
-            if (deco && !ctx->pieces) {
-                ctx->pieces = (LayoutPieceList *)calloc((size_t)ctx->tree.count, sizeof(LayoutPieceList));
-                ctx->pieces_n = ctx->pieces ? ctx->tree.count : 0;
-            }
             LayoutPieceList *pl = deco && ctx->pieces && el->box < ctx->pieces_n ? &ctx->pieces[el->box] : NULL;
             for (int k = bidi && pl ? B.el[e].head : -1; k >= 0; k = B.pc[k].next) {
                 if (pl->n == pl->cap) {
@@ -14060,8 +14050,6 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
             nkids = n;
         }
     }
-    /* (laid out again each time: its pieces are not in the flow record) */
-    if (fpieces) layout_flow_noreuse_up(ctx, idx);
     /* text-indent: the first line (before any block, and while the pen is
      * on the container's first line) starts this far in. */
     double indent0 = box->s->text_indent + box->s->text_indent_pct * avail_width;
@@ -17128,6 +17116,13 @@ typedef struct LayoutFlowBuf {
     int *cb;                    /* how far below it the highest containing block of what is
                                    absolutely positioned below is (< 0: above it; FLOW_NO_CB) */
     int *first_child, *next_sibling;
+    /* Each box's text fragments and pieces as the layout left them (moving
+     * with their box, or a piece with its anchor): frag_n of them from
+     * frag0 in fpool, pc_n from pc0 in ppool. */
+    int *frag0, *frag_n, *pc0, *pc_n;
+    LayoutTextFrag *fpool;
+    LayoutPiece *ppool;
+    size_t fpool_cap, ppool_cap;
 } LayoutFlowBuf;
 
 #define FLOW_NO_CB (1 << 20)
@@ -17164,6 +17159,7 @@ static void flow_buf_free(LayoutFlowBuf *b)
     free(b->entry); free(b->exit); free(b->snap1); free(b->snap2);
     free(b->pass); free(b->ok); free(b->noreuse); free(b->gen); free(b->copied); free(b->cb);
     free(b->img); free(b->first_child); free(b->next_sibling);
+    free(b->frag0); free(b->frag_n); free(b->pc0); free(b->pc_n); free(b->fpool); free(b->ppool);
     memset(b, 0, sizeof(*b));
 }
 
@@ -17186,8 +17182,13 @@ static bool flow_buf_ensure(LayoutFlowBuf *b, int n)
     b->img = (uint64_t *)malloc(m * sizeof(uint64_t));
     b->first_child = (int *)malloc(m * sizeof(int));
     b->next_sibling = (int *)malloc(m * sizeof(int));
+    b->frag0 = (int *)malloc(m * sizeof(int));
+    b->frag_n = (int *)malloc(m * sizeof(int));
+    b->pc0 = (int *)malloc(m * sizeof(int));
+    b->pc_n = (int *)malloc(m * sizeof(int));
     if (!b->entry || !b->exit || !b->snap1 || !b->snap2 || !b->pass || !b->ok || !b->noreuse || !b->gen ||
-        !b->copied || !b->cb || !b->img || !b->first_child || !b->next_sibling) {
+        !b->copied || !b->cb || !b->img || !b->first_child || !b->next_sibling || !b->frag0 || !b->frag_n ||
+        !b->pc0 || !b->pc_n) {
         flow_buf_free(b);
         return false;
     }
@@ -17311,10 +17312,14 @@ static void layout_flow_begin(LayoutContext *ctx)
 
 static int layout_positioned_ancestor(LayoutContext *ctx, int idx);
 
+/* A table cell (by its role, or a child of a <tr>, anonymous rows too): its
+ * row moves its content, not it, after its call (vertical-align). */
 static bool flow_parent_is_row(LayoutContext *ctx, int i)
 {
+    if (ctx->boxes[i].s->table_role == 4) return true;
     int p = ctx->tree.nodes[i].parent_idx;
     if (p < 0) return false;
+    if (ctx->boxes[p].s->table_role == 3) return true;
     HtmlNode *pn = layout_node_dom(ctx, ctx->tree.nodes[p].dom_node_idx);
     return pn && pn->type == HTML_NODE_ELEMENT && pn->tag_name && strcasecmp(pn->tag_name, "tr") == 0;
 }
@@ -17326,6 +17331,54 @@ static void flow_shift(LayoutBox *b, double dx, double dy)
 {
     b->x += dx;
     b->y += dy;
+}
+
+/* Box c's fragments and pieces from the record's box o (its children
+ * already taken from the record: a piece's anchor is one of them, the
+ * child at the same place among o's; one that is not, relative to c). */
+static void flow_reuse_lines(LayoutContext *ctx, const LayoutFlowBuf *R, const LayoutBox *snap, int c, int o)
+{
+    int n = R->frag_n[o];
+    LayoutTextFragList *tf = ctx->text_frags && c < ctx->text_frags_n ? &ctx->text_frags[c] : NULL;
+    if (tf && (n > 0 || tf->n > 0)) {
+        LayoutTextFrag *g = n > 0 ? (LayoutTextFrag *)realloc(tf->f, (size_t)n * sizeof(LayoutTextFrag)) : tf->f;
+        if (g) {
+            tf->f = g;
+            if (n > 0) memcpy(g, R->fpool + R->frag0[o], (size_t)n * sizeof(LayoutTextFrag));
+            tf->n = n;
+        } else {
+            tf->n = 0;
+        }
+    }
+    n = R->pc_n[o];
+    LayoutPieceList *pl = ctx->pieces && c < ctx->pieces_n ? &ctx->pieces[c] : NULL;
+    if (!pl || (n == 0 && pl->n == 0)) return;
+    if (pl->cap < n) {
+        LayoutPiece *np = (LayoutPiece *)realloc(pl->p, (size_t)n * sizeof(LayoutPiece));
+        if (!np) { pl->n = 0; return; }
+        pl->p = np;
+        pl->cap = n;
+    }
+    pl->n = n;
+    if (n == 0) return;
+    memcpy(pl->p, R->ppool + R->pc0[o], (size_t)n * sizeof(LayoutPiece));
+    for (int q = 0; q < n; q++) {
+        LayoutPiece *pc = &pl->p[q];
+        if (pc->anchor < 0) continue;
+        int a = ctx->tree.nodes[c].first_child_idx, oa = R->first_child[o];
+        while (a >= 0 && oa >= 0 && oa != pc->anchor) {
+            a = ctx->tree.nodes[a].next_sibling_idx;
+            oa = R->next_sibling[oa];
+        }
+        if (a >= 0 && oa >= 0) {
+            pc->anchor = a;
+        } else {
+            /* (not a child: placed against the box itself, as it was) */
+            pc->dx += snap[pc->anchor].x - snap[o].x;
+            pc->dy += snap[pc->anchor].y - snap[o].y;
+            pc->anchor = -1;
+        }
+    }
 }
 
 /* (mx, my: how far the root moved after its call in the recorded layout;
@@ -17354,15 +17407,8 @@ static void flow_reuse_children(LayoutContext *ctx, LayoutFlow *F, const LayoutB
         C->noreuse[c] = R->noreuse[oc];
         if (F->pass == 2) { C->ok[c] = R->ok[oc]; C->cb[c] = R->cb[oc]; C->copied[c] = 1; }
         flow_reuse_children(ctx, F, snap, c, oc, dx, dy, mx, my);
+        flow_reuse_lines(ctx, R, snap, c, oc);
     }
-}
-
-/* Box idx and its ancestors are not reused at the next flow pass. */
-static void layout_flow_noreuse_up(LayoutContext *ctx, int idx)
-{
-    LayoutFlow *F = ctx->flow;
-    if (!F || !F->pass) return;
-    for (int i = idx; i >= 0; i = ctx->tree.nodes[i].parent_idx) F->cur.noreuse[i] = 1;
 }
 
 static bool flow_try(LayoutContext *ctx, LayoutFlow *F, int idx, uint64_t entry)
@@ -17442,10 +17488,34 @@ static void layout_flow_end(LayoutContext *ctx)
     F->pass = 0;
     int n = ctx->tree.count;
     LayoutFlowBuf *C = &F->cur;
+    size_t nf = 0, np = 0;
     for (int i = 0; i < n; i++) {
         C->first_child[i] = ctx->tree.nodes[i].first_child_idx;
         C->next_sibling[i] = ctx->tree.nodes[i].next_sibling_idx;
         C->gen[i] = layout_has_gen(ctx, i);
+        C->frag_n[i] = ctx->text_frags && i < ctx->text_frags_n ? ctx->text_frags[i].n : 0;
+        C->pc_n[i] = ctx->pieces && i < ctx->pieces_n ? ctx->pieces[i].n : 0;
+        C->frag0[i] = (int)nf;
+        C->pc0[i] = (int)np;
+        nf += (size_t)C->frag_n[i];
+        np += (size_t)C->pc_n[i];
+    }
+    if (nf > C->fpool_cap || np > C->ppool_cap) {
+        size_t fc = nf > C->fpool_cap ? nf + nf / 4 + 64 : C->fpool_cap;
+        size_t pcap = np > C->ppool_cap ? np + np / 4 + 16 : C->ppool_cap;
+        LayoutTextFrag *fp = fc > C->fpool_cap ? (LayoutTextFrag *)realloc(C->fpool, fc * sizeof(LayoutTextFrag)) : C->fpool;
+        if (fp) { C->fpool = fp; C->fpool_cap = fc; }
+        LayoutPiece *pp = pcap > C->ppool_cap ? (LayoutPiece *)realloc(C->ppool, pcap * sizeof(LayoutPiece)) : C->ppool;
+        if (pp) { C->ppool = pp; C->ppool_cap = pcap; }
+        if (nf > C->fpool_cap || np > C->ppool_cap) {
+            /* (no room: no record) */
+            F->rec_valid = false;
+            return;
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        if (C->frag_n[i]) memcpy(C->fpool + C->frag0[i], ctx->text_frags[i].f, (size_t)C->frag_n[i] * sizeof(LayoutTextFrag));
+        if (C->pc_n[i]) memcpy(C->ppool + C->pc0[i], ctx->pieces[i].p, (size_t)C->pc_n[i] * sizeof(LayoutPiece));
     }
     int *depth = F->depth;
     for (int k = 0; k < n; k++) {
@@ -17943,6 +18013,16 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
      * children, recurses, then resolves its auto height.  Flex items and
      * table cells fork into jobs (layout_units).  Then absolutely/fixed
      * positioned boxes are placed against their final containing blocks. */
+    /* (fragments and pieces: per box, set before the jobs, which run in
+     * parallel) */
+    if (!ctx->text_frags) {
+        ctx->text_frags = (LayoutTextFragList *)calloc((size_t)ctx->tree.count + 1, sizeof(LayoutTextFragList));
+        ctx->text_frags_n = ctx->text_frags ? ctx->tree.count : 0;
+    }
+    if (!ctx->pieces) {
+        ctx->pieces = (LayoutPieceList *)calloc((size_t)ctx->tree.count + 1, sizeof(LayoutPieceList));
+        ctx->pieces_n = ctx->pieces ? ctx->tree.count : 0;
+    }
     layout_flow_begin(ctx);
     job_graph_run(job_new(layout_flow_job, NULL, ctx, 0, 0));
     layout_flow_end(ctx);
@@ -18303,6 +18383,38 @@ static bool layout_geom_close(const LayoutBox *a, const LayoutBox *b)
 #undef GEOM_NEAR
 }
 
+/* Whether box i of a and box j of b have the same fragments and pieces (a
+ * piece's anchor: the box of the same document node). */
+static bool layout_lines_same(const LayoutContext *a, int i, const LayoutContext *b, int j)
+{
+#define NEAR(u, v) (fabs((u) - (v)) < 0.01)
+    const LayoutTextFragList *fa = a->text_frags && i < a->text_frags_n ? &a->text_frags[i] : NULL;
+    const LayoutTextFragList *fb = b->text_frags && j < b->text_frags_n ? &b->text_frags[j] : NULL;
+    int na = fa ? fa->n : 0, nb = fb ? fb->n : 0;
+    if (na != nb) return false;
+    for (int q = 0; q < na; q++) {
+        const LayoutTextFrag *x = &fa->f[q], *y = &fb->f[q];
+        if (x->start != y->start || x->end != y->end || x->level != y->level || x->ellipsis != y->ellipsis ||
+            !NEAR(x->dx, y->dx) || !NEAR(x->dy, y->dy) || !NEAR(x->w, y->w))
+            return false;
+    }
+    const LayoutPieceList *pa = a->pieces && i < a->pieces_n ? &a->pieces[i] : NULL;
+    const LayoutPieceList *pb = b->pieces && j < b->pieces_n ? &b->pieces[j] : NULL;
+    na = pa ? pa->n : 0;
+    nb = pb ? pb->n : 0;
+    if (na != nb) return false;
+    for (int q = 0; q < na; q++) {
+        const LayoutPiece *x = &pa->p[q], *y = &pb->p[q];
+        int dx = x->anchor >= 0 ? a->tree.nodes[x->anchor].dom_node_idx : -1;
+        int dy = y->anchor >= 0 ? b->tree.nodes[y->anchor].dom_node_idx : -1;
+        if (dx != dy || x->sides != y->sides || !NEAR(x->dx, y->dx) || !NEAR(x->dy, y->dy) || !NEAR(x->w, y->w) ||
+            !NEAR(x->h, y->h))
+            return false;
+    }
+    return true;
+#undef NEAR
+}
+
 /* CYBER_LAYOUT_KEEP_VERIFY=1: after each layout on a kept tree, the same
  * layout on a tree built afresh (storing nothing in the style cache), and
  * every box compared. */
@@ -18358,10 +18470,12 @@ static void layout_keep_verify(LayoutContext *ctx, HtmlDocument *doc, CssStylesh
             bool same_style = memcmp(a->s, b->s, sizeof(LayoutStyle)) == 0;
             bool same = same_style && (memcmp((const char *)a + g0, (const char *)b + g0, sizeof(LayoutBox) - g0) == 0 ||
                                        layout_geom_close(a, b));
-            if (!same && bad++ == 0) {
+            bool lines = !same || layout_lines_same(ctx, i, &fresh, j);
+            if ((!same || !lines) && bad++ == 0) {
                 first = i;
                 fprintf(stderr, "[keep-verify] box %d: %s; x %.2f/%.2f y %.2f/%.2f w %.2f/%.2f h %.2f/%.2f\n", i,
-                        same_style ? "geometry" : "style", a->x, b->x, a->y, b->y, a->width, b->width, a->height, b->height);
+                        !same_style ? "style" : !same ? "geometry" : "fragments or pieces", a->x, b->x, a->y, b->y,
+                        a->width, b->width, a->height, b->height);
             }
         }
         free(at);
