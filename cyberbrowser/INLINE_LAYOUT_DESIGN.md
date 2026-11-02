@@ -74,7 +74,27 @@ went beside the floats at its top only (floats-wrap-top-below-bfc-001l, whose in
 reference the new path now lays out right).  Under CYBER_IFC=1: css/CSS2 5466, none lost (floats 12
 of the fixes); without it 5398 (three floats pages fixed by the block placement, none lost, seven
 screenshots changed).  YouTube and Wikipedia screenshots unchanged in both modes.  Forced layouts:
-YouTube within noise; Wikipedia under the switch about 6 ms over the old path (min 256 against 250).  Goal: lay out a block's inline content the way browsers do, from
+YouTube within noise; Wikipedia under the switch about 6 ms over the old path (min 256 against 250).
+
+Step 3d: white-space modes and generated content.  Each text box's own white-space: pre and
+pre-wrap keep its spaces (pre as part of the line, no break; pre-wrap as spaces that are break
+opportunities and are not removed at a line's ends, hanging there), pre, pre-wrap and pre-line keep
+its newlines as forced breaks (a newline line takes the text's line height), nowrap's collapsible
+spaces are not break opportunities, except that a space of wrapping text collapsed into a nowrap
+one keeps its break opportunity (text/white-space-collapsing-breaks-001).  The intrinsic widths
+follow the same rules.  ::before and ::after boxes are inline elements like any other, and text with
+generated content realized (text_gen) is laid out as it reads; ::first-letter stays on the flow's
+path (taking it lost linebox/line-height-bleed-002, which needs its own sizing).  Under CYBER_IFC=1:
+css/CSS2 5491, none lost (since 3c: tables 8, text 9, generated-content 6, lists 1, floats 1);
+without it 5398, every screenshot as at 3c.  YouTube identical; Wikipedia's kept-tree check now finds
+no layout that differs (it found one every run before), and its infobox label column is 5 px wider:
+a label such as "Ethnic groups (2020)[8]" is one unbreakable run now (no space between the year and
+the reference, and none between ")" and "[" is a break opportunity), where the old path broke
+between the two boxes.  Forced layouts as at 3c.
+
+Step 3 now covers what the flow's inline path does except: paragraphs that need bidi (step 4),
+::first-letter, floats and positioned boxes inside inline elements, line-clamp and text-overflow
+ellipsis.  Those blocks keep taking the old path under the switch.  Goal: lay out a block's inline content the way browsers do, from
 a per-paragraph list of items analysed once (text, white space, break opportunities, bidi levels,
 widths) and kept across layouts, so that right-to-left and mixed-direction text costs about what
 left-to-right does, line breaking never measures the same text twice, and the inline boxes a line
