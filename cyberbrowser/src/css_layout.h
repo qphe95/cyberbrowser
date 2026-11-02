@@ -502,6 +502,7 @@ typedef struct LayoutTextFrag {
     uint32_t start, end;
     double dx, dy, w;
     unsigned char level;
+    unsigned char ellipsis;   /* an ellipsis after it (line-clamp, text-overflow) */
 } LayoutTextFrag;
 
 typedef struct LayoutTextFragList {

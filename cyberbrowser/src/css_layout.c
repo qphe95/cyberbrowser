@@ -12448,6 +12448,7 @@ static void layout_text_frags_build(LayoutContext *ctx, int idx)
             fl->f[i].dy = (double)ls[i].y - b->y;
             fl->f[i].w = ls[i].width;
             fl->f[i].level = 0;
+            fl->f[i].ellipsis = 0;
         }
         fl->n = n;
     }
@@ -13453,6 +13454,7 @@ typedef struct {
     unsigned char nobrk;  /* a space that is not a break opportunity (nowrap) */
     unsigned char kept;   /* a space white-space keeps (pre-wrap): not removed at a line's ends */
     unsigned char level;  /* its bidi level (a paragraph that needs bidi) */
+    unsigned char ell;    /* a word an ellipsis follows */
     int line;
     int cp0, cp1;         /* its code points in the paragraph's (when gathered) */
 } IfcTok;
@@ -13632,7 +13634,6 @@ static bool ifc_eligible(LayoutContext *ctx, int idx)
     }
     if (!g_ifc) return false;
     const LayoutBox *b = layout_box(ctx, idx);
-    if (b->s->line_clamp || b->s->text_overflow_ellipsis) return false;
     if (ctx->tree.nodes[idx].first_child_idx < 0) return false;
     return ifc_inline_ok(ctx, idx, true);
 }
@@ -14258,6 +14259,59 @@ static double ifc_bidi_line(LayoutContext *ctx, IfcItems *I, IfcBidi *B, int t0,
     return x;
 }
 
+/* Line [a, b) of I ended with an ellipsis within limit (CSS Overflow 3
+ * section 5.1, -webkit-line-clamp): when its content passes limit, or
+ * always (force, a clamped line); what does not fit before the ellipsis
+ * hidden, the word it falls in cut at a character, white space before the
+ * ellipsis removed. */
+static void ifc_ellipsis(LayoutContext *ctx, IfcItems *I, int a, int b, double limit, bool force)
+{
+    double end = -1e30;
+    int fb = -1;   /* (the box whose font the ellipsis takes: the line's last word's) */
+    for (int q = a; q < b; q++) {
+        const IfcTok *t = &I->t[q];
+        if (t->drop || (t->kind != IFC_WORD && t->kind != IFC_ATOM)) continue;
+        if (t->x + t->w > end) end = t->x + t->w;
+        if (t->kind == IFC_WORD) fb = t->box;
+    }
+    if (fb < 0 || (!force && end <= limit + 0.01)) return;
+    static const char E[] = "\xE2\x80\xA6";
+    double room = limit - ifc_width(ctx, fb, E, 0, 3);
+    int cut = b, ell = -1;
+    for (int q = a; q < b && cut == b; q++) {
+        const IfcTok *t = &I->t[q];
+        if (!t->drop && (t->kind == IFC_WORD || t->kind == IFC_ATOM) && t->x + t->w > room + 0.01) cut = q;
+    }
+    if (cut < b && I->t[cut].kind == IFC_WORD) {
+        IfcTok *t = &I->t[cut];
+        HtmlNode *tn = css_layout_box_node(ctx, t->box);
+        const char *tx = tn ? css_layout_box_text(ctx, t->box, css_layout_node_text(ctx, tn)) : NULL;
+        uint32_t e = t->end;
+        double w = 0.0;
+        while (tx && e > t->start) {
+            e--;
+            while (e > t->start && ((unsigned char)tx[e] & 0xC0) == 0x80) e--;   /* (whole UTF-8 sequences) */
+            w = ifc_width(ctx, t->box, tx, t->start, e);
+            if (t->x + w <= room + 0.01) break;
+        }
+        if (tx && e > t->start) {
+            t->end = e;
+            t->w = w;
+            ell = cut++;
+        }
+    }
+    for (int q = cut; q < b; q++)
+        if (I->t[q].kind == IFC_WORD || I->t[q].kind == IFC_SPACE) I->t[q].drop = 1;
+    for (int q = cut - 1; ell < 0 && q >= a; q--) {
+        IfcTok *t = &I->t[q];
+        if (t->drop) continue;
+        if (t->kind == IFC_SPACE) t->drop = 1;
+        else if (t->kind == IFC_WORD) ell = q;
+        else if (t->kind == IFC_ATOM) break;
+    }
+    if (ell >= 0) I->t[ell].ell = 1;
+}
+
 /* Lay out block idx's inline content on items (when ifc_eligible): its
  * lines from cur->y, the cursor left at the last line's top with its height
  * in line_box, as the flow's per-child path leaves it. */
@@ -14491,6 +14545,26 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
     for (int q = 0; deferred && q < ndef; q++) layout_place_float(ctx, deferred[q], content_left, avail_width, y, floats, nfloats, fcap);
     free(deferred);
     if (!ltop || !lh) nlines = 0;
+    /* (-webkit-line-clamp on a -webkit-box: the lines after the clamp
+     * hidden, the last one kept ending in an ellipsis; text-overflow:
+     * ellipsis where overflow clips: each line that passes its room) */
+    int clamp = blk->s->line_clamp && blk->s->webkit_box ? blk->s->line_clamp : 0;
+    bool ell_ovf = blk->s->text_overflow_ellipsis && blk->s->overflow != 0;
+    if (!bidi && nlines > 0 && ((clamp && nlines > clamp) || ell_ovf)) {
+        for (int a = 0, L = 0; a < I.n && L < nlines; L++) {
+            int b = a;
+            while (b < I.n && (I.t[b].line == L || I.t[b].kind == IFC_FLOAT)) b++;
+            if (clamp && nlines > clamp && L >= clamp) {
+                for (int q = a; q < b; q++)
+                    if (I.t[q].kind == IFC_WORD || I.t[q].kind == IFC_SPACE) I.t[q].drop = 1;
+            } else if ((clamp && nlines > clamp && L == clamp - 1) || ell_ovf) {
+                double blx, bla;
+                ifc_band_geometry(ctx, ltop[L], lh[L], content_left, avail_width, &blx, &bla);
+                ifc_ellipsis(ctx, &I, a, b, blx + bla, clamp && nlines > clamp && L == clamp - 1);
+            }
+            a = b;
+        }
+    }
     /* Text boxes: fragments per line (consecutive tokens of one box on one
      * line), the box around them; a break, a mark, where it is. */
     for (int k = 0; k < I.n;) {
@@ -14571,7 +14645,9 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
                                 fr->dy = ltop[tq->line] + (adv - fs) * 0.5 - bb->y;
                                 fr->level = bidi ? tq->level : 0;
                                 fr->w = 0.0;
+                                fr->ellipsis = 0;
                             }
+                            if (tq->ell) fr->ellipsis = 1;
                             fr->end = tq->end;
                             if (tq->x - bb->x < fr->dx) {
                                 fr->w += fr->dx - (tq->x - bb->x);   /* (right to left: it grows leftward) */

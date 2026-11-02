@@ -170,6 +170,21 @@ space (the visual left of a right-to-left line) now hangs as it should, where th
 gap.  Timing against 5a (9 rounds, min / median): Wikipedia 256 / 262 against 257 / 267 ms,
 YouTube 205 / 217 against 205 / 228.
 
+Step 5c: line-clamp and text-overflow ellipsis on items (they kept 166 of YouTube's blocks off).
+The old path did both in painting, re-wrapping a text box's string from its wrap geometry and
+cutting it; on items the layout does it (ifc_ellipsis): a -webkit-box with -webkit-line-clamp N and
+more lines than N has the text of the later lines hidden and its line N ended with an ellipsis; a
+block with text-overflow: ellipsis whose overflow clips ends each line that passes its room with
+one.  What does not fit before the ellipsis is hidden, the word it falls in cut at a character
+(whole UTF-8 sequences), white space before it removed, the ellipsis in the font of the line's last
+word, as the old truncation did.  The fragment it follows carries it (LayoutTextFrag.ellipsis) and
+painting draws it there; painting's own truncation is skipped for a text box with fragments when
+the clamped block is its paragraph.  Not yet for a paragraph that needs bidi (no ellipsis there).
+css/CSS2 5509 with every screenshot as at 5b; YouTube and Wikipedia identical (the clamped titles
+paint as the old truncation did; a test page with clamped and ellipsed blocks renders the same on
+both paths, the item path's text boxes now as wide as what shows).  Timing against 5b: Wikipedia
+251 / 260 against 251 / 260 ms, YouTube 198 / 208 against 200 / 213.
+
 Goal: lay out a block's inline content the way browsers do, from
 a per-paragraph list of items analysed once (text, white space, break opportunities, bidi levels,
 widths) and kept across layouts, so that right-to-left and mixed-direction text costs about what

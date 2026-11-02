@@ -1754,9 +1754,16 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     /* -webkit-line-clamp / text-overflow: ellipsis on a near
                      * ancestor cut the run and end it with an ellipsis. */
                     char *clamped = NULL;
+                    /* (a box with fragments: its paragraph's layout made the
+                     * ellipsis, when the paragraph is the one clamped) */
+                    bool has_frags = ctx->text_frags && i < ctx->text_frags_n && ctx->text_frags[i].n > 0;
+                    int para_blk = ctx->tree.nodes[i].parent_idx;
+                    while (para_blk >= 0 && ctx->boxes[para_blk].s->display == CSS_DISPLAY_INLINE)
+                        para_blk = ctx->tree.nodes[para_blk].parent_idx;
                     for (int a = ctx->tree.nodes[i].parent_idx, depth = 0; a >= 0 && depth < 6;
                          a = ctx->tree.nodes[a].parent_idx, depth++) {
                         const LayoutBox *ab = &ctx->boxes[a];
+                        if (has_frags && a == para_blk) break;
                         if (ab->s->line_clamp && ab->s->webkit_box) {
                             double top = ab->y + ab->s->border_top + ab->padding_top;
                             float nlh0 = text_shaper_normal_line_height(font, (float)fs);
@@ -1789,6 +1796,10 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                             if (!text_shaper_shape_span(font, run_text, fr->start, fr->end, (float)(box->x + fr->dx),
                                                         (float)(box->y + fr->dy), scale, (fr->level & 1) != 0, tr,
                                                         tg, tb, ta, dl))
+                                return false;
+                            if (fr->ellipsis &&
+                                !text_shaper_shape_span(font, "\xE2\x80\xA6", 0, 3, (float)(box->x + fr->dx + fr->w),
+                                                        (float)(box->y + fr->dy), scale, false, tr, tg, tb, ta, dl))
                                 return false;
                         }
                     } else if (box->wrap_cont_w > 0.0) {
