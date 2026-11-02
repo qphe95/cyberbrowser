@@ -13330,16 +13330,25 @@ static int g_ifc = -1;
 static bool layout_has_gen(LayoutContext *ctx, int i);
 
 typedef struct {
-    int box;              /* text box, or the box a mark stands for */
+    int box;              /* text box; the element of an edge; the box a mark or break stands for */
     uint32_t start, end;  /* bytes in the text box's painted text */
     double w, x;
-    unsigned char kind;   /* 0 word piece, 1 collapsible space, 2 mark (an empty box's place) */
+    unsigned char kind;   /* IFC_WORD, IFC_SPACE, ... */
     unsigned char drop;   /* a space removed at a line's start */
     int line;
 } IfcTok;
 
+enum {
+    IFC_WORD,     /* a piece of a word (a word across boxes is several) */
+    IFC_SPACE,    /* a collapsible space: the break opportunity */
+    IFC_MARK,     /* where a box with nothing kept is */
+    IFC_OPEN,     /* an inline element's start edge: margin, border, padding */
+    IFC_CLOSE,    /* its end edge */
+    IFC_BR        /* a forced line break */
+};
+
 typedef struct {
-    int box, tok0, tok1;  /* an inline element and its tokens */
+    int box, tok0, tok1;  /* an inline element and its tokens (its edges included) */
 } IfcEl;
 
 typedef struct {
@@ -13347,7 +13356,7 @@ typedef struct {
     int n, cap;
     IfcEl *el;
     int nel, elcap;
-    bool space_before;    /* the last token was a collapsible space (or nothing yet) */
+    bool space_before;    /* the last text was a collapsible space (or nothing yet) */
 } IfcItems;
 
 static bool ifc_put(IfcItems *I, int box, uint32_t a, uint32_t b, double w, int kind)
@@ -13385,13 +13394,17 @@ static double ifc_width(LayoutContext *ctx, int box, const char *t, uint32_t a, 
 
 static bool ifc_space(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'; }
 
+static bool ifc_is_br(HtmlNode *n)
+{
+    return n && n->type == HTML_NODE_ELEMENT && n->tag_name && !strcasecmp(n->tag_name, "br");
+}
+
 /* Whether box idx's in-flow children, and theirs inside inline elements,
- * are what this path lays out: text and inline elements without left or
- * right margin, border or padding, white-space normal, nothing that needs
- * bidi, no generated content or pseudo-element box (::first-letter), no
- * atomic inline, image, line break or split inline (the flow's path does
- * those, for now). */
-static bool ifc_inline_ok(LayoutContext *ctx, int p, double avail, double pct_h)
+ * are what this path lays out: text, inline elements, line breaks; in
+ * white-space normal, nothing that needs bidi, no generated content or
+ * pseudo-element box (::first-letter), no atomic inline or image (the
+ * flow's path does those, for now). */
+static bool ifc_inline_ok(LayoutContext *ctx, int p)
 {
     for (int c = ctx->tree.nodes[p].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
         LayoutBox *cb = layout_box(ctx, c);
@@ -13401,16 +13414,13 @@ static bool ifc_inline_ok(LayoutContext *ctx, int p, double avail, double pct_h)
         if (!n) return false;
         if (cb->s->white_space != 0) return false;
         if (n->type == HTML_NODE_TEXT) continue;
-        if (n->type != HTML_NODE_ELEMENT || cb->s->display != CSS_DISPLAY_INLINE || cb->s->block_in_inline) return false;
-        if (!n->tag_name || n->tag_name[0] == ':' || layout_is_replaced_tag(n->tag_name) || !strcasecmp(n->tag_name, "br") ||
+        if (n->type != HTML_NODE_ELEMENT || cb->s->display != CSS_DISPLAY_INLINE || cb->s->block_in_inline == 1) return false;
+        if (ifc_is_br(n)) continue;
+        if (!n->tag_name || n->tag_name[0] == ':' || layout_is_replaced_tag(n->tag_name) ||
             !strcasecmp(n->tag_name, "img") || !strcasecmp(n->tag_name, "wbr") || layout_is_svg_box(n))
             return false;
         if (cb->s->direction == 1 || cb->s->unicode_bidi != 0 || layout_has_gen(ctx, c)) return false;
-        layout_resolve_used_sizes(cb, layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx), avail, pct_h);
-        if (cb->margin_left != 0.0 || cb->margin_right != 0.0 || cb->s->border_left != 0.0 || cb->s->border_right != 0.0 ||
-            cb->padding_left != 0.0 || cb->padding_right != 0.0)
-            return false;
-        if (!ifc_inline_ok(ctx, c, avail, pct_h)) return false;
+        if (!ifc_inline_ok(ctx, c)) return false;
     }
     return true;
 }
@@ -13425,7 +13435,7 @@ static bool ifc_eligible(LayoutContext *ctx, int idx)
     const LayoutBox *b = layout_box(ctx, idx);
     if (b->s->white_space != 0 || b->s->line_clamp || b->s->text_overflow_ellipsis || layout_has_gen(ctx, idx)) return false;
     if (ctx->tree.nodes[idx].first_child_idx < 0) return false;
-    if (!ifc_inline_ok(ctx, idx, b->content_width, layout_pct_base_height(ctx, idx))) return false;
+    if (!ifc_inline_ok(ctx, idx)) return false;
     return !(b->s->direction == 1 || b->s->unicode_bidi != 0 || layout_paragraph_walk(ctx, idx, NULL));
 }
 
@@ -13452,17 +13462,25 @@ static void ifc_collect(LayoutContext *ctx, int p, IfcItems *I, double avail_wid
                     while (j < len && ifc_space(t[j])) j++;
                     if (!I->space_before) {
                         if (sw < 0.0) sw = ifc_width(ctx, c, " ", 0, 1);
-                        ifc_put(I, c, i, j, sw, 1);
+                        ifc_put(I, c, i, j, sw, IFC_SPACE);
                         I->space_before = true;
                     }
                 } else {
                     while (j < len && !ifc_space(t[j])) j++;
-                    ifc_put(I, c, i, j, ifc_width(ctx, c, t, i, j), 0);
+                    ifc_put(I, c, i, j, ifc_width(ctx, c, t, i, j), IFC_WORD);
                     I->space_before = false;
                 }
                 i = j;
             }
+            if (I->n == n0) ifc_put(I, c, 0, 0, 0.0, IFC_MARK);   /* (nothing of it kept: where it is) */
+        } else if (ifc_is_br(n)) {
+            ifc_put(I, c, 0, 0, 0.0, IFC_BR);
+            I->space_before = true;
         } else {
+            /* (an inline split around a line break by layout_blockify: this
+             * path lays it out, its pieces are this path's) */
+            if (cb->s->block_in_inline == 2) cb->s->block_in_inline = 0;
+            if (ctx->pieces && c < ctx->pieces_n) ctx->pieces[c].n = 0;
             int e = I->nel;
             if (I->nel == I->elcap) {
                 int nc = I->elcap ? I->elcap * 2 : 16;
@@ -13474,10 +13492,15 @@ static void ifc_collect(LayoutContext *ctx, int p, IfcItems *I, double avail_wid
             I->nel++;
             I->el[e].box = c;
             I->el[e].tok0 = I->n;
+            double lw = cb->margin_left + cb->s->border_left + cb->padding_left;
+            double rw = cb->padding_right + cb->s->border_right + cb->margin_right;
+            if (lw != 0.0) ifc_put(I, c, 0, 0, lw, IFC_OPEN);
+            int inner = I->n;
             ifc_collect(ctx, c, I, avail_width, pct_h);
+            if (I->n == inner && lw == 0.0 && rw == 0.0) ifc_put(I, c, 0, 0, 0.0, IFC_MARK);
+            if (rw != 0.0) ifc_put(I, c, 0, 0, rw, IFC_CLOSE);
             I->el[e].tok1 = I->n;
         }
-        if (I->n == n0) ifc_put(I, c, 0, 0, 0.0, 2);   /* (nothing of it kept: where it is) */
     }
 }
 
@@ -13505,6 +13528,36 @@ static double ifc_tok_adv(LayoutContext *ctx, int idx, int box)
     return a;
 }
 
+/* Line L's height: from its words and the spaces it keeps; a line with
+ * only a line break takes the break's (an empty line). */
+static double ifc_line_height(LayoutContext *ctx, int idx, const IfcItems *I, int t0, int t1)
+{
+    double h = 0.0, br = 0.0;
+    for (int k = t0; k < t1; k++) {
+        const IfcTok *t = &I->t[k];
+        if (t->kind == IFC_BR) {
+            double a = ifc_tok_adv(ctx, idx, t->box);
+            if (a > br) br = a;
+        }
+        if (!(t->kind == IFC_WORD || (t->kind == IFC_SPACE && !t->drop))) continue;
+        double a = ifc_tok_adv(ctx, idx, t->box);
+        if (a > h) h = a;
+    }
+    return h > 0.0 ? h : br;
+}
+
+/* Where token k's box edge is: an open edge's border start, a close edge's
+ * border end, else the token's own extent. */
+static double ifc_tok_left(LayoutContext *ctx, const IfcTok *t)
+{
+    return t->kind == IFC_OPEN ? t->x + layout_box(ctx, t->box)->margin_left : t->x;
+}
+
+static double ifc_tok_right(LayoutContext *ctx, const IfcTok *t)
+{
+    return t->kind == IFC_CLOSE ? t->x + t->w - layout_box(ctx, t->box)->margin_right : t->x + t->w;
+}
+
 /* Lay out block idx's inline content on items (when ifc_eligible): its
  * lines from cur->y, the cursor left at the last line's top with its height
  * in line_box, as the flow's per-child path leaves it. */
@@ -13520,112 +13573,137 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
         ctx->text_frags = (LayoutTextFragList *)calloc((size_t)ctx->tree.count, sizeof(LayoutTextFragList));
         ctx->text_frags_n = ctx->text_frags ? ctx->tree.count : 0;
     }
-    /* (a space at the end of the content is a trailing space too) */
     const FloatRec *fl = ctx->float_stack + t_float_base;
     int nfl = ctx->float_count - t_float_base;
-    double y = cur->y, last_h = 0.0, last_x = content_left;
-    int line = 0, i = 0;
-    bool any = false;
-    for (int k = 0; k < I.n; k++) any = any || I.t[k].kind == 0;
-    while (any && i < I.n) {
+    bool any = false;   /* (anything that makes a line: a word, an edge, a break) */
+    for (int k = 0; k < I.n && !any; k++) any = I.t[k].kind != IFC_SPACE && I.t[k].kind != IFC_MARK;
+    int cap_lines = 16, nlines = 0;
+    double *ltop = (double *)malloc((size_t)cap_lines * sizeof(double)), *lh = (double *)malloc((size_t)cap_lines * sizeof(double));
+    double y = cur->y, last_x = content_left;
+    int i = 0;
+    while (any && ltop && lh && i < I.n) {
         double lx = content_left, la = avail_width;
         layout_flow_line_geometry(fl, nfl, y, content_left, avail_width, &lx, &la);
-        double start = lx + (line == 0 ? indent0 : 0.0), x = start;
+        double x = lx + (nlines == 0 ? indent0 : 0.0);
         int t0 = i;
-        /* (spaces at the line's start are removed) */
-        while (i < I.n && I.t[i].kind != 0) {
-            I.t[i].x = x;
-            I.t[i].line = line;
-            if (I.t[i].kind == 1) I.t[i].drop = 1;
-            i++;
-        }
-        bool placed = false;
+        bool word = false;   /* (a word on it: spaces after it are kept, a group that does not fit breaks) */
         while (i < I.n) {
+            IfcTok *t = &I.t[i];
+            if (t->kind == IFC_BR) {
+                t->x = x;
+                t->line = nlines;
+                i++;
+                break;
+            }
+            if (t->kind == IFC_SPACE) {
+                t->x = x;
+                t->line = nlines;
+                if (!word) t->drop = 1;   /* (at the line's start: removed) */
+                else x += t->w;
+                i++;
+                /* (an element that ends after the space ends on this line) */
+                while (i < I.n && (I.t[i].kind == IFC_CLOSE || I.t[i].kind == IFC_MARK)) {
+                    I.t[i].x = x;
+                    I.t[i].line = nlines;
+                    x += I.t[i].w;
+                    i++;
+                }
+                continue;
+            }
+            /* a group: up to the next space or break */
             int j = i;
             double ww = 0.0;
-            while (j < I.n && I.t[j].kind != 1) ww += I.t[j++].w;
-            if (placed && x + ww > lx + la + 0.01) break;
+            bool has_word = false;
+            while (j < I.n && I.t[j].kind != IFC_SPACE && I.t[j].kind != IFC_BR) {
+                ww += I.t[j].w;
+                has_word = has_word || I.t[j].kind == IFC_WORD;
+                j++;
+            }
+            if (word && x + ww > lx + la + 0.01) break;
             for (int k = i; k < j; k++) {
                 I.t[k].x = x;
-                I.t[k].line = line;
+                I.t[k].line = nlines;
                 x += I.t[k].w;
             }
-            placed = true;
+            word = word || has_word;
             i = j;
-            while (i < I.n && I.t[i].kind == 1) {
-                I.t[i].x = x;
-                I.t[i].line = line;
-                x += I.t[i].w;
-                i++;
+        }
+        /* (spaces at the line's end are removed, the inline boxes that close
+         * after them too: their edges move back to the last word) */
+        {
+            int f0 = i;
+            while (f0 > t0 && (I.t[f0 - 1].kind == IFC_SPACE || I.t[f0 - 1].kind == IFC_CLOSE || I.t[f0 - 1].kind == IFC_MARK)) f0--;
+            if (f0 < i) {
+                double xx = I.t[f0].x;
+                for (int k = f0; k < i; k++) {
+                    IfcTok *t = &I.t[k];
+                    t->x = xx;
+                    if (t->kind == IFC_SPACE) t->drop = 1;
+                    else xx += t->w;
+                }
+                x = xx;
             }
         }
-        /* (the line's end: its last word, trailing spaces hang) */
-        double end = start;
-        int last_word = -1;
+        /* (the line's end: its last word or edge, trailing spaces hang) */
+        double end = lx + (nlines == 0 ? indent0 : 0.0);
         for (int k = i - 1; k >= t0; k--)
-            if (I.t[k].kind == 0) { last_word = k; break; }
-        if (last_word >= 0) end = I.t[last_word].x + I.t[last_word].w;
-        double h = 0.0;
-        for (int k = t0; k < i; k++) {
-            if (I.t[k].kind == 2 || I.t[k].drop) continue;
-            double a = ifc_tok_adv(ctx, idx, I.t[k].box);
-            if (a > h) h = a;
-        }
-        /* text-align on what the line holds, its trailing spaces left out */
+            if (I.t[k].kind == IFC_WORD || I.t[k].kind == IFC_OPEN || I.t[k].kind == IFC_CLOSE) {
+                end = I.t[k].x + I.t[k].w;
+                break;
+            }
         double slack = lx + la - end;
         if (blk->s->text_align != CSS_TEXT_ALIGN_LEFT && slack > 0.5) {
             double dx = blk->s->text_align == CSS_TEXT_ALIGN_CENTER ? slack * 0.5 : slack;
             for (int k = t0; k < i; k++) I.t[k].x += dx;
             x += dx;
         }
-        for (int k = t0; k < i; k++) I.t[k].x += 0.0;
-        last_x = x;
-        last_h = h;
-        line++;
-        if (i < I.n) y += h;
-        (void)t0;
-    }
-    /* The lines' tops, for the boxes. */
-    int nlines = line;
-    double *ltop = (double *)malloc(((size_t)nlines + 1) * sizeof(double)), *lh = (double *)malloc(((size_t)nlines + 1) * sizeof(double));
-    if (ltop && lh) {
-        double yy = cur->y;
-        for (int L = 0; L < nlines; L++) {
-            double h = 0.0;
-            for (int k = 0; k < I.n; k++) {
-                if (I.t[k].line != L || I.t[k].kind == 2 || I.t[k].drop) continue;
-                double a = ifc_tok_adv(ctx, idx, I.t[k].box);
-                if (a > h) h = a;
-            }
-            ltop[L] = yy;
-            lh[L] = h;
-            yy += h;
+        if (nlines == cap_lines) {
+            cap_lines *= 2;
+            double *a = (double *)realloc(ltop, (size_t)cap_lines * sizeof(double));
+            double *b = a ? (double *)realloc(lh, (size_t)cap_lines * sizeof(double)) : NULL;
+            if (a) ltop = a;
+            if (!b) break;
+            lh = b;
         }
+        ltop[nlines] = y;
+        lh[nlines] = ifc_line_height(ctx, idx, &I, t0, i);
+        y += lh[nlines];
+        nlines++;
+        last_x = x;
     }
+    if (!ltop || !lh) nlines = 0;
     /* Text boxes: fragments per line (consecutive tokens of one box on one
-     * line), the box around them. */
-    for (int k = 0; k < I.n && ltop && lh;) {
+     * line), the box around them; a break, a mark, where it is. */
+    for (int k = 0; k < I.n;) {
         int b = I.t[k].box;
         int k1 = k;
-        while (k1 < I.n && I.t[k1].box == b) k1++;
+        while (k1 < I.n && I.t[k1].box == b && I.t[k1].kind != IFC_OPEN && I.t[k1].kind != IFC_CLOSE) k1++;
+        if (k1 == k) { k++; continue; }   /* (an edge: its element's, below) */
         LayoutBox *bb = layout_box(ctx, b);
         HtmlNode *tn = css_layout_box_node(ctx, b);
-        if (tn && tn->type == HTML_NODE_TEXT && any) {
+        int L = nlines > 0 ? (I.t[k].line < nlines ? I.t[k].line : nlines - 1) : -1;
+        double top = L >= 0 ? ltop[L] : cur->y;
+        if (I.t[k].kind == IFC_BR) {
+            bb->x = I.t[k].x;
+            bb->y = top;
+            bb->width = 0.0;
+            bb->height = layout_line_advance_box(bb);
+        } else if (tn && tn->type == HTML_NODE_TEXT && nlines > 0) {
             TextShaper *font;
             float scale, adv;
             const char *t;
             bool painted = css_layout_text_paint(ctx, b, &font, &scale, &adv, &t);
             double fs = bb->s->font_size > 0.0 ? bb->s->font_size : 16.0;
             double tadv = layout_line_advance_box(bb);
-            /* (its kept tokens) */
             int kk0 = -1, kk1 = -1;
             for (int q = k; q < k1; q++)
-                if (I.t[q].kind != 2 && !I.t[q].drop) { if (kk0 < 0) kk0 = q; kk1 = q; }
+                if (I.t[q].kind == IFC_WORD || (I.t[q].kind == IFC_SPACE && !I.t[q].drop)) { if (kk0 < 0) kk0 = q; kk1 = q; }
+            LayoutTextFragList *tf = ctx->text_frags && b < ctx->text_frags_n ? &ctx->text_frags[b] : NULL;
             if (kk0 < 0) {
                 bb->x = I.t[k].x;
-                bb->y = ltop[I.t[k].line];
+                bb->y = top;
                 bb->width = bb->height = 0.0;
-                if (ctx->text_frags && b < ctx->text_frags_n) ctx->text_frags[b].n = 0;
+                if (tf) tf->n = 0;
             } else {
                 int L0 = I.t[kk0].line, L1 = I.t[kk1].line;
                 double x0 = 1e30, x1 = -1e30;
@@ -13638,12 +13716,9 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
                 bb->y = ltop[L0];
                 bb->width = x1 - x0;
                 bb->height = L0 == L1 ? tadv : ltop[L1] + tadv - ltop[L0];
-                LayoutTextFragList *tf = ctx->text_frags && b < ctx->text_frags_n ? &ctx->text_frags[b] : NULL;
                 if (tf && painted) {
-                    int nf = 0;
-                    for (int q = kk0; q <= kk1; q++)
-                        if (!I.t[q].drop && (q == kk0 || I.t[q].line != I.t[q - 1].line || I.t[q - 1].drop)) nf++;
-                    LayoutTextFrag *g = (LayoutTextFrag *)realloc(tf->f, (size_t)(nf > 0 ? nf : 1) * sizeof(LayoutTextFrag));
+                    int nf = kk1 - kk0 + 1;
+                    LayoutTextFrag *g = (LayoutTextFrag *)realloc(tf->f, (size_t)nf * sizeof(LayoutTextFrag));
                     if (g) {
                         tf->f = g;
                         tf->n = 0;
@@ -13655,7 +13730,6 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
                                 fr->start = I.t[q].start;
                                 fr->dx = I.t[q].x - bb->x;
                                 fr->dy = ltop[I.t[q].line] + (adv - fs) * 0.5 - bb->y;
-                                fr->w = 0.0;
                                 fr->level = 0;
                             }
                             fr->end = I.t[q].end;
@@ -13664,31 +13738,35 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
                     }
                 }
             }
-            layout_update_content_sizes(bb);
         } else {
-            /* (a mark: an empty inline element, or anything with nothing on a line) */
             bb->x = I.t[k].x;
-            bb->y = nlines > 0 ? ltop[I.t[k].line < nlines ? I.t[k].line : nlines - 1] : cur->y;
+            bb->y = top;
             bb->width = bb->height = 0.0;
-            layout_update_content_sizes(bb);
         }
+        layout_update_content_sizes(bb);
         k = k1;
     }
-    /* Inline elements: around their content (one line: the content area
-     * with padding and border, centred by the half-leading, as the flow's
-     * one-line inline boxes are). */
-    for (int e = 0; e < I.nel && ltop && lh; e++) {
+    /* Inline elements: around their content and edges (one line: the
+     * content area with padding and border, centred by the half-leading, as
+     * the flow's one-line inline boxes are); on several lines, with a
+     * background or border, a piece per line, the start edge on the line it
+     * opens on and the end edge on the line it closes on. */
+    for (int e = 0; e < I.nel; e++) {
         IfcEl *el = &I.el[e];
         LayoutBox *eb = layout_box(ctx, el->box);
         double x0 = 1e30, x1 = -1e30;
         int L0 = -1, L1 = -1;
         for (int q = el->tok0; q < el->tok1; q++) {
-            if (I.t[q].drop) continue;
-            if (I.t[q].x < x0) x0 = I.t[q].x;
-            if (I.t[q].x + I.t[q].w > x1) x1 = I.t[q].x + I.t[q].w;
-            if (I.t[q].kind == 2) continue;
-            if (L0 < 0) L0 = I.t[q].line;
-            L1 = I.t[q].line;
+            const IfcTok *t = &I.t[q];
+            if (t->drop) continue;
+            /* (a space that ends a line hangs outside) */
+            if (t->kind == IFC_SPACE && (q + 1 >= I.n || I.t[q + 1].line != t->line)) continue;
+            double a = ifc_tok_left(ctx, t), z = ifc_tok_right(ctx, t);
+            if (a < x0) x0 = a;
+            if (z > x1) x1 = z;
+            if (t->kind == IFC_MARK) continue;
+            if (L0 < 0) L0 = t->line;
+            L1 = t->line;
         }
         if (x1 < x0) {
             int q = el->tok0 < I.n ? el->tok0 : I.n - 1;
@@ -13699,7 +13777,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
         double vpb = layout_vertical_border_padding(eb);
         eb->x = x0;
         eb->width = x1 - x0;
-        if (L0 < 0 || !any) {
+        if (L0 < 0 || nlines == 0) {
             int q = el->tok0 < I.n ? el->tok0 : -1;
             eb->y = q >= 0 && nlines > 0 ? ltop[I.t[q].line < nlines ? I.t[q].line : nlines - 1] : cur->y;
             eb->height = 0.0;
@@ -13709,52 +13787,51 @@ static void ifc_layout(LayoutContext *ctx, int idx, double content_left, double 
         } else {
             eb->y = ltop[L0];
             eb->height = ltop[L1] + adv - ltop[L0];
-            /* (its background and border per line) */
             bool deco = eb->s->background_color_a > 0.0f || eb->s->border_top > 0.0 || eb->s->border_bottom > 0.0 ||
-                        eb->s->background_image_url[0];
-            if (deco) {
-                if (!ctx->pieces) {
-                    ctx->pieces = (LayoutPieceList *)calloc((size_t)ctx->tree.count, sizeof(LayoutPieceList));
-                    ctx->pieces_n = ctx->pieces ? ctx->tree.count : 0;
+                        eb->s->border_left > 0.0 || eb->s->border_right > 0.0 || eb->s->background_image_url[0];
+            if (deco && !ctx->pieces) {
+                ctx->pieces = (LayoutPieceList *)calloc((size_t)ctx->tree.count, sizeof(LayoutPieceList));
+                ctx->pieces_n = ctx->pieces ? ctx->tree.count : 0;
+            }
+            LayoutPieceList *pl = deco && ctx->pieces && el->box < ctx->pieces_n ? &ctx->pieces[el->box] : NULL;
+            for (int L = L0; pl && L <= L1; L++) {
+                double a = 1e30, z = -1e30;
+                unsigned char sides = 0;
+                for (int q = el->tok0; q < el->tok1; q++) {
+                    const IfcTok *t = &I.t[q];
+                    if (t->line != L || t->drop || t->kind == IFC_MARK) continue;
+                    if (t->kind == IFC_SPACE && (q + 1 >= I.n || I.t[q + 1].line != L)) continue;
+                    if (t->kind == IFC_OPEN) sides |= 1;
+                    if (t->kind == IFC_CLOSE) sides |= 2;
+                    double l = ifc_tok_left(ctx, t), r = ifc_tok_right(ctx, t);
+                    if (l < a) a = l;
+                    if (r > z) z = r;
                 }
-                LayoutPieceList *pl = ctx->pieces && el->box < ctx->pieces_n ? &ctx->pieces[el->box] : NULL;
-                if (pl) {
-                    pl->n = 0;
-                    for (int L = L0; L <= L1; L++) {
-                        double a = 1e30, z = -1e30;
-                        for (int q = el->tok0; q < el->tok1; q++) {
-                            if (I.t[q].line != L || I.t[q].drop || I.t[q].kind == 2) continue;
-                            if (I.t[q].x < a) a = I.t[q].x;
-                            if (I.t[q].x + I.t[q].w > z) z = I.t[q].x + I.t[q].w;
-                        }
-                        if (z < a) continue;
-                        if (pl->n == pl->cap) {
-                            int nc = pl->cap ? pl->cap * 2 : 4;
-                            LayoutPiece *np = (LayoutPiece *)realloc(pl->p, (size_t)nc * sizeof(LayoutPiece));
-                            if (!np) break;
-                            pl->p = np;
-                            pl->cap = nc;
-                        }
-                        LayoutPiece *pc = &pl->p[pl->n++];
-                        pc->anchor = -1;
-                        pc->sides = 0;
-                        pc->dx = a - eb->x;
-                        pc->dy = ltop[L] + (adv - ca) / 2.0 - eb->padding_top - eb->s->border_top - eb->y;
-                        pc->w = z - a;
-                        pc->h = ca + vpb;
-                    }
+                if (z < a) continue;
+                if (pl->n == pl->cap) {
+                    int nc = pl->cap ? pl->cap * 2 : 4;
+                    LayoutPiece *np = (LayoutPiece *)realloc(pl->p, (size_t)nc * sizeof(LayoutPiece));
+                    if (!np) break;
+                    pl->p = np;
+                    pl->cap = nc;
                 }
+                LayoutPiece *pc = &pl->p[pl->n++];
+                pc->anchor = -1;
+                pc->sides = sides;
+                pc->dx = a - eb->x;
+                pc->dy = ltop[L] + (adv - ca) / 2.0 - eb->padding_top - eb->s->border_top - eb->y;
+                pc->w = z - a;
+                pc->h = ca + vpb;
             }
         }
         layout_update_content_sizes(eb);
     }
-    if (any && nlines > 0 && ltop && lh) {
+    if (nlines > 0) {
         cur->y = ltop[nlines - 1];
         cur->line_box = lh[nlines - 1];
         cur->x = last_x;
         *any_placed = true;
     }
-    (void)last_h;
     free(ltop);
     free(lh);
     free(I.t);
@@ -13780,9 +13857,12 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
      * inline, between a start and an end item (piece_of 2k and 2k + 1 for
      * piece k) where its edges take room and its border boxes are noted.
      * piece_of[i]: -1 for any other item. */
+    /* (inline content on items, CYBER_IFC=1: no pieces set up, the
+     * per-child loop not run) */
+    bool ifc_done = ifc_eligible(ctx, idx);
     FlowPiece *fpieces = NULL;
     int *piece_of = NULL, nfp = 0, extra = 0;
-    for (int i = 0; ctx->pieces && i < nkids; i++) {
+    for (int i = 0; !ifc_done && ctx->pieces && i < nkids; i++) {
         LayoutBox *kb = layout_box(ctx, kids[i]);
         if (kb->s->block_in_inline == 2 && kb->s->display == CSS_DISPLAY_INLINE)
             extra += 4 * ctx->tree.nodes[kids[i]].child_count + 4;
@@ -13894,8 +13974,6 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
     FloatRec floats[32];
     int nfloats = 0;
 
-    /* (inline content on items, CYBER_IFC=1: the per-child loop is not run) */
-    bool ifc_done = !fpieces && ifc_eligible(ctx, idx);
     if (ifc_done) ifc_layout(ctx, idx, content_left, avail_width, indent0, &cur, &any_placed);
 
     for (int i = 0; !ifc_done && i < nkids; i++) {

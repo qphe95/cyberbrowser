@@ -21,7 +21,24 @@ changed).  YouTube's screenshot identical; Wikipedia's differs below its infobox
 "Official&nbsp;languages" (the space a non-breaking one, in its own span) no longer breaks, as in a
 browser, and one line no longer starts with a stray space.  Forced layouts within noise of the old
 path (Wikipedia 260 / 265 ms median, YouTube 208 / 210).  Without the switch every screenshot is
-identical.  Next, 3b: inline box edges, `<br>` at any depth, empty inlines.  Goal: lay out a block's inline content the way browsers do, from
+identical.
+
+Step 3b: inline elements with left and right edges, `<br>` at any depth, empty inlines.  An
+element's start edge (margin, border, padding) is a token joined to the word after it, its end
+edge one joined to the word before it, neither a break opportunity; an end edge after a space stays
+on that line; a space at a line's start is removed after a start edge too.  Spaces at a line's end
+are removed with the end edges after them moved back to the last word (an inline box's border does
+not take in a trailing space).  `<br>` is a token that ends its line; a line with only a break takes
+the break's line height.  An element's outline runs from its start edge's border to its end edge's;
+on several lines with a background or border it gets a piece per line, the start side on the line
+it opens on and the end side on the line it closes on.  An inline split around a `<br>` by
+layout_blockify (BIDI_DESIGN.md step 5) is this path's now: its split pieces are not set up.  Under
+CYBER_IFC=1: css/CSS2 5395 -> 5432 (css1 15, text 7, tables 6, box-display 3, linebox 2,
+margin-padding-clear 2, ui 2, normal-flow 1, positioning 1), two lost: normal-flow/inline-box-
+border-line-break and -padding-line-break, laid out right (the final "xx" starts its line at 0, the
+space before it removed there) against a reference that uses an inline-block, which the old path
+lays out with that space kept; they come back when 3c takes inline-blocks.  YouTube and Wikipedia
+screenshots as in 3a; forced layouts within noise.  Without the switch every screenshot identical.  Goal: lay out a block's inline content the way browsers do, from
 a per-paragraph list of items analysed once (text, white space, break opportunities, bidi levels,
 widths) and kept across layouts, so that right-to-left and mixed-direction text costs about what
 left-to-right does, line breaking never measures the same text twice, and the inline boxes a line
