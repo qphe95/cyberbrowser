@@ -243,6 +243,21 @@ pseudo-element other than ::before, ::after and ::first-letter, an inline with d
 inline) and blocks with line-clamp or ellipsis among block children; 5f decides those before the
 old path goes.
 
+Step 5f, first part: every block's inline content on items.  wbr is a break opportunity of no
+width (a space token of width 0: removed at a line's start, hanging at its end); meter and progress
+are replaced atoms, a browser's default size when none is set (80 or 160 by 16; the flow had made
+them 0 wide); any other inline-level box that is not an inline element is an atom; a node that is
+neither text nor an element is nothing; a pseudo-element box is an inline element.  Line-clamp and
+text-overflow ellipsis also apply in a block with block children: ellipsis per line as before, the
+clamp counting the lines of the runs before (FlowCursor.lines).  css/CSS2 5553 with every screenshot
+as at 5e, the three replays identical, unit tests pass; timing against 5e (9 rounds): Wikipedia
+257 / 269 against 258 / 272 ms, YouTube 203 / 211 against 204 / 213.  The flow's inline branch is
+now reached only for white space between blocks, a float that starts a run, the pieces of a split
+inline that make no line box, and CYBER_IFC=0.  Second part: those handled without it, then the
+old path removed (the inline branch of the per-child loop and its line alignment, layout_piece_start
+and _end, the inline element child layout in layout_node_serial with
+layout_inline_wrapped_children, the bidi post-pass, the wrap-geometry text painting, CYBER_IFC).
+
 Goal: lay out a block's inline content the way browsers do, from
 a per-paragraph list of items analysed once (text, white space, break opportunities, bidi levels,
 widths) and kept across layouts, so that right-to-left and mixed-direction text costs about what

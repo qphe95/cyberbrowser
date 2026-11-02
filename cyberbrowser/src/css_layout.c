@@ -11159,6 +11159,7 @@ typedef struct {
     double y;          /* current vertical cursor (top of next child) */
     double line_top;   /* top of the current inline line              */
     double line_box;   /* tallest item on the current inline line     */
+    int lines;         /* lines laid out on items so far (line-clamp) */
 } FlowCursor;
 
 /* ---------------------------------------------------------------------------
@@ -13592,13 +13593,13 @@ static bool ifc_is_replaced(const LayoutBox *b, HtmlNode *n)
 {
     if (!n || n->type != HTML_NODE_ELEMENT || !n->tag_name || b->s->display != CSS_DISPLAY_INLINE) return false;
     switch (n->tag_name[0] | 0x20) {   /* (most inline elements are none of these: by first letter) */
-    case 'a': case 'b': case 'c': case 'e': case 'i': case 's': case 't': case 'v': break;
+    case 'a': case 'b': case 'c': case 'e': case 'i': case 'm': case 'p': case 's': case 't': case 'v': break;
     default: return false;
     }
     size_t len = strlen(n->tag_name);
-    if (len != 3 && len != 5 && len != 6 && len != 8) return false;   /* (svg; input audio video embed; ...) */
+    if (len != 3 && len != 5 && len != 6 && len != 8) return false;   /* (svg; input audio video embed meter; ...) */
     return (layout_is_replaced_form_element(n->tag_name) && strcasecmp(n->tag_name, "object") != 0) ||
-           layout_is_svg_box(n);
+           layout_is_svg_box(n) || !strcasecmp(n->tag_name, "meter") || !strcasecmp(n->tag_name, "progress");
 }
 
 /* A box this path places whole on a line: an atomic inline (inline-block,
@@ -13608,7 +13609,8 @@ static bool ifc_is_atom(const LayoutBox *b, HtmlNode *n)
 {
     return n && n->type == HTML_NODE_ELEMENT &&
            (layout_box_is_atomic_inline(b) || (ifc_is_img(n) && b->s->display == CSS_DISPLAY_INLINE) ||
-            ifc_is_replaced(b, n));
+            ifc_is_replaced(b, n) ||
+            (b->s->display != CSS_DISPLAY_INLINE && !layout_box_is_block_level(b)));   /* (any other inline-level box) */
 }
 
 /* Whether box p's in-flow children, and theirs inside inline elements, are
@@ -13634,16 +13636,10 @@ static bool ifc_child_ok(LayoutContext *ctx, int c)
     if (!layout_is_in_flow(cb)) return true;   /* (absolutely positioned: placed after, from its static position) */
     if (ifc_is_float(cb)) return true;   /* (placed from the line they are met on, at any depth) */
     HtmlNode *n = css_layout_box_node(ctx, c);
-    if (!n) return false;
+    if (!n || (n->type != HTML_NODE_TEXT && n->type != HTML_NODE_ELEMENT)) return true;   /* (nothing to lay out) */
     if (ifc_is_atom(cb, n)) return true;   /* (what it holds is its own) */
     if (n->type == HTML_NODE_TEXT) return true;
-    if (n->type != HTML_NODE_ELEMENT || cb->s->display != CSS_DISPLAY_INLINE || cb->s->block_in_inline == 1) return false;
-    if (ifc_is_br(n)) return true;
-    if (!n->tag_name || (n->tag_name[0] == ':' && strcmp(n->tag_name, "::before") && strcmp(n->tag_name, "::after") &&
-                         strcmp(n->tag_name, "::first-letter")) ||
-        (layout_is_replaced_tag(n->tag_name) && strcasecmp(n->tag_name, "object") != 0) ||
-        !strcasecmp(n->tag_name, "img") || !strcasecmp(n->tag_name, "wbr") || layout_is_svg_box(n))
-        return false;
+    if (cb->s->display != CSS_DISPLAY_INLINE || cb->s->block_in_inline == 1) return false;
     return ifc_inline_ok(ctx, c);
 }
 
@@ -13662,13 +13658,11 @@ static bool ifc_is_block_child(const LayoutBox *b)
 
 /* Whether block idx, with block children among its inline content (kids,
  * the flow's items), has each run of inline content between them laid out
- * on items: every one of those children what this path takes, and none of
- * line-clamp or text-overflow (which count the block's lines as one). */
-static bool ifc_runs_ok(LayoutContext *ctx, int idx, const int *kids, const int *piece_of, int nkids)
+ * on items: every one of those children what this path takes (line-clamp
+ * counting the lines of the runs before, FlowCursor.lines). */
+static bool ifc_runs_ok(LayoutContext *ctx, const int *kids, const int *piece_of, int nkids)
 {
     if (g_ifc <= 0) return false;
-    const LayoutBox *b = layout_box(ctx, idx);
-    if (b->s->line_clamp || b->s->text_overflow_ellipsis) return false;
     bool block = false;
     for (int i = 0; i < nkids; i++) {
         if (piece_of && piece_of[i] >= 0) continue;   /* (a split inline's piece starts or ends) */
@@ -13713,6 +13707,7 @@ static void ifc_collect(LayoutContext *ctx, int p, int c0, int stop, IfcItems *I
             continue;
         }
         HtmlNode *n = css_layout_box_node(ctx, c);
+        if (!n || (n->type != HTML_NODE_TEXT && n->type != HTML_NODE_ELEMENT)) continue;
         layout_resolve_used_sizes(cb, layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx), avail_width, pct_h);
         if (ifc_is_float(cb)) {
             /* (out of the line: the spaces around it collapse together) */
@@ -13773,6 +13768,10 @@ static void ifc_collect(LayoutContext *ctx, int p, int c0, int stop, IfcItems *I
             ifc_cp_upto(I, len);
             if (I->n == n0) ifc_put(I, c, 0, 0, 0.0, IFC_MARK);   /* (nothing of it kept: where it is) */
             I->bt = NULL;
+        } else if (n->tag_name && !strcasecmp(n->tag_name, "wbr") && cb->s->display == CSS_DISPLAY_INLINE) {
+            /* (a break opportunity of no width: removed at a line's start,
+             * hanging at its end, as a space is) */
+            ifc_put(I, c, 0, 0, 0.0, IFC_SPACE);
         } else if (ifc_is_br(n)) {
             ifc_cp_put(I, 0x2029, 0);   /* (a forced break ends a bidi paragraph) */
             ifc_put(I, c, 0, 0, 0.0, IFC_BR);
@@ -13788,6 +13787,10 @@ static void ifc_collect(LayoutContext *ctx, int p, int c0, int stop, IfcItems *I
                     layout_svg_size(ctx, c, n, &cb->width, &cb->height);
                     cb->width += layout_horizontal_border_padding(cb);
                     cb->height += layout_vertical_border_padding(cb);
+                } else if (!strcasecmp(n->tag_name, "meter") || !strcasecmp(n->tag_name, "progress")) {
+                    /* (a browser's default: 80 or 160 by 16) */
+                    if (cb->width <= 0.0) cb->width = n->tag_name[0] == 'm' || n->tag_name[0] == 'M' ? 80.0 : 160.0;
+                    if (cb->height <= 0.0) cb->height = 16.0;
                 } else {
                     if (cb->width <= 0.0) cb->width = 80.0;
                     if (cb->height <= 0.0) cb->height = 20.0;
@@ -13958,6 +13961,12 @@ static void ifc_intr_walk(LayoutContext *ctx, int p, IfcIntr *S)
         LayoutBox *cb = layout_box(ctx, c);
         if (!layout_is_in_flow(cb)) continue;
         HtmlNode *n = css_layout_box_node(ctx, c);
+        if (!n || (n->type != HTML_NODE_TEXT && n->type != HTML_NODE_ELEMENT)) continue;
+        if (n->type == HTML_NODE_ELEMENT && n->tag_name && !strcasecmp(n->tag_name, "wbr") &&
+            cb->s->display == CSS_DISPLAY_INLINE) {
+            ifc_intr_break(S);
+            continue;
+        }
         if (ifc_is_float(cb)) {
             double w = layout_intrinsic_contribution(ctx, c, S->want_max);
             if (S->want_max) S->line += w;
@@ -14706,17 +14715,19 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
      * ellipsis where overflow clips: each line that passes its room) */
     int clamp = blk->s->line_clamp && blk->s->webkit_box ? blk->s->line_clamp : 0;
     bool ell_ovf = blk->s->text_overflow_ellipsis && blk->s->overflow != 0;
-    if (!bidi && nlines > 0 && ((clamp && nlines > clamp) || ell_ovf)) {
+    int before = cur->lines;   /* (the block's lines in runs before this one) */
+    bool over = clamp && before + nlines > clamp;
+    if (!bidi && nlines > 0 && (over || ell_ovf)) {
         for (int a = 0, L = 0; a < I.n && L < nlines; L++) {
             int b = a;
             while (b < I.n && (I.t[b].line == L || I.t[b].kind == IFC_FLOAT)) b++;
-            if (clamp && nlines > clamp && L >= clamp) {
+            if (over && before + L >= clamp) {
                 for (int q = a; q < b; q++)
                     if (I.t[q].kind == IFC_WORD || I.t[q].kind == IFC_SPACE) I.t[q].drop = 1;
-            } else if ((clamp && nlines > clamp && L == clamp - 1) || ell_ovf) {
+            } else if ((over && before + L == clamp - 1) || ell_ovf) {
                 double blx, bla;
                 ifc_band_geometry(ctx, ltop[L], lh[L], content_left, avail_width, &blx, &bla);
-                ifc_ellipsis(ctx, &I, a, b, blx + bla, clamp && nlines > clamp && L == clamp - 1);
+                ifc_ellipsis(ctx, &I, a, b, blx + bla, over && before + L == clamp - 1);
             }
             a = b;
         }
@@ -15070,6 +15081,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
         ab->static_dy = sy - pb->y;
         ab->has_static = 1;
     }
+    cur->lines += nlines;
     if (nlines > 0) {
         cur->y = ltop[nlines - 1];
         cur->line_box = lh[nlines - 1];
@@ -15226,7 +15238,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                    &cur, &any_placed, floats, &nfloats, (int)(sizeof(floats) / sizeof(floats[0])));
     /* (block children among the inline content: each run of it between
      * them on items, CYBER_IFC) */
-    bool ifc_runs = !ifc_done && ifc_runs_ok(ctx, idx, kids, piece_of, nkids);
+    bool ifc_runs = !ifc_done && ifc_runs_ok(ctx, kids, piece_of, nkids);
 
     for (int i = 0; !ifc_done && i < nkids; i++) {
         int c = kids[i];
