@@ -277,25 +277,6 @@ static bool text_is_whitespace(const char *s)
     return true;
 }
 
-static bool node_has_class(HtmlNode *node, const char *needle)
-{
-    if (!node || node->type != HTML_NODE_ELEMENT || !needle) return false;
-    size_t needle_len = strlen(needle);
-    for (HtmlAttribute *a = node->attributes; a; a = a->next) {
-        if (strcasecmp(a->name, "class") == 0 && a->value[0]) {
-            const char *p = a->value;
-            size_t len = strlen(p);
-            for (size_t i = 0; i < len; ) {
-                while (i < len && isspace((unsigned char)p[i])) i++;
-                size_t start = i;
-                while (i < len && !isspace((unsigned char)p[i])) i++;
-                if (i - start == needle_len && strncasecmp(p + start, needle, needle_len) == 0) return true;
-            }
-        }
-    }
-    return false;
-}
-
 static bool node_class_contains_any(HtmlNode *node, const char **needles)
 {
     if (!node || node->type != HTML_NODE_ELEMENT || !needles) return false;
@@ -306,28 +287,6 @@ static bool node_class_contains_any(HtmlNode *node, const char **needles)
             if (strstr(cls, *n) != NULL) return true;
         }
     }
-    return false;
-}
-
-static bool node_or_ancestor_has_class(LayoutContext *ctx, int node_idx,
-                                        const char *needle)
-{
-    if (node_idx < 0 || node_idx >= ctx->tree.count) return false;
-    int idx = node_idx;
-    while (idx >= 0) {
-        HtmlNode *node = css_layout_box_node(ctx, idx);
-        if (node_has_class(node, needle)) return true;
-        idx = ctx->tree.nodes[idx].parent_idx;
-    }
-    return false;
-}
-
-static bool node_has_hidden_class(LayoutContext *ctx, int node_idx)
-{
-    /* Treat any node inside a hidden subtree as hidden. Some page skeletons
-     * carry class "hidden" on their root while descendants do not, so we must
-     * walk up the layout tree. */
-    if (node_or_ancestor_has_class(ctx, node_idx, "hidden")) return true;
     return false;
 }
 
@@ -1605,7 +1564,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             const LayoutBox *pb = &ctx->boxes[par];
             if (pb->s->block_in_inline == 2 && (pb->flags & LAYOUT_HAS_LAYOUT) && pb->s->display != CSS_DISPLAY_NONE &&
                 pb->s->visibility != CSS_VISIBILITY_HIDDEN && pb->opacity_eff >= 0.004 &&
-                !node_has_hidden_class(ctx, par) && !box_or_ancestor_hidden(ctx, par))
+                !box_or_ancestor_hidden(ctx, par))
                 paint_pieces(ctx, dl, par, i, (float)pb->opacity_eff);
         }
         if (!(box->flags & LAYOUT_HAS_LAYOUT)) continue;
@@ -1614,7 +1573,6 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         /* Effective opacity (product over ancestors) scales every paint. */
         float op = (float)box->opacity_eff;
         if (op < 0.004f) continue;
-        if (node_has_hidden_class(ctx, i)) continue;
         if (box_or_ancestor_hidden(ctx, i)) continue;
 
         HtmlNode *node = NULL;

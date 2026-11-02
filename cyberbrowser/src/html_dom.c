@@ -1565,11 +1565,20 @@ const char *dom_attr_name_for_output(const char *lower) {
         "yChannelSelector", "zoomAndPan", NULL
     };
     if (!lower) return lower;
-    bool has_upper_form = false;
-    for (const char *p = lower; *p; p++) if (*p >= 'a' && *p <= 'z') { has_upper_form = true; break; }
-    if (!has_upper_form) return lower;
-    for (int i = 0; svg_names[i]; i++)
-        if (strcasecmp(svg_names[i], lower) == 0) return svg_names[i];
+    /* (by atom: the names' lower-case atoms, made once; not one of them is
+     * one integer compare each, not a string compare) */
+    enum { NSVG = sizeof(svg_names) / sizeof(svg_names[0]) - 1 };
+    static CssAtom atoms[NSVG];
+    static bool made;
+    if (!made) {
+        css_atom_reserve(NSVG);
+        for (int i = 0; i < NSVG; i++) atoms[i] = css_atom_intern(svg_names[i], strlen(svg_names[i]));
+        made = true;
+    }
+    CssAtom a = css_atom_find(lower, strlen(lower));
+    if (a == CSS_ATOM_NONE) return lower;
+    for (int i = 0; i < NSVG; i++)
+        if (atoms[i] == a) return svg_names[i];
     return lower;
 }
 
@@ -2362,34 +2371,141 @@ static void mir_attrs_free(MirAttrs *a) {
     a->n = 0;
 }
 
+/* A store element's attributes as the mirror keeps them, read from the
+ * store itself: names its atoms (the mirror's names are interned lower
+ * case), values in place (a style attribute ending in ';', as the
+ * serializer writes it).  What ser_element_attrs adds from JS objects
+ * only matters for elements with native state and for script objects. */
+typedef struct MirStoreAttrs {
+    const char *names[64];
+    const char *values[64];
+    uint32_t lens[64];
+    int n;
+    char *style;          /* the style value with its ';' (malloc'd), or NULL */
+    char *owned[16];      /* values read from the wrapper (malloc'd) */
+    int nowned;
+} MirStoreAttrs;
+
+/* A wrapped element's attributes set as JS properties only (what
+ * ser_element_attrs reads), after the store's: the ones the store lacks,
+ * found by atom. */
+static void mir_store_extras(NodeId s, MirStoreAttrs *a) {
+    static const char *const props[] = { "id", "className", "class", "src", "href", "style", "alt", "title",
+                                         "width", "height", "type", "value", "name", "placeholder" };
+    static const char *const attrs[] = { "id", "class", "class", "src", "href", "style", "alt", "title",
+                                         "width", "height", "type", "value", "name", "placeholder" };
+    enum { NX = sizeof(props) / sizeof(props[0]) };
+    static CssAtom aat[NX];
+    static HtmlAtom jat[NX];
+    static bool made;
+    if (!made) {
+        css_atom_reserve(NX);
+        for (int i = 0; i < NX; i++) aat[i] = css_atom_intern(attrs[i], strlen(attrs[i]));
+        made = true;
+    }
+    GCValue obj = dom_js_existing(s);
+    if (!JS_IsObject(obj)) return;
+    int na = dom_attr_count(s);
+    for (int i = 0; i < NX && a->n < 64 && a->nowned < 16; i++) {
+        bool has = false;
+        for (int k = 0; k < na && !has; k++) has = dom_attr_at(s, k)->name == aat[i];
+        const char *nm = css_atom_str(aat[i]);
+        for (int k = 0; k < a->n && !has; k++) has = a->names[k] == nm;   /* (first one wins) */
+        if (has) continue;
+        char *v = js_object_get_own_string_atom(g_mir.ctx, obj, html_atom(g_mir.ctx, &jat[i], props[i]));
+        if (!v || !v[0]) { free(v); continue; }
+        a->names[a->n] = nm;
+        a->values[a->n] = v;
+        a->lens[a->n] = (uint32_t)strlen(v);
+        a->n++;
+        a->owned[a->nowned++] = v;
+    }
+}
+
+static void mir_store_attrs(NodeId s, MirStoreAttrs *a) {
+    a->n = 0;
+    a->style = NULL;
+    a->nowned = 0;
+    int na = dom_attr_count(s), style_at = -1;
+    for (int i = 0; i < na && a->n < 64; i++) {
+        const DomAttr *at = dom_attr_at(s, i);
+        const char *nm = css_atom_str(at->name);
+        if (!nm || !nm[0]) continue;
+        const char *v = at->value.s ? at->value.s : "";
+        uint32_t vl = at->value.s ? at->value.len : 0;
+        if (nm[0] == 's' && strcmp(nm, "style") == 0) { style_at = i; continue; }
+        a->names[a->n] = nm;
+        a->values[a->n] = v;
+        a->lens[a->n] = vl;
+        a->n++;
+    }
+    if (style_at >= 0 && a->n < 64) {
+        const DomAttr *at = dom_attr_at(s, style_at);
+        const char *v = at->value.s ? at->value.s : "";
+        uint32_t vl = at->value.s ? at->value.len : 0;
+        if (vl > 0 && v[vl - 1] != ';') {
+            a->style = (char *)malloc(vl + 2);
+            memcpy(a->style, v, vl);
+            a->style[vl] = ';';
+            a->style[vl + 1] = '\0';
+            v = a->style;
+            vl++;
+        }
+        a->names[a->n] = css_atom_str(at->name);
+        a->values[a->n] = v;
+        a->lens[a->n] = vl;
+        a->n++;
+    }
+    if (dom_has_wrapper(s)) mir_store_extras(s, a);
+}
+
 /* Read element s's attributes into mirror node idx; true when they changed. */
 static bool mir_read_attrs(NodeId s, int idx, const char *tag_lower, bool in_svg) {
     const HtmlAttribute *old_list = NULL;
     MirAttrs a;
+    MirStoreAttrs st;
     a.n = 0;
     a.in_svg = in_svg;
-    LooseAttrs loose = {0};
-    ser_element_attrs(g_mir.ctx, ser_of_node(s), tag_lower, &loose, mir_attr_sink, &a);
+    const char *const *names;
+    const char *const *values;
+    int n;
+    bool direct = dom_valid(s) && !legacy_limits() && !ser_has_native_props(tag_lower);
+    if (direct) {
+        mir_store_attrs(s, &st);
+        names = st.names;
+        values = st.values;
+        n = st.n;
+    } else {
+        LooseAttrs loose = {0};
+        ser_element_attrs(g_mir.ctx, ser_of_node(s), tag_lower, &loose, mir_attr_sink, &a);
+        names = a.names;
+        values = (const char *const *)a.values;
+        n = a.n;
+    }
     HtmlNode *hn = po_array_payload(&g_mir.doc->array, idx);
     bool same = true;
     int k = 0;
     for (HtmlAttribute *at = hn->attributes; at; at = at->next, k++) {
-        if (k >= a.n || at->name != a.names[k] || strcmp(at->value, a.values[k]) != 0) { same = false; break; }
+        if (k >= n || at->name != names[k] || strcmp(at->value, values[k]) != 0) { same = false; break; }
     }
-    if (same && k != a.n) same = false;
+    if (same && k != n) same = false;
     if (!same) {
         old_list = hn->attributes;
         hn->attributes = NULL;      /* the old list stays in the arena */
         html_document_attrs_changed(g_mir.doc, idx);
-        for (int i = 0; i < a.n; i++)
-            html_document_add_attr(g_mir.doc, idx, a.names[i], a.values[i], strlen(a.values[i]));
+        for (int i = 0; i < n; i++)
+            html_document_add_attr(g_mir.doc, idx, names[i], values[i], direct ? st.lens[i] : strlen(values[i]));
         if (!g_mir.building) {
             hn = po_array_payload(&g_mir.doc->array, idx);
             mir_log(HTML_MIRROR_ATTRS, s, old_list, hn->attributes);
             if (mir_is_sheet_tag(tag_lower)) mir_log(HTML_MIRROR_SHEETS, s, NULL, NULL);
         }
     }
-    mir_attrs_free(&a);
+    if (direct) {
+        free(st.style);
+        for (int i = 0; i < st.nowned; i++) free(st.owned[i]);
+    }
+    else mir_attrs_free(&a);
     return !same;
 }
 
