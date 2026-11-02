@@ -185,11 +185,13 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * with in-flow children (§8.3.1) and stops empty-box through-collapse. */
     unsigned char overflow;
 
-    /* vertical-align: 0=baseline, 1=middle, 2=top, 3=bottom.
-     * Table cells (td/th) default to middle per the HTML UA stylesheet;
-     * everything else defaults to baseline.  Only middle/top/bottom are
-     * honoured for table-cell content alignment at the moment. */
+    /* vertical-align: 0=baseline, 1=middle, 2=top, 3=bottom, 4=sub,
+     * 5=super, 6=text-top, 7=text-bottom, 8=a length (va_len px) or
+     * percentage (va_pct of the line-height), raising the box.  Table cells
+     * (td/th) default to middle per the HTML UA stylesheet; for a cell's
+     * content only middle/top/bottom are honoured at the moment. */
     unsigned char vertical_align;
+    float va_len, va_pct;
 
     /* Resolved typography. */
     double font_size;

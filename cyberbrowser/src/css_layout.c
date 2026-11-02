@@ -2976,10 +2976,31 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         else if (strcasecmp(value, "scroll") == 0) box->s->overflow = 3;
         else if (strcasecmp(value, "clip") == 0) box->s->overflow = 1;
     } else if (strcasecmp(prop, "vertical-align") == 0) {
-        if (strcasecmp(value, "middle") == 0) box->s->vertical_align = 1;
-        else if (strcasecmp(value, "top") == 0) box->s->vertical_align = 2;
-        else if (strcasecmp(value, "bottom") == 0) box->s->vertical_align = 3;
-        else box->s->vertical_align = 0;   /* baseline/sub/super/lengths: treat as baseline */
+        static const char *const kw[] = { "baseline", "middle", "top", "bottom", "sub", "super", "text-top",
+                                          "text-bottom" };
+        const char *v = value;
+        while (isspace((unsigned char)*v)) v++;
+        int which = -1;
+        for (int k = 0; k < 8 && which < 0; k++)
+            if (strcasecmp(v, kw[k]) == 0) which = k;
+        if (which >= 0) {
+            box->s->vertical_align = (unsigned char)which;
+        } else {
+            char *end = NULL;
+            double num = strtod(v, &end);
+            if (end != v) {
+                while (*end && isspace((unsigned char)*end)) end++;
+                if (*end == '%') {
+                    box->s->vertical_align = 8;
+                    box->s->va_len = 0.0f;
+                    box->s->va_pct = (float)(num / 100.0);
+                } else if (num == 0.0 || isalpha((unsigned char)*end)) {
+                    box->s->vertical_align = 8;
+                    box->s->va_len = (float)css_parse_length(v, parent_width, viewport_width, box->s->font_size);
+                    box->s->va_pct = 0.0f;
+                }
+            }
+        }
     } else if (strcasecmp(prop, "background-color") == 0) {
         double cr, cg, cb, ca;
         if (css_parse_color(value, &cr, &cg, &cb, &ca)) {
@@ -4855,7 +4876,7 @@ static const char *g_ua_stylesheet_css =
     "s { text-decoration: line-through; }\n"
     "del { text-decoration: line-through; }\n"
     "strike { text-decoration: line-through; }\n"
-    "a { color: #0000EE; text-decoration: underline; }\n"
+    "a:link { color: #0000EE; text-decoration: underline; }\n"
     "code { font-family: monospace; }\n"
     "kbd { font-family: monospace; }\n"
     "samp { font-family: monospace; }\n"
@@ -4870,8 +4891,8 @@ static const char *g_ua_stylesheet_css =
     "textarea[dir=auto i], pre[dir=auto i] { unicode-bidi: plaintext; }\n"
     "nobr { white-space: nowrap; }\n"
     "small { font-size: 0.833em; }\n"
-    "sub { font-size: 0.833em; }\n"
-    "sup { font-size: 0.833em; }\n"
+    "sub { vertical-align: sub; font-size: 0.833em; }\n"
+    "sup { vertical-align: super; font-size: 0.833em; }\n"
     "big { font-size: 1.17em; }\n"
     "ul { display: block; margin: 1em 0; padding-left: 40px; list-style-type: disc; }\n"
     "ol { display: block; margin: 1em 0; padding-left: 40px; list-style-type: decimal; }\n"
@@ -11543,6 +11564,34 @@ static double layout_margin_collapse(double a, double b)
 
 static bool layout_establishes_bfc(LayoutContext *ctx, int idx);
 
+/* Whether block c is empty with its margins collapsing through (no
+ * significant child, nothing separating them, CSS 2.1 section 8.3.1). */
+static bool layout_empty_through(LayoutContext *ctx, int c)
+{
+    LayoutBox *b = layout_box(ctx, c);
+    if (!layout_box_is_block_level(b) || b->s->overflow != 0 || !layout_box_collapses_through(b)) return false;
+    if (layout_establishes_bfc(ctx, c)) return false;
+    int f, l;
+    layout_sig_children(ctx, c, &f, &l);
+    return f < 0;
+}
+
+/* The next (dir 1) or previous (-1) significant in-flow sibling of c, as
+ * layout_sig_children counts them (not into split inlines: -2 there). */
+static int layout_sig_sibling(LayoutContext *ctx, int c, int dir)
+{
+    for (int k = dir > 0 ? ctx->tree.nodes[c].next_sibling_idx : ctx->tree.nodes[c].prev_sibling_idx; k >= 0;
+         k = dir > 0 ? ctx->tree.nodes[k].next_sibling_idx : ctx->tree.nodes[k].prev_sibling_idx) {
+        LayoutBox *kb = layout_box(ctx, k);
+        if (!layout_is_in_flow(kb) || kb->s->float_side != 0) continue;
+        if (kb->s->display == CSS_DISPLAY_INLINE && kb->s->block_in_inline == 2) return -2;
+        HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[k].dom_node_idx);
+        if (dn && dn->type == HTML_NODE_TEXT && layout_text_is_whitespace(css_layout_node_text(ctx, dn))) continue;
+        return k;
+    }
+    return -1;
+}
+
 static double layout_eff_margin_top(LayoutContext *ctx, int idx, int depth)
 {
     LayoutBox *box = layout_box(ctx, idx);
@@ -11562,8 +11611,15 @@ static double layout_eff_margin_top(LayoutContext *ctx, int idx, int depth)
     if (layout_establishes_bfc(ctx, idx) && idx != ctx->tree.root_idx) return mt;
     if (box->padding_top > 0.0 || box->s->border_top > 0.0) return mt;
     if (!layout_box_is_block_level(layout_box(ctx, f))) return mt;
-    double c = layout_eff_margin_top(ctx, f, depth + 1);
-    return layout_margin_collapse(mt, c);
+    double c = layout_margin_collapse(mt, layout_eff_margin_top(ctx, f, depth + 1));
+    /* (an empty first child's margins collapse through it: the next
+     * child's top margin adjoins this box's too, unless it has clearance) */
+    for (int k = f; layout_empty_through(ctx, k);) {
+        k = layout_sig_sibling(ctx, k, 1);
+        if (k < 0 || !layout_box_is_block_level(layout_box(ctx, k)) || layout_box(ctx, k)->s->clear) break;
+        c = layout_margin_collapse(c, layout_eff_margin_top(ctx, k, depth + 1));
+    }
+    return c;
 }
 
 static double layout_eff_margin_bottom(LayoutContext *ctx, int idx, int depth)
@@ -11579,10 +11635,18 @@ static double layout_eff_margin_bottom(LayoutContext *ctx, int idx, int depth)
     }
     if (layout_establishes_bfc(ctx, idx) && idx != ctx->tree.root_idx) return mb;   /* (as above) */
     if (box->padding_bottom > 0.0 || box->s->border_bottom > 0.0) return mb;
-    if (!layout_height_auto(box)) return mb;     /* explicit height blocks */
+    /* (a height blocks it, or a min-height that made it taller than its content) */
+    if (!layout_height_auto(box) || (box->min_height > 0.0 && box->content_height <= box->min_height + 0.01)) return mb;
     if (!layout_box_is_block_level(layout_box(ctx, l))) return mb;
-    double c = layout_eff_margin_bottom(ctx, l, depth + 1);
-    return layout_margin_collapse(mb, c);
+    double c = layout_margin_collapse(mb, layout_eff_margin_bottom(ctx, l, depth + 1));
+    /* (an empty last child's margins collapse through it: the one before
+     * adjoins this box's bottom margin too) */
+    for (int k = l; layout_empty_through(ctx, k) && !layout_box(ctx, k)->s->clear;) {
+        k = layout_sig_sibling(ctx, k, -1);
+        if (k < 0 || !layout_box_is_block_level(layout_box(ctx, k))) break;
+        c = layout_margin_collapse(c, layout_eff_margin_bottom(ctx, k, depth + 1));
+    }
+    return c;
 }
 
 /* Position in-flow children in a block formatting context and recurse into
@@ -12955,64 +13019,6 @@ static double ifc_intrinsic(LayoutContext *ctx, int idx, bool want_max)
     return S.best;
 }
 
-/* The height a token's line takes from it, as the flow's line box takes it
- * from the item it is in (the block's child that holds it): the item's line
- * advance, and how far the item's own children reach (a text child its line
- * advance, an element child the bottom of its box, centred on the line by
- * the half-leading). */
-static double ifc_tok_adv(LayoutContext *ctx, int idx, int box)
-{
-    int item = box, below = -1;
-    for (int p = ctx->tree.nodes[box].parent_idx; p >= 0 && p != idx; p = ctx->tree.nodes[p].parent_idx) {
-        below = item;
-        item = p;
-    }
-    double a = layout_line_advance_box(layout_box(ctx, item));
-    if (below >= 0) {
-        const LayoutBox *bb = layout_box(ctx, below);
-        HtmlNode *n = css_layout_box_node(ctx, below);
-        /* (a ::first-letter box: its line advance, as the flow sizes it) */
-        bool fl = n && n->type == HTML_NODE_ELEMENT && n->tag_name && !strcmp(n->tag_name, "::first-letter");
-        double q = (n && n->type == HTML_NODE_TEXT) || fl ? layout_line_advance_box(bb)
-                                                  : (layout_line_advance_box(bb) + layout_content_area_height(bb)) / 2.0 +
-                                                    bb->padding_bottom + bb->s->border_bottom;
-        if (q > a) a = q;
-    }
-    return a;
-}
-
-/* Line L's height: from its words and the spaces it keeps; a line with
- * only a line break takes the break's (an empty line). */
-static double ifc_line_height(LayoutContext *ctx, int idx, const IfcItems *I, int t0, int t1)
-{
-    double h = 0.0, br = 0.0;
-    for (int k = t0; k < t1; k++) {
-        const IfcTok *t = &I->t[k];
-        if (t->kind == IFC_BR) {
-            double a = ifc_tok_adv(ctx, idx, t->box);
-            if (a > br) br = a;
-        }
-        if (t->kind == IFC_ATOM) {
-            const LayoutBox *ab = layout_box(ctx, t->box);
-            double a = ab->margin_top + ab->height + ab->margin_bottom;
-            if (a > h) h = a;
-            continue;
-        }
-        /* (an inline element with margin, border or padding: not a zero-height
-         * line even without text, CSS 2.1 section 9.4.2) */
-        bool edge = t->kind == IFC_OPEN || t->kind == IFC_CLOSE;
-        if (t->kind == IFC_MARK) {
-            const LayoutBox *mb = layout_box(ctx, t->box);
-            HtmlNode *mn = css_layout_box_node(ctx, t->box);
-            edge = mn && mn->type == HTML_NODE_ELEMENT && layout_vertical_border_padding(mb) > 0.0;
-        }
-        if (!(t->kind == IFC_WORD || (t->kind == IFC_SPACE && !t->drop) || edge)) continue;
-        double a = ifc_tok_adv(ctx, idx, t->box);
-        if (a > h) h = a;
-    }
-    return h > 0.0 ? h : br;
-}
-
 /* Where token k's box edge is: an open edge's border start, a close edge's
  * border end, else the token's own extent. */
 static double ifc_tok_left(LayoutContext *ctx, const IfcTok *t)
@@ -13027,8 +13033,19 @@ static double ifc_tok_right(LayoutContext *ctx, const IfcTok *t)
 
 /* The room a line from y, h tall, has beside the floats of this formatting
  * context that overlap any of it (a point at y when h is 0). */
+static void ifc_band_geometry_from(LayoutContext *ctx, double y, double h, double content_left, double avail_width,
+                                   double *lx, double *la, int fresh);
+
 static void ifc_band_geometry(LayoutContext *ctx, double y, double h, double content_left, double avail_width,
                               double *lx, double *la)
+{
+    ifc_band_geometry_from(ctx, y, h, content_left, avail_width, lx, la, ctx->float_count);
+}
+
+/* (floats from fresh on, placed while its line was built: only those at
+ * its top narrow it) */
+static void ifc_band_geometry_from(LayoutContext *ctx, double y, double h, double content_left, double avail_width,
+                                   double *lx, double *la, int fresh)
 {
     const FloatRec *fl = ctx->float_stack + t_float_base;
     int n = ctx->float_count - t_float_base;
@@ -13039,6 +13056,7 @@ static void ifc_band_geometry(LayoutContext *ctx, double y, double h, double con
     double content_right = content_left + avail_width, li = 0.0, ri = 0.0;
     for (int i = 0; i < n; i++) {
         if (!(fl[i].top < y + h - 0.001 && fl[i].bottom > y + 0.001)) continue;
+        if (t_float_base + i >= fresh && fl[i].top > y + 0.01) continue;
         if (fl[i].right <= content_left || fl[i].left >= content_right) continue;
         if (fl[i].side == 1 && fl[i].right - content_left > li) li = fl[i].right - content_left;
         if (fl[i].side != 1 && content_right - fl[i].left > ri) ri = content_right - fl[i].left;
@@ -13372,6 +13390,342 @@ static void ifc_ellipsis(LayoutContext *ctx, IfcItems *I, int a, int b, double l
  * children from c0 up to stop (a run of it between block children,
  * ifc_runs_ok): its lines from cur->y, the cursor left at the last line's
  * top with its height in line_box, as the flow's per-child path leaves it. */
+/* ---- Line boxes (CSS 2.1 section 10.8) ----
+ * Each box on a line (the block's strut, each inline element, each text
+ * box, each atomic inline) reaches A above its baseline and D below it, its
+ * baseline vertical-align's offset (bo, down) from its parent's.  A box of
+ * line-height L, font size fs and ascent ratio a: A = (L - fs) / 2 + a fs
+ * (where the shaper draws its text, its em box centred in L), D = L - A.
+ * An atomic inline's baseline is an inline-block's last line's, else its
+ * bottom margin edge.  The line box reaches as far above and below the
+ * baseline as they do; a box aligned top or bottom is placed after, against
+ * the line, and makes it taller only when it is taller than the line. */
+typedef struct {
+    double A, D, adv, ca, asc_ca, fs;   /* (asc_ca: its content area above its baseline) */
+    TextShaper *font;
+    double bo;      /* its baseline below its tb root's (or the block's) */
+    int tb;         /* the nearest element aligned top or bottom, itself included (-1: none) */
+    int parent;     /* its enclosing element (-1: the block) */
+    unsigned char va;
+} IfcVa;
+
+/* A box aligned top or bottom on line L: how far its subtree there reaches
+ * above and below its baseline. */
+typedef struct {
+    int L, root;
+    double up, dn;
+} IfcTbExt;
+
+typedef struct {
+    IfcVa *el;      /* per element of the paragraph */
+    int *tel;       /* per token: its innermost element (-1: none) */
+    unsigned *stamp;
+    unsigned gen;
+    IfcVa strut;
+    IfcVa *atom;         /* per token: an atomic inline's metrics (atom_ok: measured) */
+    unsigned char *atom_ok;
+    double *rup, *rdn;   /* per element: (a top or bottom box's) its subtree's extent on the line measured */
+    unsigned *rgen;
+    int *roots, nroots;  /* the top and bottom boxes on the line measured */
+    IfcTbExt *ext;       /* per line, the top and bottom boxes' extents */
+    int next, extcap;
+} IfcLines;
+
+static void ifc_va_metrics(const LayoutBox *b, IfcVa *v)
+{
+    v->fs = b->s->font_size > 0.0 ? b->s->font_size : 16.0;
+    v->adv = layout_line_advance_box(b);
+    v->ca = layout_content_area_height(b);
+    TextShaper *font = display_list_get_font(layout_font_slot(b));
+    if (!font) font = display_list_get_default_font();
+    float a = 0.8f, d, g;
+    if (!font || !text_shaper_vmetrics(font, &a, &d, &g)) a = 0.8f;
+    v->A = (v->adv - v->fs) / 2.0 + a * v->fs;
+    v->D = v->adv - v->A;
+    v->asc_ca = v->A - (v->adv - v->ca) / 2.0;
+    v->font = font;
+    v->bo = 0.0;
+    v->tb = -1;
+    v->parent = -1;
+    v->va = b->s->vertical_align;
+}
+
+/* Box b's baseline below its parent's (p): its vertical-align, but top and
+ * bottom (placed against the line after). */
+static double ifc_va_offset(const LayoutBox *b, const IfcVa *v, const IfcVa *p)
+{
+    switch (b->s->vertical_align) {
+    case 1: {                                                     /* middle */
+        float xh = p->font ? text_shaper_x_height(p->font) : 0.0f;
+        return (v->A - v->D) / 2.0 - (xh > 0.0f ? xh : 0.5f) * p->fs / 2.0;
+    }
+    case 4: return p->fs / 5.0 + 1.0;                             /* sub (as Blink) */
+    case 5: return -(p->fs / 3.0 + 1.0);                          /* super */
+    case 6: return v->A - p->asc_ca;                              /* text-top */
+    case 7: return (p->ca - p->asc_ca) - v->D;                    /* text-bottom */
+    case 8: return -((double)b->s->va_len + (double)b->s->va_pct * v->adv);
+    default: return 0.0;
+    }
+}
+
+/* The lowest (first: the highest) baseline of the text in box i's subtree
+ * (not into floats, absolutely positioned boxes or boxes that clip), NAN
+ * when none. */
+static double layout_last_baseline(LayoutContext *ctx, int i, int depth, bool first)
+{
+    double best = NAN;
+    if (depth > 40) return best;
+    for (int c = ctx->tree.nodes[i].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+        const LayoutBox *cb = layout_box(ctx, c);
+        if (!layout_is_in_flow(cb) || cb->s->float_side != 0) continue;
+        const LayoutTextFragList *tf = ctx->text_frags && c < ctx->text_frags_n ? &ctx->text_frags[c] : NULL;
+        double v = NAN;
+        if (tf && tf->n > 0) {
+            IfcVa m;
+            ifc_va_metrics(cb, &m);
+            for (int q = 0; q < tf->n; q++) {
+                double y = cb->y + tf->f[q].dy + (m.A - (m.adv - m.fs) / 2.0);
+                if (isnan(v) || (first ? y < v : y > v)) v = y;
+            }
+        } else if (cb->s->overflow == 0) {
+            v = layout_last_baseline(ctx, c, depth + 1, first);
+        }
+        HtmlNode *cn = css_layout_box_node(ctx, c);
+        if (isnan(v) && cn && cn->type == HTML_NODE_TEXT && !ifc_text_blank(cb, css_layout_node_text(ctx, cn))) {
+            /* (text drawn nowhere, as at font-size 0: where its line put it) */
+            IfcVa m;
+            ifc_va_metrics(cb, &m);
+            v = cb->y + m.A;
+        }
+        if (isnan(v) && cb->s->display == CSS_DISPLAY_LIST_ITEM && cb->s->list_style_type != 0) {
+            /* (a list item with nothing else: its marker's line) */
+            IfcVa m;
+            ifc_va_metrics(cb, &m);
+            v = cb->y + cb->s->border_top + cb->padding_top + m.A;
+        }
+        if (!isnan(v) && (isnan(best) || (first ? v < best : v > best))) best = v;
+    }
+    return best;
+}
+
+/* An atomic inline's A and D: an inline-block's (or other box's that is
+ * not replaced) last line's baseline, an inline table's first row's, else
+ * its bottom margin edge. */
+static void ifc_atom_metrics(LayoutContext *ctx, int b, IfcVa *v)
+{
+    const LayoutBox *ab = layout_box(ctx, b);
+    ifc_va_metrics(ab, v);
+    double h = ab->margin_top + ab->height + ab->margin_bottom;
+    HtmlNode *n = css_layout_box_node(ctx, b);
+    double base = NAN;
+    if (ab->s->overflow == 0 && !(n && n->type == HTML_NODE_ELEMENT && (ifc_is_img(n) || ifc_is_replaced(ab, n))))
+        base = layout_last_baseline(ctx, b, 0, table_is_table(ab));
+    double A = isnan(base) ? h : base - (ab->y - ab->margin_top);
+    if (A < 0.0) A = h;   /* (text above it: its bottom; below it, as it is) */
+    v->A = A;
+    v->D = h - A;
+    v->adv = v->ca = h;
+    v->asc_ca = A;
+}
+
+/* The paragraph's boxes measured once: each element's metrics and offset,
+ * each token's element. */
+static bool ifc_lines_init(LayoutContext *ctx, int idx, const IfcItems *I, IfcLines *V)
+{
+    memset(V, 0, sizeof(*V));
+    ifc_va_metrics(layout_box(ctx, idx), &V->strut);
+    /* (one block: per element its metrics, extents and stamps, a stack;
+     * per token its element; per token an atom's metrics when it has any) */
+    bool atoms = false;
+    for (int q = 0; q < I->n && !atoms; q++) atoms = I->t[q].kind == IFC_ATOM;
+    size_t ne = (size_t)I->nel + 1, nt = (size_t)I->n + 1;
+    size_t bytes = ne * (sizeof(IfcVa) + 2 * sizeof(double) + 2 * sizeof(unsigned) + 2 * sizeof(int)) +
+                   nt * sizeof(int) + (atoms ? nt * (sizeof(IfcVa) + 1) : 0);
+    unsigned char *mem = (unsigned char *)malloc(bytes);
+    if (!mem) return false;
+    V->el = (IfcVa *)mem;
+    V->rup = (double *)(V->el + ne);
+    V->rdn = V->rup + ne;
+    V->atom = atoms ? (IfcVa *)(V->rdn + ne) : NULL;
+    V->stamp = (unsigned *)(atoms ? (unsigned char *)(V->atom + nt) : (unsigned char *)(V->rdn + ne));
+    V->rgen = V->stamp + ne;
+    V->roots = (int *)(V->rgen + ne);
+    int *stack = V->roots + ne, sp = 0;
+    V->tel = stack + ne;
+    V->atom_ok = atoms ? (unsigned char *)(V->tel + nt) : NULL;
+    memset(V->stamp, 0, 2 * ne * sizeof(unsigned));
+    if (atoms) memset(V->atom_ok, 0, nt);
+    for (int q = 0; q < I->n; q++) V->tel[q] = -1;
+    /* (elements in the order they open: a stack of the open ones) */
+    for (int e = 0; e < I->nel; e++) {
+        const IfcEl *el = &I->el[e];
+        /* (its parent, if an element of the paragraph, is open: those after
+         * it on the stack are done) */
+        int pbox = ctx->tree.nodes[el->box].parent_idx;
+        while (sp > 0 && I->el[stack[sp - 1]].box != pbox) sp--;
+        int p = sp > 0 ? stack[sp - 1] : -1;
+        const LayoutBox *eb = layout_box(ctx, el->box);
+        IfcVa *v = &V->el[e];
+        ifc_va_metrics(eb, v);
+        v->parent = p;
+        const IfcVa *pv = p >= 0 ? &V->el[p] : &V->strut;
+        if (v->va == 2 || v->va == 3) {
+            v->tb = e;
+            v->bo = 0.0;
+        } else {
+            v->tb = p >= 0 ? V->el[p].tb : -1;
+            v->bo = (p >= 0 ? V->el[p].bo : 0.0) + ifc_va_offset(eb, v, pv);
+        }
+        stack[sp++] = e;
+        for (int q = el->tok0; q < el->tok1 && q < I->n; q++) V->tel[q] = e;
+    }
+    return true;
+}
+
+static void ifc_lines_free(IfcLines *V)
+{
+    free(V->el);   /* (the block) */
+    free(V->ext);
+}
+
+/* Atomic inline token q's metrics, measured once. */
+static const IfcVa *ifc_atom_va(LayoutContext *ctx, const IfcItems *I, IfcLines *V, int q)
+{
+    if (!V->atom_ok[q]) {
+        ifc_atom_metrics(ctx, I->t[q].box, &V->atom[q]);
+        V->atom_ok[q] = 1;
+    }
+    return &V->atom[q];
+}
+
+/* Element e's baseline below line L's (asc above, desc below it). */
+static double ifc_line_bo(const IfcLines *V, int e, int L, double asc, double desc)
+{
+    if (e < 0) return 0.0;
+    const IfcVa *v = &V->el[e];
+    if (v->tb < 0) return v->bo;
+    const IfcVa *r = &V->el[v->tb];
+    double up = r->A, dn = r->D;
+    for (int k = 0; k < V->next; k++)
+        if (V->ext[k].L == L && V->ext[k].root == v->tb) {
+            up = V->ext[k].up;
+            dn = V->ext[k].dn;
+            break;
+        }
+    return (r->va == 2 ? up - asc : desc - dn) + v->bo;
+}
+
+/* An atomic inline's baseline below line L's, its metrics in *m. */
+static double ifc_atom_bo(LayoutContext *ctx, const IfcItems *I, IfcLines *V, int q, int e, int L, double asc,
+                          double desc, IfcVa *m)
+{
+    const IfcTok *t = &I->t[q];
+    *m = *ifc_atom_va(ctx, I, V, q);
+    const LayoutBox *ab = layout_box(ctx, t->box);
+    if (m->va == 2) return m->A - asc;
+    if (m->va == 3) return desc - m->D;
+    const IfcVa *pv = e >= 0 ? &V->el[e] : &V->strut;
+    return ifc_line_bo(V, e, L, asc, desc) + ifc_va_offset(ab, m, pv);
+}
+
+/* A box reaching up above and dn below the line's baseline (bo: its own
+ * baseline below that of root tb, -1: the line's): into the line's extent,
+ * or into tb's subtree's. */
+static void ifc_extent_put(IfcLines *V, int tb, double A, double D, double bo, double *up, double *dn)
+{
+    if (tb < 0) {
+        if (A - bo > *up) *up = A - bo;
+        if (D + bo > *dn) *dn = D + bo;
+        return;
+    }
+    if (V->rgen[tb] != V->gen) {
+        V->rgen[tb] = V->gen;
+        V->roots[V->nroots++] = tb;
+        V->rup[tb] = V->el[tb].A;
+        V->rdn[tb] = V->el[tb].D;
+    }
+    if (A - bo > V->rup[tb]) V->rup[tb] = A - bo;
+    if (D + bo > V->rdn[tb]) V->rdn[tb] = D + bo;
+}
+
+/* What the line of tokens [t0, t1) reaches above (*asc) and below (*desc)
+ * its baseline: nothing for a line with no text, no kept white space, no
+ * line break, no atomic inline and no inline box with margin, border or
+ * padding (CSS 2.1 section 9.4.2).  Line L (-1: a trial) keeps the extents
+ * of its boxes aligned top or bottom. */
+static void ifc_line_extent(LayoutContext *ctx, const IfcItems *I, IfcLines *V, int t0, int t1, int L, double *asc,
+                            double *desc)
+{
+    double up = V->strut.A, dn = V->strut.D, top_h = 0.0, bot_h = 0.0;
+    unsigned gen = ++V->gen;
+    V->nroots = 0;
+    int last_text = -1;
+    bool some = false;
+    IfcVa tv;
+    for (int q = t0; q < t1; q++) {
+        const IfcTok *t = &I->t[q];
+        int kind = t->kind;
+        if (!(kind == IFC_WORD || (kind == IFC_SPACE && !t->drop) || kind == IFC_BR || kind == IFC_ATOM ||
+              kind == IFC_OPEN || kind == IFC_CLOSE || kind == IFC_MARK))
+            continue;
+        if (kind != IFC_MARK) {
+            some = true;
+        } else {
+            /* (an empty inline box with vertical padding or border: a line) */
+            HtmlNode *mn = css_layout_box_node(ctx, t->box);
+            if (mn && mn->type == HTML_NODE_ELEMENT && layout_vertical_border_padding(layout_box(ctx, t->box)) > 0.0)
+                some = true;
+        }
+        int e = V->tel[q];
+        int tb = e >= 0 ? V->el[e].tb : -1;
+        if (kind == IFC_ATOM) {
+            IfcVa m = *ifc_atom_va(ctx, I, V, q);
+            if (m.va == 2 || m.va == 3) {
+                double h = m.A + m.D;
+                if (m.va == 2 && h > top_h) top_h = h;
+                if (m.va == 3 && h > bot_h) bot_h = h;
+            } else {
+                const IfcVa *pv = e >= 0 ? &V->el[e] : &V->strut;
+                double bo = (e >= 0 ? V->el[e].bo : 0.0) + ifc_va_offset(layout_box(ctx, t->box), &m, pv);
+                ifc_extent_put(V, tb, m.A, m.D, bo, &up, &dn);
+            }
+        } else if ((kind == IFC_WORD || kind == IFC_SPACE || kind == IFC_BR) && (e < 0 || I->el[e].box != t->box)) {
+            /* (a text box, or a line break: its own metrics, its parent's baseline) */
+            if (t->box != last_text) {
+                ifc_va_metrics(layout_box(ctx, t->box), &tv);
+                last_text = t->box;
+            }
+            ifc_extent_put(V, tb, tv.A, tv.D, e >= 0 ? V->el[e].bo : 0.0, &up, &dn);
+        }
+        for (int f = e; f >= 0; f = V->el[f].parent) {
+            if (V->stamp[f] == gen) break;
+            V->stamp[f] = gen;
+            const IfcVa *v = &V->el[f];
+            ifc_extent_put(V, v->tb, v->A, v->D, v->bo, &up, &dn);
+        }
+    }
+    /* (the top and bottom boxes: their subtrees' heights, kept for line L) */
+    for (int k = 0; k < V->nroots; k++) {
+        int r = V->roots[k];
+        double h = V->rup[r] + V->rdn[r];
+        if (V->el[r].va == 2 && h > top_h) top_h = h;
+        if (V->el[r].va == 3 && h > bot_h) bot_h = h;
+        if (L < 0) continue;
+        if (V->next == V->extcap) {
+            int nc = V->extcap ? V->extcap * 2 : 8;
+            IfcTbExt *ne = (IfcTbExt *)realloc(V->ext, (size_t)nc * sizeof(IfcTbExt));
+            if (!ne) continue;
+            V->ext = ne;
+            V->extcap = nc;
+        }
+        V->ext[V->next++] = (IfcTbExt){ L, r, V->rup[r], V->rdn[r] };
+    }
+    if (top_h > up + dn) dn = top_h - up;
+    if (bot_h > up + dn) up = bot_h - dn;
+    *asc = some ? up : 0.0;
+    *desc = some ? dn : 0.0;
+}
+
 static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcRun *run, double content_left,
                        double avail_width, double indent0,
                        FlowCursor *cur, bool *any_placed, FloatRec *floats, int *nfloats, int fcap)
@@ -13402,10 +13756,15 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
     int ndef = 0;
     int cap_lines = 16, nlines = 0;
     double *ltop = (double *)malloc((size_t)cap_lines * sizeof(double)), *lh = (double *)malloc((size_t)cap_lines * sizeof(double));
+    double *lasc = (double *)malloc((size_t)cap_lines * sizeof(double));   /* (each line's baseline below its top) */
+    IfcLines V;
+    if (!ifc_lines_init(ctx, idx, &I, &V)) any = false;
     double y = cur->y, last_x = content_left;
     int i = 0;
     double band_h = 0.0;   /* (a line tried again: the height of the floats' band it must clear) */
-    while (any && ltop && lh && deferred && i < I.n) {
+    int fc_line = ctx->float_count;   /* (the floats there when the line was begun) */
+    while (any && ltop && lh && lasc && deferred && i < I.n) {
+        if (band_h <= 0.0) fc_line = ctx->float_count;
         double lx = content_left, la = avail_width;
         ifc_band_geometry(ctx, y, band_h, content_left, avail_width, &lx, &la);
         double x = lx + (nlines == 0 ? indent0 : 0.0);
@@ -13441,6 +13800,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
                     for (int k = t0; k < i; k++) I.t[k].x += lx2 - lx;
                     x += lx2 - lx;
                 }
+                if (!word) fc_line = ctx->float_count;   /* (before the line's content: it shapes the line) */
                 lx = lx2;
                 la = la2;
                 i++;
@@ -13518,8 +13878,10 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
         /* (the line as tall as it is: the floats beside any of it narrow it;
          * once, built again in that room) */
         if (band_h <= 0.0) {
-            double h = ifc_line_height(ctx, idx, &I, t0, i), blx, bla;
-            ifc_band_geometry(ctx, y, h, content_left, avail_width, &blx, &bla);
+            double ha, hd, blx, bla;
+            ifc_line_extent(ctx, &I, &V, t0, i, -1, &ha, &hd);
+            double h = ha + hd;
+            ifc_band_geometry_from(ctx, y, h, content_left, avail_width, &blx, &bla, fc_line);
             if (h > 0.0 && (blx > lx + 0.01 || blx + bla < lx + la - 0.01)) {
                 for (int k = t0; k < i; k++)
                     if (I.t[k].kind != IFC_FLOAT) I.t[k].drop = 0;
@@ -13599,12 +13961,19 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
             cap_lines *= 2;
             double *a = (double *)realloc(ltop, (size_t)cap_lines * sizeof(double));
             double *b = a ? (double *)realloc(lh, (size_t)cap_lines * sizeof(double)) : NULL;
+            double *c = b ? (double *)realloc(lasc, (size_t)cap_lines * sizeof(double)) : NULL;
             if (a) ltop = a;
-            if (!b) break;
-            lh = b;
+            if (b) lh = b;
+            if (!c) break;
+            lasc = c;
         }
         ltop[nlines] = y;
-        lh[nlines] = ifc_line_height(ctx, idx, &I, t0, i);
+        {
+            double ha, hd;
+            ifc_line_extent(ctx, &I, &V, t0, i, nlines, &ha, &hd);
+            lasc[nlines] = ha;
+            lh[nlines] = ha + hd;
+        }
         y += lh[nlines];
         nlines++;
         last_x = x;
@@ -13614,7 +13983,10 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
     }
     for (int q = 0; deferred && q < ndef; q++) layout_place_float(ctx, deferred[q], content_left, avail_width, y, floats, nfloats, fcap);
     free(deferred);
-    if (!ltop || !lh) nlines = 0;
+    if (!ltop || !lh || !lasc) nlines = 0;
+    /* (an element's box on line L: the top of its line-height's slot, its
+     * baseline the line's and its offset) */
+#define IFC_SLOT(e, A_, L) (ltop[L] + lasc[L] + ifc_line_bo(&V, (e), (L), lasc[L], lh[L] - lasc[L]) - (A_))
     /* (-webkit-line-clamp on a -webkit-box: the lines after the clamp
      * hidden, the last one kept ending in an ellipsis; text-overflow:
      * ellipsis where overflow clips: each line that passes its room) */
@@ -13651,8 +14023,14 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
         int L = nlines > 0 ? (I.t[k].line < nlines ? I.t[k].line : nlines - 1) : -1;
         double top = L >= 0 ? ltop[L] : cur->y;
         if (I.t[k].kind == IFC_ATOM) {
-            /* (its margin box at the line's top, as the flow places it) */
-            double dx = I.t[k].x + bb->margin_left - bb->x, dy = top + bb->margin_top - bb->y;
+            /* (its baseline on the line's, as vertical-align offsets it) */
+            double ay = top;
+            if (L >= 0) {
+                IfcVa m;
+                double bo = ifc_atom_bo(ctx, &I, &V, k, V.tel[k], L, lasc[L], lh[L] - lasc[L], &m);
+                ay = ltop[L] + lasc[L] + bo - m.A;
+            }
+            double dx = I.t[k].x + bb->margin_left - bb->x, dy = ay + bb->margin_top - bb->y;
             if (dx != 0.0 || dy != 0.0) {
                 bb->x += dx;
                 bb->y += dy;
@@ -13664,7 +14042,13 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
         }
         if (I.t[k].kind == IFC_BR && ifc_is_br(tn)) {
             bb->x = I.t[k].x;
-            bb->y = top;
+            if (L >= 0) {
+                IfcVa m;
+                ifc_va_metrics(bb, &m);
+                bb->y = IFC_SLOT(V.tel[k], m.A, L);
+            } else {
+                bb->y = top;
+            }
             bb->width = 0.0;
             bb->height = layout_line_advance_box(bb);
         } else if (tn && tn->type == HTML_NODE_TEXT && nlines > 0) {
@@ -13672,8 +14056,10 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
             float scale, adv;
             const char *t;
             bool painted = css_layout_text_paint(ctx, b, &font, &scale, &adv, &t);
-            double fs = bb->s->font_size > 0.0 ? bb->s->font_size : 16.0;
-            double tadv = layout_line_advance_box(bb);
+            IfcVa tm;
+            ifc_va_metrics(bb, &tm);
+            int te = V.tel[k];
+            double tadv = tm.adv;
             int kk0 = -1, kk1 = -1;
             for (int q = k; q < k1; q++)
                 if (I.t[q].kind == IFC_WORD || (I.t[q].kind == IFC_SPACE && !I.t[q].drop)) { if (kk0 < 0) kk0 = q; kk1 = q; }
@@ -13692,9 +14078,9 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
                     if (I.t[q].x + I.t[q].w > x1) x1 = I.t[q].x + I.t[q].w;
                 }
                 bb->x = x0;
-                bb->y = ltop[L0];
+                bb->y = IFC_SLOT(te, tm.A, L0);
                 bb->width = x1 - x0;
-                bb->height = L0 == L1 ? tadv : ltop[L1] + tadv - ltop[L0];
+                bb->height = L0 == L1 ? tadv : IFC_SLOT(te, tm.A, L1) + tadv - bb->y;
                 if (tf && painted) {
                     int nf = kk1 - kk0 + 1;
                     LayoutTextFrag *g = (LayoutTextFrag *)realloc(tf->f, (size_t)nf * sizeof(LayoutTextFrag));
@@ -13714,7 +14100,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
                                 fr = &tf->f[tf->n++];
                                 fr->start = tq->start;
                                 fr->dx = tq->x - bb->x;
-                                fr->dy = ltop[tq->line] + (adv - fs) * 0.5 - bb->y;
+                                fr->dy = IFC_SLOT(te, tm.A, tq->line) + (tm.adv - tm.fs) * 0.5 - bb->y;
                                 fr->level = bidi ? tq->level : 0;
                                 fr->w = 0.0;
                                 fr->ellipsis = 0;
@@ -13757,7 +14143,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
             LayoutPieceList *pl = ctx->pieces && el->box < ctx->pieces_n ? &ctx->pieces[el->box] : NULL;
             double adv = layout_line_advance_box(eb), ca = layout_content_area_height(eb);
             double h = ca + layout_vertical_border_padding(eb);
-            double top_off = (adv - ca) / 2.0 - eb->padding_top - eb->s->border_top;
+            double top_off = (adv - ca) / 2.0 - eb->padding_top - eb->s->border_top - V.el[e].A;
             int pc0 = pl ? pl->n : 0;
             for (int L = 0; pl && L < nlines; L++) {
                 bool found = false;
@@ -13775,7 +14161,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
                     pc->anchor = -1;
                     pc->sides = B.pc[k].sides;
                     pc->dx = B.pc[k].a;
-                    pc->dy = ltop[L] + top_off;
+                    pc->dy = IFC_SLOT(e, 0.0, L) + top_off;
                     pc->w = B.pc[k].z - B.pc[k].a;
                     pc->h = h;
                 }
@@ -13804,7 +14190,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
                 pc->anchor = -1;
                 pc->sides = sides;
                 pc->dx = a;
-                pc->dy = ltop[L] + top_off;
+                pc->dy = IFC_SLOT(e, 0.0, L) + top_off;
                 pc->w = z - a;
                 pc->h = h;
             }
@@ -13847,9 +14233,10 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
             int q = el->tok0 < I.n ? el->tok0 : I.n - 1;
             x0 = x1 = q >= 0 ? I.t[q].x : content_left;
         }
-        double adv = layout_line_advance_box(eb);
-        double ca = layout_content_area_height(eb);
+        double adv = V.el[e].adv;
+        double ca = V.el[e].ca;
         double vpb = layout_vertical_border_padding(eb);
+        double eA = V.el[e].A;
         eb->x = x0;
         eb->width = x1 - x0;
         if (L0 < 0 || nlines == 0) {
@@ -13858,18 +14245,25 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
             eb->height = 0.0;
         } else if (L0 == L1 && !has_text && atom_h > 0.0) {
             /* (only atomic inlines: around them, as the flow sizes it from them) */
-            eb->y = ltop[L0];
-            eb->height = atom_h;
+            double t = 1e30, b = -1e30;
+            for (int q = el->tok0; q < el->tok1; q++) {
+                if (I.t[q].kind != IFC_ATOM || I.t[q].drop) continue;
+                const LayoutBox *ab = layout_box(ctx, I.t[q].box);
+                if (ab->y - ab->margin_top < t) t = ab->y - ab->margin_top;
+                if (ab->y + ab->height + ab->margin_bottom > b) b = ab->y + ab->height + ab->margin_bottom;
+            }
+            eb->y = t < b ? t : ltop[L0];
+            eb->height = t < b ? b - t : atom_h;
         } else if (L0 == L1 && npc <= 1) {
-            eb->y = ltop[L0] + (adv - ca) / 2.0 - eb->padding_top - eb->s->border_top;
+            eb->y = IFC_SLOT(e, eA, L0) + (adv - ca) / 2.0 - eb->padding_top - eb->s->border_top;
             eb->height = ca + vpb;
         } else {
             if (L0 == L1) {
-                eb->y = ltop[L0] + (adv - ca) / 2.0 - eb->padding_top - eb->s->border_top;
+                eb->y = IFC_SLOT(e, eA, L0) + (adv - ca) / 2.0 - eb->padding_top - eb->s->border_top;
                 eb->height = ca + vpb;
             } else {
-                eb->y = ltop[L0];
-                eb->height = ltop[L1] + adv - ltop[L0];
+                eb->y = IFC_SLOT(e, eA, L0);
+                eb->height = IFC_SLOT(e, eA, L1) + adv - eb->y;
             }
             bool deco = eb->s->background_color_a > 0.0f || eb->s->border_top > 0.0 || eb->s->border_bottom > 0.0 ||
                         eb->s->border_left > 0.0 || eb->s->border_right > 0.0 || eb->s->background_image_url[0];
@@ -13886,7 +14280,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
                 pc->anchor = -1;
                 pc->sides = B.pc[k].sides;
                 pc->dx = B.pc[k].a - eb->x;
-                pc->dy = ltop[B.pc[k].line] + (adv - ca) / 2.0 - eb->padding_top - eb->s->border_top - eb->y;
+                pc->dy = IFC_SLOT(e, eA, B.pc[k].line) + (adv - ca) / 2.0 - eb->padding_top - eb->s->border_top - eb->y;
                 pc->w = B.pc[k].z - B.pc[k].a;
                 pc->h = ca + vpb;
             }
@@ -13915,7 +14309,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
                 pc->anchor = -1;
                 pc->sides = sides;
                 pc->dx = a - eb->x;
-                pc->dy = ltop[L] + (adv - ca) / 2.0 - eb->padding_top - eb->s->border_top - eb->y;
+                pc->dy = IFC_SLOT(e, eA, L) + (adv - ca) / 2.0 - eb->padding_top - eb->s->border_top - eb->y;
                 pc->w = z - a;
                 pc->h = ca + vpb;
             }
@@ -13929,14 +14323,13 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
         if (!el->split || !ctx->pieces || el->box >= ctx->pieces_n) continue;
         LayoutPieceList *pl = &ctx->pieces[el->box];
         const LayoutBox *eb = layout_box(ctx, el->box);
-        double top_off = (layout_line_advance_box(eb) - layout_content_area_height(eb)) / 2.0 - eb->padding_top -
-                         eb->s->border_top;
+        double top_off = (V.el[e].adv - V.el[e].ca) / 2.0 - eb->padding_top - eb->s->border_top - V.el[e].A;
         for (int q = el->pc0; q < pl->n; q++) {
             LayoutPiece *pc = &pl->p[q];
             if (pc->anchor >= 0) continue;
             int L = -1;
             for (int l = 0; l < nlines && L < 0; l++)
-                if (fabs(ltop[l] + top_off - pc->dy) < 0.01) L = l;
+                if (fabs(IFC_SLOT(e, 0.0, l) + top_off - pc->dy) < 0.01) L = l;
             for (int k = el->tok0; L >= 0 && k < el->tok1; k++) {
                 const IfcTok *t = &I.t[k];
                 if (t->line != L || t->drop ||
@@ -13990,8 +14383,11 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
         cur->x = last_x;
         *any_placed = true;
     }
+#undef IFC_SLOT
+    ifc_lines_free(&V);
     free(ltop);
     free(lh);
+    free(lasc);
     free(I.t);
     free(I.el);
     free(I.cp);
@@ -18452,7 +18848,7 @@ static bool layout_geom_close(const LayoutBox *a, const LayoutBox *b)
  * piece's anchor: the box of the same document node). */
 static bool layout_lines_same(const LayoutContext *a, int i, const LayoutContext *b, int j)
 {
-#define NEAR(u, v) (fabs((u) - (v)) < 0.01)
+#define LL_NEAR(u, v) (fabs((u) - (v)) < 0.01)
     const LayoutTextFragList *fa = a->text_frags && i < a->text_frags_n ? &a->text_frags[i] : NULL;
     const LayoutTextFragList *fb = b->text_frags && j < b->text_frags_n ? &b->text_frags[j] : NULL;
     int na = fa ? fa->n : 0, nb = fb ? fb->n : 0;
@@ -18460,7 +18856,7 @@ static bool layout_lines_same(const LayoutContext *a, int i, const LayoutContext
     for (int q = 0; q < na; q++) {
         const LayoutTextFrag *x = &fa->f[q], *y = &fb->f[q];
         if (x->start != y->start || x->end != y->end || x->level != y->level || x->ellipsis != y->ellipsis ||
-            !NEAR(x->dx, y->dx) || !NEAR(x->dy, y->dy) || !NEAR(x->w, y->w))
+            !LL_NEAR(x->dx, y->dx) || !LL_NEAR(x->dy, y->dy) || !LL_NEAR(x->w, y->w))
             return false;
     }
     const LayoutPieceList *pa = a->pieces && i < a->pieces_n ? &a->pieces[i] : NULL;
@@ -18472,12 +18868,12 @@ static bool layout_lines_same(const LayoutContext *a, int i, const LayoutContext
         const LayoutPiece *x = &pa->p[q], *y = &pb->p[q];
         int dx = x->anchor >= 0 ? a->tree.nodes[x->anchor].dom_node_idx : -1;
         int dy = y->anchor >= 0 ? b->tree.nodes[y->anchor].dom_node_idx : -1;
-        if (dx != dy || x->sides != y->sides || !NEAR(x->dx, y->dx) || !NEAR(x->dy, y->dy) || !NEAR(x->w, y->w) ||
-            !NEAR(x->h, y->h))
+        if (dx != dy || x->sides != y->sides || !LL_NEAR(x->dx, y->dx) || !LL_NEAR(x->dy, y->dy) || !LL_NEAR(x->w, y->w) ||
+            !LL_NEAR(x->h, y->h))
             return false;
     }
     return true;
-#undef NEAR
+#undef LL_NEAR
 }
 
 /* CYBER_LAYOUT_KEEP_VERIFY=1: after each layout on a kept tree, the same

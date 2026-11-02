@@ -325,6 +325,29 @@ collapsible spaces around a control is kept, and so on which side of a span's ed
 bidi-010, -010a, -010b (piece edges in nested overrides, a few pixels).  Found on the way: a CSS
 escape such as \5d0 in a content string parses as U+0005.
 
+Line boxes by baseline (CSS 2.1 section 10.8), after step 7.  A line was as tall as its tallest
+item, every atomic inline at its top; now each box on it (the block's strut, each inline element,
+each text box, each atomic inline) reaches A above its baseline and D below, A = (L - fs) / 2 + a fs
+for a box of line-height L, font size fs and ascent ratio a (where the shaper draws its text, so a
+line of one font is placed as before), its baseline offset from its parent's by vertical-align
+(middle, sub and super as Blink, text-top, text-bottom, a length or a percentage, all parsed now);
+an atomic inline's baseline is an inline-block's last line's (an inline table's first), else its
+bottom margin edge.  The line reaches as far above and below the baseline as they do; a box aligned
+top or bottom (with its subtree's extent on the line, IfcTbExt) is placed against it after, making
+it taller only when it is taller than it.  A line with no text, no kept white space, no break, no
+atomic inline and no inline box with vertical padding or border is zero tall (section 9.4.2).
+ifc_line_extent per line, IFC_SLOT for each box's place on it; the paragraph's elements measured
+once (ifc_lines_init, one allocation).  With it: the UA style gives sub and sup their
+vertical-align (they had none: the old line raised them by accident), and a float placed while a
+line is built narrows that line only if it came before the line's content or is at its top.  Also
+in this round: margins collapsing through an empty first or last child (layout_empty_through), a
+min-height that made a box taller keeping its last child's bottom margin in, and a:link (not every
+a) blue and underlined.  css/CSS2 5560 -> 5641; YouTube's replay changes only in an icon's
+baseline, Wikipedia's lines about 3 px lower in places (the strut, superscripts raised by
+vertical-align).  Forced layouts against step 7 (7 rounds, min / median): Wikipedia 239 / 245
+against 238 / 238 ms, YouTube 193 / 196 against 190 / 193, forced-RTL Wikipedia 263 / 263 against
+258 / 261.
+
 Goal: lay out a block's inline content the way browsers do, from
 a per-paragraph list of items analysed once (text, white space, break opportunities, bidi levels,
 widths) and kept across layouts, so that right-to-left and mixed-direction text costs about what
