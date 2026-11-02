@@ -1223,6 +1223,11 @@
         var P = C && C.prototype;
         if (!P) return;
         Object.defineProperty(P, 'sheet', { get: function () { return elementSheet(this); }, configurable: true, enumerable: true });
+        /* (disabled: its sheet's) */
+        Object.defineProperty(P, 'disabled', {
+            get: function () { var s = elementSheet(this); return s ? s.disabled : false; },
+            set: function (v) { var s = elementSheet(this); if (s) s.disabled = v; },
+            configurable: true, enumerable: true });
     });
     /* (elements made before the interfaces had their own prototypes) */
     var EP = global.Element && global.Element.prototype;

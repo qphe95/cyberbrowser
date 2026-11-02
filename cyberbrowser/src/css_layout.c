@@ -738,12 +738,15 @@ static double g_unit_vw = 1024.0, g_unit_vh = 768.0, g_unit_rem = 16.0;
 /* The element whose declarations are being applied (layout_apply_declaration):
  * its font gives ex and ch. */
 static __thread const LayoutBox *t_unit_box;
+/* (its parent, during the style pass: the font it inherits until then) */
+static __thread const LayoutBox *t_unit_parent;
 
 /* ex (the font's x-height) or ch (the advance of "0") in ems, for the
  * element t_unit_box with its font as styled so far; 0.5 without one. */
 static double unit_font_ratio(bool ch)
 {
     const LayoutBox *b = t_unit_box;
+    if (b && (!b->s->font_family || !b->s->font_family[0]) && t_unit_parent) b = t_unit_parent;
     if (!b || !b->s->font_family || !b->s->font_family[0]) return 0.5;
     TextShaper *f = font_registry_slot(font_registry_resolve(b->s->font_family, b->s->font_weight,
                                                              b->s->font_italic != 0));
@@ -3295,6 +3298,13 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             if (end != p && strcasecmp(end, "em") == 0) {
                 box->s->font_size_ratio = num;
                 box->s->font_size = 16.0 * num; /* provisional */
+            } else if (end != p && (strcasecmp(end, "ex") == 0 || strcasecmp(end, "ch") == 0) && t_unit_parent) {
+                /* (of the parent's font: a ratio of its size, as em) */
+                const LayoutBox *self = t_unit_box;
+                t_unit_box = t_unit_parent;
+                box->s->font_size_ratio = num * unit_font_ratio((end[0] | 32) == 'c');
+                t_unit_box = self;
+                box->s->font_size = 16.0 * box->s->font_size_ratio; /* provisional */
             } else {
                 box->s->font_size_ratio = 0.0;
                 box->s->font_size = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
@@ -8080,6 +8090,30 @@ static bool layout_apply_wide_keyword(LayoutBox *box, const LayoutBox *parent,
         if (strcasecmp(prop, "box-sizing") == 0) { box->s->box_sizing = parent->s->box_sizing; return true; }
         if (strcasecmp(prop, "overflow") == 0) { box->s->overflow = parent->s->overflow; return true; }
         if (strcasecmp(prop, "unicode-bidi") == 0) { box->s->unicode_bidi = parent->s->unicode_bidi; return true; }
+        /* background longhands for placement and image */
+        if (!strcasecmp(prop, "background-position") || !strcasecmp(prop, "background-position-x") ||
+            !strcasecmp(prop, "background-position-y")) {
+            if (!(prop[19] == '-' && (prop[20] | 32) == 'y')) { box->s->bg_pos_xf = parent->s->bg_pos_xf; box->s->bg_pos_xpx = parent->s->bg_pos_xpx; }
+            if (!(prop[19] == '-' && (prop[20] | 32) == 'x')) { box->s->bg_pos_yf = parent->s->bg_pos_yf; box->s->bg_pos_ypx = parent->s->bg_pos_ypx; }
+            return true;
+        }
+        if (!strcasecmp(prop, "background-repeat")) {
+            box->s->bg_no_repeat_x = parent->s->bg_no_repeat_x;
+            box->s->bg_no_repeat_y = parent->s->bg_no_repeat_y;
+            return true;
+        }
+        if (!strcasecmp(prop, "background-image")) {
+            box->s->background_image_url = parent->s->background_image_url;
+            return true;
+        }
+        if (!strcasecmp(prop, "background-attachment")) { box->s->bg_fixed = parent->s->bg_fixed; return true; }
+        if (!strcasecmp(prop, "background-size")) {
+            box->s->bg_size_kind = parent->s->bg_size_kind;
+            box->s->bg_size_pct = parent->s->bg_size_pct;
+            box->s->bg_size_w = parent->s->bg_size_w;
+            box->s->bg_size_h = parent->s->bg_size_h;
+            return true;
+        }
         /* background (its color, image and placement) or its color. */
         bool bg_all = strcasecmp(prop, "background") == 0;
         if (bg_all || strcasecmp(prop, "background-color") == 0) {
@@ -8612,10 +8646,15 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
          * size worked out, so em lengths in any declaration resolve against
          * it (as the computed font-size is what they mean); then all, in
          * order. */
+        t_unit_parent = parent;
         for (int phase = 0; phase < 2; phase++) {
+        /* (normal declarations, the inline style's, then the !important
+         * ones, the inline style's last: CSS Cascade's order) */
+        for (int imp = 0; imp < 2; imp++) {
         for (int d = 0; d < count; d++) {
             const char *prop = applied[d].decl->property;
             if (prop && prop[0] == '-' && prop[1] == '-') continue;
+            if ((applied[d].decl->important != 0) != (imp == 1)) continue;
             if (phase == 0 && !style_is_font_size_prop(prop)) continue;
             t_var_failed = false;
             char *resolved = css_var_resolve(applied[d].decl->value, props);
@@ -8634,6 +8673,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
             for (int i = 0; i < inl[b].count; i++) {
                 const char *prop = inl[b].decls[i].property;
                 if (prop && prop[0] == '-' && prop[1] == '-') continue;
+                if ((inl[b].decls[i].important != 0) != (imp == 1)) continue;
                 if (phase == 0 && !style_is_font_size_prop(prop)) continue;
                 t_var_failed = false;
                 char *resolved = css_var_resolve(inl[b].decls[i].value, props);
@@ -8648,6 +8688,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
                 free(resolved);
             }
         }
+        }
         if (phase == 0) {
             if (box->s->font_size_ratio > 0.0) {
                 double base = parent ? parent->s->font_size : 16.0;
@@ -8657,6 +8698,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
             }
         }
         }
+        t_unit_parent = NULL;
         for (int b = 0; b < ninl; b++) css_declarations_free(inl[b].decls, inl[b].count);
         if (pseudo_aspect > box->s->aspect_ratio) box->s->aspect_ratio = pseudo_aspect;
 
@@ -12252,7 +12294,13 @@ static void layout_place_float(LayoutContext *ctx, int c, double content_left, d
         double next = -1.0;
         for (int fi = 0; fi < nf; fi++) {
             if (fl[fi].bottom <= fy + 0.001 || fl[fi].top >= fy + (mh > 0.0 ? mh : 0.001) - 0.001) continue;
-            if (fl[fi].right <= content_left || fl[fi].left >= content_right) continue;
+            /* (outside the containing block, a float on the other side
+             * still counts when this one, too wide, would reach it: §9.5.1
+             * rule 7) */
+            bool reach = (child->s->float_side == 1 && fl[fi].side == 2 && fl[fi].left < content_left + mw - 0.01) ||
+                         (child->s->float_side == 2 && fl[fi].side == 1 && fl[fi].right > content_right - mw + 0.01) ||
+                         fl[fi].side == child->s->float_side;   /* (one on its side: it must fit in the block) */
+            if ((fl[fi].right <= content_left || fl[fi].left >= content_right) && !reach) continue;
             if (fl[fi].side == 1 && fl[fi].right > fl_left) fl_left = fl[fi].right;
             if (fl[fi].side == 2 && fl[fi].left < fl_right) fl_right = fl[fi].left;
             if (next < 0.0 || fl[fi].bottom < next) next = fl[fi].bottom;
@@ -13162,6 +13210,9 @@ static double ifc_intrinsic(LayoutContext *ctx, int idx, bool want_max)
     memset(&S, 0, sizeof(S));
     S.want_max = want_max;
     S.space_before = true;
+    /* (the first line starts at the text-indent, a negative one too; a
+     * percentage is of a width not known yet: none) */
+    S.line = S.run = layout_box(ctx, idx)->s->text_indent;
     ifc_intr_walk(ctx, idx, &S);
     if (want_max) return S.line > S.best ? S.line : S.best;
     ifc_intr_break(&S);
@@ -13667,9 +13718,10 @@ static void ifc_atom_metrics(LayoutContext *ctx, int b, IfcVa *v)
     double h = ab->margin_top + ab->height + ab->margin_bottom;
     HtmlNode *n = css_layout_box_node(ctx, b);
     double base = NAN;
-    if (ab->s->overflow == 0 && !(n && n->type == HTML_NODE_ELEMENT && (ifc_is_img(n) || ifc_is_replaced(ab, n))))
+    if (!(n && n->type == HTML_NODE_ELEMENT && (ifc_is_img(n) || ifc_is_replaced(ab, n))))   /* (overflow too, as browsers do) */
         base = layout_last_baseline(ctx, b, 0, table_is_table(ab));
     double A = isnan(base) ? h : base - (ab->y - ab->margin_top);
+    if (ab->s->overflow != 0 && A > h) A = h;   /* (overflow: the higher of it and the bottom margin edge) */
     if (A < 0.0) A = h;   /* (text above it: its bottom; below it, as it is) */
     v->A = A;
     v->D = h - A;
@@ -14699,6 +14751,8 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
      * margin.  any_placed becomes true once any line box or non-empty block
      * has been placed (used for the first-child top-margin collapse rule). */
     double pending_mb = 0.0;
+    bool pending_clear = false;   /* (pending_mb collapses back to a top margin with clearance) */
+    bool after_clear = false;     /* (an empty box with clearance last: a later one's margins stay in) */
     bool any_placed = false;
 
     /* Floats placed by this container's flow; inline lines shrink around them. */
@@ -14820,19 +14874,21 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
              * not establish a new block formatting context (§8.3.1). */
             double eff_mt = layout_eff_margin_top(ctx, c, 0);
             double gap;
-            bool cleared = false;
+            bool cleared = false, absorbed = false;
             if (!any_placed && box->s->overflow == 0 &&
                        box->padding_top <= 0.0 && box->s->border_top <= 0.0 &&
                        idx != ctx->tree.root_idx &&
                        box->s->display != CSS_DISPLAY_FLEX && box->s->display != CSS_DISPLAY_GRID &&
                        box->s->position != CSS_POSITION_ABSOLUTE && box->s->position != CSS_POSITION_FIXED &&
                        !box->s->flow_root &&
-                       box->s->table_role != 1 && box->s->table_role != 4 && box->s->table_role != 5) {
+                       box->s->table_role != 1 && box->s->table_role != 4 && box->s->table_role != 5 &&
+                       !layout_establishes_bfc(ctx, idx)) {
                 /* Collapses out through this box (its parent applied it via
                  * layout_eff_margin_top).  The root element, and boxes that
                  * establish a new formatting context (absolutely positioned
                  * boxes), keep their children's margins inside (§8.3.1). */
                 gap = 0.0;
+                absorbed = true;
             } else {
                 gap = layout_margin_collapse(pending_mb, eff_mt);
             }
@@ -14925,7 +14981,11 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
             ctx->fl_in = 0;
 
             double eff_mb = layout_eff_margin_bottom(ctx, c, 0);
-            if (child->height <= 0.0 && layout_height_auto(child) && child->s->overflow == 0 &&
+            /* (a height of 0 too, with nothing in flow in it, §8.3.1) */
+            int zf = -1, zl = -1;
+            bool zero_h = !layout_height_auto(child) && child->s->height_set && child->s->css_height <= 0.0 &&
+                          child->s->height_percent <= 0.0 && (layout_sig_children(ctx, c, &zf, &zl), zf < 0);
+            if (child->height <= 0.0 && (layout_height_auto(child) || zero_h) && child->s->overflow == 0 &&
                 child->padding_top <= 0.0 && child->padding_bottom <= 0.0 &&
                 child->s->border_top <= 0.0 && child->s->border_bottom <= 0.0) {
                 /* Empty block: top and bottom margins collapse through into a
@@ -14933,9 +14993,14 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                  * establishes a new BFC, e.g. overflow:hidden, never
                  * collapses through, §8.3.1.)  With clearance its top
                  * margin is above it, in the clearance. */
-                pending_mb = cleared ? eff_mb : layout_margin_collapse(pending_mb, layout_margin_collapse(eff_mt, eff_mb));
+                /* (an empty first box: its margins are this box's top margin's) */
+                pending_mb = cleared ? child->margin_bottom : absorbed && !after_clear && layout_empty_through(ctx, c) ? 0.0
+                                     : layout_margin_collapse(pending_mb, layout_margin_collapse(eff_mt, eff_mb));
+                if (cleared) after_clear = true;
+                else if (after_clear) pending_clear = true;
             } else {
                 cur.y = child->y + child->height;
+                pending_clear = after_clear = false;
                 pending_mb = eff_mb;
                 any_placed = true;
             }
@@ -15040,7 +15105,8 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                 }
             }
         }
-        if (box->padding_bottom > 0.0 || box->s->border_bottom > 0.0 || layout_establishes_bfc(ctx, idx))
+        if (box->padding_bottom > 0.0 || box->s->border_bottom > 0.0 || layout_establishes_bfc(ctx, idx) ||
+            pending_clear)
             max_bottom += pending_mb;
         /* Children that overflowed their line (e.g. tall replaced inline
          * content) can extend below the anchor; take them into account. */
@@ -15054,10 +15120,14 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
             double bottom = child->y + child->height;
             if (bottom > max_bottom) max_bottom = bottom;
         }
-        /* Floats are out of flow but the container still grows around them
-         * (clearfix-free pages like Wikipedia rely on this visually). */
-        for (int fi = 0; fi < nfloats; fi++) {
-            if (floats[fi].bottom > max_bottom) max_bottom = floats[fi].bottom;
+        /* Floats are out of flow: only a box that establishes a block
+         * formatting context grows around them (CSS 2.1 section 10.6.7). */
+        if (layout_establishes_bfc(ctx, idx) || idx == ctx->tree.root_idx) {
+            /* (its own floats and those of its descendants in its context) */
+            for (int fi = 0; fi < nfloats; fi++)
+                if (floats[fi].bottom > max_bottom) max_bottom = floats[fi].bottom;
+            for (int fi = t_float_base; fi < ctx->float_count; fi++)
+                if (ctx->float_stack[fi].bottom > max_bottom) max_bottom = ctx->float_stack[fi].bottom;
         }
         if (box->s->line_clamp && box->s->webkit_box) {
             double cap = content_top + box->s->line_clamp * layout_line_advance_box(box);
@@ -18544,6 +18614,10 @@ static void layout_position_absolute_box(LayoutContext *ctx, int idx)
         layout_update_content_sizes(box);
         width_auto = false;
     }
+    /* (an image or video: its replaced width, from its used sizes) */
+    if (layout_is_img(adom) || (adom && adom->type == HTML_NODE_ELEMENT && adom->tag_name &&
+                                !strcasecmp(adom->tag_name, "video")))
+        width_auto = false;
     double ml = (box->s->margin_auto & 8) ? 0.0 : box->margin_left;
     double mr = (box->s->margin_auto & 2) ? 0.0 : box->margin_right;
     double mt = (box->s->margin_auto & 1) ? 0.0 : box->margin_top;
@@ -18570,7 +18644,10 @@ static void layout_position_absolute_box(LayoutContext *ctx, int idx)
     }
     if (has_left && has_right && !width_auto && (box->s->margin_auto & 0xA)) {
         double free_w = cb_w - box->left - box->right - box->width - ml - mr;
-        if ((box->s->margin_auto & 0xA) == 0xA) { ml += free_w / 2.0; }
+        /* (both auto with no room: the start one 0, §10.3.7) */
+        bool cb_rtl0 = (anc >= 0 ? layout_box(ctx, anc) : layout_box(ctx, ctx->tree.root_idx))->s->direction == 1;
+        if ((box->s->margin_auto & 0xA) == 0xA && free_w < 0.0) { if (cb_rtl0) ml += free_w; }
+        else if ((box->s->margin_auto & 0xA) == 0xA) { ml += free_w / 2.0; }
         else if (box->s->margin_auto & 8) ml += free_w;
     }
     /* (rtl: over-constrained, left is the one ignored; neither set, the

@@ -1593,7 +1593,8 @@ int css_style_match_after(const CssStyleSet *S, const CssStyleDoc *D, int dom,
     t->after_hits.n = 0;
     for_candidates(S, D, &S->after_buckets, dom, t, dom, on_after_hit);
     /* Branch ids increase with (rule, branch order): sort, then keep the
-     * first matching branch of each rule. */
+     * first matching branch of each rule for each pseudo-element (a rule
+     * for :before and :after both gives both). */
     for (size_t i = 1; i < t->after_hits.n; i++) {
         int32_t v = t->after_hits.v[i];
         size_t j = i;
@@ -1601,10 +1602,13 @@ int css_style_match_after(const CssStyleSet *S, const CssStyleDoc *D, int dom,
         t->after_hits.v[j] = v;
     }
     int32_t last_rule = -1;
+    unsigned kinds = 0;
     for (size_t i = 0; i < t->after_hits.n; i++) {
         const CAfter *af = &S->afters[t->after_hits.v[i]];
-        if (af->rule == last_rule) continue;
+        if (af->rule != last_rule) kinds = 0;
         last_rule = af->rule;
+        if (kinds & (1u << af->is_before)) continue;
+        kinds |= 1u << af->is_before;
         CssAfterMatch m = { af->rule, af->spec, af->is_before };
         VEC_PUSH(t->after_out, m);
     }

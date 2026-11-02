@@ -1797,7 +1797,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     float ta = (float)box->s->color_a;
                     if (ta <= 0.0f) ta = 1.0f;
                     ta *= op;
-                    if (box->s->font_size > 0.0 && box->s->font_size < 0.5) ta = 0.0f;   /* (font-size 0) */
+                    if (box->s->font_size < 0.5) ta = 0.0f;   /* (font-size 0) */
                     /* In dark mode, default-black text is invisible on dark
                      * backgrounds.  Render it white so labels are readable. */
                     if (dark_mode && tr < 0.1f && tg < 0.1f && tb < 0.1f) {
