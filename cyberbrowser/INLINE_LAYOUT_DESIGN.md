@@ -204,6 +204,23 @@ normal-flow 2, bidi-text 1, floats 1, margin-padding-clear 1); with CYBER_IFC=0 
 The three replays identical.  Timing against 5c: Wikipedia 252 / 261 against 255 / 265 ms, YouTube
 204 / 211 against 200 / 211.
 
+Step 5e, first part (what still kept blocks off, counted on the replays after 5d: YouTube 4 and
+Wikipedia 55 with an inline split around a block, Wikipedia 10 with an inline video or audio):
+- Inline replaced elements (form controls, video, canvas, iframe, audio, embed, svg with display
+  inline) are atomic inlines on items, sized as the flow sizes them (svg, canvas and iframe from
+  layout_svg_size, the others their used size or 80 x 20).  An object is its fallback content, an
+  inline element, as the flow lays it out (taking it as an atom showed the fallback beside it:
+  normal-flow/replaced-intrinsic-002).  The test is cheap (by the tag's first letter and length):
+  it runs for every inline element.
+- Floats inside inline elements: placed from the line they are met on, like the block's own.
+- ::first-letter: on items, its line height its own line advance as the flow takes it (the
+  mimicked element rule had made line-height-bleed-002's first line 50 px tall at line-height 0).
+css/CSS2 5538, none lost (floats 6, normal-flow 4, floats-clear 1, visuren 1); the three replays
+identical.  Timing against 5d (9 rounds, quiet machine): Wikipedia 252 / 255 against 246 / 255 ms;
+an earlier, noisier run that read 5 ms slower was bisected with each part switched off and showed no
+part costing anything.  Left for the second part: blocks inside inline elements (an inline split
+around a block, block_in_inline 1 and 2), then 5f.
+
 Goal: lay out a block's inline content the way browsers do, from
 a per-paragraph list of items analysed once (text, white space, break opportunities, bidi levels,
 widths) and kept across layouts, so that right-to-left and mixed-direction text costs about what

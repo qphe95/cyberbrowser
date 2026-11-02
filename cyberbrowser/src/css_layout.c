@@ -13583,12 +13583,30 @@ static bool ifc_is_img(HtmlNode *n)
     return n && n->type == HTML_NODE_ELEMENT && n->tag_name && !strcasecmp(n->tag_name, "img");
 }
 
+/* An inline replaced element other than an image: a form control, video,
+ * canvas, iframe, audio, embed, or svg (an object is its fallback content,
+ * an inline element, as the flow lays it out). */
+static bool ifc_is_replaced(const LayoutBox *b, HtmlNode *n)
+{
+    if (!n || n->type != HTML_NODE_ELEMENT || !n->tag_name || b->s->display != CSS_DISPLAY_INLINE) return false;
+    switch (n->tag_name[0] | 0x20) {   /* (most inline elements are none of these: by first letter) */
+    case 'a': case 'b': case 'c': case 'e': case 'i': case 's': case 't': case 'v': break;
+    default: return false;
+    }
+    size_t len = strlen(n->tag_name);
+    if (len != 3 && len != 5 && len != 6 && len != 8) return false;   /* (svg; input audio video embed; ...) */
+    return (layout_is_replaced_form_element(n->tag_name) && strcasecmp(n->tag_name, "object") != 0) ||
+           layout_is_svg_box(n);
+}
+
 /* A box this path places whole on a line: an atomic inline (inline-block,
- * inline-flex, inline-grid, inline-table, a control) or an inline image. */
+ * inline-flex, inline-grid, inline-table, a control), an inline image or
+ * another inline replaced element. */
 static bool ifc_is_atom(const LayoutBox *b, HtmlNode *n)
 {
     return n && n->type == HTML_NODE_ELEMENT &&
-           (layout_box_is_atomic_inline(b) || (ifc_is_img(n) && b->s->display == CSS_DISPLAY_INLINE));
+           (layout_box_is_atomic_inline(b) || (ifc_is_img(n) && b->s->display == CSS_DISPLAY_INLINE) ||
+            ifc_is_replaced(b, n));
 }
 
 /* Whether box p's in-flow children, and theirs inside inline elements, are
@@ -13596,7 +13614,7 @@ static bool ifc_is_atom(const LayoutBox *b, HtmlNode *n)
  * ::before / ::after), line breaks, atomic inlines and images, and (top: the
  * block's own) floats, in any direction, absolutely positioned boxes at any
  * depth (left out: placed after, from their static position); no
- * ::first-letter box (its own sizing, the flow's for now), no float inside an
+ * ::first-letter box (its own sizing, the flow's for now), no block inside an
  * inline element. */
 static bool ifc_is_float(const LayoutBox *b)
 {
@@ -13612,15 +13630,16 @@ static bool ifc_child_ok(LayoutContext *ctx, int c, bool top)
     LayoutBox *cb = layout_box(ctx, c);
     if (cb->s->display == CSS_DISPLAY_NONE) return true;
     if (!layout_is_in_flow(cb)) return true;   /* (absolutely positioned: placed after, from its static position) */
-    if (top && ifc_is_float(cb)) return true;   /* (the block's own floats; floats deeper in, for now, not) */
+    if (ifc_is_float(cb)) return true;   /* (placed from the line they are met on, at any depth) */
     HtmlNode *n = css_layout_box_node(ctx, c);
     if (!n) return false;
     if (ifc_is_atom(cb, n)) return true;   /* (what it holds is its own) */
     if (n->type == HTML_NODE_TEXT) return true;
     if (n->type != HTML_NODE_ELEMENT || cb->s->display != CSS_DISPLAY_INLINE || cb->s->block_in_inline == 1) return false;
     if (ifc_is_br(n)) return true;
-    if (!n->tag_name || (n->tag_name[0] == ':' && strcmp(n->tag_name, "::before") && strcmp(n->tag_name, "::after")) ||
-        layout_is_replaced_tag(n->tag_name) ||
+    if (!n->tag_name || (n->tag_name[0] == ':' && strcmp(n->tag_name, "::before") && strcmp(n->tag_name, "::after") &&
+                         strcmp(n->tag_name, "::first-letter")) ||
+        (layout_is_replaced_tag(n->tag_name) && strcasecmp(n->tag_name, "object") != 0) ||
         !strcasecmp(n->tag_name, "img") || !strcasecmp(n->tag_name, "wbr") || layout_is_svg_box(n))
         return false;
     return ifc_inline_ok(ctx, c, false);
@@ -13751,7 +13770,20 @@ static void ifc_collect(LayoutContext *ctx, int p, int c0, int stop, IfcItems *I
         } else if (ifc_is_atom(cb, n)) {
             /* (laid out here, at the content start: placed on its line later,
              * moved with what it holds) */
-            if (!ifc_is_img(n)) layout_size_atomic_inline(ctx, c, avail_width);
+            if (ifc_is_replaced(cb, n)) {
+                /* (sized as the flow sizes one: an svg from its own size, a
+                 * control or embedded content its used size, else 80 x 20) */
+                if (layout_is_svg_box(n)) {
+                    layout_svg_size(ctx, c, n, &cb->width, &cb->height);
+                    cb->width += layout_horizontal_border_padding(cb);
+                    cb->height += layout_vertical_border_padding(cb);
+                } else {
+                    if (cb->width <= 0.0) cb->width = 80.0;
+                    if (cb->height <= 0.0) cb->height = 20.0;
+                }
+            } else if (!ifc_is_img(n)) {
+                layout_size_atomic_inline(ctx, c, avail_width);
+            }
             cb->x = I->x0 + cb->margin_left;
             cb->y = I->y0 + cb->margin_top;
             layout_update_content_sizes(cb);
@@ -13956,7 +13988,9 @@ static double ifc_tok_adv(LayoutContext *ctx, int idx, int box)
     if (below >= 0) {
         const LayoutBox *bb = layout_box(ctx, below);
         HtmlNode *n = css_layout_box_node(ctx, below);
-        double q = n && n->type == HTML_NODE_TEXT ? layout_line_advance_box(bb)
+        /* (a ::first-letter box: its line advance, as the flow sizes it) */
+        bool fl = n && n->type == HTML_NODE_ELEMENT && n->tag_name && !strcmp(n->tag_name, "::first-letter");
+        double q = (n && n->type == HTML_NODE_TEXT) || fl ? layout_line_advance_box(bb)
                                                   : (layout_line_advance_box(bb) + layout_content_area_height(bb)) / 2.0 +
                                                     bb->padding_bottom + bb->s->border_bottom;
         if (q > a) a = q;
