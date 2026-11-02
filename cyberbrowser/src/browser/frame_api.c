@@ -35,6 +35,7 @@
 #include "dom_store.h"
 #include "dom_wrap.h"
 #include "http_download.h"
+#include "url_utils.h"
 #include "html_media_extract.h"
 #include "js_quickjs.h"
 #include "platform.h"
@@ -197,6 +198,7 @@ static char *realm_origin(JSContextHandle ctx) {
 }
 
 static GCValue window_seen_from(JSContextHandle ctx, uint32_t id);
+static void frame_index_define(JSContextHandle ctx);
 
 /* What a realm makes its stand-ins with.  op(kind, id, a, b) is the native
  * side (cross_op); it reaches the factory only, never a global. */
@@ -500,11 +502,29 @@ static void frame_load(Frame *f) {
     HttpBuffer buf = {0};
     char err[256] = {0};
     bool blank = !strncmp(url, "about:", 6);         /* an empty document, from nowhere */
-    bool fetched = !blank && http_get_to_memory(url, &buf, err, sizeof(err));
+    /* (a data: URL: its body, its MIME type in its header) */
+    bool data = !strncasecmp(url, "data:", 5);
+    char data_mime[128] = "text/plain";
+    bool fetched = false;
+    if (data) {
+        size_t n = 0;
+        uint8_t *d = data_url_decode(url, &n);
+        if (d) {
+            buf.data = (char *)d;
+            buf.size = n;
+            fetched = true;
+        }
+        size_t k = 0;
+        for (const char *p = url + 5; *p && *p != ';' && *p != ',' && k + 1 < sizeof data_mime; p++)
+            data_mime[k++] = (char)(*p >= 'A' && *p <= 'Z' ? *p + 32 : *p);
+        if (k) data_mime[k] = 0;
+    } else if (!blank) {
+        fetched = http_get_to_memory(url, &buf, err, sizeof(err));
+    }
     http_request_context_set(was.mode, was.initiator);
     /* The frame's document is where it ended, after redirects: its origin,
      * location and base URL are that URL's. */
-    if (fetched && http_last_url()[0]) {
+    if (fetched && !data && http_last_url()[0]) {
         snprintf(url, sizeof(url), "%s", http_last_url());
         snprintf(f->url, sizeof(f->url), "%s", url);
     }
@@ -513,9 +533,11 @@ static void frame_load(Frame *f) {
         return;
     }
     frame_setup_window(f);
+    frame_index_define(f->parent);
     JSContextHandle ctx = f->ctx;
     char mime[128];
     response_mime(fetched ? buf.headers : NULL, mime, sizeof mime);
+    if (data) snprintf(mime, sizeof mime, "%s", data_mime);
     HtmlPageStream *ps = html_page_stream_begin_frame(ctx, url);
     if (ps && fetched && xml_mime(mime)) html_page_stream_set_xml(ps, mime);
     if (ps) {
@@ -535,6 +557,67 @@ static void frame_load(Frame *f) {
     frame_fire(f->parent, dom_js(f->parent, f->iframe), "load");
 }
 
+/* ---- window[i], window.length (HTML 7.2.3: the document-tree child
+ * navigables), from the iframes of the realm's document in tree order ---- */
+
+/* The frame of the i-th iframe with a browsing context in ctx's document
+ * (or the count of them, with i < 0). */
+static Frame *child_frame(JSContextHandle ctx, int i, int *count) {
+    NodeId doc = dom_node_of(JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document"));
+    int k = 0;
+    if (dom_valid(doc)) {
+        uint32_t r = dom_slot(doc);
+        for (uint32_t s = r; s; s = dom_next_in_subtree(s, r)) {
+            if (g_dom.kind[s] != DOM_K_ELEMENT) continue;
+            Frame *f = frame_of_iframe(dom_id_of(s));
+            if (!f || f->parent != ctx || !SAFE_VALID(f->ctx)) continue;
+            if (k++ == i) return f;
+        }
+    }
+    if (count) *count = k;
+    return NULL;
+}
+
+static GCValue js_window_index_get(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv, int magic) {
+    (void)this_val; (void)argc; (void)argv;
+    Frame *f = child_frame(ctx, magic, NULL);
+    return f ? window_seen_from(ctx, f->id) : JS_UNDEFINED;
+}
+
+static GCValue js_window_length_get(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    int n = 0;
+    child_frame(ctx, -1, &n);
+    return JS_NewInt32(ctx, n);
+}
+
+/* Index properties 0 .. count - 1 on ctx's window (each read live), and
+ * its length; defined as frames come (never taken back: one past the count
+ * reads undefined). */
+static void frame_index_define(JSContextHandle ctx) {
+    if (!SAFE_VALID(ctx)) return;
+    GCValue g = JS_GetGlobalObject(ctx);
+    int n = 0;
+    child_frame(ctx, -1, &n);
+    int32_t have = 0;
+    GCValue hv = JS_GetPropertyStr(ctx, g, "__cyber_frame_indices");
+    if (JS_IsNumber(hv)) JS_ToInt32(ctx, &have, hv);
+    else {
+        JSAtom la = JS_NewAtom(ctx, "length");
+        JS_DefinePropertyGetSet(ctx, g, la, JS_NewCFunction(ctx, js_window_length_get, "length", 0), JS_UNDEFINED,
+                                JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+        JS_FreeAtom(ctx, la);
+    }
+    for (int i = have; i < n; i++) {
+        JSAtom a = JS_NewAtomUInt32(ctx, (uint32_t)i);
+        JS_DefinePropertyGetSet(ctx, g, a, JS_NewCFunctionMagic(ctx, js_window_index_get, "", 0, JS_CFUNC_generic_magic, i),
+                                JS_UNDEFINED, JS_PROP_CONFIGURABLE);
+        JS_FreeAtom(ctx, a);
+    }
+    if (n > have)
+        JS_DefinePropertyValueStr(ctx, g, "__cyber_frame_indices", JS_NewInt32(ctx, n), JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+}
+
 /* Queue a navigation of iframe to url (resolved), run by the event loop. */
 static void frame_navigate(JSContextHandle parent, NodeId iframe, const char *url) {
     Frame *f = frame_of_iframe(iframe);
@@ -552,6 +635,21 @@ static void frame_navigate(JSContextHandle parent, NodeId iframe, const char *ur
     f->state = FRAME_PENDING;
 }
 
+/* Is the frame's parent an XML document still loading?  Its scripts run
+ * once it is parsed whole (not as they are met, as an HTML document's do):
+ * its frames wait for them, or their load events would come before the
+ * handlers those scripts define. */
+static bool parent_scripts_pending(const Frame *f) {
+    if (!SAFE_VALID(f->parent)) return false;
+    NodeId doc = dom_owner(f->iframe);
+    if (!dom_valid(doc) || !(dom_flags(doc) & DOMF_XML_DOCUMENT)) return false;
+    GCValue d = dom_js(f->parent, doc);
+    const char *rs = JS_IsObject(d) ? JS_ToCString(f->parent, JS_GetPropertyStr(f->parent, d, "readyState")) : NULL;
+    bool loading = rs && !strcmp(rs, "loading");
+    if (rs) JS_FreeCString(f->parent, rs);
+    return loading;
+}
+
 int frame_api_process(void) {
     if (g_processing || (!g_frames && !g_messages)) return 0;
     g_processing = true;
@@ -563,6 +661,10 @@ int frame_api_process(void) {
             frame_discard_realm(f);
             *pp = f->next;
             free(f);
+            continue;
+        }
+        if (f->state == FRAME_PENDING && parent_scripts_pending(f)) {
+            pp = &f->next;
             continue;
         }
         if (f->state == FRAME_PENDING) {
@@ -578,7 +680,8 @@ int frame_api_process(void) {
 }
 
 bool frame_api_pending(void) {
-    for (Frame *f = g_frames; f; f = f->next) if (f->state == FRAME_PENDING) return true;
+    for (Frame *f = g_frames; f; f = f->next)
+        if (f->state == FRAME_PENDING && !parent_scripts_pending(f)) return true;
     return g_messages != NULL;
 }
 

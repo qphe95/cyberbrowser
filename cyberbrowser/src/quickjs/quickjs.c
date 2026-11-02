@@ -25795,6 +25795,13 @@ static GCValue JS_CallFree(JSContextHandle ctx, GCValue func_obj, GCValue this_o
 
 /* warning: the refcount of the context is not incremented. Return
    NULL in case of exception (case of revoked proxy only) */
+static JSContextHandle JS_GetFunctionRealm(JSContextHandle ctx, GCValue func_obj);
+
+JSContextHandle JS_GetFunctionRealmOf(JSContextHandle ctx, GCValue func_obj)
+{
+    return JS_GetFunctionRealm(ctx, func_obj);
+}
+
 static JSContextHandle JS_GetFunctionRealm(JSContextHandle ctx, GCValue func_obj)
 {
     JSObjectHandle p = GC_HANDLE_NULL;

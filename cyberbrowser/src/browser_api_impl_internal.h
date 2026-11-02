@@ -241,6 +241,12 @@ GCValue js_element_set_class_name(JSContextHandle ctx, GCValue this_val, int arg
 GCValue js_element_remove_attribute(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_has_attribute(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_toggle_attribute(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_document_create_attribute(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_document_create_attribute_ns(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_get_attribute_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_get_attribute_node_ns(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_set_attribute_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_remove_attribute_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_set_attribute_ns(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_has_attribute_ns(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_get_attribute_ns(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
@@ -286,6 +292,12 @@ GCValue js_mutation_observer_disconnect(JSContextHandle ctx, GCValue this_val, i
 void mo_notify_child_list(JSContextHandle ctx, GCValue target, GCValue added, GCValue removed, GCValue prev,
                           GCValue next);
 bool mo_child_list_observed(JSContextHandle ctx, GCValue target);
+/* Around one DOM operation that changes several children (a fragment's
+ * insertion, replaceChild, textContent, replaceChildren): its childList
+ * changes become one record per target (DOM "queue a tree mutation record"
+ * once), queued when the outermost operation ends. */
+void mo_batch_begin(JSContextHandle ctx);
+void mo_batch_end(JSContextHandle ctx);
 bool mo_any_observing(JSContextHandle ctx);
 void mo_notify_character_data(JSContextHandle ctx, GCValue target, const char *old_value);
 /* old_value: NULL when the attribute was absent. */

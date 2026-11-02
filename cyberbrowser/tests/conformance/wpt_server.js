@@ -15,6 +15,9 @@
 // <meta name=variant> variants, .headers files, and the common {{...}}
 // substitutions in .sub. files.  Python handlers (.py) are not run, but for
 // the few emulated in PY.
+// PORTS=n (default 1): it listens on port, port + 1, ... port + n - 1, each
+// with its own current page, for n browsers running pages at once (each from
+// its own port).
 // Reftests (rel=match / rel=mismatch) are counted in reftests.txt; with
 // REFTEST=1 they are what runs instead: each test page and reference (once,
 // however many tests share it) is a step whose content the UI script saves
@@ -170,7 +173,10 @@ fs.mkdirSync(out, { recursive: true });
 fs.writeFileSync(path.join(out, 'reftests.txt'), reftests.join('\n') + '\n');
 const resultsFile = path.join(out, 'results.json');
 const results = fs.existsSync(resultsFile) ? JSON.parse(fs.readFileSync(resultsFile, 'utf8')) : {};
-let current = -1;
+/* Per port: the page its browser has open (-1: none), and the ports whose
+ * browser is done (/end). */
+const NPORTS = Math.max(1, +(process.env.PORTS || 1));
+const currentOf = {}, ended = new Set();
 const left = REFTEST ? [] : pages.map((p, i) => i).filter(i => !results[pages[i].id]);
 if (REFTEST) {
     const todo = steps.filter(st => !fs.existsSync(st.shot));
@@ -215,6 +221,7 @@ const REPORT = `(function () {
 
 /* {{...}} in .sub. files, for the one host and port there is. */
 function substitute(s, url) {
+    const port = url.port, origin = url.origin;
     return s.replace(/\{\{([^}]*)\}\}/g, (all, expr) => {
         expr = expr.trim();
         if (/^host$|^domains\[[^\]]*\]$|^hosts\[[^\]]*\]\[[^\]]*\]$/.test(expr)) return '127.0.0.1';
@@ -250,20 +257,23 @@ const PY = {
     '/dom/nodes/encoding.py': url => ['text/html', `<!doctype html><meta charset="${escapeHtml(url.searchParams.get('label') || '')}">`],
 };
 
-http.createServer((req, res) => {
+const server = http.createServer((req, res) => {
     if (process.env.TRACE) console.log(req.method + ' ' + req.url);
-    const url = new URL(req.url, origin);
+    const lport = req.socket.localPort;
+    const url = new URL(req.url, 'http://127.0.0.1:' + lport);
+    const current = currentOf[lport] === undefined ? -1 : currentOf[lport];
     /* Page i is opened: the one before it is done, answered or not. */
     const opened = i => {
         if (current >= 0 && current !== i && !results[pages[current].id])
             record({ page: pages[current].id, status: 'crash', pass: 0, fail: 0, skip: 0 });
-        current = i;
+        currentOf[lport] = i;
     };
     if (url.pathname === '/end') {
         opened(-1);
+        ended.add(lport);
         res.writeHead(200, { 'content-type': 'text/html' });
         res.end('<p>done</p>');
-        setTimeout(() => process.exit(0), 1000);
+        if (ended.size >= NPORTS) setTimeout(() => process.exit(0), 1000);
         return;
     }
     const id = (url.pathname + url.search).slice(1);
@@ -275,9 +285,10 @@ http.createServer((req, res) => {
         req.on('end', () => {
             try {
                 const r = JSON.parse(body);
-                if (current >= 0 && r.page === pages[current].id && !results[r.page]) {
+                const cur = currentOf[lport] === undefined ? -1 : currentOf[lport];
+                if (cur >= 0 && r.page === pages[cur].id && !results[r.page]) {
                     record(r);
-                    fs.writeFileSync(path.join(out, `step-${current + 1}.flag`), r.status);
+                    fs.writeFileSync(path.join(out, `step-${cur + 1}.flag`), r.status);
                 }
             } catch (e) { console.log('bad result ' + e); }
             res.writeHead(204); res.end();
@@ -340,4 +351,8 @@ http.createServer((req, res) => {
     }
     res.writeHead(200, headers);
     res.end(data);
-}).listen(+port, '127.0.0.1');
+});
+for (let i = 0; i < NPORTS; i++) {
+    const s = i === 0 ? server : http.createServer(server.listeners('request')[0]);
+    s.listen(+port + i, '127.0.0.1');
+}

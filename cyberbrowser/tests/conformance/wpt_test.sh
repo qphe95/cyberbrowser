@@ -7,8 +7,10 @@
 #   tests/conformance/wpt_test.sh <build dir> <wpt> <results dir> <dir or file under wpt>...
 #
 # PORT (default 38527) is the server's; WPT_TIMEOUT_MULT scales testharness's
-# time limits (0.3: a test that hangs gives up after 3 s, not 10); with
-# REFTEST=1, SHARDS (default: one per CPU) browsers run at once.  A run picks up where results.json in
+# time limits (0.3: a test that hangs gives up after 3 s, not 10); SHARDS
+# (default: one per two CPUs) browsers run at once, testharness pages too
+# (each browser from its own port, PORT + its number; SHARDS=1: one browser,
+# one page after another).  A run picks up where results.json in
 # <results dir> left off; it prints and writes summary.txt at the end, and
 # node tests/conformance/failures.js <results dir> lists what failed.
 build=$(cd "$1" && pwd)
@@ -28,7 +30,11 @@ rm -f "$out"/step-*.flag "$out"/pages.txt
 # (each phase's time, printed at the end)
 t0=$EPOCHREALTIME; times=
 mark() { local now=$EPOCHREALTIME; times="$times $1 $(( (${now/./} - ${t0/./}) / 1000 )) ms,"; t0=$now; }
-node "$dir/wpt_server.js" "$wpt" "$P" "$out" "$@" > "$out/server.log" 2>&1 &
+n=${SHARDS:-$(( $(nproc) / 2 > 0 ? $(nproc) / 2 : 1 ))}
+# (testharness pages: a port per browser)
+ports=1
+[ -z "$REFTEST" ] && ports=$n
+PORTS=$ports node "$dir/wpt_server.js" "$wpt" "$P" "$out" "$@" > "$out/server.log" 2>&1 &
 server=$!
 for i in $(seq 400); do [ -s "$out/server.log" ] && break; sleep 0.05; done
 mark server
@@ -62,7 +68,6 @@ if [ -n "$REFTEST" ]; then
     # Reftest pages don't depend on one another: SHARDS browsers (default:
     # one per two CPUs, which measured best) take every SHARDS-th page
     # (reftest_prepare.js makes them ready).
-    n=${SHARDS:-$(( $(nproc) / 2 > 0 ? $(nproc) / 2 : 1 ))}
     rm -f "$out"/pages-*.txt "$out"/script-*.txt
     node "$dir/reftest_prepare.js" "$build" "$out" "$W" "$n"
     mark prepare
@@ -92,6 +97,31 @@ if [ -n "$REFTEST" ]; then
             fs.renameSync(from, to);
             fs.mkdirSync(from);
         }' "$build" "$out" "$n"
+elif [ "$n" -gt 1 ]; then
+    # Testharness pages don't depend on one another either: each browser
+    # takes every SHARDS-th page, from its own port (the server keeps a
+    # current page per port).
+    rm -f "$out"/pages-*.txt "$out"/script-*.txt
+    node "$dir/reftest_prepare.js" "$build" "$out" "$W" "$n" "$P"
+    mark prepare
+    pids=
+    for i in $(seq 0 $((n - 1))); do
+        [ -s "$out/pages-$i.txt" ] || continue
+        if [ "$i" = 1 ]; then
+            for t in $(seq 200); do [ -s "$build/shard-0/logs/ui.log" ] && break; sleep 0.025; done
+        fi
+        (cd "$build/shard-$i" && CYBER_UI_SCRIPT="$W/script-$i.txt" ./cb_coord.exe) 2> "$out/coord-$i.txt" &
+        pids="$pids $!"
+    done
+    mark launch
+    [ -n "$pids" ] && wait $pids
+    mark browsers
+    rm -rf "$out/logs"/shard-*
+    for i in $(seq 0 $((n - 1))); do
+        [ -d "$build/shard-$i/logs" ] || continue
+        mkdir -p "$out/logs/shard-$i"
+        cp "$build/shard-$i"/logs/*.log "$out/logs/shard-$i/" 2> /dev/null
+    done
 else
     script "$out/pages.txt" > "$out/script.txt"
     (cd "$build" && rm -rf browser_data logs/* && CYBER_UI_SCRIPT="$W/script.txt" ./cb_coord.exe) 2> "$out/coord.txt"

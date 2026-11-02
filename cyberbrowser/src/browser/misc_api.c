@@ -2650,7 +2650,19 @@ static GCValue js_mutation_observer_job(JSContextHandle ctx, int argc, GCValue *
     GCValue callback = JS_GetPropertyStr(ctx, observer, "__mo_callback");
     if (JS_IsFunction(ctx, callback)) {
         GCValue call_args[2] = { records, observer };
-        JS_Call(ctx, callback, JS_UNDEFINED, 2, call_args);
+        GCValue r = JS_Call(ctx, callback, observer, 2, call_args);
+        if (JS_IsException(r)) {
+            /* (reported in the callback's realm, HTML "report an exception") */
+            GCValue exc = JS_GetException(ctx);
+            JSContextHandle realm = JS_GetFunctionRealmOf(ctx, callback);
+            if (!realm) realm = ctx;
+            GCValue g = JS_GetGlobalObject(realm);
+            GCValue report = JS_GetPropertyStr(realm, g, "reportError");
+            if (JS_IsFunction(realm, report)) {
+                GCValue rr = JS_Call(realm, report, g, 1, &exc);
+                if (JS_IsException(rr)) JS_GetException(realm);
+            }
+        }
     }
     return JS_UNDEFINED;
 }
@@ -2666,8 +2678,79 @@ static void mo_push_record(JSContextHandle ctx, GCValue observer, GCValue record
 }
 
 
+static void mo_notify_child_list_now(JSContextHandle ctx, GCValue target, GCValue added, GCValue removed,
+                                     GCValue prev, GCValue next);
+
+/* Batched records (mo_batch_begin): per target, its added and removed nodes,
+ * the previous sibling of the first change and the next of the last; held
+ * by the global (__cyber_mo_batch) while the operation runs, as script can. */
+static int g_mob_depth;
+static bool g_mob_pending;
+
+void mo_batch_begin(JSContextHandle ctx) {
+    (void)ctx;
+    g_mob_depth++;
+}
+
+static void mo_push_all(JSContextHandle ctx, GCValue to, GCValue from) {
+    uint32_t n = 0, m = 0;
+    JS_ToUint32(ctx, &n, JS_GetPropertyStr(ctx, from, "length"));
+    JS_ToUint32(ctx, &m, JS_GetPropertyStr(ctx, to, "length"));
+    for (uint32_t i = 0; i < n; i++) JS_SetPropertyUint32(ctx, to, m + i, JS_GetPropertyUint32(ctx, from, i));
+}
+
+void mo_batch_end(JSContextHandle ctx) {
+    if (g_mob_depth <= 0 || --g_mob_depth > 0 || !g_mob_pending) return;
+    g_mob_pending = false;
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue batch = JS_GetPropertyStr(ctx, global, "__cyber_mo_batch");
+    JS_SetPropertyStr(ctx, global, "__cyber_mo_batch", JS_UNDEFINED);
+    uint32_t n = 0;
+    if (!JS_IsArray(ctx, batch)) return;
+    JS_ToUint32(ctx, &n, JS_GetPropertyStr(ctx, batch, "length"));
+    for (uint32_t i = 0; i < n; i++) {
+        GCValue e = JS_GetPropertyUint32(ctx, batch, i);
+        mo_notify_child_list_now(ctx, JS_GetPropertyStr(ctx, e, "target"), JS_GetPropertyStr(ctx, e, "added"),
+                                 JS_GetPropertyStr(ctx, e, "removed"), JS_GetPropertyStr(ctx, e, "prev"),
+                                 JS_GetPropertyStr(ctx, e, "next"));
+    }
+}
+
 void mo_notify_child_list(JSContextHandle ctx, GCValue target, GCValue added, GCValue removed, GCValue prev,
                           GCValue next) {
+    if (g_mob_depth <= 0) {
+        mo_notify_child_list_now(ctx, target, added, removed, prev, next);
+        return;
+    }
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue batch = JS_GetPropertyStr(ctx, global, "__cyber_mo_batch");
+    if (!JS_IsArray(ctx, batch)) {
+        batch = JS_NewArray(ctx);
+        JS_DefinePropertyValueStr(ctx, global, "__cyber_mo_batch", batch, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    }
+    g_mob_pending = true;
+    uint32_t n = 0;
+    JS_ToUint32(ctx, &n, JS_GetPropertyStr(ctx, batch, "length"));
+    GCValue e = JS_UNDEFINED;
+    for (uint32_t i = 0; i < n && JS_IsUndefined(e); i++) {
+        GCValue x = JS_GetPropertyUint32(ctx, batch, i);
+        if (JS_StrictEq(ctx, JS_GetPropertyStr(ctx, x, "target"), target)) e = x;
+    }
+    if (JS_IsUndefined(e)) {
+        e = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, e, "target", target);
+        JS_SetPropertyStr(ctx, e, "added", JS_NewArray(ctx));
+        JS_SetPropertyStr(ctx, e, "removed", JS_NewArray(ctx));
+        JS_SetPropertyStr(ctx, e, "prev", prev);
+        JS_SetPropertyUint32(ctx, batch, n, e);
+    }
+    mo_push_all(ctx, JS_GetPropertyStr(ctx, e, "added"), added);
+    mo_push_all(ctx, JS_GetPropertyStr(ctx, e, "removed"), removed);
+    JS_SetPropertyStr(ctx, e, "next", next);
+}
+
+static void mo_notify_child_list_now(JSContextHandle ctx, GCValue target, GCValue added, GCValue removed,
+                                     GCValue prev, GCValue next) {
     GCValue reg = mo_registry(ctx);
     GCValue len_val = JS_GetPropertyStr(ctx, reg, "length");
     uint32_t len = 0;

@@ -4,11 +4,14 @@
 // build's is newer; not hard links, whose one set of permissions the
 // sandboxes of all the shards would share), with its own browser_data and
 // logs, and its UI script (script-N.txt) and pages (pages-N.txt).
+// With a port (testharness pages, wpt_server.js on PORTS=n ports): shard N's
+// pages from port + N, each waited for until its answer (or its time and
+// 5 s more), and /end on that port at the end.
 //
-//   node reftest_prepare.js <build dir> <results dir> <results dir, Windows form> <n>
+//   node reftest_prepare.js <build dir> <results dir> <results dir, Windows form> <n> [port]
 const fs = require('fs'), path = require('path');
-const [build, out, W, nArg] = process.argv.slice(2);
-const n = +nArg;
+const [build, out, W, nArg, portArg] = process.argv.slice(2);
+const n = +nArg, js = !!portArg;
 const lines = fs.readFileSync(path.join(out, 'pages.txt'), 'utf8').split('\n').filter(Boolean);
 const exes = fs.readdirSync(build).filter(f => /^cb_.*\.exe$/.test(f) && !/^cb_(harness|webgpu_fuzz)\.exe$/.test(f));
 for (let i = 0; i < n; i++) {
@@ -28,11 +31,14 @@ for (let i = 0; i < n; i++) {
     fs.rmSync(path.join(d, 'browser_data'), { recursive: true, force: true });
     fs.rmSync(path.join(d, 'logs'), { recursive: true, force: true });
     fs.mkdirSync(path.join(d, 'logs'));
-    let script = 'open about:blank\nviewport 800 600\n';
+    let script = js ? 'open about:blank\n' : 'open about:blank\nviewport 800 600\n';
+    const origin = js ? `http://127.0.0.1:${+portArg + i}` : null;
     for (const l of mine) {
         const [k, url, ms, shot] = l.split(' ');
-        script += `go ${url}\nwaitfile ${W}/step-${k}.flag ${ms}\nshotc ${shot}\n`;
+        if (js) script += `go ${url.replace(/^http:\/\/[^/]+/, origin)}\nwaitfile ${W}/step-${k}.flag ${+ms + 5000}\n`;
+        else script += `go ${url}\nwaitfile ${W}/step-${k}.flag ${ms}\nshotc ${shot}\n`;
     }
+    if (js) script += `go ${origin}/end\nwait 1500\n`;
     fs.writeFileSync(path.join(out, `script-${i}.txt`), script + 'quit\n');
     fs.writeFileSync(path.join(out, `pages-${i}.txt`), mine.join('\n') + '\n');
 }

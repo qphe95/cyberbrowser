@@ -510,6 +510,14 @@ void execute_timer(JSContextHandle ctx, int id) {
         if (ts) { ts->calls++; ts->ms += tstat_now_ms() - ts0; }
         if (JS_IsException(result)) {
             GCValue exc = JS_GetException(ctx);
+            /* (HTML "report an exception": the window's error event) */
+            {
+                GCValue report = JS_GetPropertyStr(ctx, global_obj, "reportError");
+                if (JS_IsFunction(ctx, report)) {
+                    GCValue r = JS_Call(ctx, report, global_obj, 1, &exc);
+                    if (JS_IsException(r)) JS_GetException(ctx);
+                }
+            }
             const char *exc_str = JS_ToCString(ctx, exc);
             GCValue stack_val = JS_GetPropertyStr(ctx, exc, "stack");
             const char *stack = NULL;

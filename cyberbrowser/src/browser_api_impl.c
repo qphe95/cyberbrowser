@@ -1634,6 +1634,11 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // Document.prototype -> Node.prototype (documents get this proto in
     // dom_create_wrapper; per-document methods stay own properties).
     JS_SetPrototype(ctx, document_proto, node_proto);
+    /* (ParentNode, as on elements and fragments) */
+    JS_SetPropertyStr(ctx, document_proto, "append", JS_NewCFunction(ctx, js_element_append, "append", 1));
+    JS_SetPropertyStr(ctx, document_proto, "prepend", JS_NewCFunction(ctx, js_element_prepend, "prepend", 1));
+    JS_SetPropertyStr(ctx, document_proto, "replaceChildren",
+        JS_NewCFunction(ctx, js_element_replaceChildren, "replaceChildren", 1));
 
     JS_SetPropertyStr(ctx, document_ctor, "prototype", document_proto);
     JS_SetPropertyStr(ctx, global, "Document", document_ctor);
@@ -1883,6 +1888,16 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_FreeAtom(ctx, attr_atom);
     JS_SetPropertyStr(ctx, element_proto, "toggleAttribute",
         JS_NewCFunction(ctx, js_element_toggle_attribute, "toggleAttribute", 1));
+    JS_SetPropertyStr(ctx, element_proto, "getAttributeNode",
+        JS_NewCFunction(ctx, js_element_get_attribute_node, "getAttributeNode", 1));
+    JS_SetPropertyStr(ctx, element_proto, "getAttributeNodeNS",
+        JS_NewCFunction(ctx, js_element_get_attribute_node_ns, "getAttributeNodeNS", 2));
+    JS_SetPropertyStr(ctx, element_proto, "setAttributeNode",
+        JS_NewCFunction(ctx, js_element_set_attribute_node, "setAttributeNode", 1));
+    JS_SetPropertyStr(ctx, element_proto, "setAttributeNodeNS",
+        JS_NewCFunction(ctx, js_element_set_attribute_node, "setAttributeNodeNS", 1));
+    JS_SetPropertyStr(ctx, element_proto, "removeAttributeNode",
+        JS_NewCFunction(ctx, js_element_remove_attribute_node, "removeAttributeNode", 1));
     // NS attribute methods
     JS_SetPropertyStr(ctx, element_proto, "setAttributeNS",
         JS_NewCFunction(ctx, js_element_set_attribute_ns, "setAttributeNS", 3));
@@ -2186,6 +2201,8 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     DEF_FUNC(ctx, document, "createElementNS", js_document_create_element_ns, 2);
     DEF_FUNC(ctx, document, "createTextNode", js_document_create_text_node, 1);
     DEF_FUNC(ctx, document, "createComment", js_document_create_comment, 1);
+    DEF_FUNC(ctx, document, "createAttribute", js_document_create_attribute, 1);
+    DEF_FUNC(ctx, document, "createAttributeNS", js_document_create_attribute_ns, 2);
     DEF_FUNC(ctx, document, "createDocumentFragment", js_document_create_document_fragment, 0);
     DEF_FUNC(ctx, document, "createRange", js_document_create_range, 0);
     DEF_FUNC(ctx, document, "createTreeWalker", js_document_create_tree_walker, 3);

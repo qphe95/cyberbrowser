@@ -1031,6 +1031,8 @@ JSContextHandle JS_NewContext(JSRuntimeHandle rt);
 void *JS_GetContextOpaque(JSContextHandle ctx);
 void JS_SetContextOpaque(JSContextHandle ctx, void *opaque);
 JSRuntimeHandle JS_GetRuntime(JSContextHandle ctx);
+/* The realm (context) a function was created in (ECMA-262 GetFunctionRealm). */
+JSContextHandle JS_GetFunctionRealmOf(JSContextHandle ctx, GCValue func_obj);
 void JS_SetClassProto(JSContextHandle ctx, JSClassID class_id, GCValue obj);
 GCValue JS_GetClassProto(JSContextHandle ctx, JSClassID class_id);
 

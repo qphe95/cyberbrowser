@@ -360,6 +360,30 @@
         } catch (e) { /* the report itself failed */ }
     }
 
+    /* reportError(e), HTML "report an exception" (scripts, timers and
+     * listeners that throw come here too): an ErrorEvent at the window, its
+     * onerror called with (message, source, lineno, colno, error); the
+     * console when nothing cancels it.  (An error while one is reported is
+     * not reported again.) */
+    var reporting = false;
+    function reportError(err) {
+        if (reporting) return;
+        reporting = true;
+        try {
+            var msg;
+            try { msg = 'Uncaught ' + (err && typeof err === 'object' && 'message' in err ? (err.name ? err.name + ': ' : '') + err.message : String(err)); }
+            catch (e) { msg = 'Uncaught exception'; }
+            var line = 0, file = '';
+            try { if (err && typeof err === 'object') { line = +err.lineNumber || 0; file = String(err.fileName || ''); } } catch (e) { /* (getters) */ }
+            var ev = new global.ErrorEvent('error', { message: msg, filename: file, lineno: line, colno: 0,
+                                                       error: err, cancelable: true });
+            if (global.dispatchEvent(ev) && global.console)
+                global.console.error(msg + (err && err.stack ? '\n' + err.stack : ''));
+        } catch (e) { /* the report itself failed */ }
+        reporting = false;
+    }
+    Object.defineProperty(global, 'reportError', { value: reportError, writable: true, configurable: true, enumerable: true });
+
     function handlerProp(item, type) {
         /* an on<type> event handler: an own or inherited data/accessor value */
         var h;

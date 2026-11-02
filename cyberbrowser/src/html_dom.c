@@ -608,9 +608,14 @@ GCValue html_doc_stream_step(HtmlDocStream *s, bool final) {
     }
     if (n) {
         js_cyber_ce_push_stack(ctx);
+        /* (an iframe parsed has its about:blank document before the next
+         * script runs, as one a script inserts) */
+        bool was_blank = g_frame_blank_now;
+        g_frame_blank_now = true;
         for (uint32_t i = 0; i < n; i++)
             if (g_dom.kind[roots[i]] == DOM_K_ELEMENT && in_document(roots[i], dom_slot(s->doc)))
                 dom_ce_on_connect(ctx, dom_id_of(roots[i]));
+        g_frame_blank_now = was_blank;
         js_cyber_ce_flush_reactions(ctx, JS_UNDEFINED, 0, NULL);
         js_cyber_ce_pop_stack(ctx);
         dom_request_layout();

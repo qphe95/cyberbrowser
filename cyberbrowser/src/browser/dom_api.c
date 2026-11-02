@@ -1626,7 +1626,8 @@ static bool host_including_ancestor(NodeId a, NodeId b) {
 
 /* DOM "ensure pre-insertion validity" of inserting node into parent before
  * child (0: at the end), or with replaced set the replace algorithm's checks
- * (child is then the one replaced).  Throws and returns false if invalid. */
+ * (child is then the one replaced; none: all of them, as replaceChildren
+ * checks).  Throws and returns false if invalid. */
 static bool insert_valid(JSContextHandle ctx, NodeId parent, NodeId node, NodeId child, bool replacing) {
     int pk = dom_kind(parent), nk = dom_kind(node);
     if (pk != DOM_K_DOCUMENT && pk != DOM_K_FRAGMENT && pk != DOM_K_ELEMENT) {
@@ -1660,7 +1661,7 @@ static bool insert_valid(JSContextHandle ctx, NodeId parent, NodeId node, NodeId
         }
     bool bad = text || elements > 1;
     bool has_element = false, has_doctype = false, doctype_after = false, element_before = false;
-    for (NodeId c = dom_first_child(parent), seen = 0; c; c = dom_next_sibling(c)) {
+    for (NodeId c = replacing && !child ? DOM_NULL : dom_first_child(parent), seen = 0; c; c = dom_next_sibling(c)) {
         if (c == child) { seen = c; if (replacing) continue; }
         int k = dom_kind(c);
         if (k == DOM_K_ELEMENT) { has_element = true; if (!seen && child) element_before = true; }
@@ -1698,11 +1699,13 @@ GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc
     // DocumentFragment: append its children, not the fragment itself.
     if (dom_kind(c) == DOM_K_FRAGMENT) {
         GCValueVec children GC_VALUE_VEC_AUTO = collect_fragment_children(ctx, c);
+        mo_batch_begin(ctx);
         for (size_t i = 0; i < children.count; i++) {
             GCValue args[1] = { children.data[i] };
             GCValue r = js_node_appendChild_real(ctx, this_val, 1, args);
-            if (JS_IsException(r)) return r;
+            if (JS_IsException(r)) { mo_batch_end(ctx); return r; }
         }
+        mo_batch_end(ctx);
         return child;
     }
     if (!dom_api_insert(ctx, parent, c, DOM_NULL)) return JS_EXCEPTION;
@@ -1790,11 +1793,19 @@ GCValue js_element_replaceChildren(JSContextHandle ctx, GCValue this_val, int ar
     if (!p) return JS_ThrowTypeError(ctx, "Illegal invocation");
     GCValue node = convert_nodes(ctx, p, argc, argv);
     if (JS_IsException(node)) return node;
-    if (argc && !insert_valid(ctx, p, dom_node_of(node), DOM_NULL, false)) return JS_EXCEPTION;
+    if (argc && !insert_valid(ctx, p, dom_node_of(node), DOM_NULL, true)) return JS_EXCEPTION;
+    /* (the node out of where it is first: a record of its own) */
+    NodeId nn = argc ? dom_node_of(node) : DOM_NULL;
+    if (nn && dom_kind(nn) != DOM_K_FRAGMENT && dom_parent(nn) && dom_parent(nn) != p) {
+        GCValue pj = dom_js(ctx, dom_parent(nn));
+        GCValue r0 = js_node_removeChild_real(ctx, pj, 1, &node);
+        if (JS_IsException(r0)) return r0;
+    }
+    mo_batch_begin(ctx);
     while (dom_first_child(p))
         if (!dom_api_remove_discard(ctx, p, dom_first_child(p))) break;
-    if (!argc) return JS_UNDEFINED;
-    GCValue r = js_node_appendChild_real(ctx, this_val, 1, &node);
+    GCValue r = argc ? js_node_appendChild_real(ctx, this_val, 1, &node) : JS_UNDEFINED;
+    mo_batch_end(ctx);
     return JS_IsException(r) ? r : JS_UNDEFINED;
 }
 
@@ -1883,14 +1894,17 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
     // DocumentFragment: insert its children before ref_child, not the fragment itself.
     if (dom_kind(c) == DOM_K_FRAGMENT) {
         GCValueVec children GC_VALUE_VEC_AUTO = collect_fragment_children(ctx, c);
+        mo_batch_begin(ctx);
         for (size_t i = 0; i < children.count; i++) {
             GCValue args[2] = { children.data[i], ref_child };
             GCValue r = js_node_insertBefore_real(ctx, this_val, 2, args);
-            if (JS_IsException(r)) return r;
+            if (JS_IsException(r)) { mo_batch_end(ctx); return r; }
         }
+        mo_batch_end(ctx);
         return new_child;
     }
-    if (ref == c) return new_child;
+    /* (before itself: before what follows it, after it is taken out) */
+    if (ref == c) ref = dom_next_sibling(c);
     if (!dom_api_insert(ctx, parent, c, ref)) return JS_EXCEPTION;
     return new_child;
 }
@@ -1907,15 +1921,25 @@ GCValue js_node_replaceChild_real(JSContextHandle ctx, GCValue this_val, int arg
     NodeId old_node = dom_node_of(old_child), new_node = dom_node_of(new_child);
     if (!parent || !old_node || !new_node) return JS_ThrowTypeError(ctx, "replaceChild: invalid arguments");
     if (!insert_valid(ctx, parent, new_node, old_node, true)) return JS_EXCEPTION;
-    if (JS_StrictEq(ctx, new_child, old_child)) return old_child;
     /* (DOM "replace": old_child goes, then new_child goes before what followed
-     * it, or what followed new_child when that was it) */
+     * it, or what followed new_child when that was it; itself too: out and
+     * back in; one record) */
     NodeId ref = dom_next_sibling(old_node);
     if (ref == new_node) ref = dom_next_sibling(new_node);
-    GCValue remove_args[1] = { old_child };
-    js_node_removeChild_real(ctx, this_val, 1, remove_args);
+    /* (new_child out of where it is first: a record of its own) */
+    if (dom_kind(new_node) != DOM_K_FRAGMENT && dom_parent(new_node)) {
+        GCValue a[1] = { new_child };
+        GCValue pj = dom_js(ctx, dom_parent(new_node));
+        js_node_removeChild_real(ctx, pj, 1, a);
+    }
+    mo_batch_begin(ctx);
+    if (dom_parent(old_node) == parent) {
+        GCValue remove_args[1] = { old_child };
+        js_node_removeChild_real(ctx, this_val, 1, remove_args);
+    }
     GCValue insert_args[2] = { new_child, dom_js(ctx, ref) };
     GCValue r = js_node_insertBefore_real(ctx, this_val, 2, insert_args);
+    mo_batch_end(ctx);
     if (JS_IsException(r)) return r;
     return old_child;
 }
@@ -3094,7 +3118,11 @@ GCValue js_node_set_text_content(JSContextHandle ctx, GCValue this_val, int argc
         free(old_copy);
         return JS_UNDEFINED;
     }
-    char *copy = strndup(text, tlen);
+    char *copy = (char *)malloc(tlen + 1);   /* (not strndup: the text may hold a NUL) */
+    if (!copy) return JS_ThrowOutOfMemory(ctx);
+    memcpy(copy, text, tlen);
+    copy[tlen] = 0;
+    mo_batch_begin(ctx);
     while (dom_first_child(n)) {
         if (!dom_api_remove_discard(ctx, n, dom_first_child(n))) break;
     }
@@ -3102,6 +3130,7 @@ GCValue js_node_set_text_content(JSContextHandle ctx, GCValue this_val, int argc
         NodeId t = dom_create_chardata(DOM_K_TEXT, copy, tlen, dom_owner(n));
         dom_api_insert(ctx, n, t, DOM_NULL);
     }
+    mo_batch_end(ctx);
     free(copy);
     dom_request_layout();
     return JS_UNDEFINED;
@@ -3400,45 +3429,307 @@ GCValue js_range_detach(JSContextHandle ctx, GCValue this_val, int argc, GCValue
     return JS_UNDEFINED;
 }
 
+/* ---- Range contents (DOM 5.5) ----
+ * Boundary points as (node, offset); the edits go through the nodes' own
+ * methods (replaceData, removeChild, appendChild, cloneNode), which queue
+ * the mutation records. */
+
+typedef struct { NodeId n; uint32_t o; } RangeBP;
+
+static uint32_t rng_index(NodeId n) {
+    uint32_t i = 0;
+    for (NodeId x = dom_prev_sibling(n); x; x = dom_prev_sibling(x)) i++;
+    return i;
+}
+
+/* A node's length: its data's in code units, or its child count. */
+static uint32_t rng_length(JSContextHandle ctx, NodeId n) {
+    if (dom_kind_is_chardata(dom_kind(n))) {
+        uint32_t len = 0;
+        JS_ToUint32(ctx, &len, JS_GetPropertyStr(ctx, js_node_get_data(ctx, dom_js(ctx, n), 0, NULL), "length"));
+        return len;
+    }
+    uint32_t c = 0;
+    for (NodeId x = dom_first_child(n); x; x = dom_next_sibling(x)) c++;
+    return c;
+}
+
+static bool rng_inclusive_ancestor(NodeId a, NodeId b) {
+    for (NodeId x = b; x; x = dom_parent(x))
+        if (x == a) return true;
+    return false;
+}
+
+/* Tree order: is a before b (both in one tree, a != b)? */
+static bool rng_before(NodeId a, NodeId b) {
+    if (rng_inclusive_ancestor(a, b)) return true;
+    if (rng_inclusive_ancestor(b, a)) return false;
+    NodeId pa = a, pb = b;
+    /* (the children of their common ancestor on each side, compared) */
+    for (NodeId x = a; x; x = dom_parent(x)) {
+        NodeId y = b;
+        for (; y; y = dom_parent(y)) if (dom_parent(y) == dom_parent(x) && dom_parent(x)) break;
+        if (y) { pa = x; pb = y; break; }
+    }
+    for (NodeId s = dom_next_sibling(pa); s; s = dom_next_sibling(s)) if (s == pb) return true;
+    return false;
+}
+
+/* -1, 0, 1: a before, equal to, after b (DOM "position of a boundary point"). */
+static int rng_cmp(RangeBP a, RangeBP b) {
+    if (a.n == b.n) return a.o == b.o ? 0 : a.o < b.o ? -1 : 1;
+    if (!rng_before(a.n, b.n)) return -rng_cmp(b, a);
+    if (rng_inclusive_ancestor(a.n, b.n)) {
+        NodeId c = b.n;
+        while (dom_parent(c) != a.n) c = dom_parent(c);
+        return rng_index(c) < a.o ? 1 : -1;
+    }
+    return -1;
+}
+
+static bool rng_contained(JSContextHandle ctx, NodeId n, RangeBP s, RangeBP e) {
+    RangeBP a = { n, 0 }, z = { n, rng_length(ctx, n) };
+    return rng_cmp(s, a) < 0 && rng_cmp(z, e) < 0;
+}
+
+static bool rng_partial(NodeId n, RangeBP s, RangeBP e) {
+    return rng_inclusive_ancestor(n, s.n) != rng_inclusive_ancestor(n, e.n);
+}
+
+static GCValue rng_call(JSContextHandle ctx, NodeId n, const char *m, int argc, GCValue *argv) {
+    GCValue o = dom_js(ctx, n);
+    return JS_Call(ctx, JS_GetPropertyStr(ctx, o, m), o, argc, argv);
+}
+
+static bool rng_replace(JSContextHandle ctx, NodeId n, uint32_t off, uint32_t count) {
+    GCValue a[3] = { JS_NewUint32(ctx, off), JS_NewUint32(ctx, count), JS_NewString(ctx, "") };
+    return !JS_IsException(rng_call(ctx, n, "replaceData", 3, a));
+}
+
+/* A clone of chardata node n holding its data [off, off + count). */
+static GCValue rng_clone_data(JSContextHandle ctx, NodeId n, uint32_t off, uint32_t count) {
+    GCValue f = JS_FALSE;
+    GCValue clone = rng_call(ctx, n, "cloneNode", 1, &f);
+    if (JS_IsException(clone)) return clone;
+    GCValue a[2] = { JS_NewUint32(ctx, off), JS_NewUint32(ctx, count) };
+    GCValue sub = rng_call(ctx, n, "substringData", 2, a);
+    if (JS_IsException(sub)) return sub;
+    JS_SetPropertyStr(ctx, clone, "data", sub);
+    return clone;
+}
+
+static bool rng_append(JSContextHandle ctx, GCValue parent, GCValue child) {
+    return !JS_IsException(JS_Call(ctx, JS_GetPropertyStr(ctx, parent, "appendChild"), parent, 1, &child));
+}
+
+static bool rng_get(JSContextHandle ctx, GCValue range, RangeBP *s, RangeBP *e) {
+    int32_t so = 0, eo = 0;
+    s->n = dom_node_of(JS_GetPropertyStr(ctx, range, "startContainer"));
+    e->n = dom_node_of(JS_GetPropertyStr(ctx, range, "endContainer"));
+    JS_ToInt32(ctx, &so, JS_GetPropertyStr(ctx, range, "startOffset"));
+    JS_ToInt32(ctx, &eo, JS_GetPropertyStr(ctx, range, "endOffset"));
+    s->o = (uint32_t)so;
+    e->o = (uint32_t)eo;
+    return s->n && e->n;
+}
+
+static void rng_set_collapsed(JSContextHandle ctx, GCValue range, NodeId n, uint32_t o) {
+    GCValue nj = dom_js(ctx, n);
+    JS_SetPropertyStr(ctx, range, "startContainer", nj);
+    JS_SetPropertyStr(ctx, range, "startOffset", JS_NewUint32(ctx, o));
+    JS_SetPropertyStr(ctx, range, "endContainer", nj);
+    JS_SetPropertyStr(ctx, range, "endOffset", JS_NewUint32(ctx, o));
+    JS_SetPropertyStr(ctx, range, "collapsed", JS_TRUE);
+    range_update_common_ancestor(ctx, range);
+}
+
+/* Where the range collapses to after its contents go (delete / extract
+ * steps "new node" and "new offset"). */
+static RangeBP rng_new_point(RangeBP s, RangeBP e) {
+    if (rng_inclusive_ancestor(s.n, e.n)) return s;
+    NodeId ref = s.n;
+    while (dom_parent(ref) && !rng_inclusive_ancestor(dom_parent(ref), e.n)) ref = dom_parent(ref);
+    RangeBP p = { dom_parent(ref), rng_index(ref) + 1 };
+    return p;
+}
+
 GCValue js_range_delete_contents(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    // Best-effort: if the range is collapsed, nothing to do.
-    GCValue collapsed = JS_GetPropertyStr(ctx, this_val, "collapsed");
-    if (JS_ToBool(ctx, collapsed)) return JS_UNDEFINED;
-    // Otherwise clear the endpoints to avoid repeated deletions.
-    JS_SetPropertyStr(ctx, this_val, "endContainer", JS_GetPropertyStr(ctx, this_val, "startContainer"));
-    JS_SetPropertyStr(ctx, this_val, "endOffset", JS_GetPropertyStr(ctx, this_val, "startOffset"));
-    JS_SetPropertyStr(ctx, this_val, "collapsed", JS_TRUE);
+    RangeBP s, e;
+    if (!rng_get(ctx, this_val, &s, &e) || (s.n == e.n && s.o == e.o)) return JS_UNDEFINED;
+    if (s.n == e.n && dom_kind_is_chardata(dom_kind(s.n))) {
+        if (!rng_replace(ctx, s.n, s.o, e.o - s.o)) return JS_EXCEPTION;
+        return JS_UNDEFINED;
+    }
+    /* The contained nodes whose parent is not contained, in tree order. */
+    NodeId common = s.n;
+    while (common && !rng_inclusive_ancestor(common, e.n)) common = dom_parent(common);
+    NodeId *rm = NULL;
+    size_t nrm = 0, cap = 0;
+    for (NodeId x = dom_first_child(common); x;) {
+        if (rng_contained(ctx, x, s, e)) {
+            if (nrm == cap) { cap = cap ? cap * 2 : 16; rm = (NodeId *)realloc(rm, cap * sizeof(NodeId)); }
+            rm[nrm++] = x;
+        } else if (dom_first_child(x)) {
+            x = dom_first_child(x);
+            continue;
+        }
+        while (x && !dom_next_sibling(x) && x != common) x = dom_parent(x);
+        if (!x || x == common) break;
+        x = dom_next_sibling(x);
+    }
+    RangeBP np = rng_new_point(s, e);
+    bool ok = true;
+    if (dom_kind_is_chardata(dom_kind(s.n))) ok = rng_replace(ctx, s.n, s.o, rng_length(ctx, s.n) - s.o);
+    for (size_t i = 0; ok && i < nrm; i++) {
+        NodeId p = dom_parent(rm[i]);
+        if (!p) continue;
+        GCValue c = dom_js(ctx, rm[i]);
+        ok = !JS_IsException(rng_call(ctx, p, "removeChild", 1, &c));
+    }
+    free(rm);
+    if (ok && dom_kind_is_chardata(dom_kind(e.n))) ok = rng_replace(ctx, e.n, 0, e.o);
+    if (!ok) return JS_EXCEPTION;
+    rng_set_collapsed(ctx, this_val, np.n, np.o);
     return JS_UNDEFINED;
+}
+
+static GCValue rng_extract(JSContextHandle ctx, RangeBP s, RangeBP e, RangeBP *np_out) {
+    NodeId doc = dom_kind(s.n) == DOM_K_DOCUMENT ? s.n : dom_owner(s.n);
+    GCValue dj = dom_js(ctx, doc);
+    GCValue frag = JS_Call(ctx, JS_GetPropertyStr(ctx, dj, "createDocumentFragment"), dj, 0, NULL);
+    if (JS_IsException(frag)) return frag;
+    if (np_out) *np_out = s;
+    if (s.n == e.n && s.o == e.o) return frag;
+    if (s.n == e.n && dom_kind_is_chardata(dom_kind(s.n))) {
+        GCValue c = rng_clone_data(ctx, s.n, s.o, e.o - s.o);
+        if (JS_IsException(c) || !rng_append(ctx, frag, c) || !rng_replace(ctx, s.n, s.o, e.o - s.o)) return JS_EXCEPTION;
+        return frag;
+    }
+    NodeId common = s.n;
+    while (common && !rng_inclusive_ancestor(common, e.n)) common = dom_parent(common);
+    NodeId first = DOM_NULL, last = DOM_NULL;
+    NodeId *kids = NULL;
+    size_t nk = 0, cap = 0;
+    for (NodeId c = dom_first_child(common); c; c = dom_next_sibling(c)) {
+        if (!rng_inclusive_ancestor(s.n, e.n) && !first && rng_partial(c, s, e)) first = c;
+        if (!rng_inclusive_ancestor(e.n, s.n) && rng_partial(c, s, e)) last = c;
+        if (rng_contained(ctx, c, s, e)) {
+            if (dom_kind(c) == DOM_K_DOCTYPE) { free(kids); return throw_dom_exception(ctx, "HierarchyRequestError", "A doctype cannot be extracted."); }
+            if (nk == cap) { cap = cap ? cap * 2 : 16; kids = (NodeId *)realloc(kids, cap * sizeof(NodeId)); }
+            kids[nk++] = c;
+        }
+    }
+    RangeBP np = rng_new_point(s, e);
+    if (np_out) *np_out = np;
+    bool ok = true;
+    GCValue f = JS_FALSE;
+    if (first && dom_kind_is_chardata(dom_kind(first))) {
+        GCValue c = rng_clone_data(ctx, s.n, s.o, rng_length(ctx, s.n) - s.o);
+        ok = !JS_IsException(c) && rng_append(ctx, frag, c) && rng_replace(ctx, s.n, s.o, rng_length(ctx, s.n) - s.o);
+    } else if (first) {
+        GCValue clone = rng_call(ctx, first, "cloneNode", 1, &f);
+        RangeBP ss = s, se = { first, rng_length(ctx, first) };
+        GCValue sub = JS_IsException(clone) ? clone : rng_extract(ctx, ss, se, NULL);
+        ok = !JS_IsException(sub) && rng_append(ctx, frag, clone) && rng_append(ctx, clone, sub);
+    }
+    for (size_t i = 0; ok && i < nk; i++) ok = rng_append(ctx, frag, dom_js(ctx, kids[i]));
+    free(kids);
+    if (ok && last && dom_kind_is_chardata(dom_kind(last))) {
+        GCValue c = rng_clone_data(ctx, e.n, 0, e.o);
+        ok = !JS_IsException(c) && rng_append(ctx, frag, c) && rng_replace(ctx, e.n, 0, e.o);
+    } else if (ok && last) {
+        GCValue clone = rng_call(ctx, last, "cloneNode", 1, &f);
+        RangeBP ls = { last, 0 }, le = e;
+        GCValue sub = JS_IsException(clone) ? clone : rng_extract(ctx, ls, le, NULL);
+        ok = !JS_IsException(sub) && rng_append(ctx, frag, clone) && rng_append(ctx, clone, sub);
+    }
+    return ok ? frag : JS_EXCEPTION;
 }
 
 GCValue js_range_extract_contents(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    GCValue frag = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, frag, "nodeType", JS_NewInt32(ctx, DOM_NODE_TYPE_DOCUMENT_FRAGMENT));
-    // Deletion is a no-op for now; return an empty fragment.
-    js_range_delete_contents(ctx, this_val, 0, NULL);
+    RangeBP s, e, np;
+    if (!rng_get(ctx, this_val, &s, &e)) return JS_ThrowTypeError(ctx, "extractContents: the range has no boundary");
+    GCValue frag = rng_extract(ctx, s, e, &np);
+    if (JS_IsException(frag)) return frag;
+    rng_set_collapsed(ctx, this_val, np.n, np.o);
     return frag;
 }
 
-GCValue js_range_insert_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    if (argc < 1) return JS_ThrowTypeError(ctx, "insertNode requires 1 argument");
-    GCValue sc = JS_GetPropertyStr(ctx, this_val, "startContainer");
-    int32_t so = 0;
-    JS_ToInt32(ctx, &so, JS_GetPropertyStr(ctx, this_val, "startOffset"));
-    NodeId n = dom_node_of(sc);
-    if (dom_kind(n) == DOM_NODE_TYPE_ELEMENT) {
-        NodeId child = dom_first_child(n);
-        for (int idx = 0; child && idx < so; idx++) child = dom_next_sibling(child);
-        GCValue args[2] = { argv[0], dom_js(ctx, child) };
-        js_node_insertBefore_real(ctx, sc, 2, args);
+/* DOM "insert" into a range: at its start, splitting a Text there. */
+static GCValue rng_insert(JSContextHandle ctx, GCValue range, GCValue node) {
+    RangeBP s, e;
+    if (!rng_get(ctx, range, &s, &e)) return JS_ThrowTypeError(ctx, "insertNode: the range has no boundary");
+    NodeId n = dom_node_of(node);
+    if (!n) return JS_ThrowTypeError(ctx, "insertNode: not a Node");
+    int sk = dom_kind(s.n);
+    if (sk == DOM_K_PI || sk == DOM_K_COMMENT || (sk == DOM_K_TEXT && !dom_parent(s.n)) || s.n == n)
+        return throw_dom_exception(ctx, "HierarchyRequestError", "The node cannot be inserted there.");
+    NodeId ref = DOM_NULL;
+    if (dom_kind_is_chardata(sk)) ref = s.n;
+    else {
+        ref = dom_first_child(s.n);
+        for (uint32_t i = 0; ref && i < s.o; i++) ref = dom_next_sibling(ref);
+    }
+    NodeId parent = ref ? dom_parent(ref) : s.n;
+    GCValue pj = dom_js(ctx, parent);
+    if (dom_kind_is_chardata(sk)) {
+        GCValue off = JS_NewUint32(ctx, s.o);
+        GCValue split = rng_call(ctx, s.n, "splitText", 1, &off);
+        if (JS_IsException(split)) return split;
+        ref = dom_node_of(split);
+    }
+    if (ref == n) ref = dom_next_sibling(n);
+    if (dom_parent(n)) {
+        GCValue c = node;
+        GCValue r = rng_call(ctx, dom_parent(n), "removeChild", 1, &c);
+        if (JS_IsException(r)) return r;
+    }
+    uint32_t off = ref ? rng_index(ref) : rng_length(ctx, parent);
+    off += dom_kind(n) == DOM_K_FRAGMENT ? rng_length(ctx, n) : 1;
+    GCValue args[2] = { node, ref ? dom_js(ctx, ref) : JS_NULL };
+    GCValue r = js_node_insertBefore_real(ctx, pj, 2, args);
+    if (JS_IsException(r)) return r;
+    if (s.n == e.n && s.o == e.o) {
+        JS_SetPropertyStr(ctx, range, "endContainer", pj);
+        JS_SetPropertyStr(ctx, range, "endOffset", JS_NewUint32(ctx, off));
+        range_update_collapsed(ctx, range);
+        range_update_common_ancestor(ctx, range);
     }
     return JS_UNDEFINED;
 }
 
+GCValue js_range_insert_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "insertNode requires 1 argument");
+    return rng_insert(ctx, this_val, argv[0]);
+}
+
 GCValue js_range_surround_contents(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)argc; (void)argv;
-    return JS_UNDEFINED;
+    if (argc < 1) return JS_ThrowTypeError(ctx, "surroundContents requires 1 argument");
+    RangeBP s, e;
+    if (!rng_get(ctx, this_val, &s, &e)) return JS_ThrowTypeError(ctx, "surroundContents: the range has no boundary");
+    /* (a node other than a Text partly in it) */
+    NodeId common = s.n;
+    while (common && !rng_inclusive_ancestor(common, e.n)) common = dom_parent(common);
+    for (NodeId x = s.n; x && x != common; x = dom_parent(x))
+        if (dom_kind(x) != DOM_K_TEXT && rng_partial(x, s, e)) return throw_dom_exception(ctx, "InvalidStateError", "The range partially contains a node.");
+    for (NodeId x = e.n; x && x != common; x = dom_parent(x))
+        if (dom_kind(x) != DOM_K_TEXT && rng_partial(x, s, e)) return throw_dom_exception(ctx, "InvalidStateError", "The range partially contains a node.");
+    NodeId np = dom_node_of(argv[0]);
+    int k = dom_kind(np);
+    if (!np || k == DOM_K_DOCUMENT || k == DOM_K_DOCTYPE || k == DOM_K_FRAGMENT)
+        return throw_dom_exception(ctx, "InvalidNodeTypeError", "The node cannot surround the range's contents.");
+    GCValue frag = js_range_extract_contents(ctx, this_val, 0, NULL);
+    if (JS_IsException(frag)) return frag;
+    if (dom_first_child(np)) {
+        GCValue r = js_element_replaceChildren(ctx, argv[0], 0, NULL);
+        if (JS_IsException(r)) return r;
+    }
+    GCValue r = rng_insert(ctx, this_val, argv[0]);
+    if (JS_IsException(r)) return r;
+    if (!rng_append(ctx, argv[0], frag)) return JS_EXCEPTION;
+    return js_range_select_node(ctx, this_val, 1, argv);
 }
 
 const JSCFunctionListEntry js_range_proto_funcs[] = {
@@ -3940,24 +4231,184 @@ static GCValue attr_obj_at(JSContextHandle ctx, GCValue el, NodeId node, int i) 
     return attr;
 }
 
+/* An Attr's value (also its nodeValue and textContent): its owner element's
+ * attribute while it has one, else what it holds (__value). */
+static GCValue js_attr_value_get(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue el = JS_GetPropertyStr(ctx, this_val, "ownerElement");
+    if (JS_IsObject(el) && dom_node_of(el)) {
+        GCValue a[2] = { JS_GetPropertyStr(ctx, this_val, "namespaceURI"), JS_GetPropertyStr(ctx, this_val, "localName") };
+        GCValue v = JS_Call(ctx, JS_GetPropertyStr(ctx, el, "getAttributeNS"), el, 2, a);
+        if (JS_IsString(v)) return v;
+    }
+    GCValue v = JS_GetPropertyStr(ctx, this_val, "__value");
+    return JS_IsString(v) ? v : JS_NewString(ctx, "");
+}
+
+static GCValue js_attr_value_set(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    GCValue v = argc > 0 && !JS_IsNull(argv[0]) ? JS_ToString(ctx, argv[0]) : JS_NewString(ctx, "");
+    if (JS_IsException(v)) return v;
+    JS_DefinePropertyValueStr(ctx, this_val, "__value", v, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    GCValue el = JS_GetPropertyStr(ctx, this_val, "ownerElement");
+    if (JS_IsObject(el) && dom_node_of(el)) {
+        GCValue a[3] = { JS_GetPropertyStr(ctx, this_val, "namespaceURI"), JS_GetPropertyStr(ctx, this_val, "name"), v };
+        GCValue r = JS_Call(ctx, JS_GetPropertyStr(ctx, el, "setAttributeNS"), el, 3, a);
+        if (JS_IsException(r)) return r;
+    }
+    return JS_UNDEFINED;
+}
+
 static GCValue create_attr_obj(JSContextHandle ctx, GCValue owner_element,
                                const char *name, const char *value) {
     GCValue attr = JS_NewObject(ctx);
     if (JS_IsException(attr)) return attr;
     JS_SetPropertyStr(ctx, attr, "name", JS_NewString(ctx, name ? name : ""));
-    JS_SetPropertyStr(ctx, attr, "value", JS_NewString(ctx, value ? value : ""));
+    JS_DefinePropertyValueStr(ctx, attr, "__value", JS_NewString(ctx, value ? value : ""),
+                              JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    static const char *const vnames[] = { "value", "nodeValue", "textContent" };
+    for (int i = 0; i < 3; i++) {
+        JSAtom at = JS_NewAtom(ctx, vnames[i]);
+        JS_DefinePropertyGetSet(ctx, attr, at, JS_NewCFunction(ctx, js_attr_value_get, vnames[i], 0),
+                                JS_NewCFunction(ctx, js_attr_value_set, vnames[i], 1),
+                                JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+        JS_FreeAtom(ctx, at);
+    }
     JS_SetPropertyStr(ctx, attr, "nodeName", JS_NewString(ctx, name ? name : ""));
-    JS_SetPropertyStr(ctx, attr, "nodeValue", JS_NewString(ctx, value ? value : ""));
     JS_SetPropertyStr(ctx, attr, "namespaceURI", JS_NULL);
     JS_SetPropertyStr(ctx, attr, "localName", JS_NewString(ctx, name ? name : ""));
     JS_SetPropertyStr(ctx, attr, "prefix", JS_NULL);
-    JS_SetPropertyStr(ctx, attr, "textContent", JS_NewString(ctx, value ? value : ""));
     JS_SetPropertyStr(ctx, attr, "nodeType", JS_NewInt32(ctx, 2));
     JS_SetPropertyStr(ctx, attr, "specified", JS_TRUE);
     JS_SetPropertyStr(ctx, attr, "ownerElement", owner_element);
     /* (an Attr, when the realm has the interface) */
     GCValue proto = global_proto(ctx, "Attr");
     if (JS_IsObject(proto)) JS_SetPrototype(ctx, attr, proto);
+    return attr;
+}
+
+/* ---- Attr nodes ----
+ * An Attr is an object over its owner element's attribute (create_attr_obj:
+ * value reads and writes through); one with no owner holds its value. */
+
+static GCValue call_method(JSContextHandle ctx, GCValue obj, const char *m, int argc, GCValue *argv) {
+    return JS_Call(ctx, JS_GetPropertyStr(ctx, obj, m), obj, argc, argv);
+}
+
+/* document.createAttribute(localName): lower-cased in an HTML document. */
+GCValue js_document_create_attribute(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "Failed to execute 'createAttribute' on 'Document': 1 argument required.");
+    size_t n = 0;
+    const char *raw = JS_ToCStringLen(ctx, &n, argv[0]);
+    if (!raw) return JS_EXCEPTION;
+    if (!valid_attr_name(raw, n)) return throw_dom_exception(ctx, "InvalidCharacterError", "The attribute name is not a valid name.");
+    char *name = strndup(raw, n);
+    if (!name) return JS_ThrowOutOfMemory(ctx);
+    NodeId d = dom_node_of(this_val);
+    if (dom_is_html_document(d))
+        for (char *p = name; *p; p++) if (*p >= 'A' && *p <= 'Z') *p = (char)(*p + 32);
+    GCValue attr = create_attr_obj(ctx, JS_NULL, name, "");
+    free(name);
+    return attr;
+}
+
+/* document.createAttributeNS(namespace, qualifiedName) */
+GCValue js_document_create_attribute_ns(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_ThrowTypeError(ctx, "Failed to execute 'createAttributeNS' on 'Document': 2 arguments required.");
+    size_t n = 0;
+    const char *q = JS_ToCStringLen(ctx, &n, argv[1]);
+    if (!q) return JS_EXCEPTION;
+    if (!valid_attr_name(q, n)) return throw_dom_exception(ctx, "InvalidCharacterError", "The attribute name is not a valid name.");
+    GCValue attr = create_attr_obj(ctx, JS_NULL, q, "");
+    if (JS_IsException(attr)) return attr;
+    const char *colon = memchr(q, ':', n);
+    GCValue ns = JS_IsNull(argv[0]) || JS_IsUndefined(argv[0]) ? JS_NULL : JS_ToString(ctx, argv[0]);
+    if (JS_IsString(ns)) {
+        size_t nl = 0;
+        const char *nss = JS_ToCStringLen(ctx, &nl, ns);
+        if (nss && nl == 0) ns = JS_NULL;
+    }
+    if (colon && JS_IsNull(ns)) return throw_dom_exception(ctx, "NamespaceError", "A prefix needs a namespace.");
+    JS_SetPropertyStr(ctx, attr, "namespaceURI", ns);
+    JS_SetPropertyStr(ctx, attr, "prefix", colon ? JS_NewStringLen(ctx, q, (size_t)(colon - q)) : JS_NULL);
+    JS_SetPropertyStr(ctx, attr, "localName", colon ? JS_NewString(ctx, colon + 1) : JS_NewStringLen(ctx, q, n));
+    return attr;
+}
+
+/* element.getAttributeNode(name) / getAttributeNodeNS(namespace, localName) */
+static GCValue attr_node_get(JSContextHandle ctx, GCValue el, bool ns_form, int argc, GCValue *argv) {
+    NodeId node = dom_node_of(el);
+    if (!node) return JS_NULL;
+    int count = dom_attr_count(node);
+    for (int i = 0; i < count; i++) {
+        GCValue a = attr_obj_at(ctx, el, node, i);
+        if (!JS_IsObject(a)) continue;
+        if (ns_form) {
+            GCValue ns = argc > 0 && !JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0]) ? JS_ToString(ctx, argv[0]) : JS_NULL;
+            GCValue ans = JS_GetPropertyStr(ctx, a, "namespaceURI");
+            bool ns_eq = (JS_IsNull(ns) || (JS_IsString(ns) && JS_ToCString(ctx, ns)[0] == 0)) ? JS_IsNull(ans) : JS_StrictEq(ctx, ns, ans);
+            if (ns_eq && argc > 1 && JS_StrictEq(ctx, JS_GetPropertyStr(ctx, a, "localName"), JS_ToString(ctx, argv[1]))) return a;
+        } else {
+            GCValue v = call_method(ctx, el, "getAttribute", argc, argv);
+            if (JS_IsNull(v) || JS_IsException(v)) return JS_IsException(v) ? v : JS_NULL;
+            /* (the first attribute whose qualified name matches) */
+            GCValue want = argc > 0 ? JS_ToString(ctx, argv[0]) : JS_NewString(ctx, "undefined");
+            const char *w = JS_ToCString(ctx, want), *nm = JS_ToCString(ctx, JS_GetPropertyStr(ctx, a, "name"));
+            if (w && nm && (dom_is_html_document(dom_owner(node)) && dom_ns(node) == DOM_NS_HTML ? !strcasecmp(w, nm) : !strcmp(w, nm)))
+                return a;
+        }
+    }
+    return JS_NULL;
+}
+
+GCValue js_element_get_attribute_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    return attr_node_get(ctx, this_val, false, argc, argv);
+}
+
+GCValue js_element_get_attribute_node_ns(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    return attr_node_get(ctx, this_val, true, argc, argv);
+}
+
+/* element.setAttributeNode(attr) (and NS): its value set on this element,
+ * which becomes its owner; the Attr it replaces, or null. */
+GCValue js_element_set_attribute_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1 || !JS_IsObject(argv[0]) || JS_IsUndefined(JS_GetPropertyStr(ctx, argv[0], "localName")))
+        return JS_ThrowTypeError(ctx, "Failed to execute 'setAttributeNode' on 'Element': parameter 1 is not of type 'Attr'.");
+    GCValue attr = argv[0];
+    GCValue owner = JS_GetPropertyStr(ctx, attr, "ownerElement");
+    if (JS_IsObject(owner) && !JS_StrictEq(ctx, owner, this_val))
+        return throw_dom_exception(ctx, "InUseAttributeError", "The attribute is in use by another element.");
+    GCValue ns = JS_GetPropertyStr(ctx, attr, "namespaceURI");
+    GCValue a2[2] = { ns, JS_GetPropertyStr(ctx, attr, "localName") };
+    GCValue old = attr_node_get(ctx, this_val, true, 2, a2);
+    if (JS_IsObject(old) && JS_StrictEq(ctx, old, attr)) return attr;
+    GCValue value = JS_GetPropertyStr(ctx, attr, "value");
+    if (JS_IsObject(old)) {
+        /* (the replaced Attr keeps its value and has no owner now) */
+        JS_DefinePropertyValueStr(ctx, old, "__value", JS_GetPropertyStr(ctx, old, "value"), JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+        JS_SetPropertyStr(ctx, old, "ownerElement", JS_NULL);
+    }
+    GCValue a3[3] = { ns, JS_GetPropertyStr(ctx, attr, "name"), value };
+    GCValue r = call_method(ctx, this_val, "setAttributeNS", 3, a3);
+    if (JS_IsException(r)) return r;
+    JS_SetPropertyStr(ctx, attr, "ownerElement", this_val);
+    return JS_IsObject(old) ? old : JS_NULL;
+}
+
+/* element.removeAttributeNode(attr) */
+GCValue js_element_remove_attribute_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1 || !JS_IsObject(argv[0]))
+        return JS_ThrowTypeError(ctx, "Failed to execute 'removeAttributeNode' on 'Element': parameter 1 is not of type 'Attr'.");
+    GCValue attr = argv[0];
+    GCValue ns = JS_GetPropertyStr(ctx, attr, "namespaceURI");
+    GCValue a2[2] = { ns, JS_GetPropertyStr(ctx, attr, "localName") };
+    GCValue have = attr_node_get(ctx, this_val, true, 2, a2);
+    if (!JS_IsObject(have) || !JS_StrictEq(ctx, JS_GetPropertyStr(ctx, attr, "ownerElement"), this_val))
+        return throw_dom_exception(ctx, "NotFoundError", "The attribute is not an attribute of this element.");
+    JS_DefinePropertyValueStr(ctx, attr, "__value", JS_GetPropertyStr(ctx, attr, "value"), JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    GCValue r = call_method(ctx, this_val, "removeAttributeNS", 2, a2);
+    if (JS_IsException(r)) return r;
+    JS_SetPropertyStr(ctx, attr, "ownerElement", JS_NULL);
     return attr;
 }
 

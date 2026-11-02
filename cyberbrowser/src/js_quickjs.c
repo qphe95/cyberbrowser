@@ -219,6 +219,14 @@ static void js_quickjs_log_exception(JSContextHandle ctx, const char *tag, const
     
     if (error) {
     }
+    /* HTML "report an exception": the window's error event (reportError,
+     * dom_events.js), as a script that throws does. */
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue report = JS_GetPropertyStr(ctx, global, "reportError");
+    if (JS_IsFunction(ctx, report)) {
+        GCValue r = JS_Call(ctx, report, global, 1, &exception);
+        if (JS_IsException(r)) JS_GetException(ctx);
+    }
 }
 
 static JSClassID js_http_response_class_id;
