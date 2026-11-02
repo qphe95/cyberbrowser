@@ -1,6 +1,27 @@
 # Inline layout on paragraph items
 
-Status: planned, nothing built.  Goal: lay out a block's inline content the way browsers do, from
+Status: step 3a done, behind CYBER_IFC=1 (steps 1 and 2 measured and dropped, below).
+
+Step 3a (css_layout.c, "Inline formatting on items"): a block whose in-flow content is only text
+and inline elements without left or right margin, border or padding, in white-space normal, with
+nothing that needs bidi, no generated content and no pseudo-element box (ifc_eligible), is laid out
+by ifc_layout instead of the per-child loop.  Tokens: each text box cut into words and collapsible
+spaces, a space dropped after a space or at the start (white space collapsed across boxes), a mark
+for a box with nothing kept.  Lines: greedy, a break only at a space (none between boxes without
+one, so `Official&nbsp;<span>` text stays whole), spaces at a line's start removed and at its end
+hanging, each line's room from layout_flow_line_geometry at its top, text-indent on the first,
+text-align on its words.  Line height: as the flow's line box takes it (the item's line advance and
+how far the item's own children reach), so the two paths agree.  Output: each text box's fragments
+per line and its outline around them, each inline element's outline (one line: its content area
+centred as the flow does), pieces per line for one on several lines with a background or border; the
+block is kept from flow reuse until fragments are in the flow record (step 6).  Results under
+CYBER_IFC=1: css/CSS2 5395 -> 5417, none lost (tables 6, css1 5, box-display 3, text 3, linebox 2,
+ui 2, positioning 1); 57 screenshots differ from the old path (the fixes and failing pages that
+changed).  YouTube's screenshot identical; Wikipedia's differs below its infobox because
+"Official&nbsp;languages" (the space a non-breaking one, in its own span) no longer breaks, as in a
+browser, and one line no longer starts with a stray space.  Forced layouts within noise of the old
+path (Wikipedia 260 / 265 ms median, YouTube 208 / 210).  Without the switch every screenshot is
+identical.  Next, 3b: inline box edges, `<br>` at any depth, empty inlines.  Goal: lay out a block's inline content the way browsers do, from
 a per-paragraph list of items analysed once (text, white space, break opportunities, bidi levels,
 widths) and kept across layouts, so that right-to-left and mixed-direction text costs about what
 left-to-right does, line breaking never measures the same text twice, and the inline boxes a line
@@ -119,16 +140,18 @@ block; layout_flow_noreuse_up stops being needed for either.
 ## Steps (each lands on its own: full css/CSS2 run with no page lost, screenshots compared,
 YouTube and Wikipedia replays, LTR and forced-RTL timing)
 
-1. **Paragraph data for the bidi pass.**  Build and cache LayoutInline (text, items, levels) and
-   have layout_bidi_reorder take its text and levels from it instead of gathering and resolving per
-   layout.  The flow is unchanged.  Expected: identical screenshots; the bidi pass's gather and
-   levels (18 ms of 46 on the forced-RTL replay) gone on layouts after the first.
-2. **Widths and recorded lines.**  Piece widths in the paragraph data; the flow's text wrapping
-   sums them instead of walking the shaper, and records each wrapped box's lines where it places it,
-   so fragments come from the flow and not from a second wrap walk, and cuts reuse the widths.
-   Expected: identical screenshots (checked: summed widths equal walked ones to the last bit, or
-   the difference found), the fragments step (11 ms) mostly gone, the flow's own text measuring
-   cheaper for every page.
+1. **Paragraph data for the bidi pass.**  Not done: measured first, it would save 3-8 ms.  The
+   levels are already cached by paragraph text, so only the gathering (8 ms over the replay's six
+   layouts) was left to save, and half those layouts build a fresh tree, where data kept per box
+   index cannot carry over; on the other half, flow reuse keeps 3,155 of 45,891 boxes, so its
+   "unchanged" signal cannot be relied on either.  The paragraph data comes with step 3 instead.
+2. **Recorded lines.**  Built and dropped: the flow recorded the lines of wrapped text (in inline
+   elements too, 4,525 of 5,715 wrapped boxes on the forced-RTL replay) and fragments were built
+   from them, and the shaper's line breaking measured each word once instead of three times; every
+   screenshot identical, and no measurable change in 10 alternating rounds (forced-RTL Wikipedia
+   289 -> 290 ms median, plain Wikipedia 256 -> 256, YouTube 201 -> 202).  The second line breaking
+   cost about 5 ms over six layouts and recording about as much.  What is left of the gap is the
+   post-pass as a whole; step 3 removes it.
 3. **The line breaker, beside the old flow (CYBER_IFC=1).**  Inline content laid out from items
    as above, writing fragments, pieces and boxes; the old path stays the default.  Compared run by
    run against the old path on the full suite and the replays, in sub-steps that each reach no page
