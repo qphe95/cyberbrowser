@@ -79,6 +79,8 @@ typedef struct ImageEntry {
     uint64_t hash;
     _Atomic int state;
     _Atomic int nat_w, nat_h;           /* natural size, 0 = unknown */
+    _Atomic unsigned dims;              /* its own width (1), height (2), ratio (4) */
+    _Atomic float ratio;
     _Atomic int want_w, want_h;         /* largest requested paint size */
     _Atomic(ImagePixels *) pixels;
     int decoded_full;                   /* decoded at natural size */
@@ -249,14 +251,18 @@ static unsigned rd32le(const uint8_t *p) { return p[0] | ((unsigned)p[1] << 8) |
 static float svg_length(const char *v)
 {
     if (!v) return 0.0f;
-    float f = strtof(v, NULL);
+    char *e = NULL;
+    float f = strtof(v, &e);
+    if (e && *e == '%') return 0.0f;   /* (a percentage: no size of its own) */
     return f > 0.0f ? f : 0.0f;
 }
 
 /* Identify the format and read the natural size without decoding pixels. */
-static ImageFormat sniff(const uint8_t *d, size_t n, int *w, int *h)
+static ImageFormat sniff(const uint8_t *d, size_t n, int *w, int *h, unsigned *dims, float *ratio)
 {
     *w = *h = 0;
+    *dims = 7;
+    *ratio = 0.0f;
     if (!d || n < 12) return FMT_UNKNOWN;
     if (n >= 24 && memcmp(d, "\x89PNG\r\n\x1a\n", 8) == 0) {
         *w = (int)rd32be(d + 16);
@@ -318,6 +324,15 @@ static ImageFormat sniff(const uint8_t *d, size_t n, int *w, int *h)
             float fw = pw ? svg_length(pw + 8) : 0.0f, fh = ph ? svg_length(ph + 9) : 0.0f;
             char *vb = strstr(svg, "viewBox=\"");
             if (!vb) vb = strstr(svg, "viewBox='");
+            *dims = (fw > 0.0f ? 1u : 0u) | (fh > 0.0f ? 2u : 0u);
+            if (fw > 0.0f && fh > 0.0f) { *dims |= 4u; *ratio = fw / fh; }
+            else {
+                float a, b, c, e;
+                if (vb && sscanf(vb + 9, "%f%*[ ,]%f%*[ ,]%f%*[ ,]%f", &a, &b, &c, &e) == 4 && c > 0 && e > 0) {
+                    *dims |= 4u;
+                    *ratio = c / e;
+                }
+            }
             if (vb && (fw <= 0.0f || fh <= 0.0f)) {
                 float a, b, c, e;
                 if (sscanf(vb + 9, "%f%*[ ,]%f%*[ ,]%f%*[ ,]%f", &a, &b, &c, &e) == 4 && c > 0 && e > 0) {
@@ -326,7 +341,8 @@ static ImageFormat sniff(const uint8_t *d, size_t n, int *w, int *h)
                     else { fw = c; fh = e; }
                 }
             }
-            if (fw <= 0.0f || fh <= 0.0f) { fw = 300.0f; fh = 150.0f; }
+            if (fw <= 0.0f) fw = 300.0f;   /* (the default for what it lacks) */
+            if (fh <= 0.0f) fh = 150.0f;
             *w = (int)(fw + 0.5f);
             *h = (int)(fh + 0.5f);
         }
@@ -585,7 +601,9 @@ static void work_entry(ImageCache *c, ImageEntry *e)
         atomic_store(&e->state, ST_FETCHING);
         bool ok = fetch_entry(e);
         int w = 0, h = 0;
-        if (ok) e->fmt = sniff(e->bytes, e->nbytes, &w, &h);
+        unsigned dims = 7;
+        float ratio = 0.0f;
+        if (ok) e->fmt = sniff(e->bytes, e->nbytes, &w, &h, &dims, &ratio);
         if (!ok || e->fmt == FMT_UNKNOWN) {
             /* Unknown magic: let stb try (TGA, PSD, ...). */
             if (ok) {
@@ -606,6 +624,8 @@ static void work_entry(ImageCache *c, ImageEntry *e)
         }
         atomic_store(&e->nat_w, w);
         atomic_store(&e->nat_h, h);
+        atomic_store(&e->dims, dims | 8u);   /* (8: known) */
+        atomic_store(&e->ratio, dims & 4u && ratio > 0.0f ? ratio : h > 0 ? (float)w / (float)h : 0.0f);
         pthread_mutex_lock(&c->mu);
         atomic_store(&e->state, ST_SIZED);
         notify_locked(c, e);            /* layout can use the size now */
@@ -861,6 +881,25 @@ bool image_cache_natural_size(ImageCache *c, const char *url_or_path, int *out_w
     if (out_w) *out_w = w;
     if (out_h) *out_h = h;
     return w > 0 && h > 0;
+}
+
+bool image_cache_intrinsic(ImageCache *c, const char *url_or_path, unsigned *dims, float *ratio)
+{
+    *dims = 7;
+    *ratio = 0.0f;
+    if (!c || !url_or_path || !url_or_path[0]) return false;
+    pthread_mutex_lock(&c->mu);
+    ImageEntry *e = NULL;
+    int handle = get_entry_locked(c, url_or_path, &e);
+    int st = handle >= 0 ? atomic_load(&e->state) : ST_ERROR;
+    if (handle >= 0) {
+        unsigned d = atomic_load(&e->dims);
+        int w = atomic_load(&e->nat_w), h = atomic_load(&e->nat_h);
+        *dims = d & 8u ? d & 7u : 7u;
+        *ratio = d & 8u ? atomic_load(&e->ratio) : h > 0 ? (float)w / (float)h : 0.0f;
+    }
+    pthread_mutex_unlock(&c->mu);
+    return !(st == ST_ERROR || st == ST_QUEUED || st == ST_FETCHING);
 }
 
 int image_cache_status(ImageCache *c, const char *url_or_path)

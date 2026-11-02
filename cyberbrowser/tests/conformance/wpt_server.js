@@ -145,7 +145,7 @@ if (REFTEST) {
     fs.writeFileSync(path.join(out, 'reftests.json'), JSON.stringify({ refInfo, steps }, null, 1));
 }
 /* Says when a reftest page is ready to be compared (posted to /refready). */
-const REFREADY = `<script>//<![CDATA[
+const REFREADY = `<script style="display: none !important">//<![CDATA[
 (function () {
   function ready() {
     var x = new XMLHttpRequest();

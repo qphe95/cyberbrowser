@@ -100,7 +100,7 @@ void css_style_bloom_push(CssStyleScratch *t, const CssStyleDoc *sd, int dom);
 int css_style_match(const CssStyleSet *set, const CssStyleDoc *sd, int dom,
                     CssStyleScratch *t, const CssAppliedDecl **out);
 
-/* ::after, ::before and ::first-letter (is_before 0, 1, 2) rules whose branch matches `dom`: global rule index and the
+/* ::after, ::before, ::first-letter and ::first-line (is_before 0, 1, 2, 3) rules whose branch matches `dom`: global rule index and the
  * specificity of the first matching branch (legacy semantics), in rule
  * order.  Valid until the next call. */
 typedef struct CssAfterMatch { int rule; int specificity; int is_before; } CssAfterMatch;

@@ -140,12 +140,17 @@ static bool css_declaration_add(CssRule *rule, const char *prop, size_t prop_len
      * prioritize it above normal declarations. */
     bool is_important = false;
     {
+        /* (white space may come between the ! and important) */
         size_t vlen = strlen(v);
-        if (vlen >= 10 && strncasecmp(v + vlen - 10, "!important", 10) == 0) {
-            is_important = true;
-            v[vlen - 10] = '\0';
-            size_t trimmed = vlen - 10;
-            while (trimmed > 0 && css_is_space(v[trimmed - 1])) v[--trimmed] = '\0';
+        if (vlen >= 10 && strncasecmp(v + vlen - 9, "important", 9) == 0) {
+            size_t b = vlen - 9;
+            while (b > 0 && css_is_space(v[b - 1])) b--;
+            if (b > 0 && v[b - 1] == '!') {
+                is_important = true;
+                size_t trimmed = b - 1;
+                v[trimmed] = '\0';
+                while (trimmed > 0 && css_is_space(v[trimmed - 1])) v[--trimmed] = '\0';
+            }
         }
     }
 
@@ -645,6 +650,28 @@ static bool css_prelude_invalid(const char *sel)
             return true;
         } else if (c == ',' && br == 0) {
             first = true;
+        } else if (c == ':' && br == 0) {
+            /* (a pseudo-element, ::x or the legacy :before, :after,
+             * :first-line and :first-letter, ends its selector: only
+             * pseudo-classes may follow it; :lang() needs an argument) */
+            bool dbl = p[1] == ':';
+            const char *n = p + 1 + dbl;
+            size_t nl = 0;
+            while (isalnum((unsigned char)n[nl]) || n[nl] == '-' || n[nl] == '_') nl++;
+            if (nl == 4 && !strncasecmp(n, "lang", 4) && n[4] == '(') {
+                const char *a = n + 5;
+                while (css_is_space(*a)) a++;
+                if (*a == ')') return true;
+            }
+            bool pe = dbl || (nl == 6 && !strncasecmp(n, "before", 6)) || (nl == 5 && !strncasecmp(n, "after", 5)) ||
+                      (nl == 10 && !strncasecmp(n, "first-line", 10)) ||
+                      (nl == 12 && !strncasecmp(n, "first-letter", 12));
+            if (pe && nl > 0 && n[nl] != '(') {
+                const char *a = n + nl;
+                while (css_is_space(*a)) a++;
+                if (*a && *a != ',' && !(a == n + nl && *a == ':')) return true;
+                p = n + nl - 1;
+            }
         }
     }
 }
@@ -1064,7 +1091,10 @@ static size_t css_at_rule(const char *s, size_t len, size_t pos, bool nested, Cs
     AtKind kind = css_at_kind(name, nl);
     bool is_charset = nl == 7 && !strncasecmp(name, "charset", 7), is_import = nl == 6 && !strncasecmp(name, "import", 6),
          is_layer = nl == 5 && !strncasecmp(name, "layer", 5);
-    if (counts) *counts = css_at_known(name, nl) && !is_charset && !is_import && !(is_layer && !block);
+    /* (one that needs a block, @media; or @page;, is invalid: dropped, it
+     * does not count; of the statements only @namespace does) */
+    bool is_namespace = nl == 9 && !strncasecmp(name, "namespace", 9);
+    if (counts) *counts = css_at_known(name, nl) && !is_charset && !is_import && (block ? true : is_namespace);
     if (!block) return end;
     if (kind == AT_SKIP || !sheet) {
         size_t e;
@@ -1122,8 +1152,9 @@ static size_t css_rule_item(const char *s, size_t len, size_t pos, bool nested, 
     }
     char *sel = bad ? NULL : fast ? css_strndup_trim(s + start, pre_end - start) : tsel;
     if (sel != tsel) free(tsel);
-    /* (the text scan has checked what css_prelude_invalid looks for) */
-    if (!sel || (!fast && css_prelude_invalid(sel))) {
+    /* (the text scan has checked what css_prelude_invalid looks for, but
+     * for pseudo-elements and :lang()) */
+    if (!sel || ((!fast || strchr(sel, ':')) && css_prelude_invalid(sel))) {
         free(sel);
         css_skip_rule_block(s, len, &pos);
         return pos;

@@ -65,6 +65,11 @@ bool image_cache_natural_size(ImageCache *cache, const char *url_or_path,
                               int *out_w, int *out_h);
 bool image_cache_get_natural(ImageCache *cache, int handle, int *out_w, int *out_h);
 
+/* What of its size an image has of its own (an SVG may have none): *dims
+ * bit 1 a width, 2 a height, 4 a ratio (*ratio, width / height).  False
+ * while unknown. */
+bool image_cache_intrinsic(ImageCache *cache, const char *url_or_path, unsigned *dims, float *ratio);
+
 /* Load status (starts the fetch when needed): 1 = fetched and sized (decode
  * may still be running), 0 = in flight, -1 = failed.  Thread-safe. */
 int image_cache_status(ImageCache *cache, const char *url_or_path);

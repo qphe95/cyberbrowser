@@ -252,6 +252,9 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     /* list-style for display:list-item markers. */
     unsigned char list_style_type;   /* 0=none, 1=disc, 2=circle, 3=square, 4=decimal */
     unsigned char list_style_type_set;
+    /* list-style-image (inherited): its absolute URL, "" none */
+    const char *list_image;
+    unsigned char list_image_set;
     /* letter-spacing / word-spacing in px (0: normal) and text-transform
      * (0 none, 1 uppercase, 2 lowercase, 3 capitalize); inherited. */
     float letter_spacing, word_spacing;
@@ -432,7 +435,15 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char table_role;
     unsigned char border_spacing_set, border_collapse, border_collapse_set;   /* (border-collapse: inherited) */
     double border_spacing_h, border_spacing_v;
+    /* caption-side as given: 0 not (inherited: css_layout_caption_bottom), 1 top, 2 bottom */
+    unsigned char caption_side;
 } LayoutStyle;
+
+struct LayoutContext;
+/* Does caption box idx go below its table (caption-side, inherited)? */
+bool css_layout_caption_bottom(const struct LayoutContext *ctx, int idx);
+/* A list item's marker baseline (its first line's, else its strut's). */
+double css_layout_marker_baseline(struct LayoutContext *ctx, int idx);
 
 /* A box of the layout tree: its computed style (shared, read-only once the
  * style pass is over) and the geometry the layout passes compute.  The
@@ -489,6 +500,8 @@ typedef struct LayoutTextFrag {
     double dx, dy, w;
     unsigned char level;
     unsigned char ellipsis;   /* an ellipsis after it (line-clamp, text-overflow) */
+    unsigned char fl;         /* on a ::first-line whose color it takes (fl_rgba) */
+    uint32_t fl_rgba;
 } LayoutTextFrag;
 
 typedef struct LayoutTextFragList {
@@ -696,6 +709,11 @@ typedef struct LayoutContext {
      * with the pseudo boxes. */
     struct HtmlNode *anon_nodes;
     int anon_nodes_n;
+    /* The ::first-line color a block's first line takes from an ancestor
+     * whose first line it is (fl_in set: fl_in_rgba), from the flow laying
+     * it out to its own (layout_block_flow_inner). */
+    unsigned char fl_in;
+    uint32_t fl_in_rgba;
 } LayoutContext;
 
 #define LAYOUT_HAS_SUBJECT 1

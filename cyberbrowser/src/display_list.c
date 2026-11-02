@@ -133,6 +133,26 @@ static void dl_clip_range(DisplayList *dl, int from, const float c[4]);
  * placed in the padding box (or the viewport, fixed) by background-position
  * and repeated per background-repeat, clipped to the border box (to area,
  * when given: the canvas, for the root's). */
+/* How far table box i's captions (outside the table box) reach below its
+ * top (*bot: above its bottom). */
+static float table_caption_top(const LayoutContext *ctx, int i, const LayoutBox *box, float *bot)
+{
+    double ext = 0.0, ebot = 0.0;
+    for (int c = ctx->tree.nodes[i].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+        const LayoutBox *cb = &ctx->boxes[c];
+        if (!(cb->s->table_caption || cb->s->table_role == 5) || cb->s->display == CSS_DISPLAY_NONE) continue;
+        if (css_layout_caption_bottom(ctx, c)) {
+            double e = box->y + box->height - (cb->y - cb->margin_top);
+            if (e > ebot) ebot = e;
+            continue;
+        }
+        double e = cb->y + cb->height + cb->margin_bottom - box->y;
+        if (e > ext) ext = e;
+    }
+    *bot = (float)ebot;
+    return (float)ext;
+}
+
 static void emit_background_image(const LayoutContext *ctx, DisplayList *dl, const LayoutBox *box,
                                   const float *area)
 {
@@ -148,19 +168,39 @@ static void emit_background_image(const LayoutContext *ctx, DisplayList *dl, con
     double aw = bw - s->border_left - s->border_right, ah = bh - s->border_top - s->border_bottom;
     if (s->bg_fixed) { ax = 0.0; ay = 0.0; aw = ctx->viewport_width; ah = ctx->viewport_height; }
     if (aw <= 0.0 || ah <= 0.0) return;
+    /* (an image without a size or ratio of its own, an SVG: CSS
+     * Backgrounds 3 section 3.9, the area's for what it lacks) */
+    unsigned dims = 7;
+    float ratio = 0.0f;
+    image_cache_intrinsic(g_image_cache, s->background_image_url, &dims, &ratio);
+    bool has_r = (dims & 4) && ratio > 0.0f;
     double tw = nw, th = nh;
     if (s->bg_size_kind == 1 || s->bg_size_kind == 2) {
-        double sx = aw / nw, sy = ah / nh;
-        double k = s->bg_size_kind == 1 ? (sx > sy ? sx : sy) : (sx < sy ? sx : sy);
-        tw = nw * k;
-        th = nh * k;
+        if (!has_r) { tw = aw; th = ah; }
+        else {
+            double rw = ratio, rh = 1.0;
+            double sx = aw / rw, sy = ah / rh;
+            double k = s->bg_size_kind == 1 ? (sx > sy ? sx : sy) : (sx < sy ? sx : sy);
+            tw = rw * k;
+            th = rh * k;
+        }
     } else if (s->bg_size_kind == 3) {
         double w = s->bg_size_w, hgt = s->bg_size_h;
         if (w >= 0.0 && (s->bg_size_pct & 1)) w *= aw;
         if (hgt >= 0.0 && (s->bg_size_pct & 2)) hgt *= ah;
         if (w >= 0.0 && hgt >= 0.0) { tw = w; th = hgt; }
-        else if (w >= 0.0) { tw = w; th = w * nh / nw; }
-        else if (hgt >= 0.0) { th = hgt; tw = hgt * nw / nh; }
+        else if (w >= 0.0) { tw = w; th = has_r ? w / ratio : (dims & 2) ? nh : ah; }
+        else if (hgt >= 0.0) { th = hgt; tw = has_r ? hgt * ratio : (dims & 1) ? nw : aw; }
+    } else if ((dims & 3) != 3) {
+        /* (auto: a size of one's own where it has one, the ratio for the
+         * other, else the area's; neither and a ratio: contain) */
+        if (dims & 1) { tw = nw; th = has_r ? nw / ratio : ah; }
+        else if (dims & 2) { th = nh; tw = has_r ? nh * ratio : aw; }
+        else if (has_r) {
+            double k = aw / ratio < ah ? aw / ratio : ah;
+            th = k;
+            tw = k * ratio;
+        } else { tw = aw; th = ah; }
     }
     if (tw <= 0.0 || th <= 0.0) return;
     int handle = image_cache_request(g_image_cache, s->background_image_url, (int)ceil(tw), (int)ceil(th));
@@ -1320,6 +1360,11 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
         for (int i = 0; i < n; i++) {
             int p = ctx->tree.nodes[i].parent_idx;
             LayoutBox *b = &ctx->boxes[i];
+            /* (an absolutely positioned box: clipped as its containing
+             * block's content, not by the boxes between) */
+            if (b->s->position == CSS_POSITION_ABSOLUTE)
+                while (p >= 0 && ctx->tree.nodes[p].parent_idx >= 0 && ctx->boxes[p].s->position == CSS_POSITION_STATIC)
+                    p = ctx->tree.nodes[p].parent_idx;
             float c[4] = { -1e30f, -1e30f, 1e30f, 1e30f };
             if (p >= 0 && p < i && b->s->position != CSS_POSITION_FIXED) {
                 memcpy(c, clip[p], sizeof(c));
@@ -1335,6 +1380,14 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                     float px0 = (float)(pb->x + pb->s->border_left), py0 = (float)(pb->y + pb->s->border_top);
                     float px1 = (float)(pb->x + pb->width - pb->s->border_right);
                     float py1 = (float)(pb->y + pb->height - pb->s->border_bottom);
+                    if (pb->s->table_role == 1) {
+                        /* (a table's box, without its captions; they are
+                         * outside it, not clipped by it) */
+                        float cbot = 0.0f, ctop = table_caption_top(ctx, p, pb, &cbot);
+                        py0 += ctop;
+                        py1 -= cbot;
+                        if (b->s->table_caption || b->s->table_role == 5) { px0 = c[0]; py0 = c[1]; px1 = c[2]; py1 = c[3]; }
+                    }
                     if (px0 > c[0]) c[0] = px0;
                     if (py0 > c[1]) c[1] = py0;
                     if (px1 < c[2]) c[2] = px1;
@@ -1388,7 +1441,16 @@ static int canvas_background(LayoutContext *ctx, DisplayList *dl)
         return -2;
     if (g_image_cache && s->background_image_url[0]) {
         float area[4] = { 0.0f, 0.0f, (float)ceil(w), (float)ceil(h) };
-        emit_background_image(ctx, dl, &ctx->boxes[src], area);
+        /* (positioned against the root element's box, the body's too) */
+        LayoutBox pb = ctx->boxes[root];
+        LayoutStyle ps = *s;
+        const LayoutStyle *rs = ctx->boxes[root].s;
+        ps.border_left = rs->border_left;
+        ps.border_right = rs->border_right;
+        ps.border_top = rs->border_top;
+        ps.border_bottom = rs->border_bottom;
+        pb.s = &ps;
+        emit_background_image(ctx, dl, &pb, area);
     }
     return src;
 }
@@ -1642,11 +1704,16 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                                         ? &ctx->pieces[i] : NULL;
         if (pieces) paint_pieces(ctx, dl, i, -1, op);
 
+        /* (a table's captions above it are outside its box: its background
+         * and border below them) */
+        float cap_bot = 0.0f;
+        float cap_top = box->s->table_role == 1 ? table_caption_top(ctx, i, box, &cap_bot) : 0.0f;
+
         /* Backgrounds paint first: under the borders, list marker and the
          * box's content. */
         /* (a color however thin: a 1px box is a line) */
-        if (!pieces && i != canvas_src && box->width > 0.0f && box->height > 0.0f && box->s->background_color_a > 0.0f) {
-            float bgx = (float)box->x, bgy = (float)box->y, bgw = (float)box->width, bgh = (float)box->height;
+        if (!pieces && i != canvas_src && box->width > 0.0f && box->height > cap_top + cap_bot && box->s->background_color_a > 0.0f) {
+            float bgx = (float)box->x, bgy = (float)box->y + cap_top, bgw = (float)box->width, bgh = (float)box->height - cap_top - cap_bot;
             snap_rect(&bgx, &bgy, &bgw, &bgh);
             if (!display_list_add_rect(dl, bgx, bgy, bgw, bgh, (float)box->s->background_color_r,
                                        (float)box->s->background_color_g, (float)box->s->background_color_b,
@@ -1757,9 +1824,16 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     if (tfl && tfl->n > 0) {
                         for (int q = 0; q < tfl->n; q++) {
                             const LayoutTextFrag *fr = &tfl->f[q];
+                            float fr_r = tr, fr_g = tg, fr_b = tb, fr_a = ta;
+                            if (fr->fl) {   /* (on a ::first-line) */
+                                fr_r = (float)(fr->fl_rgba >> 24) / 255.0f;
+                                fr_g = (float)((fr->fl_rgba >> 16) & 255) / 255.0f;
+                                fr_b = (float)((fr->fl_rgba >> 8) & 255) / 255.0f;
+                                fr_a = (float)(fr->fl_rgba & 255) / 255.0f * op;
+                            }
                             if (!text_shaper_shape_span(font, run_text, fr->start, fr->end, (float)(box->x + fr->dx),
-                                                        (float)(box->y + fr->dy), scale, (fr->level & 1) != 0, tr,
-                                                        tg, tb, ta, dl))
+                                                        (float)(box->y + fr->dy), scale, (fr->level & 1) != 0, fr_r,
+                                                        fr_g, fr_b, fr_a, dl))
                                 return false;
                             if (fr->ellipsis &&
                                 !text_shaper_shape_span(font, "\xE2\x80\xA6", 0, 3, (float)(box->x + fr->dx + fr->w),
@@ -1792,7 +1866,22 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
 
         /* display:list-item marker (bullet / ordinal) in the gutter to the
          * left of the item's first line. */
-        if (default_font && node && node->type == HTML_NODE_ELEMENT &&
+        /* (list-style-image: the image, when it has loaded, outside to the
+         * left of the first line) */
+        bool image_marker = false;
+        if (g_image_cache && node && node->type == HTML_NODE_ELEMENT && box->s->display == CSS_DISPLAY_LIST_ITEM &&
+            box->s->list_image && box->s->list_image[0]) {
+            int iw = 0, ih = 0;
+            if (image_cache_natural_size(g_image_cache, box->s->list_image, &iw, &ih) && iw > 0 && ih > 0) {
+                int handle = image_cache_request(g_image_cache, box->s->list_image, iw, ih);
+                if (handle >= 0) {
+                    double mb = css_layout_marker_baseline(ctx, i);   /* (its bottom on the baseline) */
+                    emit_image(dl, (float)(box->x - iw - 7.0), (float)(mb - ih), (float)iw, (float)ih, handle);
+                    image_marker = true;
+                }
+            }
+        }
+        if (default_font && node && node->type == HTML_NODE_ELEMENT && !image_marker &&
             box->s->display == CSS_DISPLAY_LIST_ITEM && box->s->list_style_type != 0) {
             char marker[24];
             if (box->s->list_style_type == 4) {
@@ -1844,8 +1933,8 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             float br_r = ct[0], br_g = ct[1], br_b = ct[2], br_a = ct[3];   /* (a rounded ring: one color) */
             const float col[4][4] = { { cl[0], cl[1], cl[2], cl[3] }, { cr[0], cr[1], cr[2], cr[3] },
                                       { ct[0], ct[1], ct[2], ct[3] }, { cb[0], cb[1], cb[2], cb[3] } };
-            float bx = (float)box->x, by = (float)box->y;
-            float bw = (float)box->width, bh = (float)box->height;
+            float bx = (float)box->x, by = (float)box->y + cap_top;
+            float bw = (float)box->width, bh = (float)box->height - cap_top - cap_bot;
             snap_rect(&bx, &by, &bw, &bh);
             /* The widths painted (top, right, bottom, left): none for a side
              * styled none or hidden (a collapsed table's own border is room
