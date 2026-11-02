@@ -127,6 +127,9 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char width_set, height_set;
     /* Set when visibility was explicitly assigned (for inheritance). */
     unsigned char visibility_set;
+    /* A clip: rect() of no area hid the box (clip_vis*: what visibility was
+     * before, for a later clip declaration that does not). */
+    unsigned char clip_hid, clip_vis, clip_vis_set;
     double border_top, border_right, border_bottom, border_left;
     /* Per side, indexed as border_styled's bits (0 left, 1 right, 2 top,
      * 3 bottom): the color as packed RGBA (0xRRGGBBAA; bit k of
@@ -139,6 +142,10 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * collapsing table the fields above are the resolved ones, written from
      * these by layout_collapse_borders each layout. */
     float border_spec_w[4];
+    /* Computed border widths (border_styled bit order): the length even
+     * where the side has no style (its used width is 0), which is what a
+     * child's border-width: inherit takes. */
+    float border_cw[4];
     uint32_t border_spec_rgba[4];
     unsigned char border_spec_style[4], border_spec_cset;
     unsigned char border_coll;   /* the fields above written by the collapse pass (the copy stands) */
@@ -167,6 +174,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * center (as it is), 2 end; start and end follow direction (1: rtl,
      * inherited). */
     unsigned char text_align_how, direction, direction_set;
+    unsigned char text_justify;   /* text-align: justify (its last lines as start) */
     /* unicode-bidi (not inherited): 0 normal, 1 embed, 2 isolate,
      * 3 bidi-override, 4 isolate-override, 5 plaintext */
     unsigned char unicode_bidi;
@@ -434,6 +442,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * attribute or 2px) and border-collapse: collapse (no spacing). */
     unsigned char table_role;
     unsigned char border_spacing_set, border_collapse, border_collapse_set;   /* (border-collapse: inherited) */
+    unsigned char empty_cells_hide, empty_cells_set;   /* (empty-cells: inherited) */
     double border_spacing_h, border_spacing_v;
     /* caption-side as given: 0 not (inherited: css_layout_caption_bottom), 1 top, 2 bottom */
     unsigned char caption_side;

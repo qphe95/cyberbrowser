@@ -703,7 +703,7 @@ static int32_t compile_chain(Builder *b, const char *text, int32_t owner)
      * :has() arguments compile after, and compiling them reuses the
      * scratch: only their text is kept (not a copy of every part). */
     CComp tmp[CSS_MAX_SIMPLE_PARTS];
-    struct { int i; bool w, h; char comb; char where[160], has[160]; } sub[CSS_MAX_SIMPLE_PARTS];
+    struct { int i; bool w, h; char comb; char where[400], has[160]; } sub[CSS_MAX_SIMPLE_PARTS];
     int nsub = 0;
     for (int i = 0; i < count; i++) {
         const CssSimpleSelector *sp = &b->parts[i].simple;
@@ -1119,8 +1119,14 @@ static int32_t after_base_list(Builder *b, const char *branch, size_t blen, int 
     char *tail = pseudo + kwlen;
     while (*tail && isspace((unsigned char)*tail)) tail++;
     if (*tail) return -1;
+    /* ("div :after": a descendant's, as "div *:after") */
+    bool desc = pseudo > buf && isspace((unsigned char)pseudo[-1]);
     *pseudo = '\0';
     size_t l = strlen(buf);
+    if (desc && l + 3 < sizeof(buf)) {
+        while (l > 0 && isspace((unsigned char)buf[l - 1])) l--;
+        if (l > 0 && buf[l - 1] != ',') { memcpy(buf + l, " *", 3); l += 2; }
+    }
     while (l > 0 && isspace((unsigned char)buf[l - 1])) buf[--l] = '\0';
     char *base = buf;
     while (*base && isspace((unsigned char)*base)) base++;
@@ -1251,7 +1257,7 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
             }
 
             /* ::after branches (naive comma split, as the legacy code did). */
-            if (strstr(sel, ":after") || strstr(sel, ":before") || strstr(sel, ":first-letter") ||
+            if (ci_strstr((char *)sel, ":after") || ci_strstr((char *)sel, ":before") || ci_strstr((char *)sel, ":first-letter") ||
                 ci_strstr((char *)sel, ":first-line")) {
                 const char *bp = sel;
                 while (*bp) {

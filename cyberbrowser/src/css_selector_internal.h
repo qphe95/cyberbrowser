@@ -122,7 +122,8 @@ typedef struct CssSimpleSelector {
      * recursively at match time.  :where() contributes zero specificity;
      * :is() is treated the same here (a slight specificity deviation). */
     bool where_active;
-    char where_arg[160];
+    unsigned char lang_count;   /* :lang() pseudo-classes (each one in the specificity) */
+    char where_arg[400];
     /* :has(<relative selector>): leading combinator (0 descendant, '>' '+'
      * '~') and the remaining selector text. */
     bool has_active;

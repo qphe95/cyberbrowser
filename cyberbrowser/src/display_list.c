@@ -539,15 +539,47 @@ static void paint_pieces(LayoutContext *ctx, DisplayList *dl, int el, int anchor
     }
 }
 
+/* A table cell empty-cells: hide leaves unpainted (its background and
+ * borders, in the separated borders model): one with no content but
+ * collapsible white space (CSS 2.1 section 17.6.1.1). */
+static bool cell_hidden_empty(LayoutContext *ctx, int i)
+{
+    const LayoutBox *b = &ctx->boxes[i];
+    if (b->s->table_role != 4 || !b->s->empty_cells_hide || b->s->border_collapse) return false;
+    for (int c = ctx->tree.nodes[i].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+        const LayoutBox *cb = &ctx->boxes[c];
+        if (cb->s->display == CSS_DISPLAY_NONE) continue;
+        HtmlNode *n = css_layout_box_node(ctx, c);
+        if (!n) return false;
+        if (n->type == HTML_NODE_TEXT) {
+            const char *t = css_layout_box_text(ctx, c, n->text_content ? n->text_content : "");
+            for (; t && *t; t++)
+                if (!(*t == ' ' || *t == '\t' || *t == '\n' || *t == '\r' || *t == '\f')) return false;
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
 static bool box_or_ancestor_hidden(LayoutContext *ctx, int node_idx)
 {
     int idx = node_idx;
+    /* (visibility inherits, and a descendant can be visible again: the
+     * nearest box that sets it decides) */
+    bool decided = false, hidden = false;
     while (idx >= 0) {
         LayoutBox *b = &ctx->boxes[idx];
-        if (b->s->display == CSS_DISPLAY_NONE || b->s->visibility == CSS_VISIBILITY_HIDDEN) return true;
+        if (b->s->display == CSS_DISPLAY_NONE) return true;
+        /* (an object showing its image: its fallback content is not shown) */
+        if (idx != node_idx && ctx->doc && display_list_object_image(css_layout_box_node(ctx, idx))) return true;
+        if (!decided && (b->s->visibility_set || b->s->visibility != CSS_VISIBILITY_VISIBLE)) {
+            decided = true;
+            hidden = b->s->visibility != CSS_VISIBILITY_VISIBLE;
+        }
         idx = ctx->tree.nodes[idx].parent_idx;
     }
-    return false;
+    return hidden;
 }
 
 static const char* node_attribute_value(HtmlNode *node, const char *name)
@@ -899,10 +931,25 @@ static bool inside_svg(PreOrderCompactionArray *arr, int dom_idx)
     return false;
 }
 
+bool display_list_object_image(const HtmlNode *node)
+{
+    if (!node || node->type != HTML_NODE_ELEMENT || !node->tag_name || strcasecmp(node->tag_name, "object") != 0)
+        return false;
+    const char *data = node_attribute_value((HtmlNode *)node, "data");
+    if (!data || !data[0]) return false;
+    const char *type = node_attribute_value((HtmlNode *)node, "type");
+    if (type && type[0]) return strncasecmp(type, "image/", 6) == 0;
+    const char *dot = strrchr(data, '.');
+    static const char *const ext[] = { ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp", NULL };
+    for (int i = 0; dot && ext[i]; i++)
+        if (!strcasecmp(dot, ext[i])) return true;
+    return false;
+}
+
 char *display_list_image_source(const char *base_url, HtmlNode *node, float css_width)
 {
     if (!node || node->type != HTML_NODE_ELEMENT) return NULL;
-    const char *src = node_attribute_value(node, "src");
+    const char *src = node_attribute_value(node, display_list_object_image(node) ? "data" : "src");
     /* srcset, when present, overrides src with the candidate that best
      * matches the laid-out width (or the 1x candidate). */
     const char *srcset = node_attribute_value(node, "srcset");
@@ -1256,7 +1303,7 @@ static bool box_round_mask(const LayoutBox *box, DisplayMask *m)
 static bool is_replaced_tag(const HtmlNode *n)
 {
     if (!n || n->type != HTML_NODE_ELEMENT || !n->tag_name) return false;
-    return strcasecmp(n->tag_name, "img") == 0 || strcasecmp(n->tag_name, "video") == 0 ||
+    return strcasecmp(n->tag_name, "img") == 0 || display_list_object_image(n) || strcasecmp(n->tag_name, "video") == 0 ||
            strcasecmp(n->tag_name, "svg") == 0 || strcasecmp(n->tag_name, "canvas") == 0 ||
            strcasecmp(n->tag_name, "iframe") == 0;
 }
@@ -1420,8 +1467,9 @@ static int canvas_background(LayoutContext *ctx, DisplayList *dl)
  * borders), its floats, its inline-level content (an inline-block whole),
  * then its positioned descendants with z-index auto or 0 in tree order, then
  * the positive z-index ones.  A float, an atomic inline or a positioned box
- * with z-index auto paints like a stacking context of its own (its positioned
- * descendants with it: an approximation). */
+ * with z-index auto paints like a stacking context of its own, but its
+ * positioned descendants (and the stacking contexts in it) belong to the
+ * enclosing stacking context, and are painted with its own layers. */
 typedef struct { int *v; int n, cap; } PaintVec;
 
 static bool pv_push(PaintVec *p, int x)
@@ -1452,9 +1500,41 @@ static bool paint_is_context(const LayoutContext *ctx, int i)
 
 typedef struct { PaintVec negs, blocks, floats, inlines, zeros, pos; } PaintLayers;
 
+/* The z-index of a stacking context with a nonzero one (0: none). */
+static int paint_hoisted_z(const LayoutContext *ctx, int c)
+{
+    const LayoutBox *b = &ctx->boxes[c];
+    return b->s->z_index_set && paint_is_context(ctx, c) ? b->s->z_index : 0;
+}
+
+/* The positioned boxes and stacking contexts inside what paints like a
+ * stacking context of its own (n): the enclosing context's (L), in tree
+ * order (each paints its own subtree, a positioned one with what is
+ * positioned in it in turn). */
+static void paint_hoist(const LayoutContext *ctx, int n, PaintLayers *L)
+{
+    for (int c = ctx->tree.nodes[n].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+        const LayoutBox *b = &ctx->boxes[c];
+        if (b->s->display == CSS_DISPLAY_NONE) continue;
+        bool sc = paint_is_context(ctx, c);
+        if (sc || b->s->position != CSS_POSITION_STATIC) {
+            int z = paint_hoisted_z(ctx, c);
+            if (z < 0) pv_push(&L->negs, c);
+            else if (z > 0) pv_push(&L->pos, c);
+            else {
+                pv_push(&L->zeros, c);
+                if (!sc) paint_hoist(ctx, c, L);
+            }
+            continue;
+        }
+        paint_hoist(ctx, c, L);
+    }
+}
+
 /* A stacking context's descendants into its layers (an atomic inline in
- * inlines as -(index + 2)). */
-static void paint_walk(const LayoutContext *ctx, int n, PaintLayers *L)
+ * inlines as -(index + 2)).  pseudo: n only paints like one (the contexts
+ * with a nonzero z-index in it went to the enclosing one). */
+static void paint_walk(const LayoutContext *ctx, int n, PaintLayers *L, bool pseudo)
 {
     for (int c = ctx->tree.nodes[n].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
         const LayoutBox *b = &ctx->boxes[c];
@@ -1462,22 +1542,31 @@ static void paint_walk(const LayoutContext *ctx, int n, PaintLayers *L)
         bool sc = paint_is_context(ctx, c);
         if (b->s->position != CSS_POSITION_STATIC || sc) {
             int z = b->s->z_index_set ? b->s->z_index : 0;
+            if (pseudo) continue;   /* (the enclosing context's, hoisted) */
             if (z < 0 && sc) pv_push(&L->negs, c);
             else if (z > 0 && sc) pv_push(&L->pos, c);
-            else pv_push(&L->zeros, c);
+            else {
+                pv_push(&L->zeros, c);
+                if (!sc && !pseudo) paint_hoist(ctx, c, L);
+            }
             continue;
         }
-        if (b->s->float_side != 0) { pv_push(&L->floats, c); continue; }
+        if (b->s->float_side != 0) {
+            pv_push(&L->floats, c);
+            if (!pseudo) paint_hoist(ctx, c, L);
+            continue;
+        }
         HtmlNode *dn = ctx->doc ? css_layout_box_node(ctx, c) : NULL;
         bool text = dn && dn->type == HTML_NODE_TEXT;
         if (text || (b->s->display == CSS_DISPLAY_INLINE && !b->s->inline_level)) {
             pv_push(&L->inlines, c);
-            paint_walk(ctx, c, L);
+            paint_walk(ctx, c, L, pseudo);
         } else if (b->s->display == CSS_DISPLAY_INLINE_BLOCK || b->s->inline_level) {
             pv_push(&L->inlines, -(c + 2));
+            if (!pseudo) paint_hoist(ctx, c, L);
         } else {
             pv_push(&L->blocks, c);
-            paint_walk(ctx, c, L);
+            paint_walk(ctx, c, L, pseudo);
         }
     }
 }
@@ -1502,7 +1591,7 @@ static void paint_context(const LayoutContext *ctx, int root, PaintVec *out, int
     }
     PaintLayers L;
     memset(&L, 0, sizeof(L));
-    paint_walk(ctx, root, &L);
+    paint_walk(ctx, root, &L, root != ctx->tree.root_idx && !paint_is_context(ctx, root));
     paint_sort_z(ctx, &L.negs);
     paint_sort_z(ctx, &L.pos);
     for (int k = 0; k < L.negs.n; k++) paint_context(ctx, L.negs.v[k], out, depth + 1);
@@ -1569,7 +1658,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         }
         if (!(box->flags & LAYOUT_HAS_LAYOUT)) continue;
         if (box->s->display == CSS_DISPLAY_NONE) continue;
-        if (box->s->visibility == CSS_VISIBILITY_HIDDEN) continue;
+        if (box->s->visibility == CSS_VISIBILITY_HIDDEN || box->s->visibility == CSS_VISIBILITY_COLLAPSE) continue;
         /* Effective opacity (product over ancestors) scales every paint. */
         float op = (float)box->opacity_eff;
         if (op < 0.004f) continue;
@@ -1666,11 +1755,12 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
          * and border below them) */
         float cap_bot = 0.0f;
         float cap_top = box->s->table_role == 1 ? table_caption_top(ctx, i, box, &cap_bot) : 0.0f;
+        bool hid_cell = cell_hidden_empty(ctx, i);
 
         /* Backgrounds paint first: under the borders, list marker and the
          * box's content. */
         /* (a color however thin: a 1px box is a line) */
-        if (!pieces && i != canvas_src && box->width > 0.0f && box->height > cap_top + cap_bot && box->s->background_color_a > 0.0f) {
+        if (!pieces && !hid_cell && i != canvas_src && box->width > 0.0f && box->height > cap_top + cap_bot && box->s->background_color_a > 0.0f) {
             float bgx = (float)box->x, bgy = (float)box->y + cap_top, bgw = (float)box->width, bgh = (float)box->height - cap_top - cap_bot;
             snap_rect(&bgx, &bgy, &bgw, &bgh);
             if (!display_list_add_rect(dl, bgx, bgy, bgw, bgh, (float)box->s->background_color_r,
@@ -1679,12 +1769,12 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                 return false;
         }
         if (!pieces && box->width >= 2.0f && box->height >= 2.0f && box->width * box->height >= 6.0f) {
-            if (g_image_cache && box->s->background_image_url[0] && i != canvas_src) emit_background_image(ctx, dl, box, NULL);
+            if (g_image_cache && box->s->background_image_url[0] && i != canvas_src && !hid_cell) emit_background_image(ctx, dl, box, NULL);
         }
 
         /* Replaced images: <img src="..."> */
         if (node && node->type == HTML_NODE_ELEMENT &&
-            strcasecmp(node->tag_name, "img") == 0 && g_image_cache) {
+            (strcasecmp(node->tag_name, "img") == 0 || display_list_object_image(node)) && g_image_cache) {
             char *url = display_list_image_source(ctx->base_url, node, (float)box->width);
             if (url) {
                 emit_image_async(dl, box, url, op);
@@ -1881,7 +1971,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
          * The color defaults to currentColor when no border-color was given.
          * Emitted before the small-box filter: a thin box (e.g. <hr>) still
          * needs its border painted. */
-        if (!pieces && (box->s->border_top > 0.0 || box->s->border_right > 0.0 ||
+        if (!pieces && !hid_cell && (box->s->border_top > 0.0 || box->s->border_right > 0.0 ||
                         box->s->border_bottom > 0.0 || box->s->border_left > 0.0)) {
             float cl[4], cr[4], ct[4], cb[4];
             border_side_color(box, 0, op, cl);

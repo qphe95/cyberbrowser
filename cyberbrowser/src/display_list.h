@@ -121,6 +121,9 @@ ImageCache *display_list_get_image_cache(void);
  * malloc'd, NULL when the element has none.  Shared by layout (natural
  * size) and paint so both use the same image. */
 struct HtmlNode;
+/* Whether node is an <object> showing an image (its type image/..., or its
+ * data an image file): laid out and painted as an <img> of its data. */
+bool display_list_object_image(const struct HtmlNode *node);
 char *display_list_image_source(const char *base_url, struct HtmlNode *node, float css_width);
 
 /* The srcset candidate (malloc'd URL text) for a layout width; NULL if none. */

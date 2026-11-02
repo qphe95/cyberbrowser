@@ -612,6 +612,36 @@ static void css_strip_comments(char *s) {
     *o = '\0';
 }
 
+/* Whether name [n, n + nl) is a pseudo-class (or with elem, a
+ * pseudo-element) that browsers know: a selector with any other makes its
+ * whole rule invalid (Selectors 4 section 3.2).  Names with a -webkit-
+ * prefix are taken as known (there are too many to list); other vendors'
+ * are not, as in Chromium. */
+static bool css_pseudo_known(const char *n, size_t nl, bool elem)
+{
+    static const char *const classes[] = {
+        "active", "any-link", "autofill", "blank", "buffering", "checked", "closed", "current", "default",
+        "defined", "dir", "disabled", "empty", "enabled", "first", "first-child", "first-of-type", "focus",
+        "focus-visible", "focus-within", "fullscreen", "future", "has", "host", "host-context", "hover",
+        "in-range", "indeterminate", "invalid", "is", "lang", "last-child", "last-of-type", "left", "link",
+        "local-link", "matches", "modal", "muted", "not", "nth-child", "nth-last-child", "nth-last-of-type",
+        "nth-of-type", "only-child", "only-of-type", "open", "optional", "out-of-range", "past", "paused",
+        "picture-in-picture", "placeholder-shown", "playing", "popover-open", "read-only", "read-write",
+        "required", "right", "root", "scope", "seeking", "stalled", "state", "target", "target-within",
+        "user-invalid", "user-valid", "valid", "visited", "volume-locked", "where", "xr-overlay", NULL };
+    static const char *const elements[] = {
+        "after", "backdrop", "before", "checkmark", "column", "cue", "cue-region", "details-content",
+        "file-selector-button", "first-letter", "first-line", "grammar-error", "highlight", "marker", "part",
+        "picker", "picker-icon", "placeholder", "scroll-button", "scroll-marker", "scroll-marker-group",
+        "search-text", "selection", "slotted", "spelling-error", "target-text", "view-transition",
+        "view-transition-group", "view-transition-image-pair", "view-transition-new", "view-transition-old",
+        NULL };
+    if (nl > 8 && !strncasecmp(n, "-webkit-", 8)) return true;
+    for (const char *const *k = elem ? elements : classes; *k; k++)
+        if (strlen(*k) == nl && !strncasecmp(n, *k, nl)) return true;
+    return false;
+}
+
 /* A qualified rule's prelude that cannot be a selector list: a ';' or '@'
  * outside strings and brackets (CSS Syntax: a ';' does not end a prelude,
  * so "junk; .a { }" is one rule with an invalid selector), an empty
@@ -666,6 +696,7 @@ static bool css_prelude_invalid(const char *sel)
             bool pe = dbl || (nl == 6 && !strncasecmp(n, "before", 6)) || (nl == 5 && !strncasecmp(n, "after", 5)) ||
                       (nl == 10 && !strncasecmp(n, "first-line", 10)) ||
                       (nl == 12 && !strncasecmp(n, "first-letter", 12));
+            if (nl > 0 && !css_pseudo_known(n, nl, pe)) return true;
             if (pe && nl > 0 && n[nl] != '(') {
                 const char *a = n + nl;
                 while (css_is_space(*a)) a++;
@@ -1438,6 +1469,29 @@ static void css_apply_pseudo(CssSimpleSelector *out,
         }
         return;
     }
+    if (css_pseudo_name_is(name, nl, "lang")) {
+        /* The element's language, its lang attribute's or the nearest
+         * ancestor's (else the document's, from a content-language meta),
+         * is the range or starts with it and a '-' (case insensitive): as
+         * a test of those attributes. */
+        size_t k = 0, e = al;
+        while (k < e && (css_is_space(arg[k]) || arg[k] == '"' || arg[k] == '\'')) k++;
+        while (e > k && (css_is_space(arg[e - 1]) || arg[e - 1] == '"' || arg[e - 1] == '\'')) e--;
+        if (e > k && e - k < 40 && !out->where_active) {
+            char r[48];
+            memcpy(r, arg + k, e - k);
+            r[e - k] = '\0';
+            snprintf(out->where_arg, sizeof(out->where_arg),
+                     "[lang|=\"%s\" i], [lang|=\"%s\" i] *:not([lang]), "
+                     "html:not([lang]):has(meta[http-equiv=\"content-language\" i][content|=\"%s\" i]), "
+                     "html:not([lang]):has(meta[http-equiv=\"content-language\" i][content|=\"%s\" i]) *:not([lang])",
+                     r, r, r, r);
+            out->where_active = true;
+            out->has_substantive = true;
+            out->lang_count++;
+        }
+        return;
+    }
     if (css_pseudo_name_is(name, nl, "has")) {
         /* Relative selector: an optional leading combinator, then a selector
          * matched against descendants / children / following siblings. */
@@ -1477,6 +1531,7 @@ static void css_simple_reset(CssSimpleSelector *out) {
     out->not_active = out->not_has_tag = out->not_has_id = false;
     out->not_class_count = out->not_attr_count = 0;
     out->where_active = out->has_active = false;
+    out->lang_count = 0;
     out->has_comb = 0;
 }
 
@@ -1698,7 +1753,7 @@ static int css_specificity_from_simple(const CssSimpleSelector *simple) {
     b += simple->attr_count;
     b += (simple->child_pos ? 1 : 0) + (simple->type_pos ? 1 : 0) +
          (simple->nth_kind ? 1 : 0) + (simple->is_root ? 1 : 0) +
-         (simple->requires_link ? 1 : 0) + (simple->requires_empty ? 1 : 0);
+         (simple->requires_link ? 1 : 0) + (simple->requires_empty ? 1 : 0) + simple->lang_count;
     if (simple->not_active) {
         a += simple->not_has_id ? 1 : 0;
         b += simple->not_class_count + simple->not_attr_count;
