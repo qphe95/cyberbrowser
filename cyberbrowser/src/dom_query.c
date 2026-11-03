@@ -53,6 +53,7 @@ typedef struct SelSimple {
     uint8_t kind, op, ci;
     CssAtom atom;               /* tag / attribute name */
     char *val;                  /* id, class, attribute value */
+    char *raw;                  /* an attribute name with upper case, as written (else NULL) */
     uint32_t vlen;
     int a, b;                   /* an+b */
     struct SelList *sub;        /* :not / :is */
@@ -103,8 +104,9 @@ static bool sp_ws(SelParser *sp) {
     }
 }
 
+/* (NUL: U+FFFD, CSS Syntax 3.3's preprocessing) */
 static bool ident_char(unsigned char c) {
-    return isalnum(c) || c == '-' || c == '_' || c >= 0x80 || c == '\\';
+    return isalnum(c) || c == '-' || c == '_' || c >= 0x80 || c == '\\' || c == 0;
 }
 
 static size_t put_utf8(char *o, uint32_t c) {
@@ -123,7 +125,9 @@ static uint32_t sp_hex(SelParser *sp) {
     uint32_t c = 0;
     for (int k = 0; k < 6 && sp->p < sp->e && isxdigit((unsigned char)*sp->p); k++, sp->p++)
         c = c * 16 + (uint32_t)(isdigit((unsigned char)*sp->p) ? *sp->p - '0' : tolower((unsigned char)*sp->p) - 'a' + 10);
-    if (sp->p < sp->e && isspace((unsigned char)*sp->p)) sp->p++;
+    /* (CR LF is one newline) */
+    if (sp->p + 1 < sp->e && sp->p[0] == '\r' && sp->p[1] == '\n') sp->p += 2;
+    else if (sp->p < sp->e && isspace((unsigned char)*sp->p)) sp->p++;
     return c;
 }
 
@@ -133,8 +137,18 @@ static char *sp_ident(SelParser *sp, uint32_t *len) {
     char *out = malloc((size_t)(sp->e - b) * 4 + 1);
     uint32_t n = 0;
     while (sp->p < sp->e && ident_char((unsigned char)*sp->p)) {
+        if (*sp->p == 0) {      /* (NUL) */
+            n += (uint32_t)put_utf8(out + n, 0xFFFD);
+            sp->p++;
+            continue;
+        }
         if (*sp->p == '\\') {
-            if (sp->p + 1 >= sp->e || sp->p[1] == '\n') break;
+            if (sp->p + 1 >= sp->e) {       /* (an escape at the end: U+FFFD) */
+                n += (uint32_t)put_utf8(out + n, 0xFFFD);
+                sp->p++;
+                continue;
+            }
+            if (sp->p[1] == '\n') break;
             sp->p++;
             if (isxdigit((unsigned char)*sp->p)) {
                 n += (uint32_t)put_utf8(out + n, sp_hex(sp));
@@ -161,7 +175,7 @@ static bool ident_start(const SelParser *sp) {
     }
     if (p >= sp->e) return false;
     unsigned char c = (unsigned char)*p;
-    return isalpha(c) || c == '_' || c >= 0x80 || (c == '\\' && p + 1 < sp->e && p[1] != '\n');
+    return isalpha(c) || c == '_' || c >= 0x80 || c == 0 || (c == '\\' && (p + 1 >= sp->e || p[1] != '\n'));
 }
 
 /* The pseudo-classes and pseudo-elements a selector may name (Selectors 4,
@@ -304,6 +318,8 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
             css_atom_reserve(1);
             s.kind = SS_ATTR;
             s.atom = css_atom_intern(name, nl);
+            for (uint32_t k = 0; k < nl && !s.raw; k++)
+                if (name[k] >= 'A' && name[k] <= 'Z') s.raw = strndup(name, nl);
             bool legacy = css_attr_legacy_ci(name, nl);
             free(name);
             sp_ws(sp);
@@ -343,7 +359,7 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                     char *f = ident_char((unsigned char)*sp->p) ? sp_ident(sp, &fl) : NULL;
                     char fc = f && fl == 1 ? (char)tolower((unsigned char)f[0]) : 0;
                     free(f);
-                    if (fc != 'i' && fc != 's') { sp->err = true; free(s.val); break; }
+                    if (fc != 'i' && fc != 's') { sp->err = true; free(s.val); free(s.raw); break; }
                     s.ci = fc == 'i';
                     sp_ws(sp);
                 } else {
@@ -351,7 +367,7 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                 }
             }
             /* (and the end of the input the brackets: CSS Syntax 5.4.8) */
-            if (sp->p < sp->e && *sp->p != ']') { sp->err = true; free(s.val); break; }
+            if (sp->p < sp->e && *sp->p != ']') { sp->err = true; free(s.val); free(s.raw); break; }
             if (sp->p < sp->e) sp->p++;
         } else if (ch == ':') {
             sp->p++;
@@ -523,6 +539,7 @@ static void sel_free(SelList *l) {
             SelCompound *c = &l->x[i].c[j];
             for (int k = 0; k < c->n; k++) {
                 free(c->s[k].val);
+                free(c->s[k].raw);
                 sel_free(c->s[k].sub);
             }
             free(c->s);
@@ -593,10 +610,14 @@ static bool cmp_n(const char *a, const char *b, size_t n, bool ci) {
     return ci ? strncasecmp(a, b, n) == 0 : memcmp(a, b, n) == 0;
 }
 
+/* (an attribute selector's name matches ASCII-case-insensitively on an HTML
+ * element in an HTML document, else as written) */
 static bool attr_ok(uint32_t s, const SelSimple *ss) {
     DomAttrList *l = &g_dom.attrs[s];
+    bool exact = ss->raw && !(g_dom.ns[s] == DOM_NS_HTML && dom_is_html_document(dom_owner(dom_id_of(s))));
     for (int i = 0; i < l->n; i++) {
         if (l->a[i].name != ss->atom) continue;
+        if (exact && strcmp(dom_attr_qualified_name(&l->a[i]), ss->raw) != 0) continue;
         const char *v = l->a[i].value.s ? l->a[i].value.s : "";
         size_t vn = l->a[i].value.len, n = ss->vlen;
         bool ci = ss->ci;

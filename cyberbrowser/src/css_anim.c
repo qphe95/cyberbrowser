@@ -63,7 +63,8 @@ static inline void bset(uint64_t *b, int i, bool on)
 
 /* ---- Properties ---- */
 
-static const char *const k_props[ANIM_NPROP] = { "left", "top", "right", "bottom", "opacity", "transform" };
+static const char *const k_props[ANIM_NPROP] = { "left", "top", "right", "bottom", "opacity", "transform", "width",
+                                                  "height" };
 
 const char *anim_prop_name(int p) { return p >= 0 && p < ANIM_NPROP ? k_props[p] : ""; }
 

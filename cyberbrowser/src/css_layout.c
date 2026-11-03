@@ -17726,6 +17726,10 @@ static void layout_anim_read(const LayoutStyle *s, AnimVal v[ANIM_NPROP])
     v[ANIM_TRANSFORM] = s->has_translate ? (AnimVal){ (float)s->translate_x, (float)s->translate_y,
                                                       s->translate_xpct == 0 && s->translate_ypct == 0 }
                                          : (AnimVal){ 0, 0, 1 };
+    /* (a length in px: auto, a percentage or a keyword doesn't interpolate here) */
+    v[ANIM_WIDTH] = (AnimVal){ (float)s->css_width, 0,
+                               s->width_set && s->width_percent <= 0.0 && !s->width_keyword };
+    v[ANIM_HEIGHT] = (AnimVal){ (float)s->css_height, 0, s->height_set && s->height_percent <= 0.0 };
 }
 
 static void layout_anim_write(LayoutStyle *s, int p, const AnimVal *v)
@@ -17738,6 +17742,15 @@ static void layout_anim_write(LayoutStyle *s, int p, const AnimVal *v)
     } else if (p == ANIM_OPACITY) {
         s->opacity = v->x < 0 ? 0 : v->x > 1 ? 1 : v->x;
         s->opacity_set = 1;
+    } else if (p == ANIM_WIDTH) {
+        s->css_width = v->x < 0 ? 0 : v->x;
+        s->width_set = 1;
+        s->width_percent = 0.0;
+        s->width_keyword = 0;
+    } else if (p == ANIM_HEIGHT) {
+        s->css_height = v->x < 0 ? 0 : v->x;
+        s->height_set = 1;
+        s->height_percent = 0.0;
     } else {
         s->translate_x = v->x;
         s->translate_y = v->y;

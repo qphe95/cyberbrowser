@@ -1691,7 +1691,7 @@ static bool insert_valid(JSContextHandle ctx, NodeId parent, NodeId node, NodeId
         throw_dom_exception(ctx, "HierarchyRequestError", "The node cannot be inserted.");
         return false;
     }
-    if ((nk == DOM_K_TEXT && pk == DOM_K_DOCUMENT) || (nk == DOM_K_DOCTYPE && pk != DOM_K_DOCUMENT)) {
+    if (((nk == DOM_K_TEXT || nk == DOM_K_CDATA) && pk == DOM_K_DOCUMENT) || (nk == DOM_K_DOCTYPE && pk != DOM_K_DOCUMENT)) {
         throw_dom_exception(ctx, "HierarchyRequestError", "The node cannot be a child of this parent.");
         return false;
     }

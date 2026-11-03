@@ -20463,7 +20463,7 @@ static GCValue js_call_c_function(JSContextHandle ctx, GCValue func_obj,
             JSContextHandle realm = (JSContextHandle)po->u.cfunc.realm_handle;
             if (!SAFE_VALID(realm)) realm = ctx;
             if (po->u.cfunc.brand && g_brand_check && !(flags & JS_CALL_FLAG_CONSTRUCTOR) &&
-                !g_brand_check(ctx, this_obj_const, po->u.cfunc.brand))
+                !g_brand_check(realm, this_obj_const, po->u.cfunc.brand))
                 return JS_ThrowTypeError(realm, "Illegal invocation");
             if (argc < po->u.cfunc.required)
                 return JS_ThrowTypeError(realm, "%d argument%s required, but only %d present.", po->u.cfunc.required,

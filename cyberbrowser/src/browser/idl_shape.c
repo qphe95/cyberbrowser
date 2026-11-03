@@ -56,9 +56,22 @@ static const struct { const char *name; int brand; } k_brands[] = {
     { "ProcessingInstruction", B_PI }, { "DocumentType", B_DOCTYPE }, { "Attr", B_ATTR },
 };
 
+/* Other interfaces whose this is checked by their prototype: an object
+ * that inherits the realm's Interface.prototype (B_PROTO + the interface's
+ * index in the table).  (Not the ones whose methods check their own this,
+ * nor hot ones: DOMTokenList, the lists.) */
+#define B_PROTO 100
+static const char *const k_proto_brands[] = { "MutationObserver", "AbstractRange", "Range", "StaticRange",
+                                              "NodeIterator", "TreeWalker", "DOMImplementation" };
+
 static int brand_of(const char *iface) {
     for (size_t i = 0; i < sizeof k_brands / sizeof k_brands[0]; i++)
         if (!strcmp(k_brands[i].name, iface)) return k_brands[i].brand;
+    for (size_t i = 0; i < sizeof k_proto_brands / sizeof k_proto_brands[0]; i++) {
+        if (strcmp(k_proto_brands[i], iface)) continue;
+        for (int k = 0; k < NIFACE; k++)
+            if (!strcmp(k_idl_ifaces[k].name, iface)) return B_PROTO + k;
+    }
     return B_NONE;
 }
 
@@ -73,6 +86,23 @@ static bool is_attr(JSContextHandle ctx, GCValue v) {
 }
 
 static int brand_check(JSContextHandle ctx, GCValue v, int brand) {
+    if (brand >= B_PROTO) {
+        /* (any realm's Interface.prototype: one on the chain whose own
+         * constructor is named the interface) */
+        if (!JS_IsObject(v)) return 0;
+        const char *want = k_idl_ifaces[brand - B_PROTO].name;
+        JSAtom ca = JS_NewAtom(ctx, "constructor");
+        int ok = 0;
+        for (GCValue x = JS_GetPrototype(ctx, v); JS_IsObject(x) && !ok; x = JS_GetPrototype(ctx, x)) {
+            JSPropertyDescriptor d;
+            if (JS_GetOwnProperty(ctx, &d, x, ca) <= 0 || (d.flags & JS_PROP_GETSET) || !JS_IsFunction(ctx, d.value)) continue;
+            const char *nm = JS_ToCString(ctx, JS_GetPropertyStr(ctx, d.value, "name"));
+            ok = nm && !strcmp(nm, want);
+            if (nm) JS_FreeCString(ctx, nm);
+        }
+        JS_FreeAtom(ctx, ca);
+        return ok;
+    }
     NodeId n = JS_IsObject(v) ? dom_node_of(v) : DOM_NULL;
     int k = dom_kind(n);
     switch (brand) {
@@ -103,8 +133,9 @@ static void set_checks(JSContextHandle ctx, Checked **seen, int *n, int *cap, GC
     for (int i = 0; i < *n; i++) {
         if (!JS_StrictEq(ctx, (*seen)[i].fn, fn)) continue;
         if ((*seen)[i].brand != brand) {
-            /* (a node interface and another: Node's, else none) */
-            int b = (*seen)[i].brand != B_NONE && brand != B_NONE ? B_NODE : B_NONE;
+            /* (two node interfaces: Node's, else none) */
+            int a0 = (*seen)[i].brand;
+            int b = a0 != B_NONE && brand != B_NONE && a0 < B_PROTO && brand < B_PROTO ? B_NODE : B_NONE;
             (*seen)[i].brand = b;
             JS_SetCFunctionChecks(fn, required, b);
         }

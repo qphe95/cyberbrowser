@@ -23,7 +23,7 @@
 #include "dom_store.h"
 
 /* The properties that animate (the others keep their cascaded value). */
-enum { ANIM_LEFT, ANIM_TOP, ANIM_RIGHT, ANIM_BOTTOM, ANIM_OPACITY, ANIM_TRANSFORM, ANIM_NPROP };
+enum { ANIM_LEFT, ANIM_TOP, ANIM_RIGHT, ANIM_BOTTOM, ANIM_OPACITY, ANIM_TRANSFORM, ANIM_WIDTH, ANIM_HEIGHT, ANIM_NPROP };
 
 /* A value: px (or a number: opacity; a translation: x, y).  ok 0: one
  * that does not interpolate (auto, a percentage): it changes at once. */
