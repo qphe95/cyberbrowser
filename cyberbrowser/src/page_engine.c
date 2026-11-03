@@ -634,7 +634,7 @@ uint64_t gc_os_now_ns(void);
 static void dispatch_page_lifecycle_events(JSContextHandle ctx) {
     const char *dcl_js =
         "document.readyState = 'interactive';"
-        "document.dispatchEvent(new Event('DOMContentLoaded', { bubbles: true }));";
+        "__cyberDispatchTrusted(document, new Event('DOMContentLoaded', { bubbles: true }));";
     JS_Eval(ctx, dcl_js, strlen(dcl_js), "<lifecycle>", JS_EVAL_TYPE_GLOBAL);
     pump_due_work(ctx);
     image_api_scan(ctx);

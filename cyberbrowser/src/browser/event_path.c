@@ -19,8 +19,9 @@
  *   EP_HANDLER    an on<type> handler set (dom_events.js's handler map)
  *   EP_ALWAYS     the window, or <body> (whose handlers forward to it)
  *   EP_ON_PROP    a function-valued on<type> property (another type)
+ *   EP_SHADOW     it is in a shadow tree
  */
-enum { EP_LISTENERS = 1, EP_ON_ATTR = 2, EP_HANDLER = 4, EP_ALWAYS = 8, EP_ON_PROP = 16 };
+enum { EP_LISTENERS = 1, EP_ON_ATTR = 2, EP_HANDLER = 4, EP_ALWAYS = 8, EP_ON_PROP = 16, EP_SHADOW = 32 };
 #include <stdio.h>
 #include <string.h>
 
@@ -107,6 +108,15 @@ static uint32_t slot_of(GCValue v) {
     return n && dom_valid(n) ? dom_slot(n) : 0;
 }
 
+/* The global of a function's realm. */
+static GCValue js_function_global(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc < 1 || !JS_IsFunction(ctx, argv[0])) return JS_NULL;
+    JSContextHandle realm = JS_GetFunctionRealmOf(ctx, argv[0]);
+    if (!realm) return JS_NULL;
+    return JS_GetGlobalObject(realm);
+}
+
 static GCValue js_event_path(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
     uint32_t target = argc > 0 ? slot_of(argv[0]) : 0;
@@ -137,7 +147,7 @@ static GCValue js_event_path(JSContextHandle ctx, GCValue this_val, int argc, GC
     }
 
     GCValue out = JS_NewArray(ctx);
-    uint32_t k = 0, first_root = root_of(target);
+    uint32_t k = 0, first_root = root_of(target), item_root = first_root;
     GCValue item_v = argv[0];
     uint32_t item = target;
     for (int guard = 0; guard < 4096; guard++) {
@@ -151,7 +161,7 @@ static GCValue js_event_path(JSContextHandle ctx, GCValue this_val, int argc, GC
             uint32_t r = retarget(related, item);
             JS_SetPropertyUint32(ctx, out, k++, r == related ? related_v : dom_js(ctx, dom_id_of(r)));
         }
-        int flags = 0;
+        int flags = is_shadow_root(item_root) ? EP_SHADOW : 0;
         if (map_has(ctx, item_v, la, type_atom, true)) flags |= EP_LISTENERS;
         if (map_has(ctx, item_v, ha, type_atom, false)) flags |= EP_HANDLER;
         if (g_dom.kind[item] == DOM_K_ELEMENT) {
@@ -196,6 +206,8 @@ static GCValue js_event_path(JSContextHandle ctx, GCValue this_val, int argc, GC
             if (!next) next = g_dom.parent[item];
         }
         if (!next) break;
+        /* (a parent has the same root) */
+        if (next != g_dom.parent[item]) item_root = root_of(next);
         item = next;
         item_v = JS_IsObject(next_v) ? next_v : dom_js(ctx, dom_id_of(next));
         if (!JS_IsObject(item_v)) break;
@@ -206,6 +218,8 @@ static GCValue js_event_path(JSContextHandle ctx, GCValue this_val, int argc, GC
 }
 
 void event_path_install(JSContextHandle ctx, GCValue global) {
+    JS_DefinePropertyValueStr(ctx, global, "__cyberFunctionGlobal",
+                              JS_NewCFunction(ctx, js_function_global, "__cyberFunctionGlobal", 1), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberEventPath",
                               JS_NewCFunction(ctx, js_event_path, "__cyberEventPath", 5), JS_PROP_CONFIGURABLE);
 }

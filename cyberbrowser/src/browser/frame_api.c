@@ -58,6 +58,8 @@ typedef struct Frame {
     NodeId doc;                 /* the frame's document */
     FrameState state;
     char url[2048];             /* the navigation's (or the loaded page's) URL */
+    char fallback_base[2048];   /* an about: frame: its base URL when it has no <base> */
+    bool dead;                  /* its document is no longer fully active */
 } Frame;
 
 static Frame *g_frames;
@@ -118,8 +120,78 @@ static void root_value(GCValue v, bool add) {
     if (add) gc_add_root(h); else gc_remove_root(h);
 }
 
+/* ---- not fully active: the documents and globals of frames gone ---- */
+
+static struct { NodeId *id; uint32_t n, cap; } g_dead_docs;
+static uint32_t g_dead_any;
+
+static JSAtom inactive_atom(JSContextHandle ctx) {
+    GCValue sym = JS_Eval(ctx, "Symbol.for('cyber.inactive')", 28, "<frame>", JS_EVAL_TYPE_GLOBAL);
+    return JS_ValueToAtom(ctx, sym);
+}
+
+static void dead_doc_add(NodeId doc) {
+    if (!doc) return;
+    uint32_t k = 0;
+    for (uint32_t i = 0; i < g_dead_docs.n; i++)
+        if (dom_valid(g_dead_docs.id[i])) g_dead_docs.id[k++] = g_dead_docs.id[i];
+    g_dead_docs.n = k;
+    if (k == g_dead_docs.cap) {
+        g_dead_docs.cap = k ? k * 2 : 8;
+        g_dead_docs.id = realloc(g_dead_docs.id, g_dead_docs.cap * sizeof(NodeId));
+    }
+    g_dead_docs.id[g_dead_docs.n++] = doc;
+}
+
+/* __cyberInactive(item, global): is item's document, or (not a node) its
+ * realm's global, or the listener's global, not fully active? */
+static GCValue js_inactive(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (!g_dead_any || argc < 2) return JS_FALSE;
+    JSAtom a = inactive_atom(ctx);
+    bool off = JS_IsObject(argv[1]) && JS_ToBool(ctx, JS_GetProperty(ctx, argv[1], a)) > 0;
+    NodeId n = off || !JS_IsObject(argv[0]) ? DOM_NULL : dom_node_of(argv[0]);
+    if (n) {
+        NodeId d = dom_kind(n) == DOM_K_DOCUMENT ? n : dom_owner(n);
+        for (uint32_t i = 0; i < g_dead_docs.n && !off; i++) off = g_dead_docs.id[i] == d;
+    } else if (!off && JS_IsObject(argv[0])) {
+        off = JS_ToBool(ctx, JS_GetProperty(ctx, argv[0], a)) > 0;
+        GCValue fn = off ? JS_UNDEFINED : JS_GetPropertyStr(ctx, argv[0], "dispatchEvent");
+        JSContextHandle realm = JS_IsFunction(ctx, fn) ? JS_GetFunctionRealmOf(ctx, fn) : NULL;
+        if (realm) off = JS_ToBool(ctx, JS_GetProperty(ctx, JS_GetGlobalObject(realm), a)) > 0;
+    }
+    JS_FreeAtom(ctx, a);
+    return JS_NewBool(ctx, off);
+}
+
+/* (its frames with it) */
+static void frame_mark_dead(Frame *f) {
+    if (f->dead || !SAFE_VALID(f->ctx)) return;
+    f->dead = true;
+    g_dead_any++;
+    dead_doc_add(f->doc);
+    JSAtom a = inactive_atom(f->ctx);
+    JS_SetProperty(f->ctx, JS_GetGlobalObject(f->ctx), a, JS_TRUE);
+    JS_FreeAtom(f->ctx, a);
+    for (Frame *c = g_frames; c; c = c->next)
+        if (c != f && c->parent == f->ctx) frame_mark_dead(c);
+}
+
+/* A node left its tree: the frames of the iframes that went with it aren't
+ * fully active now (their realms go at the next turn, frame_api_process: a
+ * script of theirs may be what's running). */
+void frame_api_on_disconnect(void) {
+    for (Frame *f = g_frames; f; f = f->next)
+        if (!f->dead && SAFE_VALID(f->ctx) && !dom_is_connected(f->iframe)) frame_mark_dead(f);
+}
+
 static void frame_discard_realm(Frame *f) {
     if (!SAFE_VALID(f->ctx)) return;
+    frame_mark_dead(f);
+    /* (its frames go with it) */
+    for (Frame *c = g_frames; c; c = c->next)
+        if (c != f && c->parent == f->ctx) frame_discard_realm(c);
+    f->dead = false;
     if (f->factory_made) root_value(f->factory, false);
     f->factory_made = false;
     timer_cancel_realm(f->ctx);
@@ -509,6 +581,14 @@ static void frame_load(Frame *f) {
     snprintf(url, sizeof(url), "%s", f->url);
     frame_discard_realm(f);
     f->state = FRAME_LOADED;
+    /* (what its base URL falls back on, as it is now) */
+    if (!strncmp(url, "about:", 6)) {
+        GCValue pd = JS_GetPropertyStr(f->parent, JS_GetGlobalObject(f->parent), "document");
+        GCValue pb = JS_IsObject(pd) ? JS_GetPropertyStr(f->parent, pd, "baseURI") : JS_UNDEFINED;
+        const char *pbs = JS_IsString(pb) ? JS_ToCString(f->parent, pb) : NULL;
+        snprintf(f->fallback_base, sizeof(f->fallback_base), "%s", pbs ? pbs : "");
+        if (pbs) JS_FreeCString(f->parent, pbs);
+    }
     /* A frame document, asked for by the parent's origin (which the network
      * process lets through ORB: section 9). */
     char *parent_origin = realm_origin(f->parent);
@@ -558,7 +638,10 @@ static void frame_load(Frame *f) {
     HtmlPageStream *ps = html_page_stream_begin_frame(ctx, url);
     if (ps && fetched && xml_mime(mime)) html_page_stream_set_xml(ps, mime);
     if (ps) {
-        if (fetched && buf.data && buf.size) html_page_stream_feed(ps, buf.data, buf.size);
+        /* (about:srcdoc: the attribute's markup) */
+        const char *srcdoc = !strcmp(url, "about:srcdoc") ? dom_get_attr_str(f->iframe, "srcdoc") : NULL;
+        if (srcdoc && srcdoc[0]) html_page_stream_feed(ps, srcdoc, strlen(srcdoc));
+        else if (fetched && buf.data && buf.size) html_page_stream_feed(ps, buf.data, buf.size);
         else if (!blank) platform_log(LOG_LEVEL_WARN, "frame", "could not fetch frame %s: %s", url, err);
         html_page_stream_finish(ps, NULL);
     }
@@ -566,7 +649,7 @@ static void frame_load(Frame *f) {
     if (!SAFE_VALID(f->ctx)) return;    /* (a script removed the frame) */
     static const char lifecycle_js[] =
         "document.readyState = 'interactive';"
-        "document.dispatchEvent(new Event('DOMContentLoaded', { bubbles: true }));"
+        "__cyberDispatchTrusted(document, new Event('DOMContentLoaded', { bubbles: true }));"
         "document.readyState = 'complete';"
         "window.dispatchEvent(new Event('load'));";
     GCValue r = JS_Eval(ctx, lifecycle_js, sizeof(lifecycle_js) - 1, "<frame_lifecycle>", JS_EVAL_TYPE_GLOBAL);
@@ -742,6 +825,23 @@ static GCValue js_iframe_get_content_document(JSContextHandle ctx, GCValue this_
     return JS_GetPropertyStr(f->ctx, JS_GetGlobalObject(f->ctx), "document");
 }
 
+static GCValue js_iframe_get_srcdoc(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    const char *v = dom_get_attr_str(dom_node_of(this_val), "srcdoc");
+    return JS_NewString(ctx, v ? v : "");
+}
+
+static GCValue js_iframe_set_srcdoc(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    NodeId n = dom_node_of(this_val);
+    GCValue set = JS_GetPropertyStr(ctx, this_val, "setAttribute");
+    GCValue args[2] = { JS_NewString(ctx, "srcdoc"), JS_ToString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED) };
+    if (JS_IsException(args[1])) return args[1];
+    GCValue r = JS_IsFunction(ctx, set) ? JS_Call(ctx, set, this_val, 2, args) : JS_UNDEFINED;
+    if (JS_IsException(r)) return r;
+    if (n && dom_is_connected(n)) frame_navigate(ctx, n, "about:srcdoc");
+    return JS_UNDEFINED;
+}
+
 static GCValue js_iframe_get_src(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     NodeId n = dom_node_of(this_val);
@@ -792,13 +892,15 @@ void frame_api_on_connect(JSContextHandle ctx, NodeId subtree) {
     for (NodeId n = subtree; n; ) {
         if (dom_kind(n) == DOM_K_ELEMENT && dom_tag(n) == iframe_tag && !frame_of_iframe(n)) {
             const char *src = dom_get_attr_str(n, "src");
-            if (src && src[0]) {
+            if (dom_get_attr_str(n, "srcdoc")) {
+                frame_navigate(ctx, n, "about:srcdoc");
+            } else if (src && src[0]) {
                 char *base = realm_url(ctx);
                 char *abs = wurl_resolve(base, src);
                 free(base);
                 frame_navigate(ctx, n, abs ? abs : src);
                 free(abs);
-            } else if (!dom_get_attr_str(n, "srcdoc")) {
+            } else {
                 frame_navigate(ctx, n, "about:blank");
                 Frame *f = frame_of_iframe(n);
                 if (g_frame_blank_now && f && f->state == FRAME_PENDING) frame_load(f);
@@ -815,6 +917,8 @@ void frame_api_on_connect(JSContextHandle ctx, NodeId subtree) {
 void frame_api_install(JSContextHandle ctx, GCValue global) {
     if (!g_main_doc) g_main_doc = g_dom_document;
     dom_wrap_set_realm_resolver(realm_of_document);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberInactive", JS_NewCFunction(ctx, js_inactive, "__cyberInactive", 2),
+                              JS_PROP_CONFIGURABLE);
     anim_api_init();
     GCValue ctor = JS_GetPropertyStr(ctx, global, "HTMLIFrameElement");
     GCValue proto = JS_IsObject(ctor) ? JS_GetPropertyStr(ctx, ctor, "prototype") : JS_UNDEFINED;
@@ -834,4 +938,16 @@ void frame_api_install(JSContextHandle ctx, GCValue global) {
                             JS_NewCFunction(ctx, js_iframe_set_src, "set src", 1),
                             JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, src);
+    JSAtom srcdoc = JS_NewAtom(ctx, "srcdoc");
+    JS_DefinePropertyGetSet(ctx, proto, srcdoc, JS_NewCFunction(ctx, js_iframe_get_srcdoc, "get srcdoc", 0),
+                            JS_NewCFunction(ctx, js_iframe_set_srcdoc, "set srcdoc", 1),
+                            JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+    JS_FreeAtom(ctx, srcdoc);
+}
+
+/* The base URL an about:blank or about:srcdoc frame falls back on: its
+ * parent's document's (HTML "fallback base URL"); NULL when not one. */
+char *frame_api_fallback_base(JSContextHandle ctx) {
+    Frame *f = frame_of_realm(ctx);
+    return f && f->fallback_base[0] ? strdup(f->fallback_base) : NULL;
 }

@@ -368,6 +368,8 @@ static const struct { const char *iface, *prop, *attr; const char *const *suppor
     { "HTMLAreaElement", "relList", "rel", REL_NAV },
     { "HTMLFormElement", "relList", "rel", REL_NAV },
     { "HTMLIFrameElement", "sandbox", "sandbox", SANDBOX },
+    { "HTMLOutputElement", "htmlFor", "for", NULL },
+    { "HTMLLinkElement", "sizes", "sizes", NULL },
 };
 
 /* The element's list for g_lists[magic], made once and kept on it under a

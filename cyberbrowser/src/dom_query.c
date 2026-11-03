@@ -51,6 +51,7 @@ struct SelList;
 
 typedef struct SelSimple {
     uint8_t kind, op, ci;
+    bool any_ns;                /* [*|name] */
     CssAtom atom;               /* tag / attribute name */
     char *val;                  /* id, class, attribute value */
     char *raw;                  /* an attribute name with upper case, as written (else NULL) */
@@ -309,7 +310,7 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
             sp_ws(sp);
             /* `*|name` and `|name`: any and no namespace (attributes carry
              * none here).  A prefix would need @namespace, so it's invalid. */
-            if (sp->p + 1 < sp->e && sp->p[0] == '*' && sp->p[1] == '|') sp->p += 2;
+            if (sp->p + 1 < sp->e && sp->p[0] == '*' && sp->p[1] == '|') { sp->p += 2; s.any_ns = true; }
             else if (sp->p + 1 < sp->e && sp->p[0] == '|' && sp->p[1] != '=') sp->p++;
             uint32_t nl = 0;
             char *name = sp_ident(sp, &nl);
@@ -617,8 +618,13 @@ static bool attr_ok(uint32_t s, const SelSimple *ss) {
     DomAttrList *l = &g_dom.attrs[s];
     bool exact = ss->raw && !(g_dom.ns[s] == DOM_NS_HTML && dom_is_html_document(dom_owner(dom_id_of(s))));
     for (int i = 0; i < l->n; i++) {
-        if (l->a[i].name != ss->atom) continue;
-        if (exact && strcmp(dom_attr_qualified_name(&l->a[i]), ss->raw) != 0) continue;
+        if (l->a[i].name != ss->atom) {
+            /* (under its qualified name, with a prefix) */
+            const char *qn = ss->any_ns ? dom_attr_qualified_name(&l->a[i]) : NULL;
+            const char *colon = qn ? strchr(qn, ':') : NULL;
+            const char *want = colon ? css_atom_str(ss->atom) : NULL;
+            if (!want || strcmp(colon + 1, want) != 0) continue;
+        } else if (exact && strcmp(dom_attr_qualified_name(&l->a[i]), ss->raw) != 0) continue;
         const char *v = l->a[i].value.s ? l->a[i].value.s : "";
         size_t vn = l->a[i].value.len, n = ss->vlen;
         bool ci = ss->ci;

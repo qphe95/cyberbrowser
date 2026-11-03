@@ -17730,6 +17730,16 @@ static void layout_anim_read(const LayoutStyle *s, AnimVal v[ANIM_NPROP])
     v[ANIM_WIDTH] = (AnimVal){ (float)s->css_width, 0,
                                s->width_set && s->width_percent <= 0.0 && !s->width_keyword };
     v[ANIM_HEIGHT] = (AnimVal){ (float)s->css_height, 0, s->height_set && s->height_percent <= 0.0 };
+    v[ANIM_COLOR] = (AnimVal){ (float)s->color_r, (float)s->color_g, 1, (float)s->color_b, (float)s->color_a };
+    v[ANIM_BGCOLOR] = (AnimVal){ (float)s->background_color_r, (float)s->background_color_g, 1,
+                                 (float)s->background_color_b, (float)s->background_color_a };
+}
+
+void css_layout_anim_seed(const LayoutContext *ctx, int idx, uint32_t el)
+{
+    AnimVal v[ANIM_NPROP];
+    layout_anim_read(ctx->boxes[idx].s, v);
+    anim_seed(el, 0, v);
 }
 
 static void layout_anim_write(LayoutStyle *s, int p, const AnimVal *v)
@@ -17751,6 +17761,10 @@ static void layout_anim_write(LayoutStyle *s, int p, const AnimVal *v)
         s->css_height = v->x < 0 ? 0 : v->x;
         s->height_set = 1;
         s->height_percent = 0.0;
+    } else if (p == ANIM_COLOR) {
+        s->color_r = v->x; s->color_g = v->y; s->color_b = v->z; s->color_a = v->w;
+    } else if (p == ANIM_BGCOLOR) {
+        s->background_color_r = v->x; s->background_color_g = v->y; s->background_color_b = v->z; s->background_color_a = v->w;
     } else {
         s->translate_x = v->x;
         s->translate_y = v->y;

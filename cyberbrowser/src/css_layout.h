@@ -803,6 +803,9 @@ void css_layout_box_max(const LayoutContext *ctx, int idx, double *x, double *y)
 bool css_layout_box_offset(const LayoutContext *ctx, int idx, float *x, float *y);
 void css_layout_box_scrolled(const LayoutContext *ctx, int idx, double *dx, double *dy, bool *fixed);
 
+/* Box idx's values as the transitions store's before-change style. */
+void css_layout_anim_seed(const LayoutContext *ctx, int idx, uint32_t el);
+
 /* The text a text box lays out and paints (white space processed). */
 const char *css_layout_box_text(const LayoutContext *ctx, int idx, const char *raw);
 

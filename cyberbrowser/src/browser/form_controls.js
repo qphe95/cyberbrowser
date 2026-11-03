@@ -76,7 +76,7 @@
                  'time', 'datetime-local', 'number', 'range', 'color', 'checkbox', 'radio', 'file',
                  'submit', 'image', 'reset', 'button'];
     function inputType(el) {
-        var v = el.getAttribute('type');
+        var v = el.getAttributeNS(null, 'type');
         if (v === null) return 'text';
         v = v.toLowerCase();
         return TYPES.indexOf(v) >= 0 ? v : 'text';
@@ -267,7 +267,7 @@
     }
     function optionSelected(o) {
         var s = state(o);
-        return s.dirtySelected ? s.selected : o.hasAttribute('selected');
+        return s.dirtySelected ? s.selected : o.hasAttributeNS(null, 'selected');
     }
     function setSelected(o, v) { var s = state(o); s.selected = !!v; s.dirtySelected = true; }
     /* the selectedness setting algorithm, for a single select: the last
@@ -276,7 +276,8 @@
         opts = opts || optionsOf(sel);
         var idx = -1;
         for (var i = 0; i < opts.length; i++) if (optionSelected(opts[i])) idx = sel.multiple ? (idx < 0 ? i : idx) : i;
-        if (idx < 0 && !sel.multiple && !(Number(sel.getAttribute('size')) > 1)) {
+        /* (a script asked for none: it stays so) */
+        if (idx < 0 && !state(sel).noneAsked && !sel.multiple && !(Number(sel.getAttributeNS(null, 'size')) > 1)) {
             for (var j = 0; j < opts.length; j++) if (!opts[j].hasAttribute('disabled')) return j;
         }
         return idx;
@@ -312,6 +313,7 @@
         accessor(SP, 'selectedIndex', function () { return selectedIndexOf(this); }, function (i) {
             var opts = optionsOf(this);
             opts.forEach(function (o, k) { setSelected(o, k === (i | 0)); });
+            state(this).noneAsked = !opts[i | 0];
         });
         accessor(SP, 'value', function () {
             var opts = optionsOf(this), o = opts[selectedIndexOf(this, opts)];
@@ -394,8 +396,14 @@
                 if (el.localName === 'select') optionsOf(el).forEach(function (o) { if (o[STATE]) o[STATE].dirtySelected = false; });
             });
         });
-        method(FP, 'checkValidity', function () { return true; });
-        method(FP, 'reportValidity', function () { return true; });
+        /* (each control's, all of them: each invalid one fires its event) */
+        function formValid() {
+            var ok = true;
+            elementsOf(this).forEach(function (el) { if (!el.checkValidity()) ok = false; });
+            return ok;
+        }
+        method(FP, 'checkValidity', formValid);
+        method(FP, 'reportValidity', formValid);
     }
 
     /* ---- label / fieldset / output ---- */
@@ -438,18 +446,158 @@
             }
         }) });
 
-    /* validity: everything is valid (no constraint validation yet) */
-    var validity = Object.freeze({ valueMissing: false, typeMismatch: false, patternMismatch: false,
-        tooLong: false, tooShort: false, rangeUnderflow: false, rangeOverflow: false, stepMismatch: false,
-        badInput: false, customError: false, valid: true });
+    /* ---- FormData (XHR 5): the entries, a form's as HTML "constructing the
+     * entry list" has them (without files or the _charset_ name) ---- */
+    var FD_ENTRIES = Symbol('entries');
+    function formEntries(form, submitter) {
+        var out = [];
+        elementsOf(form).forEach(function (el) {
+            var name = el.getAttributeNS(null, 'name');
+            if (!name || el.matches('datalist *')) return;
+            for (var a = el; a && a.nodeType === 1; a = a.parentNode)
+                if (a.hasAttributeNS(null, 'disabled') && (a === el || a.localName === 'fieldset')) return;
+            var ln = el.localName;
+            if (ln === 'select') {
+                optionsOf(el).forEach(function (o) { if (o.selected && !o.disabled) out.push([name, o.value]); });
+            } else if (ln === 'textarea') {
+                out.push([name, el.value]);
+            } else if (ln === 'button' || ln === 'input') {
+                var t = ln === 'input' ? inputType(el) : String(el.getAttributeNS(null, 'type') || 'submit').toLowerCase();
+                if ((t === 'submit' || t === 'button' || t === 'reset' || t === 'image') && el !== submitter) return;
+                if (t === 'file') return;
+                if ((t === 'checkbox' || t === 'radio') && !el.checked) return;
+                out.push([name, el.value]);
+            }
+        });
+        return out;
+    }
+    function FormData(form, submitter) {
+        if (!new.target) throw new TypeError("Failed to construct 'FormData': Please use the 'new' operator.");
+        if (form !== undefined && !(FP && FP.isPrototypeOf(form)))
+            throw new TypeError("Failed to construct 'FormData': parameter 1 is not of type 'HTMLFormElement'.");
+        this[FD_ENTRIES] = form ? formEntries(form, submitter) : [];
+    }
+    function fdValue(v) { return global.Blob && v instanceof global.Blob ? v : String(v); }
+    var FDP = FormData.prototype;
+    method(FDP, 'append', function (n, v) { this[FD_ENTRIES].push([String(n), fdValue(v)]); });
+    method(FDP, 'delete', function (n) { n = String(n); this[FD_ENTRIES] = this[FD_ENTRIES].filter(function (e) { return e[0] !== n; }); });
+    method(FDP, 'get', function (n) {
+        n = String(n);
+        var e = this[FD_ENTRIES].find(function (x) { return x[0] === n; });
+        return e ? e[1] : null;
+    });
+    method(FDP, 'getAll', function (n) {
+        n = String(n);
+        return this[FD_ENTRIES].filter(function (x) { return x[0] === n; }).map(function (x) { return x[1]; });
+    });
+    method(FDP, 'has', function (n) { n = String(n); return this[FD_ENTRIES].some(function (x) { return x[0] === n; }); });
+    method(FDP, 'set', function (n, v) {
+        n = String(n);
+        var es = this[FD_ENTRIES], at = es.findIndex(function (x) { return x[0] === n; });
+        var kept = es.filter(function (x, i) { return x[0] !== n || i === at; });
+        if (at < 0) kept.push([n, fdValue(v)]);
+        else kept[kept.findIndex(function (x) { return x[0] === n; })] = [n, fdValue(v)];
+        this[FD_ENTRIES] = kept;
+    });
+    method(FDP, 'forEach', function (cb, thisArg) {
+        var es = this[FD_ENTRIES];
+        for (var i = 0; i < es.length; i++) cb.call(thisArg, es[i][1], es[i][0], this);
+    });
+    method(FDP, 'entries', function () { return this[FD_ENTRIES].map(function (e) { return [e[0], e[1]]; })[Symbol.iterator](); });
+    method(FDP, 'keys', function () { return this[FD_ENTRIES].map(function (e) { return e[0]; })[Symbol.iterator](); });
+    method(FDP, 'values', function () { return this[FD_ENTRIES].map(function (e) { return e[1]; })[Symbol.iterator](); });
+    Object.defineProperty(FDP, Symbol.iterator, { configurable: true, writable: true, value: FDP.entries });
+    Object.defineProperty(FDP, Symbol.toStringTag, { configurable: true, value: 'FormData' });
+    Object.defineProperty(global, 'FormData', { configurable: true, writable: true, value: FormData });
+
+    /* Constraint validation (HTML 4.10.20): who's a candidate, and what's wrong
+     * with its value.  (No tooLong, tooShort, stepMismatch or badInput: those
+     * want user edits or parsing that isn't here.) */
+    function candidate(el) {
+        if (el.localName === 'fieldset' || el.hasAttributeNS(null, 'disabled')) return false;
+        for (var a = el.parentNode; a && a.nodeType === 1; a = a.parentNode)
+            if (a.localName === 'datalist' || (a.localName === 'fieldset' && a.hasAttributeNS(null, 'disabled'))) return false;
+        if (el.localName === 'button') return String(el.getAttributeNS(null, 'type') || 'submit').toLowerCase() === 'submit';
+        if (el.localName === 'textarea') return !el.hasAttributeNS(null, 'readonly');
+        if (el.localName === 'input') {
+            var t = inputType(el);
+            return t !== 'hidden' && t !== 'reset' && t !== 'button' && !el.hasAttributeNS(null, 'readonly');
+        }
+        return true;
+    }
+    function valueMissing(el) {
+        if (!el.hasAttributeNS(null, 'required')) return false;
+        if (el.localName === 'select') return !el.value;
+        if (el.localName === 'input') {
+            var t = inputType(el);
+            if (t === 'checkbox') return !el.checked;
+            if (t === 'radio') {
+                var form = el.form, name = el.getAttributeNS(null, 'name'), root = rootOf(el);
+                if (el.checked || !name || !root.querySelectorAll) return !el.checked;
+                var all = root.querySelectorAll('input');
+                for (var i = 0; i < all.length; i++)
+                    if (inputType(all[i]) === 'radio' && all[i].checked && all[i].form === form &&
+                        all[i].getAttributeNS(null, 'name') === name) return false;
+                return true;
+            }
+            if (t === 'submit' || t === 'image') return false;
+        }
+        return !el.value;
+    }
+    function typeMismatch(el) {
+        if (el.localName !== 'input' || !el.value) return false;
+        var t = inputType(el);
+        if (t === 'email') return !/^[^@\s]+@[^@\s]+$/.test(el.value);
+        if (t === 'url') { try { new global.URL(el.value); return false; } catch (e) { return true; } }
+        return false;
+    }
+    function patternMismatch(el) {
+        var p = el.localName === 'input' ? el.getAttributeNS(null, 'pattern') : null;
+        if (p === null || !el.value) return false;
+        try { return !new RegExp('^(?:' + p + ')$', 'v').test(el.value); } catch (e) { return false; }
+    }
+    function rangeMismatch(el, attr, under) {
+        if (el.localName !== 'input' || !el.value || inputType(el) !== 'number') return false;
+        var lim = parseFloat(el.getAttributeNS(null, attr)), v = parseFloat(el.value);
+        return !isNaN(lim) && !isNaN(v) && (under ? v < lim : v > lim);
+    }
+    function customError(el) { return !!state(el).customValidity; }
+    var FLAWS = { valueMissing: valueMissing, typeMismatch: typeMismatch, patternMismatch: patternMismatch,
+        rangeUnderflow: function (el) { return rangeMismatch(el, 'min', true); },
+        rangeOverflow: function (el) { return rangeMismatch(el, 'max', false); },
+        customError: customError };
+    function isValid(el) {
+        if (!candidate(el)) return true;
+        for (var k in FLAWS) if (FLAWS[k](el)) return false;
+        return true;
+    }
+    /* (the element's: it reads as the element is now) */
+    function validityOf(el) {
+        var s = state(el);
+        if (s.validity) return s.validity;
+        var v = {};
+        ['tooLong', 'tooShort', 'stepMismatch', 'badInput'].forEach(function (k) { v[k] = false; });
+        Object.keys(FLAWS).forEach(function (k) {
+            Object.defineProperty(v, k, { enumerable: true, get: function () { return candidate(el) && FLAWS[k](el); } });
+        });
+        Object.defineProperty(v, 'valid', { enumerable: true, get: function () { return isValid(el); } });
+        return s.validity = v;
+    }
+    function checkValidity() {
+        if (isValid(this)) return true;
+        this.dispatchEvent(new global.Event('invalid', { cancelable: true }));
+        return false;
+    }
     [IP, TP, SP, BP, FSP].forEach(function (P) {
         if (!P) return;
-        accessor(P, 'validity', function () { return validity; });
-        accessor(P, 'validationMessage', function () { return ''; });
-        accessor(P, 'willValidate', function () { return true; });
-        method(P, 'checkValidity', function () { return true; });
-        method(P, 'reportValidity', function () { return true; });
-        method(P, 'setCustomValidity', function () {});
+        accessor(P, 'validity', function () { return validityOf(this); });
+        accessor(P, 'validationMessage', function () {
+            return isValid(this) ? '' : state(this).customValidity || 'Invalid value.';
+        });
+        accessor(P, 'willValidate', function () { return candidate(this); });
+        method(P, 'checkValidity', checkValidity);
+        method(P, 'reportValidity', checkValidity);
+        method(P, 'setCustomValidity', function (m) { state(this).customValidity = String(m); });
         if (P !== FSP) accessor(P, 'labels', function () {
             var d = this.ownerDocument, out = [];
             if (d && d.querySelectorAll) {

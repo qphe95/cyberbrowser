@@ -28,6 +28,7 @@
 #include "css_parser.h"
 #include "css_props.h"
 #include "dom_js.h"
+#include "layout_api.h"
 #include "css_style_decl.h"
 #include "computed_style.h"
 
@@ -231,6 +232,9 @@ static void block_changed(JSContextHandle ctx, GCValue obj, StyleBlock *b) {
     if (!b->owner || !dom_valid(b->owner)) return;
     char *text = block_text(b);
     if (text) {
+        /* (it gains a transition) */
+        const char *was_style = dom_get_attr_str(b->owner, "style");
+        if (strstr(text, "transition") && !(was_style && strstr(was_style, "transition"))) layout_query_anim_seed(b->owner);
         if (text[0] || dom_get_attr_str(b->owner, "style")) dom_set_attr_str(b->owner, "style", text);
         free(text);
     }

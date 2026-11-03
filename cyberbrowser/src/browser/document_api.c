@@ -307,7 +307,6 @@ static GCValue js_adopt_node(JSContextHandle ctx, GCValue this_val, int argc, GC
         return throw_dom_exception(ctx, "NotSupportedError", "Documents cannot be adopted.");
     if (dom_flags(n) & DOMF_SHADOW_ROOT)
         return throw_dom_exception(ctx, "HierarchyRequestError", "Shadow roots cannot be adopted.");
-    if (dom_kind(n) == DOM_K_FRAGMENT && dom_host(n)) return argv[0];   /* (a template's content) */
     NodeId p = dom_parent(n);
     if (p) {
         GCValue pj = dom_js(ctx, p);
@@ -441,8 +440,9 @@ static GCValue js_create_document(JSContextHandle ctx, GCValue this_val, int arg
     /* (qualifiedName is [LegacyNullToEmptyString]) */
     GCValue qn = JS_IsNull(argv[1]) ? JS_NewString(ctx, "") : JS_ToString(ctx, argv[1]);
     if (JS_IsException(qn)) return qn;
-    const char *q = JS_ToCString(ctx, qn);
-    if (q && q[0]) {
+    size_t qlen = 0;
+    const char *q = JS_ToCStringLen(ctx, &qlen, qn);
+    if (q && qlen) {
         GCValue args[2] = { argv[0], qn };
         el = js_document_create_element_ns(ctx, nd, 2, args);
         if (JS_IsException(el)) return el;

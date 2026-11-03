@@ -319,12 +319,22 @@ GCValue js_xhr_constructor(JSContextHandle ctx, GCValue new_target, int argc, GC
     return obj;
 }
 
+/* An event at the request: its listeners and its on<type> (dom_events.js). */
+static void js_xhr_fire(JSContextHandle ctx, GCValue this_val, const char *type) {
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue ctor = JS_GetPropertyStr(ctx, global, "Event");
+    GCValue trusted = JS_GetPropertyStr(ctx, global, "__cyberDispatchTrusted");
+    if (!JS_IsFunction(ctx, ctor) || !JS_IsFunction(ctx, trusted)) return;
+    GCValue name = JS_NewString(ctx, type);
+    GCValue ev = JS_CallConstructor(ctx, ctor, 1, &name);
+    if (JS_IsException(ev)) { JS_GetException(ctx); return; }
+    GCValue args[2] = { this_val, ev };
+    if (JS_IsException(JS_Call(ctx, trusted, JS_UNDEFINED, 2, args))) JS_GetException(ctx);
+}
+
 static void js_xhr_fire_state(JSContextHandle ctx, XMLHttpRequestHandle xhr, GCValue this_val, int state) {
     SAFE_SET(xhr, XMLHttpRequestHandle, ready_state, state);
-    GCValue cb = JS_GetPropertyStr(ctx, this_val, "onreadystatechange");
-    if (JS_IsFunction(ctx, cb)) {
-        JS_Call(ctx, cb, this_val, 0, NULL);
-    }
+    js_xhr_fire(ctx, this_val, "readystatechange");
 }
 
 static GCValue js_xhr_open(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
@@ -473,8 +483,7 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
                     SAFE_SET(xhr, XMLHttpRequestHandle, status, 0);
                     SAFE_SET(xhr, XMLHttpRequestHandle, response_text, JS_UNDEFINED);
                     js_xhr_fire_state(ctx, xhr, this_val, 4);
-                    GCValue onerror = JS_GetPropertyStr(ctx, this_val, "onerror");
-                    if (JS_IsFunction(ctx, onerror)) JS_Call(ctx, onerror, this_val, 0, NULL);
+                    js_xhr_fire(ctx, this_val, "error");
                     return JS_UNDEFINED;
                 }
             }
@@ -503,8 +512,7 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
                     SAFE_SET(xhr, XMLHttpRequestHandle, status, 0);
                     SAFE_SET(xhr, XMLHttpRequestHandle, response_text, JS_UNDEFINED);
                     js_xhr_fire_state(ctx, xhr, this_val, 4);
-                    GCValue onerror = JS_GetPropertyStr(ctx, this_val, "onerror");
-                    if (JS_IsFunction(ctx, onerror)) JS_Call(ctx, onerror, this_val, 0, NULL);
+                    js_xhr_fire(ctx, this_val, "error");
                     return JS_UNDEFINED;
                 }
             }
@@ -527,16 +535,14 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
             js_xhr_fire_state(ctx, xhr, this_val, 2);
             js_xhr_fire_state(ctx, xhr, this_val, 3);
             js_xhr_fire_state(ctx, xhr, this_val, 4);
-            GCValue onload = JS_GetPropertyStr(ctx, this_val, "onload");
-            if (JS_IsFunction(ctx, onload)) JS_Call(ctx, onload, this_val, 0, NULL);
+            js_xhr_fire(ctx, this_val, "load");
             return JS_UNDEFINED;
         } else {
             platform_http_free_buffer(&response_buffer);
             SAFE_SET(xhr, XMLHttpRequestHandle, status, 0);
             SAFE_SET(xhr, XMLHttpRequestHandle, response_text, JS_UNDEFINED);
             js_xhr_fire_state(ctx, xhr, this_val, 4);
-            GCValue onerror = JS_GetPropertyStr(ctx, this_val, "onerror");
-            if (JS_IsFunction(ctx, onerror)) JS_Call(ctx, onerror, this_val, 0, NULL);
+            js_xhr_fire(ctx, this_val, "error");
             return JS_UNDEFINED;
         }
     }
@@ -546,14 +552,8 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     SAFE_SET(xhr, XMLHttpRequestHandle, status, 200);
     SAFE_SET(xhr, XMLHttpRequestHandle, response_text, JS_NewString(ctx, "{}"));
     
-    GCValue onreadystatechange = JS_GetPropertyStr(ctx, this_val, "onreadystatechange");
-    if (JS_IsFunction(ctx, onreadystatechange)) {
-        JS_Call(ctx, onreadystatechange, this_val, 0, NULL);
-    }
-    GCValue onload = JS_GetPropertyStr(ctx, this_val, "onload");
-    if (JS_IsFunction(ctx, onload)) {
-        JS_Call(ctx, onload, this_val, 0, NULL);
-    }
+    js_xhr_fire(ctx, this_val, "readystatechange");
+    js_xhr_fire(ctx, this_val, "load");
     
     return JS_UNDEFINED;
 }

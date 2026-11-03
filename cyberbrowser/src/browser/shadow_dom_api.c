@@ -45,10 +45,16 @@ GCValue js_shadow_root_get_mode_wrapper(JSContextHandle ctx, GCValue this_val, i
     return js_shadow_root_get_mode(ctx, this_val);
 }
 
+char *dom_serialize(JSContextHandle ctx, NodeId n, bool outer, size_t *len_out);
+
 GCValue js_shadow_root_get_innerHTML(JSContextHandle ctx, GCValue this_val) {
     ShadowRootDataHandle sr = JS_GetOpaqueHandle2(ctx, this_val, js_shadow_root_class_id);
     if (SAFE_IS_NULL(sr)) return JS_ThrowTypeError(ctx, "Invalid ShadowRoot");
-    return SAFE_GET_OR(sr, ShadowRootDataHandle, innerHTML, JS_NULL);
+    size_t len = 0;
+    char *s = dom_serialize(ctx, dom_node_of(this_val), false, &len);
+    GCValue out = JS_NewStringLen(ctx, s, len);
+    free(s);
+    return out;
 }
 
 GCValue js_shadow_root_set_innerHTML(JSContextHandle ctx, GCValue this_val, GCValue val) {

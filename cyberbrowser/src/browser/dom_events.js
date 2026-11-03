@@ -390,9 +390,11 @@
         return first && rootOf(first) === shadowRoot;
     }
 
-    function report(err) {
+    function report(err, g) {
         try {
-            if (typeof global.reportError === 'function' && global.reportError !== report) global.reportError(err);
+            /* (in the listener's global, when it's another) */
+            if (g && g !== global && typeof g.reportError === 'function') g.reportError(err);
+            else if (typeof global.reportError === 'function' && global.reportError !== report) global.reportError(err);
             else if (global.console) global.console.error('Uncaught ' + (err && err.stack ? err + '\n' + err.stack : err));
         } catch (e) { /* the report itself failed */ }
     }
@@ -456,15 +458,37 @@
     /* window.event (HTML 8.1.8 "current event"): the event whose listener
      * runs, unless its object is in a shadow tree (DOM 2.10 "inner invoke") */
     var currentEvent;
+    var CURRENT_EVENT = Symbol.for('cyber.currentEvent');
+    Object.defineProperty(global, CURRENT_EVENT, { configurable: true,
+        get: function () { return currentEvent; }, set: function (v) { currentEvent = v; } });
     function inShadowTree(item) {
-        var SR = global.ShadowRoot;
-        if (!SR || !item || typeof item.getRootNode !== 'function') return false;
-        try { return item.getRootNode() instanceof SR; } catch (e) { return false; }
+        if (!item || typeof item.getRootNode !== 'function') return false;
+        try {
+            var r = item.getRootNode();
+            return r.nodeType === 11 && typeof r.mode === 'string';
+        } catch (e) { return false; }
+    }
+    /* The global of a listener: a function's realm's; an object's, by its
+     * prototype's constructor. */
+    var functionGlobal = global.__cyberFunctionGlobal;
+    function listenerGlobal(cb) {
+        if (!functionGlobal) return global;
+        try {
+            if (typeof cb !== 'function') cb = Object.getPrototypeOf(cb).constructor;
+            return typeof cb === 'function' ? functionGlobal(cb) || global : global;
+        } catch (e) { return global; }
+    }
+
+    /* (no listener runs for a target, or from a global, not fully active) */
+    function inactive(item, g) {
+        var f = global.__cyberInactive;
+        return f ? f(item, g) : false;
     }
 
     /* The listeners of s.type at item (and its handler); whether it has any. */
     function innerInvoke(ev, s, entry, item, capturePass) {
-        var shadow;
+        /* (where the object was when the path was made) */
+        var shadow = entry.flags === undefined ? entry.shadow : (entry.flags & EP_SHADOW) !== 0;
         var map = item[LISTENERS];
         var list = map && map[s.type];
         var found = false;
@@ -475,21 +499,25 @@
                 if (l.removed) continue;
                 if (l.capture !== capturePass) continue;
                 if (l.once) removeListener(item, s.type, l);
-                var prevEvent = currentEvent;
-                if (shadow === undefined) shadow = inShadowTree(item);
-                if (!shadow) currentEvent = ev;
+                var fn = l.callback, thisArg = item;
+                var g = listenerGlobal(fn), here = g === global;
+                if (inactive(item, g)) continue;
+                var prevEvent = here ? currentEvent : g[CURRENT_EVENT];
+                if (!shadow) { if (here) currentEvent = ev; else g[CURRENT_EVENT] = ev; }
                 try {
-                    var fn = l.callback, thisArg = item;
                     if (typeof fn !== 'function') {
                         thisArg = fn;
-                        try { fn = fn.handleEvent; } catch (e) { report(e); continue; }
-                        if (typeof fn !== 'function') { report(new TypeError("'handleEvent' is not a function")); continue; }
+                        try { fn = fn.handleEvent; } catch (e) { report(e, g); continue; }
+                        if (typeof fn !== 'function') {
+                            report(new (g.TypeError || TypeError)("'handleEvent' is not a function"), g);
+                            continue;
+                        }
                     }
                     if (l.passive) s.inPassive = true;
-                    try { fn.call(thisArg, ev); } catch (e) { report(e); }
+                    try { fn.call(thisArg, ev); } catch (e) { report(e, g); }
                 } finally {
                     s.inPassive = false;
-                    currentEvent = prevEvent;
+                    if (here) currentEvent = prevEvent; else g[CURRENT_EVENT] = prevEvent;
                 }
                 if (s.stopImmediate) return true;
             }
@@ -498,20 +526,21 @@
          * property unless the native path says there is no content attribute
          * and none was set (nor forwarded from <body> to the window) */
         /* (a native path's flags say whether a handler may be set) */
-        var h = entry.flags === undefined || (entry.flags & (EP_ON_ATTR | EP_HANDLER | EP_ALWAYS | EP_ON_PROP))
-                ? handlerProp(item, s.type) : null;
+        var h = (entry.flags === undefined || (entry.flags & (EP_ON_ATTR | EP_HANDLER | EP_ALWAYS | EP_ON_PROP))) &&
+                !inactive(item, null) ? handlerProp(item, s.type) : null;
+        if (h && inactive(item, listenerGlobal(h))) h = null;
         if (h) found = true;
         if (!capturePass) {
             if (h) {
-                var r, prevEv = currentEvent;
-                if (shadow === undefined) shadow = inShadowTree(item);
-                if (!shadow) currentEvent = ev;
+                var r, hg = listenerGlobal(h), hhere = hg === global;
+                var prevEv = hhere ? currentEvent : hg[CURRENT_EVENT];
+                if (!shadow) { if (hhere) currentEvent = ev; else hg[CURRENT_EVENT] = ev; }
                 try {
                     r = s.type === 'error' && ev instanceof global.ErrorEvent && item === global
                         ? h.call(item, ev.message, ev.filename, ev.lineno, ev.colno, ev.error)
                         : h.call(item, ev);
-                } catch (e) { report(e); r = undefined; }
-                finally { currentEvent = prevEv; }
+                } catch (e) { report(e, hg); r = undefined; }
+                finally { if (hhere) currentEvent = prevEv; else hg[CURRENT_EVENT] = prevEv; }
                 if (s.type === 'error' && item === global ? r === true : r === false) cancel(s);
                 else if (s.type === 'beforeunload' && r != null) cancel(s);
             }
@@ -545,6 +574,13 @@
         var path = [];
         var t = target, related = retarget(origRelated, target);
         var guard = 0;
+        /* (its related target retargets to itself: no one to tell) */
+        if (origRelated && related === target && origRelated !== target) {
+            s.relatedTarget = null;
+            s.dispatching = false;
+            s.stop = s.stopImmediate = false;
+            return !s.canceled;
+        }
         s.path = path;
         /* a node's path comes from the node store in one call (event_path.c) */
         /* (a trusted event with a legacy type: every object, for its listeners of either type) */
@@ -553,12 +589,16 @@
         if (flat) return dispatchFlat(ev, s, target, origRelated, flat);
         {
             while (t && guard++ < 4096) {
-                path.push({ item: t, target: retarget(target, t),
+                path.push({ item: t, target: retarget(target, t), shadow: inShadowTree(t),
                             relatedTarget: origRelated ? retarget(origRelated, t) : null });
                 t = parentOf(t, ev, s);
             }
         }
-        (void related);
+        /* The targets it ends with: the last entry's that is at its target,
+         * none out of a shadow tree (DOM 2.9 "clearTargets"). */
+        var last = path.length ? path[0] : null;
+        for (var q = path.length - 1; q > 0; q--) if (path[q].item === path[q].target) { last = path[q]; break; }
+        var clear = last && (inShadowTree(last.target) || (last.relatedTarget && inShadowTree(last.relatedTarget)));
         /* capture: from the outermost to the target */
         for (var i = path.length - 1; i >= 0; i--) {
             var e = path[i];
@@ -572,8 +612,8 @@
         }
         s.phase = NONE;
         s.currentTarget = null;
-        s.target = path.length ? path[0].target : target;
-        s.relatedTarget = origRelated ? retarget(origRelated, target) : null;
+        s.target = clear ? null : last ? last.target : target;
+        s.relatedTarget = clear || !last ? null : last.relatedTarget;
         s.dispatching = false;
         s.stop = s.stopImmediate = false;
         return !s.canceled;
@@ -581,22 +621,27 @@
     /* Dispatch over a native path ([item, target, relatedTarget, flags] per
      * entry, event_path.c): only the entries where something may run are
      * visited; composedPath() reads the items from s.flat. */
-    var EP_LISTENERS = 1, EP_ON_ATTR = 2, EP_HANDLER = 4, EP_ALWAYS = 8, EP_ON_PROP = 16, EP_ALL = 31;
+    var EP_LISTENERS = 1, EP_ON_ATTR = 2, EP_HANDLER = 4, EP_ALWAYS = 8, EP_ON_PROP = 16, EP_ALL = 31, EP_SHADOW = 32;
     /* addEventListener and handler sets: once a listener runs that adds one,
      * the flags may be stale, and every later entry is visited */
     var listenerChanges = 0;
     function dispatchFlat(ev, s, target, origRelated, flat) {
         s.flat = flat;
         var n = flat.length >> 2, changes = listenerChanges;
+        /* (as dispatchEvent0: the targets it ends with) */
+        var last = 0;
+        for (var q = n - 1; q > 0; q--) if (flat[4 * q] === flat[4 * q + 1]) { last = q; break; }
+        var endTarget = flat[4 * last + 1], endRelated = flat[4 * last + 2];
+        var clear = (flat[4 * last + 3] & EP_SHADOW) !== 0 || (endRelated && inShadowTree(endRelated));
         for (var i = n - 1; i >= 0; i--) {
-            var fl = changes === listenerChanges ? flat[4 * i + 3] : EP_ALL;
+            var fl = changes === listenerChanges ? flat[4 * i + 3] : EP_ALL | (flat[4 * i + 3] & EP_SHADOW);
             if (!(fl & EP_LISTENERS)) continue;
             var e = { item: flat[4 * i], target: flat[4 * i + 1], relatedTarget: flat[4 * i + 2], flags: fl };
             invoke(ev, s, e, i === 0 || e.item === e.target ? AT_TARGET : CAPTURING_PHASE, true);
         }
         for (var j = 0; j < n; j++) {
-            var f = changes === listenerChanges ? flat[4 * j + 3] : EP_ALL;
-            if (!f) continue;
+            var f = changes === listenerChanges ? flat[4 * j + 3] : EP_ALL | (flat[4 * j + 3] & EP_SHADOW);
+            if (!(f & EP_ALL)) continue;
             var item = flat[4 * j], tgt = flat[4 * j + 1];
             var atTarget = j === 0 || item === tgt;
             if (!atTarget && !s.bubbles) continue;
@@ -605,8 +650,8 @@
         }
         s.phase = NONE;
         s.currentTarget = null;
-        s.target = n ? flat[1] : target;
-        s.relatedTarget = origRelated ? retarget(origRelated, target) : null;
+        s.target = clear ? null : endTarget;
+        s.relatedTarget = clear ? null : endRelated;
         s.dispatching = false;
         s.stop = s.stopImmediate = false;
         s.flat = null;
@@ -634,7 +679,9 @@
         var target = this == null ? global : this;
         if (!event || !event[STATE])
             throw new TypeError("Failed to execute 'dispatchEvent': parameter 1 is not of type 'Event'.");
-        st(event).isTrusted = false;
+        /* (one being dispatched throws, and stays as it is) */
+        var es = st(event);
+        if (!es.dispatching && es.initialized) es.isTrusted = false;
         return dispatch(target, event);
     }
 
@@ -731,7 +778,7 @@
         for (var n = el.parentNode; n; n = n.parentNode) if (n.localName === 'form') return n;
         return null;
     }
-    function inputType(el) { return String(el.getAttribute('type') || 'text').toLowerCase(); }
+    function inputType(el) { return String(el.getAttributeNS(null, 'type') || 'text').toLowerCase(); }
     function radioGroup(el) {
         var name = el.getAttribute('name'), root = formOf(el) || rootOf(el);
         if (!name || !root || !root.querySelectorAll) return [];

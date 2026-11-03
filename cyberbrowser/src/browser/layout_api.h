@@ -29,6 +29,9 @@ int layout_query_client_rects(JSContextHandle ctx, GCValue element, double (*out
 /* A box or viewport (a document) has scrolled: its scroll event, then its
  * scrollend, at the next rendering opportunities (the tick). */
 void layout_scroll_queue(JSContextHandle ctx, uint32_t id);
+/* An element's inline style gains a transition: what it was in the last layout
+ * is its before-change style (the transition's own change comes with it). */
+void layout_query_anim_seed(uint32_t id);
 int layout_scroll_tick(JSContextHandle ctx);
 
 /* The element's used font size in px from the cached layout (computed

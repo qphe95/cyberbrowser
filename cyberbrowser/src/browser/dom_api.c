@@ -686,9 +686,11 @@ static void collect_ce_candidates(NodeId root, uint32_t **out, uint32_t *n) {
 /* A subtree was inserted into a connected tree: enqueue an upgrade for every
  * custom element candidate in it, then connectedCallbacks for the elements
  * that already have one (upgraded elements).  Upgrades run only on connect. */
+static bool g_insert_connecting;
 void dom_ce_on_connect(JSContextHandle ctx, NodeId subtree) {
     CP_ACC("CE connect+upgrade");
-    frame_api_on_connect(ctx, subtree);
+    /* (inserted by script: after the whole insertion, post_insert_collect) */
+    if (!g_insert_connecting) frame_api_on_connect(ctx, subtree);
     uint32_t *ids = NULL, n = 0;
     collect_ce_candidates(subtree, &ids, &n);
     if (!n) { free(ids); return; }
@@ -1467,23 +1469,26 @@ static void post_insert_queue(NodeId id) {
     g_post_insert.ids[g_post_insert.n++] = id;
 }
 
-/* The scripts in child's subtree (tree order), or its parent script when
- * text went into one. */
+/* The scripts and iframes in child's subtree (tree order), or its parent
+ * script when text went into one. */
+static CssAtom g_script_tag, g_iframe_tag;
 static void post_insert_collect(NodeId parent, NodeId child) {
-    if (!g_dom_dynamic_scripts_enabled) return;
     if (dom_kind(child) != DOM_K_ELEMENT) {
-        if (dom_tag_is(parent, "script")) post_insert_queue(parent);
+        if (g_dom_dynamic_scripts_enabled && dom_tag_is(parent, "script")) post_insert_queue(parent);
         return;
     }
-    static CssAtom script_tag;
-    if (!script_tag) {
-        css_atom_reserve(1);
-        script_tag = css_atom_intern("script", 6);
+    if (!g_script_tag) {
+        css_atom_reserve(2);
+        g_script_tag = css_atom_intern("script", 6);
+        g_iframe_tag = css_atom_intern("iframe", 6);
     }
     uint32_t r = dom_slot(child);
-    for (uint32_t s = r; s; s = dom_next_in_subtree(s, r))
-        if (g_dom.tag[s] == script_tag && g_dom.kind[s] == DOM_K_ELEMENT && !(g_dom.flags[s] & DOMF_PARSER_SCRIPT))
+    for (uint32_t s = r; s; s = dom_next_in_subtree(s, r)) {
+        if (g_dom.kind[s] != DOM_K_ELEMENT) continue;
+        if (g_dom.tag[s] == g_iframe_tag) post_insert_queue(dom_id_of(s));
+        else if (g_dom.tag[s] == g_script_tag && g_dom_dynamic_scripts_enabled && !(g_dom.flags[s] & DOMF_PARSER_SCRIPT))
             post_insert_queue(dom_id_of(s));
+    }
 }
 
 /* (each run takes the queue: an insertion by one of them has its own) */
@@ -1493,8 +1498,17 @@ void dom_post_insert_flush(JSContextHandle ctx) {
         NodeId *ids = g_post_insert.ids;
         g_post_insert.ids = NULL;
         g_post_insert.n = g_post_insert.cap = 0;
-        for (uint32_t i = 0; i < n; i++)
-            if (dom_valid(ids[i])) dom_maybe_load_script(ctx, dom_js(ctx, ids[i]));
+        for (uint32_t i = 0; i < n; i++) {
+            if (!dom_valid(ids[i])) continue;
+            if (dom_tag(ids[i]) == g_iframe_tag) {
+                bool was = g_frame_blank_now;
+                g_frame_blank_now = true;
+                if (dom_is_connected(ids[i])) frame_api_on_connect(ctx, ids[i]);
+                g_frame_blank_now = was;
+            } else {
+                dom_maybe_load_script(ctx, dom_js(ctx, ids[i]));
+            }
+        }
         free(ids);
     }
 }
@@ -1672,10 +1686,10 @@ bool dom_api_insert(JSContextHandle ctx, NodeId parent, NodeId child, NodeId ref
     js_cyber_ce_push_stack(ctx);
     bool connected = dom_api_is_connected(ctx, child);
     if (connected) {
-        bool was = g_frame_blank_now;
-        g_frame_blank_now = true;
+        bool was = g_insert_connecting;
+        g_insert_connecting = true;
         dom_ce_on_connect(ctx, child);
-        g_frame_blank_now = was;
+        g_insert_connecting = was;
     }
     dom_flush_ce_reactions(ctx);
     js_cyber_ce_pop_stack(ctx);
@@ -1723,6 +1737,7 @@ bool dom_api_remove(JSContextHandle ctx, NodeId parent, NodeId child) {
     }
     bool was_connected = dom_api_is_connected(ctx, parent);
     dom_detach(child, false);
+    if (was_connected && !g_dom_moving) frame_api_on_disconnect();
     dom_request_layout();
     if (dom_tag_is(parent, "picture")) {
         image_api_picture_changed(parent);
@@ -2405,6 +2420,7 @@ GCValue js_node_contains_real(JSContextHandle ctx, GCValue this_val, int argc, G
     if (argc < 1 || JS_IsNull(argv[0]) || JS_IsUndefined(argv[0])) return JS_FALSE;
     if (JS_StrictEq(ctx, this_val, argv[0])) return JS_TRUE;
     NodeId a = dom_node_of(this_val), b = dom_node_of(argv[0]);
+    if (!b) return JS_ThrowTypeError(ctx, "Failed to execute 'contains' on 'Node': parameter 1 is not of type 'Node'.");
     return JS_NewBool(ctx, a && b && dom_contains(a, b));
 }
 
@@ -4286,10 +4302,12 @@ GCValue js_document_create_attribute_ns(JSContextHandle ctx, GCValue this_val, i
     const char *q = JS_ToCStringLen(ctx, &n, argv[1]);
     if (!q) return JS_EXCEPTION;
     if (!valid_attr_name(q, n)) return throw_dom_exception(ctx, "InvalidCharacterError", "The attribute name is not a valid name.");
+    const char *colon = memchr(q, ':', n);
+    if (colon && (colon == q || colon + 1 == q + n))
+        return throw_dom_exception(ctx, "InvalidCharacterError", "The attribute name is not a valid name.");
     GCValue attr = create_attr_obj(ctx, JS_NULL, q, "");
     if (JS_IsException(attr)) return attr;
     attr_set(ctx, attr, "ownerDocument", this_val);
-    const char *colon = memchr(q, ':', n);
     GCValue ns = JS_IsNull(argv[0]) || JS_IsUndefined(argv[0]) ? JS_NULL : JS_ToString(ctx, argv[0]);
     if (JS_IsString(ns)) {
         size_t nl = 0;
@@ -4937,6 +4955,15 @@ GCValue js_document_create_document_fragment(JSContextHandle ctx, GCValue this_v
     NodeId f = dom_create_fragment(owner_of_value(ctx, this_val));
     GCValue frag = dom_js(ctx, f);
     if (JS_IsObject(frag)) dom_node_set_owner_document(ctx, frag, this_val);
+    return frag;
+}
+
+// new DocumentFragment(): in the current global's document
+GCValue js_document_fragment_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
+    GCValue doc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document");
+    GCValue frag = js_document_create_document_fragment(ctx, doc, argc, argv);
+    GCValue proto = JS_IsObject(frag) && JS_IsObject(new_target) ? JS_GetPropertyStr(ctx, new_target, "prototype") : JS_UNDEFINED;
+    if (JS_IsObject(proto)) JS_SetPrototype(ctx, frag, proto);
     return frag;
 }
 

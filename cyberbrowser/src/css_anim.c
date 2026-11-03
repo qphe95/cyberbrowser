@@ -64,7 +64,7 @@ static inline void bset(uint64_t *b, int i, bool on)
 /* ---- Properties ---- */
 
 static const char *const k_props[ANIM_NPROP] = { "left", "top", "right", "bottom", "opacity", "transform", "width",
-                                                  "height" };
+                                                  "height", "color", "background-color" };
 
 const char *anim_prop_name(int p) { return p >= 0 && p < ANIM_NPROP ? k_props[p] : ""; }
 
@@ -77,18 +77,26 @@ int anim_prop_of(const char *name)
 
 static bool val_same(const AnimVal *x, const AnimVal *y)
 {
-    return x->ok == y->ok && (!x->ok || (fabsf(x->x - y->x) < 1e-4f && fabsf(x->y - y->y) < 1e-4f));
+    return x->ok == y->ok && (!x->ok || (fabsf(x->x - y->x) < 1e-4f && fabsf(x->y - y->y) < 1e-4f &&
+                                         fabsf(x->z - y->z) < 1e-4f && fabsf(x->w - y->w) < 1e-4f));
 }
 
 static AnimVal val_mix(const AnimVal *x, const AnimVal *y, double t)
 {
     if (!x->ok || !y->ok) return t < 0.5 ? *x : *y;
-    AnimVal r = { (float)(x->x + (y->x - x->x) * t), (float)(x->y + (y->y - x->y) * t), 1 };
+    AnimVal r = { (float)(x->x + (y->x - x->x) * t), (float)(x->y + (y->y - x->y) * t), 1,
+                  (float)(x->z + (y->z - x->z) * t), (float)(x->w + (y->w - x->w) * t) };
     return r;
 }
 
 void anim_val_css(int prop, const AnimVal *v, char *buf, size_t cap)
 {
+    if (prop == ANIM_COLOR || prop == ANIM_BGCOLOR) {
+        int r = (int)lround(v->x * 255.0f), g = (int)lround(v->y * 255.0f), b = (int)lround(v->z * 255.0f);
+        if (v->w >= 1.0f) snprintf(buf, cap, "rgb(%d, %d, %d)", r, g, b);
+        else snprintf(buf, cap, "rgba(%d, %d, %d, %.6g)", r, g, b, v->w);
+        return;
+    }
     if (prop == ANIM_TRANSFORM) snprintf(buf, cap, "matrix(1, 0, 0, 1, %.6g, %.6g)", v->x, v->y);
     else if (prop == ANIM_OPACITY) snprintf(buf, cap, "%.6g", v->x);
     else snprintf(buf, cap, "%.6gpx", v->x);
@@ -467,6 +475,15 @@ static void anim_timing(int r, const SpecList L[ANIM_NFIELD], int j)
     const char *f = list_item(&L[ANIM_F_FILL], j, "none", buf, sizeof buf);
     A.fill[r] = !strcasecmp(f, "forwards") ? F_FORWARDS : !strcasecmp(f, "backwards") ? F_BACKWARDS :
                 !strcasecmp(f, "both") ? F_BOTH : F_NONE;
+}
+
+void anim_seed(NodeId el, int ps, const AnimVal base[ANIM_NPROP])
+{
+    for (int p = 0; p < ANIM_NPROP; p++) {
+        if (row_find(el, ps, K_BASE, p, NULL) >= 0) continue;
+        int b = row_new(el, ps, K_BASE, p);
+        if (b >= 0) A.a[b] = base[p];
+    }
 }
 
 void anim_box(NodeId el, int ps, const char *spec, const AnimVal base[ANIM_NPROP], bool detect, double now,

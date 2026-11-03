@@ -81,6 +81,7 @@ GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc
 
 // Forward declarations for internal functions
 GCValue js_dummy_function(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_document_fragment_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
 GCValue js_dummy_function_true(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_create_from_ctor_proto(JSContextHandle ctx, GCValue ctor);
 GCValue js_message_channel_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
@@ -1622,7 +1623,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, window, "HTMLSlotElement", slot_ctor);
     
     // DocumentFragment constructor (needs node_proto)
-    GCValue doc_fragment_ctor = JS_NewCFunction2(ctx, js_dummy_function, "DocumentFragment", 0, JS_CFUNC_constructor, 0);
+    GCValue doc_fragment_ctor = JS_NewCFunction2(ctx, js_document_fragment_constructor, "DocumentFragment", 0, JS_CFUNC_constructor, 0);
     GCValue doc_fragment_proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, doc_fragment_proto, "constructor", doc_fragment_ctor);
     // Inherit Node methods (appendChild, insertBefore, removeChild, cloneNode, ...)
@@ -2953,6 +2954,11 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     LOG_INFO("Setting up XMLHttpRequest...");
     GCValue xhr_proto = JS_NewObject(ctx);
     JS_SetPropertyFunctionList(ctx, xhr_proto, js_xhr_proto_funcs, js_xhr_proto_funcs_count);
+    {
+        GCValue et = JS_GetPropertyStr(ctx, global, "EventTarget");
+        GCValue et_proto = JS_IsObject(et) ? JS_GetPropertyStr(ctx, et, "prototype") : JS_UNDEFINED;
+        if (JS_IsObject(et_proto)) JS_SetPrototype(ctx, xhr_proto, et_proto);
+    }
     GCValue xhr_ctor = JS_NewCFunction2(ctx, js_xhr_constructor, "XMLHttpRequest", 
         1, JS_CFUNC_constructor, 0);
     JS_SetConstructor(ctx, xhr_ctor, xhr_proto);

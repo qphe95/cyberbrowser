@@ -1787,6 +1787,12 @@ static GCValue js_scroll_top_set(JSContextHandle ctx, GCValue this_val, int argc
 static GCValue js_scroll_left_set(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
 { return lq_scroll_write(ctx, this_val, argc, argv, false); }
 
+void layout_query_anim_seed(uint32_t id)
+{
+    int idx = g_lq_valid ? lq_box_index(id) : -1;
+    if (idx >= 0) css_layout_anim_seed(&g_lq_layout, idx, id);
+}
+
 /* ---- scroll and scrollend (CSSOM View "run the scroll steps") ---- */
 
 /* The targets with an event due: 1 scroll, 2 scrollend (the rendering

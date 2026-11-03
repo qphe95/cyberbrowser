@@ -608,6 +608,8 @@ static GCValue js_iter_next(JSContextHandle ctx, GCValue this_val, int argc, GCV
 
 /* ---- the document base URL and <a>/<area> ---- */
 
+char *frame_api_fallback_base(JSContextHandle ctx);
+
 /* The document's URL (location.href). */
 static char *document_url(JSContextHandle ctx) {
     GCValue loc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "location");
@@ -638,6 +640,10 @@ static char *node_document_url(JSContextHandle ctx, NodeId d) {
 static const WUrl *base_url(JSContextHandle ctx, NodeId el) {
     NodeId d = el ? (dom_kind(el) == DOM_K_DOCUMENT ? el : dom_owner(el)) : DOM_NULL;
     char *doc = node_document_url(ctx, d);
+    if (!strcmp(doc, "about:srcdoc") || !strcmp(doc, "about:blank")) {
+        char *fb = frame_api_fallback_base(ctx);
+        if (fb) { free(doc); doc = fb; }
+    }
     const char *base = NULL;
     if (d) {
         /* (the first HTML base element with an href) */

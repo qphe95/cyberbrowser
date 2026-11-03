@@ -23,13 +23,14 @@
 #include "dom_store.h"
 
 /* The properties that animate (the others keep their cascaded value). */
-enum { ANIM_LEFT, ANIM_TOP, ANIM_RIGHT, ANIM_BOTTOM, ANIM_OPACITY, ANIM_TRANSFORM, ANIM_WIDTH, ANIM_HEIGHT, ANIM_NPROP };
+enum { ANIM_LEFT, ANIM_TOP, ANIM_RIGHT, ANIM_BOTTOM, ANIM_OPACITY, ANIM_TRANSFORM, ANIM_WIDTH, ANIM_HEIGHT, ANIM_COLOR, ANIM_BGCOLOR, ANIM_NPROP };
 
 /* A value: px (or a number: opacity; a translation: x, y).  ok 0: one
  * that does not interpolate (auto, a percentage): it changes at once. */
 typedef struct AnimVal {
     float x, y;
     uint8_t ok;
+    float z, w;     /* (a color: x, y, z, w are r, g, b, a) */
 } AnimVal;
 
 /* ---- The specification: the transition-* and animation-* longhands as
@@ -71,6 +72,10 @@ typedef int (*AnimKeyframesFn)(void *ud, const char *name, const float **offs, c
  * *cur the values at now (set[p]: animated). */
 void anim_box(NodeId el, int ps, const char *spec, const AnimVal base[ANIM_NPROP], bool detect, double now,
               AnimKeyframesFn kf, AnimFrameFn frame, void *ud, AnimVal cur[ANIM_NPROP], bool set[ANIM_NPROP]);
+
+/* The values el/ps had before its style gained a transition, for any
+ * property that has none yet. */
+void anim_seed(NodeId el, int ps, const AnimVal base[ANIM_NPROP]);
 
 /* The value of prop on el/ps at now, when something animates it. */
 bool anim_value(NodeId el, int ps, int prop, double now, AnimVal *out);

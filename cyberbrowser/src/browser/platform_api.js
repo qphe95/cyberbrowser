@@ -207,14 +207,14 @@
      * shadow root's slot the node is assigned to) */
     if (ELP && !Object.prototype.hasOwnProperty.call(ELP, 'slot'))
         Object.defineProperty(ELP, 'slot', { configurable: true, enumerable: true,
-            get: function () { var v = this.getAttribute('slot'); return v === null ? '' : v; },
+            get: function () { var v = this.getAttributeNS(null, 'slot'); return v === null ? '' : v; },
             set: function (v) { this.setAttribute('slot', String(v)); } });
     function assignedSlot() {
         if (this === null || typeof this !== 'object' || !NP.isPrototypeOf(this)) throw new TypeError('Illegal invocation');
         var host = this.parentNode;
         var root = host && host.nodeType === 1 ? host.shadowRoot : null;
         if (!root || root.mode !== 'open') return null;
-        var want = this.nodeType === 1 ? (this.getAttribute('slot') || '') : '';
+        var want = this.nodeType === 1 ? (this.getAttributeNS(null, 'slot') || '') : '';
         var slots = root.querySelectorAll('slot');
         for (var i = 0; i < slots.length; i++) if ((slots[i].getAttribute('name') || '') === want) return slots[i];
         return null;
@@ -259,6 +259,13 @@
         Object.defineProperty(DOCP, 'scrollingElement', { configurable: true, enumerable: true, get: function () {
             return this.compatMode === 'BackCompat' ? this.body : this.documentElement;
         } });
+
+    /* (HTML 4.11.1) */
+    var DETP = global.HTMLDetailsElement && global.HTMLDetailsElement.prototype;
+    if (DETP && !('open' in DETP))
+        Object.defineProperty(DETP, 'open', { configurable: true, enumerable: true,
+            get: function () { return this.hasAttributeNS(null, 'open'); },
+            set: function (v) { if (v) this.setAttribute('open', ''); else this.removeAttribute('open'); } });
 
     /* ---- scrolling (CSSOM View), over scrollTop and scrollLeft ---- */
     /* (smooth scrolling is an instant one) */
