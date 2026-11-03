@@ -749,6 +749,21 @@ static uint32_t build_element(Builder *b, DomTok *t, uint32_t parent, bool paren
         g_dom.attrs[s] = (DomAttrList){ t->attrs, t->nattr, t->nattr, t->attr_blk };
         t->attrs = NULL; t->nattr = 0; t->attr_blk = 0;      /* ownership moved */
         DomAttrList *l = &g_dom.attrs[s];
+        /* (adjust foreign attributes, HTML 13.2.6.5: xlink:*, xml:* and
+         * xmlns on SVG and MathML elements are in their namespaces) */
+        for (int i = 0; ns != DOM_NS_HTML && i < l->n; i++) {
+            const char *an = css_atom_str(l->a[i].name);
+            if (!an) continue;
+            static const char *const xlink[] = { "actuate", "arcrole", "href", "role", "show", "title", "type" };
+            if (!strncmp(an, "xlink:", 6)) {
+                for (size_t k = 0; k < sizeof xlink / sizeof xlink[0]; k++)
+                    if (!strcmp(an + 6, xlink[k])) l->a[i].ns = DOM_NS_XLINK;
+            } else if (!strcmp(an, "xml:lang") || !strcmp(an, "xml:space")) {
+                l->a[i].ns = DOM_NS_XML;
+            } else if (!strcmp(an, "xmlns") || !strcmp(an, "xmlns:xlink")) {
+                l->a[i].ns = DOM_NS_XMLNS;
+            }
+        }
         static CssAtom class_name;
         if (!class_name) { css_atom_reserve(1); class_name = css_atom_intern("class", 5); }
         bool seen_id = false, seen_class = false;

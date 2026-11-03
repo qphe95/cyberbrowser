@@ -273,6 +273,18 @@ GCValue js_document_create_range(JSContextHandle ctx, GCValue this_val, int argc
 GCValue js_range_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
 /* AbstractRange, Range and StaticRange (range_api.c). */
 void range_api_install(JSContextHandle ctx, GCValue global);
+/* The MutationRecord interface (misc_api.c). */
+void mutation_record_install(JSContextHandle ctx, GCValue global);
+/* The Attr interface (dom_api.c). */
+void attr_api_install(JSContextHandle ctx, GCValue global);
+/* The NamedNodeMap interface (dom_api.c). */
+void named_node_map_install(JSContextHandle ctx, GCValue global);
+/* The window of the index-th child frame of realm ctx's document (frame_api.c); 0 for none. */
+uint32_t frame_indexed_child(JSContextHandle ctx, uint32_t index);
+/* frame_api.c: the id of the window of ctx's child frame named name (0:
+ * none), and that window as seen from ctx. */
+uint32_t frame_named_child(JSContextHandle ctx, const char *name, size_t len);
+GCValue frame_window_of(JSContextHandle ctx, uint32_t id);
 /* WebIDL shapes for the DOM interfaces the realm has (idl_shape.c). */
 void idl_shape_apply(JSContextHandle ctx, GCValue global);
 /* Dedicated workers (worker_api.c): the Worker interface and the natives;

@@ -40,11 +40,36 @@ static Trav *trav_of(JSContextHandle ctx, GCValue obj, JSClassID *which) {
     return c ? c->t : NULL;
 }
 
+/* ---- the live NodeIterators (their pre-removing steps) ---- */
+
+static struct { Trav **t; uint32_t n, cap; } g_iters;
+
+static void iter_pre_remove(NodeId node);
+
+static void iters_add(Trav *t) {
+    if (g_iters.n == g_iters.cap) {
+        g_iters.cap = g_iters.cap ? g_iters.cap * 2 : 16;
+        g_iters.t = realloc(g_iters.t, g_iters.cap * sizeof *g_iters.t);
+    }
+    g_iters.t[g_iters.n++] = t;
+    g_dom_pre_remove = iter_pre_remove;
+}
+
+static void iters_drop(Trav *t) {
+    for (uint32_t i = 0; i < g_iters.n; i++)
+        if (g_iters.t[i] == t) { g_iters.t[i] = g_iters.t[--g_iters.n]; break; }
+    if (!g_iters.n) g_dom_pre_remove = NULL;
+}
+
 static void finalize(GCValue v, JSClassID id) {
     GCHandle h = JS_GetOpaqueHandle(v, id);
     if (h == GC_HANDLE_NULL) return;
     Cell *c = (Cell *)gc_deref(h);
-    if (c) { free(c->t); c->t = NULL; }
+    if (c) {
+        if (id == g_iter_class) iters_drop(c->t);
+        free(c->t);
+        c->t = NULL;
+    }
 }
 static void walker_finalizer(JSRuntimeHandle rt, GCValue v) { (void)rt; finalize(v, g_walker_class); }
 static void iter_finalizer(JSRuntimeHandle rt, GCValue v) { (void)rt; finalize(v, g_iter_class); }
@@ -305,6 +330,41 @@ static GCValue js_filter(JSContextHandle ctx, GCValue this_val, int argc, GCValu
     return JS_IsUndefined(f) ? JS_NULL : f;
 }
 
+static bool inclusive_ancestor(uint32_t a, uint32_t d) {
+    for (; d; d = PARENT(d)) if (d == a) return true;
+    return false;
+}
+
+/* "NodeIterator pre-removing steps" (DOM 6.1), for each live iterator: a
+ * reference in the subtree going moves to the first node after it within
+ * the root (pointer before), else to the node before it in tree order. */
+static void iter_pre_remove(NodeId node) {
+    uint32_t r = S(node);
+    if (!r) return;
+    for (uint32_t i = 0; i < g_iters.n; i++) {
+        Trav *t = g_iters.t[i];
+        uint32_t ref = S(t->cur), root = S(t->root);
+        if (!ref || !root || !inclusive_ancestor(r, ref) || inclusive_ancestor(r, root)) continue;
+        if (t->before) {
+            /* (the first following node not in r's subtree, within the root) */
+            uint32_t next = 0;
+            for (uint32_t x = r; x && x != root && !next; x = PARENT(x)) next = NEXT(x);
+            if (next && inclusive_ancestor(root, next)) {
+                t->cur = N(next);
+                continue;
+            }
+            t->before = false;
+        }
+        uint32_t prev = PREV(r);
+        if (prev) {
+            while (LAST(prev)) prev = LAST(prev);
+            t->cur = N(prev);
+        } else {
+            t->cur = N(PARENT(r));
+        }
+    }
+}
+
 /* document.createTreeWalker (magic 0) / createNodeIterator (magic 1) */
 static GCValue js_create(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv, int magic) {
     (void)this_val;
@@ -326,6 +386,7 @@ static GCValue js_create(JSContextHandle ctx, GCValue this_val, int argc, GCValu
     if (h == GC_HANDLE_NULL) { free(t); return JS_ThrowOutOfMemory(ctx); }
     ((Cell *)gc_deref(h))->t = t;
     JS_SetOpaqueHandle(obj, h);
+    if (magic) iters_add(t);
     JS_DefinePropertyValueStr(ctx, obj, "__filter", argc > 2 && !JS_IsUndefined(argv[2]) ? argv[2] : JS_NULL, 0);
     return obj;
 }

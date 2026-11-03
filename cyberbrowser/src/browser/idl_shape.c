@@ -30,6 +30,7 @@ typedef struct IdlMember {
     uint8_t kind;
     uint8_t required;           /* operations: the arguments they need */
     const char *value;          /* constants */
+    uint8_t unscopable;         /* [Unscopable]: in the prototype's @@unscopables */
 } IdlMember;
 
 typedef struct IdlIface {
@@ -61,11 +62,14 @@ static int brand_of(const char *iface) {
     return B_NONE;
 }
 
-/* An Attr: an object of nodeType 2 over no store node (dom_api.c). */
+/* An Attr: an object with its own hidden fields (__a_name; dom_api.c) over
+ * no store node. */
 static bool is_attr(JSContextHandle ctx, GCValue v) {
-    int32_t nt = 0;
-    return JS_IsObject(v) && !dom_node_of(v) && JS_ToInt32(ctx, &nt, JS_GetPropertyStr(ctx, v, "nodeType")) == 0 &&
-           nt == 2;
+    if (!JS_IsObject(v) || dom_node_of(v)) return false;
+    JSAtom a = JS_NewAtom(ctx, "__a_name");
+    int own = JS_GetOwnProperty(ctx, NULL, v, a);
+    JS_FreeAtom(ctx, a);
+    return own > 0;
 }
 
 static int brand_check(JSContextHandle ctx, GCValue v, int brand) {
@@ -134,7 +138,15 @@ static void shape_member(JSContextHandle ctx, GCValue obj, const IdlMember *m, i
         if (!(d.flags & JS_PROP_GETSET) && JS_IsFunction(ctx, d.value)) {
             JS_DefinePropertyValue(ctx, obj, a, d.value, JS_PROP_WRITABLE | JS_PROP_ENUMERABLE | JS_PROP_CONFIGURABLE);
             JS_DefinePropertyValueStr(ctx, d.value, "length", JS_NewInt32(ctx, m->required), JS_PROP_CONFIGURABLE);
-            set_checks(ctx, seen, n, cap, d.value, m->required, m->kind == IDL_OP ? brand : B_NONE);
+            /* (an anonymous function: the operation's name) */
+            size_t fl = 0;
+            GCValue fname = JS_GetPropertyStr(ctx, d.value, "name");
+            const char *fs = JS_IsString(fname) ? JS_ToCStringLen(ctx, &fl, fname) : NULL;
+            if (fs) JS_FreeCString(ctx, fs);
+            if (!fl) JS_DefinePropertyValueStr(ctx, d.value, "name", JS_NewString(ctx, m->name), JS_PROP_CONFIGURABLE);
+            /* (a promise-returning operation rejects rather than throws: its own check) */
+            bool promise = !strcmp(m->name, "exitFullscreen") || !strcmp(m->name, "requestFullscreen");
+            set_checks(ctx, seen, n, cap, d.value, m->required, m->kind == IDL_OP && !promise ? brand : B_NONE);
         }
     } else if (d.flags & JS_PROP_GETSET) {
         char gname[96];
@@ -194,6 +206,32 @@ void idl_shape_apply(JSContextHandle ctx, GCValue global) {
         if (!JS_IsObject(proto)) continue;
         redefine_value(ctx, ctor, "prototype", proto, 0);
         redefine_value(ctx, proto, "constructor", ctor, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+        /* (an interface object's [[Prototype]]: its parent's interface object) */
+        if (f->parent) {
+            GCValue pc = JS_GetPropertyStr(ctx, global, f->parent);
+            if (JS_IsObject(pc) && !JS_StrictEq(ctx, JS_GetPrototype(ctx, ctor), pc)) JS_SetPrototype(ctx, ctor, pc);
+        }
+        /* (its class string: the prototype's own @@toStringTag) */
+        {
+            GCValue sym = JS_GetPropertyStr(ctx, JS_GetPropertyStr(ctx, global, "Symbol"), "toStringTag");
+            JSAtom ta = JS_ValueToAtom(ctx, sym);
+            if (JS_GetOwnProperty(ctx, NULL, proto, ta) == 0)
+                JS_DefinePropertyValue(ctx, proto, ta, JS_NewString(ctx, f->name), JS_PROP_CONFIGURABLE);
+            JS_FreeAtom(ctx, ta);
+        }
+        /* ([Unscopable] members: the prototype's @@unscopables, a null-prototype object) */
+        GCValue unscop = JS_UNDEFINED;
+        for (int k = 0; k < f->count; k++) {
+            if (!mem[k].unscopable) continue;
+            if (JS_IsUndefined(unscop)) unscop = JS_NewObjectProto(ctx, JS_NULL);
+            JS_DefinePropertyValueStr(ctx, unscop, mem[k].name, JS_TRUE, JS_PROP_C_W_E);
+        }
+        if (!JS_IsUndefined(unscop)) {
+            GCValue sym = JS_GetPropertyStr(ctx, JS_GetPropertyStr(ctx, global, "Symbol"), "unscopables");
+            JSAtom ua = JS_ValueToAtom(ctx, sym);
+            JS_DefinePropertyValue(ctx, proto, ua, unscop, JS_PROP_CONFIGURABLE);
+            JS_FreeAtom(ctx, ua);
+        }
         int brand = brand_of(f->name);
         for (int k = 0; k < f->count; k++) {
             const IdlMember *m = &mem[k];

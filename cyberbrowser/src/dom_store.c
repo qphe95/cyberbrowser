@@ -786,10 +786,13 @@ void dom_link_append(NodeId parent, NodeId child) {
     dom_link_before(parent, child, DOM_NULL);
 }
 
+void (*g_dom_pre_remove)(NodeId child);
+
 void dom_unlink(NodeId child) {
     if (!dom_valid(child)) return;
     uint32_t c = dom_slot(child), p = g_dom.parent[c];
     if (!p) return;
+    if (g_dom_pre_remove) g_dom_pre_remove(child);
     dom_note_connected_change(p);
     uint32_t index = 0;
     if (g_dom_ranges_live)

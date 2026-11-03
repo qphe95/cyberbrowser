@@ -2610,20 +2610,74 @@ bool mo_child_list_observed(JSContextHandle ctx, GCValue target) {
     return false;
 }
 
+/* ---- MutationRecord: its attributes are its prototype's getters, over
+ * the record's hidden fields (__mr_<name>) ---- */
+
+static const char *const k_mr_fields[] = { "type", "target", "addedNodes", "removedNodes", "previousSibling",
+                                           "nextSibling", "attributeName", "attributeNamespace", "oldValue" };
+#define MR_NFIELDS ((int)(sizeof k_mr_fields / sizeof k_mr_fields[0]))
+
+static void mr_set(JSContextHandle ctx, GCValue record, int field, GCValue v) {
+    char key[40];
+    snprintf(key, sizeof key, "__mr_%s", k_mr_fields[field]);
+    JS_DefinePropertyValueStr(ctx, record, key, v, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+}
+
+static GCValue js_mutation_record_get(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv, int magic) {
+    (void)argc; (void)argv;
+    char key[40];
+    snprintf(key, sizeof key, "__mr_%s", k_mr_fields[magic]);
+    JSAtom a = JS_NewAtom(ctx, key), t = JS_NewAtom(ctx, "__mr_type");
+    int own = JS_IsObject(this_val) ? JS_GetOwnProperty(ctx, NULL, this_val, t) : 0;
+    JS_FreeAtom(ctx, t);
+    if (own <= 0) {
+        JS_FreeAtom(ctx, a);
+        return JS_ThrowTypeError(ctx, "Illegal invocation");
+    }
+    GCValue v = JS_GetProperty(ctx, this_val, a);
+    JS_FreeAtom(ctx, a);
+    return v;
+}
+
+static GCValue js_mutation_record_ctor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    return JS_ThrowTypeError(ctx, "Illegal constructor");
+}
+
+/* The MutationRecord interface (DOM 4.3.5) on the global. */
+void mutation_record_install(JSContextHandle ctx, GCValue global) {
+    GCValue proto = JS_NewObject(ctx);
+    GCValue c = JS_NewCFunction2(ctx, js_mutation_record_ctor, "MutationRecord", 0, JS_CFUNC_constructor_or_func, 0);
+    JS_SetConstructor(ctx, c, proto);
+    for (int i = 0; i < MR_NFIELDS; i++) {
+        char gn[48];
+        snprintf(gn, sizeof gn, "get %s", k_mr_fields[i]);
+        JSAtom a = JS_NewAtom(ctx, k_mr_fields[i]);
+        JS_DefinePropertyGetSet(ctx, proto, a, JS_NewCFunctionMagic(ctx, js_mutation_record_get, gn, 0, JS_CFUNC_generic_magic, i),
+                                JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+        JS_FreeAtom(ctx, a);
+    }
+    GCValue sym = JS_GetPropertyStr(ctx, global, "Symbol");
+    JSAtom tag = JS_ValueToAtom(ctx, JS_GetPropertyStr(ctx, sym, "toStringTag"));
+    JS_DefinePropertyValue(ctx, proto, tag, JS_NewString(ctx, "MutationRecord"), JS_PROP_CONFIGURABLE);
+    JS_FreeAtom(ctx, tag);
+    JS_DefinePropertyValueStr(ctx, global, "MutationRecord", c, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+}
+
 static GCValue mo_create_record_full(JSContextHandle ctx, GCValue target, GCValue added, GCValue removed,
                                 const char *type, const char *attr_name, const char *old_value) {
     GCValue record = JS_NewObject(ctx);
     GCValue proto = JS_GetPropertyStr(ctx, JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "MutationRecord"), "prototype");
     if (JS_IsObject(proto)) JS_SetPrototype(ctx, record, proto);
-    JS_SetPropertyStr(ctx, record, "type", JS_NewString(ctx, type ? type : "childList"));
-    JS_SetPropertyStr(ctx, record, "target", target);
-    JS_SetPropertyStr(ctx, record, "addedNodes", added);
-    JS_SetPropertyStr(ctx, record, "removedNodes", removed);
-    JS_SetPropertyStr(ctx, record, "previousSibling", JS_NULL);
-    JS_SetPropertyStr(ctx, record, "nextSibling", JS_NULL);
-    JS_SetPropertyStr(ctx, record, "attributeName", attr_name ? JS_NewString(ctx, attr_name) : JS_NULL);
-    JS_SetPropertyStr(ctx, record, "attributeNamespace", JS_NULL);
-    JS_SetPropertyStr(ctx, record, "oldValue", old_value ? JS_NewString(ctx, old_value) : JS_NULL);
+    mr_set(ctx, record, 0, JS_NewString(ctx, type ? type : "childList"));
+    mr_set(ctx, record, 1, target);
+    mr_set(ctx, record, 2, added);
+    mr_set(ctx, record, 3, removed);
+    mr_set(ctx, record, 4, JS_NULL);
+    mr_set(ctx, record, 5, JS_NULL);
+    mr_set(ctx, record, 6, attr_name ? JS_NewString(ctx, attr_name) : JS_NULL);
+    mr_set(ctx, record, 7, JS_NULL);
+    mr_set(ctx, record, 8, old_value ? JS_NewString(ctx, old_value) : JS_NULL);
     return record;
 }
 
@@ -2759,8 +2813,8 @@ static void mo_notify_child_list_now(JSContextHandle ctx, GCValue target, GCValu
         GCValue observer = JS_GetPropertyUint32(ctx, reg, i);
         if (mo_observer_interested(ctx, observer, target, "childList")) {
             GCValue record = mo_create_record_full(ctx, target, added, removed, "childList", NULL, NULL);
-            JS_SetPropertyStr(ctx, record, "previousSibling", JS_IsObject(prev) ? prev : JS_NULL);
-            JS_SetPropertyStr(ctx, record, "nextSibling", JS_IsObject(next) ? next : JS_NULL);
+            mr_set(ctx, record, 4, JS_IsObject(prev) ? prev : JS_NULL);
+            mr_set(ctx, record, 5, JS_IsObject(next) ? next : JS_NULL);
             mo_push_record(ctx, observer, record);
             mo_schedule_callback(ctx, observer);
         }

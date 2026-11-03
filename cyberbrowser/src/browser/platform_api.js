@@ -57,7 +57,9 @@
         'HTMLOutputElement', 'HTMLParagraphElement', 'HTMLPictureElement', 'HTMLPreElement',
         'HTMLProgressElement', 'HTMLSourceElement', 'HTMLSpanElement', 'HTMLTableElement',
         'HTMLTableSectionElement', 'HTMLTableCellElement', 'HTMLTimeElement', 'HTMLTitleElement',
-        'HTMLTableRowElement', 'HTMLTrackElement', 'HTMLUListElement', 'HTMLUnknownElement'
+        'HTMLTableRowElement', 'HTMLTrackElement', 'HTMLUListElement', 'HTMLUnknownElement',
+        'HTMLDirectoryElement', 'HTMLFontElement', 'HTMLFrameElement', 'HTMLFrameSetElement', 'HTMLParamElement',
+        'HTMLMarqueeElement'
     ].forEach(function (name) {
         if (typeof global[name] === 'function') return;
         var C = function () { illegal(); };
@@ -68,13 +70,34 @@
         expose(name, C);
     });
 
+    /* (HTMLAudioElement: an <audio> is the native media object, with the
+     * media members of HTMLVideoElement.prototype but not video's own) */
+    var VE = global.HTMLVideoElement;
+    if (HE && VE && VE.prototype) {
+        if (typeof global.HTMLAudioElement !== 'function') {
+            var AE = function () { illegal(); };
+            Object.defineProperty(AE, 'name', { value: 'HTMLAudioElement' });
+            AE.prototype = Object.create(HE.prototype);
+            var videoOnly = ['constructor', 'width', 'height', 'videoWidth', 'videoHeight', 'poster', 'playsInline',
+                             'getVideoPlaybackQuality', 'requestPictureInPicture', 'disablePictureInPicture'];
+            Object.getOwnPropertyNames(VE.prototype).forEach(function (n) {
+                if (videoOnly.indexOf(n) < 0) Object.defineProperty(AE.prototype, n, Object.getOwnPropertyDescriptor(VE.prototype, n));
+            });
+            define(AE.prototype, 'constructor', AE);
+            Object.setPrototypeOf(AE, HE);
+            expose('HTMLAudioElement', AE);
+        }
+    }
+
     /* ---- traversal (DOM 6): NodeFilter, NodeIterator, TreeWalker ---- */
-    var NodeFilter = { FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3,
+    /* (a legacy callback interface object: a function that throws, with the constants) */
+    var NodeFilter = ({ NodeFilter() { illegal(); } }).NodeFilter;
+    var nfConsts = { FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3,
         SHOW_ALL: 0xFFFFFFFF, SHOW_ELEMENT: 0x1, SHOW_ATTRIBUTE: 0x2, SHOW_TEXT: 0x4, SHOW_CDATA_SECTION: 0x8,
         SHOW_ENTITY_REFERENCE: 0x10, SHOW_ENTITY: 0x20, SHOW_PROCESSING_INSTRUCTION: 0x40, SHOW_COMMENT: 0x80,
         SHOW_DOCUMENT: 0x100, SHOW_DOCUMENT_TYPE: 0x200, SHOW_DOCUMENT_FRAGMENT: 0x400, SHOW_NOTATION: 0x800 };
-    if (typeof global.NodeFilter !== 'object' || !global.NodeFilter || global.NodeFilter.FILTER_SKIP !== 3)
-        expose('NodeFilter', Object.freeze(NodeFilter));
+    for (var nfk in nfConsts) Object.defineProperty(NodeFilter, nfk, { value: nfConsts[nfk], enumerable: true });
+    if (!global.NodeFilter || global.NodeFilter.FILTER_SKIP !== 3) expose('NodeFilter', NodeFilter);
     /* (NodeIterator and TreeWalker: browser/traversal.c) */
 
     /* ---- Node.isEqualNode / isSameNode (DOM 4.4) ---- */
@@ -94,6 +117,9 @@
             }
             break;
         }
+        case 2:
+            if (a.namespaceURI !== b.namespaceURI || a.localName !== b.localName || a.value !== b.value) return false;
+            break;
         case 3: case 4: case 8:
             if (a.data !== b.data) return false;
             break;
@@ -109,10 +135,22 @@
         for (var j = 0; j < ca.length; j++) if (!equalNodes(ca[j], cb[j])) return false;
         return true;
     }
+    /* (WebIDL: this a Node, and the one argument given) */
+    function nodeCall(t, method, argc) {
+        if (t === null || typeof t !== 'object' || !NP.isPrototypeOf(t))
+            throw new TypeError("Failed to execute '" + method + "' on 'Node': Illegal invocation");
+        if (argc < 1) throw new TypeError("Failed to execute '" + method + "' on 'Node': 1 argument required, but only 0 present.");
+    }
     if (NP && typeof NP.isEqualNode !== 'function')
-        define(NP, 'isEqualNode', function isEqualNode(other) { return other != null && equalNodes(this, other); });
+        define(NP, 'isEqualNode', function isEqualNode(other) {
+            nodeCall(this, 'isEqualNode', arguments.length);
+            return other != null && equalNodes(this, other);
+        });
     if (NP && typeof NP.isSameNode !== 'function')
-        define(NP, 'isSameNode', function isSameNode(other) { return this === other; });
+        define(NP, 'isSameNode', function isSameNode(other) {
+            nodeCall(this, 'isSameNode', arguments.length);
+            return this === other;
+        });
 
     /* ---- ChildNode on character data (DOM 4.2.8): text, comments ---- */
     function nodesOf(doc, args) {
@@ -127,7 +165,12 @@
     [CDP, global.Text && global.Text.prototype, global.Comment && global.Comment.prototype].forEach(function (P) {
         if (!P) return;
         if (typeof P.remove !== 'function')
-            define(P, 'remove', function remove() { var p = this.parentNode; if (p) p.removeChild(this); });
+            define(P, 'remove', function remove() {
+                if (this === null || typeof this !== 'object' || !NP.isPrototypeOf(this))
+                    throw new TypeError("Failed to execute 'remove': Illegal invocation");
+                var p = this.parentNode;
+                if (p) p.removeChild(this);
+            });
         if (typeof P.before !== 'function')
             define(P, 'before', function before() {
                 var p = this.parentNode, self = this;
@@ -146,6 +189,39 @@
                 p.removeChild(this);
                 ns.forEach(function (n) { p.insertBefore(n, ref); });
             });
+    });
+
+    /* (ChildNode on DocumentType too; NonDocumentTypeChildNode's element
+     * siblings on CharacterData, Element's getters) */
+    var DTP = global.DocumentType && global.DocumentType.prototype, ELP = global.Element && global.Element.prototype;
+    if (DTP && CDP) ['before', 'after', 'replaceWith', 'remove'].forEach(function (m) {
+        if (!Object.prototype.hasOwnProperty.call(DTP, m) && typeof CDP[m] === 'function')
+            Object.defineProperty(DTP, m, { value: CDP[m], writable: true, configurable: true, enumerable: true });
+    });
+    if (CDP && ELP) ['previousElementSibling', 'nextElementSibling'].forEach(function (m) {
+        var d = Object.getOwnPropertyDescriptor(ELP, m);
+        if (d && d.get && !Object.prototype.hasOwnProperty.call(CDP, m))
+            Object.defineProperty(CDP, m, { get: d.get, configurable: true, enumerable: true });
+    });
+    /* (Slottable: element.slot reflects slot=""; assignedSlot, the open
+     * shadow root's slot the node is assigned to) */
+    if (ELP && !Object.prototype.hasOwnProperty.call(ELP, 'slot'))
+        Object.defineProperty(ELP, 'slot', { configurable: true, enumerable: true,
+            get: function () { var v = this.getAttribute('slot'); return v === null ? '' : v; },
+            set: function (v) { this.setAttribute('slot', String(v)); } });
+    function assignedSlot() {
+        if (this === null || typeof this !== 'object' || !NP.isPrototypeOf(this)) throw new TypeError('Illegal invocation');
+        var host = this.parentNode;
+        var root = host && host.nodeType === 1 ? host.shadowRoot : null;
+        if (!root || root.mode !== 'open') return null;
+        var want = this.nodeType === 1 ? (this.getAttribute('slot') || '') : '';
+        var slots = root.querySelectorAll('slot');
+        for (var i = 0; i < slots.length; i++) if ((slots[i].getAttribute('name') || '') === want) return slots[i];
+        return null;
+    }
+    [ELP, global.Text && global.Text.prototype].forEach(function (P) {
+        if (P && !Object.prototype.hasOwnProperty.call(P, 'assignedSlot'))
+            Object.defineProperty(P, 'assignedSlot', { get: assignedSlot, configurable: true, enumerable: true });
     });
 
     /* ---- attribute nodes (DOM 4.9.2): getAttributeNode and the rest ---- */

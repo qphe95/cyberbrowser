@@ -70,6 +70,9 @@ for (const d of dirs) {
                 for (const v of vs) addPage(`${m[1]}.${m[2]}.html${v}`, f, meta.long);
             if (m[2] === 'worker' || (m[2] === 'any' && has('dedicatedworker|worker|default')))
                 for (const v of vs) addPage(`${m[1]}.${m[2] === 'any' ? 'any.worker' : 'worker'}.html${v}`, f, meta.long);
+            /* (shared workers too; service workers are not run) */
+            if (m[2] === 'any' && has('sharedworker|worker'))
+                for (const v of vs) addPage(`${m[1]}.any.sharedworker.html${v}`, f, meta.long);
             continue;
         }
         if (!/\.(html?|xht|xhtml|xml|svg)$/.test(base)) continue;
@@ -116,13 +119,13 @@ ${meta.scripts.map(s => `<script src="${esc(s)}"></script>`).join('\n')}
 }
 
 /* A dedicated-worker test's page: its results come from the worker. */
-function workerPage(base, search) {
+function workerPage(base, search, shared) {
     return `<!doctype html>
 <meta charset=utf-8>
 <script src="/resources/testharness.js"></script>
 <script src="/resources/testharnessreport.js"></script>
 <div id=log></div>
-<script>fetch_tests_from_worker(new Worker("/${base}.js${search || ''}"));</script>
+<script>fetch_tests_from_worker(new ${shared ? 'SharedWorker' : 'Worker'}("/${base}.js${search || ''}"));</script>
 `;
 }
 
@@ -354,6 +357,11 @@ const server = http.createServer((req, res) => {
             res.writeHead(200, { 'content-type': 'text/javascript' });
             return res.end(workerScript(`${wk[1]}.any.js`));
         }
+    }
+    const sw = /^\/(.*?)\.any\.sharedworker\.html$/.exec(url.pathname);
+    if (sw && fs.existsSync(path.join(root, `${sw[1]}.any.js`))) {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        return res.end(workerPage(`${sw[1]}.any.worker`, url.search, true));
     }
     const w = /^\/(.*)\.(any|window)\.html$/.exec(url.pathname);
     if (w && fs.existsSync(path.join(root, `${w[1]}.${w[2]}.js`))) {

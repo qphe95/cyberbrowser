@@ -320,6 +320,9 @@ void dom_link_append(NodeId parent, NodeId child);
 void dom_link_before(NodeId parent, NodeId child, NodeId ref);
 /* Unlink `child` from its parent (no-op when detached). */
 void dom_unlink(NodeId child);
+/* Called with a node about to be unlinked from its parent (NodeIterator's
+ * pre-removing steps: traversal.c sets it while there are iterators). */
+extern void (*g_dom_pre_remove)(NodeId child);
 /* Free a detached subtree (and the shadow roots and template contents that
  * hang off it).  The caller guarantees no wrapper refers to any of it. */
 void dom_free_subtree(NodeId root);

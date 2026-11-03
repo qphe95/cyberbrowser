@@ -1,7 +1,8 @@
 /*
  * worker_api.c - dedicated workers (HTML 10.2), run on the page's thread.
  *
- * new Worker(url) gets a realm of its own in the page's runtime, set up as
+ * new Worker(url) (and new SharedWorker(url), its port the one it talks
+ * through) gets a realm of its own in the page's runtime, set up as
  * a window's is and then made a worker's: the DOM interfaces not exposed to
  * workers (idl_table.inc) and the document go, and its global is a
  * DedicatedWorkerGlobalScope with postMessage, importScripts and a
@@ -37,7 +38,7 @@ static struct {
     JSContextHandle *owner, *ctx;   /* the realm that made it, its own (0 until started) */
     GCValue *obj;               /* the Worker object (rooted) */
     char **url;
-    unsigned char *closed;
+    unsigned char *closed, *shared;
 } W;
 
 static WorkerTask *g_tasks;
@@ -51,11 +52,11 @@ static void task_push(int kind, int w, char *json) {
     g_tasks[g_ntasks++] = (WorkerTask){ kind, w, json };
 }
 
-static int worker_new(JSContextHandle owner, GCValue obj, const char *url) {
+static int worker_new(JSContextHandle owner, GCValue obj, const char *url, bool shared) {
     if (W.n == W.cap) {
         int cap = W.cap ? W.cap * 2 : 8;
 #define G(f) W.f = realloc(W.f, (size_t)cap * sizeof(*W.f))
-        G(owner); G(ctx); G(obj); G(url); G(closed);
+        G(owner); G(ctx); G(obj); G(url); G(closed); G(shared);
 #undef G
         W.cap = cap;
     }
@@ -66,6 +67,7 @@ static int worker_new(JSContextHandle owner, GCValue obj, const char *url) {
     gc_add_root(GC_VALUE_GET_HANDLE(obj));
     W.url[w] = strdup(url);
     W.closed[w] = 0;
+    W.shared[w] = shared;
     return w;
 }
 
@@ -91,13 +93,14 @@ static char *json_of(JSContextHandle ctx, GCValue v) {
 
 /* ---- the natives ---- */
 
-/* __cyberWorkerStart(worker, url): its row; the script starts as a task. */
+/* __cyberWorkerStart(target, url, shared): its row (target: the Worker, or a
+ * SharedWorker's port, what its messages go to); the script starts as a task. */
 static GCValue js_worker_start(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
     if (argc < 2 || !JS_IsObject(argv[0])) return JS_ThrowTypeError(ctx, "bad worker");
     const char *url = JS_ToCString(ctx, argv[1]);
     if (!url) return JS_EXCEPTION;
-    int w = worker_new(ctx, argv[0], url);
+    int w = worker_new(ctx, argv[0], url, argc > 2 && JS_ToBool(ctx, argv[2]));
     JS_FreeCString(ctx, url);
     task_push(WT_START, w, NULL);
     return JS_NewInt32(ctx, w);
@@ -156,9 +159,9 @@ static GCValue js_worker_import(JSContextHandle ctx, GCValue this_val, int argc,
 
 /* What a worker's global becomes (window's made a worker's). */
 static const char k_worker_setup[] =
-    "(function (g, url, windowOnly) {\n"
+    "(function (g, url, windowOnly, shared) {\n"
     "  for (var i = 0; i < windowOnly.length; i++) delete g[windowOnly[i]];\n"
-    "  delete g.document;\n"
+    "  delete g.document; delete g.Window; delete g.window;\n"
     "  function scope(name, parent) {\n"
     "    var c = function () { throw new TypeError('Illegal constructor'); };\n"
     "    Object.defineProperty(c, 'name', { value: name });\n"
@@ -169,26 +172,39 @@ static const char k_worker_setup[] =
     "    return c;\n"
     "  }\n"
     "  var WGS = scope('WorkerGlobalScope', g.EventTarget);\n"
-    "  var DWGS = scope('DedicatedWorkerGlobalScope', WGS);\n"
-    "  Object.setPrototypeOf(g, DWGS.prototype);\n"
+    "  var GS = scope(shared ? 'SharedWorkerGlobalScope' : 'DedicatedWorkerGlobalScope', WGS);\n"
+    "  Object.setPrototypeOf(g, GS.prototype);\n"
     "  var loc = new URL(url);\n"
     "  var wl = { href: loc.href, origin: loc.origin, protocol: loc.protocol, host: loc.host, hostname: loc.hostname,\n"
     "             port: loc.port, pathname: loc.pathname, search: loc.search, hash: loc.hash,\n"
     "             toString: function () { return loc.href; } };\n"
     "  Object.defineProperty(g, 'location', { value: wl, configurable: true });\n"
     "  Object.defineProperty(g, 'self', { value: g, writable: true, configurable: true });\n"
-    "  g.postMessage = function postMessage(m) { g.__cyberWorkerOut(m); };\n"
+    "  if (!shared) g.postMessage = function postMessage(m) { g.__cyberWorkerOut(m); };\n"
+    "  else delete g.postMessage;\n"
     "  g.importScripts = function importScripts() {\n"
     "    for (var i = 0; i < arguments.length; i++) g.__cyberImport(new URL(String(arguments[i]), url).href);\n"
     "  };\n"
     "  g.close = function close() {};\n"
     "  var handlers = {};\n"
-    "  ['message', 'error', 'messageerror'].forEach(function (t) {\n"
+    "  ['message', 'error', 'messageerror', 'connect'].forEach(function (t) {\n"
     "    Object.defineProperty(g, 'on' + t, { configurable: true, get: function () { return handlers[t] || null; },\n"
     "      set: function (f) { if (handlers[t]) g.removeEventListener(t, handlers[t]);\n"
     "        handlers[t] = typeof f === 'function' ? f : null; if (handlers[t]) g.addEventListener(t, handlers[t]); } });\n"
     "  });\n"
-    "  g.__cyberDeliver = function (data) { g.dispatchEvent(new MessageEvent('message', { data: data })); };\n"
+    "  var to = g;\n"
+    "  if (shared) {\n"
+    "    /* (its end of the port: a connect event brings it) */\n"
+    "    class Port extends g.EventTarget {\n"
+    "      postMessage(m) { g.__cyberWorkerOut(m); }\n"
+    "      start() {}\n"
+    "      close() {}\n"
+    "    }\n"
+    "    Object.defineProperty(Port.prototype, Symbol.toStringTag, { value: 'MessagePort', configurable: true });\n"
+    "    to = new Port();\n"
+    "    g.__cyberConnect = function () { g.dispatchEvent(new MessageEvent('connect', { source: to, ports: [to] })); };\n"
+    "  }\n"
+    "  g.__cyberDeliver = function (data) { to.dispatchEvent(new MessageEvent('message', { data: data })); };\n"
     "})";
 
 /* The DOM interfaces a worker does not have (idl_shape.c's table). */
@@ -216,8 +232,8 @@ static void worker_start(int w) {
     W.ctx[w] = ctx;
     GCValue g = JS_GetGlobalObject(ctx);
     GCValue setup = JS_Eval(ctx, k_worker_setup, sizeof k_worker_setup - 1, "<worker setup>", JS_EVAL_TYPE_GLOBAL);
-    GCValue args[3] = { g, JS_NewString(ctx, W.url[w]), idl_window_only_names(ctx) };
-    GCValue r = JS_IsException(setup) ? setup : JS_Call(ctx, setup, JS_UNDEFINED, 3, args);
+    GCValue args[4] = { g, JS_NewString(ctx, W.url[w]), idl_window_only_names(ctx), JS_NewBool(ctx, W.shared[w]) };
+    GCValue r = JS_IsException(setup) ? setup : JS_Call(ctx, setup, JS_UNDEFINED, 4, args);
     if (JS_IsException(r)) {
         JS_GetException(ctx);
         return;
@@ -228,6 +244,13 @@ static void worker_start(int w) {
         GCValue report = JS_GetPropertyStr(ctx, g, "reportError");
         if (JS_IsFunction(ctx, report)) {
             GCValue rr = JS_Call(ctx, report, g, 1, &exc);
+            if (JS_IsException(rr)) JS_GetException(ctx);
+        }
+    }
+    if (W.shared[w]) {
+        GCValue c = JS_GetPropertyStr(ctx, g, "__cyberConnect");
+        if (JS_IsFunction(ctx, c)) {
+            GCValue rr = JS_Call(ctx, c, g, 0, NULL);
             if (JS_IsException(rr)) JS_GetException(ctx);
         }
     }
@@ -294,6 +317,26 @@ static const char k_worker_class[] =
     "        h[t] = typeof f === 'function' ? f : null; if (h[t]) this.addEventListener(t, h[t]); } });\n"
     "  });\n"
     "  Object.defineProperty(g, 'Worker', { value: Worker, writable: true, configurable: true });\n"
+    "  class MessagePortOf extends g.EventTarget {\n"
+    "    postMessage(m) { post(this.__w, m); }\n"
+    "    start() {}\n"
+    "    close() { stop(this.__w); }\n"
+    "  }\n"
+    "  Object.defineProperty(MessagePortOf.prototype, Symbol.toStringTag, { value: 'MessagePort', configurable: true });\n"
+    "  Object.defineProperty(MessagePortOf.prototype, 'onmessage', { configurable: true, enumerable: true,\n"
+    "    get: function () { return this.__om || null; },\n"
+    "    set: function (f) { if (this.__om) this.removeEventListener('message', this.__om);\n"
+    "      this.__om = typeof f === 'function' ? f : null; if (this.__om) this.addEventListener('message', this.__om); } });\n"
+    "  class SharedWorker extends g.EventTarget {\n"
+    "    constructor(url, options) {\n"
+    "      if (arguments.length < 1) throw new TypeError(\"Failed to construct 'SharedWorker': 1 argument required.\");\n"
+    "      super();\n"
+    "      var port = new MessagePortOf();\n"
+    "      Object.defineProperty(port, '__w', { value: start(port, new URL(String(url), g.location.href).href, true) });\n"
+    "      Object.defineProperty(this, 'port', { value: port, enumerable: true });\n"
+    "    }\n"
+    "  }\n"
+    "  Object.defineProperty(g, 'SharedWorker', { value: SharedWorker, writable: true, configurable: true });\n"
     "  g.__cyberWorkerDeliver = function (w, data) { w.dispatchEvent(new MessageEvent('message', { data: data })); };\n"
     "})";
 

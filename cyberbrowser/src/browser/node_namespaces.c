@@ -45,8 +45,10 @@ static NodeId lookup_element(NodeId n) {
     }
 }
 
-/* "locate a namespace" (prefix NULL: the default namespace); NULL for none. */
+/* "locate a namespace" (prefix NULL: the default namespace); NULL for none
+ * (and for no element: a fragment's, a doctype's, an empty document's). */
 static const char *locate_namespace(NodeId el, const char *prefix) {
+    if (!el) return NULL;
     if (prefix && !strcmp(prefix, "xml")) return XML_NS;
     if (prefix && !strcmp(prefix, "xmlns")) return XMLNS_NS;
     for (; el; el = parent_element(el)) {
@@ -85,6 +87,24 @@ static bool nullable_arg(JSContextHandle ctx, int argc, GCValue *argv, bool empt
     return true;
 }
 
+/* The element a lookup on this_val sees (an Attr: its owner element);
+ * false when this_val is not a Node. */
+static bool lookup_this(JSContextHandle ctx, GCValue this_val, NodeId *el) {
+    NodeId n = dom_node_of(this_val);
+    if (n) {
+        *el = lookup_element(n);
+        return true;
+    }
+    if (!JS_IsObject(this_val)) return false;
+    JSAtom a = JS_NewAtom(ctx, "__a_name");
+    int own = JS_GetOwnProperty(ctx, NULL, this_val, a);
+    JS_FreeAtom(ctx, a);
+    if (own <= 0) return false;
+    GCValue o = JS_GetPropertyStr(ctx, this_val, "__a_ownerElement");
+    *el = JS_IsObject(o) ? dom_node_of(o) : DOM_NULL;
+    return true;
+}
+
 static GCValue string_or_null(JSContextHandle ctx, const char *s) {
     return s ? JS_NewString(ctx, s) : JS_NULL;
 }
@@ -92,25 +112,25 @@ static GCValue string_or_null(JSContextHandle ctx, const char *s) {
 static GCValue js_lookup_namespace_uri(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     const char *prefix;
     if (!nullable_arg(ctx, argc, argv, true, &prefix)) return JS_EXCEPTION;
-    NodeId n = dom_node_of(this_val);
-    if (!n) return JS_ThrowTypeError(ctx, "Illegal invocation");
-    return string_or_null(ctx, locate_namespace(lookup_element(n), prefix));
+    NodeId el;
+    if (!lookup_this(ctx, this_val, &el)) return JS_ThrowTypeError(ctx, "Illegal invocation");
+    return string_or_null(ctx, locate_namespace(el, prefix));
 }
 
 static GCValue js_lookup_prefix(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     const char *ns;
     if (!nullable_arg(ctx, argc, argv, true, &ns)) return JS_EXCEPTION;
-    NodeId n = dom_node_of(this_val);
-    if (!n) return JS_ThrowTypeError(ctx, "Illegal invocation");
-    return ns ? string_or_null(ctx, locate_prefix(lookup_element(n), ns)) : JS_NULL;
+    NodeId el;
+    if (!lookup_this(ctx, this_val, &el)) return JS_ThrowTypeError(ctx, "Illegal invocation");
+    return ns ? string_or_null(ctx, locate_prefix(el, ns)) : JS_NULL;
 }
 
 static GCValue js_is_default_namespace(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     const char *ns;
     if (!nullable_arg(ctx, argc, argv, true, &ns)) return JS_EXCEPTION;
-    NodeId n = dom_node_of(this_val);
-    if (!n) return JS_ThrowTypeError(ctx, "Illegal invocation");
-    const char *d = locate_namespace(lookup_element(n), NULL);
+    NodeId el;
+    if (!lookup_this(ctx, this_val, &el)) return JS_ThrowTypeError(ctx, "Illegal invocation");
+    const char *d = locate_namespace(el, NULL);
     return JS_NewBool(ctx, (!d && !ns) || (d && ns && !strcmp(d, ns)));
 }
 

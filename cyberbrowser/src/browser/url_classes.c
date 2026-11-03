@@ -704,9 +704,18 @@ static GCValue js_base_uri(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     return v;
 }
 
-/* document.URL and documentURI: the document's URL. */
-static GCValue js_document_url(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)this_val; (void)argc; (void)argv;
+/* Document.prototype's URL, documentURI (magic 0) and contentType (1): a
+ * document made by script holds its own (__cyber_url, __cyber_ct); the
+ * realm's page document has its location's URL. */
+static GCValue js_document_url(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv, int magic) {
+    (void)argc; (void)argv;
+    NodeId d = JS_IsObject(this_val) ? dom_node_of(this_val) : DOM_NULL;
+    if (dom_kind(d) != DOM_K_DOCUMENT) return JS_ThrowTypeError(ctx, "Illegal invocation");
+    GCValue own = JS_GetPropertyStr(ctx, this_val, magic ? "__cyber_ct" : "__cyber_url");
+    if (JS_IsString(own)) return own;
+    if (magic) return JS_NewString(ctx, dom_is_html_document(d) ? "text/html" : "application/xml");
+    NodeId page = dom_node_of(JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document"));
+    if (d != page) return JS_NewString(ctx, "about:blank");
     char *u = document_url(ctx);
     GCValue v = JS_NewString(ctx, u);
     free(u);
@@ -831,25 +840,28 @@ void url_hyperlinks_install(JSContextHandle ctx, GCValue global) {
             accessor(ctx, p, g_part_names[k], js_link_get, k == P_ORIGIN ? NULL : js_link_set, k);
         method(ctx, p, "toString", js_link_get, 0, P_HREF);
     }
-    /* node.baseURI; the document's own baseURI (which embedder code
-     * assigns) becomes the same accessor, with a setter that ignores it */
+    /* node.baseURI (read-only); the document's own baseURI (which embedder
+     * code assigns) becomes the same getter, with a setter that ignores it */
     GCValue targets[2] = { global_proto(ctx, "Node"), JS_GetPropertyStr(ctx, global, "document") };
     for (int i = 0; i < 2; i++) {
         if (!JS_IsObject(targets[i])) continue;
         JSAtom a = JS_NewAtom(ctx, "baseURI");
         JS_DefinePropertyGetSet(ctx, targets[i], a, JS_NewCFunction(ctx, js_base_uri, "get baseURI", 0),
-                                JS_NewCFunction(ctx, js_ignore, "set baseURI", 1), JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+                                i ? JS_NewCFunction(ctx, js_ignore, "set baseURI", 1) : JS_UNDEFINED,
+                                JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
         JS_FreeAtom(ctx, a);
     }
-    /* the page's document: URL and documentURI (other documents keep their own) */
-    GCValue doc = targets[1];
-    static const char *const doc_urls[] = { "URL", "documentURI" };
-    for (int i = 0; i < 2 && JS_IsObject(doc); i++) {
-        JSAtom a = JS_NewAtom(ctx, doc_urls[i]);
+    /* every document's URL, documentURI and contentType (Document.prototype;
+     * the page document's own data properties of these go) */
+    GCValue dp = global_proto(ctx, "Document");
+    static const char *const doc_attrs[] = { "URL", "documentURI", "contentType" };
+    for (int i = 0; i < 3 && JS_IsObject(dp); i++) {
+        JSAtom a = JS_NewAtom(ctx, doc_attrs[i]);
         char gn[32];
-        snprintf(gn, sizeof gn, "get %s", doc_urls[i]);
-        JS_DefinePropertyGetSet(ctx, doc, a, JS_NewCFunction(ctx, js_document_url, gn, 0), JS_UNDEFINED,
-                                JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+        snprintf(gn, sizeof gn, "get %s", doc_attrs[i]);
+        JS_DefinePropertyGetSet(ctx, dp, a, JS_NewCFunctionMagic(ctx, js_document_url, gn, 0, JS_CFUNC_generic_magic, i == 2),
+                                JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+        if (JS_IsObject(targets[1])) JS_DeleteProperty(ctx, targets[1], a, 0);
         JS_FreeAtom(ctx, a);
     }
 }

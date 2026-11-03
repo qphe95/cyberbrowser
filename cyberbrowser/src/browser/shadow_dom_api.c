@@ -286,9 +286,19 @@ const JSCFunctionListEntry js_shadow_root_proto_funcs[] = {
 };
 const size_t js_shadow_root_proto_funcs_count = sizeof(js_shadow_root_proto_funcs) / sizeof(js_shadow_root_proto_funcs[0]);
 
+/* clonable (magic 0) and serializable (1): what attachShadow's init said */
+static GCValue js_shadow_root_get_flag(JSContextHandle ctx, GCValue this_val, int magic) {
+    ShadowRootDataHandle sr = JS_GetOpaqueHandle2(ctx, this_val, js_shadow_root_class_id);
+    if (SAFE_IS_NULL(sr)) return JS_ThrowTypeError(ctx, "Invalid ShadowRoot");
+    return JS_NewBool(ctx, JS_ToBool(ctx, JS_GetPropertyStr(ctx, this_val, magic ? "__cyber_serializable" : "__cyber_clonable")));
+}
+
 /* ShadowRoot.prototype's own members over DocumentFragment's (a native
  * shadow root's tree is its store fragment: Node's members work on it). */
 const JSCFunctionListEntry js_shadow_root_native_funcs[] = {
+    JS_CGETSET_DEF("host", js_shadow_root_get_host, NULL),
+    JS_CGETSET_MAGIC_DEF("clonable", js_shadow_root_get_flag, NULL, 0),
+    JS_CGETSET_MAGIC_DEF("serializable", js_shadow_root_get_flag, NULL, 1),
     JS_CGETSET_DEF("mode", js_shadow_root_get_mode, NULL),
     JS_CGETSET_DEF("delegatesFocus", js_shadow_root_get_delegates_focus, NULL),
     JS_CGETSET_DEF("slotAssignment", js_shadow_root_get_slot_assignment, NULL),
@@ -319,6 +329,7 @@ static GCValue shadow_root_wrap(JSContextHandle ctx, GCValue this_val, ShadowRoo
     NodeId host_node = dom_node_of(this_val);
     GCValue shadow_root = JS_NewObjectClass(ctx, js_shadow_root_class_id);
     JS_SetOpaqueHandle(shadow_root, sr);
+    SAFE_SET(sr, ShadowRootDataHandle, host, this_val);     /* (ShadowRoot.prototype.host) */
     {
         GCValue global = JS_GetGlobalObject(ctx);
         GCValue sr_ctor = JS_GetPropertyStr(ctx, global, "ShadowRoot");
@@ -337,8 +348,6 @@ static GCValue shadow_root_wrap(JSContextHandle ctx, GCValue this_val, ShadowRoo
         }
     }
 
-    // Keep the host accessible to DOM connectivity checks (e.g. isConnected).
-    JS_SetPropertyStr(ctx, shadow_root, "host", this_val);
 
     // Store shadowRoot reference on the element.
     JS_SetPropertyStr(ctx, this_val, "__shadowRoot", shadow_root);
@@ -399,6 +408,13 @@ GCValue js_element_attach_shadow(JSContextHandle ctx, GCValue this_val, int argc
     SAFE_SET(sr, ShadowRootDataHandle, delegates_focus, delegates_focus);
     SAFE_SET(sr, ShadowRootDataHandle, manual_slot_assignment, manual_slot_assignment);
     GCValue shadow_root = shadow_root_wrap(ctx, this_val, sr);
+    static const char *const flags[] = { "clonable", "serializable" };
+    for (int i = 0; i < 2; i++) {
+        char key[32];
+        snprintf(key, sizeof key, "__cyber_%s", flags[i]);
+        JS_DefinePropertyValueStr(ctx, shadow_root, key, JS_NewBool(ctx, JS_ToBool(ctx, JS_GetPropertyStr(ctx, argv[0], flags[i]))),
+                                  JS_PROP_CONFIGURABLE);
+    }
 
     // Polymer's _attachDom passes a pre-built fragment as `shadyUpgradeFragment`.
     // Move its children into the new shadow root so the composed tree is ready.

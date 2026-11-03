@@ -38,6 +38,10 @@ enum {
     SS_NTH_OF_TYPE, SS_NTH_LAST_OF_TYPE,
     SS_FIRST_OF_TYPE, SS_LAST_OF_TYPE, SS_ONLY_OF_TYPE, SS_EMPTY, SS_ROOT, SS_SCOPE,
     SS_CHECKED, SS_DISABLED, SS_ENABLED,
+    SS_NO_NS,        /* |type: an element in no namespace */
+    SS_LINK,         /* :link, :any-link: a and area with href */
+    SS_TARGET,       /* :target: the element the URL's fragment names */
+    SS_LANG,         /* :lang(val) */
     SS_ANY,          /* unsupported pseudo-class: matches */
     SS_NEVER,        /* pseudo-element: never matches */
 };
@@ -254,10 +258,15 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
     while (sp->p < sp->e && !sp->err) {
         sp_comments(sp);
         if (sp->p >= sp->e) break;
-        /* `*|` and `|` before a type selector: any / no namespace, which
-         * for this store's elements is the same. */
+        /* `*|` and `|` before a type selector: any namespace / none */
         if (!any && sp->p + 1 < sp->e && sp->p[0] == '*' && sp->p[1] == '|') sp->p += 2;
-        else if (!any && sp->p + 1 < sp->e && sp->p[0] == '|' && sp->p[1] != '=') sp->p++;
+        else if (!any && sp->p + 1 < sp->e && sp->p[0] == '|' && sp->p[1] != '=') {
+            sp->p++;
+            SelSimple ns;
+            memset(&ns, 0, sizeof ns);
+            ns.kind = SS_NO_NS;
+            add_simple(c, ns);
+        }
         if (sp->p >= sp->e) { sp->err = true; break; }
         char ch = *sp->p;
         SelSimple s;
@@ -423,6 +432,21 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                 else if (strcmp(name, "checked") == 0) s.kind = SS_CHECKED;
                 else if (strcmp(name, "disabled") == 0) s.kind = SS_DISABLED;
                 else if (strcmp(name, "enabled") == 0) s.kind = SS_ENABLED;
+                else if (strcmp(name, "link") == 0 || strcmp(name, "any-link") == 0 || strcmp(name, "-webkit-any-link") == 0)
+                    s.kind = SS_LINK;
+                else if (strcmp(name, "visited") == 0) s.kind = SS_NEVER;      /* (no history here) */
+                else if (strcmp(name, "target") == 0) s.kind = SS_TARGET;
+                else if (strcmp(name, "lang") == 0) {
+                    /* (the argument: an identifier or a string, trimmed) */
+                    const char *a = args, *ae = args ? args + alen : NULL;
+                    while (a && a < ae && (*a == ' ' || *a == '\t' || *a == '\n')) a++;
+                    while (a && ae > a && (ae[-1] == ' ' || ae[-1] == '\t' || ae[-1] == '\n')) ae--;
+                    if (a && ae - a >= 2 && (*a == '"' || *a == '\'') && ae[-1] == *a) { a++; ae--; }
+                    if (!a || ae <= a) { sp->err = true; free(name); break; }
+                    s.kind = SS_LANG;
+                    s.vlen = (uint32_t)(ae - a);
+                    s.val = strndup(a, s.vlen);
+                }
                 else if (strcmp(name, "before") == 0 || strcmp(name, "after") == 0 ||
                          strcmp(name, "first-line") == 0 || strcmp(name, "first-letter") == 0) s.kind = SS_NEVER;
                 else if (known_name(name, k_pseudo_classes)) s.kind = SS_ANY;
@@ -593,15 +617,83 @@ static bool attr_ok(uint32_t s, const SelSimple *ss) {
     return false;
 }
 
-static CssAtom g_a_id, g_a_class, g_a_checked, g_a_disabled;
+static CssAtom g_a_id, g_a_class, g_a_checked, g_a_disabled, g_a_href, g_a_lang;
+/* (the tags :link and :enabled look at) */
+static CssAtom g_t_a, g_t_area, g_t_form[7], g_t_legend;
 
 static void atoms_init(void) {
     if (g_a_id) return;
-    css_atom_reserve(4);
+    css_atom_reserve(16);
+    g_t_legend = css_atom_intern("legend", 6);
     g_a_id = css_atom_intern("id", 2);
     g_a_class = css_atom_intern("class", 5);
     g_a_checked = css_atom_intern("checked", 7);
     g_a_disabled = css_atom_intern("disabled", 8);
+    g_a_href = css_atom_intern("href", 4);
+    g_a_lang = css_atom_intern("lang", 4);
+    g_t_a = css_atom_intern("a", 1);
+    g_t_area = css_atom_intern("area", 4);
+    static const char *const form[7] = { "button", "input", "select", "textarea", "optgroup", "option", "fieldset" };
+    for (int i = 0; i < 7; i++) g_t_form[i] = css_atom_intern(form[i], strlen(form[i]));
+}
+
+/* The fragment :target matches (dom_query_set_target). */
+static struct { char *s; uint32_t n; } g_target;
+
+void dom_query_set_target(const char *frag, size_t n) {
+    free(g_target.s);
+    g_target.s = n ? strndup(frag, n) : NULL;
+    g_target.n = (uint32_t)n;
+}
+
+/* Whether s is a form control :enabled and :disabled apply to. */
+static bool form_control(uint32_t s) {
+    if (g_dom.ns[s] != DOM_NS_HTML) return false;
+    for (int i = 0; i < 7; i++) if (g_dom.tag[s] == g_t_form[i]) return true;
+    return false;
+}
+
+static const char *attr_val(uint32_t s, CssAtom a, uint32_t *len);
+
+/* A form control's "disabled" (HTML 4.10.18.5): its disabled attribute; in
+ * a disabled fieldset, not in that fieldset's first legend; an option in a
+ * disabled optgroup.  (g_t_form: button input select textarea optgroup
+ * option fieldset) */
+static bool control_disabled(uint32_t s) {
+    uint32_t n;
+    if (attr_val(s, g_a_disabled, &n)) return true;
+    uint32_t p = g_dom.parent[s];
+    if (g_dom.tag[s] == g_t_form[5])
+        return p && g_dom.kind[p] == DOM_K_ELEMENT && g_dom.tag[p] == g_t_form[4] && attr_val(p, g_a_disabled, &n);
+    if (g_dom.tag[s] == g_t_form[4]) return false;
+    for (uint32_t child = s, x = p; x && g_dom.kind[x] == DOM_K_ELEMENT; child = x, x = g_dom.parent[x]) {
+        if (g_dom.tag[x] != g_t_form[6] || g_dom.ns[x] != DOM_NS_HTML || !attr_val(x, g_a_disabled, &n)) continue;
+        /* (the fieldset's first legend child: not disabled by it) */
+        uint32_t legend = 0;
+        for (uint32_t c = g_dom.first[x]; c && !legend; c = g_dom.next[c])
+            if (g_dom.kind[c] == DOM_K_ELEMENT && g_dom.tag[c] == g_t_legend && g_dom.ns[c] == DOM_NS_HTML) legend = c;
+        if (!legend || child != legend) return true;
+    }
+    return false;
+}
+
+/* :lang(want): the language of s (its nearest lang="" (xml:lang)) is want or
+ * starts with want and a '-', ASCII case-insensitively. */
+static bool lang_ok(uint32_t s, const char *want, uint32_t wn) {
+    for (uint32_t x = s; x && g_dom.kind[x] == DOM_K_ELEMENT; x = g_dom.parent[x]) {
+        const DomAttrList *l = &g_dom.attrs[x];
+        const DomAttr *found = NULL;
+        for (int i = 0; i < l->n && !found; i++) {
+            const char *q = dom_attr_qualified_name(&l->a[i]);
+            if ((l->a[i].ns == DOM_NS_XML && !strcmp(q, "xml:lang")) || (!l->a[i].ns && l->a[i].name == g_a_lang)) found = &l->a[i];
+        }
+        if (!found) continue;
+        uint32_t n = found->value.len;
+        const char *v = found->value.s ? found->value.s : "";
+        if (n < wn || strncasecmp(v, want, wn) != 0) return false;
+        return n == wn || v[wn] == '-';
+    }
+    return false;
 }
 
 static const char *attr_val(uint32_t s, CssAtom a, uint32_t *len) {
@@ -674,8 +766,24 @@ static bool simple_ok(uint32_t s, const SelSimple *ss, uint32_t scope) {
     case SS_ROOT: return g_dom.parent[s] && g_dom.kind[g_dom.parent[s]] == DOM_K_DOCUMENT;
     case SS_SCOPE: return s == scope;
     case SS_CHECKED: { uint32_t n; return attr_val(s, g_a_checked, &n) != NULL; }
-    case SS_DISABLED: { uint32_t n; return attr_val(s, g_a_disabled, &n) != NULL; }
-    case SS_ENABLED: { uint32_t n; return attr_val(s, g_a_disabled, &n) == NULL; }
+    case SS_DISABLED: return form_control(s) && control_disabled(s);
+    case SS_ENABLED: return form_control(s) && !control_disabled(s);
+    case SS_NO_NS: return g_dom.ns[s] == DOM_NS_NULL;
+    case SS_LINK: {
+        uint32_t n;
+        return g_dom.ns[s] == DOM_NS_HTML && (g_dom.tag[s] == g_t_a || g_dom.tag[s] == g_t_area) &&
+               attr_val(s, g_a_href, &n) != NULL;
+    }
+    case SS_TARGET: {
+        uint32_t n = 0;
+        const char *v = g_target.s ? attr_val(s, g_a_id, &n) : NULL;
+        if (!v || n != g_target.n || memcmp(v, g_target.s, n)) return false;
+        /* (the document's indicated part: an element in a document) */
+        uint32_t r = s;
+        while (g_dom.parent[r]) r = g_dom.parent[r];
+        return g_dom.kind[r] == DOM_K_DOCUMENT;
+    }
+    case SS_LANG: return lang_ok(s, ss->val, ss->vlen);
     case SS_ANY: return true;
     default: return false;
     }
@@ -724,10 +832,14 @@ static bool list_matches(const SelList *l, uint32_t s, uint32_t scope) {
 }
 
 bool dom_query_matches(NodeId el, const char *sel, size_t len) {
+    return dom_query_matches_scoped(el, sel, len, el);
+}
+
+bool dom_query_matches_scoped(NodeId el, const char *sel, size_t len, NodeId scope) {
     if (!dom_valid(el) || dom_kind(el) != DOM_K_ELEMENT) return false;
     atoms_init();
     SelList *l = sel_get(sel, len);
-    return list_matches(l, dom_slot(el), dom_slot(el));
+    return list_matches(l, dom_slot(el), dom_valid(scope) ? dom_slot(scope) : 0);
 }
 
 /* ============================================================================

@@ -58,7 +58,11 @@
             composed: !!init.composed, target: null, currentTarget: null, relatedTarget: null,
             phase: NONE, canceled: false, stop: false, stopImmediate: false, inPassive: false,
             dispatching: false, initialized: true, isTrusted: false, timeStamp: now(), path: [] } });
+        /* ([LegacyUnforgeable]: each event's own) */
+        Object.defineProperty(this, 'isTrusted', { get: isTrustedGetter, enumerable: true });
     }
+    var isTrustedGetter = function isTrusted() { return st(this).isTrusted; };
+    Object.defineProperty(isTrustedGetter, 'name', { value: 'get isTrusted' });
     var EP = Event.prototype;
     [['NONE', NONE], ['CAPTURING_PHASE', CAPTURING_PHASE], ['AT_TARGET', AT_TARGET],
      ['BUBBLING_PHASE', BUBBLING_PHASE]].forEach(function (c) {
@@ -74,14 +78,13 @@
     getter(EP, 'cancelable', function () { return st(this).cancelable; });
     getter(EP, 'composed', function () { return st(this).composed; });
     getter(EP, 'defaultPrevented', function () { return st(this).canceled; });
-    getter(EP, 'isTrusted', function () { return st(this).isTrusted; });
     getter(EP, 'timeStamp', function () { return st(this).timeStamp; });
     Object.defineProperty(EP, 'returnValue', { configurable: true, enumerable: true,
         get: function () { return !st(this).canceled; },
         set: function (v) { if (!v) cancel(st(this)); } });
     Object.defineProperty(EP, 'cancelBubble', { configurable: true, enumerable: true,
         get: function () { return st(this).stop; },
-        set: function (v) { if (v) st(this).stop = true; } });
+        set: function (v) { var s = st(this); if (v) s.stop = true; } });
     function cancel(s) { if (s.cancelable && !s.inPassive) s.canceled = true; }
     define(EP, 'preventDefault', function preventDefault() { cancel(st(this)); });
     define(EP, 'stopPropagation', function stopPropagation() { st(this).stop = true; });
@@ -97,6 +100,7 @@
     });
     define(EP, 'initEvent', function initEvent(type, bubbles, cancelable) {
         var s = st(this);
+        if (arguments.length < 1) throw new TypeError("Failed to execute 'initEvent' on 'Event': 1 argument required, but only 0 present.");
         if (s.dispatching) return;
         s.type = String(type); s.bubbles = !!bubbles; s.cancelable = !!cancelable;
         s.stop = s.stopImmediate = s.canceled = false; s.target = null;
@@ -136,6 +140,8 @@
 
     var CustomEvent = eventClass('CustomEvent', Event, { detail: nul() });
     define(CustomEvent.prototype, 'initCustomEvent', function initCustomEvent(type, bubbles, cancelable, detail) {
+        st(this);
+        if (arguments.length < 1) throw new TypeError("Failed to execute 'initCustomEvent' on 'CustomEvent': 1 argument required, but only 0 present.");
         this.initEvent(type, bubbles, cancelable);
         st(this).detail = detail === undefined ? null : detail;
     });
@@ -261,8 +267,16 @@
         var d = target && target.ownerDocument;
         return !!d && (target === d.documentElement || target === d.body);
     }
+    /* (WebIDL: this an EventTarget; a plain object or a primitive is not) */
+    function etThis(t, method, argc) {
+        var target = t == null ? global : t;
+        if ((typeof target !== 'object' && typeof target !== 'function') || Object.getPrototypeOf(target) === Object.prototype)
+            throw new TypeError("Failed to execute '" + method + "' on 'EventTarget': Illegal invocation");
+        if (argc < 2) throw new TypeError("Failed to execute '" + method + "' on 'EventTarget': 2 arguments required, but only " + argc + " present.");
+        return target;
+    }
     function addEventListener(type, callback, options) {
-        var target = this == null ? global : this;
+        var target = etThis(this, 'addEventListener', arguments.length);
         listenerChanges++;
         var o = flatten(options);
         if (callback === null || callback === undefined) return;
@@ -292,7 +306,7 @@
         }
     }
     function removeEventListener(type, callback, options) {
-        var target = this == null ? global : this;
+        var target = etThis(this, 'removeEventListener', arguments.length);
         var capture = flatten(options).capture;
         var map = listenersOf(target, false), list = map && map[String(type)];
         if (!list) return;
@@ -746,14 +760,21 @@
     /* the types whose on<type> properties are the handler accessors below */
     var HANDLER_TYPE = Object.create(null);
     GLOBAL_HANDLERS.concat(WINDOW_HANDLERS, DOCUMENT_HANDLERS).forEach(function (t) { HANDLER_TYPE[t] = true; });
+    /* (an accessor's this: an object that inherits it; nothing, the global) */
+    function handlerThis(t, P) {
+        if (t === undefined || t === null) return global;
+        if ((typeof t === 'object' || typeof t === 'function') && (t === global || t === win || P.isPrototypeOf(t))) return t;
+        throw new TypeError('Illegal invocation');
+    }
     function handlerAccessor(P, type) {
         var name = 'on' + type;
         var own = Object.getOwnPropertyDescriptor(P, name);
         if (own && (own.get || own.set)) return;    /* (a native one already) */
         Object.defineProperty(P, name, { configurable: true, enumerable: true,
             get: function () {
+                var t = handlerThis(this, P);
                 /* <body>'s window handlers are the window's (HTML 8.1.8.2) */
-                var self = bodyForwards(this, type) ? global : this;
+                var self = bodyForwards(t, type) ? global : t;
                 var h = self[HANDLERS];
                 if (h && Object.prototype.hasOwnProperty.call(h, type)) return h[type];
                 /* the content attribute, compiled on first use (the window's
@@ -764,7 +785,7 @@
                     if (code !== null) {
                         var fn = null;
                         try {
-                            fn = type === 'error' && this === global
+                            fn = type === 'error' && t === global
                                 ? new Function('event', 'source', 'lineno', 'colno', 'error', code)
                                 : new Function('event', code);
                         } catch (e) { report(e); }
@@ -775,14 +796,16 @@
                 return null;
             },
             set: function (v) {
-                var self = bodyForwards(this, type) ? global : this;
+                var t = handlerThis(this, P);
+                var self = bodyForwards(t, type) ? global : t;
                 setHandler(self, type, typeof v === 'function' || (v !== null && typeof v === 'object') ? v : null);
             } });
     }
     /* The handlers <body> (and <frameset>) forward to the window. */
     var BODY_FORWARDED = ['blur', 'error', 'focus', 'load', 'resize', 'scroll'].concat(WINDOW_HANDLERS);
     function bodyForwards(el, type) {
-        return el !== global && el && global.document && el === global.document.body && BODY_FORWARDED.indexOf(type) >= 0;
+        return el !== global && el && (el.localName === 'body' || el.localName === 'frameset') &&
+               el.namespaceURI === 'http://www.w3.org/1999/xhtml' && BODY_FORWARDED.indexOf(type) >= 0;
     }
     function setHandler(target, type, v) {
         listenerChanges++;
@@ -799,6 +822,11 @@
         if (P) GLOBAL_HANDLERS.forEach(function (t) { handlerAccessor(P, t); });
     });
     if (DOC_P) DOCUMENT_HANDLERS.forEach(function (t) { handlerAccessor(DOC_P, t); });
+    /* (the Fullscreen API's on Element and Document; slotchange on ShadowRoot) */
+    [global.Element && global.Element.prototype, DOC_P].forEach(function (P) {
+        if (P) ['fullscreenchange', 'fullscreenerror'].forEach(function (t) { handlerAccessor(P, t); });
+    });
+    if (global.ShadowRoot) handlerAccessor(global.ShadowRoot.prototype, 'slotchange');
     var WINP = Object.getPrototypeOf(global);
     if (WINP && WINP !== Object.prototype)
         GLOBAL_HANDLERS.concat(WINDOW_HANDLERS).forEach(function (t) { handlerAccessor(WINP, t); });
@@ -905,7 +933,7 @@
         var stripHash = function (u) { var i = u.indexOf('#'); return i < 0 ? u : u.slice(0, i); };
         var resolve = function (u) {
             try { return new global.URL(String(u), getHref()).href; }
-            catch (e) { throw new (global.DOMException || Error)("Failed to execute 'pushState': the URL '" + u + "' is invalid.", 'SecurityError'); }
+            catch (e) { throw new (global.DOMException || Error)("Failed to execute 'pushState': the URL '" + u + "' is invalid (" + e + ").", 'SecurityError'); }
         };
         var sameOrigin = function (a, b) {
             try { return new global.URL(a).origin === new global.URL(b).origin; } catch (e) { return false; }
@@ -1046,11 +1074,22 @@
     }
     getter(AbortSignal.prototype, 'aborted', function () { return abortState(this).aborted; });
     getter(AbortSignal.prototype, 'reason', function () { return abortState(this).reason; });
-    define(AbortSignal.prototype, 'throwIfAborted', function () {
+    define(AbortSignal.prototype, 'throwIfAborted', function throwIfAborted() {
         var a = abortState(this);
         if (a.aborted) throw a.reason;
     });
     handlerAccessor(AbortSignal.prototype, 'abort');
+    (function () {
+        /* (onabort: an AbortSignal's only) */
+        var d = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'onabort');
+        if (d && d.get) {
+            var g = d.get, sset = d.set;
+            Object.defineProperty(AbortSignal.prototype, 'onabort', { configurable: true, enumerable: true,
+                get: function () { abortState(this); return g.call(this); },
+                set: function (v) { abortState(this); return sset.call(this, v); } });
+        }
+    })();
+    Object.setPrototypeOf(AbortSignal, EventTarget);
     define(AbortSignal, 'abort', function abort(reason) {
         var s = newSignal(), a = s[ABORT];
         a.aborted = true;

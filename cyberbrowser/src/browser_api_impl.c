@@ -183,6 +183,16 @@ static GCValue js_html_script_element_supports(JSContextHandle ctx, GCValue this
     return JS_NewBool(ctx, supported);
 }
 
+/* element.requestFullscreen(): no fullscreen here (a promise rejected with a TypeError). */
+static GCValue js_request_fullscreen(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    GCValue promise_ctor = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "Promise");
+    GCValue te = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "TypeError");
+    GCValue msg = JS_NewString(ctx, "Fullscreen is not supported.");
+    GCValue e = JS_CallConstructor(ctx, te, 1, &msg);
+    return JS_Call(ctx, JS_GetPropertyStr(ctx, promise_ctor, "reject"), promise_ctor, 1, &e);
+}
+
 // Promise rejection helper
 GCValue js_promise_reject(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
@@ -215,16 +225,31 @@ static int js_window_properties_get_own(JSContextHandle ctx, JSPropertyDescripto
     GCValue doc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document");
     busy = 0;
     NodeId d = JS_IsObject(doc) ? dom_node_of(doc) : DOM_NULL;
-    NodeId el = d ? dom_query_by_id(d, name, len) : DOM_NULL;
-    JS_FreeCString(ctx, name);
-    if (!el) return 0;
-    GCValue v = dom_js(ctx, el);
-    if (JS_IsException(v)) return -1;
-    const char *tag = dom_tag_name(el);
-    if (tag && (strcasecmp(tag, "iframe") == 0 || strcasecmp(tag, "frame") == 0)) {
-        GCValue w = JS_GetPropertyStr(ctx, v, "contentWindow");
-        if (JS_IsObject(w)) v = w;
+    /* (an index: that child frame's window) */
+    bool digits = len > 0 && len < 10 && (name[0] != '0' || len == 1);
+    for (size_t i = 0; i < len && digits; i++) digits = name[i] >= '0' && name[i] <= '9';
+    if (digits) {
+        uint32_t fi = frame_indexed_child(ctx, (uint32_t)strtoul(name, NULL, 10));
+        JS_FreeCString(ctx, name);
+        if (!fi) return 0;
+        GCValue w = frame_window_of(ctx, fi);
+        if (!JS_IsObject(w)) return 0;
+        if (desc) {
+            desc->flags = JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE;
+            desc->value = w;
+            desc->getter = JS_UNDEFINED;
+            desc->setter = JS_UNDEFINED;
+        }
+        return 1;
     }
+    /* (a frame by its name: its window; else the element with that id) */
+    uint32_t fw = frame_named_child(ctx, name, len);
+    NodeId el = !fw && d ? dom_query_by_id(d, name, len) : DOM_NULL;
+    JS_FreeCString(ctx, name);
+    if (!fw && !el) return 0;
+    GCValue v = fw ? frame_window_of(ctx, fw) : dom_js(ctx, el);
+    if (JS_IsException(v)) return -1;
+    if (!JS_IsObject(v)) return 0;
     if (desc) {
         desc->flags = JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE;
         desc->value = v;
@@ -1948,7 +1973,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
 
     // Fullscreen API no-op stubs (document.fullscreenEnabled reports support)
     JS_SetPropertyStr(ctx, element_proto, "requestFullscreen",
-        JS_NewCFunction(ctx, js_dummy_function, "requestFullscreen", 0));
+        JS_NewCFunction(ctx, js_request_fullscreen, "requestFullscreen", 0));
     JS_SetPropertyStr(ctx, element_proto, "webkitRequestFullscreen",
         JS_NewCFunction(ctx, js_dummy_function, "webkitRequestFullscreen", 0));
     
@@ -2147,29 +2172,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     }
     LOG_INFO("DOMException setup done");
 
-    // ===== NodeFilter constants =====
-    LOG_INFO("Creating NodeFilter object...");
-    GCValue node_filter = JS_NewObject(ctx);
-    LOG_INFO("NodeFilter object created, setting properties...");
-    DEF_PROP_INT(ctx, node_filter, "FILTER_ACCEPT", 1);
-    DEF_PROP_INT(ctx, node_filter, "FILTER_REJECT", 2);
-    DEF_PROP_INT(ctx, node_filter, "FILTER_SKIP", 3);
-    DEF_PROP_INT(ctx, node_filter, "SHOW_ALL", 0xFFFFFFFF);
-    DEF_PROP_INT(ctx, node_filter, "SHOW_ELEMENT", 0x1);
-    DEF_PROP_INT(ctx, node_filter, "SHOW_ATTRIBUTE", 0x2);
-    DEF_PROP_INT(ctx, node_filter, "SHOW_TEXT", 0x4);
-    DEF_PROP_INT(ctx, node_filter, "SHOW_CDATA_SECTION", 0x8);
-    DEF_PROP_INT(ctx, node_filter, "SHOW_ENTITY_REFERENCE", 0x10);
-    DEF_PROP_INT(ctx, node_filter, "SHOW_ENTITY", 0x20);
-    DEF_PROP_INT(ctx, node_filter, "SHOW_PROCESSING_INSTRUCTION", 0x40);
-    DEF_PROP_INT(ctx, node_filter, "SHOW_COMMENT", 0x80);
-    DEF_PROP_INT(ctx, node_filter, "SHOW_DOCUMENT", 0x100);
-    DEF_PROP_INT(ctx, node_filter, "SHOW_DOCUMENT_TYPE", 0x200);
-    DEF_PROP_INT(ctx, node_filter, "SHOW_DOCUMENT_FRAGMENT", 0x400);
-    DEF_PROP_INT(ctx, node_filter, "SHOW_NOTATION", 0x800);
-    JS_SetPropertyStr(ctx, global, "NodeFilter", node_filter);
-    JS_SetPropertyStr(ctx, window, "NodeFilter", node_filter);
-    LOG_INFO("NodeFilter set");
+    // (NodeFilter: platform_api.js)
     
     // ===== Document =====
     LOG_INFO("Creating document object...");
@@ -2184,7 +2187,6 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     DEF_PROP_INT(ctx, document, "nodeType", 9);
     DEF_PROP_STR(ctx, document, "readyState", "complete");
     /* (characterSet, charset: Document.prototype's, document_api.c) */
-    DEF_PROP_STR(ctx, document, "contentType", "text/html");
     DEF_PROP_STR(ctx, document, "referrer", "");
     GCValue doc_cookie_getter = JS_NewCFunction(ctx, js_document_cookie_getter, "get cookie", 0);
     GCValue doc_cookie_setter = JS_NewCFunction(ctx, js_document_cookie_setter, "set cookie", 1);
@@ -2211,8 +2213,6 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     DEF_FUNC(ctx, document, "createElementNS", js_document_create_element_ns, 2);
     DEF_FUNC(ctx, document, "createTextNode", js_document_create_text_node, 1);
     DEF_FUNC(ctx, document, "createComment", js_document_create_comment, 1);
-    DEF_FUNC(ctx, document, "createAttribute", js_document_create_attribute, 1);
-    DEF_FUNC(ctx, document, "createAttributeNS", js_document_create_attribute_ns, 2);
     DEF_FUNC(ctx, document, "createDocumentFragment", js_document_create_document_fragment, 0);
     DEF_FUNC(ctx, document, "createRange", js_document_create_range, 0);
     DEF_FUNC(ctx, document, "createTreeWalker", js_document_create_tree_walker, 3);
@@ -3227,6 +3227,9 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     
     // AbstractRange, Range, StaticRange
     range_api_install(ctx, global);
+    mutation_record_install(ctx, global);
+    attr_api_install(ctx, global);
+    named_node_map_install(ctx, global);
 
     // ===== Shadow DOM APIs =====
     // Native shadow DOM: Element.prototype.attachShadow and ShadowRoot

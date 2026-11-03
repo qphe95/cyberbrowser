@@ -340,9 +340,9 @@ static GCValue new_document(JSContextHandle ctx, bool xml, const char *content_t
         GCValue proto = global_proto(ctx, "XMLDocument");
         if (JS_IsObject(proto)) JS_SetPrototype(ctx, doc, proto);
     }
-    JS_DefinePropertyValueStr(ctx, doc, "contentType", JS_NewString(ctx, content_type), JS_PROP_CONFIGURABLE);
-    JS_DefinePropertyValueStr(ctx, doc, "URL", JS_NewString(ctx, "about:blank"), JS_PROP_CONFIGURABLE);
-    JS_DefinePropertyValueStr(ctx, doc, "documentURI", JS_NewString(ctx, "about:blank"), JS_PROP_CONFIGURABLE);
+    /* (what Document.prototype's contentType and URL read: url_classes.c) */
+    JS_DefinePropertyValueStr(ctx, doc, "__cyber_ct", JS_NewString(ctx, content_type), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, doc, "__cyber_url", JS_NewString(ctx, "about:blank"), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, doc, "readyState", JS_NewString(ctx, "complete"), JS_PROP_CONFIGURABLE);
     /* (no browsing context: no window, no location) */
     JS_DefinePropertyValueStr(ctx, doc, "location", JS_NULL, JS_PROP_CONFIGURABLE);
@@ -500,6 +500,27 @@ static GCValue plain_getter(JSContextHandle ctx, GCValue this_val, int argc, GCV
     return fns[magic](ctx, this_val, argc, argv);
 }
 
+static GCValue js_false_getter(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv, int magic) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv; (void)magic;
+    return JS_FALSE;
+}
+
+static GCValue js_null_getter(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv, int magic) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv; (void)magic;
+    return JS_NULL;
+}
+
+/* exitFullscreen(): nothing is fullscreen (a promise rejected with a TypeError). */
+static GCValue js_exit_fullscreen(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    GCValue promise_ctor = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "Promise");
+    GCValue reject = JS_GetPropertyStr(ctx, promise_ctor, "reject");
+    GCValue te = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "TypeError");
+    GCValue msg = JS_NewString(ctx, "Not in fullscreen");
+    GCValue e = JS_CallConstructor(ctx, te, 1, &msg);
+    return JS_Call(ctx, reject, promise_ctor, 1, &e);
+}
+
 static void method(JSContextHandle ctx, GCValue proto, const char *name, JSCFunction *fn, int length) {
     JS_DefinePropertyValueStr(ctx, proto, name, JS_NewCFunction(ctx, fn, name, length),
                               JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
@@ -570,6 +591,26 @@ void document_api_install(JSContextHandle ctx, GCValue global) {
     method(ctx, dp, "createProcessingInstruction", js_create_processing_instruction, 2);
     method(ctx, dp, "createDocumentFragment", js_document_create_document_fragment, 0);
     method(ctx, dp, "createRange", js_document_create_range, 0);
+    method(ctx, dp, "createAttribute", js_document_create_attribute, 1);
+    method(ctx, dp, "createAttributeNS", js_document_create_attribute_ns, 2);
+    {
+        /* (ParentNode, as on elements and fragments) */
+        static const struct { const char *name; JSCFunction *get; } acc[] = {
+            { "children", js_element_get_children }, { "firstElementChild", js_element_get_firstElementChild },
+            { "lastElementChild", js_element_get_lastElementChild }, { "childElementCount", js_element_get_childElementCount },
+        };
+        for (size_t i = 0; i < sizeof acc / sizeof acc[0]; i++) {
+            JSAtom a = JS_NewAtom(ctx, acc[i].name);
+            JS_DefinePropertyGetSet(ctx, dp, a, JS_NewCFunction(ctx, acc[i].get, acc[i].name, 0), JS_UNDEFINED,
+                                    JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+            JS_FreeAtom(ctx, a);
+        }
+        /* (Fullscreen: none here) */
+        getter(ctx, dp, "fullscreenEnabled", js_false_getter, 0);
+        getter(ctx, dp, "fullscreen", js_false_getter, 0);
+        getter(ctx, dp, "fullscreenElement", js_null_getter, 0);
+        method(ctx, dp, "exitFullscreen", js_exit_fullscreen, 0);
+    }
     method(ctx, dp, "importNode", js_document_import_node, 1);
     method(ctx, dp, "adoptNode", js_adopt_node, 1);
     {

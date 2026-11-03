@@ -72,6 +72,19 @@ static Frame *frame_of_iframe(NodeId iframe) {
     return NULL;
 }
 
+/* The window of a frame of realm ctx's document whose iframe's name is
+ * name (WindowProperties' first case: a child navigable's target name); 0
+ * for none. */
+uint32_t frame_named_child(JSContextHandle ctx, const char *name, size_t len) {
+    for (Frame *f = g_frames; f; f = f->next) {
+        if (f->parent != ctx || !SAFE_VALID(f->ctx) || !dom_valid(f->iframe) || !dom_is_connected(f->iframe)) continue;
+        const char *n = dom_get_attr_str(f->iframe, "name");
+        if (n && strlen(n) == len && !memcmp(n, name, len)) return f->id;
+    }
+    return 0;
+}
+
+
 static JSContextHandle realm_of_document(NodeId doc) {
     for (Frame *f = g_frames; f; f = f->next) if (f->doc == doc && SAFE_VALID(f->ctx)) return f->ctx;
     if (doc == g_main_doc) return g_js_context;
@@ -361,6 +374,10 @@ static GCValue window_seen_from(JSContextHandle ctx, uint32_t id) {
     GCValue w = JS_Call(ctx, *factory, JS_UNDEFINED, 1, &arg);
     if (JS_IsException(w)) { JS_GetException(ctx); return JS_NULL; }
     return w;
+}
+
+GCValue frame_window_of(JSContextHandle ctx, uint32_t id) {
+    return window_seen_from(ctx, id);
 }
 
 static const char deliver_js[] =
@@ -677,6 +694,13 @@ int frame_api_process(void) {
     }
     g_processing = false;
     return done;
+}
+
+/* The window of the index-th child frame of realm ctx's document
+ * (window[index]); 0 for none. */
+uint32_t frame_indexed_child(JSContextHandle ctx, uint32_t index) {
+    Frame *f = index <= 0x7fffffffu ? child_frame(ctx, (int)index, NULL) : NULL;
+    return f ? f->id : 0;
 }
 
 bool frame_api_pending(void) {

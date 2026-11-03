@@ -3,7 +3,7 @@
  * events (browser/dom_events.js); the form controls' IDL attributes
  * (browser/form_controls.js); <canvas> and its 2D context
  * (browser/canvas_api.js), then its WebGL and WebGPU contexts
- * (browser/webgpu_api.c). */
+ * (browser/webgpu_api.c); XPath (browser/xpath.js). */
 #include <string.h>
 #include <quickjs.h>
 #include <quickjs_gc_unified.h>
@@ -29,6 +29,10 @@ static const char *cssom_js =
 
 static const char *canvas_api_js =
 #include "canvas_api_js.inc"
+;
+
+static const char *xpath_js =
+#include "xpath_js.inc"
 ;
 
 static void platform_api_report(JSContextHandle ctx)
@@ -94,6 +98,7 @@ void platform_api_install(JSContextHandle ctx, GCValue global, GCValue window)
     platform_api_run(ctx, form_controls_js, "<form_controls>", global, window);
     platform_api_run(ctx, cssom_js, "<cssom>", global, window);
     platform_api_run(ctx, canvas_api_js, "<canvas_api>", global, window);
+    platform_api_run(ctx, xpath_js, "<xpath>", global, window);
     dom_token_list_install(ctx, global, window);
     url_hyperlinks_install(ctx, global);
     webgpu_api_install(ctx, global, window);

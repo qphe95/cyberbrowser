@@ -41,8 +41,12 @@ void dom_node_list_free(DomNodeList *l);
 NodeId dom_query_first(NodeId scope, const char *sel, size_t len, bool include_self);
 DomNodeList dom_query_all(NodeId scope, const char *sel, size_t len, bool include_self);
 bool dom_query_matches(NodeId el, const char *sel, size_t len);
+/* Whether el matches sel with :scope the element scope. */
+bool dom_query_matches_scoped(NodeId el, const char *sel, size_t len, NodeId scope);
 /* Is the selector parsable? */
 bool dom_query_valid(const char *sel, size_t len);
+/* The fragment (no '#') :target matches until the next call; NULL or 0: none. */
+void dom_query_set_target(const char *frag, size_t n);
 
 /* Index lookups (connected elements of document `doc`, document order). */
 NodeId dom_query_by_id(NodeId doc, const char *id, size_t len);

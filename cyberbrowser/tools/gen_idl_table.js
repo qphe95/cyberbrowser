@@ -57,18 +57,19 @@ const out = [];
 const rows = [];
 for (const b of ifaces.values()) {
     const members = new Map();   /* (overloads: the fewest required) */
-    const put = (name, kind, req, value) => {
+    const put = (name, kind, req, value, unscop) => {
         const m = members.get(name + '/' + (kind === STATIC_OP || kind === STATIC_ATTR ? 's' : ''));
-        if (m) { m.req = Math.min(m.req, req); return; }
-        members.set(name + '/' + (kind === STATIC_OP || kind === STATIC_ATTR ? 's' : ''), { name, kind, req, value });
+        if (m) { m.req = Math.min(m.req, req); m.unscop = m.unscop || unscop; return; }
+        members.set(name + '/' + (kind === STATIC_OP || kind === STATIC_ATTR ? 's' : ''), { name, kind, req, value, unscop: !!unscop });
     };
     for (const m of b.members) {
         const unforgeable = (m.extAttrs || []).some(a => a.name === 'LegacyUnforgeable');
+        const unscop = (m.extAttrs || []).some(a => a.name === 'Unscopable');
         if (m.type === 'constructor') b.ctor = b.ctor < 0 ? required(m.arguments) : Math.min(b.ctor, required(m.arguments));
-        else if (m.type === 'operation' && m.name) put(m.name, m.special === 'static' ? STATIC_OP : OP, required(m.arguments));
+        else if (m.type === 'operation' && m.name) put(m.name, m.special === 'static' ? STATIC_OP : OP, required(m.arguments), undefined, unscop);
         else if (m.type === 'operation' && m.special === 'stringifier') put('toString', OP, 0);
         else if (m.type === 'attribute' && !unforgeable)
-            put(m.name, m.special === 'static' ? STATIC_ATTR : m.readonly ? RO_ATTR : ATTR, 0);
+            put(m.name, m.special === 'static' ? STATIC_ATTR : m.readonly ? RO_ATTR : ATTR, 0, undefined, unscop);
         else if (m.type === 'const') put(m.name, CONST, 0, constValue(m.value));
         else if (m.type === 'iterable' && !m.async) {
             for (const n of ['entries', 'keys', 'values']) put(n, OP, 0);
@@ -85,7 +86,7 @@ out.push('static const IdlMember k_idl_members[] = {');
 const ifaceLines = [];
 let first = 0;
 for (const { b, members } of rows) {
-    for (const m of members) out.push(`    { ${q(m.name)}, ${m.kind}, ${m.req}, ${m.value !== undefined ? q(m.value) : 'NULL'} },`);
+    for (const m of members) out.push(`    { ${q(m.name)}, ${m.kind}, ${m.req}, ${m.value !== undefined ? q(m.value) : 'NULL'}, ${m.unscop ? 1 : 0} },`);
     const flags = (b.callback ? 1 : 0) | (b.attrs.includes('LegacyNoInterfaceObject') ? 2 : 0) | (b.workers ? 4 : 0);
     ifaceLines.push(`    { ${q(b.name)}, ${q(b.parent)}, ${first}, ${members.length}, ${b.ctor}, ${flags} },`);
     first += members.length;
