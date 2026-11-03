@@ -451,6 +451,7 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                 else if (strcmp(name, "link") == 0 || strcmp(name, "any-link") == 0 || strcmp(name, "-webkit-any-link") == 0)
                     s.kind = SS_LINK;
                 else if (strcmp(name, "visited") == 0) s.kind = SS_NEVER;      /* (no history here) */
+                else if (strcmp(name, "active") == 0 || strcmp(name, "hover") == 0) s.kind = SS_NEVER;   /* (no pointer here) */
                 else if (strcmp(name, "target") == 0) s.kind = SS_TARGET;
                 else if (strcmp(name, "lang") == 0) {
                     /* (the argument: an identifier or a string, trimmed) */

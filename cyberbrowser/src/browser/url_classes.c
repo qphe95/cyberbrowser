@@ -622,14 +622,38 @@ static char *document_url(JSContextHandle ctx) {
  * URL, else the document URL.  Cached while both strings stay the same. */
 static struct { char *doc, *base; WUrl u; bool ok; } g_base;
 
+/* (a document's URL: the page's its location's; one made by script its
+ * own, __cyber_url, about:blank by default) */
+static char *node_document_url(JSContextHandle ctx, NodeId d) {
+    NodeId page = dom_node_of(JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document"));
+    if (!d || d == page) return document_url(ctx);
+    GCValue dj = dom_js(ctx, d);
+    GCValue u = JS_IsObject(dj) ? JS_GetPropertyStr(ctx, dj, "__cyber_url") : JS_UNDEFINED;
+    const char *s = JS_IsString(u) ? JS_ToCString(ctx, u) : NULL;
+    char *r = strdup(s ? s : "about:blank");
+    if (s) JS_FreeCString(ctx, s);
+    return r;
+}
+
 static const WUrl *base_url(JSContextHandle ctx, NodeId el) {
-    char *doc = document_url(ctx);
+    NodeId d = el ? (dom_kind(el) == DOM_K_DOCUMENT ? el : dom_owner(el)) : DOM_NULL;
+    char *doc = node_document_url(ctx, d);
     const char *base = NULL;
-    NodeId d = el ? dom_owner(el) : DOM_NULL;
     if (d) {
+        /* (the first HTML base element with an href) */
         DomNodeList l = dom_query_by_tag(d, "base", 4);
-        for (uint32_t i = 0; i < l.n && !base; i++) base = dom_attr(l.ids[i], "href");
+        for (uint32_t i = 0; i < l.n && !base; i++)
+            if (dom_ns(l.ids[i]) == DOM_NS_HTML) base = dom_attr(l.ids[i], "href");
         dom_node_list_free(&l);
+        /* (none: a cloned document's base URL is its source's, kept as __cyber_base) */
+        GCValue dj = base ? JS_UNDEFINED : dom_js(ctx, d);
+        GCValue kept = JS_IsObject(dj) ? JS_GetPropertyStr(ctx, dj, "__cyber_base") : JS_UNDEFINED;
+        const char *ks = JS_IsString(kept) ? JS_ToCString(ctx, kept) : NULL;
+        if (ks) {
+            free(doc);
+            doc = strdup(ks);
+            JS_FreeCString(ctx, ks);
+        }
     }
     if (g_base.ok && !strcmp(g_base.doc, doc) && ((!base && !g_base.base) || (base && g_base.base && !strcmp(base, g_base.base)))) {
         free(doc);

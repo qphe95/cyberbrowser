@@ -1130,8 +1130,11 @@ static bool build_tokens(Builder *b, TokChunk *c, size_t *pi, size_t *detour) {
         if (b->doc_mode) {
             if (t->kind == TK_START && doc_before(b, t, t->tag)) continue;
             if (t->kind == TK_TEXT && b->phase != DOC_IN_BODY) {
-                if (all_space(&t->text)) continue;      /* (white space before the body) */
-                doc_before(b, t, 0);
+                /* (white space before the head goes; in the head it is the
+                 * head's (or its title's), after it the html element's) */
+                bool ws = all_space(&t->text);
+                if (ws && (b->phase == DOC_INITIAL || b->phase == DOC_BEFORE_HEAD)) continue;
+                if (!ws) doc_before(b, t, 0);
             }
             if (t->kind == TK_END && (end_tag_is(b, t, "body") || end_tag_is(b, t, "html"))) continue;  /* (the body stays open) */
         }

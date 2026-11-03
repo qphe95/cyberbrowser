@@ -2270,6 +2270,15 @@ GCValue js_node_cloneNode_real(JSContextHandle ctx, GCValue this_val, int argc, 
     /* The clone belongs to the same document as the original (DOM spec:
      * cloneNode keeps the node document; importNode re-documents it). */
     NodeId copy = clone_node(original, deep, dom_owner(original));
+    if (dom_kind(original) == DOM_K_DOCUMENT) {
+        /* (a document's clone has its URL and content type) */
+        GCValue cj = dom_js(ctx, copy);
+        static const char *const keep[] = { "URL", "contentType", "baseURI" },
+                                *const hidden[] = { "__cyber_url", "__cyber_ct", "__cyber_base" };
+        for (int i = 0; i < 3 && JS_IsObject(cj); i++)
+            JS_DefinePropertyValueStr(ctx, cj, hidden[i], JS_GetPropertyStr(ctx, this_val, keep[i]), JS_PROP_CONFIGURABLE);
+        return cj;
+    }
     if (deep) clone_copy_styles(ctx, original, copy);
     else if (dom_kind(original) == DOM_K_ELEMENT && dom_has_wrapper(original)) {
         char *css = html_style_object_css_text(ctx, dom_element_style(ctx, dom_js_existing(original), false));
