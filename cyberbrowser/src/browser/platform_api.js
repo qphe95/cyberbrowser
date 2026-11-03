@@ -253,6 +253,13 @@
             });
     }
 
+    /* (CSSOM View: the element whose scroll is the viewport's) */
+    var DOCP = global.Document && global.Document.prototype;
+    if (DOCP && !('scrollingElement' in DOCP))
+        Object.defineProperty(DOCP, 'scrollingElement', { configurable: true, enumerable: true, get: function () {
+            return this.compatMode === 'BackCompat' ? this.body : this.documentElement;
+        } });
+
     /* ---- DocumentFragment (and ShadowRoot).getElementById (DOM 4.2.4) ---- */
     var DFP = global.DocumentFragment && global.DocumentFragment.prototype;
     if (DFP && typeof DFP.getElementById !== 'function')

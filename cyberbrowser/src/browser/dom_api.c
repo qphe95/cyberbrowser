@@ -1167,7 +1167,8 @@ enum { DOM_SCRIPT_NONE, DOM_SCRIPT_CLASSIC, DOM_SCRIPT_MODULE };
 static int dom_script_kind(JSContextHandle ctx, GCValue script) {
     NodeId n = dom_node_of(script);
     const char *type = n ? dom_get_attr_str(n, "type") : NULL;
-    if (!n) {
+    /* (script.type = x may have set the object's property only) */
+    if (!type) {
         GCValue typev = JS_GetPropertyStr(ctx, script, "type");
         type = JS_IsString(typev) ? JS_ToCString(ctx, typev) : NULL;
     }
@@ -1387,15 +1388,114 @@ static bool dom_queue_dynamic_script(JSContextHandle ctx, GCValue script, const 
     return true;
 }
 
+/* A script-inserted script with no src (HTML "prepare the script element"):
+ * its child text, run once; an empty one isn't started, and runs when it
+ * has text.  An exception goes to reportError. */
+static void dom_run_inline_script(JSContextHandle ctx, GCValue script) {
+    NodeId n = dom_node_of(script);
+    if (dom_flags(n) & DOMF_PARSER_SCRIPT) return;
+    if (JS_ToBool(ctx, JS_GetPropertyStr(ctx, script, "__cyber_script_loaded"))) return;
+    if (JS_ToBool(ctx, JS_GetPropertyStr(ctx, script, "__cyber_parser_script"))) return;
+    if (!dom_node_is_connected(ctx, script) || !dom_script_type_is_executable(ctx, script)) return;
+    size_t len = 0;
+    for (NodeId c = dom_first_child(n); c; c = dom_next_sibling(c))
+        if (dom_kind(c) == DOM_K_TEXT || dom_kind(c) == DOM_K_CDATA) {
+            uint32_t l = 0;
+            dom_text(c, &l);
+            len += l;
+        }
+    if (!len) return;
+    char *text = malloc(len + 1);
+    if (!text) return;
+    size_t k = 0;
+    for (NodeId c = dom_first_child(n); c; c = dom_next_sibling(c))
+        if (dom_kind(c) == DOM_K_TEXT || dom_kind(c) == DOM_K_CDATA) {
+            uint32_t l = 0;
+            const char *t = dom_text(c, &l);
+            memcpy(text + k, t, l);
+            k += l;
+        }
+    text[k] = 0;
+    JS_SetPropertyStr(ctx, script, "__cyber_script_loaded", JS_TRUE);
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue doc = JS_GetPropertyStr(ctx, global, "document");
+    GCValue prev_current = JS_GetPropertyStr(ctx, doc, "currentScript");
+    bool module = dom_script_kind(ctx, script) == DOM_SCRIPT_MODULE;
+    JS_SetPropertyStr(ctx, doc, "currentScript", module ? JS_NULL : script);
+    GCValue href = JS_GetPropertyStr(ctx, JS_GetPropertyStr(ctx, global, "location"), "href");
+    const char *url = JS_IsString(href) ? JS_ToCString(ctx, href) : NULL;
+    GCValue result = module ? js_quickjs_eval_module(ctx, text, k, url ? url : "", 0)
+                            : JS_Eval(ctx, text, k, url ? url : "<inline>", JS_EVAL_TYPE_GLOBAL);
+    if (url) JS_FreeCString(ctx, url);
+    free(text);
+    JS_SetPropertyStr(ctx, doc, "currentScript", prev_current);
+    if (JS_IsException(result)) {
+        GCValue exc = JS_GetException(ctx);
+        GCValue report = JS_GetPropertyStr(ctx, global, "reportError");
+        if (JS_IsFunction(ctx, report)) {
+            GCValue rr = JS_Call(ctx, report, global, 1, &exc);
+            if (JS_IsException(rr)) JS_GetException(ctx);
+        }
+    }
+}
+
 static void dom_maybe_load_script(JSContextHandle ctx, GCValue node) {
     if (!g_dom_dynamic_scripts_enabled) return;
     if (!dom_tag_is(dom_node_of(node), "script")) return;
+    /* (scripting is disabled in a document with no browsing context) */
+    if (dom_owner(dom_node_of(node)) != dom_node_of(JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document"))) return;
     GCValue srcv = JS_GetPropertyStr(ctx, node, "src");
     const char *src = JS_IsString(srcv) ? JS_ToCString(ctx, srcv) : NULL;
     if (src && src[0]) {
         dom_execute_external_script(ctx, node, src);
+    } else if (dom_attr_index_qualified(dom_node_of(node), "src", 3) < 0) {
+        dom_run_inline_script(ctx, node);
     }
     if (src) JS_FreeCString(ctx, src);
+}
+
+/* ---- scripts an insertion brought in: run when the operation is done ---- */
+
+static struct { NodeId *ids; uint32_t n, cap; } g_post_insert;
+
+static void post_insert_queue(NodeId id) {
+    if (g_post_insert.n == g_post_insert.cap) {
+        g_post_insert.cap = g_post_insert.cap ? g_post_insert.cap * 2 : 8;
+        g_post_insert.ids = realloc(g_post_insert.ids, g_post_insert.cap * sizeof(NodeId));
+    }
+    g_post_insert.ids[g_post_insert.n++] = id;
+}
+
+/* The scripts in child's subtree (tree order), or its parent script when
+ * text went into one. */
+static void post_insert_collect(NodeId parent, NodeId child) {
+    if (!g_dom_dynamic_scripts_enabled) return;
+    if (dom_kind(child) != DOM_K_ELEMENT) {
+        if (dom_tag_is(parent, "script")) post_insert_queue(parent);
+        return;
+    }
+    static CssAtom script_tag;
+    if (!script_tag) {
+        css_atom_reserve(1);
+        script_tag = css_atom_intern("script", 6);
+    }
+    uint32_t r = dom_slot(child);
+    for (uint32_t s = r; s; s = dom_next_in_subtree(s, r))
+        if (g_dom.tag[s] == script_tag && g_dom.kind[s] == DOM_K_ELEMENT && !(g_dom.flags[s] & DOMF_PARSER_SCRIPT))
+            post_insert_queue(dom_id_of(s));
+}
+
+/* (each run takes the queue: an insertion by one of them has its own) */
+void dom_post_insert_flush(JSContextHandle ctx) {
+    while (g_post_insert.n) {
+        uint32_t n = g_post_insert.n;
+        NodeId *ids = g_post_insert.ids;
+        g_post_insert.ids = NULL;
+        g_post_insert.n = g_post_insert.cap = 0;
+        for (uint32_t i = 0; i < n; i++)
+            if (dom_valid(ids[i])) dom_maybe_load_script(ctx, dom_js(ctx, ids[i]));
+        free(ids);
+    }
 }
 
 /* Stylesheets of inserted links still downloading (the fetch pool has
@@ -1569,7 +1669,8 @@ bool dom_api_insert(JSContextHandle ctx, NodeId parent, NodeId child, NodeId ref
         return true;
     }
     js_cyber_ce_push_stack(ctx);
-    if (dom_api_is_connected(ctx, child)) {
+    bool connected = dom_api_is_connected(ctx, child);
+    if (connected) {
         bool was = g_frame_blank_now;
         g_frame_blank_now = true;
         dom_ce_on_connect(ctx, child);
@@ -1578,9 +1679,13 @@ bool dom_api_insert(JSContextHandle ctx, NodeId parent, NodeId child, NodeId ref
     dom_flush_ce_reactions(ctx);
     js_cyber_ce_pop_stack(ctx);
 
-    // Load external scripts that are inserted dynamically after the initial
-    // page load (e.g. YouTube's module loader).
-    if (need_js) dom_maybe_load_script(ctx, child_js);
+    // Scripts inserted dynamically after the initial page load (e.g. YouTube's
+    // module loader), the node's and any in its subtree, once the operation
+    // is done.
+    if (connected) {
+        post_insert_collect(parent, child);
+        if (!mo_batch_active()) dom_post_insert_flush(ctx);
+    }
     if (need_js && g_dom_dynamic_scripts_enabled) dom_maybe_load_stylesheet(ctx, child_js);
     if (observers)
         notify_child_list(ctx, parent_js, child_js, false, dom_prev_sibling(child), dom_next_sibling(child));
@@ -2212,6 +2317,13 @@ static NodeId clone_one(NodeId src, NodeId owner) {
     g_dom.tag[d] = g_dom.tag[s];
     g_dom.flags[d] = (uint16_t)(g_dom.flags[s] & (DOMF_CE_CANDIDATE | DOMF_RAW_TEXT | DOMF_VOID | DOMF_SELF_CLOSED |
                                                   DOMF_XML_DOCUMENT));
+    /* (a script's "already started" comes along, but a template's contents
+     * have not started: their root is a fragment) */
+    if (g_dom.flags[s] & DOMF_PARSER_SCRIPT) {
+        uint32_t r = s;
+        while (g_dom.parent[r]) r = g_dom.parent[r];
+        if (g_dom.kind[r] != DOM_K_FRAGMENT) g_dom.flags[d] |= DOMF_PARSER_SCRIPT;
+    }
     g_dom.id_atom[d] = g_dom.id_atom[s];
     g_dom.ns[d] = g_dom.ns[s];
     g_dom.prefix[d] = g_dom.prefix[s];

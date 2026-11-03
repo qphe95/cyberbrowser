@@ -1407,6 +1407,14 @@ static void run_ready_async(HtmlPageStream *ps, bool wait) {
 /* A script element the parser has just inserted. */
 static void dispatch_parser_script(HtmlPageStream *ps, GCValue script) {
     char url[SCRIPT_URL_MAX_LEN];
+    /* (an empty script with no src has not started: text given it later
+     * runs, HTML "prepare the script element") */
+    NodeId sn = dom_node_of(script);
+    if (sn && !dom_first_child(sn) && dom_attr_index_qualified(sn, "src", 3) < 0) {
+        g_dom.flags[dom_slot(sn)] &= (uint16_t)~DOMF_PARSER_SCRIPT;
+        JS_SetPropertyStr(ps->ctx, script, "__cyber_parser_script", JS_FALSE);
+        return;
+    }
     switch (classify_parser_script(dom_node_of(script), url, sizeof(url))) {
     case PS_BLOCKING: run_blocking(ps, script); break;
     case PS_ASYNC:    queue_push(&ps->async, script, url); break;

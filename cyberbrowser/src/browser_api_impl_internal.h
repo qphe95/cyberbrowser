@@ -338,6 +338,9 @@ bool mo_child_list_observed(JSContextHandle ctx, GCValue target);
  * once), queued when the outermost operation ends. */
 void mo_batch_begin(JSContextHandle ctx);
 void mo_batch_end(JSContextHandle ctx);
+bool mo_batch_active(void);
+/* Run the scripts insertions have queued (dom_api.c). */
+void dom_post_insert_flush(JSContextHandle ctx);
 bool mo_any_observing(JSContextHandle ctx);
 void mo_notify_character_data(JSContextHandle ctx, GCValue target, const char *old_value);
 /* old_value: NULL when the attribute was absent. */

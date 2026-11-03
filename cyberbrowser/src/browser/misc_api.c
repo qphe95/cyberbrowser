@@ -2764,8 +2764,8 @@ static void mo_push_all(JSContextHandle ctx, GCValue to, GCValue from) {
     for (uint32_t i = 0; i < n; i++) JS_SetPropertyUint32(ctx, to, m + i, JS_GetPropertyUint32(ctx, from, i));
 }
 
-void mo_batch_end(JSContextHandle ctx) {
-    if (g_mob_depth <= 0 || --g_mob_depth > 0 || !g_mob_pending) return;
+static void mo_batch_deliver(JSContextHandle ctx) {
+    if (!g_mob_pending) return;
     g_mob_pending = false;
     GCValue global = JS_GetGlobalObject(ctx);
     GCValue batch = JS_GetPropertyStr(ctx, global, "__cyber_mo_batch");
@@ -2780,6 +2780,16 @@ void mo_batch_end(JSContextHandle ctx) {
                                  JS_GetPropertyStr(ctx, e, "next"));
     }
 }
+
+/* The end of an operation: its records, then the scripts it inserted (they
+ * run once the whole insertion is done: DOM "insert", post-connection steps). */
+void mo_batch_end(JSContextHandle ctx) {
+    if (g_mob_depth <= 0 || --g_mob_depth > 0) return;
+    mo_batch_deliver(ctx);
+    dom_post_insert_flush(ctx);
+}
+
+bool mo_batch_active(void) { return g_mob_depth > 0; }
 
 /* DOM 4.2.3 "remove" step: each removed node gets a transient registration
  * of every subtree registration on the parent or above (observed until its
