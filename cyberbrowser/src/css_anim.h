@@ -92,6 +92,7 @@ typedef struct AnimEvent {
 /* Up to cap events due at now, each once; the rows of elements no longer
  * in a document dropped.  *live: whether anything still runs. */
 int anim_tick(double now, AnimEvent *out, int cap, bool *live);
+bool anim_cancels_due(void);
 
 /* The documents of the elements with rows, up to cap. */
 int anim_docs(NodeId *out, int cap);

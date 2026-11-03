@@ -1726,9 +1726,18 @@ static NodeId lq_scroll_subject(JSContextHandle ctx, NodeId id, double *mx, doub
     g_lq_ask = LQ_ASK_EXTENT;
     int idx = lq_query(ctx, dom_js(ctx, box));
     g_lq_ask = LQ_ASK_POS;
-    if (idx < 0 || (!view && !css_layout_box_scrolls(&g_lq_layout, idx))) return DOM_NULL;
+    bool text_control = !view && (is_tag(id, "input") || is_tag(id, "textarea"));
+    if (idx < 0 || (!view && !text_control && !css_layout_box_scrolls(&g_lq_layout, idx))) return DOM_NULL;
     double cw, ch, sw, sh;
     lq_scroll_size(idx, view != DOM_NULL, &cw, &ch, &sw, &sh);
+    if (text_control) {
+        /* (its text has no boxes here: as wide as its characters, about half an em) */
+        size_t len = 0;
+        const char *v = JS_ToCStringLen(ctx, &len, JS_GetPropertyStr(ctx, dom_js(ctx, id), "value"));
+        double w = (double)len * g_lq_layout.boxes[idx].s->font_size * 0.5;
+        if (v) JS_FreeCString(ctx, v);
+        if (w > sw) sw = w;
+    }
     *mx = lround(sw) - lround(cw);
     *my = lround(sh) - lround(ch);
     if (*mx < 0.0) *mx = 0.0;

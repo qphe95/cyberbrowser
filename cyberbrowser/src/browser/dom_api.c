@@ -326,6 +326,8 @@ static bool dom_attr_has_accessor(NodeId id, const char *name) {
  * applies to obj: not over an IDL attribute or method of its interface
  * (assigning disabled="" through its setter would remove the attribute,
  * value="x" would set the control's value). */
+static NodeId template_contents_owner(NodeId doc);
+
 static bool dom_attr_reflects_as_expando(JSContextHandle ctx, NodeId id, GCValue obj, const char *name) {
     if (strcmp(name, "id") == 0 || strcmp(name, "class") == 0 || strcmp(name, "style") == 0) return false;
     if (id && dom_attr_has_accessor(id, name)) return false;
@@ -358,18 +360,29 @@ void dom_element_setup_wrapper(JSContextHandle ctx, NodeId id, GCValue obj) {
          * (template polyfills test for and replace it). */
         NodeId c = dom_template_content(id);
         if (!c) {
-            c = dom_create_fragment(dom_owner(id));
+            c = dom_create_fragment(template_contents_owner(dom_owner(id)));
             dom_set_template_content(id, c);
         }
         GCValue content = dom_js(ctx, c);
-        if (JS_IsObject(content)) {
-            JS_SetPropertyStr(ctx, obj, "content", content);
-            NodeId d = dom_owner(id);
-            if (dom_has_wrapper(d))
-                JS_DefinePropertyValueStr(ctx, content, "ownerDocument", dom_js_existing(d),
-                                          JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
-        }
+        if (JS_IsObject(content)) JS_SetPropertyStr(ctx, obj, "content", content);
     }
+}
+
+/* A document's "appropriate template contents owner document": a document of
+ * its kind with no browsing context, made once (its slot in the document's
+ * content column). */
+static NodeId template_contents_owner(NodeId doc) {
+    if (!dom_valid(doc) || dom_kind(doc) != DOM_K_DOCUMENT) return doc;
+    /* (itself such a one: it is its own) */
+    if (dom_flags(doc) & DOMF_INERT_DOC) return doc;
+    uint32_t s = dom_slot(doc), c = g_dom.content[s];
+    if (c && g_dom.kind[c] == DOM_K_DOCUMENT) return dom_id_of(c);
+    NodeId inert = dom_create_document();
+    uint32_t i = dom_slot(inert);
+    g_dom.flags[i] |= DOMF_INERT_DOC | (dom_flags(doc) & DOMF_XML_DOCUMENT);
+    g_dom.realm[i] = g_dom.realm[s];
+    g_dom.content[s] = i;
+    return inert;
 }
 
 /* Factory for wrappers of store nodes (dom_wrap.h). */
@@ -1469,9 +1482,20 @@ static void post_insert_queue(NodeId id) {
     g_post_insert.ids[g_post_insert.n++] = id;
 }
 
+static CssAtom g_script_tag, g_iframe_tag, g_frame_tag;
+/* (a shadow tree comes along: it's connected with its host) */
+static void post_insert_subtree(uint32_t r) {
+    for (uint32_t s = r; s; s = dom_next_in_subtree(s, r)) {
+        if (g_dom.kind[s] != DOM_K_ELEMENT) continue;
+        if (g_dom.tag[s] == g_iframe_tag || g_dom.tag[s] == g_frame_tag) post_insert_queue(dom_id_of(s));
+        else if (g_dom.tag[s] == g_script_tag && g_dom_dynamic_scripts_enabled && !(g_dom.flags[s] & DOMF_PARSER_SCRIPT))
+            post_insert_queue(dom_id_of(s));
+        if (g_dom.shadow[s]) post_insert_subtree(g_dom.shadow[s]);
+    }
+}
+
 /* The scripts and iframes in child's subtree (tree order), or its parent
  * script when text went into one. */
-static CssAtom g_script_tag, g_iframe_tag, g_frame_tag;
 static void post_insert_collect(NodeId parent, NodeId child) {
     if (dom_kind(child) != DOM_K_ELEMENT) {
         if (g_dom_dynamic_scripts_enabled && dom_tag_is(parent, "script")) post_insert_queue(parent);
@@ -1483,13 +1507,7 @@ static void post_insert_collect(NodeId parent, NodeId child) {
         g_iframe_tag = css_atom_intern("iframe", 6);
         g_frame_tag = css_atom_intern("frame", 5);
     }
-    uint32_t r = dom_slot(child);
-    for (uint32_t s = r; s; s = dom_next_in_subtree(s, r)) {
-        if (g_dom.kind[s] != DOM_K_ELEMENT) continue;
-        if (g_dom.tag[s] == g_iframe_tag || g_dom.tag[s] == g_frame_tag) post_insert_queue(dom_id_of(s));
-        else if (g_dom.tag[s] == g_script_tag && g_dom_dynamic_scripts_enabled && !(g_dom.flags[s] & DOMF_PARSER_SCRIPT))
-            post_insert_queue(dom_id_of(s));
-    }
+    post_insert_subtree(dom_slot(child));
 }
 
 /* (each run takes the queue: an insertion by one of them has its own) */
@@ -1637,6 +1655,9 @@ void dom_api_adopt(JSContextHandle ctx, NodeId node, NodeId doc) {
         g_dom.owner[s] = d;
         if (g_dom.wrapper[s]) JS_DeleteProperty(ctx, dom_js(ctx, dom_id_of(s)), od, 0);
         if (g_dom.shadow[s]) dom_api_adopt(ctx, dom_id_of(g_dom.shadow[s]), doc);
+        /* (a template's contents follow, to the new document's owner for them) */
+        if (g_dom.kind[s] == DOM_K_ELEMENT && g_dom.content[s])
+            dom_api_adopt(ctx, dom_id_of(g_dom.content[s]), template_contents_owner(doc));
     }
     JS_FreeAtom(ctx, od);
 }
@@ -1695,6 +1716,9 @@ bool dom_api_insert(JSContextHandle ctx, NodeId parent, NodeId child, NodeId ref
     dom_flush_ce_reactions(ctx);
     js_cyber_ce_pop_stack(ctx);
 
+    /* (its mutation record is queued first: an inserted script can see it) */
+    if (observers)
+        notify_child_list(ctx, parent_js, child_js, false, dom_prev_sibling(child), dom_next_sibling(child));
     // Scripts inserted dynamically after the initial page load (e.g. YouTube's
     // module loader), the node's and any in its subtree, once the operation
     // is done.
@@ -1703,8 +1727,6 @@ bool dom_api_insert(JSContextHandle ctx, NodeId parent, NodeId child, NodeId ref
         if (!mo_batch_active()) dom_post_insert_flush(ctx);
     }
     if (need_js && g_dom_dynamic_scripts_enabled) dom_maybe_load_stylesheet(ctx, child_js);
-    if (observers)
-        notify_child_list(ctx, parent_js, child_js, false, dom_prev_sibling(child), dom_next_sibling(child));
     return true;
 }
 
@@ -2406,6 +2428,12 @@ GCValue js_node_cloneNode_real(JSContextHandle ctx, GCValue this_val, int argc, 
         GCValue cj = dom_js(ctx, copy);
         static const char *const keep[] = { "URL", "contentType", "baseURI" },
                                 *const hidden[] = { "__cyber_url", "__cyber_ct", "__cyber_base" };
+        /* (an XMLDocument's clone is one) */
+        if (JS_IsObject(cj) && dom_flags(original) & DOMF_XML_DOCUMENT) {
+            GCValue xd = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "XMLDocument");
+            GCValue xp = JS_IsObject(xd) ? JS_GetPropertyStr(ctx, xd, "prototype") : JS_UNDEFINED;
+            if (JS_IsObject(xp)) JS_SetPrototype(ctx, cj, xp);
+        }
         for (int i = 0; i < 3 && JS_IsObject(cj); i++)
             JS_DefinePropertyValueStr(ctx, cj, hidden[i], JS_GetPropertyStr(ctx, this_val, keep[i]), JS_PROP_CONFIGURABLE);
         return cj;
@@ -3088,6 +3116,16 @@ static bool attr_ns_arg(JSContextHandle ctx, GCValue v, uint32_t *ns) {
     return true;
 }
 
+/* (DOM "valid namespace prefix": some, with no white space, NUL, / or >) */
+static bool valid_ns_prefix(const char *s, size_t n) {
+    if (!n) return false;
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r' || c == 0 || c == '/' || c == '>') return false;
+    }
+    return true;
+}
+
 // Element.prototype.setAttributeNS
 GCValue js_element_set_attribute_ns(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 3) return JS_ThrowTypeError(ctx, "Failed to execute 'setAttributeNS' on 'Element': 3 arguments required.");
@@ -3106,7 +3144,7 @@ GCValue js_element_set_attribute_ns(JSContextHandle ctx, GCValue this_val, int a
     if (colon) {
         local = colon + 1;
         ln = qn - pn - 1;
-        if (!valid_attr_name(qname, pn)) err = "InvalidCharacterError", kind = "The namespace prefix is not valid.";
+        if (!valid_ns_prefix(qname, pn)) err = "InvalidCharacterError", kind = "The namespace prefix is not valid.";
     }
     if (!err && !valid_attr_name(local, ln)) err = "InvalidCharacterError", kind = "The local name is not valid.";
     if (!err) {
@@ -4298,6 +4336,8 @@ GCValue js_document_create_attribute(JSContextHandle ctx, GCValue this_val, int 
     return attr;
 }
 
+static bool valid_ns_prefix(const char *s, size_t n);
+
 /* document.createAttributeNS(namespace, qualifiedName) */
 GCValue js_document_create_attribute_ns(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
@@ -4305,9 +4345,9 @@ GCValue js_document_create_attribute_ns(JSContextHandle ctx, GCValue this_val, i
     size_t n = 0;
     const char *q = JS_ToCStringLen(ctx, &n, argv[1]);
     if (!q) return JS_EXCEPTION;
-    if (!valid_attr_name(q, n)) return throw_dom_exception(ctx, "InvalidCharacterError", "The attribute name is not a valid name.");
     const char *colon = memchr(q, ':', n);
-    if (colon && (colon == q || colon + 1 == q + n))
+    /* (a prefix may hold what a local name can't, DOM "validate and extract") */
+    if (colon ? !valid_ns_prefix(q, (size_t)(colon - q)) || !valid_attr_name(colon + 1, n - (size_t)(colon - q) - 1) : !valid_attr_name(q, n))
         return throw_dom_exception(ctx, "InvalidCharacterError", "The attribute name is not a valid name.");
     GCValue attr = create_attr_obj(ctx, JS_NULL, q, "");
     if (JS_IsException(attr)) return attr;
@@ -4983,6 +5023,9 @@ GCValue js_document_import_node(JSContextHandle ctx, GCValue this_val, int argc,
         attr_set(ctx, clone, "ownerDocument", this_val);
         return clone;
     }
+    /* (all of it, not only its root) */
+    NodeId imported = dom_node_of(clone), into = dom_node_of(this_val);
+    if (imported && into && dom_owner(imported) != into) dom_api_adopt(ctx, imported, into);
     dom_node_set_owner_document(ctx, clone, this_val);
     /* Imported into the document: its custom elements upgrade now. */
     NodeId cn = dom_node_of(clone);
@@ -5012,7 +5055,7 @@ static GCValue hit_test_layout_node(JSContextHandle ctx, LayoutContext *layout, 
     bool inside = (x >= box->x && x <= box->x + box->width &&
                    y >= box->y && y <= box->y + box->height);
     /* (what overflows a box is still there, unless it clips) */
-    if (!inside && box->s->overflow != 0) return JS_NULL;
+    if (!inside && css_layout_box_scrolls(layout, idx)) return JS_NULL;
     /* (its children are where its scroll offset has them) */
     float sx = 0.0f, sy = 0.0f;
     css_layout_box_offset(layout, idx, &sx, &sy);

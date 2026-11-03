@@ -297,6 +297,7 @@ void dom_set_element_name(NodeId id, uint32_t ns, const char *prefix, size_t pn,
 /* Is the document an XML document (not an HTML document)? */
 #define DOMF_XML_DOCUMENT (1u << 12)   /* (on document nodes) */
 #define DOMF_SHADOW_CLOSED (1u << 13)  /* (on shadow roots) mode "closed" */
+#define DOMF_INERT_DOC (1u << 13)      /* (on document nodes) a template contents owner */
 static inline bool dom_is_html_document(NodeId doc) { return !(dom_flags(doc) & DOMF_XML_DOCUMENT); }
 
 /* ---- attributes ---- */

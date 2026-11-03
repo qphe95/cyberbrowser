@@ -294,6 +294,20 @@
             if (ec.nodeType === 3) this.setEnd(ec, ahead(ec, eo));
         } });
 
+    /* (fullscreen isn't here, but [LegacyLenientSetter]: a setter that does nothing) */
+    if (DOCP) ['fullscreenEnabled', 'fullscreen', 'fullscreenElement'].forEach(function (name) {
+        var d = Object.getOwnPropertyDescriptor(DOCP, name);
+        if (!d || !d.get || d.set) return;
+        var set = function () {};
+        Object.defineProperty(set, 'name', { value: 'set ' + name });
+        Object.defineProperty(DOCP, name, { configurable: true, enumerable: true, get: d.get, set: set });
+    });
+    var SRP = global.ShadowRoot && global.ShadowRoot.prototype;
+    if (SRP && !('fullscreenElement' in SRP))
+        Object.defineProperty(SRP, 'fullscreenElement', { configurable: true, enumerable: true,
+            get: Object.getOwnPropertyDescriptor({ get fullscreenElement() { return null; } }, 'fullscreenElement').get,
+            set: Object.getOwnPropertyDescriptor({ set fullscreenElement(v) {} }, 'fullscreenElement').set });
+
     /* (Performance is an EventTarget) */
     var PERF = global.performance;
     if (PERF && global.EventTarget && !PERF.addEventListener) {
@@ -404,6 +418,7 @@
     var DFP = global.DocumentFragment && global.DocumentFragment.prototype;
     if (DFP && typeof DFP.getElementById !== 'function')
         define(DFP, 'getElementById', function getElementById(id) {
+            if (arguments.length < 1) throw new TypeError("Failed to execute 'getElementById' on 'DocumentFragment': 1 argument required.");
             id = String(id);
             if (!id) return null;
             var all = this.querySelectorAll('[id]');

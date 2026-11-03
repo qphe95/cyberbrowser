@@ -1355,7 +1355,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // Keep event_target_proto for Node's prototype chain
     
     // Node constructor
-    GCValue node_ctor = JS_NewCFunction2(ctx, js_dummy_function, "Node", 0, JS_CFUNC_constructor, 0);
+    GCValue node_ctor = JS_NewCFunction2(ctx, js_illegal_constructor, "Node", 0, JS_CFUNC_constructor, 0);
     GCValue node_proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, node_proto, "constructor", node_ctor);
     // Node.prototype -> EventTarget.prototype
@@ -3254,7 +3254,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // attachShadow with its own and keeps its __shady_* bookkeeping; its
     // `instanceof ShadowRoot` checks resolve against this constructor.
     {
-        GCValue shadow_root_ctor = JS_NewCFunction2(ctx, js_dummy_function, "ShadowRoot",
+        GCValue shadow_root_ctor = JS_NewCFunction2(ctx, js_illegal_constructor, "ShadowRoot",
             0, JS_CFUNC_constructor, 0);
         GCValue shadow_root_proto = JS_NewObject(ctx);
         JS_SetPropertyStr(ctx, shadow_root_ctor, "prototype", shadow_root_proto);

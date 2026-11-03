@@ -35,6 +35,10 @@ static const char *xpath_js =
 #include "xpath_js.inc"
 ;
 
+static const char *xslt_js =
+#include "xslt_js.inc"
+;
+
 static void platform_api_report(JSContextHandle ctx)
 {
     GCValue e = JS_GetException(ctx);
@@ -101,6 +105,7 @@ void platform_api_install(JSContextHandle ctx, GCValue global, GCValue window)
     platform_api_run(ctx, cssom_js, "<cssom>", global, window);
     platform_api_run(ctx, canvas_api_js, "<canvas_api>", global, window);
     platform_api_run(ctx, xpath_js, "<xpath>", global, window);
+    platform_api_run(ctx, xslt_js, "<xslt>", global, window);
     dom_token_list_install(ctx, global, window);
     url_hyperlinks_install(ctx, global);
     webgpu_api_install(ctx, global, window);

@@ -169,6 +169,9 @@ GCValue js_create_from_ctor_proto(JSContextHandle ctx, GCValue ctor) {
 // Uses js_dom_node_class_id so DOM node data can be retrieved via JS_GetOpaqueHandle
 GCValue js_element_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
     (void)argc; (void)argv;
+    /* (only as what a subclass derives from) */
+    if (JS_StrictEq(ctx, new_target, JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "Element")))
+        return JS_ThrowTypeError(ctx, "Illegal constructor");
     GCValue obj = JS_NewObjectClass(ctx, js_dom_node_class_id);
     if (JS_IsException(obj))
         return JS_EXCEPTION;
@@ -2332,6 +2335,8 @@ GCValue js_mutation_observer_constructor(JSContextHandle ctx, GCValue new_target
     GCValue obj = JS_NewObjectClass(ctx, js_mutation_observer_class_id);
     JS_SetOpaqueHandle(obj, mo);
     
+    static uint32_t created;
+    JS_SetPropertyStr(ctx, obj, "__mo_seq", JS_NewUint32(ctx, ++created));
     JS_SetPropertyStr(ctx, obj, "__mo_callback", argv[0]);
     JS_SetPropertyStr(ctx, obj, "__mo_records", JS_NewArray(ctx));
     JS_SetPropertyStr(ctx, obj, "__mo_scheduled", JS_FALSE);
@@ -2697,20 +2702,54 @@ static void mo_schedule_callback(JSContextHandle ctx, GCValue observer) {
     GCValue scheduled = JS_GetPropertyStr(ctx, observer, "__mo_scheduled");
     if (JS_ToBool(ctx, scheduled)) return;
     JS_SetPropertyStr(ctx, observer, "__mo_scheduled", JS_TRUE);
-    GCValue args[1] = { observer };
-    JS_EnqueueJob(ctx, js_mutation_observer_job, 1, args);
+    /* (one microtask for them all: DOM "notify mutation observers") */
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue due = JS_GetPropertyStr(ctx, global, "__cyber_mo_due");
+    bool queued = JS_IsArray(ctx, due);
+    if (!queued) {
+        due = JS_NewArray(ctx);
+        JS_DefinePropertyValueStr(ctx, global, "__cyber_mo_due", due, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    }
+    uint32_t n = 0;
+    JS_ToUint32(ctx, &n, JS_GetPropertyStr(ctx, due, "length"));
+    JS_SetPropertyUint32(ctx, due, n, observer);
+    if (!queued) JS_EnqueueJob(ctx, js_mutation_observer_job, 0, NULL);
 }
 
+static void mo_notify_one(JSContextHandle ctx, GCValue observer);
+
+/* The ones due, oldest observer first. */
 static GCValue js_mutation_observer_job(JSContextHandle ctx, int argc, GCValue *argv) {
-    if (argc < 1) return JS_UNDEFINED;
-    GCValue observer = argv[0];
+    (void)argc; (void)argv;
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue due = JS_GetPropertyStr(ctx, global, "__cyber_mo_due");
+    JS_DefinePropertyValueStr(ctx, global, "__cyber_mo_due", JS_UNDEFINED, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    if (!JS_IsArray(ctx, due)) return JS_UNDEFINED;
+    uint32_t n = 0;
+    JS_ToUint32(ctx, &n, JS_GetPropertyStr(ctx, due, "length"));
+    uint32_t *seq = malloc((n + 1) * sizeof(uint32_t));
+    bool *done = calloc(n + 1, sizeof(bool));
+    if (!seq || !done) { free(seq); free(done); return JS_UNDEFINED; }
+    for (uint32_t i = 0; i < n; i++) JS_ToUint32(ctx, &seq[i], JS_GetPropertyStr(ctx, JS_GetPropertyUint32(ctx, due, i), "__mo_seq"));
+    for (uint32_t k = 0; k < n; k++) {
+        int best = -1;
+        for (uint32_t i = 0; i < n; i++) if (!done[i] && (best < 0 || seq[i] < seq[best])) best = (int)i;
+        done[best] = true;
+        mo_notify_one(ctx, JS_GetPropertyUint32(ctx, due, (uint32_t)best));
+    }
+    free(seq);
+    free(done);
+    return JS_UNDEFINED;
+}
+
+static void mo_notify_one(JSContextHandle ctx, GCValue observer) {
     JS_SetPropertyStr(ctx, observer, "__mo_scheduled", JS_FALSE);
     mo_drop_transients(ctx, observer, JS_UNDEFINED);
     GCValue records = JS_GetPropertyStr(ctx, observer, "__mo_records");
-    if (!JS_IsArray(ctx, records)) return JS_UNDEFINED;
+    if (!JS_IsArray(ctx, records)) return;
     uint32_t nrec = 0;
     JS_ToUint32(ctx, &nrec, JS_GetPropertyStr(ctx, records, "length"));
-    if (nrec == 0) return JS_UNDEFINED;          /* emptied by disconnect / takeRecords */
+    if (nrec == 0) return;          /* emptied by disconnect / takeRecords */
     JS_SetPropertyStr(ctx, observer, "__mo_records", JS_NewArray(ctx));
     GCValue callback = JS_GetPropertyStr(ctx, observer, "__mo_callback");
     if (JS_IsFunction(ctx, callback)) {
@@ -2729,7 +2768,6 @@ static GCValue js_mutation_observer_job(JSContextHandle ctx, int argc, GCValue *
             }
         }
     }
-    return JS_UNDEFINED;
 }
 
 static void mo_push_record(JSContextHandle ctx, GCValue observer, GCValue record) {

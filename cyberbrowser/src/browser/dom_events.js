@@ -263,6 +263,7 @@
     eventClass('DeviceOrientationEvent', Event, { alpha: nul(), beta: nul(), gamma: nul(), absolute: bool(false) });
     /* (made by createEvent only, in browsers; a constructor here) */
     eventClass('BeforeUnloadEvent', Event, { returnValue: str('') });
+    eventClass('GamepadEvent', Event, { gamepad: nul() });
     var TextEvent = eventClass('TextEvent', UIEvent, { data: str('') });
     define(TextEvent.prototype, 'initTextEvent', function (type, bubbles, cancelable, view, data) {
         this.initEvent(type, bubbles, cancelable);
@@ -674,12 +675,14 @@
     /* window.event: [Replaceable], the current event or undefined */
     if (global.document) [global, win].forEach(function (o) {
         if (!o || Object.getOwnPropertyDescriptor(o, 'event')) return;
-        Object.defineProperty(o, 'event', { configurable: true, enumerable: true,
-            get: function () {
+        var ed = Object.getOwnPropertyDescriptor({
+            get event() {
                 if (this !== undefined && this !== null && this !== global && this !== win) throw new TypeError('Illegal invocation');
                 return currentEvent;
             },
-            set: function (v) { Object.defineProperty(this, 'event', { value: v, writable: true, configurable: true, enumerable: true }); } });
+            set event(v) { Object.defineProperty(this, 'event', { value: v, writable: true, configurable: true, enumerable: true }); }
+        }, 'event');
+        Object.defineProperty(o, 'event', { configurable: true, enumerable: true, get: ed.get, set: ed.set });
     });
 
     /* (the engine's events: trusted ones, anim_api.c) */
@@ -754,6 +757,8 @@
         deviceorientationevent: global.DeviceOrientationEvent, textevent: global.TextEvent
     };
     function createEvent(iface) {
+        if (!this || this.nodeType !== 9) throw new TypeError('Illegal invocation');
+        if (arguments.length < 1) throw new TypeError("Failed to execute 'createEvent' on 'Document': 1 argument required.");
         var C = createEventMap[String(iface).toLowerCase()];
         if (!C) throw DOMExceptionOr("Failed to execute 'createEvent': The provided event type ('" + iface + "') is invalid.", 'NotSupportedError');
         var e = new C('');

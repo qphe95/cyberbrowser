@@ -858,7 +858,9 @@ static void build_doctype(Builder *b, DomTok *t) {
     NodeId dt = dom_create_doctype(name, nn, ids[0], idn[0], ids[1], idn[1], dom_id_of(b->owner));
     uint32_t slot = dom_slot(dt);
     parent = stream_parent(b, parent, false, slot);
-    dom_link_before(dom_id_of(parent), dt, dom_id_of(g_dom.first[parent]));
+    uint32_t after = g_dom.first[parent];
+    while (after && g_dom.kind[after] == DOM_K_COMMENT) after = g_dom.next[after];
+    dom_link_before(dom_id_of(parent), dt, dom_id_of(after));
 }
 
 static CssAtom g_a_html, g_a_head, g_a_body, g_head_content[11];
@@ -1101,6 +1103,11 @@ static void close_end_tag(Builder *b, const DomTok *t) {
             }
         }
         if (k >= 0) pop_to(b, (uint32_t)k);
+        /* (a </p> with no p open makes an empty one, HTML 13.2.6.4.7) */
+        else if (tag == g_t.p && b->sp) {
+            implied(b, g_t.p, b->stack[b->sp - 1]);
+            b->sp--;
+        }
         return;
     }
     for (uint32_t i = b->sp; i-- > 0; ) {

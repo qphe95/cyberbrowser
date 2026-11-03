@@ -125,9 +125,17 @@ static void root_value(GCValue v, bool add) {
 static struct { NodeId *id; uint32_t n, cap; } g_dead_docs;
 static uint32_t g_dead_any;
 
+/* (kept, as event_path.c's: a symbol's atom is the runtime's; made anew for
+ * another runtime, a document loaded in this process anew) */
 static JSAtom inactive_atom(JSContextHandle ctx) {
-    GCValue sym = JS_Eval(ctx, "Symbol.for('cyber.inactive')", 28, "<frame>", JS_EVAL_TYPE_GLOBAL);
-    return JS_ValueToAtom(ctx, sym);
+    static JSAtom atom;
+    static uint32_t serial;
+    if (!atom || serial != JS_GetContextSerial(ctx)) {
+        GCValue sym = JS_Eval(ctx, "Symbol.for('cyber.inactive')", 28, "<frame>", JS_EVAL_TYPE_GLOBAL);
+        atom = JS_ValueToAtom(ctx, sym);
+        serial = JS_GetContextSerial(ctx);
+    }
+    return atom;
 }
 
 static void dead_doc_add(NodeId doc) {
@@ -160,9 +168,10 @@ static GCValue js_inactive(JSContextHandle ctx, GCValue this_val, int argc, GCVa
         JSContextHandle realm = JS_IsFunction(ctx, fn) ? JS_GetFunctionRealmOf(ctx, fn) : NULL;
         if (realm) off = JS_ToBool(ctx, JS_GetProperty(ctx, JS_GetGlobalObject(realm), a)) > 0;
     }
-    JS_FreeAtom(ctx, a);
     return JS_NewBool(ctx, off);
 }
+
+static void frame_index_define(JSContextHandle ctx);
 
 /* (its frames with it) */
 static void frame_mark_dead(Frame *f) {
@@ -172,7 +181,6 @@ static void frame_mark_dead(Frame *f) {
     dead_doc_add(f->doc);
     JSAtom a = inactive_atom(f->ctx);
     JS_SetProperty(f->ctx, JS_GetGlobalObject(f->ctx), a, JS_TRUE);
-    JS_FreeAtom(f->ctx, a);
     for (Frame *c = g_frames; c; c = c->next)
         if (c != f && c->parent == f->ctx) frame_mark_dead(c);
 }
@@ -182,7 +190,11 @@ static void frame_mark_dead(Frame *f) {
  * script of theirs may be what's running). */
 void frame_api_on_disconnect(void) {
     for (Frame *f = g_frames; f; f = f->next)
-        if (!f->dead && SAFE_VALID(f->ctx) && !dom_is_connected(f->iframe)) frame_mark_dead(f);
+        if (!f->dead && SAFE_VALID(f->ctx) && !dom_is_connected(f->iframe)) {
+            frame_mark_dead(f);
+            /* (window[i] has one less) */
+            frame_index_define(f->parent);
+        }
 }
 
 static void frame_discard_realm(Frame *f) {

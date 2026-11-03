@@ -33,7 +33,7 @@ static double now_ms(void) {
 
 enum {
     SS_TAG, SS_UNIVERSAL, SS_ID, SS_CLASS, SS_ATTR,
-    SS_NOT, SS_IS,
+    SS_NOT, SS_IS, SS_HAS, SS_ANCHOR,
     SS_FIRST_CHILD, SS_LAST_CHILD, SS_ONLY_CHILD, SS_NTH_CHILD, SS_NTH_LAST_CHILD,
     SS_NTH_OF_TYPE, SS_NTH_LAST_OF_TYPE,
     SS_FIRST_OF_TYPE, SS_LAST_OF_TYPE, SS_ONLY_OF_TYPE, SS_EMPTY, SS_ROOT, SS_SCOPE,
@@ -82,6 +82,7 @@ static void sel_free(SelList *l);
 typedef struct SelParser {
     const char *p, *e;
     bool err;
+    bool relative;  /* in :has(): each from the anchor */
 } SelParser;
 
 /* Comments separate tokens without being whitespace (a comment between `div`
@@ -420,7 +421,16 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                     alen = (size_t)(sp->p - args);
                     if (sp->p < sp->e) sp->p++;
                 }
-                if (strcmp(name, "not") == 0 || strcmp(name, "is") == 0 || strcmp(name, "where") == 0 ||
+                if (strcmp(name, "has") == 0) {
+                    /* (relative selectors: each from an anchor, the element) */
+                    if (!args) { sp->err = true; free(name); break; }
+                    SelParser sub = { args, args + alen, false, true };
+                    s.sub = parse_list(&sub, true);
+                    if (!s.sub || !s.sub->ok) { sel_free(s.sub); sp->err = true; free(name); break; }
+                    s.kind = SS_HAS;
+                    for (int q = 0; q < s.sub->n; q++)
+                        if (s.sub->x[q].n > 1 && (s.sub->x[q].c[1].comb == '+' || s.sub->x[q].c[1].comb == '~')) s.a = 1;
+                } else if (strcmp(name, "not") == 0 || strcmp(name, "is") == 0 || strcmp(name, "where") == 0 ||
                     strcmp(name, "matches") == 0 || strcmp(name, "-webkit-any") == 0) {
                     if (!args) { sp->err = true; free(name); break; }
                     bool is_not = strcmp(name, "not") == 0;
@@ -480,6 +490,8 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
             css_atom_reserve(1);
             s.kind = SS_TAG;
             s.atom = css_atom_intern(name, nl);
+            for (uint32_t k = 0; k < nl && !s.raw; k++)
+                if (name[k] >= 'A' && name[k] <= 'Z') s.raw = strndup(name, nl);
             free(name);
         } else {
             break;
@@ -499,6 +511,20 @@ static SelList *parse_list(SelParser *sp, bool nested) {
         sp_ws(sp);
         SelComplex cx = { NULL, 0 };
         char comb = 0;
+        if (sp->relative) {
+            comb = ' ';
+            if (sp->p < sp->e && (*sp->p == '>' || *sp->p == '+' || *sp->p == '~')) {
+                comb = *sp->p++;
+                sp_ws(sp);
+            }
+            SelCompound a = { NULL, 0, 0 };
+            SelSimple as;
+            memset(&as, 0, sizeof(as));
+            as.kind = SS_ANCHOR;
+            add_simple(&a, as);
+            cx.c = malloc(sizeof(SelCompound));
+            cx.c[cx.n++] = a;
+        }
         for (;;) {
             SelCompound c = { NULL, 0, comb };
             if (!parse_compound(sp, &c)) { free(c.s); break; }
@@ -616,7 +642,8 @@ static bool cmp_n(const char *a, const char *b, size_t n, bool ci) {
  * element in an HTML document, else as written) */
 static bool attr_ok(uint32_t s, const SelSimple *ss) {
     DomAttrList *l = &g_dom.attrs[s];
-    bool exact = ss->raw && !(g_dom.ns[s] == DOM_NS_HTML && dom_is_html_document(dom_owner(dom_id_of(s))));
+    bool exact = !(g_dom.ns[s] == DOM_NS_HTML && dom_is_html_document(dom_owner(dom_id_of(s))));
+    const char *written = ss->raw ? ss->raw : css_atom_str(ss->atom);
     for (int i = 0; i < l->n; i++) {
         if (l->a[i].name != ss->atom) {
             /* (under its qualified name, with a prefix) */
@@ -624,7 +651,7 @@ static bool attr_ok(uint32_t s, const SelSimple *ss) {
             const char *colon = qn ? strchr(qn, ':') : NULL;
             const char *want = colon ? css_atom_str(ss->atom) : NULL;
             if (!want || strcmp(colon + 1, want) != 0) continue;
-        } else if (exact && strcmp(dom_attr_qualified_name(&l->a[i]), ss->raw) != 0) continue;
+        } else if (exact && written && strcmp(dom_attr_qualified_name(&l->a[i]), written) != 0) continue;
         const char *v = l->a[i].value.s ? l->a[i].value.s : "";
         size_t vn = l->a[i].value.len, n = ss->vlen;
         bool ci = ss->ci;
@@ -740,10 +767,18 @@ static bool nth_ok(int a, int b, int pos) {
 }
 
 static bool list_matches(const SelList *l, uint32_t s, uint32_t scope);
+static uint32_t g_has_anchor;
 
 static bool simple_ok(uint32_t s, const SelSimple *ss, uint32_t scope) {
     switch (ss->kind) {
-    case SS_TAG: return g_dom.tag[s] == ss->atom;
+    case SS_TAG: {
+        if (g_dom.tag[s] != ss->atom) return false;
+        /* (an HTML element in an HTML document: any case; else as it's written) */
+        NodeId id = dom_id_of(s);
+        if (g_dom.ns[s] == DOM_NS_HTML && dom_is_html_document(dom_owner(id))) return true;
+        const char *want = ss->raw ? ss->raw : css_atom_str(ss->atom);
+        return !want || strcmp(dom_local_name(id), want) == 0;
+    }
     case SS_UNIVERSAL: return true;
     case SS_ID: {
         uint32_t n = 0;
@@ -773,6 +808,21 @@ static bool simple_ok(uint32_t s, const SelSimple *ss, uint32_t scope) {
         return false;
     }
     case SS_ATTR: return attr_ok(s, ss);
+    case SS_ANCHOR: return s == g_has_anchor;
+    case SS_HAS: {
+        uint32_t was = g_has_anchor;
+        bool found = false;
+        g_has_anchor = s;
+        for (uint32_t d = g_dom.first[s] ? dom_next_in_subtree(s, s) : 0; d && !found; d = dom_next_in_subtree(d, s))
+            found = g_dom.kind[d] == DOM_K_ELEMENT && list_matches(ss->sub, d, scope);
+        /* (+ and ~ look at what follows) */
+        if (ss->a)
+            for (uint32_t x = g_dom.next[s]; x && !found; x = g_dom.next[x])
+                for (uint32_t d = x; d && !found; d = dom_next_in_subtree(d, x))
+                    found = g_dom.kind[d] == DOM_K_ELEMENT && list_matches(ss->sub, d, scope);
+        g_has_anchor = was;
+        return found;
+    }
     case SS_NOT: return !list_matches(ss->sub, s, scope);
     case SS_IS: return list_matches(ss->sub, s, scope);
     case SS_FIRST_CHILD: case SS_LAST_CHILD: case SS_ONLY_CHILD:

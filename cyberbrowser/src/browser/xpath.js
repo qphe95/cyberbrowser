@@ -16,6 +16,7 @@
     'use strict';
     var HTML_NS = 'http://www.w3.org/1999/xhtml';
     var STATE = Symbol('xpath');
+    var CURRENT = Symbol('current');
 
     function define(obj, name, value, enumerable) {
         Object.defineProperty(obj, name, { value: value, writable: true, configurable: true, enumerable: !!enumerable });
@@ -496,7 +497,10 @@
     function evaluate(e, ctx) {
         switch (e.t) {
         case 'lit': return e.v;
-        case 'var': throw domError('Variables are not supported.', 'NamespaceError');
+        case 'var':
+            /* (XSLT's, xslt.js; document.evaluate has none) */
+            if (ctx.vars && e.name in ctx.vars) return ctx.vars[e.name];
+            throw domError('Variables are not supported.', 'NamespaceError');
         case 'neg': return -toNum(evaluate(e.a, ctx));
         case 'bin': {
             if (e.op === 'or') return toBool(evaluate(e.a, ctx)) || toBool(evaluate(e.b, ctx));
@@ -551,6 +555,12 @@
     var FUNCTIONS = {
         last: function (ctx, a) { need(a, 0, 0); return ctx.size; },
         position: function (ctx, a) { need(a, 0, 0); return ctx.pos; },
+        /* (XSLT's) */
+        current: function (ctx, a) {
+            need(a, 0, 0);
+            if (!ctx.vars) throw new TypeError('current() is for XSLT.');
+            return [ctx.vars[CURRENT] || ctx.node];
+        },
         count: function (ctx, a) { need(a, 1, 1); return argSet(ctx, a, 0).length; },
         id: function (ctx, a) {
             need(a, 1, 1);
@@ -676,7 +686,7 @@
         return v;
     }
 
-    var XPathResult = ({ XPathResult() { illegal(); } }).XPathResult;
+    var XPathResult = function XPathResult() { illegal(); };
     XPathResult.prototype = Object.create(Object.prototype);
     var RP = XPathResult.prototype;
     var TYPES = ['ANY_TYPE', 'NUMBER_TYPE', 'STRING_TYPE', 'BOOLEAN_TYPE', 'UNORDERED_NODE_ITERATOR_TYPE',
@@ -772,7 +782,7 @@
         };
     }
 
-    var XPathExpression = ({ XPathExpression() { illegal(); } }).XPathExpression;
+    var XPathExpression = function XPathExpression() { illegal(); };
     XPathExpression.prototype = Object.create(Object.prototype);
     var EXP = XPathExpression.prototype;
     function compile(expression, resolver) {
@@ -800,16 +810,22 @@
     define(EXP, 'constructor', XPathExpression);
 
     /* XPathEvaluatorBase: on XPathEvaluator.prototype and Document.prototype */
+    function needEvaluator(o) {
+        if (!o || typeof o !== 'object' || !(o.nodeType === 9 || o instanceof XPathEvaluator)) throw new TypeError('Illegal invocation');
+    }
     var base = {
         createExpression: function createExpression(expression, resolver) {
+            needEvaluator(this);
             if (arguments.length < 1) throw new TypeError("Failed to execute 'createExpression': 1 argument required.");
             return compile(expression, resolver);
         },
         createNSResolver: function createNSResolver(nodeResolver) {
+            needEvaluator(this);
             if (arguments.length < 1) throw new TypeError("Failed to execute 'createNSResolver': 1 argument required.");
             return needNode(nodeResolver, 'createNSResolver');
         },
         evaluate: function evaluate(expression, contextNode, resolver, type, result) {
+            needEvaluator(this);
             if (arguments.length < 2) throw new TypeError("Failed to execute 'evaluate': 2 arguments required.");
             needNode(contextNode, 'evaluate');
             return run(compile(expression, resolver), contextNode, type, result);
@@ -825,6 +841,20 @@
         define(EVP, bk, base[bk], true);
         if (DocP) define(DocP, bk, base[bk], true);
     }
+    /* (for xslt.js: an expression's plain value) */
+    function xsltEval(expression, resolver, ctx) {
+        var tree = compile(expression, resolver)[STATE].tree;
+        /* (current() is the node the expression starts from) */
+        if (ctx.vars) {
+            var had = ctx.vars[CURRENT];
+            ctx.vars[CURRENT] = ctx.node;
+            try { return evaluate(tree, ctx); } finally { ctx.vars[CURRENT] = had; }
+        }
+        return evaluate(tree, ctx);
+    }
+    xsltEval.string = function (v) { return toStr(v); };
+    xsltEval.boolean = function (v) { return toBool(v); };
+    Object.defineProperty(global, '__cyberXPath', { value: xsltEval, configurable: true });
     expose('XPathResult', XPathResult);
     expose('XPathExpression', XPathExpression);
     expose('XPathEvaluator', XPathEvaluator);

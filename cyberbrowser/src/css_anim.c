@@ -378,7 +378,11 @@ bool anim_has(NodeId el, int ps)
     return false;
 }
 
-bool anim_any(void) { return A.live_n > 0; }
+/* Cancellations since the last tick (once it has been seen to run). */
+static AnimEvent g_cancels[32];
+static int g_ncancels;
+bool anim_any(void) { return A.live_n > 0 || g_ncancels > 0; }
+bool anim_cancels_due(void) { return g_ncancels > 0; }
 
 /* ---- Values at a time ---- */
 
@@ -477,6 +481,20 @@ static void anim_timing(int r, const SpecList L[ANIM_NFIELD], int j)
                 !strcasecmp(f, "both") ? F_BOTH : F_NONE;
 }
 
+static void note_cancel(int r, int type, double now)
+{
+    if (g_ncancels == (int)(sizeof g_cancels / sizeof g_cancels[0])) return;
+    /* (only one whose run or start event has gone) */
+    if (type == ANIM_EV_TCANCEL ? !bit(A.ev_run, r) : !bit(A.ev_start, r)) return;
+    AnimEvent *e = &g_cancels[g_ncancels++];
+    e->el = A.el[r];
+    e->ps = A.ps[r];
+    e->type = (uint8_t)type;
+    snprintf(e->name, sizeof e->name, "%s", A.name[r]);
+    double t = now - A.start[r] - A.delay[r];
+    e->elapsed = (t > 0 ? t : 0) / 1000.0;
+}
+
 void anim_seed(NodeId el, int ps, const AnimVal base[ANIM_NPROP])
 {
     for (int p = 0; p < ANIM_NPROP; p++) {
@@ -512,7 +530,7 @@ void anim_box(NodeId el, int ps, const char *spec, const AnimVal base[ANIM_NPROP
             double delay = j >= 0 ? parse_time(list_item(&L[ANIM_F_TDELAY], j, "0s", buf, sizeof buf)) : 0;
             if (j < 0 || dur + (delay > 0 ? delay : 0) <= 0) {
                 /* (not transitioned: what ran is cancelled) */
-                if (t >= 0) row_free(t);
+                if (t >= 0) { note_cancel(t, ANIM_EV_TCANCEL, now); row_free(t); }
                 if (b >= 0) row_free(b);
                 continue;
             }
@@ -523,7 +541,7 @@ void anim_box(NodeId el, int ps, const char *spec, const AnimVal base[ANIM_NPROP
             }
             if (val_same(&A.a[b], &base[p])) continue;
             AnimVal from = t >= 0 ? trans_value(t, now) : A.a[b];
-            if (t >= 0) row_free(t);
+            if (t >= 0) { note_cancel(t, ANIM_EV_TCANCEL, now); row_free(t); }
             A.a[b] = base[p];
             if (dur <= 0 || !from.ok || !base[p].ok || val_same(&from, &base[p])) continue;
             t = row_new(el, ps, K_TRANS, p);
@@ -598,7 +616,10 @@ void anim_box(NodeId el, int ps, const char *spec, const AnimVal base[ANIM_NPROP
             if (!bit(A.seen, r)) { if (ng < ANIM_LIST) gone[ng++] = r; }
             else bset(A.seen, r, false);
         }
-        for (int i = 0; i < ng; i++) anim_free(gone[i]);
+        for (int i = 0; i < ng; i++) {
+            if (!bit(A.ev_end, gone[i])) note_cancel(gone[i], ANIM_EV_ACANCEL, now);
+            anim_free(gone[i]);
+        }
     }
 
     for (int p = 0; p < ANIM_NPROP; p++) {
@@ -626,6 +647,8 @@ int anim_tick(double now, AnimEvent *out, int cap, bool *live)
 {
     int n = 0;
     *live = false;
+    (void)now;
+    while (g_ncancels > 0 && n + 4 < cap) out[n++] = g_cancels[--g_ncancels];
     for (int r = 0; r < A.n; r++) {
         if (!bit(A.alive, r)) continue;
         NodeId el = A.el[r];

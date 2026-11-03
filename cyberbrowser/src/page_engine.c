@@ -30,6 +30,7 @@
 #include "image_cache.h"
 #include "browser/image_api.h"
 #include "browser/layout_api.h"
+#include "css_anim.h"
 #include "cyber_profile.h"
 #include "cyber_sampler.h"
 #include "dom_store.h"
@@ -1423,6 +1424,8 @@ void page_turn(bool run_timers, bool wait, int width, int height, PageTurn *out)
             page_frame_build(&g_frame, g_doc, g_loop_images, width, height);
             out->new_frame = g_frame.valid;
             page_scroll_clamp();
+            /* (their events want a turn) */
+            if (anim_cancels_due()) timer_anim_wake(g_ctx);
         } else {
             printf("WARNING: failed to rebuild native document from JS DOM\n");
         }
