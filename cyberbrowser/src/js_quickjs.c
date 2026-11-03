@@ -663,7 +663,6 @@ const JSCFunctionListEntry js_xhr_proto_funcs[] = {
     JS_CGETSET_DEF("responseText", js_xhr_get_response_text, NULL),
     JS_CGETSET_DEF("withCredentials", js_xhr_get_with_credentials, js_xhr_set_with_credentials),
     JS_PROP_STRING_DEF("responseType", "", JS_PROP_WRITABLE),
-    JS_PROP_STRING_DEF("response", "", JS_PROP_WRITABLE),
 };
 const size_t js_xhr_proto_funcs_count = sizeof(js_xhr_proto_funcs) / sizeof(js_xhr_proto_funcs[0]);
 
@@ -2582,7 +2581,7 @@ static GCValue create_element_named(JSContextHandle ctx, GCValue this_val, uint3
     for (size_t i = 0; exact && i < ln; i++) exact = !(local[i] >= 'A' && local[i] <= 'Z');
     if (!exact) dom_set_element_name(el, ns, prefix, pn, local, ln);
     bool tmpl = ns == DOM_NS_HTML && ln == 8 && !memcmp(local, "template", 8);
-    if (tmpl) dom_set_template_content(el, dom_create_fragment(owner));
+    if (tmpl) dom_set_template_content(el, dom_create_fragment(template_contents_owner(owner)));
     GCValue elem = dom_js(ctx, el);
     if (!JS_IsObject(elem)) return JS_NULL;
     if (tmpl) {

@@ -558,6 +558,7 @@ GCValue builtin_eval(JSContextHandle ctx, const char *src, const char *name);
 void webgpu_api_install(JSContextHandle ctx, GCValue global, GCValue window);
 void frame_api_install(JSContextHandle ctx, GCValue global);
 void frame_api_on_connect(JSContextHandle ctx, NodeId subtree);
+NodeId template_contents_owner(NodeId doc);
 void frame_api_on_disconnect(void);
 /* While set (a script's insertion), an iframe without src that connects
  * gets its about:blank document and load event at once (HTML 4.8.5). */

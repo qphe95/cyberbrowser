@@ -612,7 +612,9 @@ GCValue html_doc_stream_step(HtmlDocStream *s, bool final) {
                 if (!observed) continue;
                 GCValue added = JS_NewArray(ctx);
                 JS_SetPropertyUint32(ctx, added, 0, dom_js(ctx, dom_id_of(k)));
-                mo_notify_child_list(ctx, dom_js(ctx, dom_id_of(p)), added, JS_NewArray(ctx), JS_NULL, JS_NULL);
+                mo_notify_child_list(ctx, dom_js(ctx, dom_id_of(p)), added, JS_NewArray(ctx),
+                                     g_dom.prev[k] ? dom_js(ctx, dom_id_of(g_dom.prev[k])) : JS_NULL,
+                                     JS_NULL);
             }
         }
     }

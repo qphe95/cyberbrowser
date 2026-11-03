@@ -1041,12 +1041,14 @@ void js_struct_index_scan_fetched(const char *url, const char *data, size_t len,
         release(arg);
         return;
     }
-    uint8_t *copy = (uint8_t *)malloc(len);
+    /* (NUL-terminated: the parser that precompiles it reads a byte past its end) */
+    uint8_t *copy = (uint8_t *)malloc(len + 1);
     if (!copy) {
         release(arg);
         return;
     }
     memcpy(copy, data, len);
+    copy[len] = 0;
     void *t = js_struct_index_announce(data, len);
     void *pc = g_pc_announce ? g_pc_announce(data, len) : NULL;
     release(arg);

@@ -308,6 +308,45 @@
             get: Object.getOwnPropertyDescriptor({ get fullscreenElement() { return null; } }, 'fullscreenElement').get,
             set: Object.getOwnPropertyDescriptor({ set fullscreenElement(v) {} }, 'fullscreenElement').set });
 
+    /* (HTML 3.1.5: the document's collections) */
+    if (DOCP) [['scripts', 'script'], ['embeds', 'embed'], ['plugins', 'embed']].forEach(function (m) {
+        if (!(m[0] in DOCP))
+            Object.defineProperty(DOCP, m[0], { configurable: true, enumerable: true,
+                get: function () { return this.getElementsByTagName(m[1]); } });
+    });
+    /* (DOM parsing: as innerHTML and DOMParser here) */
+    if (global.Document && !global.Document.parseHTMLUnsafe)
+        Object.defineProperty(global.Document, 'parseHTMLUnsafe', { configurable: true, enumerable: true, writable: true,
+            value: function parseHTMLUnsafe(html) { return new global.DOMParser().parseFromString(String(html), 'text/html'); } });
+    if (global.Element && !global.Element.prototype.setHTMLUnsafe)
+        Object.defineProperty(global.Element.prototype, 'setHTMLUnsafe', { configurable: true, enumerable: true, writable: true,
+            value: function setHTMLUnsafe(html) { this.innerHTML = String(html); } });
+    if (global.ShadowRoot && !global.ShadowRoot.prototype.setHTMLUnsafe)
+        Object.defineProperty(global.ShadowRoot.prototype, 'setHTMLUnsafe', { configurable: true, enumerable: true, writable: true,
+            value: function setHTMLUnsafe(html) { this.innerHTML = String(html); } });
+    /* (XMLHttpRequest's response, by its responseType) */
+    var XHRP = global.XMLHttpRequest && global.XMLHttpRequest.prototype;
+    if (XHRP) {
+        var parsedDoc = function (x) {
+            var ct = (x.getResponseHeader('content-type') || 'application/xml').split(';')[0].trim();
+            if (ct !== 'text/html' && ct !== 'application/xml' && ct !== 'text/xml' && ct !== 'application/xhtml+xml' && !/\+xml$/.test(ct))
+                ct = 'application/xml';
+            return new global.DOMParser().parseFromString(x.responseText, ct);
+        };
+        Object.defineProperty(XHRP, 'response', { configurable: true, enumerable: true, get: function () {
+            if (this.readyState !== 4) return this.responseType === '' || this.responseType === 'text' ? '' : null;
+            switch (this.responseType) {
+            case 'document': return parsedDoc(this);
+            case 'json': try { return JSON.parse(this.responseText); } catch (e) { return null; }
+            default: return this.responseText;
+            }
+        } });
+        Object.defineProperty(XHRP, 'responseXML', { configurable: true, enumerable: true, get: function () {
+            if (this.readyState !== 4 || (this.responseType !== '' && this.responseType !== 'document')) return null;
+            return parsedDoc(this);
+        } });
+    }
+
     /* (Performance is an EventTarget) */
     var PERF = global.performance;
     if (PERF && global.EventTarget && !PERF.addEventListener) {

@@ -25,6 +25,7 @@
  * Nodes are wrapped in their document's realm (dom_wrap_set_realm_resolver),
  * so a parent reaching into a same-origin frame gets the frame's objects. */
 #include <string.h>
+#include <ctype.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <quickjs.h>
@@ -589,6 +590,24 @@ static bool xml_mime(const char *m) {
     return !strcmp(m, "text/xml") || !strcmp(m, "application/xml") || (n > 4 && !strcmp(m + n - 4, "+xml"));
 }
 
+/* (the %XX of a javascript: URL's script) */
+static char *wurl_percent_decode(const char *s) {
+    size_t n = strlen(s), k = 0;
+    char *out = malloc(n + 1);
+    if (!out) return NULL;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == '%' && i + 2 < n && isxdigit((unsigned char)s[i + 1]) && isxdigit((unsigned char)s[i + 2])) {
+            char hex[3] = { s[i + 1], s[i + 2], 0 };
+            out[k++] = (char)strtol(hex, NULL, 16);
+            i += 2;
+        } else {
+            out[k++] = s[i];
+        }
+    }
+    out[k] = 0;
+    return out;
+}
+
 /* Navigate f to f->url: a new realm and document with the page loaded. */
 static void frame_load(Frame *f) {
     char url[2048];
@@ -612,7 +631,7 @@ static void frame_load(Frame *f) {
     free(parent_origin);
     HttpBuffer buf = {0};
     char err[256] = {0};
-    bool blank = !strncmp(url, "about:", 6);         /* an empty document, from nowhere */
+    bool blank = !strncmp(url, "about:", 6) || !strncasecmp(url, "javascript:", 11);         /* an empty document, from nowhere */
     /* (a data: URL: its body, its MIME type in its header) */
     bool data = !strncasecmp(url, "data:", 5);
     char data_mime[128] = "text/plain";
@@ -658,7 +677,19 @@ static void frame_load(Frame *f) {
     if (ps) {
         /* (about:srcdoc: the attribute's markup) */
         const char *srcdoc = !strcmp(url, "about:srcdoc") ? dom_get_attr_str(f->iframe, "srcdoc") : NULL;
-        if (srcdoc && srcdoc[0]) html_page_stream_feed(ps, srcdoc, strlen(srcdoc));
+        const char *js_out = NULL;
+        size_t js_out_n = 0;
+        if (!strncasecmp(url, "javascript:", 11)) {
+            /* (a javascript: URL: what its script returns, as a string, is the document) */
+            char *body = wurl_percent_decode(url + 11);
+            GCValue v = JS_Eval(ctx, body ? body : "", body ? strlen(body) : 0, "<javascript-url>", JS_EVAL_TYPE_GLOBAL);
+            free(body);
+            if (JS_IsException(v)) JS_GetException(ctx);
+            else if (JS_IsString(v)) js_out = JS_ToCStringLen(ctx, &js_out_n, v);
+        }
+        if (js_out) html_page_stream_feed(ps, js_out, js_out_n);
+        else if (!strncasecmp(url, "javascript:", 11)) { /* (nothing to show) */ }
+        else if (srcdoc && srcdoc[0]) html_page_stream_feed(ps, srcdoc, strlen(srcdoc));
         else if (fetched && buf.data && buf.size) html_page_stream_feed(ps, buf.data, buf.size);
         else if (!blank) platform_log(LOG_LEVEL_WARN, "frame", "could not fetch frame %s: %s", url, err);
         html_page_stream_finish(ps, NULL);
@@ -735,7 +766,13 @@ static void frame_index_define(JSContextHandle ctx) {
                                 JS_UNDEFINED, JS_PROP_CONFIGURABLE);
         JS_FreeAtom(ctx, a);
     }
-    if (n > have)
+    /* (a frame gone: its index with it) */
+    for (int i = n; i < have; i++) {
+        JSAtom a = JS_NewAtomUInt32(ctx, (uint32_t)i);
+        JS_DeleteProperty(ctx, g, a, 0);
+        JS_FreeAtom(ctx, a);
+    }
+    if (n != have)
         JS_DefinePropertyValueStr(ctx, g, "__cyber_frame_indices", JS_NewInt32(ctx, n), JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
 }
 
@@ -832,14 +869,14 @@ static GCValue js_iframe_get_content_window(JSContextHandle ctx, GCValue this_va
     (void)argc; (void)argv;
     Frame *f = frame_of_iframe(dom_node_of(this_val));
     frame_ensure(f);
-    return f && SAFE_VALID(f->ctx) ? window_seen_from(ctx, f->id) : JS_NULL;
+    return f && SAFE_VALID(f->ctx) && !f->dead ? window_seen_from(ctx, f->id) : JS_NULL;
 }
 
 static GCValue js_iframe_get_content_document(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     Frame *f = frame_of_iframe(dom_node_of(this_val));
     frame_ensure(f);
-    if (!f || !SAFE_VALID(f->ctx) || !realms_same_origin(ctx, f->ctx)) return JS_NULL;
+    if (!f || !SAFE_VALID(f->ctx) || f->dead || !realms_same_origin(ctx, f->ctx)) return JS_NULL;
     return JS_GetPropertyStr(f->ctx, JS_GetGlobalObject(f->ctx), "document");
 }
 
@@ -884,7 +921,9 @@ static GCValue js_iframe_set_src(JSContextHandle ctx, GCValue this_val, int argc
         GCValue r = JS_Call(ctx, set, this_val, 2, args);
         if (JS_IsException(r)) return r;
     }
-    if (n && dom_is_connected(n)) {
+    /* (no browsing context in a document without one) */
+    NodeId realm_doc = dom_node_of(JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document"));
+    if (n && dom_is_connected(n) && dom_owner(n) == realm_doc) {
         char *base = realm_url(ctx);
         char *abs = wurl_resolve(base, s);
         free(base);

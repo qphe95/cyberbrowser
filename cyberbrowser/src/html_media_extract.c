@@ -1405,8 +1405,13 @@ static void run_ready_async(HtmlPageStream *ps, bool wait) {
 }
 
 /* A script element the parser has just inserted. */
+void timer_microtask_checkpoint(JSContextHandle ctx);
+
 static void dispatch_parser_script(HtmlPageStream *ps, GCValue script) {
     char url[SCRIPT_URL_MAX_LEN];
+    /* (what ran before it finishes first: HTML "prepare the script element"
+     * performs a checkpoint when the stack is empty) */
+    timer_microtask_checkpoint(ps->ctx);
     /* (an empty script with no src has not started: text given it later
      * runs, HTML "prepare the script element") */
     NodeId sn = dom_node_of(script);

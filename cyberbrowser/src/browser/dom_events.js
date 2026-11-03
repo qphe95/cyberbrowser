@@ -504,7 +504,8 @@
         var found = false;
         if (list) for (var k = 0; k < list.length && !found; k++) found = !list[k].removed;
         if (list) {
-            for (var i = 0; i < list.length; i++) {
+            /* (the listeners there now: DOM 2.10 clones the list) */
+            for (var i = 0, end = list.length; i < end; i++) {
                 var l = list[i];
                 if (l.removed) continue;
                 if (l.capture !== capturePass) continue;
@@ -923,6 +924,13 @@
     function followHyperlink(a, view) {
         var href = a.getAttribute('href');
         if (href === null) return;
+        /* (a javascript: URL runs, in a task of its own) */
+        if (/^\s*javascript:/i.test(href)) {
+            var code = href.replace(/^\s*javascript:/i, '');
+            try { code = decodeURIComponent(code); } catch (e) { /* (as it is) */ }
+            global.setTimeout(function () { (0, global.eval)(code); }, 0);
+            return;
+        }
         var loc = view.location;
         if (!loc) return;
         var url;

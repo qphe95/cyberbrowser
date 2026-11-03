@@ -326,8 +326,6 @@ static bool dom_attr_has_accessor(NodeId id, const char *name) {
  * applies to obj: not over an IDL attribute or method of its interface
  * (assigning disabled="" through its setter would remove the attribute,
  * value="x" would set the control's value). */
-static NodeId template_contents_owner(NodeId doc);
-
 static bool dom_attr_reflects_as_expando(JSContextHandle ctx, NodeId id, GCValue obj, const char *name) {
     if (strcmp(name, "id") == 0 || strcmp(name, "class") == 0 || strcmp(name, "style") == 0) return false;
     if (id && dom_attr_has_accessor(id, name)) return false;
@@ -371,7 +369,7 @@ void dom_element_setup_wrapper(JSContextHandle ctx, NodeId id, GCValue obj) {
 /* A document's "appropriate template contents owner document": a document of
  * its kind with no browsing context, made once (its slot in the document's
  * content column). */
-static NodeId template_contents_owner(NodeId doc) {
+NodeId template_contents_owner(NodeId doc) {
     if (!dom_valid(doc) || dom_kind(doc) != DOM_K_DOCUMENT) return doc;
     /* (itself such a one: it is its own) */
     if (dom_flags(doc) & DOMF_INERT_DOC) return doc;
@@ -2502,6 +2500,9 @@ void dom_node_set_owner_document(JSContextHandle ctx, GCValue node, GCValue doc)
     if (n && dom_kind(d) == DOM_K_DOCUMENT) {
         /* (Node.prototype's getter reads the store) */
         g_dom.owner[dom_slot(n)] = dom_slot(d);
+        /* (a template's contents: the inert document's) */
+        NodeId tc = dom_kind(n) == DOM_K_ELEMENT ? dom_template_content(n) : DOM_NULL;
+        if (tc) g_dom.owner[dom_slot(tc)] = dom_slot(template_contents_owner(d));
         return;
     }
     JS_DefinePropertyValueStr(ctx, node, "ownerDocument", doc,

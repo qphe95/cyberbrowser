@@ -226,9 +226,14 @@ JSClassID js_window_properties_class_id;
 
 static int js_window_properties_get_own(JSContextHandle ctx, JSPropertyDescriptor *desc,
                                         GCValue obj, JSAtom prop) {
-    (void)obj;
     static int busy;    /* reading `document` below must not come back here */
     if (busy) return 0;
+    /* (the window it's of, whoever's asking: its realm is its function's) */
+    busy = 1;
+    GCValue realm_fn = JS_GetPropertyStr(ctx, obj, "__cyber_realm_of");
+    busy = 0;
+    JSContextHandle own = JS_IsFunction(ctx, realm_fn) ? JS_GetFunctionRealmOf(ctx, realm_fn) : NULL;
+    if (own) ctx = own;
     GCValue key = JS_AtomToValue(ctx, prop);
     if (!JS_IsString(key)) return 0;
     size_t len = 0;
@@ -1332,7 +1337,11 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         if (!JS_IsRegisteredClass(wrt, js_window_properties_class_id))
             JS_NewClass(wrt, js_window_properties_class_id, &js_window_properties_class_def);
         GCValue named = JS_NewObjectProtoClass(ctx, JS_GetPrototype(ctx, window_proto), js_window_properties_class_id);
-        if (!JS_IsException(named)) JS_SetPrototype(ctx, window_proto, named);
+        if (!JS_IsException(named)) {
+            JS_SetPrototype(ctx, window_proto, named);
+            /* (a function of this realm: js_window_properties_get_own) */
+            JS_DefinePropertyValueStr(ctx, named, "__cyber_realm_of", JS_NewCFunction(ctx, js_undefined, "", 0), 0);
+        }
     }
 
     // ===== Create DOM Constructors with proper prototype chain in C =====
