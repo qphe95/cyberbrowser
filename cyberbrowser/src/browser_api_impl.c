@@ -2162,9 +2162,6 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     DEF_FUNC(ctx, window, "close", js_undefined, 0);
     DEF_FUNC(ctx, window, "focus", js_undefined, 0);
     DEF_FUNC(ctx, window, "blur", js_undefined, 0);
-    DEF_FUNC(ctx, window, "scrollTo", js_undefined, 2);
-    DEF_FUNC(ctx, window, "scrollBy", js_undefined, 2);
-    DEF_FUNC(ctx, window, "scroll", js_undefined, 2);  // Alias to scrollTo
     DEF_FUNC(ctx, window, "print", js_undefined, 0);
     DEF_FUNC(ctx, window, "postMessage", js_undefined, 2);
     // window.addEventListener/removeEventListener/dispatchEvent are inherited

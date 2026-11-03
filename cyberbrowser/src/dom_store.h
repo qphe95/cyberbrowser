@@ -152,6 +152,20 @@ typedef struct DomStore {
 extern DomStore g_dom;
 
 /* ---- ids ---- */
+/* Scroll offsets (CSSOM View), flat: the rows of an element's scrolling box, or
+ * a document's for its viewport.  Few, searched in order; no row means 0, 0.
+ * paint: the display list is out of date; fixed: the last one had a fixed box
+ * (it moves against the viewport's scroll). */
+typedef struct DomScrolls {
+    NodeId *id;
+    float *x, *y;
+    uint32_t n, cap;
+    bool paint, fixed;
+} DomScrolls;
+extern DomScrolls g_dom_scrolls;
+bool dom_scroll_get(NodeId id, float *x, float *y);
+void dom_scroll_set(NodeId id, float x, float y);
+
 static inline uint32_t dom_slot(NodeId id) { return id & DOM_SLOT_MASK; }
 static inline NodeId dom_id_of(uint32_t slot) {
     return slot ? (slot | ((uint32_t)g_dom.gen[slot] << DOM_SLOT_BITS)) : DOM_NULL;

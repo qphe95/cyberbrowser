@@ -111,7 +111,9 @@ static uint32_t frame_extent(const DisplayList *dl) {
         if (b > bottom) bottom = b;
     }
     if (bottom > 1e6f) bottom = 1e6f;
-    return bottom > 0 ? (uint32_t)bottom : 0;
+    /* (and the boxes, painted or not: scripts can scroll to them) */
+    uint32_t boxes = page_content_height();
+    return bottom > (float)boxes ? (uint32_t)bottom : boxes;
 }
 
 static void clamp_scroll(void) {
@@ -181,6 +183,15 @@ static void paint(void) {
     chan_send(&g_chan, TU_FRAME, &fr, sizeof(fr), 1000);
     g_in_flight = true;
     g_need_paint = false;
+}
+
+/* Where a wheel is a box's, when that's changed. */
+static void send_scroll_boxes(void) {
+    static TuScrollBoxes last, now;
+    memset(&now, 0, sizeof(now));
+    now.n = page_wheel_boxes(now.box, PROTO_SCROLL_BOXES);
+    if (memcmp(&now, &last, sizeof(now)) == 0) return;
+    if (chan_send(&g_chan, TU_SCROLL_BOXES, &now, sizeof(now), 1000)) last = now;
 }
 
 static void send_title(void) {
@@ -299,9 +310,12 @@ static void handle(const ChanMsg *m) {
         if (m->len != sizeof(UtScroll)) return;
         UtScroll sc;
         memcpy(&sc, m->data, sizeof(sc));
+        /* (a box under the wheel first) */
+        if (sc.x >= 0) sc.dy = page_wheel((double)sc.x, (double)sc.y + g_scroll, sc.dy);
         int64_t y = (int64_t)g_scroll + sc.dy;
         g_scroll = y < 0 ? 0 : (uint32_t)(y > 100000000 ? 100000000 : y);
         clamp_scroll();
+        page_viewport_scroll_to(g_scroll);
         g_scroll_seq = sc.seq;
         g_need_paint = true;
         return;
@@ -1053,6 +1067,17 @@ load:
             clamp_scroll();
             g_need_paint = true;
             send_title();
+            send_scroll_boxes();
+        }
+        /* The page's scroll: what a script set, as far as the content goes. */
+        if (!g_hidden) {
+            uint32_t page_y = page_viewport_scroll();
+            if (page_y != g_scroll) {
+                g_scroll = page_y;
+                clamp_scroll();
+                page_viewport_scroll_to(g_scroll);
+                g_need_paint = true;
+            }
         }
         /* A playing video's new frame: the same display list, its image anew. */
         bool video = !g_hidden && page_refresh_videos();

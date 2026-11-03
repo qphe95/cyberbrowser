@@ -63,7 +63,14 @@ enum {
     TU_NAVIGATE,        /* TuNavigate + URL: the user followed a link */
     TU_STATE,           /* TuState */
     TU_WANT_WEBGPU,     /* (empty): it needs its site's web-GPU process (passed on as UC_WEBGPU) */
+    TU_SCROLL_BOXES,    /* TuScrollBoxes: where a wheel isn't the viewport's to move at once */
 };
+
+#define PROTO_SCROLL_BOXES 16
+typedef struct TuScrollBoxes {
+    uint32_t n;                                 /* at most PROTO_SCROLL_BOXES */
+    int32_t box[PROTO_SCROLL_BOXES][4];         /* x0, y0, x1, y1 in the page */
+} TuScrollBoxes;
 
 typedef struct TuFrame {
     uint32_t frame, unused;
@@ -112,6 +119,7 @@ typedef struct UtSize {
 typedef struct UtScroll {
     int32_t dy;
     uint32_t seq;       /* the UI's count of scrolls to this tab: the GPU process gets the same (UG_SCROLL) */
+    int32_t x, y;       /* the wheel's place in the viewport; x < 0: no place, the viewport's */
 } UtScroll;
 
 typedef struct UtPoint {

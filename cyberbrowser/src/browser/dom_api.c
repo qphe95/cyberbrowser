@@ -18,6 +18,7 @@
 #include "browser_api_impl_types.h"
 #include "browser_api_impl_handle_helpers.h"
 #include "browser_api_impl_internal.h"
+#include "layout_api.h"
 #include "html_dom.h"
 #include "css_parser.h"
 #include "css_layout.h"
@@ -4960,6 +4961,20 @@ GCValue js_document_import_node(JSContextHandle ctx, GCValue this_val, int argc,
 
 /* Hit test of the last layout (§7, "Rendering"): deepest box under the point
  * whose DOM node is an element, as its wrapper. */
+/* (where the test began, and the viewport's scroll: a fixed box is on the viewport) */
+static double g_hit_x, g_hit_y;
+static float g_hit_vx, g_hit_vy;
+static int g_hit_box;
+
+static void hit_test_begin(LayoutContext *layout, double x, double y) {
+    g_hit_x = x;
+    g_hit_y = y;
+    g_hit_vx = g_hit_vy = 0.0f;
+    g_hit_box = -1;
+    HtmlNode *rn = g_dom_scrolls.n ? css_layout_box_node(layout, layout->tree.root_idx) : NULL;
+    if (rn) dom_scroll_get(dom_owner(rn->store_id), &g_hit_vx, &g_hit_vy);
+}
+
 static GCValue hit_test_layout_node(JSContextHandle ctx, LayoutContext *layout, int idx, double x, double y) {
     if (!layout || idx < 0 || idx >= layout->tree.count) return JS_NULL;
     LayoutBox *box = &layout->boxes[idx];
@@ -4968,26 +4983,69 @@ static GCValue hit_test_layout_node(JSContextHandle ctx, LayoutContext *layout, 
     bool inside = (x >= box->x && x <= box->x + box->width &&
                    y >= box->y && y <= box->y + box->height);
     if (!inside) return JS_NULL;
+    /* (its children are where its scroll offset has them) */
+    float sx = 0.0f, sy = 0.0f;
+    css_layout_box_offset(layout, idx, &sx, &sy);
     int last_child = -1;
     for (int child = ref->first_child_idx; child >= 0; child = layout->tree.nodes[child].next_sibling_idx)
         last_child = child;
     while (last_child >= 0) {
-        GCValue child_hit = hit_test_layout_node(ctx, layout, last_child, x, y);
+        const LayoutStyle *cs = layout->boxes[last_child].s;
+        bool away = cs->position == CSS_POSITION_ABSOLUTE && box->s->position == CSS_POSITION_STATIC;
+        double cx = away ? x : x + sx, cy = away ? y : y + sy;
+        if (cs->position == CSS_POSITION_FIXED) { cx = g_hit_x - g_hit_vx; cy = g_hit_y - g_hit_vy; }
+        GCValue child_hit = hit_test_layout_node(ctx, layout, last_child, cx, cy);
         if (!JS_IsNull(child_hit)) return child_hit;
         last_child = layout->tree.nodes[last_child].prev_sibling_idx;
     }
     if (ref->dom_node_idx >= 0 && layout->doc) {
         HtmlNode *hnode = (HtmlNode *)po_array_payload(&layout->doc->array, ref->dom_node_idx);
         if (hnode && hnode->type == HTML_NODE_ELEMENT && dom_valid(hnode->store_id) &&
-            dom_kind(hnode->store_id) == DOM_K_ELEMENT)
+            dom_kind(hnode->store_id) == DOM_K_ELEMENT) {
+            g_hit_box = idx;
             return dom_js(ctx, hnode->store_id);
+        }
     }
     return JS_NULL;
+}
+
+/* A wheel's dy at (x, y) of a layout (document coordinates): the nearest box
+ * there the user can scroll and that has room takes it.  What's left for the
+ * viewport: 0, or dy. */
+int dom_wheel(JSContextHandle ctx, LayoutContext *layout, double x, double y, int dy) {
+    if (!layout || layout->tree.root_idx < 0) return dy;
+    hit_test_begin(layout, x, y);
+    hit_test_layout_node(ctx, layout, layout->tree.root_idx, x, y);
+    for (int i = g_hit_box; i >= 0; ) {
+        const LayoutStyle *s = layout->boxes[i].s;
+        if (s->overflow >= 2 && css_layout_box_scrolls(layout, i)) {
+            HtmlNode *n = css_layout_box_node(layout, i);
+            double mx, my;
+            css_layout_box_max(layout, i, &mx, &my);
+            float ox = 0.0f, oy = 0.0f;
+            if (n) dom_scroll_get(n->store_id, &ox, &oy);
+            double to = (double)oy + dy;
+            to = to > my ? my : to < 0.0 ? 0.0 : to;
+            if (n && (float)to != oy) {
+                dom_scroll_set(n->store_id, ox, (float)to);
+                layout_scroll_queue(ctx, n->store_id);
+                return 0;
+            }
+        }
+        int p = layout->tree.nodes[i].parent_idx;
+        if (s->position == CSS_POSITION_FIXED) break;
+        if (s->position == CSS_POSITION_ABSOLUTE)
+            while (p >= 0 && layout->tree.nodes[p].parent_idx >= 0 && layout->boxes[p].s->position == CSS_POSITION_STATIC)
+                p = layout->tree.nodes[p].parent_idx;
+        i = p;
+    }
+    return dy;
 }
 
 /* The element under (x, y) of a layout (document coordinates), or null. */
 GCValue dom_element_at(JSContextHandle ctx, LayoutContext *layout, double x, double y) {
     if (!layout || layout->tree.root_idx < 0) return JS_NULL;
+    hit_test_begin(layout, x, y);
     return hit_test_layout_node(ctx, layout, layout->tree.root_idx, x, y);
 }
 
@@ -5022,6 +5080,12 @@ GCValue js_document_element_from_point(JSContextHandle ctx, GCValue this_val, in
     GCValue result = doc_elem;
     LayoutContext *layout = &g_hit_cache.layout;
     if (g_hit_cache.ok && layout->tree.root_idx >= 0) {
+        /* (x, y are the viewport's) */
+        float vx = 0.0f, vy = 0.0f;
+        dom_scroll_get(dom_node_of(this_val), &vx, &vy);
+        x += vx;
+        y += vy;
+        hit_test_begin(layout, x, y);
         GCValue hit = hit_test_layout_node(ctx, layout, layout->tree.root_idx, x, y);
         if (!JS_IsNull(hit)) result = hit;
     }

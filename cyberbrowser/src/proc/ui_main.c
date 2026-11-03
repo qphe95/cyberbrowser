@@ -70,6 +70,7 @@ typedef struct Tab {
                                  * until it says it loads the new one) */
     bool shown;                 /* the GPU process presented one in its window */
     uint32_t scroll_seq;
+    TuScrollBoxes scroll_boxes;
     TuFrame frame;
     DWORD last_frame_tick;
     double start_ms, frame_ms, loaded_ms, last_frame_ms;  /* load timing for scripts: process started, first and last frames, loaded */
@@ -196,6 +197,7 @@ static void start_process(Tab *t) {
     t->shown = false;
     t->title[0] = 0;
     t->scroll_seq = 0;
+    t->scroll_boxes.n = 0;
     memset(&t->gesture, 0, sizeof(t->gesture));
     UcOpenTab o = { t->id, (uint32_t)content_w(w), (uint32_t)content_h(w) };
     size_t n = strlen(t->url);
@@ -550,6 +552,9 @@ static void from_tab(Tab *t, const ChanMsg *m) {
             show_content(&g_wins[t->win]);
         }
         return;
+    case TU_SCROLL_BOXES:
+        t->scroll_boxes = u.boxes;
+        return;
     case TU_TITLE:
         memcpy(t->title, u.text, u.text_len + 1);
         update_tab(t);
@@ -885,15 +890,26 @@ static void send_active(Win *w, uint16_t type, const void *p, uint32_t n) {
         ui_gesture(&t->gesture, GetTickCount());    /* lets it open one tab */
 }
 
-/* To the tab and, so the content moves at once, to the GPU process. */
-static void scroll(Win *w, int dy) {
+/* To the tab and, so the content moves at once, to the GPU process (over a
+ * box that may take it, the tab decides: its next frame shows what moved).
+ * x < 0: no place, the viewport's. */
+static void scroll_at(Win *w, int dy, int x, int y) {
     Tab *t = active_tab(w);
     if (!t || !t->started) return;
-    UtScroll s = { dy, ++t->scroll_seq };
+    UtScroll s = { dy, ++t->scroll_seq, x, y };
     chan_send(&t->chan, UT_SCROLL, &s, sizeof(s), 100);
+    if (x >= 0) {
+        int64_t py = (int64_t)y + t->frame.scroll_y;
+        for (uint32_t i = 0; i < t->scroll_boxes.n; i++) {
+            const int32_t *b = t->scroll_boxes.box[i];
+            if (x >= b[0] && x < b[2] && py >= b[1] && py < b[3]) return;
+        }
+    }
     UgScroll g = { t->id, s.seq, dy };
     if (g_have_gpu) big_send(&g_gpu, UG_SCROLL, &g, sizeof(g), NULL, 0, NULL, 0, 100);
 }
+
+static void scroll(Win *w, int dy) { scroll_at(w, dy, -1, -1); }
 
 static void select_tab(Win *w, int i) {
     if (i < 0 || i >= w->n) return;
@@ -1076,8 +1092,12 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         g_drag.down = g_drag.dragging = false;
         return 0;
     case WM_MOUSEWHEEL:
-        scroll(w, -GET_WHEEL_DELTA_WPARAM(wp) * 100 / WHEEL_DELTA);
+    {
+        POINT at = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        ScreenToClient(w->wnd, &at);
+        scroll_at(w, -GET_WHEEL_DELTA_WPARAM(wp) * 100 / WHEEL_DELTA, at.y >= CONTENT_Y ? at.x : -1, at.y - CONTENT_Y);
         return 0;
+    }
     case WM_KEYDOWN:
         if (shortcut(wi, wp)) return 0;
         switch (wp) {
@@ -1136,6 +1156,7 @@ static bool script_command(void) {
     }
     if (sscanf(g_cmd, "click %d %d", &a, &b) == 2) { UtPoint p = { a, b }; send_active(w, UT_CLICK, &p, sizeof(p)); return true; }
     if (sscanf(g_cmd, "scroll %d", &a) == 1) { scroll(w, a); return true; }
+    { int c; if (sscanf(g_cmd, "wheel %d %d %d", &a, &b, &c) == 3) { scroll_at(w, c, a, b); return true; } }
     if (sscanf(g_cmd, "select %d", &a) == 1) { select_tab(w, a); return true; }
     if (!strncmp(g_cmd, "detach", 6)) {
         if (t) {

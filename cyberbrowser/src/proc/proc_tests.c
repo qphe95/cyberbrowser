@@ -1342,6 +1342,13 @@ static void test_ui_core(void) {
     s.state = 77;
     CHECK(ui_tab_message(TU_STATE, (const uint8_t *)&s, sizeof(s), &u) == TU_STATE && u.state == TAB_LOADING);
     CHECK(ui_tab_message(TU_WANT_WEBGPU, m, 0, &u) == TU_WANT_WEBGPU && ui_tab_message(TU_WANT_WEBGPU, m, 1, &u) == 0);
+    static TuScrollBoxes sb;
+    sb.n = 1;
+    sb.box[0][3] = -7;
+    CHECK(ui_tab_message(TU_SCROLL_BOXES, (const uint8_t *)&sb, sizeof(sb), &u) == TU_SCROLL_BOXES && u.boxes.n == 1 && u.boxes.box[0][3] == -7);
+    CHECK(ui_tab_message(TU_SCROLL_BOXES, (const uint8_t *)&sb, sizeof(sb) - 1, &u) == 0);
+    sb.n = PROTO_SCROLL_BOXES + 1;
+    CHECK(ui_tab_message(TU_SCROLL_BOXES, (const uint8_t *)&sb, sizeof(sb), &u) == 0);
     TuNavigate nv = { 5 };
     memcpy(m, &nv, sizeof(nv));
     memcpy(m + sizeof(nv), "https://a.com/", 14);

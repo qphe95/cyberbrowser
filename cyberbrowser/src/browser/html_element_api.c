@@ -17,7 +17,6 @@
  *   draggable, translate, inert, tabIndex, contentEditable.
  * - insertAdjacentHTML / insertAdjacentElement / insertAdjacentText.
  * - checkVisibility(): false without a box or when visibility is hidden.
- * - scrollIntoView / scroll / scrollTo / scrollBy: no-ops (no scrolling).
  */
 #include "html_element_api.h"
 
@@ -146,9 +145,6 @@ static const char k_html_element_js[] =
 "    if (!r || (r.width === 0 && r.height === 0 && this.getClientRects().length === 0 && !this.firstChild)) return false;\n"
 "    for (var e = this; e && e.nodeType === 1; e = e.parentNode) { if (hiddenEl(e)) return false; }\n"
 "    return true;\n"
-"  });\n"
-"  ['scrollIntoView', 'scrollIntoViewIfNeeded', 'scroll', 'scrollTo', 'scrollBy'].forEach(function(n){\n"
-"    method(n, function(){});\n"
 "  });\n"
 "})";
 

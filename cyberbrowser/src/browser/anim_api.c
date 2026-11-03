@@ -21,7 +21,7 @@
 #include "js_quickjs.h"
 #include "layout_api.h"
 
-void timer_anim_wake(JSContextHandle ctx);
+
 
 /* Frames sampled while something ran (layout_api.c lays out again when it
  * moved on). */

@@ -1327,6 +1327,22 @@ void page_frame_stats(unsigned *frames, double *wall_ms, double *cpu_ms) {
     if (cpu_ms) *cpu_ms = (double)g_frames_cpu_us / 1000.0;
 }
 
+/* The boxes this layout leaves with less to scroll: at what's left, with
+ * their events (CSSOM View). */
+static void page_scroll_clamp(void) {
+    if (!g_dom_scrolls.n || !g_frame.valid) return;
+    const LayoutContext *l = &g_frame.layout;
+    for (int i = 0; i < l->tree.count; i++) {
+        float x, y, ox, oy;
+        if (l->boxes[i].s->overflow == 0 || !css_layout_box_offset(l, i, &x, &y)) continue;
+        NodeId id = css_layout_box_node(l, i)->store_id;
+        dom_scroll_get(id, &ox, &oy);
+        if (x == ox && y == oy) continue;
+        dom_scroll_set(id, x, y);
+        layout_scroll_queue(g_ctx, id);
+    }
+}
+
 void page_turn(bool run_timers, bool wait, int width, int height, PageTurn *out) {
     bool had_timers = false;
     bool had_images = false;
@@ -1406,12 +1422,19 @@ void page_turn(bool run_timers, bool wait, int width, int height, PageTurn *out)
 
             page_frame_build(&g_frame, g_doc, g_loop_images, width, height);
             out->new_frame = g_frame.valid;
+            page_scroll_clamp();
         } else {
             printf("WARNING: failed to rebuild native document from JS DOM\n");
         }
         g_frames_built++;
         g_frames_wall_us += gc_os_now_ns() / 1000 - wall0;
         g_frames_cpu_us += platform_thread_cpu_us() - cpu0;
+    }
+    /* (only scrolled: the same layout, a new list) */
+    if (g_dom_scrolls.paint && g_rendering && g_frame.valid) {
+        display_list_free(&g_frame.dl);
+        g_frame.valid = css_layout_build_display_list(&g_frame.layout, &g_frame.dl);
+        out->new_frame = g_frame.valid;
     }
     out->had_timers = had_timers;
     out->had_images = had_images;
@@ -1423,9 +1446,67 @@ void page_request_layout(void) {
 
 GCValue dom_element_at(JSContextHandle ctx, LayoutContext *layout, double x, double y);
 
+int dom_wheel(JSContextHandle ctx, LayoutContext *layout, double x, double y, int dy);
+
+int page_wheel(double x, double y, int dy) {
+    return g_frame.valid ? dom_wheel(g_ctx, &g_frame.layout, x, y, dy) : dy;
+}
+
+uint32_t page_wheel_boxes(int32_t (*out)[4], uint32_t max) {
+    if (!g_frame.valid) return 0;
+    const LayoutContext *l = &g_frame.layout;
+    uint32_t n = 0;
+    for (int i = 0; i < l->tree.count; i++) {
+        const LayoutBox *b = &l->boxes[i];
+        if (b->s->overflow < 2 || !css_layout_box_scrolls(l, i)) continue;
+        double mx, my, dx, dy;
+        bool fixed;
+        css_layout_box_max(l, i, &mx, &my);
+        if (my <= 0.0) continue;
+        if (n == max) {
+            /* (too many to say: the whole page) */
+            out[0][0] = out[0][1] = 0;
+            out[0][2] = out[0][3] = INT32_MAX;
+            return 1;
+        }
+        css_layout_box_scrolled(l, i, &dx, &dy, &fixed);
+        out[n][0] = (int32_t)(b->x - dx);
+        out[n][1] = (int32_t)(b->y - dy + (fixed ? page_viewport_scroll() : 0));
+        out[n][2] = (int32_t)(b->x - dx + b->width);
+        out[n][3] = (int32_t)(b->y - dy + b->height + (fixed ? page_viewport_scroll() : 0));
+        n++;
+    }
+    return n;
+}
+
 GCValue page_element_at(double x, double y) {
     if (!g_frame.valid) return JS_NULL;
     return dom_element_at(g_ctx, &g_frame.layout, x, y);
+}
+
+uint32_t page_content_height(void) {
+    if (!g_frame.valid || g_frame.layout.tree.root_idx < 0) return 0;
+    double right = 0.0, bottom = 0.0;
+    int root = g_frame.layout.tree.root_idx;
+    const LayoutBox *b = &g_frame.layout.boxes[root];
+    if (b->y + b->height > bottom) bottom = b->y + b->height;
+    css_layout_extent(&g_frame.layout, root, &right, &bottom);
+    return bottom > 1e6 ? 1000000u : (uint32_t)ceil(bottom);
+}
+
+uint32_t page_viewport_scroll(void) {
+    float x = 0.0f, y = 0.0f;
+    if (g_dom_scrolls.n && g_ctx) dom_scroll_get(dom_node_of(get_global_document(g_ctx)), &x, &y);
+    return (uint32_t)y;
+}
+
+void page_viewport_scroll_to(uint32_t y) {
+    if (!g_ctx || y == page_viewport_scroll()) return;
+    NodeId d = dom_node_of(get_global_document(g_ctx));
+    float x = 0.0f, oy;
+    dom_scroll_get(d, &x, &oy);
+    dom_scroll_set(d, x, (float)y);
+    layout_scroll_queue(g_ctx, d);
 }
 
 const char *page_title(void) {

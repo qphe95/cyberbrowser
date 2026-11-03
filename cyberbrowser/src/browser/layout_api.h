@@ -26,6 +26,11 @@ bool layout_query_element_box(JSContextHandle ctx, GCValue element, LayoutQueryB
  * its border box; none without a box. */
 int layout_query_client_rects(JSContextHandle ctx, GCValue element, double (*out)[4], int max);
 
+/* A box or viewport (a document) has scrolled: its scroll event, then its
+ * scrollend, at the next rendering opportunities (the tick). */
+void layout_scroll_queue(JSContextHandle ctx, uint32_t id);
+int layout_scroll_tick(JSContextHandle ctx);
+
 /* The element's used font size in px from the cached layout (computed
  * values for getComputedStyle when only a relative declaration is known). */
 bool layout_query_font_size(JSContextHandle ctx, GCValue element, double *px);

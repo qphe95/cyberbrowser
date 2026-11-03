@@ -88,6 +88,15 @@ void page_request_layout(void);
 GCValue page_element_at(double x, double y);
 /* The title of the current document (its first <title>), or NULL. */
 const char *page_title(void);
+/* A wheel at (x, y) of the page: the part of dy no box there took.  The boxes
+ * that take a wheel: x0, y0, x1, y1 of the page, up to max. */
+int page_wheel(double x, double y, int dy);
+uint32_t page_wheel_boxes(int32_t (*out)[4], uint32_t max);
+/* How far the page's boxes go down, painted or not. */
+uint32_t page_content_height(void);
+/* The viewport's scroll, as the page's scripts see it. */
+uint32_t page_viewport_scroll(void);
+void page_viewport_scroll_to(uint32_t y);
 /* A DOM change is waiting to be laid out. */
 bool page_needs_layout(void);
 /* The page can be painted the first time: its stylesheets are here and

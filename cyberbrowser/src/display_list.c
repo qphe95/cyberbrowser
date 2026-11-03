@@ -1383,15 +1383,29 @@ static bool mask_covers(const LayoutContext *ctx, int i, int start, int end)
     return start <= i && i < end;
 }
 
-static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (*clip)[4]);
+static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (*clip)[4], float (*off)[2]);
+
+/* The viewport's scroll of box idx's document. */
+static void dl_viewport_scroll(LayoutContext *ctx, float *x, float *y)
+{
+    *x = *y = 0.0f;
+    HtmlNode *rn = ctx->tree.root_idx >= 0 && ctx->doc ? css_layout_box_node(ctx, ctx->tree.root_idx) : NULL;
+    if (rn) dom_scroll_get(dom_owner(rn->store_id), x, y);
+}
 
 bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
 {
     if (!ctx || !dl) return false;
     display_list_init(dl);
-    /* overflow != visible clips descendants to the padding box. */
+    /* overflow != visible clips descendants to the padding box, and they
+     * move by its scroll offset (off: only while something is scrolled). */
     int n = ctx->tree.count;
     float (*clip)[4] = (float (*)[4])malloc(((size_t)n + 1) * sizeof(*clip));
+    float (*off)[2] = g_dom_scrolls.n ? (float (*)[2])calloc((size_t)n + 1, sizeof(*off)) : NULL;
+    float view_x = 0.0f, view_y = 0.0f;
+    if (off) dl_viewport_scroll(ctx, &view_x, &view_y);
+    bool fixed = false;
+    g_dom_scrolls.paint = false;
     if (clip) {
         for (int i = 0; i < n; i++) {
             int p = ctx->tree.nodes[i].parent_idx;
@@ -1402,8 +1416,19 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                 while (p >= 0 && ctx->tree.nodes[p].parent_idx >= 0 && ctx->boxes[p].s->position == CSS_POSITION_STATIC)
                     p = ctx->tree.nodes[p].parent_idx;
             float c[4] = { -1e30f, -1e30f, 1e30f, 1e30f };
+            if (b->s->position == CSS_POSITION_FIXED) {
+                fixed = true;
+                /* (the frame scrolls as a whole with the viewport: this stays) */
+                if (off) { off[i][0] = -view_x; off[i][1] = -view_y; }
+            }
             if (p >= 0 && p < i && b->s->position != CSS_POSITION_FIXED) {
                 memcpy(c, clip[p], sizeof(c));
+                float sx, sy;
+                if (off) {
+                    off[i][0] = off[p][0];
+                    off[i][1] = off[p][1];
+                    if (css_layout_box_offset(ctx, p, &sx, &sy)) { off[i][0] += sx; off[i][1] += sy; }
+                }
                 LayoutBox *pb = &ctx->boxes[p];
                 /* overflow on <html>/<body> applies to the viewport. */
                 HtmlNode *pn = ctx->doc ? css_layout_box_node(ctx, p) : NULL;
@@ -1416,6 +1441,10 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                     float px0 = (float)(pb->x + pb->s->border_left), py0 = (float)(pb->y + pb->s->border_top);
                     float px1 = (float)(pb->x + pb->width - pb->s->border_right);
                     float py1 = (float)(pb->y + pb->height - pb->s->border_bottom);
+                    if (off) {
+                        px0 -= off[p][0]; px1 -= off[p][0];
+                        py0 -= off[p][1]; py1 -= off[p][1];
+                    }
                     if (pb->s->table_role == 1) {
                         /* (a table's box, without its captions; they are
                          * outside it, not clipped by it) */
@@ -1433,8 +1462,10 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
             memcpy(clip[i], c, sizeof(c));
         }
     }
-    bool ok = build_display_list_impl(ctx, dl, clip);
+    g_dom_scrolls.fixed = fixed;
+    bool ok = build_display_list_impl(ctx, dl, clip, off);
     free(clip);
+    free(off);
     return ok;
 }
 
@@ -1637,11 +1668,31 @@ static void paint_context(const LayoutContext *ctx, int root, PaintVec *out, int
     free(L.negs.v); free(L.blocks.v); free(L.floats.v); free(L.inlines.v); free(L.zeros.v); free(L.pos.v);
 }
 
-static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (*clip)[4])
+/* Move what a box painted, [from, dl->count) and masks [mask_from, ...), by
+ * its scrolled ancestors' offsets. */
+static void dl_scroll_range(DisplayList *dl, int from, int mask_from, const float o[2])
+{
+    if (o[0] == 0.0f && o[1] == 0.0f) return;
+    for (int k = from; k < dl->count; k++) {
+        DisplayListCmd *cmd = &dl->cmds[k];
+        cmd->x -= o[0];
+        cmd->y -= o[1];
+        if (cmd->type == DL_BORDER) { cmd->u.border.x -= o[0]; cmd->u.border.y -= o[1]; }
+    }
+    for (int k = mask_from; k < dl->mask_count; k++) {
+        DisplayMask *m = &dl->masks[k];
+        m->x -= o[0];
+        m->y -= o[1];
+        m->ix -= o[0];
+        m->iy -= o[1];
+    }
+}
+
+static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (*clip)[4], float (*off)[2])
 {
     bool dark_mode = document_is_dark_mode(ctx);
     TextShaper *default_font = display_list_get_default_font();
-    int pending_box = -1, pending_from = 0;
+    int pending_box = -1, pending_from = 0, pending_mask = 0;
     /* Open masks: each covers its box's subtree, [start, end) of the layout
      * indices.  Every such mask is also noted (reg_*), so a descendant
      * painted after its subtree was left (a positioned one) opens it again. */
@@ -1658,6 +1709,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
 
     for (int k = 0; k < order.n; k++) {
         int i = order.v[k];
+        if (pending_box >= 0 && off) dl_scroll_range(dl, pending_from, pending_mask, off[pending_box]);
         if (pending_box >= 0 && clip) dl_clip_range(dl, pending_from, clip[pending_box]);
         while (nmask > 0 && !mask_covers(ctx, i, mask_start[nmask - 1], mask_end[nmask - 1])) {
             nmask--;
@@ -1675,6 +1727,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         }
         pending_box = i;
         pending_from = dl->count;
+        pending_mask = dl->mask_count;
         LayoutBox *box = &ctx->boxes[i];
         /* The pieces of a split inline that start with this box: where their
          * line is in the paint order. */
@@ -2137,6 +2190,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         }
 
     }
+    if (pending_box >= 0 && off) dl_scroll_range(dl, pending_from, pending_mask, off[pending_box]);
     if (pending_box >= 0 && clip) dl_clip_range(dl, pending_from, clip[pending_box]);
     while (nmask > 0) {
         nmask--;

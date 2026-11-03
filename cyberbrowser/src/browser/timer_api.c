@@ -12,6 +12,7 @@
 #include "browser_api_impl_types.h"
 #include "browser_api_impl_handle_helpers.h"
 #include "browser_api_impl_internal.h"
+#include "layout_api.h"
 #include "html_dom.h"
 #include "css_parser.h"
 #include "gc_value_helpers.h"
@@ -678,8 +679,9 @@ int timer_process_due(JSContextHandle ctx) {
         timer_microtask_checkpoint(ctx);
     }
 
-    /* A rendering opportunity: transitions and animations fire their
-     * events, intersection observers see layout changes. */
+    /* A rendering opportunity: scrolls fire their events, transitions and
+     * animations theirs, intersection observers see layout changes. */
+    processed += layout_scroll_tick(ctx);
     processed += anim_api_tick(ctx);
     processed += image_api_tick(ctx);
     processed += worker_api_tick(ctx);

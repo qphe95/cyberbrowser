@@ -44,6 +44,24 @@ uint16_t ui_tab_message(uint16_t type, const uint8_t *data, uint32_t len, UiTabM
     }
     case TU_WANT_WEBGPU:
         return len == 0 ? (uint16_t)TU_WANT_WEBGPU : 0;
+    case TU_SCROLL_BOXES: {
+        if (len != sizeof(TuScrollBoxes)) return 0;
+        uint32_t n = rd32(data);
+        if (n > PROTO_SCROLL_BOXES) return 0;
+        out->boxes.n = n;
+        /*@ loop invariant 0 <= i <= n;
+            loop assigns i, out->boxes.box[0 .. PROTO_SCROLL_BOXES - 1][0 .. 3];
+            loop variant n - i;
+         */
+        for (uint32_t i = 0; i < n; i++) {
+            const uint8_t *r = data + 4 + i * 16;
+            out->boxes.box[i][0] = (int32_t)rd32(r);
+            out->boxes.box[i][1] = (int32_t)rd32(r + 4);
+            out->boxes.box[i][2] = (int32_t)rd32(r + 8);
+            out->boxes.box[i][3] = (int32_t)rd32(r + 12);
+        }
+        return TU_SCROLL_BOXES;
+    }
     case TU_NAVIGATE: {
         if (len <= sizeof(TuNavigate) || len > sizeof(TuNavigate) + PROTO_URL_MAX) return 0;
         uint32_t n = len - (uint32_t)sizeof(TuNavigate);

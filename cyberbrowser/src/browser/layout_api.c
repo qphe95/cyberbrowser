@@ -1,7 +1,8 @@
 /*
  * Layout metrics for scripts (CSSOM View): offsetWidth/Height/Top/Left,
  * offsetParent, clientWidth/Height/Top/Left, scrollWidth/Height,
- * scrollTop/Left and the box behind getBoundingClientRect.
+ * scrollTop/Left and the box behind getBoundingClientRect (which is in client
+ * coordinates: less the scroll offsets above it).
  *
  * Like a browser's forced reflow, the first query after the document changed
  * lays it out again; later queries reuse that layout.  "Changed" is the
@@ -55,6 +56,7 @@
 #include <quickjs_gc_unified.h>
 #include "gc_platform.h"
 #include "browser_api_impl.h"
+#include "browser_api_impl_internal.h"
 
 /* The cached forced layout. */
 static LayoutContext g_lq_layout;
@@ -1521,6 +1523,18 @@ char *layout_query_custom(JSContextHandle ctx, GCValue element, const char *name
     return v ? strdup(v) : NULL;
 }
 
+/* From page to client coordinates: what's scrolled above box idx, the viewport too. */
+static void lq_client_shift(NodeId id, int idx, double *dx, double *dy)
+{
+    bool fixed;
+    css_layout_box_scrolled(&g_lq_layout, idx, dx, dy, &fixed);
+    float vx, vy;
+    if (g_dom_scrolls.n && !fixed && dom_scroll_get(dom_owner(id), &vx, &vy)) {
+        *dx += vx;
+        *dy += vy;
+    }
+}
+
 bool layout_query_element_box(JSContextHandle ctx, GCValue element, LayoutQueryBox *out)
 {
     memset(out, 0, sizeof(*out));
@@ -1536,13 +1550,26 @@ bool layout_query_element_box(JSContextHandle ctx, GCValue element, LayoutQueryB
     out->border_bottom = b->s->border_bottom;
     out->border_left = b->s->border_left;
     out->inline_level = b->s->display == CSS_DISPLAY_INLINE;
+    double dx, dy;
+    lq_client_shift(dom_node_of(element), idx, &dx, &dy);
+    out->x -= dx;
+    out->y -= dy;
     return true;
 }
 
 int layout_query_client_rects(JSContextHandle ctx, GCValue element, double (*out)[4], int max)
 {
     int idx = lq_query(ctx, element);
-    return idx < 0 ? 0 : css_layout_client_rects(&g_lq_layout, idx, out, max);
+    int n = idx < 0 ? 0 : css_layout_client_rects(&g_lq_layout, idx, out, max);
+    if (n && g_dom_scrolls.n) {
+        double dx, dy;
+        lq_client_shift(dom_node_of(element), idx, &dx, &dy);
+        for (int i = 0; i < n; i++) {
+            out[i][0] -= dx;
+            out[i][1] -= dy;
+        }
+    }
+    return n;
 }
 
 static bool is_tag(NodeId id, const char *tag)
@@ -1584,17 +1611,20 @@ enum { M_OFFSET_W, M_OFFSET_H, M_OFFSET_T, M_OFFSET_L,
        M_CLIENT_W, M_CLIENT_H, M_CLIENT_T, M_CLIENT_L,
        M_SCROLL_W, M_SCROLL_H };
 
-/* Right / bottom extent of the rendered subtree of box idx (page coords). */
-static void lq_extent(int idx, double *right, double *bottom)
+/* Box idx's client size and scrollWidth / scrollHeight (the root's client box
+ * is the viewport). */
+static void lq_scroll_size(int idx, bool root, double *cw, double *ch, double *sw, double *sh)
 {
-    const LayoutNodeRef *nodes = g_lq_layout.tree.nodes;
-    for (int c = nodes[idx].first_child_idx; c >= 0; c = nodes[c].next_sibling_idx) {
-        const LayoutBox *cb = &g_lq_layout.boxes[c];
-        if (cb->s->display == CSS_DISPLAY_NONE) continue;
-        if (cb->x + cb->width > *right) *right = cb->x + cb->width;
-        if (cb->y + cb->height > *bottom) *bottom = cb->y + cb->height;
-        lq_extent(c, right, bottom);
-    }
+    const LayoutBox *b = &g_lq_layout.boxes[idx];
+    double left = b->x + b->s->border_left, top = b->y + b->s->border_top;
+    *cw = root ? g_lq_vw : b->width - b->s->border_left - b->s->border_right;
+    *ch = root ? g_lq_vh : b->height - b->s->border_top - b->s->border_bottom;
+    double right = left + *cw, bottom = top + *ch;
+    if (root && b->x + b->width > right) right = b->x + b->width;
+    if (root && b->y + b->height > bottom) bottom = b->y + b->height;
+    css_layout_extent(&g_lq_layout, idx, &right, &bottom);
+    *sw = right - left;
+    *sh = bottom - top;
 }
 
 static GCValue lq_metric(JSContextHandle ctx, GCValue this_val, int which)
@@ -1636,12 +1666,9 @@ static GCValue lq_metric(JSContextHandle ctx, GCValue this_val, int which)
     case M_SCROLL_W:
     case M_SCROLL_H: {
         if (inl) return JS_NewInt32(ctx, 0);
-        double left = b->x + b->s->border_left, top = b->y + b->s->border_top;
-        double cw = root ? g_lq_vw : b->width - b->s->border_left - b->s->border_right;
-        double ch = root ? g_lq_vh : b->height - b->s->border_top - b->s->border_bottom;
-        double right = left + cw, bottom = top + ch;
-        lq_extent(idx, &right, &bottom);
-        return lq_int(ctx, which == M_SCROLL_W ? right - left : bottom - top);
+        double cw, ch, sw, sh;
+        lq_scroll_size(idx, root, &cw, &ch, &sw, &sh);
+        return lq_int(ctx, which == M_SCROLL_W ? sw : sh);
     }
     }
     return JS_NewInt32(ctx, 0);
@@ -1672,16 +1699,172 @@ static GCValue js_offset_parent(JSContextHandle ctx, GCValue this_val, int argc,
     return op ? dom_js(ctx, op) : JS_NULL;
 }
 
-static GCValue js_scroll_offset(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+/* ---- scrollTop, scrollLeft (the offsets: dom_scroll_get) ---- */
+
+static bool lq_quirks(JSContextHandle ctx, NodeId doc)
 {
-    (void)this_val; (void)argc; (void)argv;
-    return JS_NewInt32(ctx, 0);
+    const char *s = JS_ToCString(ctx, JS_GetPropertyStr(ctx, dom_js(ctx, doc), "compatMode"));
+    bool q = s && strcmp(s, "BackCompat") == 0;
+    if (s) JS_FreeCString(ctx, s);
+    return q;
 }
 
-static GCValue js_scroll_offset_set(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+/* What the element's scrollTop is of: a scroll container, the element; the
+ * root (body in quirks mode), its document's viewport; else nothing.  Its
+ * greatest offsets in *mx, *my. */
+static NodeId lq_scroll_subject(JSContextHandle ctx, NodeId id, double *mx, double *my)
 {
-    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    if (!id || dom_kind(id) != DOM_K_ELEMENT) return DOM_NULL;
+    NodeId view = DOM_NULL, box = id;
+    if (is_root_element(id)) {
+        if (lq_quirks(ctx, dom_parent(id))) return DOM_NULL;
+        view = dom_parent(id);
+    } else if (is_tag(id, "body") && is_root_element(dom_parent(id)) && lq_quirks(ctx, dom_parent(dom_parent(id)))) {
+        view = dom_parent(dom_parent(id));
+        box = dom_parent(id);
+    }
+    g_lq_ask = LQ_ASK_EXTENT;
+    int idx = lq_query(ctx, dom_js(ctx, box));
+    g_lq_ask = LQ_ASK_POS;
+    if (idx < 0 || (!view && !css_layout_box_scrolls(&g_lq_layout, idx))) return DOM_NULL;
+    double cw, ch, sw, sh;
+    lq_scroll_size(idx, view != DOM_NULL, &cw, &ch, &sw, &sh);
+    *mx = lround(sw) - lround(cw);
+    *my = lround(sh) - lround(ch);
+    if (*mx < 0.0) *mx = 0.0;
+    if (*my < 0.0) *my = 0.0;
+    return view ? view : id;
+}
+
+static GCValue lq_scroll_read(JSContextHandle ctx, GCValue this_val, bool top)
+{
+    /* (nothing scrolled: no layout to answer 0) */
+    if (!g_dom_scrolls.n) return JS_NewInt32(ctx, 0);
+    NodeId id = dom_node_of(this_val);
+    double mx, my;
+    NodeId s = lq_scroll_subject(ctx, id, &mx, &my);
+    float x = 0.0f, y = 0.0f;
+    if (!s) {
+        /* (a box gone takes its offset with it) */
+        if (id && dom_scroll_get(id, &x, &y)) dom_scroll_set(id, 0.0f, 0.0f);
+        return JS_NewInt32(ctx, 0);
+    }
+    if (!dom_scroll_get(s, &x, &y)) return JS_NewInt32(ctx, 0);
+    if (x > mx || y > my) {
+        x = x > mx ? (float)mx : x;
+        y = y > my ? (float)my : y;
+        dom_scroll_set(s, x, y);
+        layout_scroll_queue(ctx, s);
+    }
+    return lq_int(ctx, top ? y : x);
+}
+
+static GCValue lq_scroll_write(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv, bool top)
+{
+    double v = 0.0;
+    if (argc > 0 && JS_ToFloat64(ctx, &v, argv[0]) < 0) return JS_EXCEPTION;
+    if (!isfinite(v)) v = 0.0;
+    if (v <= 0.0 && !g_dom_scrolls.n) return JS_UNDEFINED;
+    double mx, my;
+    NodeId s = lq_scroll_subject(ctx, dom_node_of(this_val), &mx, &my);
+    if (!s) return JS_UNDEFINED;
+    float x = 0.0f, y = 0.0f;
+    dom_scroll_get(s, &x, &y);
+    double m = top ? my : mx;
+    v = v < 0.0 ? 0.0 : v > m ? m : (double)lround(v);
+    if ((float)v == (top ? y : x)) return JS_UNDEFINED;
+    dom_scroll_set(s, top ? x : (float)v, top ? (float)v : y);
+    layout_scroll_queue(ctx, s);
     return JS_UNDEFINED;
+}
+
+static GCValue js_scroll_top(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{ (void)argc; (void)argv; return lq_scroll_read(ctx, this_val, true); }
+static GCValue js_scroll_left(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{ (void)argc; (void)argv; return lq_scroll_read(ctx, this_val, false); }
+static GCValue js_scroll_top_set(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{ return lq_scroll_write(ctx, this_val, argc, argv, true); }
+static GCValue js_scroll_left_set(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{ return lq_scroll_write(ctx, this_val, argc, argv, false); }
+
+/* ---- scroll and scrollend (CSSOM View "run the scroll steps") ---- */
+
+/* The targets with an event due: 1 scroll, 2 scrollend (the rendering
+ * opportunity after its last scroll). */
+static struct {
+    NodeId *id;
+    uint8_t *due;
+    uint32_t n, cap;
+} g_scroll_q;
+
+void layout_scroll_queue(JSContextHandle ctx, uint32_t id)
+{
+    uint32_t i = 0;
+    while (i < g_scroll_q.n && g_scroll_q.id[i] != id) i++;
+    if (i == g_scroll_q.n) {
+        if (g_scroll_q.n == g_scroll_q.cap) {
+            g_scroll_q.cap = g_scroll_q.cap ? g_scroll_q.cap * 2 : 8;
+            g_scroll_q.id = realloc(g_scroll_q.id, g_scroll_q.cap * sizeof(*g_scroll_q.id));
+            g_scroll_q.due = realloc(g_scroll_q.due, g_scroll_q.cap);
+        }
+        g_scroll_q.id[g_scroll_q.n++] = id;
+    }
+    g_scroll_q.due[i] = 1;
+    timer_anim_wake(ctx);
+}
+
+/* (a document's bubbles, to its window; an element's doesn't) */
+static void lq_scroll_fire(JSContextHandle ctx, NodeId id, const char *type)
+{
+    GCValue target = dom_valid(id) ? dom_js(ctx, id) : JS_UNDEFINED;
+    if (!JS_IsObject(target)) return;
+    GCValue dispatch = JS_GetPropertyStr(ctx, target, "dispatchEvent");
+    if (!JS_IsFunction(ctx, dispatch)) return;
+    JSContextHandle realm = JS_GetFunctionRealmOf(ctx, dispatch);
+    if (!realm) realm = ctx;
+    GCValue global = JS_GetGlobalObject(realm);
+    GCValue ctor = JS_GetPropertyStr(realm, global, "Event");
+    if (!JS_IsFunction(realm, ctor)) return;
+    GCValue init = JS_NewObject(realm);
+    JS_SetPropertyStr(realm, init, "bubbles", JS_NewBool(realm, dom_kind(id) == DOM_K_DOCUMENT));
+    GCValue args[2] = { JS_NewString(realm, type), init };
+    GCValue ev = JS_CallConstructor(realm, ctor, 2, args);
+    if (JS_IsException(ev)) { JS_GetException(realm); return; }
+    GCValue trusted = JS_GetPropertyStr(realm, global, "__cyberDispatchTrusted");
+    GCValue targs[2] = { target, ev };
+    GCValue r = JS_IsFunction(realm, trusted) ? JS_Call(realm, trusted, JS_UNDEFINED, 2, targs)
+                                              : JS_Call(realm, dispatch, target, 1, &ev);
+    if (JS_IsException(r)) JS_GetException(realm);
+    timer_microtask_checkpoint(ctx);
+}
+
+int layout_scroll_tick(JSContextHandle ctx)
+{
+    uint32_t n = g_scroll_q.n;
+    if (!n) return 0;
+    /* (what the events do queues for the next one) */
+    NodeId *ids = malloc(n * sizeof(*ids));
+    uint8_t *due = malloc(n);
+    if (!ids || !due) { free(ids); free(due); return 0; }
+    memcpy(ids, g_scroll_q.id, n * sizeof(*ids));
+    memcpy(due, g_scroll_q.due, n);
+    uint32_t k = 0;
+    for (uint32_t i = 0; i < n; i++)
+        if (due[i] == 1) {
+            g_scroll_q.id[k] = ids[i];
+            g_scroll_q.due[k++] = 2;
+        }
+    g_scroll_q.n = k;
+    for (uint32_t i = 0; i < n; i++)
+        if (due[i] == 1) lq_scroll_fire(ctx, ids[i], "scroll");
+    /* (not for a box removed since) */
+    for (uint32_t i = 0; i < n; i++)
+        if (due[i] == 2 && dom_is_connected(ids[i]))
+            lq_scroll_fire(ctx, ids[i], "scrollend");
+    free(ids);
+    free(due);
+    if (g_scroll_q.n) timer_anim_wake(ctx);
+    return (int)n;
 }
 
 static void define_accessor(JSContextHandle ctx, GCValue proto, const char *name,
@@ -1711,8 +1894,8 @@ void layout_api_install(JSContextHandle ctx, GCValue element_proto)
     define_accessor(ctx, element_proto, "clientLeft", js_client_left, NULL);
     define_accessor(ctx, element_proto, "scrollWidth", js_scroll_width, NULL);
     define_accessor(ctx, element_proto, "scrollHeight", js_scroll_height, NULL);
-    define_accessor(ctx, element_proto, "scrollTop", js_scroll_offset, js_scroll_offset_set);
-    define_accessor(ctx, element_proto, "scrollLeft", js_scroll_offset, js_scroll_offset_set);
+    define_accessor(ctx, element_proto, "scrollTop", js_scroll_top, js_scroll_top_set);
+    define_accessor(ctx, element_proto, "scrollLeft", js_scroll_left, js_scroll_left_set);
 }
 
 uint64_t layout_api_cheap_hits(void)

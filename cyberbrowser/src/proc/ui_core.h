@@ -13,6 +13,7 @@
  *   TU_STATE        TuState (one uint32); TAB_LOADED and TAB_LOAD_FAILED
  *                   are themselves, anything else is TAB_LOADING
  *   TU_WANT_WEBGPU  nothing
+ *   TU_SCROLL_BOXES TuScrollBoxes, n <= PROTO_SCROLL_BOXES
  *   TU_NAVIGATE     TuNavigate (new_tab: one uint32, any nonzero is 1), then
  *                   a URL of 1 .. PROTO_URL_MAX bytes, none of them NUL
  *
@@ -32,6 +33,7 @@
 
 typedef struct UiTabMsg {
     TuFrame frame;                  /* TU_FRAME */
+    TuScrollBoxes boxes;            /* TU_SCROLL_BOXES */
     uint32_t state;                 /* TU_STATE: TAB_LOADING, TAB_LOADED or TAB_LOAD_FAILED */
     uint32_t new_tab;               /* TU_NAVIGATE: 0 or 1 */
     uint32_t text_len;              /* TU_TITLE, TU_NAVIGATE: of text */
@@ -63,6 +65,8 @@ typedef struct UiGesture {
         (out->state == TAB_LOADING || out->state == TAB_LOADED || out->state == TAB_LOAD_FAILED) &&
         ((u32le(data) == TAB_LOADED || u32le(data) == TAB_LOAD_FAILED) ==> out->state == u32le(data));
     ensures \result == TU_WANT_WEBGPU ==> type == TU_WANT_WEBGPU && len == 0;
+    ensures \result == TU_SCROLL_BOXES ==> type == TU_SCROLL_BOXES && len == sizeof(TuScrollBoxes) &&
+        out->boxes.n <= PROTO_SCROLL_BOXES;
     ensures \result == TU_NAVIGATE ==> type == TU_NAVIGATE &&
         sizeof(TuNavigate) < len <= sizeof(TuNavigate) + PROTO_URL_MAX &&
         out->new_tab == (u32le(data) != 0 ? 1 : 0) && out->text_len == len - sizeof(TuNavigate) &&

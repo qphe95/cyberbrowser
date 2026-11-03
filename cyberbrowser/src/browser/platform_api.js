@@ -260,6 +260,97 @@
             return this.compatMode === 'BackCompat' ? this.body : this.documentElement;
         } });
 
+    /* ---- scrolling (CSSOM View), over scrollTop and scrollLeft ---- */
+    /* (smooth scrolling is an instant one) */
+    var ELP = global.Element && global.Element.prototype;
+    function scrollEnum(name, owner, v, allowed) {
+        if (allowed.indexOf(v = String(v)) < 0)
+            throw new TypeError("Failed to execute '" + name + "' on '" + owner + "': '" + v + "' is not a valid enum value.");
+        return v;
+    }
+    function scrollNumber(v) { v = Number(v); return isFinite(v) ? v : 0; }
+    function scrollArgs(name, owner, args) {
+        if (args.length >= 2) return { left: scrollNumber(args[0]), top: scrollNumber(args[1]) };
+        var a = args[0], o = {};
+        if (a === undefined || a === null) return o;
+        if (typeof a !== 'object' && typeof a !== 'function')
+            throw new TypeError("Failed to execute '" + name + "' on '" + owner + "': parameter 1 is not of type 'ScrollToOptions'.");
+        if (a.behavior !== undefined) scrollEnum(name, owner, a.behavior, ['auto', 'instant', 'smooth']);
+        if (a.left !== undefined) o.left = scrollNumber(a.left);
+        if (a.top !== undefined) o.top = scrollNumber(a.top);
+        return o;
+    }
+    function scrollApply(el, o, by) {
+        if (o.left !== undefined) el.scrollLeft = by ? el.scrollLeft + o.left : o.left;
+        if (o.top !== undefined) el.scrollTop = by ? el.scrollTop + o.top : o.top;
+    }
+    function scrollViewportElement() {
+        var d = global.document;
+        return d && d.scrollingElement;
+    }
+    [['scroll', false], ['scrollTo', false], ['scrollBy', true]].forEach(function (m) {
+        var name = m[0], by = m[1];
+        if (ELP) Object.defineProperty(ELP, name, { configurable: true, enumerable: true, writable: true, value: function () {
+            scrollApply(this, scrollArgs(name, 'Element', arguments), by);
+        } });
+        Object.defineProperty(global, name, { configurable: true, enumerable: true, writable: true, value: function () {
+            var o = scrollArgs(name, 'Window', arguments), el = scrollViewportElement();
+            if (el) scrollApply(el, o, by);
+        } });
+    });
+    [['scrollX', 'scrollLeft'], ['pageXOffset', 'scrollLeft'], ['scrollY', 'scrollTop'], ['pageYOffset', 'scrollTop']].forEach(function (m) {
+        Object.defineProperty(global, m[0], { configurable: true, enumerable: true,
+            get: function () { var el = scrollViewportElement(); return el ? el[m[1]] : 0; },
+            set: function (v) { Object.defineProperty(global, m[0], { configurable: true, enumerable: true, writable: true, value: v }); } });
+    });
+    /* The offset that brings [lo, hi] into [vlo, vhi], by how it's asked. */
+    function scrollAlign(how, lo, hi, vlo, vhi) {
+        if (how === 'start') return lo - vlo;
+        if (how === 'end') return hi - vhi;
+        if (how === 'center') return (lo + hi) / 2 - (vlo + vhi) / 2;
+        if (lo < vlo && hi > vhi) return 0;
+        if (lo < vlo || hi > vhi) return hi - lo > vhi - vlo === (lo < vlo) ? hi - vhi : lo - vlo;
+        return 0;
+    }
+    function scrollIntoViewOf(el, block, inline) {
+        var d = el.ownerDocument, root = d.documentElement;
+        for (var a = el.assignedSlot || el.parentNode || el.host; a && a !== d; a = a.assignedSlot || a.parentNode || a.host) {
+            if (a.nodeType !== 1 || a === root || a === d.body) continue;
+            if (a.scrollHeight <= a.clientHeight && a.scrollWidth <= a.clientWidth) continue;
+            var r = el.getBoundingClientRect(), b = a.getBoundingClientRect();
+            var l = b.left + a.clientLeft, t = b.top + a.clientTop;
+            a.scrollLeft += scrollAlign(inline, r.left, r.right, l, l + a.clientWidth);
+            a.scrollTop += scrollAlign(block, r.top, r.bottom, t, t + a.clientHeight);
+        }
+        var se = d.scrollingElement;
+        if (!se) return;
+        var v = el.getBoundingClientRect();
+        se.scrollLeft += scrollAlign(inline, v.left, v.right, 0, global.innerWidth);
+        se.scrollTop += scrollAlign(block, v.top, v.bottom, 0, global.innerHeight);
+    }
+    if (ELP) {
+        Object.defineProperty(ELP, 'scrollIntoView', { configurable: true, enumerable: true, writable: true, value: function () {
+            var arg = arguments[0], block = 'start', inline = 'nearest', LOGICAL = ['start', 'center', 'end', 'nearest'];
+            if (typeof arg === 'object' && arg !== null || typeof arg === 'function') {
+                if (arg.behavior !== undefined) scrollEnum('scrollIntoView', 'Element', arg.behavior, ['auto', 'instant', 'smooth']);
+                if (arg.block !== undefined) block = scrollEnum('scrollIntoView', 'Element', arg.block, LOGICAL);
+                if (arg.inline !== undefined) inline = scrollEnum('scrollIntoView', 'Element', arg.inline, LOGICAL);
+            } else if (arg !== undefined && arg !== null && !arg) {
+                block = 'end';
+            }
+            scrollIntoViewOf(this, block, inline);
+        } });
+        Object.defineProperty(ELP, 'scrollIntoViewIfNeeded', { configurable: true, enumerable: true, writable: true, value: function () {
+            scrollIntoViewOf(this, 'nearest', 'nearest');
+        } });
+    }
+    if (DOCP && !('elementsFromPoint' in DOCP))
+        Object.defineProperty(DOCP, 'elementsFromPoint', { configurable: true, enumerable: true, writable: true, value: function (x, y) {
+            var out = [];
+            for (var e = this.elementFromPoint(x, y); e; e = e.parentElement) out.push(e);
+            return out;
+        } });
+
     /* ---- DocumentFragment (and ShadowRoot).getElementById (DOM 4.2.4) ---- */
     var DFP = global.DocumentFragment && global.DocumentFragment.prototype;
     if (DFP && typeof DFP.getElementById !== 'function')

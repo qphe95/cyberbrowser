@@ -9,6 +9,47 @@
 #include <strings.h>
 
 DomStore g_dom;
+DomScrolls g_dom_scrolls;
+
+bool dom_scroll_get(NodeId id, float *x, float *y) {
+    for (uint32_t i = 0; i < g_dom_scrolls.n; i++)
+        if (g_dom_scrolls.id[i] == id) {
+            *x = g_dom_scrolls.x[i];
+            *y = g_dom_scrolls.y[i];
+            return true;
+        }
+    return false;
+}
+
+void dom_scroll_set(NodeId id, float x, float y) {
+    DomScrolls *s = &g_dom_scrolls;
+    if (dom_kind(id) != DOM_K_DOCUMENT || s->fixed) s->paint = true;
+    uint32_t i = 0;
+    while (i < s->n) {
+        /* (the rows of nodes gone go with any change) */
+        if (s->id[i] != id && dom_valid(s->id[i])) { i++; continue; }
+        if (s->id[i] == id && (x != 0.0f || y != 0.0f)) {
+            s->x[i] = x;
+            s->y[i] = y;
+            return;
+        }
+        s->n--;
+        s->id[i] = s->id[s->n];
+        s->x[i] = s->x[s->n];
+        s->y[i] = s->y[s->n];
+    }
+    if (x == 0.0f && y == 0.0f) return;
+    if (s->n == s->cap) {
+        s->cap = s->cap ? s->cap * 2 : 8;
+        s->id = realloc(s->id, s->cap * sizeof(*s->id));
+        s->x = realloc(s->x, s->cap * sizeof(*s->x));
+        s->y = realloc(s->y, s->cap * sizeof(*s->y));
+    }
+    s->id[s->n] = id;
+    s->x[s->n] = x;
+    s->y[s->n] = y;
+    s->n++;
+}
 
 /* ============================================================================
  * Arena blocks: reference counted, registered in a two-level table so jobs can

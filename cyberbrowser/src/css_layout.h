@@ -792,6 +792,17 @@ const char *css_layout_node_text(const LayoutContext *ctx, const HtmlNode *node)
 #define LAYOUT_ANON_DOM0 0x50000000
 struct HtmlNode *css_layout_box_node(const LayoutContext *ctx, int idx);
 
+/* Scrolling.  Right / bottom extent of box idx's rendered subtree (page
+ * coordinates; they grow only); whether it is a scroll container (html and
+ * body are the viewport's); its offset, clamped to that extent, when it is
+ * scrolled; and what its scrolled ancestors move it by (fixed: it is on the
+ * viewport, whatever that has scrolled). */
+void css_layout_extent(const LayoutContext *ctx, int idx, double *right, double *bottom);
+bool css_layout_box_scrolls(const LayoutContext *ctx, int idx);
+void css_layout_box_max(const LayoutContext *ctx, int idx, double *x, double *y);
+bool css_layout_box_offset(const LayoutContext *ctx, int idx, float *x, float *y);
+void css_layout_box_scrolled(const LayoutContext *ctx, int idx, double *dx, double *dy, bool *fixed);
+
 /* The text a text box lays out and paints (white space processed). */
 const char *css_layout_box_text(const LayoutContext *ctx, int idx, const char *raw);
 

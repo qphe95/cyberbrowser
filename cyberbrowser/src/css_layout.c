@@ -19989,6 +19989,71 @@ static void client_rects_walk(const LayoutContext *ctx, int p, double (*r)[4], i
     }
 }
 
+void css_layout_extent(const LayoutContext *ctx, int idx, double *right, double *bottom)
+{
+    const LayoutNodeRef *nodes = ctx->tree.nodes;
+    for (int c = nodes[idx].first_child_idx; c >= 0; c = nodes[c].next_sibling_idx) {
+        const LayoutBox *cb = &ctx->boxes[c];
+        if (cb->s->display == CSS_DISPLAY_NONE) continue;
+        if (cb->x + cb->width > *right) *right = cb->x + cb->width;
+        if (cb->y + cb->height > *bottom) *bottom = cb->y + cb->height;
+        css_layout_extent(ctx, c, right, bottom);
+    }
+}
+
+bool css_layout_box_scrolls(const LayoutContext *ctx, int idx)
+{
+    const LayoutBox *b = &ctx->boxes[idx];
+    if (b->s->overflow == 0 || b->s->display == CSS_DISPLAY_NONE || b->s->display == CSS_DISPLAY_INLINE) return false;
+    const HtmlNode *n = ctx->doc ? css_layout_box_node(ctx, idx) : NULL;
+    return !(n && n->type == HTML_NODE_ELEMENT && n->tag_name &&
+             (strcasecmp(n->tag_name, "html") == 0 || strcasecmp(n->tag_name, "body") == 0));
+}
+
+void css_layout_box_max(const LayoutContext *ctx, int idx, double *x, double *y)
+{
+    const LayoutBox *b = &ctx->boxes[idx];
+    double left = b->x + b->s->border_left, top = b->y + b->s->border_top;
+    double right = b->x + b->width - b->s->border_right, bottom = b->y + b->height - b->s->border_bottom;
+    double cw = right - left, ch = bottom - top;
+    css_layout_extent(ctx, idx, &right, &bottom);
+    *x = right - left - cw;
+    *y = bottom - top - ch;
+}
+
+bool css_layout_box_offset(const LayoutContext *ctx, int idx, float *x, float *y)
+{
+    if (!g_dom_scrolls.n || !css_layout_box_scrolls(ctx, idx)) return false;
+    const HtmlNode *n = css_layout_box_node(ctx, idx);
+    if (!n || !dom_scroll_get(n->store_id, x, y)) return false;
+    double mx, my;
+    css_layout_box_max(ctx, idx, &mx, &my);
+    if (*x > mx) *x = (float)mx;
+    if (*y > my) *y = (float)my;
+    return true;
+}
+
+void css_layout_box_scrolled(const LayoutContext *ctx, int idx, double *dx, double *dy, bool *fixed)
+{
+    *dx = *dy = 0.0;
+    *fixed = false;
+    if (!g_dom_scrolls.n) return;
+    const LayoutNodeRef *nodes = ctx->tree.nodes;
+    for (int i = idx; i >= 0; ) {
+        const LayoutBox *b = &ctx->boxes[i];
+        if (b->s->position == CSS_POSITION_FIXED) { *fixed = true; return; }
+        int p = nodes[i].parent_idx;
+        /* (an absolutely positioned box moves with its containing block,
+         * not the boxes between) */
+        if (b->s->position == CSS_POSITION_ABSOLUTE)
+            while (p >= 0 && nodes[p].parent_idx >= 0 && ctx->boxes[p].s->position == CSS_POSITION_STATIC)
+                p = nodes[p].parent_idx;
+        float x, y;
+        if (p >= 0 && css_layout_box_offset(ctx, p, &x, &y)) { *dx += x; *dy += y; }
+        i = p;
+    }
+}
+
 int css_layout_client_rects(const LayoutContext *ctx, int idx, double (*out)[4], int max)
 {
     if (!ctx || idx < 0 || idx >= ctx->tree.count || max <= 0) return 0;
