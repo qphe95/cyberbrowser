@@ -405,6 +405,18 @@ static void imply_head_and_body(NodeId frag, NodeId head, NodeId body) {
  * parsed head and body children moved under them, and the root's other
  * children after them.  Properties of the old skeleton are transferred.
  * `page`: it is the page's document (the DOM index follows its root). */
+/* documentElement, head and body are Document.prototype's getters over the
+ * store (document_api.c): an own property set on a document object (as this
+ * file once did) shadows them, and goes stale when the root changes. */
+static void doc_drop_cached_roots(JSContextHandle ctx, GCValue js_doc) {
+    static const char *const names[] = { "documentElement", "head", "body" };
+    for (int i = 0; i < 3; i++) {
+        JSAtom a = JS_NewAtom(ctx, names[i]);
+        JS_DeleteProperty(ctx, js_doc, a, 0);
+        JS_FreeAtom(ctx, a);
+    }
+}
+
 static bool populate_from_fragment(JSContextHandle ctx, GCValue js_doc, NodeId frag, bool page) {
     NodeId doc = dom_node_of(js_doc);
     if (dom_kind(doc) != DOM_K_DOCUMENT) return false;
@@ -465,9 +477,7 @@ static bool populate_from_fragment(JSContextHandle ctx, GCValue js_doc, NodeId f
     html_transfer_element_properties(ctx, new_body_element, old_body_element);
     html_transfer_element_properties(ctx, new_head_element, old_head_element);
 
-    JS_SetPropertyStr(ctx, js_doc, "documentElement", new_doc_element);
-    JS_SetPropertyStr(ctx, js_doc, "head", new_head_element);
-    JS_SetPropertyStr(ctx, js_doc, "body", new_body_element);
+    doc_drop_cached_roots(ctx, js_doc);
     JS_SetPropertyStr(ctx, new_doc_element, "head", new_head_element);
     JS_SetPropertyStr(ctx, new_doc_element, "body", new_body_element);
     /* (the page's root only: not a DOMParser document's) */
@@ -551,7 +561,7 @@ static void stream_note_root_elements(HtmlDocStream *s) {
         GCValue e = dom_js(ctx, s->de);
         dom_node_set_owner_document(ctx, e, s->js_doc);
         html_transfer_element_properties(ctx, e, s->old_de);
-        JS_SetPropertyStr(ctx, s->js_doc, "documentElement", e);
+        doc_drop_cached_roots(ctx, s->js_doc);
         /* (the page's root only: a frame's document has its own) */
         if (s->doc == g_dom_document) g_dom_index_root = s->de;
     }
@@ -652,9 +662,7 @@ void html_doc_stream_xml(HtmlDocStream *s, const char *data, size_t len, const c
     /* (the root, and an XHTML document's head and body, as the HTML stream
      * notes them; none implied) */
     stream_note_root_elements(s);
-    if (!s->de) JS_SetPropertyStr(ctx, s->js_doc, "documentElement", JS_NULL);
-    if (!s->head) JS_SetPropertyStr(ctx, s->js_doc, "head", JS_NULL);
-    if (!s->body) JS_SetPropertyStr(ctx, s->js_doc, "body", JS_NULL);
+    doc_drop_cached_roots(ctx, s->js_doc);
     if (s->de) {
         js_cyber_ce_push_stack(ctx);
         dom_ce_on_connect(ctx, s->de);

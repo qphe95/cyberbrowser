@@ -57,15 +57,22 @@ for (const d of dirs) {
     for (const f of files) {
         const base = path.posix.basename(f);
         if (/-(ref|notref)\.|-manual\.|^ref-|-ref$/.test(base) || /\/(reference|support)\//.test(f)) continue;
-        const m = /^(.*)\.(any|window)\.js$/.exec(f);
+        const m = /^(.*)\.(any|window|worker)\.js$/.exec(f);
         if (m) {
             const src = fs.readFileSync(path.join(root, f), 'utf8');
             const meta = scriptMeta(src);
-            if (m[2] === 'any' && meta.global && !/(^|,)\s*(window|default)\s*(,|$)/.test(meta.global)) continue;
-            for (const v of meta.variants.length ? meta.variants : ['']) addPage(`${m[1]}.${m[2]}.html${v}`, f, meta.long);
+            const vs = meta.variants.length ? meta.variants : [''];
+            /* (.any.js: in a window and a dedicated worker unless its globals
+             * say otherwise; .worker.js: in a dedicated worker) */
+            const globals = m[2] === 'any' ? (meta.global || 'window,dedicatedworker') : m[2];
+            const has = g => new RegExp('(^|,)\\s*(' + g + ')\\s*(,|$)').test(globals);
+            if (m[2] === 'window' || (m[2] === 'any' && has('window|default')))
+                for (const v of vs) addPage(`${m[1]}.${m[2]}.html${v}`, f, meta.long);
+            if (m[2] === 'worker' || (m[2] === 'any' && has('dedicatedworker|worker|default')))
+                for (const v of vs) addPage(`${m[1]}.${m[2] === 'any' ? 'any.worker' : 'worker'}.html${v}`, f, meta.long);
             continue;
         }
-        if (!/\.(html?|xht|xhtml)$/.test(base)) continue;
+        if (!/\.(html?|xht|xhtml|xml|svg)$/.test(base)) continue;
         const src = fs.readFileSync(path.join(root, f), 'utf8');
         if (/rel\s*=\s*["']?(match|mismatch)\b/i.test(src)) { reftests.push(f); continue; }
         if (!/\/resources\/testharness\.js/.test(src)) continue;
@@ -106,6 +113,29 @@ ${meta.scripts.map(s => `<script src="${esc(s)}"></script>`).join('\n')}
 <div id=log></div>
 <script src="/${esc(jsPath)}"></script>
 `;
+}
+
+/* A dedicated-worker test's page: its results come from the worker. */
+function workerPage(base, search) {
+    return `<!doctype html>
+<meta charset=utf-8>
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<div id=log></div>
+<script>fetch_tests_from_worker(new Worker("/${base}.js${search || ''}"));</script>
+`;
+}
+
+/* What wpt serve's .any.worker.js is: testharness, the META scripts, the
+ * test, done(). */
+function workerScript(jsPath) {
+    const meta = scriptMeta(fs.readFileSync(path.join(root, jsPath), 'utf8'));
+    const q = s => JSON.stringify(s);
+    return ['self.GLOBAL = { isWindow: () => false, isWorker: () => true, isShadowRealm: () => false };',
+            'importScripts("/resources/testharness.js");',
+            ...meta.scripts.map(sc => `importScripts(${q(sc)});`),
+            `importScripts(${q('/' + jsPath)});`,
+            'done();', ''].join('\n');
 }
 
 /* ---- reftests ---- */
@@ -210,7 +240,7 @@ const REPORT = `(function () {
       var t = tests[i];
       if (t.status === 0) r.pass++;
       else if (t.status === 4) r.skip++;
-      else { r.fail++; if (r.fails.length < 200) r.fails.push(t.name + ': ' + TEST[t.status] + (t.message ? ' ' + String(t.message).slice(0, 300) : '')); }
+      else { r.fail++; if (r.fails.length < ${+(process.env.WPT_FAILS_MAX || 200)}) r.fails.push(t.name + ': ' + TEST[t.status] + (t.message ? ' ' + String(t.message).slice(0, 300) : '')); }
     }
     var x = new XMLHttpRequest();
     x.open('POST', '/result');
@@ -307,9 +337,23 @@ const server = http.createServer((req, res) => {
         });
         return;
     }
+    /* (wpt serve's alias for the WebIDL parser idlharness.js loads) */
+    if (url.pathname === '/resources/WebIDLParser.js') url.pathname = '/resources/webidl2/lib/webidl2.js';
     if (url.pathname === '/resources/testharnessreport.js') {
         res.writeHead(200, { 'content-type': 'text/javascript' });
         return res.end(REPORT);
+    }
+    /* a worker test's page, and the script its worker runs */
+    const wk = /^\/(.*?)\.(any\.worker|worker)\.(html|js)$/.exec(url.pathname);
+    if (wk && fs.existsSync(path.join(root, `${wk[1]}.${wk[2] === 'worker' ? 'worker' : 'any'}.js`))) {
+        if (wk[3] === 'html') {
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+            return res.end(workerPage(`${wk[1]}.${wk[2]}`, url.search));
+        }
+        if (wk[2] === 'any.worker') {
+            res.writeHead(200, { 'content-type': 'text/javascript' });
+            return res.end(workerScript(`${wk[1]}.any.js`));
+        }
     }
     const w = /^\/(.*)\.(any|window)\.html$/.exec(url.pathname);
     if (w && fs.existsSync(path.join(root, `${w[1]}.${w[2]}.js`))) {

@@ -6791,6 +6791,8 @@ static GCValue JS_NewCFunction3(JSContextHandle ctx, JSCFunction *func,
     SAFE_SET(p, JSObjectHandle, u.cfunc.length, length);
     SAFE_SET(p, JSObjectHandle, u.cfunc.cproto, cproto);
     SAFE_SET(p, JSObjectHandle, u.cfunc.magic, magic);
+    SAFE_SET(p, JSObjectHandle, u.cfunc.required, 0);
+    SAFE_SET(p, JSObjectHandle, u.cfunc.brand, 0);
     SAFE_SET(p, JSObjectHandle, is_constructor, (cproto == JS_CFUNC_constructor ||
                          cproto == JS_CFUNC_constructor_magic ||
                          cproto == JS_CFUNC_constructor_or_func ||
@@ -20403,6 +20405,20 @@ static JSStackFrame *js_alloc_c_frame(JSContextHandle ctx, int argc, int arg_cou
     return sf;
 }
 
+static JSBrandCheck *g_brand_check;
+
+void JS_SetBrandCheck(JSBrandCheck *check) { g_brand_check = check; }
+
+bool JS_SetCFunctionChecks(GCValue func_obj, int required, int brand)
+{
+    if (GC_VALUE_GET_TAG(func_obj) != JS_TAG_OBJECT) return false;
+    JSObject *o = GC_DEREF_H(JS_VALUE_GET_OBJ(func_obj), JSObjectHandle);
+    if (!o || o->class_id != JS_CLASS_C_FUNCTION) return false;
+    o->u.cfunc.required = (uint8_t)(required > 255 ? 255 : required);
+    o->u.cfunc.brand = (uint16_t)brand;
+    return true;
+}
+
 static GCValue js_call_c_function(JSContextHandle ctx, GCValue func_obj,
                                   GCValue this_obj_const,
                                   int argc, GCValue *argv, int flags)
@@ -20422,6 +20438,21 @@ static GCValue js_call_c_function(JSContextHandle ctx, GCValue func_obj,
     p = JS_VALUE_GET_OBJ(func_obj);
     cproto = (JSCFunctionEnum)SAFE_GET_OR(p, JSObjectHandle, u.cfunc.cproto, 0);
     arg_count = SAFE_GET_OR(p, JSObjectHandle, u.cfunc.length, 0);
+    {
+        /* (WebIDL's checks, when the function has them) */
+        JSObject *po = GC_DEREF_H(p, JSObjectHandle);
+        if (unlikely(po->u.cfunc.brand | po->u.cfunc.required)) {
+            /* (the error is the function's realm's) */
+            JSContextHandle realm = (JSContextHandle)po->u.cfunc.realm_handle;
+            if (!SAFE_VALID(realm)) realm = ctx;
+            if (po->u.cfunc.brand && g_brand_check && !(flags & JS_CALL_FLAG_CONSTRUCTOR) &&
+                !g_brand_check(ctx, this_obj_const, po->u.cfunc.brand))
+                return JS_ThrowTypeError(realm, "Illegal invocation");
+            if (argc < po->u.cfunc.required)
+                return JS_ThrowTypeError(realm, "%d argument%s required, but only %d present.", po->u.cfunc.required,
+                                         po->u.cfunc.required == 1 ? "" : "s", argc);
+        }
+    }
 
     /* Native calls are poll points for the collector (bytecode functions
      * poll at entry). */

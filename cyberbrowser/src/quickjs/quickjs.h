@@ -1033,6 +1033,12 @@ void JS_SetContextOpaque(JSContextHandle ctx, void *opaque);
 JSRuntimeHandle JS_GetRuntime(JSContextHandle ctx);
 /* The realm (context) a function was created in (ECMA-262 GetFunctionRealm). */
 JSContextHandle JS_GetFunctionRealmOf(JSContextHandle ctx, GCValue func_obj);
+/* A native function's WebIDL checks: calls with fewer than required
+ * arguments, or a this the checker says does not implement interface brand
+ * (nonzero), throw a TypeError before it runs.  False: not a native one. */
+typedef int JSBrandCheck(JSContextHandle ctx, GCValue this_val, int brand);
+bool JS_SetCFunctionChecks(GCValue func_obj, int required, int brand);
+void JS_SetBrandCheck(JSBrandCheck *check);
 void JS_SetClassProto(JSContextHandle ctx, JSClassID class_id, GCValue obj);
 GCValue JS_GetClassProto(JSContextHandle ctx, JSClassID class_id);
 
@@ -1924,6 +1930,10 @@ struct JSObject {
             uint8_t length;
             uint8_t cproto;
             int16_t magic;
+            /* WebIDL: the arguments it needs (fewer: a TypeError) and the
+             * interface its this must implement (0: any), JS_SetCFunctionChecks */
+            uint8_t required;
+            uint16_t brand;
         } cfunc;
         /* array part for fast arrays and typed arrays */
         struct { /* JS_CLASS_ARRAY, JS_CLASS_ARGUMENTS, JS_CLASS_MAPPED_ARGUMENTS, JS_CLASS_UINT8C_ARRAY..JS_CLASS_FLOAT64_ARRAY */

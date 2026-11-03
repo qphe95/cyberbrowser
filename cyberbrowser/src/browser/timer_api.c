@@ -682,6 +682,7 @@ int timer_process_due(JSContextHandle ctx) {
      * events, intersection observers see layout changes. */
     processed += anim_api_tick(ctx);
     processed += image_api_tick(ctx);
+    processed += worker_api_tick(ctx);
     processed += intersection_observers_tick(ctx);
     return processed;
 }

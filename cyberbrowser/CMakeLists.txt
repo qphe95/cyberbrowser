@@ -101,6 +101,8 @@ set(BE_SOURCES
     src/browser/fetch_api.c
     src/browser/timer_api.c
     src/browser/range_api.c
+    src/browser/idl_shape.c
+    src/browser/worker_api.c
     src/browser/anim_api.c
     src/browser_api_impl.c
     src/html_dom.c

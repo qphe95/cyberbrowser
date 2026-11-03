@@ -97,4 +97,7 @@ void platform_api_install(JSContextHandle ctx, GCValue global, GCValue window)
     dom_token_list_install(ctx, global, window);
     url_hyperlinks_install(ctx, global);
     webgpu_api_install(ctx, global, window);
+    worker_api_install(ctx, global);
+    /* (last: the shapes of what the rest installed) */
+    idl_shape_apply(ctx, global);
 }

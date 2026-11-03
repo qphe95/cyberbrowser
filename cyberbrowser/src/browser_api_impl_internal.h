@@ -273,6 +273,12 @@ GCValue js_document_create_range(JSContextHandle ctx, GCValue this_val, int argc
 GCValue js_range_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
 /* AbstractRange, Range and StaticRange (range_api.c). */
 void range_api_install(JSContextHandle ctx, GCValue global);
+/* WebIDL shapes for the DOM interfaces the realm has (idl_shape.c). */
+void idl_shape_apply(JSContextHandle ctx, GCValue global);
+/* Dedicated workers (worker_api.c): the Worker interface and the natives;
+ * the event loop's turn of their tasks. */
+void worker_api_install(JSContextHandle ctx, GCValue global);
+int worker_api_tick(JSContextHandle ctx);
 GCValue js_range_set_start(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_range_set_end(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_range_select_node_contents(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
