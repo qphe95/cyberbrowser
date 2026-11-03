@@ -529,8 +529,10 @@ static const char frame_window_js[] =
     "    Object.defineProperty(w, 'close', { value: function close() { w.__cyberFrameClose(); }, configurable: true, writable: true });"
     "  }"
     "  function px(v) { var n = parseFloat(v); return isFinite(n) ? n : NaN; }"
+    "  var hidden = !!frameElement && !!frameElement.ownerDocument && frameElement.getClientRects && !frameElement.getClientRects().length;"
     "  function size(dim, attr, dflt) {"
     "    var f = frameElement, n = NaN;"
+    "    if (hidden) return 0;"
     "    if (f) { n = px(f.style && f.style[dim]); if (isNaN(n)) n = px(f.getAttribute(attr)); }"
     "    return isNaN(n) ? (opener ? (dim === 'width' ? opener.innerWidth : opener.innerHeight) : dflt) : Math.round(n);"
     "  }"
@@ -540,7 +542,8 @@ static const char frame_window_js[] =
     "  Object.defineProperty(w, 'outerHeight', { get: function () { return w.innerHeight; }, configurable: true });"
     /* (its element's size changed: a resize at it, frame_api_resize_tick) */
     "  var lastW = w.innerWidth, lastH = w.innerHeight;"
-    "  Object.defineProperty(w, '__cyberFrameResized', { configurable: true, value: function () {"
+    "  Object.defineProperty(w, '__cyberFrameResized', { configurable: true, value: function (small) {"
+    "    hidden = small && !!frameElement && !frameElement.getClientRects().length;"
     "    var a = w.innerWidth, b = w.innerHeight;"
     "    if (a === lastW && b === lastH) return;"
     "    lastW = a; lastH = b;"
@@ -866,7 +869,9 @@ int frame_api_resize_tick(void) {
     for (Frame *f = g_frames; f; f = f->next) {
         if (f->dead || f->popup || !f->ctx || f->state != FRAME_LOADED) continue;
         GCValue fn = JS_GetPropertyStr(f->ctx, JS_GetGlobalObject(f->ctx), "__cyberFrameResized");
-        if (JS_IsFunction(f->ctx, fn) && JS_IsException(JS_Call(f->ctx, fn, JS_UNDEFINED, 0, NULL))) JS_GetException(f->ctx);
+        /* (asking if it has a box lays out: not on a big page) */
+        GCValue small = JS_NewBool(f->ctx, g_dom.live < 5000);
+        if (JS_IsFunction(f->ctx, fn) && JS_IsException(JS_Call(f->ctx, fn, JS_UNDEFINED, 1, &small))) JS_GetException(f->ctx);
     }
     return 0;
 }

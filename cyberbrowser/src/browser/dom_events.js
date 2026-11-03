@@ -1222,6 +1222,7 @@
         global.addEventListener('load', function () {
             var h = new global.URL(getHref()).hash;
             if (h) scrollToFragment(global, h);
+            if (global.__cyberFontsLoaded) global.__cyberFontsLoaded();
         }, { once: true });
         var HP = Object.getPrototypeOf(hist) && Object.getPrototypeOf(hist) !== Object.prototype ? Object.getPrototypeOf(hist) : hist;
         ['pushState', 'replaceState', 'back', 'forward', 'go'].forEach(function (k) {

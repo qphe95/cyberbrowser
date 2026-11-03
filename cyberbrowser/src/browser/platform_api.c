@@ -19,6 +19,10 @@ static const char *dom_events_js =
 #include "dom_events_js.inc"
 ;
 
+static const char *web_animations_js =
+#include "web_animations_js.inc"
+;
+
 static const char *form_controls_js =
 #include "form_controls_js.inc"
 ;
@@ -103,6 +107,8 @@ void platform_api_install(JSContextHandle ctx, GCValue global, GCValue window)
     platform_api_run(ctx, dom_events_js, "<dom_events>", global, window);
     platform_api_run(ctx, form_controls_js, "<form_controls>", global, window);
     platform_api_run(ctx, cssom_js, "<cssom>", global, window);
+    anim_api_install(ctx, global);
+    platform_api_run(ctx, web_animations_js, "<web_animations>", global, window);
     platform_api_run(ctx, canvas_api_js, "<canvas_api>", global, window);
     platform_api_run(ctx, xpath_js, "<xpath>", global, window);
     platform_api_run(ctx, xslt_js, "<xslt>", global, window);

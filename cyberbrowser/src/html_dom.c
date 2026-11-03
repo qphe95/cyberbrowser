@@ -1750,6 +1750,8 @@ static void ser_element_attrs(JSContextHandle ctx, SerNode n, const char *tag_lo
             if (sl > 0 && attr_style[sl - 1] != ';')
                 serialize_buf_append(&style_buf, ";");
         }
+        const char *animated = n.id ? anim_api_web_style(n.id) : NULL;
+        if (animated) serialize_buf_append(&style_buf, animated);
         /* A store element's style object writes its declarations back to
          * the attribute (css_style_decl.c): the attribute is the style. */
         if (!n.id && JS_IsObject(n.obj)) {
@@ -2474,6 +2476,14 @@ static void mir_store_attrs(NodeId s, MirStoreAttrs *a) {
         a->names[a->n] = css_atom_str(at->name);
         a->values[a->n] = v;
         a->lens[a->n] = vl;
+        a->n++;
+    }
+    /* (what Web Animations give it: a style attribute after its own) */
+    const char *animated = anim_api_web_style(s);
+    if (animated && a->n < 64) {
+        a->names[a->n] = "style";
+        a->values[a->n] = animated;
+        a->lens[a->n] = (uint32_t)strlen(animated);
         a->n++;
     }
     if (dom_has_wrapper(s)) mir_store_extras(s, a);

@@ -43,7 +43,7 @@ static struct {
     AnimVal *a, *b;
     float (*kfo)[ANIM_KF];
     AnimVal (*kfv)[ANIM_KF];
-    uint64_t *alive, *ev_run, *ev_start, *ev_end, *seen, *paused;
+    uint64_t *alive, *ev_run, *ev_start, *ev_end, *seen, *paused, *held;
     int *head;              /* per store slot */
     uint32_t head_n;
     int live_n;             /* rows alive */
@@ -282,7 +282,7 @@ static bool rows_grow(void)
     G(iters); G(pause_at); G(name); G(owner); G(next); G(iter); G(gen); G(a); G(b); G(kfo); G(kfv);
 #undef G
     size_t words = (size_t)cap / 64, old = (size_t)A.cap / 64;
-    uint64_t **bits[] = { &A.alive, &A.ev_run, &A.ev_start, &A.ev_end, &A.seen, &A.paused };
+    uint64_t **bits[] = { &A.alive, &A.ev_run, &A.ev_start, &A.ev_end, &A.seen, &A.paused, &A.held };
     for (size_t i = 0; i < sizeof bits / sizeof bits[0]; i++) {
         uint64_t *q = (uint64_t *)realloc(*bits[i], words * sizeof(uint64_t));
         if (!q) return false;
@@ -334,6 +334,7 @@ static int row_new(NodeId el, int ps, int kind, int prop)
     bset(A.ev_end, r, false);
     bset(A.seen, r, false);
     bset(A.paused, r, false);
+    bset(A.held, r, false);
     A.next[r] = A.head[s];
     A.head[s] = r + 1;
     A.live_n++;
@@ -391,9 +392,11 @@ bool anim_cancels_due(void) { return g_ncancels > 0; }
 
 /* ---- Values at a time ---- */
 
+static double row_time(int r, double now);
+
 static AnimVal trans_value(int r, double now)
 {
-    double t = now - A.start[r] - A.delay[r];
+    double t = row_time(r, now) - A.start[r] - A.delay[r];
     double x = A.dur[r] > 0 ? t / A.dur[r] : 1;
     if (x < 0) x = 0;
     if (x > 1) x = 1;
@@ -476,10 +479,13 @@ static void anim_timing(int r, const SpecList L[ANIM_NFIELD], int j, double now)
 {
     char buf[128];
     bool paused = !strcasecmp(list_item(&L[ANIM_F_PLAY], j, "running", buf, sizeof buf), "paused");
-    if (paused && !bit(A.paused, r)) A.pause_at[r] = now;
-    /* (resumed: from where it stopped) */
-    else if (!paused && bit(A.paused, r)) A.start[r] += now - A.pause_at[r];
-    bset(A.paused, r, paused);
+    /* (script's pause() or play() has the say over the style's, Animations 2) */
+    if (!bit(A.held, r)) {
+        if (paused && !bit(A.paused, r)) A.pause_at[r] = now;
+        /* (resumed: from where it stopped) */
+        else if (!paused && bit(A.paused, r)) A.start[r] += now - A.pause_at[r];
+        bset(A.paused, r, paused);
+    }
     A.dur[r] = parse_time(list_item(&L[ANIM_F_DUR], j, "0s", buf, sizeof buf));
     A.delay[r] = parse_time(list_item(&L[ANIM_F_DELAY], j, "0s", buf, sizeof buf));
     parse_ease(list_item(&L[ANIM_F_EASE], j, "ease", buf, sizeof buf), &A.ease[r], A.ep[r]);
@@ -722,7 +728,7 @@ int anim_tick(double now, AnimEvent *out, int cap, bool *live)
         }
         if (n + 3 > cap) { *live = true; break; }
         if (A.kind[r] == K_TRANS) {
-            double t = now - A.start[r];
+            double t = row_time(r, now) - A.start[r];
             double el0 = A.delay[r] < 0 ? -A.delay[r] : 0;
             if (el0 > A.dur[r]) el0 = A.dur[r];
             if (!bit(A.ev_run, r)) { n = emit(out, n, r, ANIM_EV_TRUN, el0); bset(A.ev_run, r, true); }
@@ -823,6 +829,47 @@ void anim_row_values(int r, double now, void (*fn)(void *ud, const char *prop, c
         anim_val_css(A.prop[t], &v, buf, sizeof buf);
         fn(ud, k_props[A.prop[t]], buf);
     }
+}
+
+bool anim_row_timing(int r, uint32_t gen, double now, AnimRowTiming *out)
+{
+    if (!anim_row_info(r, gen, NULL, NULL, NULL, NULL)) return false;
+    out->start = A.start[r];
+    out->delay = A.delay[r];
+    out->duration = A.dur[r];
+    out->iterations = A.kind[r] == K_TRANS ? 1 : A.iters[r];
+    out->current = row_time(r, now) - A.start[r];
+    out->paused = bit(A.paused, r);
+    out->ended = A.kind[r] == K_ANIM && bit(A.ev_end, r);
+    out->fill = A.fill[r];
+    out->direction = A.dir[r];
+    return true;
+}
+
+void anim_row_set_time(int r, uint32_t gen, double now, double t)
+{
+    if (!anim_row_info(r, gen, NULL, NULL, NULL, NULL)) return;
+    A.start[r] = row_time(r, now) - t;
+    if (A.kind[r] != K_ANIM) return;
+    /* (back before its end or start: those can come again) */
+    double local = t - A.delay[r], active = isinf(A.iters[r]) ? INFINITY : A.dur[r] * A.iters[r];
+    if (local < active) bset(A.ev_end, r, false);
+    if (local < 0) { bset(A.ev_start, r, false); A.iter[r] = 0; }
+    else if (A.dur[r] > 0) A.iter[r] = (int)floor((local < active ? local : 0) / A.dur[r]);
+}
+
+void anim_row_set_start(int r, uint32_t gen, double start)
+{
+    if (anim_row_info(r, gen, NULL, NULL, NULL, NULL)) A.start[r] = start;
+}
+
+void anim_row_pause(int r, uint32_t gen, double now, bool paused)
+{
+    if (!anim_row_info(r, gen, NULL, NULL, NULL, NULL)) return;
+    if (paused && !bit(A.paused, r)) A.pause_at[r] = now;
+    else if (!paused && bit(A.paused, r)) A.start[r] += now - A.pause_at[r];
+    bset(A.paused, r, paused);
+    bset(A.held, r, true);
 }
 
 void anim_row_cancel(int r)

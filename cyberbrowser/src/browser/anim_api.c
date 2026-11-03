@@ -9,6 +9,7 @@
  */
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <quickjs.h>
 #include "browser_api_impl.h"
@@ -63,10 +64,133 @@ static void anim_dispatch(JSContextHandle ctx, const AnimEvent *e)
     if (JS_IsException(r)) JS_GetException(ctx);
 }
 
+/* ---- Web Animations (web_animations.js): what each element's effects come to,
+ * declarations the cascade takes after its inline style ---- */
+
+static struct { NodeId *el; char **text; uint32_t n, cap; } g_web_styles;
+#define WEB_REALMS 16
+static JSContextHandle g_web_realms[WEB_REALMS];
+static int g_web_realm_n;
+
+const char *anim_api_web_style(uint32_t el)
+{
+    for (uint32_t i = 0; i < g_web_styles.n; i++)
+        if (g_web_styles.el[i] == el) return g_web_styles.text[i];
+    return NULL;
+}
+
+void anim_api_reset(void)
+{
+    for (uint32_t i = 0; i < g_web_styles.n; i++) free(g_web_styles.text[i]);
+    g_web_styles.n = 0;
+    g_web_realm_n = 0;
+}
+
+/* __cyberAnimStyle(el, text or null) */
+static GCValue js_anim_style(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    NodeId el = argc > 0 ? dom_node_of(argv[0]) : DOM_NULL;
+    if (!el) return JS_UNDEFINED;
+    const char *text = argc > 1 && JS_IsString(argv[1]) ? JS_ToCString(ctx, argv[1]) : NULL;
+    uint32_t i = 0;
+    while (i < g_web_styles.n && g_web_styles.el[i] != el) i++;
+    bool had = i < g_web_styles.n;
+    if (!text && !had) return JS_UNDEFINED;
+    if (text && had && !strcmp(text, g_web_styles.text[i])) return JS_UNDEFINED;
+    if (had) free(g_web_styles.text[i]);
+    if (!text) {
+        g_web_styles.n--;
+        g_web_styles.el[i] = g_web_styles.el[g_web_styles.n];
+        g_web_styles.text[i] = g_web_styles.text[g_web_styles.n];
+    } else {
+        if (!had) {
+            if (g_web_styles.n == g_web_styles.cap) {
+                g_web_styles.cap = g_web_styles.cap ? g_web_styles.cap * 2 : 16;
+                g_web_styles.el = realloc(g_web_styles.el, g_web_styles.cap * sizeof(NodeId));
+                g_web_styles.text = realloc(g_web_styles.text, g_web_styles.cap * sizeof(char *));
+            }
+            g_web_styles.el[i] = el;
+            g_web_styles.n++;
+        }
+        g_web_styles.text[i] = strdup(text);
+    }
+    dom_mark_dirty(el, DOMF_DIRTY_ATTR);
+    dom_request_relayout();
+    return JS_UNDEFINED;
+}
+
+/* __cyberAnimRow(op, row, gen, value): a CSS animation or transition for
+ * script.  op 0: its timing, [start, delay, duration, iterations, current,
+ * paused, ended, fill, direction, now], or null; 1 seek; 2 start time; 3 pause;
+ * 4 play. */
+static GCValue js_anim_row(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    int32_t op = 0, r = -1, g = 0;
+    double v = 0.0;
+    if (argc < 3 || JS_ToInt32(ctx, &op, argv[0]) || JS_ToInt32(ctx, &r, argv[1]) || JS_ToInt32(ctx, &g, argv[2])) return JS_NULL;
+    if (argc > 3) JS_ToFloat64(ctx, &v, argv[3]);
+    double now = (double)page_time_ms();
+    if (op == 0) {
+        AnimRowTiming t;
+        if (!anim_row_timing(r, (uint32_t)g, now, &t)) return JS_NULL;
+        double values[] = { t.start, t.delay, t.duration, t.iterations, t.current, t.paused, t.ended, t.fill, t.direction, now };
+        GCValue a = JS_NewArray(ctx);
+        for (uint32_t i = 0; i < sizeof values / sizeof values[0]; i++) JS_SetPropertyUint32(ctx, a, i, JS_NewFloat64(ctx, values[i]));
+        return a;
+    }
+    if (op == 1) anim_row_set_time(r, (uint32_t)g, now, v);
+    else if (op == 2) anim_row_set_start(r, (uint32_t)g, v);
+    else if (op == 3) anim_row_pause(r, (uint32_t)g, now, true);
+    else if (op == 4) anim_row_pause(r, (uint32_t)g, now, false);
+    g_anim_frame++;
+    dom_request_relayout();
+    timer_anim_wake(ctx);
+    return JS_UNDEFINED;
+}
+
+/* __cyberAnimWake(): this realm's animations want turns. */
+static GCValue js_anim_wake(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+    int i = 0;
+    while (i < g_web_realm_n && g_web_realms[i] != ctx) i++;
+    if (i == g_web_realm_n && g_web_realm_n < WEB_REALMS) g_web_realms[g_web_realm_n++] = ctx;
+    timer_anim_wake(ctx);
+    return JS_UNDEFINED;
+}
+
+void anim_api_install(JSContextHandle ctx, GCValue global)
+{
+    JS_DefinePropertyValueStr(ctx, global, "__cyberAnimStyle", JS_NewCFunction(ctx, js_anim_style, "__cyberAnimStyle", 2), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberAnimWake", JS_NewCFunction(ctx, js_anim_wake, "__cyberAnimWake", 0), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberAnimRow", JS_NewCFunction(ctx, js_anim_row, "__cyberAnimRow", 4), JS_PROP_CONFIGURABLE);
+}
+
+static void web_animations_tick(JSContextHandle ctx)
+{
+    for (int i = 0; i < g_web_realm_n; ) {
+        JSContextHandle realm = g_web_realms[i];
+        GCValue fn = JS_GetPropertyStr(realm, JS_GetGlobalObject(realm), "__cyberWebAnimTick");
+        bool more = false;
+        if (JS_IsFunction(realm, fn)) {
+            GCValue r = JS_Call(realm, fn, JS_UNDEFINED, 0, NULL);
+            if (JS_IsException(r)) JS_GetException(realm);
+            else more = JS_ToBool(realm, r) > 0;
+            timer_microtask_checkpoint(ctx);
+        }
+        if (more) { i++; continue; }
+        g_web_realms[i] = g_web_realms[--g_web_realm_n];
+    }
+    if (g_web_realm_n) { g_anim_frame++; timer_anim_wake(ctx); }
+}
+
 /* A rendering opportunity: the events due, then (while anything runs) a
  * frame: the layout samples it again, and another turn comes. */
 int anim_api_tick(JSContextHandle ctx)
 {
+    if (g_web_realm_n) web_animations_tick(ctx);
     if (!anim_any()) return 0;
     /* (the other documents with transitions see their style changes: the
      * main one's frames lay it out, theirs only queries do) */
@@ -185,6 +309,9 @@ GCValue js_element_get_animations(JSContextHandle ctx, GCValue this_val, int arg
         JS_DefinePropertyValueStr(ctx, a, "__cyber_row", JS_NewInt32(ctx, rows[i]), JS_PROP_CONFIGURABLE);
         JS_DefinePropertyValueStr(ctx, a, "__cyber_gen", JS_NewInt32(ctx, (int32_t)g), JS_PROP_CONFIGURABLE);
         JS_SetPropertyStr(ctx, a, kind == 1 ? "transitionProperty" : "animationName", JS_NewString(ctx, name));
+        JS_SetPropertyStr(ctx, a, "row", JS_NewInt32(ctx, rows[i]));
+        JS_SetPropertyStr(ctx, a, "gen", JS_NewInt32(ctx, (int32_t)g));
+        JS_SetPropertyStr(ctx, a, "pseudo", JS_NewString(ctx, ps == 1 ? "::before" : ps == 2 ? "::after" : ""));
         JS_SetPropertyStr(ctx, a, "commitStyles", JS_NewCFunction(ctx, js_anim_commit_styles, "commitStyles", 0));
         JS_SetPropertyStr(ctx, a, "cancel", JS_NewCFunction(ctx, js_anim_cancel, "cancel", 0));
         JS_SetPropertyStr(ctx, a, "play", JS_NewCFunction(ctx, js_anim_noop, "play", 0));

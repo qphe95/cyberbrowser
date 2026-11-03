@@ -581,6 +581,10 @@ extern const JSCFunctionListEntry js_shadow_root_native_funcs[];
 extern const size_t js_shadow_root_native_funcs_count;
 void timer_install_rejection_tracker(JSRuntimeHandle rt);
 int frame_api_process(void);
+void anim_api_install(JSContextHandle ctx, GCValue global);
+void anim_api_reset(void);
+/* What Web Animations give an element, declarations after its inline style. */
+const char *anim_api_web_style(uint32_t el);
 int frame_api_resize_tick(void);
 bool frame_api_pending(void);
 GCValue js_request_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);

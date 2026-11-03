@@ -286,6 +286,8 @@ int image_api_tick(JSContextHandle ctx)
         JS_DeleteProperty(ctx, el, fa, 0);
         JS_FreeAtom(ctx, fa);
         char *url = img_url_of(id);
+        /* (src="" : nothing to fetch, an error) */
+        if (!url && ic && dom_get_attr_str(id, "src")) { fire(ctx, el, "error"); fired++; continue; }
         if (!url || !ic) { free(url); continue; }
         int st = image_cache_status(ic, url);
         if (st == 0) {

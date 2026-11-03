@@ -541,8 +541,8 @@
         return bad ? new global.DOMException("Could not parse the font list '" + spec + "'", 'SyntaxError') : null;
     } });
     /* (document.fonts' events: the faces the sheets declare have loaded by the
-     * time the page has, for a page that listens) */
-    if (global.addEventListener) global.addEventListener('load', function () {
+     * time the page has, for a page that listens; dom_events.js calls this) */
+    Object.defineProperty(global, '__cyberFontsLoaded', { configurable: true, value: function () {
         var d = global.document, set = d && d.fonts;
         if (!set || typeof set.onloadingdone !== 'function') return;
         var faces = [], sheets = d.styleSheets;
@@ -556,7 +556,7 @@
         var e = new global.Event('loadingdone');
         Object.defineProperty(e, 'fontfaces', { value: faces, enumerable: true });
         global.setTimeout(function () { set.onloadingdone(e); }, 0);
-    });
+    } });
 
     /* The flat tree, in order (Selectors: the snap targets in a shadow tree or
      * slotted count where they show). */

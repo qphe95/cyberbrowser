@@ -1223,6 +1223,7 @@
 "        global.addEventListener('load', function () {\n"
 "            var h = new global.URL(getHref()).hash;\n"
 "            if (h) scrollToFragment(global, h);\n"
+"            if (global.__cyberFontsLoaded) global.__cyberFontsLoaded();\n"
 "        }, { once: true });\n"
 "        var HP = Object.getPrototypeOf(hist) && Object.getPrototypeOf(hist) !== Object.prototype ? Object.getPrototypeOf(hist) : hist;\n"
 "        ['pushState', 'replaceState', 'back', 'forward', 'go'].forEach(function (k) {\n"

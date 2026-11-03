@@ -122,6 +122,16 @@ uint32_t anim_row_gen(int r);
  * fn(ud, property, value) for each. */
 void anim_row_values(int r, double now, void (*fn)(void *ud, const char *prop, const char *value), void *ud);
 void anim_row_cancel(int r);
+/* A row's timing for script (Animation objects); times in ms. */
+typedef struct AnimRowTiming {
+    double start, delay, duration, iterations, current;
+    bool paused, ended;
+    int fill, direction;        /* (bit 0 forwards, bit 1 backwards); normal, reverse, alternate, alternate-reverse */
+} AnimRowTiming;
+bool anim_row_timing(int r, uint32_t gen, double now, AnimRowTiming *out);
+void anim_row_set_time(int r, uint32_t gen, double now, double t);
+void anim_row_set_start(int r, uint32_t gen, double start);
+void anim_row_pause(int r, uint32_t gen, double now, bool paused);
 /* A value as CSS text for prop (buf of cap). */
 void anim_val_css(int prop, const AnimVal *v, char *buf, size_t cap);
 
