@@ -269,7 +269,7 @@ static Frame *frame_of_window(uint32_t id) {
 static char *origin_url(JSContextHandle ctx) {
     for (int depth = 0; depth < 32; depth++) {
         char *u = realm_url(ctx);
-        Frame *f = strncmp(u, "about:", 6) ? NULL : frame_of_realm(ctx);
+        Frame *f = strncmp(u, "about:", 6) && strncasecmp(u, "javascript:", 11) ? NULL : frame_of_realm(ctx);
         if (!f || !SAFE_VALID(f->parent)) return u;
         free(u);
         ctx = f->parent;

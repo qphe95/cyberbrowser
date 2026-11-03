@@ -390,7 +390,10 @@ NodeId template_contents_owner(NodeId doc) {
  * Interfaces the browser does not define fall back to HTMLElement. */
 static const char *element_interface_name(NodeId id) {
     /* (other namespaces' elements: SVG's are SVGElements, the rest Elements) */
-    if (dom_ns(id) != DOM_NS_HTML) return dom_ns(id) == DOM_NS_SVG ? "SVGElement" : "Element";
+    if (dom_ns(id) != DOM_NS_HTML) {
+        if (dom_ns(id) != DOM_NS_SVG) return "Element";
+        return !strcmp(dom_local_name(id), "a") ? "SVGAElement" : "SVGElement";
+    }
     /* (HTML's element names are lower-case: an upper-case local name, as
      * createElementNS makes, is no HTML element's) */
     for (const char *p = dom_local_name(id); p && *p; p++)
@@ -3074,10 +3077,6 @@ GCValue js_element_has_attribute(JSContextHandle ctx, GCValue this_val, int argc
     char *name = n ? attr_lookup_name(n, raw, nlen) : NULL;
     bool has = name && dom_attr_index_qualified(n, name, nlen) >= 0;
     free(name);
-    if (!has && strcmp(raw, "id") == 0) {
-        GCValue val = JS_GetPropertyStr(ctx, this_val, "id");
-        has = !JS_IsUndefined(val) && JS_IsString(val);
-    }
     return JS_NewBool(ctx, has);
 }
 
@@ -4120,7 +4119,20 @@ static GCValue js_attr_ctor(JSContextHandle ctx, GCValue this_val, int argc, GCV
 }
 
 /* The Attr interface on the global (its prototype Node's). */
+/* A control's validity for :valid and :invalid (form_controls.js has the
+ * constraints): 0 not a candidate for validation, 1 valid, 2 invalid. */
+static int control_validity(NodeId n) {
+    extern JSContextHandle g_js_context;
+    JSContextHandle ctx = g_js_context;
+    GCValue el = dom_js(ctx, n);
+    if (!JS_IsObject(el) || JS_ToBool(ctx, JS_GetPropertyStr(ctx, el, "willValidate")) <= 0) return 0;
+    GCValue v = JS_GetPropertyStr(ctx, el, "validity");
+    if (!JS_IsObject(v)) return 0;
+    return JS_ToBool(ctx, JS_GetPropertyStr(ctx, v, "valid")) > 0 ? 1 : 2;
+}
+
 void attr_api_install(JSContextHandle ctx, GCValue global) {
+    g_dom_query_validity = control_validity;
     GCValue node = JS_GetPropertyStr(ctx, global, "Node");
     GCValue np = JS_IsObject(node) ? JS_GetPropertyStr(ctx, node, "prototype") : JS_UNDEFINED;
     GCValue proto = JS_NewObject(ctx);

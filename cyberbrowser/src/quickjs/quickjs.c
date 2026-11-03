@@ -10128,7 +10128,10 @@ static int __exception JS_GetOwnPropertyNamesInternal2(JSContextHandle ctx,
     }
 
     num_index = 0;
-    str_index = num_keys_count;
+    /* (a class's own keys go before the ordinary ones: Web IDL's legacy
+       platform objects list theirs first, and a proxy has no others) */
+    int exotic_index = num_keys_count;
+    str_index = num_keys_count + exotic_keys_count;
     sym_index = str_index + str_keys_count;
 
     num_sorted = TRUE;
@@ -10176,16 +10179,16 @@ static int __exception JS_GetOwnPropertyNamesInternal2(JSContextHandle ctx,
                 }
             }
         } else {
-            /* Note: exotic keys are not reordered and comes after the object own properties. */
+            /* Note: exotic keys are not reordered. */
             for(i = 0; i < exotic_count; i++) {
                 atom = tab_exotic[i].atom;
                 is_enumerable = tab_exotic[i].is_enumerable;
                 kind = JS_AtomGetKind(ctx, atom);
                 if ((!(flags & JS_GPN_ENUM_ONLY) || is_enumerable) &&
                     ((flags >> kind) & 1) != 0) {
-                    tab_atom[sym_index].atom = atom;
-                    tab_atom[sym_index].is_enumerable = is_enumerable;
-                    sym_index++;
+                    tab_atom[exotic_index].atom = atom;
+                    tab_atom[exotic_index].is_enumerable = is_enumerable;
+                    exotic_index++;
                 } else {
                     JS_FreeAtom(ctx, atom);
                 }
@@ -10195,7 +10198,7 @@ static int __exception JS_GetOwnPropertyNamesInternal2(JSContextHandle ctx,
     }
 
     assert(num_index == num_keys_count);
-    assert(str_index == num_keys_count + str_keys_count);
+    assert(str_index == num_keys_count + exotic_keys_count + str_keys_count);
     assert(sym_index == atom_count);
 
     if (num_keys_count != 0 && !num_sorted) {
@@ -11394,6 +11397,8 @@ int JS_SetPropertyInternal(JSContextHandle ctx, GCValue obj,
                             
                             return ret;
                         }
+                        if (ret && p1 != p && em->set_passes && em->set_passes(ctx, obj1, prop))
+                            ret = 0;
                         if (ret) {
                             if (desc.flags & JS_PROP_GETSET) {
                                 if (JS_IsUndefined(desc.setter))
@@ -25845,6 +25850,19 @@ static GCValue JS_CallFree(JSContextHandle ctx, GCValue func_obj, GCValue this_o
    NULL in case of exception (case of revoked proxy only) */
 static JSContextHandle JS_GetFunctionRealm(JSContextHandle ctx, GCValue func_obj);
 
+JSContextHandle JS_GetProxyRealm(GCValue obj)
+{
+    if (JS_VALUE_GET_TAG(obj) != JS_TAG_OBJECT)
+        return GC_HANDLE_NULL;
+    JSObjectHandle p = JS_VALUE_GET_OBJ(obj);
+    if (SAFE_GET_OR(p, JSObjectHandle, class_id, 0) != JS_CLASS_PROXY)
+        return GC_HANDLE_NULL;
+    JSProxyDataHandle s = SAFE_GET_OR(p, JSObjectHandle, u.proxy_data_handle, GC_HANDLE_NULL);
+    if (!SAFE_VALID(s))
+        return GC_HANDLE_NULL;
+    return (JSContextHandle)(SAFE_GET_OR(s, JSProxyDataHandle, realm_handle, GC_HANDLE_NULL));
+}
+
 JSContextHandle JS_GetFunctionRealmOf(JSContextHandle ctx, GCValue func_obj)
 {
     return JS_GetFunctionRealm(ctx, func_obj);
@@ -39116,6 +39134,19 @@ static int js_link_module(JSContextHandle ctx, JSModuleDefHandle m)
 
 /* return JS_ATOM_NULL if the name cannot be found. Only works with
    not striped bytecode functions. */
+int JS_CountScriptFrames(JSContextHandle ctx)
+{
+    int n = 0;
+    for (JSStackFrame *sf = js_rt_current_stack_frame(ctx_rt); sf; sf = JS_SF_PREV(sf)) {
+        if (JS_VALUE_GET_TAG(sf->cur_func) != JS_TAG_OBJECT)
+            continue;
+        JSObjectHandle p = JS_VALUE_GET_OBJ(sf->cur_func);
+        if (js_class_has_bytecode(SAFE_GET_OR(p, JSObjectHandle, class_id, 0)))
+            n++;
+    }
+    return n;
+}
+
 JSAtom JS_GetScriptOrModuleName(JSContextHandle ctx, int n_stack_levels)
 {
     JSStackFrame *sf;
@@ -62207,6 +62238,8 @@ static void js_proxy_mark(JSRuntimeHandle rt, GCValue val,
         mark_func(rt, s_handle);
         JS_MarkValue(rt, SAFE_GET_OR(s, JSProxyDataHandle, target, GC_UNDEFINED), mark_func);
         JS_MarkValue(rt, SAFE_GET_OR(s, JSProxyDataHandle, handler, GC_UNDEFINED), mark_func);
+        if (SAFE_GET_OR(s, JSProxyDataHandle, realm_handle, GC_HANDLE_NULL) != GC_HANDLE_NULL)
+            mark_func(rt, SAFE_GET_OR(s, JSProxyDataHandle, realm_handle, GC_HANDLE_NULL));
     }
 }
 
@@ -63083,6 +63116,7 @@ static GCValue js_proxy_constructor(JSContextHandle ctx, GCValue this_val,
     JSProxyDataHandle s = s_handle;
     SAFE_SET_VALUE(s, JSProxyDataHandle, target, target);
     SAFE_SET_VALUE(s, JSProxyDataHandle, handler, handler);
+    SAFE_SET_HANDLE(s, JSProxyDataHandle, realm_handle, SAFE_HANDLE(ctx));
     SAFE_SET(s, JSProxyDataHandle, is_func, JS_IsFunction(ctx, target));
     SAFE_SET(s, JSProxyDataHandle, is_revoked, FALSE);
     JS_SetOpaqueHandle(obj, s_handle);

@@ -28,23 +28,25 @@
         await frame(w);
     };
 
-    /* An origin (viewport, pointer or an element, whose center it is) as
-     * coordinates in the window. */
+    /* An origin (viewport, pointer or an element, the center of what's of it
+     * in view: WebDriver "get in view center point") as coordinates in the
+     * window. */
     function at(w, action, last) {
         const o = action.origin;
         if (o === 'pointer') return [last[0] + action.x, last[1] + action.y];
         if (o && typeof o === 'object') {
             const r = o.getBoundingClientRect();
-            return [r.left + r.width / 2 + action.x, r.top + r.height / 2 + action.y];
+            const left = Math.max(0, r.left), right = Math.min(w.innerWidth, r.right);
+            const top = Math.max(0, r.top), bottom = Math.min(w.innerHeight, r.bottom);
+            return [Math.floor((left + right) / 2) + action.x, Math.floor((top + bottom) / 2) + action.y];
         }
         return [action.x, action.y];
     }
 
     internal.action_sequence = async function (actions, context) {
-        /* (no touch or pen input here: say so, rather than a test waiting for it) */
-        if (actions.some(s => s.type === 'pointer' && s.parameters && s.parameters.pointerType && s.parameters.pointerType !== 'mouse'))
-            throw new Error('action_sequence: only mouse pointers are implemented');
         const w = context || window;
+        /* (a touch or pen pointer: a finger) */
+        const finger = s => s.type === 'pointer' && s.parameters && s.parameters.pointerType && s.parameters.pointerType !== 'mouse';
         const input = w.__cyberInput;
         const ticks = actions.reduce((n, s) => Math.max(n, s.actions.length), 0);
         const last = new Map();
@@ -59,11 +61,18 @@
                 case 'pointerMove': {
                     const p = at(w, a, pos);
                     last.set(source.id, p);
-                    input.move(p[0], p[1]);
+                    if (!finger(source)) input.move(p[0], p[1]);
+                    else if (source.down) input.touchMove(p[0], p[1]);
                     break;
                 }
-                case 'pointerDown': input.down(pos[0], pos[1], a.button || 0); break;
-                case 'pointerUp': input.up(pos[0], pos[1], a.button || 0); break;
+                case 'pointerDown':
+                    if (finger(source)) { source.down = true; input.touchDown(pos[0], pos[1]); }
+                    else input.down(pos[0], pos[1], a.button || 0);
+                    break;
+                case 'pointerUp':
+                    if (finger(source)) { source.down = false; input.touchUp(pos[0], pos[1]); }
+                    else input.up(pos[0], pos[1], a.button || 0);
+                    break;
                 case 'scroll': {
                     const p = at(w, a, pos);
                     input.wheel(p[0], p[1], a.deltaX || 0, a.deltaY || 0);
@@ -76,5 +85,7 @@
             if (wait) await pause(wait);
             await frame(w);
         }
+        /* (an action chain's wheel events are a transaction of their own) */
+        input.wheelEnd();
     };
 })();

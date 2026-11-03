@@ -40,6 +40,10 @@ void dom_node_list_free(DomNodeList *l);
 /* Selector queries.  `include_self` also tests the scope node itself. */
 NodeId dom_query_first(NodeId scope, const char *sel, size_t len, bool include_self);
 DomNodeList dom_query_all(NodeId scope, const char *sel, size_t len, bool include_self);
+/* A control's validity, for :valid and :invalid: 0 not a candidate, 1 valid,
+ * 2 invalid (the DOM API's; none: no control is a candidate). */
+extern int (*g_dom_query_validity)(NodeId el);
+
 bool dom_query_matches(NodeId el, const char *sel, size_t len);
 /* Whether el matches sel with :scope the element scope. */
 bool dom_query_matches_scoped(NodeId el, const char *sel, size_t len, NodeId scope);

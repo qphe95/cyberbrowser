@@ -42,6 +42,8 @@ enum {
     SS_LINK,         /* :link, :any-link: a and area with href */
     SS_TARGET,       /* :target: the element the URL's fragment names */
     SS_LANG,         /* :lang(val) */
+    SS_HOST,         /* :host: only across a combinator out of a shadow tree */
+    SS_VALID, SS_INVALID,
     SS_ANY,          /* unsupported pseudo-class: matches */
     SS_NEVER,        /* pseudo-element: never matches */
 };
@@ -477,6 +479,12 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                 }
                 else if (strcmp(name, "before") == 0 || strcmp(name, "after") == 0 ||
                          strcmp(name, "first-line") == 0 || strcmp(name, "first-letter") == 0) s.kind = SS_NEVER;
+                else if (strcmp(name, "host") == 0 && !args) s.kind = SS_HOST;
+                else if (strcmp(name, "valid") == 0 || strcmp(name, "invalid") == 0) {
+                    s.kind = name[0] == 'v' ? SS_VALID : SS_INVALID;
+                    css_atom_reserve(1);
+                    s.atom = css_atom_intern("form", 4);
+                }
                 else if (known_name(name, k_pseudo_classes)) s.kind = SS_ANY;
                 else { sp->err = true; free(name); break; }
                 free(name);
@@ -701,6 +709,8 @@ void dom_query_set_target(const char *frag, size_t n) {
     g_target.n = (uint32_t)n;
 }
 
+int (*g_dom_query_validity)(NodeId el);
+
 /* Whether s is a form control :enabled and :disabled apply to. */
 static bool form_control(uint32_t s) {
     if (g_dom.ns[s] != DOM_NS_HTML) return false;
@@ -869,6 +879,20 @@ static bool simple_ok(uint32_t s, const SelSimple *ss, uint32_t scope) {
         return g_dom.kind[r] == DOM_K_DOCUMENT;
     }
     case SS_LANG: return lang_ok(s, ss->val, ss->vlen);
+    case SS_VALID:
+    case SS_INVALID: {
+        if (g_dom.ns[s] != DOM_NS_HTML || !g_dom_query_validity) return false;
+        /* (a form or fieldset: by the controls in it, HTML 4.16.3) */
+        if (g_dom.tag[s] == ss->atom || g_dom.tag[s] == g_t_form[6]) {
+            for (uint32_t x = g_dom.first[s]; x; x = dom_next_in_subtree(x, s))
+                if (g_dom.kind[x] == DOM_K_ELEMENT && form_control(x) && g_dom_query_validity(dom_id_of(x)) == 2)
+                    return ss->kind == SS_INVALID;
+            return ss->kind == SS_VALID;
+        }
+        if (!form_control(s)) return false;
+        int v = g_dom_query_validity(dom_id_of(s));
+        return v == (ss->kind == SS_VALID ? 1 : 2);
+    }
     case SS_ANY: return true;
     default: return false;
     }
@@ -885,6 +909,13 @@ static uint32_t prev_element(uint32_t s) {
     return 0;
 }
 
+/* The leftmost compound, all :host: what a shadow tree's root stands for. */
+static bool host_at_left(const SelComplex *cx, int i) {
+    if (i != 1 || cx->c[0].n == 0) return false;
+    for (int k = 0; k < cx->c[0].n; k++) if (cx->c[0].s[k].kind != SS_HOST) return false;
+    return true;
+}
+
 /* Does compound i (and everything to its left) match at s? */
 static bool complex_at(const SelComplex *cx, int i, uint32_t s, uint32_t scope) {
     if (!compound_ok(s, &cx->c[i], scope)) return false;
@@ -892,6 +923,7 @@ static bool complex_at(const SelComplex *cx, int i, uint32_t s, uint32_t scope) 
     switch (cx->c[i].comb) {
     case '>': {
         uint32_t p = g_dom.parent[s];
+        if (p && (g_dom.flags[p] & DOMF_SHADOW_ROOT)) return host_at_left(cx, i);
         return p && complex_at(cx, i - 1, p, scope);
     }
     case '+': {
@@ -903,8 +935,10 @@ static bool complex_at(const SelComplex *cx, int i, uint32_t s, uint32_t scope) 
             if (complex_at(cx, i - 1, p, scope)) return true;
         return false;
     default:
-        for (uint32_t p = g_dom.parent[s]; p; p = g_dom.parent[p])
+        for (uint32_t p = g_dom.parent[s]; p; p = g_dom.parent[p]) {
+            if (g_dom.flags[p] & DOMF_SHADOW_ROOT) return host_at_left(cx, i);
             if (complex_at(cx, i - 1, p, scope)) return true;
+        }
         return false;
     }
 }

@@ -2857,7 +2857,9 @@ static void mo_add_transients(JSContextHandle ctx, GCValue parent, GCValue remov
                 JS_SetPropertyStr(ctx, t, "target", JS_GetPropertyUint32(ctx, removed, k));
                 JS_SetPropertyStr(ctx, t, "options", opts);
                 JS_SetPropertyStr(ctx, t, "transient", JS_TRUE);
-                JS_SetPropertyStr(ctx, t, "source", r);
+                /* (of a transient one: where that one came from) */
+                JS_SetPropertyStr(ctx, t, "source",
+                                  JS_ToBool(ctx, JS_GetPropertyStr(ctx, r, "transient")) ? JS_GetPropertyStr(ctx, r, "source") : r);
                 uint32_t len = 0;
                 JS_ToUint32(ctx, &len, JS_GetPropertyStr(ctx, regs, "length"));
                 JS_SetPropertyUint32(ctx, regs, len, t);

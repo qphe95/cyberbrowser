@@ -263,11 +263,19 @@ static int js_list_delete(JSContextHandle ctx, GCValue obj, JSAtom prop) {
     return js_list_get_own(ctx, NULL, obj, prop) > 0 ? 0 : 1;
 }
 
+/* (Web IDL [[Set]]: named properties aren't looked at; indices are) */
+static int js_list_set_passes(JSContextHandle ctx, GCValue obj, JSAtom prop) {
+    (void)obj;
+    uint32_t i;
+    return !JS_AtomArrayIndex(ctx, prop, &i);
+}
+
 static JSClassExoticMethods g_list_exotic = {
     .get_own_property = js_list_get_own,
     .get_own_property_names = js_list_own_names,
     .delete_property = js_list_delete,
     .define_own_property = js_list_define,
+    .set_passes = js_list_set_passes,
 };
 
 static JSClassDef g_list_def = {

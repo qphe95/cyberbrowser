@@ -881,7 +881,13 @@ static GCValue js_video_get_video_height(JSContextHandle ctx, GCValue this_val) 
 static GCValue js_video_get_network_state(JSContextHandle ctx, GCValue this_val) {
     HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id);
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
-    return JS_NewInt32(ctx, SAFE_GET_OR(vid, HTMLVideoElementHandle, network_state, 0));
+    int state = SAFE_GET_OR(vid, HTMLVideoElementHandle, network_state, 0);
+    /* (a <source> child and no src: resource selection's first step is done) */
+    NodeId n = state ? DOM_NULL : dom_node_of(this_val);
+    if (n && !dom_get_attr_str(n, "src"))
+        for (NodeId c = dom_first_child(n); c; c = dom_next_sibling(c))
+            if (dom_kind(c) == DOM_K_ELEMENT && !strcmp(dom_local_name(c), "source")) return JS_NewInt32(ctx, 3);
+    return JS_NewInt32(ctx, state);
 }
 
 static GCValue js_video_can_play_type(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {

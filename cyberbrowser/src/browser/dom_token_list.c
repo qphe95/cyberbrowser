@@ -367,6 +367,7 @@ static const struct { const char *iface, *prop, *attr; const char *const *suppor
     { "HTMLAnchorElement", "relList", "rel", REL_NAV },
     { "HTMLAreaElement", "relList", "rel", REL_NAV },
     { "HTMLFormElement", "relList", "rel", REL_NAV },
+    { "SVGAElement", "relList", "rel", REL_NAV },
     { "HTMLIFrameElement", "sandbox", "sandbox", SANDBOX },
     { "HTMLOutputElement", "htmlFor", "for", NULL },
     { "HTMLLinkElement", "sizes", "sizes", NULL },

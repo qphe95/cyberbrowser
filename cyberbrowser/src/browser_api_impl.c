@@ -1604,6 +1604,14 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, svg_element_ctor, "prototype", svg_element_proto);
     JS_SetPropertyStr(ctx, global, "SVGElement", svg_element_ctor);
     JS_SetPropertyStr(ctx, window, "SVGElement", svg_element_ctor);
+
+    GCValue svg_a_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "SVGAElement", 0, JS_CFUNC_constructor_or_func, 0);
+    GCValue svg_a_proto = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, svg_a_proto, "constructor", svg_a_ctor);
+    JS_SetPrototype(ctx, svg_a_proto, svg_element_proto);
+    JS_SetPropertyStr(ctx, svg_a_ctor, "prototype", svg_a_proto);
+    JS_SetPropertyStr(ctx, global, "SVGAElement", svg_a_ctor);
+    JS_SetPropertyStr(ctx, window, "SVGAElement", svg_a_ctor);
     
     // HTMLTemplateElement constructor (needed by ShadyDOM polyfill)
     GCValue template_ctor = JS_NewCFunction2(ctx, js_dummy_function, "HTMLTemplateElement", 0, JS_CFUNC_constructor, 0);
@@ -3792,6 +3800,15 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, html_media_element_proto, "webkitSourceSetDuration",
         JS_NewCFunction(ctx, js_dummy_function, "webkitSourceSetDuration", 1));
     
+    static const struct { const char *name; int value; } media_consts[] = {
+        { "NETWORK_EMPTY", 0 }, { "NETWORK_IDLE", 1 }, { "NETWORK_LOADING", 2 }, { "NETWORK_NO_SOURCE", 3 },
+        { "HAVE_NOTHING", 0 }, { "HAVE_METADATA", 1 }, { "HAVE_CURRENT_DATA", 2 }, { "HAVE_FUTURE_DATA", 3 },
+        { "HAVE_ENOUGH_DATA", 4 } };
+    for (size_t i = 0; i < sizeof media_consts / sizeof media_consts[0]; i++) {
+        JS_SetPropertyStr(ctx, html_media_element_ctor, media_consts[i].name, JS_NewInt32(ctx, media_consts[i].value));
+        JS_SetPropertyStr(ctx, html_media_element_proto, media_consts[i].name, JS_NewInt32(ctx, media_consts[i].value));
+    }
+
     JS_SetPropertyStr(ctx, html_media_element_ctor, "prototype", html_media_element_proto);
     JS_SetPropertyStr(ctx, global, "HTMLMediaElement", html_media_element_ctor);
     LOG_INFO("HTMLMediaElement API set");

@@ -1812,6 +1812,15 @@ static struct {
     uint32_t n, cap;
 } g_scroll_q;
 
+/* (a drag under way: its boxes' scrollend waits for its end) */
+static bool g_scroll_hold;
+
+void layout_scroll_hold(JSContextHandle ctx, bool hold)
+{
+    g_scroll_hold = hold;
+    if (!hold && g_scroll_q.n) timer_anim_wake(ctx);
+}
+
 void layout_scroll_queue(JSContextHandle ctx, uint32_t id)
 {
     uint32_t i = 0;
@@ -1865,7 +1874,7 @@ int layout_scroll_tick(JSContextHandle ctx)
     memcpy(due, g_scroll_q.due, n);
     uint32_t k = 0;
     for (uint32_t i = 0; i < n; i++)
-        if (due[i] == 1) {
+        if (due[i] == 1 || g_scroll_hold) {
             g_scroll_q.id[k] = ids[i];
             g_scroll_q.due[k++] = 2;
         }
@@ -1874,11 +1883,11 @@ int layout_scroll_tick(JSContextHandle ctx)
         if (due[i] == 1) lq_scroll_fire(ctx, ids[i], "scroll");
     /* (not for a box removed since) */
     for (uint32_t i = 0; i < n; i++)
-        if (due[i] == 2 && dom_is_connected(ids[i]))
+        if (due[i] == 2 && !g_scroll_hold && dom_is_connected(ids[i]))
             lq_scroll_fire(ctx, ids[i], "scrollend");
     free(ids);
     free(due);
-    if (g_scroll_q.n) timer_anim_wake(ctx);
+    if (g_scroll_q.n && !g_scroll_hold) timer_anim_wake(ctx);
     return (int)n;
 }
 

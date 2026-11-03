@@ -1033,6 +1033,10 @@ void JS_SetContextOpaque(JSContextHandle ctx, void *opaque);
 JSRuntimeHandle JS_GetRuntime(JSContextHandle ctx);
 /* The realm (context) a function was created in (ECMA-262 GetFunctionRealm). */
 JSContextHandle JS_GetFunctionRealmOf(JSContextHandle ctx, GCValue func_obj);
+/* The script frames on the stack (C functions' don't count). */
+int JS_CountScriptFrames(JSContextHandle ctx);
+/* The realm a proxy was made in, revoked or not; none for anything else. */
+JSContextHandle JS_GetProxyRealm(GCValue obj);
 /* A native function's WebIDL checks: calls with fewer than required
  * arguments, or a this the checker says does not implement interface brand
  * (nonzero), throw a TypeError before it runs.  False: not a native one. */
@@ -1163,6 +1167,10 @@ typedef struct JSClassExoticMethods {
     GCValue (*get_prototype)(JSContextHandle ctx, GCValue obj);
     /* return < 0 if exception or TRUE/FALSE */
     int (*set_prototype)(JSContextHandle ctx, GCValue obj, GCValue proto_val);
+    /* TRUE: setting prop on an object inheriting from this one passes this
+       one by, whatever its get_own_property says (a legacy platform object's
+       named property). */
+    int (*set_passes)(JSContextHandle ctx, GCValue obj, JSAtom prop);
     /* return < 0 if exception or TRUE/FALSE */
     int (*is_extensible)(JSContextHandle ctx, GCValue obj);
     /* return < 0 if exception or TRUE/FALSE */

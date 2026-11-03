@@ -481,9 +481,14 @@
     /* The global of a listener: a function's realm's; an object's, by its
      * prototype's constructor. */
     var functionGlobal = global.__cyberFunctionGlobal;
+    var scriptFrames = global.__cyberScriptFrames, microtasks = global.__cyberMicrotasks;
+    /* (the frames of a dispatch nothing called: dispatchEvent0, dispatch, its entry) */
+    var DISPATCH_FRAMES = 3;
     function listenerGlobal(cb) {
         if (!functionGlobal) return global;
         try {
+            var made = functionGlobal(cb);
+            if (made) return made;
             if (typeof cb !== 'function') cb = Object.getPrototypeOf(cb).constructor;
             return typeof cb === 'function' ? functionGlobal(cb) || global : global;
         } catch (e) { return global; }
@@ -518,16 +523,21 @@
                 try {
                     if (typeof fn !== 'function') {
                         thisArg = fn;
-                        try { fn = fn.handleEvent; } catch (e) { report(e, g); continue; }
+                        try { fn = here ? fn.handleEvent : g.__cyberRealmHandleEvent(fn); } catch (e) { report(e, g); continue; }
                         if (typeof fn !== 'function') {
                             report(new (g.TypeError || TypeError)("'handleEvent' is not a function"), g);
                             continue;
                         }
                     }
                     if (l.passive) s.inPassive = true;
-                    try { fn.call(thisArg, ev); } catch (e) { report(e, g); }
+                    try {
+                        if (here) fn.call(thisArg, ev);
+                        else g.__cyberRealmCall(fn, thisArg, ev);
+                    } catch (e) { report(e, g); }
                 } finally {
                     s.inPassive = false;
+                    /* (with the event still current: the callback's clean-up) */
+                    if (s.alone) microtasks();
                     if (here) currentEvent = prevEvent; else g[CURRENT_EVENT] = prevEvent;
                 }
                 if (s.stopImmediate) return true;
@@ -550,8 +560,13 @@
                     r = s.type === 'error' && ev instanceof global.ErrorEvent && item === global
                         ? h.call(item, ev.message, ev.filename, ev.lineno, ev.colno, ev.error)
                         : h.call(item, ev);
+                    /* (Web IDL: the return value converts as the callback's finishing) */
+                    if (s.type === 'beforeunload' && r != null) r = String(r);
                 } catch (e) { report(e, hg); r = undefined; }
-                finally { if (hhere) currentEvent = prevEv; else hg[CURRENT_EVENT] = prevEv; }
+                finally {
+                    if (s.alone) microtasks();
+                    if (hhere) currentEvent = prevEv; else hg[CURRENT_EVENT] = prevEv;
+                }
                 if (s.type === 'error' && item === global ? r === true : r === false) cancel(s);
                 else if (s.type === 'beforeunload' && r != null) cancel(s);
             }
@@ -581,6 +596,7 @@
         if (s.dispatching || !s.initialized)
             throw new DOMExceptionOr("Failed to execute 'dispatchEvent': The event is already being dispatched.", 'InvalidStateError');
         s.dispatching = true;
+        s.alone = scriptFrames && scriptFrames() === DISPATCH_FRAMES;
         var origRelated = s.relatedTarget;
         var path = [];
         var t = target, related = retarget(origRelated, target);
@@ -1375,7 +1391,66 @@
 
     /* ---- input: pointer, wheel and keys as the browser gets them (the tab's
      * wheel and clicks, and testdriver in the WPT runs) ---- */
-    var pointer = { over: null, pressed: null, buttons: 0 };
+    var pointer = { over: null, pressed: null, buttons: 0, bar: null, touch: null, touchFrame: null, wheelTarget: null, wheelUntil: 0, wheelAt: 0 };
+    /* (wheel events go on to the first one's target while they keep coming and
+     * it stays where it was) */
+    var WHEEL_TRANSACTION_MS = 500;
+    function docTop(t) {
+        if (global.getComputedStyle(t).display === 'contents') return NaN;
+        var rects = t.getClientRects();
+        return rects.length ? rects[0].top + global.scrollY : NaN;
+    }
+    /* A frame at a point: its document takes the input, at its coordinates. */
+    function frameInput(t) {
+        if (!t || !/^i?frame$/.test(t.localName || '')) return null;
+        try {
+            var input = t.contentWindow && t.contentWindow.__cyberInput;
+            if (!input) return null;
+            var r = t.getBoundingClientRect();
+            return { input: input, left: r.left + t.clientLeft, top: r.top + t.clientTop };
+        } catch (e) { return null; }
+    }
+    /* The scrollbar of a box at a point: which way, and how far along. */
+    function scrollbarAt(t, x, y) {
+        for (var a = t; a; a = flatParent(a)) {
+            if (a.nodeType !== 1 || a === a.ownerDocument.documentElement || a === a.ownerDocument.body) continue;
+            var r = a.getBoundingClientRect(), cs = global.getComputedStyle(a);
+            var left = r.left + a.clientLeft, top = r.top + a.clientTop;
+            if (!/auto|scroll/.test(cs.overflow || cs.overflowY || '')) continue;
+            /* (from its padding box's edge out: scrollbars take no room here,
+             * so a box's scrollbar is at most its border) */
+            var vbar = a.offsetWidth - a.clientWidth - a.clientLeft;
+            var hbar = a.offsetHeight - a.clientHeight - a.clientTop;
+            if (vbar > 0 && x >= left + a.clientWidth && x < left + a.clientWidth + vbar && y >= top && y < top + a.clientHeight)
+                return { el: a, prop: 'scrollTop', at: y - top, track: a.clientHeight, size: a.scrollHeight, last: y };
+            if (hbar > 0 && y >= top + a.clientHeight && y < top + a.clientHeight + hbar && x >= left && x < left + a.clientWidth)
+                return { el: a, prop: 'scrollLeft', at: x - left, track: a.clientWidth, size: a.scrollWidth, last: x };
+        }
+        return null;
+    }
+    /* A press on a scrollbar: on the thumb it drags; beside it, a page. */
+    function barPress(bar) {
+        if (bar.size <= bar.track) return;
+        var from = bar.el[bar.prop] * bar.track / bar.size, len = bar.track * bar.track / bar.size;
+        if (bar.at < from || bar.at >= from + len) {
+            bar.el[bar.prop] += (bar.at < from ? -1 : 1) * bar.track * 0.875;
+            return;
+        }
+        pointer.bar = bar;
+        global.__cyberScrollHold(true);
+    }
+    /* A touch event at the finger's target: cancelable if a listener isn't passive. */
+    function touchEvent(t, type, x, y, ended) {
+        var touch = { identifier: 0, target: t, clientX: x, clientY: y, pageX: x + global.scrollX, pageY: y + global.scrollY,
+                      screenX: x, screenY: y, radiusX: 1, radiusY: 1, rotationAngle: 0, force: 1 };
+        return trusted(t, global.TouchEvent, type, { cancelable: listenerBlocks(t, [type]), view: global,
+            touches: ended ? [] : [touch], targetTouches: ended ? [] : [touch], changedTouches: [touch] });
+    }
+    function touchInit(x, y, button) {
+        var i = mouseInit(x, y, button);
+        i.pointerId = 2; i.pointerType = 'touch'; i.isPrimary = true; i.pressure = 0.5;
+        return i;
+    }
     function trusted(target, Ctor, type, init) {
         init.bubbles = init.bubbles !== false;
         init.composed = true;
@@ -1423,14 +1498,15 @@
     }
     /* The wheel's event may be cancelled only when a listener for it isn't
      * passive (or there's a handler). */
-    function wheelBlocked(t) {
+    function wheelBlocked(t) { return listenerBlocks(t, ['wheel', 'mousewheel']); }
+    function listenerBlocks(t, types) {
         var path = [];
         for (var a = t; a; a = flatParent(a)) path.push(a);
         path.push(global);
         return path.some(function (o) {
-            if (o.onwheel || o.onmousewheel) return true;
             var map = o[LISTENERS];
-            return ['wheel', 'mousewheel'].some(function (type) {
+            return types.some(function (type) {
+                if (o['on' + type]) return true;
                 return map && map[type] && map[type].some(function (l) { return !l.removed && !l.passive; });
             });
         });
@@ -1445,7 +1521,14 @@
             if (dy && (dy > 0 ? a.scrollTop < a.scrollHeight - a.clientHeight : a.scrollTop > 0)) { a.scrollTop += dy; dy = 0; }
             if (dx && (dx > 0 ? a.scrollLeft < a.scrollWidth - a.clientWidth : a.scrollLeft > 0)) { a.scrollLeft += dx; dx = 0; }
         }
-        if (dx || dy) global.scrollBy(dx, dy);
+        if (!dx && !dy) return;
+        var was = [global.scrollX, global.scrollY];
+        global.scrollBy(dx, dy);
+        /* (nothing left to scroll here: the frame's container) */
+        if (global.scrollX === was[0] && global.scrollY === was[1] && global.frameElement) {
+            var outer = global.parent && global.parent.__cyberInput;
+            if (outer) outer.chain(global.frameElement, dx, dy);
+        }
     }
     var KEYS = { '\uE003': 'Backspace', '\uE004': 'Tab', '\uE006': 'Enter', '\uE007': 'Enter', '\uE008': 'Shift', '\uE009': 'Control',
                  '\uE00A': 'Alt', '\uE00C': 'Escape', '\uE00D': ' ', '\uE00E': 'PageUp', '\uE00F': 'PageDown', '\uE010': 'End',
@@ -1478,6 +1561,13 @@
         move: function (x, y) {
             var t = hitAt(x, y);
             if (!t) return;
+            var into = frameInput(t);
+            if (into) { into.input.move(x - into.left, y - into.top); return; }
+            if (pointer.bar) {
+                var pos = pointer.bar.prop === 'scrollTop' ? y : x;
+                pointer.bar.el[pointer.bar.prop] += (pos - pointer.bar.last) * pointer.bar.size / pointer.bar.track;
+                pointer.bar.last = pos;
+            }
             var was = pointer.over;
             if (was !== t) {
                 if (was && was.isConnected) bothEvents(was, x, y, 0, 'pointerout', 'mouseout', t);
@@ -1489,13 +1579,20 @@
         down: function (x, y, button) {
             var t = hitAt(x, y);
             if (!t) return;
+            var into = frameInput(t);
+            if (into) { into.input.down(x - into.left, y - into.top, button); return; }
             pointer.buttons |= 1 << button;
             pointer.pressed = t;
             focusTarget(t, !bothEvents(t, x, y, button, 'pointerdown', 'mousedown'));
+            var bar = button === 0 ? scrollbarAt(t, x, y) : null;
+            if (bar) barPress(bar);
         },
         up: function (x, y, button) {
             var t = hitAt(x, y);
             if (!t) return;
+            var into = frameInput(t);
+            if (into) { into.input.up(x - into.left, y - into.top, button); return; }
+            if (pointer.bar) { pointer.bar = null; global.__cyberScrollHold(false); }
             pointer.buttons &= ~(1 << button);
             bothEvents(t, x, y, button, 'pointerup', 'mouseup');
             var on = pointer.pressed && commonAncestor(pointer.pressed, t);
@@ -1506,9 +1603,67 @@
                 trusted(on, MouseEvent, button === 0 ? 'click' : 'auxclick', i);
             }
         },
+        /* A finger: a press, then a drag scrolls (the browser takes the
+         * pointer from the page: pointercancel), else it's a tap. */
+        touchDown: function (x, y) {
+            var t = hitAt(x, y);
+            if (!t) return;
+            var into = frameInput(t);
+            pointer.touchFrame = into;
+            if (into) { into.input.touchDown(x - into.left, y - into.top); return; }
+            var c = pointer.touch = { target: t, x: x, y: y, scrolling: false, canceled: false };
+            trusted(t, global.PointerEvent, 'pointerdown', touchInit(x, y, 0));
+            c.canceled = !touchEvent(t, 'touchstart', x, y, false);
+        },
+        touchMove: function (x, y) {
+            var into = pointer.touchFrame;
+            if (into) { into.input.touchMove(x - into.left, y - into.top); return; }
+            var c = pointer.touch;
+            if (!c) return;
+            var dx = c.x - x, dy = c.y - y;
+            c.x = x; c.y = y;
+            if (!dx && !dy) return;
+            /* (a listener can keep it for the page) */
+            if (!touchEvent(c.target, 'touchmove', x, y, false)) c.canceled = true;
+            if (!c.scrolling) {
+                if (c.canceled || global.getComputedStyle(c.target).touchAction === 'none') {
+                    trusted(c.target, global.PointerEvent, 'pointermove', touchInit(x, y, -1));
+                    return;
+                }
+                c.scrolling = true;
+                global.__cyberScrollHold(true);
+                trusted(c.target, global.PointerEvent, 'pointercancel', touchInit(x, y, 0));
+            }
+            wheelScroll(c.target, dx, dy);
+        },
+        touchUp: function (x, y) {
+            var into = pointer.touchFrame;
+            pointer.touchFrame = null;
+            if (into) { into.input.touchUp(x - into.left, y - into.top); return; }
+            var c = pointer.touch;
+            pointer.touch = null;
+            if (!c) return;
+            var go = touchEvent(c.target, 'touchend', x, y, true);
+            if (c.scrolling) { global.__cyberScrollHold(false); return; }
+            trusted(c.target, global.PointerEvent, 'pointerup', touchInit(x, y, 0));
+            if (!go || c.canceled) return;
+            var i = mouseInit(x, y, 0);
+            i.detail = 1;
+            if (!controlDisabled(c.target)) trusted(c.target, MouseEvent, 'click', i);
+        },
+        wheelEnd: function () { pointer.wheelTarget = null; },
+        /* (a frame with nothing left to scroll hands the rest to its container) */
+        chain: function (from, dx, dy) { wheelScroll(from, dx, dy); },
         wheel: function (x, y, dx, dy) {
             var t = hitAt(x, y);
             if (!t) return;
+            var into = frameInput(t);
+            if (into) { into.input.wheel(x - into.left, y - into.top, dx, dy); return; }
+            var now = global.performance.now();
+            if (now < pointer.wheelUntil && pointer.wheelTarget && pointer.wheelTarget.isConnected &&
+                docTop(pointer.wheelTarget) === pointer.wheelAt) t = pointer.wheelTarget;
+            else { pointer.wheelTarget = t; pointer.wheelAt = docTop(t); }
+            pointer.wheelUntil = now + WHEEL_TRANSACTION_MS;
             var i = mouseInit(x, y, 0);
             i.cancelable = wheelBlocked(t);
             i.deltaX = dx; i.deltaY = dy; i.deltaMode = 0;

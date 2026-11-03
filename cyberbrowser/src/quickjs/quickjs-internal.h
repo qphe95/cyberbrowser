@@ -349,6 +349,7 @@ static inline void js_varref_set_in_array(GCHandle array_handle, size_t index,
 struct JSProxyData {
     GCValue target;
     GCValue handler;
+    GCHandle realm_handle;
     uint8_t is_func;
     uint8_t is_revoked;
 };

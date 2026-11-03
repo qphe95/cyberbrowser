@@ -111,10 +111,48 @@ static uint32_t slot_of(GCValue v) {
 /* The global of a function's realm. */
 static GCValue js_function_global(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
+    JSContextHandle made = argc ? JS_GetProxyRealm(argv[0]) : GC_HANDLE_NULL;
+    if (made) return JS_GetGlobalObject(made);
     if (argc < 1 || !JS_IsFunction(ctx, argv[0])) return JS_NULL;
     JSContextHandle realm = JS_GetFunctionRealmOf(ctx, argv[0]);
     if (!realm) return JS_NULL;
     return JS_GetGlobalObject(realm);
+}
+
+/* A callback called, or its handleEvent read, from this function's realm:
+ * what fails there (a revoked proxy) fails with that realm's errors. */
+static GCValue js_realm_call(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    return argc < 3 ? JS_UNDEFINED : JS_Call(ctx, argv[0], argv[1], 1, &argv[2]);
+}
+
+static GCValue js_realm_handle_event(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    return argc < 1 ? JS_UNDEFINED : JS_GetPropertyStr(ctx, argv[0], "handleEvent");
+}
+
+/* What a dispatch reads to know whether anything called it, and the
+ * checkpoint it then does after each callback (HTML "clean up after running
+ * script": the stack is empty but for the dispatch). */
+static GCValue js_script_frames(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    return JS_NewInt32(ctx, JS_CountScriptFrames(ctx));
+}
+
+extern void timer_microtask_checkpoint(JSContextHandle ctx);
+
+static GCValue js_microtasks(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    timer_microtask_checkpoint(ctx);
+    return JS_UNDEFINED;
+}
+
+extern void layout_scroll_hold(JSContextHandle ctx, bool hold);
+
+static GCValue js_scroll_hold(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    layout_scroll_hold(ctx, argc > 0 && JS_ToBool(ctx, argv[0]) > 0);
+    return JS_UNDEFINED;
 }
 
 static GCValue js_event_path(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
@@ -220,6 +258,16 @@ static GCValue js_event_path(JSContextHandle ctx, GCValue this_val, int argc, GC
 void event_path_install(JSContextHandle ctx, GCValue global) {
     JS_DefinePropertyValueStr(ctx, global, "__cyberFunctionGlobal",
                               JS_NewCFunction(ctx, js_function_global, "__cyberFunctionGlobal", 1), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberScriptFrames",
+                              JS_NewCFunction(ctx, js_script_frames, "__cyberScriptFrames", 0), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberMicrotasks",
+                              JS_NewCFunction(ctx, js_microtasks, "__cyberMicrotasks", 0), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberScrollHold",
+                              JS_NewCFunction(ctx, js_scroll_hold, "__cyberScrollHold", 1), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberRealmCall",
+                              JS_NewCFunction(ctx, js_realm_call, "__cyberRealmCall", 3), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberRealmHandleEvent",
+                              JS_NewCFunction(ctx, js_realm_handle_event, "__cyberRealmHandleEvent", 1), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberEventPath",
                               JS_NewCFunction(ctx, js_event_path, "__cyberEventPath", 5), JS_PROP_CONFIGURABLE);
 }

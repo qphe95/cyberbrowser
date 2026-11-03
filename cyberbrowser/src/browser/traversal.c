@@ -24,7 +24,9 @@ enum { ACCEPT = 1, REJECT = 2, SKIP = 3 };
 typedef struct Trav {
     NodeId root, cur;           /* cur: TreeWalker's current node, NodeIterator's reference */
     uint32_t show;
+    NodeId walk;                /* NodeIterator: where a traversal is, while filtering */
     bool active, before;        /* before: NodeIterator's pointerBeforeReferenceNode */
+    bool walk_before;
 } Trav;
 
 typedef struct Cell { Trav *t; } Cell;
@@ -88,6 +90,23 @@ static NodeId N(uint32_t s) { return dom_id_of(s); }
 #define NEXT(s) g_dom.next[s]
 #define PREV(s) g_dom.prev[s]
 
+/* The realm a filter's errors are of (Web IDL "call a user object's
+ * operation"): a proxy's, a function's, else its prototype's constructor's. */
+static JSContextHandle filter_realm(JSContextHandle ctx, GCValue f) {
+    JSContextHandle r = JS_GetProxyRealm(f);
+    if (r) return r;
+    GCValue fn = f;
+    if (!JS_IsFunction(ctx, f)) {
+        GCValue p = JS_GetPrototype(ctx, f);
+        fn = JS_IsObject(p) ? JS_GetPropertyStr(ctx, p, "constructor") : JS_UNDEFINED;
+        if (JS_IsException(fn)) { JS_GetException(ctx); return ctx; }
+    }
+    if (!JS_IsFunction(ctx, fn) || JS_GetProxyRealm(fn)) return ctx;
+    r = JS_GetFunctionRealmOf(ctx, fn);
+    if (!r) { JS_GetException(ctx); return ctx; }
+    return r;
+}
+
 /* "filter" (DOM 6.1): ACCEPT, REJECT or SKIP (another number: none of
  * them); -1 with an exception pending. */
 static int filter(JSContextHandle ctx, GCValue obj, Trav *t, uint32_t s) {
@@ -100,14 +119,15 @@ static int filter(JSContextHandle ctx, GCValue obj, Trav *t, uint32_t s) {
     GCValue f = JS_GetPropertyStr(ctx, obj, "__filter");
     if (JS_IsNull(f) || JS_IsUndefined(f)) return ACCEPT;
     GCValue node = dom_js(ctx, N(s)), r;
+    JSContextHandle own = filter_realm(ctx, f);
     t->active = true;
     if (JS_IsFunction(ctx, f)) {
-        r = JS_Call(ctx, f, JS_UNDEFINED, 1, &node);
+        r = JS_Call(own, f, JS_UNDEFINED, 1, &node);
     } else {
-        GCValue m = JS_GetPropertyStr(ctx, f, "acceptNode");
+        GCValue m = JS_GetPropertyStr(own, f, "acceptNode");
         if (JS_IsException(m)) { t->active = false; return -1; }
-        if (!JS_IsFunction(ctx, m)) { t->active = false; JS_ThrowTypeError(ctx, "acceptNode is not a function"); return -1; }
-        r = JS_Call(ctx, m, f, 1, &node);
+        if (!JS_IsFunction(ctx, m)) { t->active = false; JS_ThrowTypeError(own, "acceptNode is not a function"); return -1; }
+        r = JS_Call(own, m, f, 1, &node);
     }
     t->active = false;
     if (JS_IsException(r)) return -1;
@@ -278,23 +298,27 @@ static GCValue js_iterate(JSContextHandle ctx, GCValue this_val, int argc, GCVal
     (void)argc; (void)argv;
     THIS(t);
     uint32_t root = S(t->root), node = S(t->cur);
-    bool before = t->before;
     if (!node) return JS_NULL;
+    t->walk = t->cur;
+    t->walk_before = t->before;
     for (;;) {
+        /* (from where it is now: a filter's removal can move it) */
+        node = S(t->walk);
         if (next) {
-            if (!before) { node = following(node, root); if (!node) return JS_NULL; }
-            else before = false;
+            if (!t->walk_before) { node = following(node, root); if (!node) return JS_NULL; }
+            else t->walk_before = false;
         } else {
-            if (before) { node = preceding(node, root); if (!node) return JS_NULL; }
-            else before = true;
+            if (t->walk_before) { node = preceding(node, root); if (!node) return JS_NULL; }
+            else t->walk_before = true;
         }
+        t->walk = N(node);
         int r;
         FILTER(r, node);
         if (r == ACCEPT) break;
     }
-    t->cur = N(node);
-    t->before = before;
-    return dom_js(ctx, t->cur);
+    t->cur = t->walk;
+    t->before = t->walk_before;
+    return dom_js(ctx, N(node));
 }
 
 static GCValue js_before_ref(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
@@ -335,33 +359,40 @@ static bool inclusive_ancestor(uint32_t a, uint32_t d) {
     return false;
 }
 
-/* "NodeIterator pre-removing steps" (DOM 6.1), for each live iterator: a
- * reference in the subtree going moves to the first node after it within
+/* A position in the subtree r going moves to the first node after it within
  * the root (pointer before), else to the node before it in tree order. */
+static void retarget(uint32_t r, uint32_t root, NodeId *pos, bool *before) {
+    uint32_t at = S(*pos);
+    if (!at || !root || !inclusive_ancestor(r, at) || inclusive_ancestor(r, root)) return;
+    if (*before) {
+        /* (the first following node not in r's subtree, within the root) */
+        uint32_t next = 0;
+        for (uint32_t x = r; x && x != root && !next; x = PARENT(x)) next = NEXT(x);
+        if (next && inclusive_ancestor(root, next)) {
+            *pos = N(next);
+            return;
+        }
+        *before = false;
+    }
+    uint32_t prev = PREV(r);
+    if (prev) {
+        while (LAST(prev)) prev = LAST(prev);
+        *pos = N(prev);
+    } else {
+        *pos = N(PARENT(r));
+    }
+}
+
+/* "NodeIterator pre-removing steps" (DOM 6.1), for each live iterator: its
+ * reference, and where a traversal under way is. */
 static void iter_pre_remove(NodeId node) {
     uint32_t r = S(node);
     if (!r) return;
     for (uint32_t i = 0; i < g_iters.n; i++) {
         Trav *t = g_iters.t[i];
-        uint32_t ref = S(t->cur), root = S(t->root);
-        if (!ref || !root || !inclusive_ancestor(r, ref) || inclusive_ancestor(r, root)) continue;
-        if (t->before) {
-            /* (the first following node not in r's subtree, within the root) */
-            uint32_t next = 0;
-            for (uint32_t x = r; x && x != root && !next; x = PARENT(x)) next = NEXT(x);
-            if (next && inclusive_ancestor(root, next)) {
-                t->cur = N(next);
-                continue;
-            }
-            t->before = false;
-        }
-        uint32_t prev = PREV(r);
-        if (prev) {
-            while (LAST(prev)) prev = LAST(prev);
-            t->cur = N(prev);
-        } else {
-            t->cur = N(PARENT(r));
-        }
+        uint32_t root = S(t->root);
+        retarget(r, root, &t->cur, &t->before);
+        if (t->active) retarget(r, root, &t->walk, &t->walk_before);
     }
 }
 
