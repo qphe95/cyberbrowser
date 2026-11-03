@@ -103,6 +103,9 @@ bool js_quickjs_net_wait_all(unsigned int ms);
 typedef void (*JsNetDoneFn)(JSContextHandle ctx, void *user, const char *url, bool ok, int status,
                             PlatformHttpBuffer *resp, const char *err);
 bool js_quickjs_net_get(const char *url, JsNetDoneFn done, void *user);
+/* The same, not counted as pending: a video that never finishes loading does
+ * not keep the page from being quiet. */
+bool js_quickjs_net_get_background(const char *url, JsNetDoneFn done, void *user);
 
 /* Dispatch DOMContentLoaded and load events on document/window. */
 void js_quickjs_dispatch_lifecycle_events(void);

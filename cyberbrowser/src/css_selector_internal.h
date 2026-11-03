@@ -101,6 +101,10 @@ typedef struct CssSimpleSelector {
     bool requires_empty;     /* :empty — element must have no element/text children */
     bool never_match;        /* dynamic pseudo-class (:visited, :hover, ...) — never true in a static render */
     bool requires_link;      /* :link — must be <a>/<area> with an href attribute */
+    uint32_t state_mask;     /* :hover, :checked, ...: the DOM_ST_* the element must have */
+    uint32_t not_state;      /* (of the flattened :not()) */
+    bool not_list_active;    /* :not() of anything else: not_list_arg, evaluated as a list */
+    char not_list_arg[400];
     int  child_pos;          /* 0=none, 1=:first-child, 2=:last-child, 3=:only-child */
     int  type_pos;           /* 0=none, 1=:first-of-type, 2=:last-of-type, 3=:only-of-type */
     int  nth_kind;           /* 0=none, 1=nth-child, 2=nth-last-child, 3=nth-of-type, 4=nth-last-of-type */

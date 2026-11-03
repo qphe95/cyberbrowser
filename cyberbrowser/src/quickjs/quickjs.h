@@ -1978,6 +1978,7 @@ struct JSObject {
         GCValue object_data;    /* for JS_SetObjectData(): 8/16/16 bytes */
         struct JSGlobalObject {
             GCValue uninitialized_vars; /* hidden object containing the list of uninitialized variables */
+            GCValue lexical_vars; /* hidden object: the script scope's let, const and class (not properties of the global) */
         } global_object;
     } u;
     GCValue prototype;

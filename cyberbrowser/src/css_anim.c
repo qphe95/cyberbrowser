@@ -36,14 +36,14 @@ static struct {
     NodeId *el;
     uint8_t *ps, *kind, *prop, *ease, *dir, *fill, *kfn;
     float (*ep)[4];         /* the timing function's parameters */
-    double *start, *delay, *dur, *iters;
+    double *start, *delay, *dur, *iters, *pause_at;
     char (*name)[64];
     int *owner, *next, *iter;
     uint32_t *gen;
     AnimVal *a, *b;
     float (*kfo)[ANIM_KF];
     AnimVal (*kfv)[ANIM_KF];
-    uint64_t *alive, *ev_run, *ev_start, *ev_end, *seen;
+    uint64_t *alive, *ev_run, *ev_start, *ev_end, *seen, *paused;
     int *head;              /* per store slot */
     uint32_t head_n;
     int live_n;             /* rows alive */
@@ -64,7 +64,11 @@ static inline void bset(uint64_t *b, int i, bool on)
 /* ---- Properties ---- */
 
 static const char *const k_props[ANIM_NPROP] = { "left", "top", "right", "bottom", "opacity", "transform", "width",
-                                                  "height", "color", "background-color" };
+                                                  "height", "color", "background-color",
+                                                  "padding-top", "padding-right", "padding-bottom", "padding-left",
+                                                  "margin-top", "margin-right", "margin-bottom", "margin-left",
+                                                  "border-top-width", "border-right-width", "border-bottom-width",
+                                                  "border-left-width", "font-size", "letter-spacing", "word-spacing", "font-weight" };
 
 const char *anim_prop_name(int p) { return p >= 0 && p < ANIM_NPROP ? k_props[p] : ""; }
 
@@ -98,7 +102,7 @@ void anim_val_css(int prop, const AnimVal *v, char *buf, size_t cap)
         return;
     }
     if (prop == ANIM_TRANSFORM) snprintf(buf, cap, "matrix(1, 0, 0, 1, %.6g, %.6g)", v->x, v->y);
-    else if (prop == ANIM_OPACITY) snprintf(buf, cap, "%.6g", v->x);
+    else if (prop == ANIM_OPACITY || prop == ANIM_FONT_WEIGHT) snprintf(buf, cap, "%.6g", v->x);
     else snprintf(buf, cap, "%.6gpx", v->x);
 }
 
@@ -275,10 +279,10 @@ static bool rows_grow(void)
     int cap = A.cap ? A.cap * 2 : 64;
 #define G(f) do { void *q = realloc((void *)A.f, (size_t)cap * sizeof(*A.f)); if (!q) return false; A.f = q; } while (0)
     G(el); G(ps); G(kind); G(prop); G(ease); G(dir); G(fill); G(kfn); G(ep); G(start); G(delay); G(dur);
-    G(iters); G(name); G(owner); G(next); G(iter); G(gen); G(a); G(b); G(kfo); G(kfv);
+    G(iters); G(pause_at); G(name); G(owner); G(next); G(iter); G(gen); G(a); G(b); G(kfo); G(kfv);
 #undef G
     size_t words = (size_t)cap / 64, old = (size_t)A.cap / 64;
-    uint64_t **bits[] = { &A.alive, &A.ev_run, &A.ev_start, &A.ev_end, &A.seen };
+    uint64_t **bits[] = { &A.alive, &A.ev_run, &A.ev_start, &A.ev_end, &A.seen, &A.paused };
     for (size_t i = 0; i < sizeof bits / sizeof bits[0]; i++) {
         uint64_t *q = (uint64_t *)realloc(*bits[i], words * sizeof(uint64_t));
         if (!q) return false;
@@ -329,6 +333,7 @@ static int row_new(NodeId el, int ps, int kind, int prop)
     bset(A.ev_start, r, false);
     bset(A.ev_end, r, false);
     bset(A.seen, r, false);
+    bset(A.paused, r, false);
     A.next[r] = A.head[s];
     A.head[s] = r + 1;
     A.live_n++;
@@ -395,11 +400,14 @@ static AnimVal trans_value(int r, double now)
     return val_mix(&A.a[r], &A.b[r], ease_apply(A.ease[r], A.ep[r], x));
 }
 
+/* The time row r's animation has reached: a paused one's stays. */
+static double row_time(int r, double now) { return bit(A.paused, r) ? A.pause_at[r] : now; }
+
 /* The progress of animation row r at now (0 .. 1, eased), or false when it
  * has no effect then. */
 static bool anim_progress(int r, double now, double *out)
 {
-    double t = now - A.start[r] - A.delay[r];
+    double t = row_time(r, now) - A.start[r] - A.delay[r];
     double dur = A.dur[r], iters = A.iters[r];
     double active = isinf(iters) ? INFINITY : dur * iters;
     double it, x;
@@ -464,9 +472,14 @@ bool anim_value(NodeId el, int ps, int prop, double now, AnimVal *out)
 
 /* ---- Layout ---- */
 
-static void anim_timing(int r, const SpecList L[ANIM_NFIELD], int j)
+static void anim_timing(int r, const SpecList L[ANIM_NFIELD], int j, double now)
 {
     char buf[128];
+    bool paused = !strcasecmp(list_item(&L[ANIM_F_PLAY], j, "running", buf, sizeof buf), "paused");
+    if (paused && !bit(A.paused, r)) A.pause_at[r] = now;
+    /* (resumed: from where it stopped) */
+    else if (!paused && bit(A.paused, r)) A.start[r] += now - A.pause_at[r];
+    bset(A.paused, r, paused);
     A.dur[r] = parse_time(list_item(&L[ANIM_F_DUR], j, "0s", buf, sizeof buf));
     A.delay[r] = parse_time(list_item(&L[ANIM_F_DELAY], j, "0s", buf, sizeof buf));
     parse_ease(list_item(&L[ANIM_F_EASE], j, "ease", buf, sizeof buf), &A.ease[r], A.ep[r]);
@@ -493,6 +506,45 @@ static void note_cancel(int r, int type, double now)
     snprintf(e->name, sizeof e->name, "%s", A.name[r]);
     double t = now - A.start[r] - A.delay[r];
     e->elapsed = (t > 0 ? t : 0) / 1000.0;
+}
+
+static void row_cancel_noted(int r, double now)
+{
+    if (A.kind[r] == K_TRANS) { note_cancel(r, ANIM_EV_TCANCEL, now); row_free(r); }
+    else if (A.kind[r] == K_ANIM) {
+        if (!bit(A.ev_end, r)) note_cancel(r, ANIM_EV_ACANCEL, now);
+        anim_free(r);
+    }
+}
+
+void anim_reset(void)
+{
+    for (int r = 0; r < A.n; r++) if (bit(A.alive, r)) row_free(r);
+    g_ncancels = 0;
+}
+
+void anim_node_removed(NodeId root)
+{
+    if (A.live_n <= 0 || !dom_valid(root)) return;
+    uint32_t top = dom_slot(root);
+    double now = anim_now();
+    for (int r = 0; r < A.n; r++) {
+        if (!bit(A.alive, r) || !dom_valid(A.el[r])) continue;
+        uint32_t s = dom_slot(A.el[r]);
+        while (s && s != top) s = g_dom.parent[s] ? g_dom.parent[s] : g_dom.host[s];
+        if (s) {
+            if (A.kind[r] == K_BASE || A.kind[r] == K_TRACK) continue;
+            row_cancel_noted(r, now);
+        }
+    }
+}
+
+void anim_pseudo_gone(NodeId el, int ps, double now)
+{
+    int cancel[ANIM_LIST], n = 0;
+    FOR_ROWS(r, el)
+        if (A.ps[r] == ps && (A.kind[r] == K_TRANS || A.kind[r] == K_ANIM) && n < ANIM_LIST) cancel[n++] = r;
+    for (int i = 0; i < n; i++) row_cancel_noted(cancel[i], now);
 }
 
 void anim_seed(NodeId el, int ps, const AnimVal base[ANIM_NPROP])
@@ -522,6 +574,12 @@ void anim_box(NodeId el, int ps, const char *spec, const AnimVal base[ANIM_NPROP
             const char *nm = list_item(&L[ANIM_F_TPROP], j, "all", buf, sizeof buf);
             if (!strcasecmp(nm, "all")) for (int p = 0; p < ANIM_NPROP; p++) cover[p] = j;
             else if (anim_prop_of(nm) >= 0) cover[anim_prop_of(nm)] = j;
+            /* (a shorthand: its longhands) */
+            else if (!strcasecmp(nm, "padding")) for (int p = ANIM_PADDING_TOP; p <= ANIM_PADDING_LEFT; p++) cover[p] = j;
+            else if (!strcasecmp(nm, "margin")) for (int p = ANIM_MARGIN_TOP; p <= ANIM_MARGIN_LEFT; p++) cover[p] = j;
+            else if (!strcasecmp(nm, "border-width") || !strcasecmp(nm, "border"))
+                for (int p = ANIM_BORDER_TOP; p <= ANIM_BORDER_LEFT; p++) cover[p] = j;
+            else if (!strcasecmp(nm, "inset")) for (int p = ANIM_LEFT; p <= ANIM_BOTTOM; p++) cover[p] = j;
         }
         for (int p = 0; p < ANIM_NPROP; p++) {
             int b = row_find(el, ps, K_BASE, p, NULL), t = row_find(el, ps, K_TRANS, p, NULL);
@@ -568,7 +626,7 @@ void anim_box(NodeId el, int ps, const char *spec, const AnimVal base[ANIM_NPROP
             if (!name[0] || !strcasecmp(name, "none")) continue;
             int r = row_find(el, ps, K_ANIM, -1, name);
             if (r >= 0) {
-                anim_timing(r, L, j);
+                anim_timing(r, L, j, now);
                 bset(A.seen, r, true);
                 continue;
             }
@@ -581,7 +639,7 @@ void anim_box(NodeId el, int ps, const char *spec, const AnimVal base[ANIM_NPROP
             if (r < 0) continue;
             snprintf(A.name[r], sizeof A.name[r], "%s", name);
             A.start[r] = now;
-            anim_timing(r, L, j);
+            anim_timing(r, L, j, now);
             bset(A.seen, r, true);
             /* (a track per property the frames set) */
             int track[ANIM_NPROP];
@@ -653,8 +711,13 @@ int anim_tick(double now, AnimEvent *out, int cap, bool *live)
         if (!bit(A.alive, r)) continue;
         NodeId el = A.el[r];
         if (!dom_valid(el) || !dom_is_connected(el)) {
+            /* (the element left: what ran is cancelled, and says so) */
+            if (dom_valid(el)) {
+                if (A.kind[r] == K_TRANS) note_cancel(r, ANIM_EV_TCANCEL, now);
+                else if (A.kind[r] == K_ANIM && !bit(A.ev_end, r)) note_cancel(r, ANIM_EV_ACANCEL, now);
+            }
             if (A.kind[r] == K_ANIM) anim_free(r);
-            else row_free(r);
+            else if (A.kind[r] != K_TRACK) row_free(r);
             continue;
         }
         if (n + 3 > cap) { *live = true; break; }
@@ -672,13 +735,15 @@ int anim_tick(double now, AnimEvent *out, int cap, bool *live)
             *live = true;
         } else if (A.kind[r] == K_ANIM) {
             if (bit(A.ev_end, r)) continue;
-            double t = now - A.start[r] - A.delay[r];
+            double t = row_time(r, now) - A.start[r] - A.delay[r];
             double active = isinf(A.iters[r]) ? INFINITY : A.dur[r] * A.iters[r];
             *live = true;
             if (t < 0) continue;
             if (!bit(A.ev_start, r)) {
                 n = emit(out, n, r, ANIM_EV_ASTART, A.delay[r] < 0 ? -A.delay[r] : 0);
                 bset(A.ev_start, r, true);
+                /* (it starts in the iteration a negative delay puts it in) */
+                if (A.dur[r] > 0) A.iter[r] = (int)floor((t < active ? t : 0) / A.dur[r]);
             }
             if (t >= active) {
                 n = emit(out, n, r, ANIM_EV_AEND, active);
@@ -694,6 +759,7 @@ int anim_tick(double now, AnimEvent *out, int cap, bool *live)
             }
         }
     }
+    while (g_ncancels > 0 && n + 4 < cap) out[n++] = g_cancels[--g_ncancels];
     return n;
 }
 

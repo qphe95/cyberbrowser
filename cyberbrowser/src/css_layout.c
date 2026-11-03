@@ -18,6 +18,7 @@
 #include "html_dom.h"
 #include "dom_fetch.h"
 #include "dom_store.h"
+#include "dom_query.h"
 #include "dom_wrap.h"
 #include "text_shaper.h"
 #include "display_list.h"
@@ -5933,14 +5934,11 @@ static bool has_compound_keys(HasSubjects *hs, HasKeySet *ks, const char *st, co
     return true;
 }
 
-/* Pseudo-classes that never match here (dynamic states a static render
- * does not have; css_apply_pseudo gives them never_match). */
+/* Pseudo-classes that never match here (css_apply_pseudo gives them never_match). */
 static bool has_pseudo_never_matches(const char *name, size_t nl)
 {
     static const char *const names[] = {
-        "visited", "hover", "active", "focus", "focus-visible", "focus-within", "target", "target-within",
-        "checked", "disabled", "indeterminate", "read-write", "autofill", "playing", "paused", "current",
-        "past", "future",
+        "visited", "target-within", "autofill", "current", "past", "future",
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strlen(names[i]) == nl && strncasecmp(names[i], name, nl) == 0) return true;
@@ -7454,6 +7452,9 @@ static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects
                 if (a->name) h = style_mix(h, a->name, strlen(a->name) + 1);
                 if (a->value) h = style_mix(h, a->value, strlen(a->value) + 1);
             }
+            /* (its states too: they change with the attributes' generation) */
+            uint32_t st = dom_element_state(hn->store_id);
+            if (st) h = style_mix(h, &st, sizeof st);
             if (!h) h = 1;
             hn->attr_hash = h;
         }
@@ -17733,6 +17734,20 @@ static void layout_anim_read(const LayoutStyle *s, AnimVal v[ANIM_NPROP])
     v[ANIM_COLOR] = (AnimVal){ (float)s->color_r, (float)s->color_g, 1, (float)s->color_b, (float)s->color_a };
     v[ANIM_BGCOLOR] = (AnimVal){ (float)s->background_color_r, (float)s->background_color_g, 1,
                                  (float)s->background_color_b, (float)s->background_color_a };
+    /* (pct_sides: bits 0-3 margin T/R/B/L, 4-7 padding; those with a
+     * percentage, or auto margins, don't interpolate here) */
+    const double pad[4] = { s->padding_top, s->padding_right, s->padding_bottom, s->padding_left };
+    const double mar[4] = { s->margin_top, s->margin_right, s->margin_bottom, s->margin_left };
+    const double bor[4] = { s->border_top, s->border_right, s->border_bottom, s->border_left };
+    for (int k = 0; k < 4; k++) {
+        v[ANIM_PADDING_TOP + k] = (AnimVal){ (float)pad[k], 0, !(s->pct_sides & (16 << k)) };
+        v[ANIM_MARGIN_TOP + k] = (AnimVal){ (float)mar[k], 0, !(s->pct_sides & (1 << k)) && !s->margin_auto };
+        v[ANIM_BORDER_TOP + k] = (AnimVal){ (float)bor[k], 0, 1 };
+    }
+    v[ANIM_FONT_SIZE] = (AnimVal){ (float)s->font_size, 0, 1 };
+    v[ANIM_FONT_WEIGHT] = (AnimVal){ (float)s->font_weight, 0, 1 };
+    v[ANIM_LETTER_SPACING] = (AnimVal){ s->letter_spacing_set ? s->letter_spacing : 0.0f, 0, 1 };
+    v[ANIM_WORD_SPACING] = (AnimVal){ s->word_spacing_set ? s->word_spacing : 0.0f, 0, 1 };
 }
 
 void css_layout_anim_seed(const LayoutContext *ctx, int idx, uint32_t el)
@@ -17763,6 +17778,28 @@ static void layout_anim_write(LayoutStyle *s, int p, const AnimVal *v)
         s->height_percent = 0.0;
     } else if (p == ANIM_COLOR) {
         s->color_r = v->x; s->color_g = v->y; s->color_b = v->z; s->color_a = v->w;
+    } else if (p >= ANIM_PADDING_TOP && p <= ANIM_PADDING_LEFT) {
+        double *f[4] = { &s->padding_top, &s->padding_right, &s->padding_bottom, &s->padding_left };
+        *f[p - ANIM_PADDING_TOP] = v->x < 0 ? 0 : v->x;
+        s->em_deferred &= (unsigned char)~(16 << (p - ANIM_PADDING_TOP));
+    } else if (p >= ANIM_MARGIN_TOP && p <= ANIM_MARGIN_LEFT) {
+        double *f[4] = { &s->margin_top, &s->margin_right, &s->margin_bottom, &s->margin_left };
+        *f[p - ANIM_MARGIN_TOP] = v->x;
+        s->em_deferred &= (unsigned char)~(1 << (p - ANIM_MARGIN_TOP));
+    } else if (p >= ANIM_BORDER_TOP && p <= ANIM_BORDER_LEFT) {
+        double *f[4] = { &s->border_top, &s->border_right, &s->border_bottom, &s->border_left };
+        *f[p - ANIM_BORDER_TOP] = v->x < 0 ? 0 : v->x;
+    } else if (p == ANIM_FONT_WEIGHT) {
+        s->font_weight = (int)(v->x < 1 ? 1 : v->x > 1000 ? 1000 : v->x + 0.5f);
+        s->font_weight_set = 1;
+    } else if (p == ANIM_FONT_SIZE) {
+        s->font_size = v->x < 0 ? 0 : v->x;
+    } else if (p == ANIM_LETTER_SPACING) {
+        s->letter_spacing = v->x;
+        s->letter_spacing_set = 1;
+    } else if (p == ANIM_WORD_SPACING) {
+        s->word_spacing = v->x;
+        s->word_spacing_set = 1;
     } else if (p == ANIM_BGCOLOR) {
         s->background_color_r = v->x; s->background_color_g = v->y; s->background_color_b = v->z; s->background_color_a = v->w;
     } else {
@@ -17860,6 +17897,19 @@ static void layout_animate(LayoutContext *ctx, const CssStyleSet *set)
         if (wrote) {
             if (i < base && ctx->slot_ver) ctx->slot_ver[i] = 0;
             if (ctx->style_left) ctx->style_left[i] = 0;
+        }
+        any = anim_any();
+    }
+    /* (a pseudo-element's box gone, its content cleared: what ran on it stops) */
+    for (int i = 0; any && !ctx->cache_readonly && i < base; i++) {
+        NodeId el = ctx->ids[i];
+        if (!el || dom_kind(el) != DOM_K_ELEMENT) continue;
+        for (int ps = 1; ps <= 2; ps++) {
+            if (!anim_has(el, ps)) continue;
+            bool box = false;
+            for (int k = 0; !box && ctx->pseudo_pairs && k < pn / 2; k++)
+                box = ctx->pseudo_pairs[k].owner == i && ctx->pseudo_pairs[k].side == ps - 1;
+            if (!box) anim_pseudo_gone(el, ps, now);
         }
         any = anim_any();
     }

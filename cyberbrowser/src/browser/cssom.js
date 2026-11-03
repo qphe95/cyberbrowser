@@ -608,6 +608,13 @@
     var CSSContainerRule = subclass('CSSContainerRule', CSSConditionRule);
     var CSSLayerBlockRule = subclass('CSSLayerBlockRule', CSSGroupingRule);
     var CSSLayerStatementRule = subclass('CSSLayerStatementRule', CSSRule);
+    var CSSViewTransitionRule = subclass('CSSViewTransitionRule', CSSRule);
+    getter(CSSViewTransitionRule.prototype, 'navigation', function () { return this.__navigation; });
+    getter(CSSViewTransitionRule.prototype, 'types', function () { return Object.freeze(this.__types.slice()); });
+    CSSViewTransitionRule.prototype.__text = function () {
+        return '@view-transition { ' + (this.__navigation ? 'navigation: ' + this.__navigation + '; ' : '') +
+            (this.__types.length ? 'types: ' + this.__types.join(' ') + '; ' : '') + '}';
+    };
     var CSSScopeRule = subclass('CSSScopeRule', CSSGroupingRule);
     var CSSStartingStyleRule = subclass('CSSStartingStyleRule', CSSGroupingRule);
     var CSSImportRule = subclass('CSSImportRule', CSSRule);
@@ -952,6 +959,17 @@
                     r = makeRule(CSSLayerBlockRule, 'layer', { __name: names[0] || '', __rules: [] });
                     r.__rules = parseRules(p.block, ctx === 'style' ? 'style' : 'group', r);
                 }
+                break;
+            case 'view-transition':
+                if (p.block === null || p.prelude) return null;
+                r = makeRule(CSSViewTransitionRule, 'view-transition', { __navigation: '', __types: [] });
+                p.block.split(';').forEach(function (d) {
+                    var at = d.indexOf(':');
+                    if (at < 0) return;
+                    var k = d.slice(0, at).trim().toLowerCase(), v = d.slice(at + 1).trim();
+                    if (k === 'navigation' && /^(auto|none)$/i.test(v)) r.__navigation = v.toLowerCase();
+                    else if (k === 'types') r.__types = /^none$/i.test(v) ? [] : v.split(/\s+/);
+                });
                 break;
             case 'starting-style':
                 if (p.block === null) return null;

@@ -25,6 +25,7 @@
  * Nodes are wrapped in their document's realm (dom_wrap_set_realm_resolver),
  * so a parent reaching into a same-origin frame gets the frame's objects. */
 #include <string.h>
+#include "cyber_env.h"
 #include <ctype.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -60,6 +61,8 @@ typedef struct Frame {
     FrameState state;
     char url[2048];             /* the navigation's (or the loaded page's) URL */
     bool popup;                 /* window.open's: its element is in no document */
+    bool closing;               /* window.close(): gone at the next turn */
+    bool view_transition;       /* the document it had opted into one to the next */
     char fallback_base[2048];   /* an about: frame: its base URL when it has no <base> */
     bool dead;                  /* its document is no longer fully active */
 } Frame;
@@ -514,18 +517,22 @@ static int deliver_messages(void) {
 }
 
 static const char frame_window_js[] =
-    "(function (url, parent, top, frameElement) {"
+    "(function (url, parent, top, frameElement, opener) {"
     "  var w = globalThis;"
     "  if (w.location) w.location.href = url;"
     "  if (document) { try { document.domain = w.location.hostname; } catch (e) {}"
     "                  try { document.baseURI = w.location.href; } catch (e) {} }"
     "  function ro(name, v) { Object.defineProperty(w, name, { value: v, configurable: true, writable: false }); }"
-    "  ro('parent', parent); ro('top', top || parent); ro('frameElement', frameElement);"
+    "  ro('parent', opener ? w : parent); ro('top', opener ? w : top || parent); ro('frameElement', frameElement);"
+    "  if (opener) {"
+    "    Object.defineProperty(w, 'opener', { value: opener, configurable: true, writable: true });"
+    "    Object.defineProperty(w, 'close', { value: function close() { w.__cyberFrameClose(); }, configurable: true, writable: true });"
+    "  }"
     "  function px(v) { var n = parseFloat(v); return isFinite(n) ? n : NaN; }"
     "  function size(dim, attr, dflt) {"
     "    var f = frameElement, n = NaN;"
     "    if (f) { n = px(f.style && f.style[dim]); if (isNaN(n)) n = px(f.getAttribute(attr)); }"
-    "    return isNaN(n) ? dflt : Math.round(n);"
+    "    return isNaN(n) ? (opener ? (dim === 'width' ? opener.innerWidth : opener.innerHeight) : dflt) : Math.round(n);"
     "  }"
     "  Object.defineProperty(w, 'innerWidth', { get: function () { return size('width', 'width', 300); }, configurable: true });"
     "  Object.defineProperty(w, 'innerHeight', { get: function () { return size('height', 'height', 150); }, configurable: true });"
@@ -556,9 +563,11 @@ static void frame_setup_window(Frame *f) {
     GCValue iframe = same && !f->popup ? dom_js(f->parent, f->iframe) : JS_NULL;
     GCValue setup = JS_Eval(ctx, frame_window_js, sizeof(frame_window_js) - 1, "<frame_window>",
                             JS_EVAL_TYPE_GLOBAL);
+    /* (what the last document here opted into, for pagereveal) */
+    JS_DefinePropertyValueStr(ctx, win, "__cyberOldOptIn", JS_NewBool(ctx, f->view_transition), JS_PROP_CONFIGURABLE);
     if (JS_IsFunction(ctx, setup)) {
-        GCValue args[4] = { JS_NewString(ctx, f->url), parent_win, top, iframe };
-        GCValue r = JS_Call(ctx, setup, JS_UNDEFINED, 4, args);
+        GCValue args[5] = { JS_NewString(ctx, f->url), parent_win, top, iframe, f->popup ? parent_win : JS_NULL };
+        GCValue r = JS_Call(ctx, setup, JS_UNDEFINED, 5, args);
         if (JS_IsException(r)) JS_GetException(ctx);
     } else if (JS_IsException(setup)) {
         JS_GetException(ctx);
@@ -625,6 +634,16 @@ static void frame_load(Frame *f) {
     /* (the document going: its window hears) */
     if (SAFE_VALID(f->ctx) && !f->dead) {
         GCValue was = JS_GetGlobalObject(f->ctx);
+        /* (pageswap: whether a view transition goes on, same-origin only) */
+        char *from = realm_url(f->ctx);
+        bool same = same_origin(from, url);
+        free(from);
+        GCValue swap = JS_GetPropertyStr(f->ctx, was, "__cyberPageSwap");
+        GCValue to = JS_NewString(f->ctx, url), sr = JS_FALSE;
+        GCValue sa[2] = { to, JS_NewBool(f->ctx, same) };
+        if (JS_IsFunction(f->ctx, swap)) sr = JS_Call(f->ctx, swap, JS_UNDEFINED, 2, sa);
+        if (JS_IsException(sr)) { JS_GetException(f->ctx); sr = JS_FALSE; }
+        f->view_transition = same && JS_ToBool(f->ctx, sr) > 0;
         frame_fire(f->ctx, was, "beforeunload");
         frame_fire(f->ctx, was, "pagehide");
         frame_fire(f->ctx, was, "unload");
@@ -717,6 +736,7 @@ static void frame_load(Frame *f) {
         "document.readyState = 'interactive';"
         "__cyberDispatchTrusted(document, new Event('DOMContentLoaded', { bubbles: true }));"
         "document.readyState = 'complete';"
+        "if (window.__cyberPageReveal) __cyberPageReveal();"
         "window.dispatchEvent(new Event('load'));";
     GCValue r = JS_Eval(ctx, lifecycle_js, sizeof(lifecycle_js) - 1, "<frame_lifecycle>", JS_EVAL_TYPE_GLOBAL);
     if (JS_IsException(r)) JS_GetException(ctx);
@@ -836,7 +856,7 @@ int frame_api_process(void) {
     int done = deliver_messages();
     for (Frame **pp = &g_frames; *pp; ) {
         Frame *f = *pp;
-        if (!dom_valid(f->iframe) || (!f->popup && !dom_is_connected(f->iframe))) {
+        if (!dom_valid(f->iframe) || f->closing || (!f->popup && !dom_is_connected(f->iframe))) {
             /* the iframe left its document: its browsing context goes */
             frame_discard_realm(f);
             *pp = f->next;
@@ -1023,12 +1043,19 @@ static GCValue js_frame_navigate_to(JSContextHandle ctx, GCValue this_val, int a
  * a document (a page with a URL for one gets none: as a blocked popup). */
 static GCValue js_window_open(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
+    char *to = NULL;
     if (argc > 0 && !JS_IsUndefined(argv[0])) {
         const char *u = JS_ToCString(ctx, argv[0]);
         if (!u) return JS_EXCEPTION;
         bool blank = !u[0] || !strcmp(u, "about:blank");
+        /* (with a URL, only where popups are allowed: the tests' runs) */
+        if (!blank) {
+            if (!cyber_getenv("CYBER_ALLOW_POPUPS")) { JS_FreeCString(ctx, u); return JS_NULL; }
+            char *base = realm_url(ctx);
+            to = wurl_resolve(base, u);
+            free(base);
+        }
         JS_FreeCString(ctx, u);
-        if (!blank) return JS_NULL;
     }
     GCValue g = JS_GetGlobalObject(ctx), doc = JS_GetPropertyStr(ctx, g, "document");
     GCValue create = JS_IsObject(doc) ? JS_GetPropertyStr(ctx, doc, "createElement") : JS_UNDEFINED;
@@ -1052,6 +1079,12 @@ static GCValue js_window_open(JSContextHandle ctx, GCValue this_val, int argc, G
     if (!f) return JS_NULL;
     f->popup = true;
     frame_ensure(f);
+    /* (its initial document first, as the opener can reach it at once) */
+    if (to) {
+        snprintf(f->url, sizeof(f->url), "%s", to);
+        f->state = FRAME_PENDING;
+        free(to);
+    }
     return SAFE_VALID(f->ctx) ? window_seen_from(ctx, f->id) : JS_NULL;
 }
 
@@ -1085,7 +1118,19 @@ static GCValue js_input_into(JSContextHandle ctx, GCValue this_val, int argc, GC
     return JS_TRUE;
 }
 
+/* window.close() on a popup: closed now; its realm goes at the next turn. */
+static GCValue js_frame_close(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    Frame *f = frame_of_realm(ctx);
+    if (f && f->popup) {
+        f->closing = true;
+        JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "closed", JS_TRUE, JS_PROP_CONFIGURABLE);
+    }
+    return JS_UNDEFINED;
+}
+
 void frame_api_install(JSContextHandle ctx, GCValue global) {
+    JS_DefinePropertyValueStr(ctx, global, "__cyberFrameClose", JS_NewCFunction(ctx, js_frame_close, "__cyberFrameClose", 0), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberFrameNavigate", JS_NewCFunction(ctx, js_frame_navigate_to, "__cyberFrameNavigate", 1), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberInputInto", JS_NewCFunction(ctx, js_input_into, "__cyberInputInto", 6), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "open", JS_NewCFunction(ctx, js_window_open, "open", 0),

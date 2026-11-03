@@ -77,6 +77,8 @@ for (const d of dirs) {
         }
         if (!/\.(html?|xht|xhtml|xml|svg)$/.test(base)) continue;
         const src = fs.readFileSync(path.join(root, f), 'utf8');
+        /* (flags=interact: it asks a person to act, as -manual does) */
+        if (/<meta\s[^>]*name\s*=\s*["']?flags\b[^>]*\binteract\b/i.test(src)) continue;
         if (/rel\s*=\s*["']?(match|mismatch)\b/i.test(src)) { reftests.push(f); continue; }
         if (!/\/resources\/testharness\.js/.test(src)) continue;
         const long = /<meta\s+name=["']?timeout["']?\s+content=["']?long/i.test(src);
@@ -254,6 +256,7 @@ const REPORT = `(function () {
 `;
 
 /* {{...}} in .sub. files, for the one host and port there is. */
+const stalledResumes = new Set();
 function substitute(s, url) {
     const port = url.port, origin = url.origin;
     return s.replace(/\{\{([^}]*)\}\}/g, (all, expr) => {
@@ -388,6 +391,27 @@ const server = http.createServer((req, res) => {
     if (url.pathname === '/common/redirect.py') {
         res.writeHead(+(url.searchParams.get('status') || 302), { location: url.searchParams.get('location') });
         return res.end();
+    }
+    /* (support/stall-resume.py: the start of a video, then the rest once a POST says so) */
+    if (url.pathname === '/css/selectors/media/support/stall-resume.py') {
+        const key = url.searchParams.get('key');
+        if (req.method === 'POST') {
+            stalledResumes.add(key);
+            setTimeout(() => stalledResumes.delete(key), 5000);
+            return res.end('put ' + key + ' into stash');
+        }
+        const video = fs.readFileSync(path.join(root, 'media/movie_300.webm'));
+        res.writeHead(200, { 'content-type': 'video/webm', 'content-length': video.length });
+        res.write(video.subarray(0, 4096));
+        const deadline = Date.now() + 30000;
+        const wait = setInterval(() => {
+            if (Date.now() > deadline) { clearInterval(wait); return res.destroy(); }
+            if (!stalledResumes.has(key)) return;
+            clearInterval(wait);
+            res.end(video.subarray(4096));
+        }, 100);
+        res.on('close', () => clearInterval(wait));
+        return;
     }
     if (PY[url.pathname]) {
         const [type, body] = PY[url.pathname](url, req);

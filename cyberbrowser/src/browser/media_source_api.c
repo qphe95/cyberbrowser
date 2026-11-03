@@ -7,7 +7,12 @@
  * playing, timeupdate, waiting, ...).  Events are queued as tasks and fired
  * from media_tick(), at the top of an event-loop turn, like a browser's
  * media task source; appendBuffer()'s update events come the same way.
- * Audio is demuxed (its buffered ranges gate playback) but not played. */
+ * Audio is demuxed (its buffered ranges gate playback) but not played.
+ *
+ * Any other media element with something to play has a player too (plain):
+ * the HTML load algorithm over one resource, fetched whole on a background
+ * request (no data until it has all arrived) and demuxed into a MediaBuffer
+ * of its own. */
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -27,6 +32,8 @@
 #include "platform.h"
 #include "dom_wrap.h"
 #include "media/media_buffer.h"
+#include "js_quickjs.h"
+#include "dom_query.h"
 #include "cyber_env.h"
 #include <stdio.h>
 
@@ -107,10 +114,14 @@ static MediaBuffer *sb_media(GCValue sb_obj) {
 // Media tasks: events fired at the top of the next event-loop turn
 // ============================================================================
 
+enum { SETTLE_NONE, SETTLE_RESOLVE, SETTLE_ABORT, SETTLE_UNSUPPORTED };
+
 typedef struct MediaTask {
     GCValue target;             /* rooted while queued */
-    char type[24];
+    char type[24];              /* (empty: no event, only the settling) */
     bool clear_updating;        /* SourceBuffer: updating = false first */
+    int settle;                 /* play() promises settled after the event */
+    GCValue waiters;            /* rooted: their [resolve, reject, ...] */
 } MediaTask;
 
 static MediaTask *g_tasks;
@@ -135,6 +146,8 @@ static void media_queue_event(GCValue target, const char *type, bool clear_updat
     t->target = target;
     snprintf(t->type, sizeof(t->type), "%s", type);
     t->clear_updating = clear_updating;
+    t->settle = SETTLE_NONE;
+    t->waiters = JS_UNDEFINED;
     root_value(target, true);
 }
 
@@ -558,6 +571,11 @@ void js_media_make_event_target(JSContextHandle ctx, GCValue obj) {
 // ============================================================================
 
 enum { HAVE_NOTHING, HAVE_METADATA, HAVE_CURRENT_DATA, HAVE_FUTURE_DATA, HAVE_ENOUGH_DATA };
+enum { NET_EMPTY, NET_IDLE, NET_LOADING, NET_NO_SOURCE };
+
+/* No data for this long and a load is stalled (HTML: "about three seconds";
+ * it only tells the page, and a test's clock is short). */
+#define MEDIA_STALL_MS 1000
 
 typedef struct MediaPlayer {
     GCValue video, ms;          /* rooted while attached */
@@ -572,13 +590,29 @@ typedef struct MediaPlayer {
     unsigned long long last_paint_ms;
     uint64_t shown_frame;       /* the frame media_refresh_video_frames last put */
     int shown_w, shown_h;
+    int seek_wait;              /* turns before a seek may finish */
+    /* A plain resource (no MediaSource): */
+    bool plain;
+    MediaBuffer *mb;            /* the demuxed file, once it has all arrived */
+    int net;                    /* networkState */
+    bool select_pending;        /* resource selection, at the next turn */
+    bool fetching, complete, defer_fetch;
+    bool can_autoplay;
+    bool stalled, stalled_sent;
+    uintptr_t load_id;          /* the current fetch's: a stale one is ignored */
+    unsigned long long fetch_ms;
+    double default_start;       /* a seek before there was anything to seek in */
+    int error;                  /* MediaError code, 0 = none */
+    int source_next;            /* the <source> child to try next */
+    char *url;                  /* currentSrc */
+    GCValue waiters;            /* rooted: pending play() [resolve, reject, ...] */
 } MediaPlayer;
 
 /* Someone shows new frames without a layout (media_refresh_video_frames):
  * a playing video then asks for no layouts of its own. */
 static bool g_refreshing;
 
-#define MAX_PLAYERS 32
+#define MAX_PLAYERS 256
 static MediaPlayer *g_players[MAX_PLAYERS];
 static int g_nplayers;
 static JSContextHandle g_media_ctx;   /* the context players were attached in */
@@ -586,9 +620,14 @@ static JSContextHandle g_media_ctx;   /* the context players were attached in */
 /* A new document in this process (page_engine_reset, the JS heap gone with
  * the last one's): no players, no queued events. */
 void media_api_reset(void) {
-    for (int i = 0; i < g_nplayers; i++) free(g_players[i]);
+    for (int i = 0; i < g_nplayers; i++) {
+        media_buffer_destroy(g_players[i]->mb);
+        free(g_players[i]->url);
+        free(g_players[i]);
+    }
     g_nplayers = 0;
     g_ntasks = 0;
+    dom_media_forget();
     g_media_ctx = GC_HANDLE_NULL;
     g_refreshing = false;
 }
@@ -616,7 +655,18 @@ static void player_settle_clock(MediaPlayer *p) {
     p->base_ms = (unsigned long long)page_clock_now_ms();
 }
 
+static int player_ranges(JSContextHandle ctx, MediaPlayer *p, MediaRange *out, int max);
+
 static double player_duration(MediaPlayer *p) {
+    if (p->plain) {
+        if (!media_buffer_has_init(p->mb)) return NAN;
+        double d = media_buffer_duration(p->mb);
+        if (d > 0.0) return d;
+        /* (a file that does not say: where its samples end) */
+        MediaRange r[MAX_RANGES];
+        int n = media_buffer_ranges(p->mb, r, MAX_RANGES);
+        return n > 0 ? r[n - 1].end : NAN;
+    }
     MediaSourceDataHandle ms = JS_GetOpaqueHandle(p->ms, js_media_source_class_id);
     if (SAFE_IS_NULL(ms) || SAFE_GET_OR(ms, MediaSourceDataHandle, ready_state, 0) == 0) return NAN;
     return SAFE_GET_OR(ms, MediaSourceDataHandle, duration, NAN);
@@ -624,6 +674,11 @@ static double player_duration(MediaPlayer *p) {
 
 /* The active SourceBuffers' media. */
 static int player_buffers(JSContextHandle ctx, MediaPlayer *p, MediaBuffer **out, int max) {
+    if (p->plain) {
+        if (!p->mb || max < 1) return 0;
+        out[0] = p->mb;
+        return 1;
+    }
     GCValue arr = JS_GetPropertyStr(ctx, p->ms, "__activeSourceBuffers");
     int32_t len = 0;
     JS_ToInt32(ctx, &len, JS_GetPropertyStr(ctx, arr, "length"));
@@ -672,7 +727,57 @@ static int player_ranges(JSContextHandle ctx, MediaPlayer *p, MediaRange *out, i
 
 static MediaBuffer *player_video_buffer(JSContextHandle ctx, MediaPlayer *p);
 
+/* What selectors see of it: :playing, :seeking, :buffering, :stalled. */
+static void player_sync_state(MediaPlayer *p) {
+    if (!p->node || !dom_valid(p->node)) return;
+    const uint16_t mask = DOM_ST_PLAYING | DOM_ST_SEEKING | DOM_ST_BUFFERING | DOM_ST_STALLED;
+    uint16_t on = 0;
+    if (!p->paused) on |= DOM_ST_PLAYING;
+    if (p->seeking) on |= DOM_ST_SEEKING;
+    if (!p->paused && (!p->plain || p->net == NET_LOADING) && p->ready <= HAVE_CURRENT_DATA) {
+        on |= DOM_ST_BUFFERING;
+        if (p->stalled) on |= DOM_ST_STALLED;
+    }
+    uint32_t s = dom_slot(p->node);
+    uint16_t now = (uint16_t)((g_dom.state[s] & ~mask) | on);
+    if (now == g_dom.state[s]) return;
+    g_dom.state[s] = now;
+    dom_mark_dirty(p->node, DOMF_DIRTY_ATTR);
+    dom_request_layout();
+}
+
+/* The pending play() promises go with this event: settled after it fires. */
+static void player_queue_settle(MediaPlayer *p, const char *type, int settle) {
+    media_queue_event(p->video, type, false);
+    MediaTask *t = &g_tasks[g_ntasks - 1];
+    t->settle = settle;
+    t->waiters = p->waiters;
+    p->waiters = JS_UNDEFINED;
+}
+
+static void player_seek(MediaPlayer *p, double t) {
+    if (t < 0) t = 0;
+    p->t = t;
+    p->base_ms = (unsigned long long)page_clock_now_ms();
+    p->seeking = true;
+    p->seek_wait = 1;           /* (it is seeking for the event, at least) */
+    p->ended = false;
+    media_queue_event(p->video, "seeking", false);
+    player_sync_state(p);
+}
+
 static void player_update(JSContextHandle ctx, MediaPlayer *p) {
+    if (p->plain && !p->mb) {
+        /* (loading, or nothing to do) */
+        if (p->fetching && !p->stalled_sent &&
+            (unsigned long long)page_clock_now_ms() - p->fetch_ms >= MEDIA_STALL_MS) {
+            p->stalled_sent = true;
+            p->stalled = true;
+            media_queue_event(p->video, "stalled", false);
+        }
+        player_sync_state(p);
+        return;
+    }
     MediaBuffer *mbs[8];
     int nb = player_buffers(ctx, p, mbs, 8);
     bool meta = nb > 0;
@@ -688,6 +793,7 @@ static void player_update(JSContextHandle ctx, MediaPlayer *p) {
             if (!covers(mbs[i], t, 1.0, duration)) future = false;
         }
         ready = future ? HAVE_ENOUGH_DATA : cur ? HAVE_CURRENT_DATA : HAVE_METADATA;
+        if (p->plain) ready = HAVE_ENOUGH_DATA;     /* (it has all of it) */
     }
     int old = p->ready;
     if (ready != old)
@@ -698,6 +804,11 @@ static void player_update(JSContextHandle ctx, MediaPlayer *p) {
         media_queue_event(p->video, "durationchange", false);
         media_queue_event(p->video, "loadedmetadata", false);
         media_queue_event(p->video, "resize", false);
+        if (p->default_start > 0.0) {
+            double at = p->default_start;
+            p->default_start = 0.0;
+            player_seek(p, !isnan(duration) && at > duration ? duration : at);
+        }
     }
     if (ready < HAVE_FUTURE_DATA && old >= HAVE_FUTURE_DATA) {
         player_settle_clock(p);         /* freeze the clock while stalled */
@@ -708,7 +819,8 @@ static void player_update(JSContextHandle ctx, MediaPlayer *p) {
         p->sent_loadeddata = true;
         media_queue_event(p->video, "loadeddata", false);
     }
-    if (p->seeking && ready >= HAVE_CURRENT_DATA) {
+    if (p->seek_wait > 0) p->seek_wait--;
+    else if (p->seeking && ready >= HAVE_CURRENT_DATA) {
         p->seeking = false;
         p->base_ms = (unsigned long long)page_clock_now_ms();
         media_queue_event(p->video, "seeked", false);
@@ -718,20 +830,34 @@ static void player_update(JSContextHandle ctx, MediaPlayer *p) {
         p->base_ms = (unsigned long long)page_clock_now_ms();
         media_queue_event(p->video, "canplay", false);
         if (ready == HAVE_ENOUGH_DATA) media_queue_event(p->video, "canplaythrough", false);
-        if (!p->paused) { p->waiting = false; media_queue_event(p->video, "playing", false); }
+        if (p->plain && p->paused && p->can_autoplay && dom_get_attr_str(p->node, "autoplay")) {
+            p->can_autoplay = false;
+            p->paused = false;
+            media_queue_event(p->video, "play", false);
+        }
+        if (!p->paused) {
+            p->waiting = false;
+            if (p->plain) player_queue_settle(p, "playing", SETTLE_RESOLVE);
+            else media_queue_event(p->video, "playing", false);
+        }
     }
 
     unsigned long long now = (unsigned long long)page_clock_now_ms();
-    MediaSourceDataHandle ms = JS_GetOpaqueHandle(p->ms, js_media_source_class_id);
-    bool stream_ended = !SAFE_IS_NULL(ms) && SAFE_GET_OR(ms, MediaSourceDataHandle, ready_state, 0) == 2;
-    if (!p->paused && !p->ended && stream_ended && !isnan(duration) && player_time(p) >= duration - 0.05) {
-        p->t = duration;
-        p->base_ms = now;
-        p->paused = true;
-        p->ended = true;
-        media_queue_event(p->video, "timeupdate", false);
-        media_queue_event(p->video, "pause", false);
-        media_queue_event(p->video, "ended", false);
+    MediaSourceDataHandle ms = p->plain ? GC_HANDLE_NULL : JS_GetOpaqueHandle(p->ms, js_media_source_class_id);
+    bool stream_ended = p->plain ? p->complete : !SAFE_IS_NULL(ms) && SAFE_GET_OR(ms, MediaSourceDataHandle, ready_state, 0) == 2;
+    if (!p->paused && !p->ended && !p->seeking && stream_ended && !isnan(duration) && player_time(p) >= duration - 0.05) {
+        if (p->plain && dom_get_attr_str(p->node, "loop")) {
+            player_seek(p, 0.0);
+        } else {
+            p->t = duration;
+            p->base_ms = now;
+            p->paused = true;
+            p->ended = true;
+            media_queue_event(p->video, "timeupdate", false);
+            media_queue_event(p->video, "pause", false);
+            if (p->plain) player_queue_settle(p, "ended", SETTLE_ABORT);
+            else media_queue_event(p->video, "ended", false);
+        }
     }
     bool running = !p->paused && !p->waiting && p->ready >= HAVE_FUTURE_DATA;
     if (running && now - p->last_timeupdate_ms >= 250) {
@@ -752,9 +878,306 @@ static void player_update(JSContextHandle ctx, MediaPlayer *p) {
         p->last_paint_ms = now;
         g_dom_needs_layout = 1;
     }
+    player_sync_state(p);
+}
+
+/* ---- a plain resource: the load algorithm ---- */
+
+static MediaPlayer *player_ensure(JSContextHandle ctx, GCValue video) {
+    MediaPlayer *p = player_of(video);
+    if (p || !JS_IsObject(video) || g_nplayers == MAX_PLAYERS) return p;
+    p = (MediaPlayer *)calloc(1, sizeof(MediaPlayer));
+    if (!p) return NULL;
+    p->plain = true;
+    p->video = video;
+    p->ms = JS_UNDEFINED;
+    p->waiters = JS_UNDEFINED;
+    root_value(video, true);
+    p->node = dom_node_of(video);
+    g_media_ctx = ctx;
+    p->paused = true;
+    p->rate = 1.0;
+    p->can_autoplay = true;
+    p->base_ms = (unsigned long long)page_clock_now_ms();
+    g_players[g_nplayers++] = p;
+    return p;
+}
+
+static void player_select(JSContextHandle ctx, MediaPlayer *p);
+
+/* Nothing (more) can be played. */
+static void player_load_failed(MediaPlayer *p) {
+    p->fetching = false;
+    p->stalled = false;
+    p->error = 4;       /* MEDIA_ERR_SRC_NOT_SUPPORTED */
+    p->net = NET_NO_SOURCE;
+    player_queue_settle(p, "error", SETTLE_UNSUPPORTED);
+    player_sync_state(p);
+}
+
+/* This resource can't be played: the next <source>, or that's all. */
+static void player_try_next(JSContextHandle ctx, MediaPlayer *p) {
+    if (p->node && dom_get_attr_str(p->node, "src")) { player_load_failed(p); return; }
+    int i = 0;
+    for (NodeId c = dom_first_child(p->node); c; c = dom_next_sibling(c))
+        if (dom_kind(c) == DOM_K_ELEMENT && !strcmp(dom_local_name(c), "source") && ++i == p->source_next) {
+            media_queue_event(dom_js(ctx, c), "error", false);
+            break;
+        }
+    player_select(ctx, p);
+}
+
+static void media_fetch_done(JSContextHandle ctx, void *user, const char *url, bool ok, int status,
+                             PlatformHttpBuffer *resp, const char *err) {
+    (void)url;
+    MediaPlayer *p = NULL;
+    for (int i = 0; i < g_nplayers && !p; i++)
+        if (g_players[i]->plain && g_players[i]->fetching && g_players[i]->load_id == (uintptr_t)user) p = g_players[i];
+    if (!p) return;     /* (it has moved on) */
+    MEDIA_LOG("fetched %s: status %d, %zu bytes %s", p->url, status, resp ? resp->size : 0, err ? err : "");
+    p->fetching = false;
+    p->stalled = false;
+    const uint8_t *d = ok && status >= 200 && status < 300 && resp ? (const uint8_t *)resp->data : NULL;
+    size_t n = d ? resp->size : 0;
+    /* (by its bytes, as HTML sniffs: a server's type says little) */
+    bool webm = n >= 4 && d[0] == 0x1A && d[1] == 0x45 && d[2] == 0xDF && d[3] == 0xA3;
+    bool mp4 = n >= 8 && !memcmp(d + 4, "ftyp", 4);
+    if (webm || mp4) {
+        p->mb = media_buffer_create(webm ? "video/webm" : "video/mp4");
+        if (p->mb && !media_buffer_load_whole(p->mb, d, n)) {
+            media_buffer_destroy(p->mb);
+            p->mb = NULL;
+        }
+    }
+    if (!p->mb) { player_try_next(ctx, p); return; }
+    p->complete = true;
+    p->net = NET_IDLE;
+    media_queue_event(p->video, "progress", false);
+    media_queue_event(p->video, "suspend", false);
+}
+
+static void player_fetch(MediaPlayer *p) {
+    static uintptr_t next_id;
+    p->defer_fetch = false;
+    p->load_id = ++next_id;
+    p->fetching = true;
+    p->net = NET_LOADING;
+    p->fetch_ms = (unsigned long long)page_clock_now_ms();
+    p->stalled = p->stalled_sent = false;
+    if (!js_quickjs_net_get_background(p->url, media_fetch_done, (void *)p->load_id)) player_load_failed(p);
+}
+
+/* Resource selection: the src attribute, or each <source> in turn. */
+static void player_select(JSContextHandle ctx, MediaPlayer *p) {
+    p->select_pending = false;
+    const char *chosen = NULL;
+    bool from_attr = false;
+    if (p->node && (chosen = dom_get_attr_str(p->node, "src"))) from_attr = true;
+    else if (p->node) {
+        int i = 0;
+        for (NodeId c = dom_first_child(p->node); c && !chosen; c = dom_next_sibling(c)) {
+            if (dom_kind(c) != DOM_K_ELEMENT || strcmp(dom_local_name(c), "source")) continue;
+            if (++i <= p->source_next) continue;
+            p->source_next = i;
+            const char *src = dom_get_attr_str(c, "src"), *type = dom_get_attr_str(c, "type");
+            if (src && src[0] && (!type || !type[0] || media_type_supported(type))) chosen = src;
+            else media_queue_event(dom_js(ctx, c), "error", false);
+        }
+        if (!chosen) {
+            /* (none at all, or a new <source> may come) */
+            p->net = i ? NET_NO_SOURCE : NET_EMPTY;
+            player_sync_state(p);
+            return;
+        }
+    } else {
+        p->net = NET_EMPTY;
+        return;
+    }
+    media_queue_event(p->video, "loadstart", false);
+    p->net = NET_LOADING;
+    if (from_attr && !chosen[0]) { player_load_failed(p); return; }
+    free(p->url);
+    p->url = dom_resolve_document_url(ctx, chosen);
+    if (!p->url) { player_load_failed(p); return; }
+    const char *preload = dom_get_attr_str(p->node, "preload");
+    if (preload && !strcasecmp(preload, "none") && !dom_get_attr_str(p->node, "autoplay")) {
+        /* (until something asks to play it) */
+        p->defer_fetch = true;
+        p->net = NET_IDLE;
+        media_queue_event(p->video, "suspend", false);
+        return;
+    }
+    player_fetch(p);
+}
+
+void media_element_load(JSContextHandle ctx, GCValue video) {
+    MEDIA_LOG("load()");
+    MediaPlayer *p = player_ensure(ctx, video);
+    /* (a MediaSource drives its own load: sourceopen, loadedmetadata, ...) */
+    if (!p || !p->plain) return;
+    if (p->net == NET_LOADING || p->net == NET_IDLE) media_queue_event(video, "abort", false);
+    if (p->net != NET_EMPTY) media_queue_event(video, "emptied", false);
+    if (p->t != 0.0) media_queue_event(video, "timeupdate", false);
+    player_queue_settle(p, "", SETTLE_ABORT);
+    p->fetching = p->complete = p->defer_fetch = false;
+    p->load_id = 0;
+    p->paused = true;
+    p->waiting = p->seeking = p->ended = false;
+    p->stalled = p->stalled_sent = false;
+    p->seek_wait = 0;
+    p->t = p->default_start = 0.0;
+    p->rate = 1.0;
+    p->ready = HAVE_NOTHING;
+    p->sent_metadata = p->sent_loadeddata = false;
+    p->can_autoplay = true;
+    p->error = 0;
+    p->source_next = 0;
+    p->shown_frame = 0;
+    p->shown_w = p->shown_h = 0;
+    free(p->url);
+    p->url = NULL;
+    media_buffer_destroy(p->mb);
+    p->mb = NULL;
+    p->base_ms = (unsigned long long)page_clock_now_ms();
+    p->net = NET_NO_SOURCE;
+    p->select_pending = true;
+    player_sync_state(p);
+    g_dom_needs_layout = 1;
+}
+
+GCValue media_element_play_resource(JSContextHandle ctx, GCValue video) {
+    MEDIA_LOG("play() (resource)");
+    GCValue funcs[2] = { GC_UNDEFINED_INIT, GC_UNDEFINED_INIT };
+    GCValue promise = JS_NewPromiseCapability(ctx, funcs);
+    if (JS_IsException(promise)) return promise;
+    MediaPlayer *p = player_ensure(ctx, video);
+    if (!p) return promise;
+    if (p->error == 4) {
+        GCValue args[2] = { JS_NewString(ctx, "The element has no supported source"), JS_NewString(ctx, "NotSupportedError") };
+        GCValue e = JS_CallConstructor(ctx, JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "DOMException"), 2, args);
+        JS_Call(ctx, funcs[1], JS_UNDEFINED, 1, &e);
+        return promise;
+    }
+    if (p->net == NET_EMPTY) { p->net = NET_NO_SOURCE; p->select_pending = true; }
+    if (p->defer_fetch) player_fetch(p);
+    if (p->ended) player_seek(p, 0.0);
+    if (!JS_IsObject(p->waiters)) {
+        p->waiters = JS_NewArray(ctx);
+        root_value(p->waiters, true);
+    }
+    int32_t len = 0;
+    JS_ToInt32(ctx, &len, JS_GetPropertyStr(ctx, p->waiters, "length"));
+    JS_SetPropertyUint32(ctx, p->waiters, (uint32_t)len, funcs[0]);
+    JS_SetPropertyUint32(ctx, p->waiters, (uint32_t)len + 1, funcs[1]);
+    p->can_autoplay = false;
+    if (p->paused) {
+        p->paused = false;
+        p->base_ms = (unsigned long long)page_clock_now_ms();
+        media_queue_event(video, "play", false);
+        if (p->ready <= HAVE_CURRENT_DATA) { p->waiting = true; media_queue_event(video, "waiting", false); }
+        else player_queue_settle(p, "playing", SETTLE_RESOLVE);
+    } else if (p->ready >= HAVE_FUTURE_DATA) {
+        player_queue_settle(p, "", SETTLE_RESOLVE);
+    }
+    player_sync_state(p);
+    return promise;
+}
+
+bool media_element_source_attached(GCValue video) {
+    MediaPlayer *p = player_of(video);
+    return p && !p->plain;
+}
+
+bool media_element_seeking(GCValue video) {
+    MediaPlayer *p = player_of(video);
+    return p && p->seeking;
+}
+
+int media_element_network_state(GCValue video) {
+    MediaPlayer *p = player_of(video);
+    return p && p->plain ? p->net : -1;
+}
+
+const char *media_element_url(GCValue video) {
+    MediaPlayer *p = player_of(video);
+    return p && p->plain && p->url ? p->url : "";
+}
+
+GCValue media_element_error(JSContextHandle ctx, GCValue video) {
+    MediaPlayer *p = player_of(video);
+    if (!p || !p->error) return JS_NULL;
+    GCValue e = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, e, "code", JS_NewInt32(ctx, p->error));
+    JS_SetPropertyStr(ctx, e, "message", JS_NewString(ctx, "MEDIA_ELEMENT_ERROR: Format error"));
+    return e;
+}
+
+bool media_element_muted(GCValue video) {
+    NodeId n = dom_node_of(video);
+    return n && (dom_element_state(n) & DOM_ST_MUTED) != 0;
+}
+
+void media_element_volume_changed(GCValue video) { media_queue_event(video, "volumechange", false); }
+
+void media_element_set_muted(GCValue video, bool muted) {
+    NodeId n = dom_node_of(video);
+    if (!n) return;
+    bool was = media_element_muted(video);
+    uint32_t s = dom_slot(n);
+    g_dom.state[s] = (uint16_t)((g_dom.state[s] & ~DOM_ST_MUTED) | DOM_ST_MUTE_SET | (muted ? DOM_ST_MUTED : 0));
+    if (was == muted) return;
+    dom_mark_dirty(n, DOMF_DIRTY_ATTR);
+    dom_request_layout();
+    media_element_volume_changed(video);
+}
+
+/* Elements with something to play that no script started: a parsed
+ * <video src>, or a <source> added to an empty one. */
+static void media_scan_elements(JSContextHandle ctx) {
+    uint32_t n;
+    const NodeId *els = dom_media_elements(&n);
+    for (uint32_t i = 0; i < n; i++) {
+        NodeId el = els[i];
+        if (!dom_valid(el)) continue;
+        MediaPlayer *p = NULL;
+        for (int k = 0; k < g_nplayers && !p; k++) if (g_players[k]->node == el) p = g_players[k];
+        if (p && (!p->plain || p->net != NET_EMPTY || p->select_pending)) continue;
+        bool has = dom_get_attr_str(el, "src") != NULL;
+        for (NodeId c = dom_first_child(el); c && !has; c = dom_next_sibling(c))
+            has = dom_kind(c) == DOM_K_ELEMENT && !strcmp(dom_local_name(c), "source");
+        if (!has || !dom_is_connected(el)) continue;
+        p = player_ensure(ctx, dom_js(ctx, el));
+        if (!p || !p->plain) continue;
+        p->net = NET_NO_SOURCE;
+        p->select_pending = true;
+    }
+}
+
+/* The play() promises in waiters: settled, and let go. */
+static void settle_waiters(JSContextHandle ctx, GCValue waiters, int settle) {
+    if (!JS_IsObject(waiters)) return;
+    GCValue value = JS_UNDEFINED;
+    if (settle != SETTLE_RESOLVE) {
+        bool abort = settle == SETTLE_ABORT;
+        GCValue args[2] = {
+            JS_NewString(ctx, abort ? "The play() request was interrupted" : "The element has no supported source"),
+            JS_NewString(ctx, abort ? "AbortError" : "NotSupportedError") };
+        value = JS_CallConstructor(ctx, JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "DOMException"), 2, args);
+    }
+    int32_t len = 0;
+    JS_ToInt32(ctx, &len, JS_GetPropertyStr(ctx, waiters, "length"));
+    for (int32_t i = 0; i + 1 < len; i += 2) {
+        GCValue fn = JS_GetPropertyUint32(ctx, waiters, (uint32_t)(settle == SETTLE_RESOLVE ? i : i + 1));
+        GCValue r = JS_Call(ctx, fn, JS_UNDEFINED, 1, &value);
+        if (JS_IsException(r)) JS_GetException(ctx);
+    }
+    root_value(waiters, false);
 }
 
 int media_tick(JSContextHandle ctx) {
+    media_scan_elements(ctx);
+    for (int i = 0; i < g_nplayers; i++)
+        if (g_players[i]->select_pending) player_select(ctx, g_players[i]);
     for (int i = 0; i < g_nplayers; i++) player_update(ctx, g_players[i]);
     if (g_ntasks == 0) return 0;
     /* Fire what is queued now; events these handlers queue wait a turn. */
@@ -768,8 +1191,11 @@ int media_tick(JSContextHandle ctx) {
             SourceBufferDataHandle sb = JS_GetOpaqueHandle(tasks[i].target, js_source_buffer_class_id);
             if (!SAFE_IS_NULL(sb)) SAFE_SET(sb, SourceBufferDataHandle, updating, 0);
         }
-        media_fire(ctx, tasks[i].target, tasks[i].type);
+        if (tasks[i].type[0]) media_fire(ctx, tasks[i].target, tasks[i].type);
+        if (tasks[i].settle != SETTLE_NONE) settle_waiters(ctx, tasks[i].waiters, tasks[i].settle);
         root_value(tasks[i].target, false);
+        /* (each is a task: what awaited it runs before the next) */
+        timer_microtask_checkpoint(ctx);
     }
     free(tasks);
     return n;
@@ -782,11 +1208,24 @@ bool media_element_attach(JSContextHandle ctx, GCValue video, GCValue ms_obj) {
     MediaSourceDataHandle ms = JS_GetOpaqueHandle(ms_obj, js_media_source_class_id);
     if (SAFE_IS_NULL(ms)) return false;
     media_element_detach(ctx, video);
+    MediaPlayer *old = player_of(video);
+    if (old) {
+        /* (a plain resource before it: what it was doing stops) */
+        media_element_load(ctx, video);
+        old->select_pending = false;
+        if (JS_IsObject(old->waiters)) root_value(old->waiters, false);
+        root_value(old->video, false);
+        for (int i = 0; i < g_nplayers; i++)
+            if (g_players[i] == old) { g_players[i] = g_players[--g_nplayers]; break; }
+        free(old->url);
+        free(old);
+    }
     if (g_nplayers == MAX_PLAYERS) return false;
     MediaPlayer *p = (MediaPlayer *)calloc(1, sizeof(MediaPlayer));
     if (!p) return false;
     p->video = video;
     p->ms = ms_obj;
+    p->waiters = JS_UNDEFINED;
     root_value(video, true);
     root_value(ms_obj, true);
     p->node = dom_node_of(video);
@@ -805,7 +1244,7 @@ bool media_element_attach(JSContextHandle ctx, GCValue video, GCValue ms_obj) {
 void media_element_detach(JSContextHandle ctx, GCValue video) {
     for (int i = 0; i < g_nplayers; i++) {
         MediaPlayer *p = g_players[i];
-        if (JS_VALUE_GET_HANDLE(p->video) != JS_VALUE_GET_HANDLE(video)) continue;
+        if (p->plain || JS_VALUE_GET_HANDLE(p->video) != JS_VALUE_GET_HANDLE(video)) continue;
         MediaSourceDataHandle ms = JS_GetOpaqueHandle(p->ms, js_media_source_class_id);
         if (!SAFE_IS_NULL(ms)) SAFE_SET(ms, MediaSourceDataHandle, ready_state, 0);
         media_queue_event(p->ms, "sourceclose", false);
@@ -822,18 +1261,21 @@ bool media_element_active(GCValue video) { return player_of(video) != NULL; }
 
 double media_element_current_time(GCValue video) {
     MediaPlayer *p = player_of(video);
-    return p ? player_time(p) : 0.0;
+    if (!p) return 0.0;
+    return p->plain && p->ready == HAVE_NOTHING ? p->default_start : player_time(p);
 }
 
-void media_element_seek(GCValue video, double t) {
-    MediaPlayer *p = player_of(video);
-    if (!p || isnan(t)) return;
-    if (t < 0) t = 0;
-    p->t = t;
-    p->base_ms = (unsigned long long)page_clock_now_ms();
-    p->seeking = true;
-    p->ended = false;
-    media_queue_event(p->video, "seeking", false);
+void media_element_seek(JSContextHandle ctx, GCValue video, double t) {
+    if (isnan(t)) return;
+    MediaPlayer *p = player_ensure(ctx, video);
+    if (!p) return;
+    if (p->plain) {
+        /* (nothing to seek in yet: it starts there) */
+        if (p->ready == HAVE_NOTHING) { p->default_start = t; return; }
+        double d = player_duration(p);
+        if (!isnan(d) && t > d) t = d;
+    }
+    player_seek(p, t);
 }
 
 double media_element_duration(GCValue video) {
@@ -873,20 +1315,26 @@ void media_element_play(GCValue video) {
     media_queue_event(p->video, "play", false);
     if (p->ready >= HAVE_FUTURE_DATA) media_queue_event(p->video, "playing", false);
     else { p->waiting = true; media_queue_event(p->video, "waiting", false); }
+    player_sync_state(p);
 }
 
-void media_element_pause(GCValue video) {
+void media_element_pause(JSContextHandle ctx, GCValue video) {
+    (void)ctx;
     MediaPlayer *p = player_of(video);
-    if (!p || p->paused) return;
+    if (!p) return;
+    p->can_autoplay = false;
+    if (p->paused) return;
     player_settle_clock(p);
     p->paused = true;
     p->waiting = false;
     media_queue_event(p->video, "timeupdate", false);
-    media_queue_event(p->video, "pause", false);
+    if (p->plain) player_queue_settle(p, "pause", SETTLE_ABORT);
+    else media_queue_event(p->video, "pause", false);
+    player_sync_state(p);
 }
 
-void media_element_set_rate(GCValue video, double rate) {
-    MediaPlayer *p = player_of(video);
+void media_element_set_rate(JSContextHandle ctx, GCValue video, double rate) {
+    MediaPlayer *p = player_ensure(ctx, video);
     if (!p || isnan(rate)) return;
     player_settle_clock(p);
     p->rate = rate;

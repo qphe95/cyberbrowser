@@ -23,7 +23,11 @@
 #include "dom_store.h"
 
 /* The properties that animate (the others keep their cascaded value). */
-enum { ANIM_LEFT, ANIM_TOP, ANIM_RIGHT, ANIM_BOTTOM, ANIM_OPACITY, ANIM_TRANSFORM, ANIM_WIDTH, ANIM_HEIGHT, ANIM_COLOR, ANIM_BGCOLOR, ANIM_NPROP };
+enum { ANIM_LEFT, ANIM_TOP, ANIM_RIGHT, ANIM_BOTTOM, ANIM_OPACITY, ANIM_TRANSFORM, ANIM_WIDTH, ANIM_HEIGHT, ANIM_COLOR, ANIM_BGCOLOR,
+       ANIM_PADDING_TOP, ANIM_PADDING_RIGHT, ANIM_PADDING_BOTTOM, ANIM_PADDING_LEFT,
+       ANIM_MARGIN_TOP, ANIM_MARGIN_RIGHT, ANIM_MARGIN_BOTTOM, ANIM_MARGIN_LEFT,
+       ANIM_BORDER_TOP, ANIM_BORDER_RIGHT, ANIM_BORDER_BOTTOM, ANIM_BORDER_LEFT,
+       ANIM_FONT_SIZE, ANIM_LETTER_SPACING, ANIM_WORD_SPACING, ANIM_FONT_WEIGHT, ANIM_NPROP };
 
 /* A value: px (or a number: opacity; a translation: x, y).  ok 0: one
  * that does not interpolate (auto, a percentage): it changes at once. */
@@ -52,6 +56,9 @@ double anim_now(void);
 const char *anim_prop_name(int prop);
 int anim_prop_of(const char *name);
 
+/* A new document: nothing runs. */
+void anim_reset(void);
+
 /* ---- Layout ---- */
 
 /* Whether element el (pseudo ps) has rows. */
@@ -76,6 +83,12 @@ void anim_box(NodeId el, int ps, const char *spec, const AnimVal base[ANIM_NPROP
 /* The values el/ps had before its style gained a transition, for any
  * property that has none yet. */
 void anim_seed(NodeId el, int ps, const AnimVal base[ANIM_NPROP]);
+
+/* Subtree root left its document: what runs in it is cancelled now, so that
+ * putting it back does not continue them. */
+void anim_node_removed(NodeId root);
+/* el's pseudo-element ps has no box any more: as cancelled. */
+void anim_pseudo_gone(NodeId el, int ps, double now);
 
 /* The value of prop on el/ps at now, when something animates it. */
 bool anim_value(NodeId el, int ps, int prop, double now, AnimVal *out);

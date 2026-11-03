@@ -49,6 +49,8 @@ bool dom_query_matches(NodeId el, const char *sel, size_t len);
 bool dom_query_matches_scoped(NodeId el, const char *sel, size_t len, NodeId scope);
 /* Is the selector parsable? */
 bool dom_query_valid(const char *sel, size_t len);
+/* el's states (DOM_ST_*): those set on it and those its attributes give. */
+uint32_t dom_element_state(NodeId el);
 /* The fragment (no '#') :target matches until the next call; NULL or 0: none. */
 void dom_query_set_target(const char *frag, size_t n);
 

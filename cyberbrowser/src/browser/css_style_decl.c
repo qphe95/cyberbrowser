@@ -235,7 +235,12 @@ static void block_changed(JSContextHandle ctx, GCValue obj, StyleBlock *b) {
         /* (it gains a transition) */
         const char *was_style = dom_get_attr_str(b->owner, "style");
         if (strstr(text, "transition") && !(was_style && strstr(was_style, "transition"))) layout_query_anim_seed(b->owner);
-        if (text[0] || dom_get_attr_str(b->owner, "style")) dom_set_attr_str(b->owner, "style", text);
+        char *old = was_style ? strdup(was_style) : NULL;
+        bool changed = !old || strcmp(old, text) != 0;
+        if (text[0] || was_style) dom_set_attr_str(b->owner, "style", text);
+        /* (the attribute changed: an observer hears of it) */
+        if (changed && (text[0] || old)) mo_notify_attribute(ctx, dom_js(ctx, b->owner), "style", old);
+        free(old);
         free(text);
     }
     dom_mark_dirty(b->owner, DOMF_DIRTY_ATTR);

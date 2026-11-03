@@ -1505,6 +1505,22 @@ static void css_parse_nth(const char *arg, size_t al, int *out_a, int *out_b)
     *out_b = atoi(np + 1);
 }
 
+uint32_t css_state_bit(const char *name, size_t nl)
+{
+    static const struct { const char *n; uint32_t bit; } k[] = {
+        { "hover", DOM_ST_HOVER }, { "active", DOM_ST_ACTIVE }, { "focus", DOM_ST_FOCUS },
+        { "focus-visible", DOM_ST_FOCUS_VISIBLE }, { "focus-within", DOM_ST_FOCUS_WITHIN }, { "target", DOM_ST_TARGET },
+        { "checked", DOM_ST_CHECKED }, { "indeterminate", DOM_ST_INDETERMINATE }, { "playing", DOM_ST_PLAYING },
+        { "paused", DOM_ST_PAUSED }, { "muted", DOM_ST_MUTED }, { "seeking", DOM_ST_SEEKING },
+        { "buffering", DOM_ST_BUFFERING }, { "stalled", DOM_ST_STALLED }, { "enabled", DOM_ST_ENABLED },
+        { "disabled", DOM_ST_DISABLED }, { "read-write", DOM_ST_READ_WRITE }, { "read-only", DOM_ST_READ_ONLY },
+        { "required", DOM_ST_REQUIRED }, { "optional", DOM_ST_OPTIONAL },
+    };
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; i++)
+        if (strlen(k[i].n) == nl && !strncasecmp(k[i].n, name, nl)) return k[i].bit;
+    return 0;
+}
+
 /* Record a parsed pseudo-class/element on the simple selector. */
 static void css_apply_pseudo(CssSimpleSelector *out,
                              const char *name, size_t nl,
@@ -1532,22 +1548,16 @@ static void css_apply_pseudo(CssSimpleSelector *out,
     }
     if (css_pseudo_name_is(name, nl, "empty")) { out->requires_empty = true; return; }
     if (css_pseudo_name_is(name, nl, "link")) { out->requires_link = true; return; }
-    /* Dynamic states: never true for a freshly-rendered static page. */
+    uint32_t state_bit = css_state_bit(name, nl);
+    if (state_bit) {
+        out->state_mask |= state_bit;
+        out->has_substantive = true;
+        return;
+    }
+    /* (states nothing here has: no history, no autofill, no timeline) */
     if (css_pseudo_name_is(name, nl, "visited") ||
-        css_pseudo_name_is(name, nl, "hover") ||
-        css_pseudo_name_is(name, nl, "active") ||
-        css_pseudo_name_is(name, nl, "focus") ||
-        css_pseudo_name_is(name, nl, "focus-visible") ||
-        css_pseudo_name_is(name, nl, "focus-within") ||
-        css_pseudo_name_is(name, nl, "target") ||
         css_pseudo_name_is(name, nl, "target-within") ||
-        css_pseudo_name_is(name, nl, "checked") ||
-        css_pseudo_name_is(name, nl, "disabled") ||
-        css_pseudo_name_is(name, nl, "indeterminate") ||
-        css_pseudo_name_is(name, nl, "read-write") ||
         css_pseudo_name_is(name, nl, "autofill") ||
-        css_pseudo_name_is(name, nl, "playing") ||
-        css_pseudo_name_is(name, nl, "paused") ||
         css_pseudo_name_is(name, nl, "current") ||
         css_pseudo_name_is(name, nl, "past") ||
         css_pseudo_name_is(name, nl, "future")) {
@@ -1576,11 +1586,34 @@ static void css_apply_pseudo(CssSimpleSelector *out,
         /* Parse the first compound of the argument as a simple selector and
          * store it flattened; complex/list arguments degrade to "always match"
          * (the pseudo is effectively dropped), matching legacy behavior. */
+        /* (a list, a combinator or another pseudo-class in it: the list,
+         * evaluated at match time; a lone state flattens like the rest) */
+        size_t pk = 0, pe = al;
+        while (pk < pe && css_is_space(arg[pk])) pk++;
+        while (pe > pk && css_is_space(arg[pe - 1])) pe--;
+        bool flat = pe > pk && pe - pk < sizeof(out->not_list_arg);
+        for (size_t i = pk; flat && i < pe; i++)
+            if (strchr(",>+~ \t\n()", arg[i])) flat = false;
+        if (flat)
+            for (const char *c = memchr(arg + pk, ':', pe - pk); c && flat; c = memchr(c + 1, ':', (size_t)(arg + pe - c - 1))) {
+                const char *e = c + 1;
+                while (e < arg + pe && (isalnum((unsigned char)*e) || *e == '-')) e++;
+                if (*(c + 1) == ':' || !css_state_bit(c + 1, (size_t)(e - c - 1))) flat = false;
+            }
+        if (!flat && pe > pk && pe - pk < sizeof(out->not_list_arg)) {
+            memcpy(out->not_list_arg, arg + pk, pe - pk);
+            out->not_list_arg[pe - pk] = '\0';
+            out->not_list_active = true;
+            out->has_substantive = true;
+            return;
+        }
         CssSimpleSelector tmp;
         css_parse_simple_selector(arg, al, &tmp);
         if (tmp.has_tag || tmp.has_id || tmp.class_count > 0 || tmp.attr_count > 0 ||
-            tmp.universal) {
+            tmp.universal || tmp.state_mask) {
             out->not_active = true;
+            out->has_substantive = true;
+            out->not_state = tmp.state_mask;
             out->not_has_tag = tmp.has_tag;
             out->not_has_id = tmp.has_id;
             memcpy(out->not_tag, tmp.tag, sizeof(out->not_tag));
@@ -1669,6 +1702,9 @@ static void css_simple_reset(CssSimpleSelector *out) {
     out->has_tag = out->has_id = out->is_root = out->universal = false;
     out->has_substantive = out->is_pseudo_element = out->requires_empty = false;
     out->never_match = out->requires_link = false;
+    out->state_mask = out->not_state = 0;
+    out->not_list_active = false;
+    out->not_list_arg[0] = '\0';
     out->child_pos = out->type_pos = out->nth_kind = out->nth_a = out->nth_b = 0;
     out->not_active = out->not_has_tag = out->not_has_id = false;
     out->not_class_count = out->not_attr_count = 0;
@@ -1896,13 +1932,34 @@ static int css_specificity_from_simple(const CssSimpleSelector *simple) {
     b += (simple->child_pos ? 1 : 0) + (simple->type_pos ? 1 : 0) +
          (simple->nth_kind ? 1 : 0) + (simple->is_root ? 1 : 0) +
          (simple->requires_link ? 1 : 0) + (simple->requires_empty ? 1 : 0) + simple->lang_count;
+    b += __builtin_popcount(simple->state_mask);
     if (simple->not_active) {
         a += simple->not_has_id ? 1 : 0;
-        b += simple->not_class_count + simple->not_attr_count;
+        b += simple->not_class_count + simple->not_attr_count + __builtin_popcount(simple->not_state);
     }
     int c = (simple->has_tag && !simple->universal) ? 1 : 0;
     if (simple->not_active && simple->not_has_tag) c++;
-    return a * 1000 + b * 10 + c;
+    int spec = a * 1000 + b * 10 + c;
+    /* (:not() of a list: its most specific selector) */
+    if (simple->not_list_active) {
+        int best = 0;
+        const char *p = simple->not_list_arg;
+        while (*p) {
+            const char *e = p;
+            int depth = 0;
+            for (; *e && (depth || *e != ','); e++) depth += *e == '(' ? 1 : *e == ')' ? -1 : 0;
+            char one[400];
+            size_t l = (size_t)(e - p);
+            if (l >= sizeof one) l = sizeof one - 1;
+            memcpy(one, p, l);
+            one[l] = '\0';
+            int s = css_specificity_from_selector_text(one);
+            if (s > best) best = s;
+            p = *e ? e + 1 : e;
+        }
+        spec += best;
+    }
+    return spec;
 }
 
 static int css_specificity_from_chain(const CssSelectorPart *parts, int count);
@@ -1997,7 +2054,7 @@ static bool css_simple_matches_ex(const CssSimpleSelector *simple, HtmlDocument 
      * every node, applying pseudo-element-only declarations (often
      * display:none) to real elements. */
     if (!simple->has_substantive) return false;
-    if (simple->never_match) return false;
+    if (simple->never_match || simple->state_mask) return false;
     if (simple->is_root) {
         /* :root matches the document root element (html). */
         if (strcasecmp(node->tag_name, "html") != 0) return false;

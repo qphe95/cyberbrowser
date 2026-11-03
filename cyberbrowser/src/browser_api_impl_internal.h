@@ -521,15 +521,29 @@ bool media_element_attach(JSContextHandle ctx, GCValue video, GCValue media_sour
 void media_element_detach(JSContextHandle ctx, GCValue video);
 bool media_element_active(GCValue video);
 double media_element_current_time(GCValue video);
-void media_element_seek(GCValue video, double t);
+void media_element_seek(JSContextHandle ctx, GCValue video, double t);
 double media_element_duration(GCValue video);
 int media_element_ready_state(GCValue video);
 bool media_element_paused(GCValue video);
 bool media_element_ended(GCValue video);
 GCValue media_element_buffered(JSContextHandle ctx, GCValue video);
 void media_element_play(GCValue video);
-void media_element_pause(GCValue video);
-void media_element_set_rate(GCValue video, double rate);
+void media_element_pause(JSContextHandle ctx, GCValue video);
+void media_element_set_rate(JSContextHandle ctx, GCValue video, double rate);
+/* A plain resource (video.src, <source>), not a MediaSource: the load
+ * algorithm, and play() with its promise. */
+void media_element_load(JSContextHandle ctx, GCValue video);
+GCValue media_element_play_resource(JSContextHandle ctx, GCValue video);
+bool media_element_source_attached(GCValue video);
+bool media_element_seeking(GCValue video);
+int media_element_network_state(GCValue video);      /* -1: no state of its own */
+const char *media_element_url(GCValue video);        /* currentSrc */
+GCValue media_element_error(JSContextHandle ctx, GCValue video);
+bool media_element_muted(GCValue video);
+void media_element_set_muted(GCValue video, bool muted);
+void media_element_volume_changed(GCValue video);
+void js_video_src_attr_changed(JSContextHandle ctx, GCValue el, const char *src);
+char *dom_resolve_document_url(JSContextHandle ctx, const char *href);
 void media_element_video_size(JSContextHandle ctx, GCValue video, int *w, int *h);
 /* Fire queued media events and advance playback (each event-loop turn). */
 int media_tick(JSContextHandle ctx);   /* returns the events fired */

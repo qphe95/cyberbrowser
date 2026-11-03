@@ -106,6 +106,8 @@ char* css_to_camel_case(const char *prop);
 
 /* Selector matching: returns true if the selector matches the given DOM node. */
 bool css_selector_matches(const char *selector, HtmlDocument *doc, HtmlNode *node);
+/* The DOM_ST_* of a pseudo-class that is a state of the element (0: not one). */
+uint32_t css_state_bit(const char *name, size_t nl);
 
 /* Match a rule's selector against a node. The selector is parsed once and
  * cached on the rule (rule->compiled), so repeated calls over many nodes do

@@ -56,6 +56,7 @@ MediaBuffer *media_buffer_create(const char *m) { (void)m; return calloc(1, size
 void media_buffer_destroy(MediaBuffer *mb) { free(mb); }
 bool media_buffer_append(MediaBuffer *mb, const uint8_t *d, size_t n, double o)
 { (void)mb; (void)d; (void)n; (void)o; return true; }
+bool media_buffer_load_whole(MediaBuffer *mb, const uint8_t *d, size_t n) { (void)mb; (void)d; (void)n; return false; }
 void media_buffer_remove(MediaBuffer *mb, double s, double e) { (void)mb; (void)s; (void)e; }
 void media_buffer_reset_parser(MediaBuffer *mb) { (void)mb; }
 int media_buffer_ranges(MediaBuffer *mb, MediaRange *o, int m) { (void)mb; (void)o; (void)m; return 0; }
@@ -332,14 +333,17 @@ static void close_demux(AVFormatContext *fmt)
     if (io) { av_free(io->buffer); avio_context_free(&io); }
 }
 
-/* The stream this buffer carries: the first audio or video stream. */
+/* The stream this buffer carries: the first video stream, or else the first
+ * audio stream (a file holds both). */
 static int pick_stream(AVFormatContext *fmt)
 {
+    int audio = -1;
     for (unsigned i = 0; i < fmt->nb_streams; i++) {
         enum AVMediaType t = fmt->streams[i]->codecpar->codec_type;
-        if (t == AVMEDIA_TYPE_VIDEO || t == AVMEDIA_TYPE_AUDIO) return (int)i;
+        if (t == AVMEDIA_TYPE_VIDEO) return (int)i;
+        if (t == AVMEDIA_TYPE_AUDIO && audio < 0) audio = (int)i;
     }
-    return -1;
+    return audio;
 }
 
 /* Codec parameters, kind, size and duration from an opened demuxer. */
@@ -411,6 +415,12 @@ static void add_samples(MediaBuffer *mb, Sample *ns, int nn)
     mb->ranges_dirty = true;
 }
 
+static int double_cmp(const void *a, const void *b)
+{
+    double x = *(const double *)a, y = *(const double *)b;
+    return x < y ? -1 : x > y;
+}
+
 static bool demux_media(MediaBuffer *mb, const uint8_t *data, size_t len, double offset)
 {
     MemReader rd = { mb->init, mb->init_len, data, len, 0 };
@@ -453,13 +463,23 @@ static bool demux_media(MediaBuffer *mb, const uint8_t *data, size_t len, double
     av_packet_free(&pkt);
     close_demux(fmt);
     /* Durations the container left out: the gap to the next sample. */
-    for (int i = 0; i < nn; i++) {
+    double *order = nn ? malloc((size_t)nn * sizeof(double)) : NULL;
+    if (order) {
+        for (int i = 0; i < nn; i++) order[i] = ns[i].pts;
+        qsort(order, (size_t)nn, sizeof(double), double_cmp);
+    }
+    for (int i = 0; order && i < nn; i++) {
         if (ns[i].dur > 0.0) continue;
-        double next = 1e300;
-        for (int j = 0; j < nn; j++)
-            if (ns[j].pts > ns[i].pts + 1e-9 && ns[j].pts < next) next = ns[j].pts;
+        /* (the first presentation time past this one) */
+        int lo = 0, hi = nn;
+        while (lo < hi) {
+            int mid = lo + (hi - lo) / 2;
+            if (order[mid] > ns[i].pts + 1e-9) hi = mid; else lo = mid + 1;
+        }
+        double next = lo < nn ? order[lo] : 1e300;
         ns[i].dur = next < 1e299 && next - ns[i].pts < 1.0 ? next - ns[i].pts : fallback_dur;
     }
+    free(order);
     pthread_mutex_lock(&mb->mu);
     add_samples(mb, ns, nn);
     pthread_mutex_unlock(&mb->mu);
@@ -530,6 +550,17 @@ void media_buffer_destroy(MediaBuffer *mb)
     pthread_cond_destroy(&mb->ready);
     if (mb->par) avcodec_parameters_free(&mb->par);
     free(mb);
+}
+
+bool media_buffer_load_whole(MediaBuffer *mb, const uint8_t *data, size_t len)
+{
+    if (!mb || !data || !len) return false;
+    /* (the file is its own initialization: nothing goes before it) */
+    free(mb->init);
+    mb->init = malloc(1);
+    mb->init_len = 0;
+    /* (a file of a codec this build has no decoder for can't be played) */
+    return mb->init && demux_media(mb, data, len, 0.0) && mb->par && avcodec_find_decoder(mb->par->codec_id);
 }
 
 bool media_buffer_append(MediaBuffer *mb, const uint8_t *data, size_t len, double offset)
@@ -725,6 +756,18 @@ static int slot_free(const MediaBuffer *mb)
     return best;
 }
 
+/* A slot for the frame asked for, when slot_free has none: the frames ahead
+ * filling them are the wrong ones (it rewound).  The farthest of them that is
+ * not shown.  mu held. */
+static int slot_for_wanted(const MediaBuffer *mb)
+{
+    int k = slot_free(mb);
+    if (k >= 0 || slot_of(mb, mb->want) >= 0) return k;
+    for (int i = 0; i < VSLOTS; i++)
+        if (i != mb->shown && (k < 0 || mb->slot[i].pts > mb->slot[k].pts)) k = i;
+    return k;
+}
+
 /* Frames decoded past the one asked for, still in the slots.  mu held. */
 static int slots_ahead(const MediaBuffer *mb)
 {
@@ -807,7 +850,7 @@ static void *worker_main(void *arg)
                 continue;
             }
             /* the frame asked for, or one past it */
-            int k = slot_free(mb);
+            int k = slot_for_wanted(mb);
             if (k >= 0) {
                 struct VFrame *v = &mb->slot[k];
                 v->pts = INT64_MIN;     /* being written */
@@ -844,7 +887,7 @@ static void *worker_main(void *arg)
         drained = false;
         if (slot_of(mb, want) < 0) {
             /* the newest frame before it shows, as before the worker */
-            int k = prev->buf[0] && gen == mb->gen ? slot_free(mb) : -1;
+            int k = prev->buf[0] && gen == mb->gen ? slot_for_wanted(mb) : -1;
             if (k >= 0) {
                 struct VFrame *v = &mb->slot[k];
                 v->pts = INT64_MIN;

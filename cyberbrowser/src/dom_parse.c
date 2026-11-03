@@ -745,6 +745,7 @@ static uint32_t build_element(Builder *b, DomTok *t, uint32_t parent, bool paren
     }
     g_dom.flags[s] = dom_tag_flags(t->tag) | ((t->flags & TKF_SELF_CLOSED) ? DOMF_SELF_CLOSED : 0);
     if (t->tag == g_raw_atoms[0]) g_dom.flags[s] |= DOMF_PARSER_SCRIPT;
+    if (g_dom.flags[s] & DOMF_MEDIA) dom_media_note(s);
     if (t->nattr) {
         g_dom.attrs[s] = (DomAttrList){ t->attrs, t->nattr, t->nattr, t->attr_blk };
         t->attrs = NULL; t->nattr = 0; t->attr_blk = 0;      /* ownership moved */

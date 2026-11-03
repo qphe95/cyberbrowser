@@ -3,6 +3,8 @@
 #include "cyber_env.h"
 #include "job_system.h"
 #include "css_selector_internal.h"
+#include "css_parser.h"
+#include "css_style.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -37,7 +39,8 @@ enum {
     SS_FIRST_CHILD, SS_LAST_CHILD, SS_ONLY_CHILD, SS_NTH_CHILD, SS_NTH_LAST_CHILD,
     SS_NTH_OF_TYPE, SS_NTH_LAST_OF_TYPE,
     SS_FIRST_OF_TYPE, SS_LAST_OF_TYPE, SS_ONLY_OF_TYPE, SS_EMPTY, SS_ROOT, SS_SCOPE,
-    SS_CHECKED, SS_DISABLED, SS_ENABLED,
+    SS_DISABLED, SS_ENABLED,
+    SS_STATE,        /* dom_element_state has all of mask */
     SS_NO_NS,        /* |type: an element in no namespace */
     SS_LINK,         /* :link, :any-link: a and area with href */
     SS_TARGET,       /* :target: the element the URL's fragment names */
@@ -458,13 +461,13 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                 else if (strcmp(name, "empty") == 0) s.kind = SS_EMPTY;
                 else if (strcmp(name, "root") == 0) s.kind = SS_ROOT;
                 else if (strcmp(name, "scope") == 0) s.kind = SS_SCOPE;
-                else if (strcmp(name, "checked") == 0) s.kind = SS_CHECKED;
                 else if (strcmp(name, "disabled") == 0) s.kind = SS_DISABLED;
                 else if (strcmp(name, "enabled") == 0) s.kind = SS_ENABLED;
                 else if (strcmp(name, "link") == 0 || strcmp(name, "any-link") == 0 || strcmp(name, "-webkit-any-link") == 0)
                     s.kind = SS_LINK;
                 else if (strcmp(name, "visited") == 0) s.kind = SS_NEVER;      /* (no history here) */
-                else if (strcmp(name, "active") == 0 || strcmp(name, "hover") == 0) s.kind = SS_NEVER;   /* (no pointer here) */
+                else if ((s.a = (int)css_state_bit(name, strlen(name))) != 0 && strcmp(name, "disabled") && strcmp(name, "enabled") &&
+                         strcmp(name, "target")) s.kind = SS_STATE;
                 else if (strcmp(name, "target") == 0) s.kind = SS_TARGET;
                 else if (strcmp(name, "lang") == 0) {
                     /* (the argument: an identifier or a string, trimmed) */
@@ -742,6 +745,58 @@ static bool control_disabled(uint32_t s) {
     return false;
 }
 
+uint32_t dom_element_state(NodeId el)
+{
+    if (!dom_valid(el)) return 0;
+    atoms_init();
+    uint32_t s = dom_slot(el), st = g_dom.state[s], n;
+    if (g_dom.kind[s] != DOM_K_ELEMENT || g_dom.ns[s] != DOM_NS_HTML) return st;
+    /* (each element, each time it is read for style: by atom, not by name) */
+    static CssAtom a_ce, t_video, t_audio;
+    if (!a_ce) {
+        css_atom_reserve(3);
+        a_ce = css_atom_intern("contenteditable", 15);
+        t_video = css_atom_intern("video", 5);
+        t_audio = css_atom_intern("audio", 5);
+    }
+    uint32_t cl = 0;
+    const char *ce = g_dom.attrs[s].n ? attr_val(s, a_ce, &cl) : NULL;
+    bool rw = ce && !(cl == 5 && !strncasecmp(ce, "false", 5));
+    if (form_control(s)) {
+        bool off = control_disabled(s);
+        st |= off ? DOM_ST_DISABLED : DOM_ST_ENABLED;
+        CssAtom t = g_dom.tag[s];
+        bool input = t == g_t_form[1], textarea = t == g_t_form[3], select = t == g_t_form[2], option = t == g_t_form[5];
+        const char *ty = input ? dom_get_attr_str(el, "type") : NULL;
+        if (input || option) {
+            /* (the attribute until the element's own checkedness is set) */
+            bool has = option ? dom_get_attr_str(el, "selected") != NULL
+                              : ty && (!strcasecmp(ty, "checkbox") || !strcasecmp(ty, "radio")) && attr_val(s, g_a_checked, &n);
+            if (!(st & DOM_ST_CHECK_SET)) st = has ? st | DOM_ST_CHECKED : st & ~(uint32_t)DOM_ST_CHECKED;
+        }
+        if (input || select || textarea) st |= dom_get_attr_str(el, "required") ? DOM_ST_REQUIRED : DOM_ST_OPTIONAL;
+        if (textarea || input) {
+            static const char *const text[] = { "text", "search", "url", "tel", "email", "password", "date", "month",
+                                                "week", "time", "datetime-local", "number" };
+            bool editable = textarea || !ty;
+            for (size_t i = 0; !editable && i < sizeof text / sizeof text[0]; i++) editable = !strcasecmp(ty, text[i]);
+            /* (an unknown type is a text field) */
+            if (!editable) {
+                static const char *const other[] = { "hidden", "range", "color", "checkbox", "radio", "file", "submit", "image", "reset", "button" };
+                editable = true;
+                for (size_t i = 0; editable && i < sizeof other / sizeof other[0]; i++) editable = strcasecmp(ty, other[i]) != 0;
+            }
+            if (editable && !off && !dom_get_attr_str(el, "readonly")) rw = true;
+        }
+    }
+    st |= rw ? DOM_ST_READ_WRITE : DOM_ST_READ_ONLY;
+    if (g_dom.tag[s] == t_video || g_dom.tag[s] == t_audio) {
+        if (!(st & DOM_ST_PLAYING)) st |= DOM_ST_PAUSED;
+        if (!(st & DOM_ST_MUTE_SET)) st = dom_get_attr_str(el, "muted") ? st | DOM_ST_MUTED : st & ~(uint32_t)DOM_ST_MUTED;
+    }
+    return st;
+}
+
 /* :lang(want): the language of s (its nearest lang="" (xml:lang)) is want or
  * starts with want and a '-', ASCII case-insensitively. */
 static bool lang_ok(uint32_t s, const char *want, uint32_t wn) {
@@ -860,7 +915,7 @@ static bool simple_ok(uint32_t s, const SelSimple *ss, uint32_t scope) {
         return true;
     case SS_ROOT: return g_dom.parent[s] && g_dom.kind[g_dom.parent[s]] == DOM_K_DOCUMENT;
     case SS_SCOPE: return s == scope;
-    case SS_CHECKED: { uint32_t n; return attr_val(s, g_a_checked, &n) != NULL; }
+    case SS_STATE: return (dom_element_state(dom_id_of(s)) & (uint32_t)ss->a) == (uint32_t)ss->a;
     case SS_DISABLED: return form_control(s) && control_disabled(s);
     case SS_ENABLED: return form_control(s) && !control_disabled(s);
     case SS_NO_NS: return g_dom.ns[s] == DOM_NS_NULL;

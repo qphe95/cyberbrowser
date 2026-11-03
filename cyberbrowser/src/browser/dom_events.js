@@ -1481,10 +1481,24 @@
         if (controlDisabled(t)) return true;
         return trusted(t, MouseEvent, mtype, mouseInit(x, y, button, related));
     }
+    /* pointerenter/leave, mouseenter/leave: at each element, not bubbling */
+    function boundary(el, x, y, ptype, mtype, related) {
+        if (el.nodeType !== 1) return;
+        var pi = pointerInit(x, y, 0, related), mi = mouseInit(x, y, 0, related);
+        pi.bubbles = mi.bubbles = false;
+        pi.cancelable = mi.cancelable = false;
+        trusted(el, global.PointerEvent, ptype, pi);
+        if (!controlDisabled(el)) trusted(el, MouseEvent, mtype, mi);
+    }
+    /* :hover and :active: the element and what it is in */
+    function chainState(el, bit, on) {
+        for (var a = el; a; a = flatParent(a)) if (a.nodeType === 1) global.__cyberElState(a, bit, on);
+    }
     function focusTarget(t, canceled) {
         if (canceled) return;
         for (var a = t; a; a = flatParent(a)) {
-            if (a.nodeType === 1 && (a.tabIndex >= 0 || a.isContentEditable)) {
+            /* (a click focuses tabindex=-1 too: only Tab skips it) */
+            if (a.nodeType === 1 && (a.tabIndex >= 0 || a.hasAttribute('tabindex') || a.isContentEditable)) {
                 if (!controlDisabled(a) && typeof a.focus === 'function') a.focus();
                 return;
             }
@@ -1537,9 +1551,24 @@
                  '\uE011': 'Home', '\uE012': 'ArrowLeft', '\uE013': 'ArrowUp', '\uE014': 'ArrowRight', '\uE015': 'ArrowDown',
                  '\uE017': 'Delete', '\uE03D': 'Meta' };
     function keyOf(k) { return KEYS[k] || k; }
+    /* Tab: the next element in the sequential focus order (positive tabindex
+     * first, then tree order), round to the first. */
+    function focusNext() {
+        var d = global.document, all = d.querySelectorAll('*'), list = [];
+        for (var i = 0; i < all.length; i++) {
+            var e = all[i];
+            if (typeof e.tabIndex === 'number' && e.tabIndex >= 0 && !controlDisabled(e) && e.getClientRects().length) list.push(e);
+        }
+        list = list.filter(function (e) { return e.tabIndex > 0; }).sort(function (a, b) { return a.tabIndex - b.tabIndex; })
+            .concat(list.filter(function (e) { return e.tabIndex === 0; }));
+        if (!list.length) return;
+        var at = list.indexOf(d.activeElement);
+        list[(at + 1) % list.length].focus();
+    }
     function keyDefault(key, el) {
         var d = global.document, h = global.innerHeight, dx = 0, dy = 0;
         switch (key) {
+        case 'Tab': global.__cyberLastInput = 'key'; focusNext(); return;
         case 'ArrowDown': dy = 40; break;
         case 'ArrowUp': dy = -40; break;
         case 'ArrowRight': dx = 40; break;
@@ -1582,9 +1611,19 @@
             }
             var was = pointer.over;
             if (was !== t) {
-                if (was && was.isConnected) bothEvents(was, x, y, 0, 'pointerout', 'mouseout', t);
+                chainState(was, 1, false);
+                chainState(t, 1, true);
+                var common = was && was.isConnected ? commonAncestor(was, t) : null;
+                if (was && was.isConnected) {
+                    bothEvents(was, x, y, 0, 'pointerout', 'mouseout', t);
+                    for (var l = was; l && l !== common; l = flatParent(l)) boundary(l, x, y, 'pointerleave', 'mouseleave', t);
+                }
                 pointer.over = t;
                 bothEvents(t, x, y, 0, 'pointerover', 'mouseover', was);
+                /* (outermost first) */
+                var entered = [];
+                for (var e = t; e && e !== common; e = flatParent(e)) entered.push(e);
+                for (var i = entered.length - 1; i >= 0; i--) boundary(entered[i], x, y, 'pointerenter', 'mouseenter', was);
             }
             bothEvents(t, x, y, 0, 'pointermove', 'mousemove');
         },
@@ -1595,7 +1634,11 @@
             if (into) { into.input.down(x - into.left, y - into.top, button); return; }
             pointer.buttons |= 1 << button;
             pointer.pressed = t;
-            focusTarget(t, !bothEvents(t, x, y, button, 'pointerdown', 'mousedown'));
+            if (button === 0) { chainState(t, 2, true); pointer.active = t; }
+            global.__cyberLastInput = 'mouse';
+            var canceled = !bothEvents(t, x, y, button, 'pointerdown', 'mousedown');
+            global.__cyberFocusByMouse = true;
+            try { focusTarget(t, canceled); } finally { global.__cyberFocusByMouse = false; }
             var bar = button === 0 ? scrollbarAt(t, x, y) : null;
             if (bar) barPress(bar);
         },
@@ -1606,6 +1649,7 @@
             if (into) { into.input.up(x - into.left, y - into.top, button); return; }
             if (pointer.bar) { pointer.bar = null; global.__cyberScrollHold(false); }
             pointer.buttons &= ~(1 << button);
+            if (button === 0 && pointer.active) { chainState(pointer.active, 2, false); pointer.active = null; }
             bothEvents(t, x, y, button, 'pointerup', 'mouseup');
             var on = pointer.pressed && commonAncestor(pointer.pressed, t);
             pointer.pressed = null;
@@ -1684,6 +1728,7 @@
             if (go) wheelScroll(t, dx, dy);
         },
         keyDown: function (k, el) {
+            global.__cyberLastInput = 'key';
             var key = keyOf(k), t = el || (global.document && (global.document.activeElement || global.document.body));
             if (!t) return;
             var go = trusted(t, KeyboardEvent, 'keydown', { cancelable: true, key: key, view: global });
@@ -1694,6 +1739,13 @@
             var t = el || (global.document && (global.document.activeElement || global.document.body));
             if (t) trusted(t, KeyboardEvent, 'keyup', { cancelable: true, key: keyOf(k), view: global });
         }
+    } });
+
+    /* (a <style> inserted: load, for whoever listens by now) */
+    Object.defineProperty(global, '__cyberStyleInserted', { configurable: true, value: function (el) {
+        var map = el[LISTENERS];
+        if (!el.onload && !(map && map.load)) return;
+        task(function () { global.__cyberDispatchTrusted(el, new Event('load')); });
     } });
 
     /* for the C entry points (event_api.c), which forward here */

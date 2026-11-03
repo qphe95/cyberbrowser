@@ -647,6 +647,7 @@ static void dispatch_page_lifecycle_events(JSContextHandle ctx) {
     if (g_loop_images) image_cache_process_pending(g_loop_images);
     const char *load_js =
         "document.readyState = 'complete';"
+        "if (window.__cyberPageReveal) __cyberPageReveal();"
         "var loadEvt = new Event('load');"
         "window.dispatchEvent(loadEvt);"
         "document.dispatchEvent(loadEvt);";
@@ -898,6 +899,7 @@ bool page_load(void) {
         if (!(sp && sp[0] == '0')) {
             prepare_page_scripts();
             scripts_prepared = true;
+            html_page_stream_abandon();
             page_stream = html_page_stream_begin();
         }
     }
@@ -1256,6 +1258,14 @@ void gc_cleanup(void);
 bool page_engine_reset(void) {
     uint64_t t0 = gc_os_now_ns();
     page_close();
+    html_page_stream_abandon();
+    {
+        extern void js_quickjs_net_forget(void);
+        extern void worker_api_reset(void);
+        js_quickjs_net_forget();
+        worker_api_reset();
+        anim_reset();
+    }
     timer_api_reset();
     scheduler_reset();
     dom_fetch_reset();

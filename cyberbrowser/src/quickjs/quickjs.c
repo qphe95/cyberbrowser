@@ -6489,6 +6489,7 @@ static GCValue JS_NewObjectFromShape(JSContextHandle ctx, JSShapeHandle sh, JSCl
         break;
     case JS_CLASS_GLOBAL_OBJECT:
         SAFE_SET_VALUE(p, JSObjectHandle, u.global_object.uninitialized_vars, JS_UNDEFINED);
+        SAFE_SET_VALUE(p, JSObjectHandle, u.global_object.lexical_vars, JS_UNDEFINED);
         break;
     default:
     set_exotic:
@@ -12518,6 +12519,9 @@ static int JS_CheckDefineGlobalVar(JSContextHandle ctx, JSAtom prop, int flags)
     JSShapeProperty *prs;
 
     p = JS_VALUE_GET_OBJ(SAFE_GET_OR(ctx, JSContextHandle, global_obj, GC_UNDEFINED));
+    /* (the script scope's let, const and class: nothing redeclares them) */
+    if (find_own_property1(JS_VALUE_GET_OBJ(SAFE_GET_OR(p, JSObjectHandle, u.global_object.lexical_vars, GC_UNDEFINED)), prop))
+        goto fail_redeclaration;
     prs = find_own_property1(p, prop);
     /* XXX: should handle JS_PROP_AUTOINIT */
     if (flags & DEFINE_GLOBAL_LEX_VAR) {
@@ -12555,8 +12559,14 @@ static int JS_GetGlobalVarRef(JSContextHandle ctx, JSAtom prop, GCValue *sp)
     JSShapeProperty *prs;
     JSProperty *pr;
 
-    /* Check global_obj for the property */
+    /* Check the script scope, then global_obj, for the property */
     p = JS_VALUE_GET_OBJ(SAFE_GET_OR(ctx, JSContextHandle, global_obj, GC_UNDEFINED));
+    GCValue lex = SAFE_GET_OR(p, JSObjectHandle, u.global_object.lexical_vars, GC_UNDEFINED);
+    if (find_own_property(&pr, JS_VALUE_GET_OBJ(lex), prop)) {
+        sp[0] = lex;
+        sp[1] = JS_AtomToValue(ctx, prop);
+        return 0;
+    }
     prs = find_own_property(&pr, p, prop);
     if (prs) {
         /* Found on global_obj - use it */
@@ -19075,6 +19085,7 @@ static void js_global_object_mark(JSRuntimeHandle rt, GCValue val,
 {
     JSObjectHandle p = JS_VALUE_GET_OBJ(val);
     JS_MarkValue(rt, SAFE_GET_OR(p, JSObjectHandle, u.global_object.uninitialized_vars, GC_UNDEFINED), mark_func);
+    JS_MarkValue(rt, SAFE_GET_OR(p, JSObjectHandle, u.global_object.lexical_vars, GC_UNDEFINED), mark_func);
 }
 
 static JSVarRefHandle js_global_object_get_uninitialized_var(JSContextHandle ctx, JSObjectHandle p1, 
@@ -19145,18 +19156,20 @@ static JSVarRefHandle js_closure_define_global_var(JSContextHandle ctx, JSClosur
     /* Use only global_obj - no separate global_var_obj */
     p = JS_VALUE_GET_OBJ(SAFE_GET_OR(ctx, JSContextHandle, global_obj, GC_UNDEFINED));
     
+    /* (in the script scope, not on the global: `const parent` leaves
+       window.parent as it is.  A lazily parsed function's reference to a name
+       comes here unmarked as lexical: the binding there is the one it means) */
+    p1 = JS_VALUE_GET_OBJ(SAFE_GET_OR(p, JSObjectHandle, u.global_object.lexical_vars, GC_UNDEFINED));
+    prs = find_own_property(&pr, p1, cv->var_name);
+    if (prs) {
+        assert((prs->flags & JS_PROP_TMASK) == JS_PROP_VARREF);
+        return (JSVarRefHandle)(pr->u.var_ref_handle);
+    }
     if (cv->is_lexical) {
         flags = JS_PROP_ENUMERABLE | JS_PROP_CONFIGURABLE;
         if (!cv->is_const)
             flags |= JS_PROP_WRITABLE;
-
-        prs = find_own_property(&pr, p, cv->var_name);
-        if (prs) {
-            assert((prs->flags & JS_PROP_TMASK) == JS_PROP_VARREF);
-            var_ref = (JSVarRefHandle)(pr->u.var_ref_handle);
-            /* ref_count removed - using mark-and-sweep GC */
-            return var_ref;
-        }
+        p = p1;
     } else {
         flags = JS_PROP_ENUMERABLE | JS_PROP_WRITABLE;
         if (is_direct_or_indirect_eval)
@@ -19234,7 +19247,8 @@ static JSVarRefHandle js_closure_define_global_var(JSContextHandle ctx, JSClosur
     /* ref_count removed - using mark-and-sweep GC */
     
     /* bgmdwnldr: sync global var to window object */
-    js_quickjs_on_global_var_defined(ctx, cv->var_name);
+    if (!cv->is_lexical)
+        js_quickjs_on_global_var_defined(ctx, cv->var_name);
     
     return var_ref;
 }
@@ -19246,8 +19260,11 @@ static JSVarRefHandle js_closure_global_var(JSContextHandle ctx, JSClosureVar *c
     JSProperty *pr;
     JSVarRefHandle var_ref = GC_HANDLE_NULL;
 
-    /* Use only global_obj - no separate global_var_obj */
+    /* The script scope first, then global_obj */
     p = JS_VALUE_GET_OBJ(SAFE_GET_OR(ctx, JSContextHandle, global_obj, GC_UNDEFINED));
+    prs = find_own_property(&pr, JS_VALUE_GET_OBJ(SAFE_GET_OR(p, JSObjectHandle, u.global_object.lexical_vars, GC_UNDEFINED)), cv->var_name);
+    if (prs)
+        return (JSVarRefHandle)(pr->u.var_ref_handle);
  redo:
     prs = find_own_property(&pr, p, cv->var_name);
     if (CYBER_ENV(CYBER_T_GV)) {
@@ -68350,6 +68367,12 @@ static int JS_AddIntrinsicBasicObjects(JSContextHandle ctx)
         }
         p = JS_VALUE_GET_OBJ(SAFE_GET_OR(ctx, JSContextHandle, global_obj, GC_UNDEFINED));
         SAFE_SET_VALUE(p, JSObjectHandle, u.global_object.uninitialized_vars, obj);
+        obj = JS_NewObjectProtoClassAlloc(ctx, JS_NULL, JS_CLASS_OBJECT, 4);
+        if (JS_IsException(obj)) {
+            QJS_LOGE("JS_AddIntrinsicBasicObjects: lexical_vars creation failed!");
+            return -1;
+        }
+        SAFE_SET_VALUE(p, JSObjectHandle, u.global_object.lexical_vars, obj);
     }
     QJS_LOGI("JS_AddIntrinsicBasicObjects: uninitialized_vars set");
     /* No separate global_var_obj - all globals are on global_obj */

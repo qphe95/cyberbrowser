@@ -3,6 +3,7 @@
  */
 #include "css_style.h"
 #include "css_selector_internal.h"
+#include "dom_query.h"
 #include "preorder_compaction_array.h"
 
 #include <ctype.h>
@@ -172,6 +173,7 @@ struct CssStyleDoc {
     int count;
     uint8_t *is_elem;
     uint8_t *flags;
+    uint32_t *state;      /* dom_element_state */
     CssAtom *tag, *id;
     uint32_t *cls_off; uint16_t *cls_n;
     uint32_t *attr_off; uint16_t *attr_n;
@@ -222,6 +224,7 @@ static void sd_element_features(CssStyleDoc *d, HtmlNode *node, int i)
     d->tag[i] = atom_cstr(node->tag_name);
     const char *id = node_attr(node, "id");
     d->id[i] = id ? atom_cstr(id) : CSS_ATOM_NONE;
+    d->state[i] = dom_element_state(node->store_id);
     d->flags[i] &= (uint8_t)~DF_LINK;
     if ((strcasecmp(node->tag_name, "a") == 0 || strcasecmp(node->tag_name, "area") == 0) &&
         node_attr(node, "href"))
@@ -271,6 +274,7 @@ static CssStyleDoc *styledoc_build(HtmlDocument *doc, CssStyleDoc *old, uint32_t
     d->count = n;
     d->is_elem = calloc((size_t)n + 1, 1);
     d->flags = calloc((size_t)n + 1, 1);
+    d->state = calloc((size_t)n + 1, sizeof(uint32_t));
     d->tag = calloc((size_t)n + 1, sizeof(CssAtom));
     d->id = calloc((size_t)n + 1, sizeof(CssAtom));
     d->cls_off = calloc((size_t)n + 1, sizeof(uint32_t));
@@ -354,6 +358,7 @@ static CssStyleDoc *styledoc_build(HtmlDocument *doc, CssStyleDoc *old, uint32_t
             d->tag[i] = old->tag[j];
             d->id[i] = old->id[j];
             d->flags[i] |= old->flags[j] & DF_LINK;
+            d->state[i] = old->state[j];
             if (take) {
                 d->cls_off[i] = old->cls_off[j];
                 d->attr_off[i] = old->attr_off[j];
@@ -439,7 +444,7 @@ void css_styledoc_free(CssStyleDoc *d)
 {
     if (!d) return;
     free(d->store_id);
-    free(d->is_elem); free(d->flags); free(d->tag); free(d->id);
+    free(d->is_elem); free(d->flags); free(d->state); free(d->tag); free(d->id);
     free(d->cls_off); free(d->cls_n); free(d->attr_off); free(d->attr_n);
     free(d->pool); free((void *)d->pool_val); free(d->parent);
     free(d->prev_elem); free(d->next_elem); free(d->sub_end); free(d->pos_first); free(d->pos_last); free(d->type_first); free(d->type_last);
@@ -521,7 +526,7 @@ int css_styledoc_compare(const CssStyleDoc *a, const CssStyleDoc *b)
 {
     if (a->count != b->count) return 0;
     for (int i = 0; i < a->count; i++) {
-        if (a->is_elem[i] != b->is_elem[i] || a->flags[i] != b->flags[i] || a->tag[i] != b->tag[i] ||
+        if (a->is_elem[i] != b->is_elem[i] || a->flags[i] != b->flags[i] || a->state[i] != b->state[i] || a->tag[i] != b->tag[i] ||
             a->id[i] != b->id[i] || a->parent[i] != b->parent[i] || a->pos_first[i] != b->pos_first[i] ||
             a->pos_last[i] != b->pos_last[i] || a->type_first[i] != b->type_first[i] ||
             a->type_last[i] != b->type_last[i] || a->prev_elem[i] != b->prev_elem[i] ||
@@ -553,7 +558,9 @@ typedef struct CComp {
     uint8_t comb;
     uint8_t never;
     int nth_a, nth_b;
+    uint32_t state, not_state;
     CssAtom not_tag, not_id;
+    int32_t not_list; /* list index, -1 = none */
     int32_t where;   /* list index, -1 = none */
     int32_t has;     /* :has() list index, -1 = none */
     uint8_t has_comb;
@@ -657,6 +664,9 @@ static void compile_comp(Builder *b, const CssSimpleSelector *s, int comb, CComp
     memset(c, 0, sizeof(*c));
     c->where = -1;
     c->has = -1;
+    c->not_list = -1;
+    c->state = s->state_mask;
+    c->not_state = s->not_state;
     c->comb = (uint8_t)comb;
     c->never = (!s->has_substantive || s->never_match) ? 1 : 0;
     c->tag = s->has_tag ? atom_cstr(s->tag) : CSS_ATOM_NONE;
@@ -706,14 +716,16 @@ static int32_t compile_chain(Builder *b, const char *text, int32_t owner)
      * :has() arguments compile after, and compiling them reuses the
      * scratch: only their text is kept (not a copy of every part). */
     CComp tmp[CSS_MAX_SIMPLE_PARTS];
-    struct { int i; bool w, h; char comb; char where[400], has[160]; } sub[CSS_MAX_SIMPLE_PARTS];
+    struct { int i; bool w, h, n; char comb; char where[400], has[160], nl[400]; } sub[CSS_MAX_SIMPLE_PARTS];
     int nsub = 0;
     for (int i = 0; i < count; i++) {
         const CssSimpleSelector *sp = &b->parts[i].simple;
         compile_comp(b, sp, b->parts[i].combinator, &tmp[i]);
         if (tmp[i].never) ch.never = 1;
-        if (sp->where_active || sp->has_active) {
+        if (sp->where_active || sp->has_active || sp->not_list_active) {
             sub[nsub].i = i;
+            sub[nsub].n = sp->not_list_active;
+            if (sp->not_list_active) memcpy(sub[nsub].nl, sp->not_list_arg, sizeof(sub[nsub].nl));
             sub[nsub].w = sp->where_active;
             sub[nsub].h = sp->has_active;
             sub[nsub].comb = sp->has_comb;
@@ -728,6 +740,7 @@ static int32_t compile_chain(Builder *b, const char *text, int32_t owner)
     for (int k = 0; k < nsub; k++) {
         int i = sub[k].i;
         if (sub[k].w) tmp[i].where = compile_list(b, sub[k].where);
+        if (sub[k].n) tmp[i].not_list = compile_list(b, sub[k].nl);
         if (sub[k].h) {
             tmp[i].has = compile_list(b, sub[k].has);
             tmp[i].has_comb = (uint8_t)sub[k].comb;
@@ -888,6 +901,7 @@ static bool comp_match(const CssStyleSet *S, const CssStyleDoc *D, const CComp *
 {
     if (n < 0 || !D->is_elem[n]) return false;
     if (c->never) return false;
+    if (c->state && (D->state[n] & c->state) != c->state) return false;
     if (c->root && D->tag[n] != S->atom_html) return false;
     if (c->link && !(D->flags[n] & DF_LINK)) return false;
     if (c->id && D->id[n] != c->id) return false;
@@ -922,7 +936,7 @@ static bool comp_match(const CssStyleSet *S, const CssStyleDoc *D, const CComp *
         if (!nth_matches(c->nth_a, c->nth_b, pos)) return false;
     }
     if (c->not_active) {
-        bool hit = true;
+        bool hit = (D->state[n] & c->not_state) == c->not_state;
         if (c->not_has_tag && D->tag[n] != c->not_tag) hit = false;
         if (hit && c->not_has_id && D->id[n] != c->not_id) hit = false;
         for (uint32_t i = 0; hit && i < c->ncls_n; i++)
@@ -937,6 +951,7 @@ static bool comp_match(const CssStyleSet *S, const CssStyleDoc *D, const CComp *
     }
     if (c->tag && D->tag[n] != c->tag) return false;
     if (c->where >= 0 && !list_match(S, D, c->where, n)) return false;
+    if (c->not_list >= 0 && list_match(S, D, c->not_list, n)) return false;
     if (c->has >= 0 && !has_match(S, D, c, n)) return false;
     return true;
 }
@@ -1698,7 +1713,7 @@ bool css_style_shareable(const CssStyleDoc *D, int dom)
 bool css_style_features_equal(const CssStyleDoc *D, int a, int b)
 {
     if (D->tag[a] != D->tag[b] || D->id[a] != D->id[b]) return false;
-    if ((D->flags[a] & DF_LINK) != (D->flags[b] & DF_LINK)) return false;
+    if ((D->flags[a] & DF_LINK) != (D->flags[b] & DF_LINK) || D->state[a] != D->state[b]) return false;
     if (D->cls_n[a] != D->cls_n[b] || D->attr_n[a] != D->attr_n[b]) return false;
     if (memcmp(D->pool + D->cls_off[a], D->pool + D->cls_off[b], D->cls_n[a] * sizeof(CssAtom))) return false;
     if (memcmp(D->pool + D->attr_off[a], D->pool + D->attr_off[b], D->attr_n[a] * sizeof(CssAtom))) return false;

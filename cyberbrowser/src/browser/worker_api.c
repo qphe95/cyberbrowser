@@ -262,6 +262,14 @@ static void deliver(JSContextHandle ctx, GCValue fn, GCValue this_val, int argc,
     if (JS_IsException(r)) JS_GetException(ctx);
 }
 
+/* The heap is about to go: the workers and what was queued for them with it. */
+void worker_api_reset(void) {
+    for (int i = 0; i < g_ntasks; i++) free(g_tasks[i].json);
+    g_ntasks = 0;
+    for (int w = 0; w < W.n; w++) free(W.url[w]);
+    W.n = 0;
+}
+
 int worker_api_tick(JSContextHandle ctx) {
     (void)ctx;
     if (!g_ntasks) return 0;

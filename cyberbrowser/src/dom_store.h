@@ -100,6 +100,19 @@ typedef struct DomTreeRec {
 /* An element's first class atoms, inline in its slot. */
 typedef struct DomCls4 { CssAtom a[4]; } DomCls4;
 
+/* An element's states, as selectors see them (dom_element_state).  Below 1 << 16:
+ * what the browser sets (DomStore.state); from there: read off its attributes. */
+enum {
+    DOM_ST_HOVER = 1 << 0, DOM_ST_ACTIVE = 1 << 1, DOM_ST_FOCUS = 1 << 2, DOM_ST_FOCUS_VISIBLE = 1 << 3,
+    DOM_ST_FOCUS_WITHIN = 1 << 4, DOM_ST_TARGET = 1 << 5, DOM_ST_CHECKED = 1 << 6,
+    DOM_ST_CHECK_SET = 1 << 7,      /* its checkedness is its own, not the attribute's */
+    DOM_ST_INDETERMINATE = 1 << 8, DOM_ST_PLAYING = 1 << 9, DOM_ST_MUTED = 1 << 10, DOM_ST_SEEKING = 1 << 11,
+    DOM_ST_BUFFERING = 1 << 12, DOM_ST_STALLED = 1 << 13,
+    DOM_ST_MUTE_SET = 1 << 14,      /* its mutedness is its own, not the attribute's */
+    DOM_ST_PAUSED = 1 << 16, DOM_ST_ENABLED = 1 << 17, DOM_ST_DISABLED = 1 << 18, DOM_ST_READ_WRITE = 1 << 19,
+    DOM_ST_READ_ONLY = 1 << 20, DOM_ST_REQUIRED = 1 << 21, DOM_ST_OPTIONAL = 1 << 22,
+};
+
 typedef struct DomStore {
     uint32_t cap;           /* slots allocated (slot 0 is never used) */
     uint32_t count;         /* high-water mark: slots [1, count) were used */
@@ -109,6 +122,7 @@ typedef struct DomStore {
     uint8_t  *kind;
     uint8_t  *gen;
     uint16_t *flags;
+    uint16_t *state;        /* DOM_ST_* the browser set */
     CssAtom  *tag;          /* element local name (lower case) */
     uint32_t *parent, *first, *last, *next, *prev;   /* slots, 0 = none */
     uint32_t *host;         /* shadow root / template content -> host slot */
@@ -234,6 +248,11 @@ static inline const char *dom_doctype_system_id(NodeId id) { return dom_name_str
 NodeId dom_create_pi(const char *target, size_t tn, const char *data, size_t dn, NodeId owner);
 /* Flags derived from the tag name (CE candidate, raw text, void). */
 uint16_t dom_tag_flags(CssAtom tag);
+/* The media elements created so far (a parsed one has no script to start its
+ * load: browser/media_source_api.c looks them over), and forgetting them. */
+const NodeId *dom_media_elements(uint32_t *n);
+void dom_media_note(uint32_t slot);
+void dom_media_forget(void);
 
 /* ---- reads ---- */
 static inline int dom_kind(NodeId id) { return dom_valid(id) ? g_dom.kind[dom_slot(id)] : DOM_K_FREE; }
@@ -296,6 +315,7 @@ const char *dom_prefix(NodeId id);
 void dom_set_element_name(NodeId id, uint32_t ns, const char *prefix, size_t pn, const char *local, size_t ln);
 /* Is the document an XML document (not an HTML document)? */
 #define DOMF_XML_DOCUMENT (1u << 12)   /* (on document nodes) */
+#define DOMF_MEDIA (1u << 12)          /* (on elements) video, audio */
 #define DOMF_SHADOW_CLOSED (1u << 13)  /* (on shadow roots) mode "closed" */
 #define DOMF_INERT_DOC (1u << 13)      /* (on document nodes) a template contents owner */
 #define DOMF_META_PENDING (1u << 14)   /* (on metas) inserted, its post-insertion steps to come */

@@ -576,6 +576,104 @@
             set: function (v) { this.setAttribute(m[1], String(v)); } });
     });
 
+    /* ---- View transitions: the API and its promises; nothing is captured
+     * or animated, the update simply happens ---- */
+    function ViewTransition() { throw new TypeError('Illegal constructor'); }
+    var newViewTransition = function (update, types) {
+        var vt = Object.create(ViewTransition.prototype), resolveReady, rejectReady, resolveFinished, rejectFinished,
+            resolveDone, rejectDone, skipped = false, timedOut = false;
+        var ready = new Promise(function (a, b) { resolveReady = a; rejectReady = b; });
+        var finished = new Promise(function (a, b) { resolveFinished = a; rejectFinished = b; });
+        var done = new Promise(function (a, b) { resolveDone = a; rejectDone = b; });
+        /* (the page's three promises have no handlers of ours: a rejection
+         * nobody takes is reported as unhandled) */
+        var timer = global.setTimeout(function () {
+            timedOut = true;
+            rejectReady(new global.DOMException('Transition update callback timed out', 'TimeoutError'));
+        }, 4000);
+        Promise.resolve().then(update).then(function (v) {
+            global.clearTimeout(timer);
+            if (timedOut) return;
+            resolveDone(v);
+            if (skipped) rejectReady(new global.DOMException('Transition was skipped', 'AbortError'));
+            else resolveReady();
+            resolveFinished();
+        }, function (reason) {
+            global.clearTimeout(timer);
+            if (timedOut) return;
+            rejectDone(reason);
+            rejectReady(reason);
+            rejectFinished(reason);
+        });
+        Object.defineProperties(vt, {
+            updateCallbackDone: { value: done, enumerable: true }, ready: { value: ready, enumerable: true },
+            finished: { value: finished, enumerable: true },
+            types: { value: new Set(types || []), enumerable: true },
+            __skipped: { get: function () { return skipped; } },
+            skipTransition: { value: function skipTransition() { skipped = true; }, enumerable: true }
+        });
+        return vt;
+    };
+    if (global.document && !global.Document.prototype.startViewTransition) {
+        expose('ViewTransition', ViewTransition);
+        Object.defineProperty(global.Document.prototype, 'startViewTransition', { configurable: true, enumerable: true, writable: true,
+            value: function startViewTransition(arg) {
+                var update = typeof arg === 'function' ? arg : arg && arg.update, types = arg && typeof arg === 'object' ? arg.types : null;
+                /* (a new one skips the one running) */
+                if (this.__cyberViewTransition) this.__cyberViewTransition.skipTransition();
+                var vt = newViewTransition(function () { return update ? update() : undefined; }, types);
+                Object.defineProperty(this, '__cyberViewTransition', { value: vt, configurable: true, writable: true });
+                return vt;
+            } });
+    }
+    /* The last @view-transition in force in the document's sheets. */
+    var viewTransitionRule = function () {
+        var found = null;
+        var walk = function (rules) {
+            for (var i = 0; i < rules.length; i++) {
+                var r = rules[i], n = r.__kind;
+                if (n === 'view-transition') { if (r.navigation) found = r; }
+                else if (n === 'layer' || (n === 'media' && global.matchMedia(r.media.mediaText).matches) ||
+                         (n === 'supports' && global.CSS.supports(r.conditionText))) walk(r.cssRules);
+            }
+        };
+        var sheets = global.document ? global.document.styleSheets : [];
+        for (var i = 0; i < sheets.length; i++) {
+            try { walk(sheets[i].cssRules); } catch (e) { /* (cross-origin) */ }
+        }
+        return found;
+    };
+    var pageTransitionEvent = function (type) {
+        var C = function (t, init) {
+            var e = new global.Event(t, init);
+            Object.defineProperty(e, 'viewTransition', { value: init && init.viewTransition || null, enumerable: true });
+            if (type === 'PageSwapEvent') Object.defineProperty(e, 'activation', { value: init && init.activation || null, enumerable: true });
+            return e;
+        };
+        Object.defineProperty(C, 'name', { value: type });
+        C.prototype = Object.create(global.Event.prototype, { constructor: { value: C, writable: true, configurable: true } });
+        expose(type, C);
+        return C;
+    };
+    if (global.Event && global.addEventListener) {
+        var PageSwapEvent = pageTransitionEvent('PageSwapEvent'), PageRevealEvent = pageTransitionEvent('PageRevealEvent');
+        var nothing = function () {};
+        Object.defineProperty(global, '__cyberPageSwap', { configurable: true, value: function (url, same) {
+            var rule = viewTransitionRule();
+            var vt = same && rule && rule.navigation === 'auto' ? newViewTransition(nothing, rule.types) : null;
+            var activation = { entry: { url: url }, from: { url: global.location.href }, navigationType: 'replace' };
+            global.__cyberDispatchTrusted(global, new PageSwapEvent('pageswap', { viewTransition: vt, activation: activation }));
+            return !!vt && !vt.__skipped;
+        } });
+        /* (before the load event: this engine has no first frame to wait for) */
+        Object.defineProperty(global, '__cyberPageReveal', { configurable: true, value: function () {
+            /* (only after a document that opted in: reading every sheet's rules isn't free) */
+            var rule = global.__cyberOldOptIn ? viewTransitionRule() : null;
+            var vt = rule && rule.navigation === 'auto' ? newViewTransition(nothing, rule.types) : null;
+            global.__cyberDispatchTrusted(global, new PageRevealEvent('pagereveal', { viewTransition: vt }));
+        } });
+    }
+
     /* (Performance is an EventTarget) */
     var PERF = global.performance;
     if (PERF && global.EventTarget && !PERF.addEventListener) {

@@ -28,6 +28,7 @@
 #include <quickjs.h>
 #include <quickjs_gc_unified.h>
 #include "dom_js.h"
+void dom_request_layout(void);
 #include "css_style.h"
 
 static const char k_html_element_js[] =
@@ -63,19 +64,42 @@ static const char k_html_element_js[] =
 "    catch (e) { ev = new Event(type, {bubbles: bubbles}); }\n"
 "    target.dispatchEvent(ev);\n"
 "  }\n"
+"  var ST_FOCUS = 4, ST_VISIBLE = 8, ST_WITHIN = 16;\n"
+"  function focusState(el, on, visible) {\n"
+"    __cyberElState(el, ST_FOCUS, on);\n"
+"    __cyberElState(el, ST_VISIBLE, !!(on && visible));\n"
+"    for (var a = el; a; a = a.parentNode || a.host) if (a.nodeType === 1) __cyberElState(a, ST_WITHIN, on);\n"
+"  }\n"
+"  function takesText(el) {\n"
+"    var t = el.localName;\n"
+"    if (el.isContentEditable || t === 'textarea') return true;\n"
+"    if (t !== 'input') return false;\n"
+"    return !/^(hidden|range|color|checkbox|radio|file|submit|image|reset|button)$/i.test(el.getAttribute('type') || '');\n"
+"  }\n"
+"  /* (Selectors 4 :focus-visible heuristics) */\n"
+"  function focusVisible(el, prev) {\n"
+"    if (takesText(el)) return true;\n"
+"    if (window.__cyberFocusByMouse) return false;\n"
+"    if (window.__cyberLastInput === 'key') return true;\n"
+"    if (prev && prev.nodeType === 1 && prev !== el.ownerDocument.body) return __cyberElState(prev, ST_VISIBLE);\n"
+"    return window.__cyberLastInput !== 'mouse';\n"
+"  }\n"
 "  method('focus', function(){\n"
 "    var doc = this.ownerDocument || document;\n"
 "    if (!this.isConnected) return;\n"
 "    var prev = doc.activeElement;\n"
 "    if (prev === this) return;\n"
-"    if (prev && prev !== doc.body && prev.dispatchEvent) { fire(prev, 'blur', false, this); fire(prev, 'focusout', true, this); }\n"
+"    var visible = focusVisible(this, prev);\n"
+"    if (prev && prev !== doc.body && prev.dispatchEvent) { focusState(prev, false); fire(prev, 'blur', false, this); fire(prev, 'focusout', true, this); }\n"
 "    doc.activeElement = this;\n"
+"    focusState(this, true, visible);\n"
 "    fire(this, 'focus', false, prev); fire(this, 'focusin', true, prev);\n"
 "  });\n"
 "  method('blur', function(){\n"
 "    var doc = this.ownerDocument || document;\n"
 "    if (doc.activeElement !== this) return;\n"
 "    doc.activeElement = doc.body;\n"
+"    focusState(this, false);\n"
 "    fire(this, 'blur', false, null); fire(this, 'focusout', true, null);\n"
 "  });\n"
 "\n"
@@ -348,11 +372,32 @@ static GCValue js_options(JSContextHandle ctx, GCValue this_val, int argc, GCVal
     return arr;
 }
 
+/* __cyberElState(el, mask[, on]): whether el has the state; with on, sets it. */
+static GCValue js_el_state(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    NodeId el = argc > 0 ? dom_node_of(argv[0]) : 0;
+    int32_t mask = 0;
+    if (!el || argc < 2 || JS_ToInt32(ctx, &mask, argv[1])) return JS_FALSE;
+    uint32_t s = dom_slot(el);
+    if (argc > 2 && !JS_IsUndefined(argv[2])) {
+        uint16_t was = g_dom.state[s];
+        uint16_t now = JS_ToBool(ctx, argv[2]) ? (uint16_t)(was | mask) : (uint16_t)(was & ~mask);
+        if (now != was) {
+            g_dom.state[s] = now;
+            dom_mark_dirty(el, DOMF_DIRTY_ATTR);
+            dom_request_layout();
+        }
+    }
+    return JS_NewBool(ctx, (g_dom.state[s] & mask) != 0);
+}
+
 void html_element_api_install(JSContextHandle ctx, GCValue element_proto)
 {
     if (!JS_IsObject(element_proto)) return;
     JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberInnerText",
                               JS_NewCFunction(ctx, js_inner_text, "__cyberInnerText", 1), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberElState", JS_NewCFunction(ctx, js_el_state, "__cyberElState", 3), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberOptions",
                               JS_NewCFunction(ctx, js_options, "__cyberOptions", 1), JS_PROP_CONFIGURABLE);
     run_installer(ctx, k_html_element_js, sizeof(k_html_element_js) - 1, "<html_element_api>", element_proto);

@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <ctype.h>
 #include "html_dom.h"
+#include "dom_query.h"
 #include "xml_parse.h"
 #include "browser/css_style_decl.h"
 #include "gc_value_helpers.h"
@@ -2504,6 +2505,9 @@ static bool mir_read_attrs(NodeId s, int idx, const char *tag_lower, bool in_svg
         if (k >= n || at->name != names[k] || strcmp(at->value, values[k]) != 0) { same = false; break; }
     }
     if (same && k != n) same = false;
+    /* (a state selectors see counts as a change of its attributes) */
+    uint32_t el_state = dom_element_state(s);
+    if (hn->el_state != el_state) { hn->el_state = el_state; same = false; }
     if (!same) {
         old_list = hn->attributes;
         hn->attributes = NULL;      /* the old list stays in the arena */

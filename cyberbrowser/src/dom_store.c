@@ -208,6 +208,7 @@ static void store_grow(uint32_t need) {
     GROW(wrapper, uint32_t);
     GROW(wrap_idx, uint32_t);
     GROW(realm, uint16_t);
+    GROW(state, uint16_t);
     GROW(text, DomStr);
     GROW(attrs, DomAttrList);
     GROW(id_atom, CssAtom);
@@ -247,6 +248,7 @@ uint32_t dom_alloc_slot(int kind, NodeId owner) {
     }
     g_dom.kind[s] = (uint8_t)kind;
     g_dom.flags[s] = 0;
+    g_dom.state[s] = 0;
     g_dom.tag[s] = CSS_ATOM_NONE;
     g_dom.parent[s] = g_dom.first[s] = g_dom.last[s] = g_dom.next[s] = g_dom.prev[s] = 0;
     g_dom.host[s] = g_dom.shadow[s] = g_dom.content[s] = 0;
@@ -326,6 +328,7 @@ uint16_t dom_tag_flags(CssAtom tag) {
         if (strchr(s, '-')) f |= DOMF_CE_CANDIDATE;
         for (int i = 0; k_void_tags[i]; i++) if (strcmp(s, k_void_tags[i]) == 0) { f |= DOMF_VOID; break; }
         for (int i = 0; k_raw_tags[i]; i++) if (strcmp(s, k_raw_tags[i]) == 0) { f |= DOMF_RAW_TEXT; break; }
+        if (!strcmp(s, "video") || !strcmp(s, "audio")) f |= DOMF_MEDIA;
     }
     if (tag >= g_tag_flags_cap) {
         uint32_t cap = g_tag_flags_cap ? g_tag_flags_cap : 1024;
@@ -348,8 +351,30 @@ NodeId dom_create_element(CssAtom tag, NodeId owner) {
     uint32_t s = dom_alloc_slot(DOM_K_ELEMENT, owner);
     g_dom.tag[s] = tag;
     g_dom.flags[s] = dom_tag_flags(tag);
+    if (g_dom.flags[s] & DOMF_MEDIA) dom_media_note(s);
     return dom_id_of(s);
 }
+
+static NodeId *g_media_els;
+static uint32_t g_media_n, g_media_cap;
+
+void dom_media_note(uint32_t slot) {
+    if (g_media_n == g_media_cap) {
+        uint32_t cap = g_media_cap ? g_media_cap * 2 : 16;
+        NodeId *a = realloc(g_media_els, cap * sizeof(NodeId));
+        if (!a) return;
+        g_media_els = a;
+        g_media_cap = cap;
+    }
+    g_media_els[g_media_n++] = dom_id_of(slot);
+}
+
+const NodeId *dom_media_elements(uint32_t *n) {
+    *n = g_media_n;
+    return g_media_els;
+}
+
+void dom_media_forget(void) { g_media_n = 0; }
 
 NodeId dom_create_element_str(const char *tag, size_t n, NodeId owner) {
     css_atom_reserve(1);

@@ -34,6 +34,7 @@
 #include "dom_snapshot.h"
 #include "dom_wrap.h"
 #include "dom_js.h"
+#include "css_anim.h"
 #include "css_style_decl.h"
 #include "dom_fetch.h"
 #include "dom_query.h"
@@ -1129,6 +1130,18 @@ static NodeId owner_of_value(JSContextHandle ctx, GCValue doc) {
 
 /* Resolve a URL against window.location.href.  Only handles the http/https
  * cases needed for YouTube module loading. */
+static char* dom_resolve_url(const char *base, const char *href);
+
+/* href against the document's URL (malloc'd). */
+char *dom_resolve_document_url(JSContextHandle ctx, const char *href) {
+    GCValue loc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "location");
+    GCValue hrefv = JS_GetPropertyStr(ctx, loc, "href");
+    const char *base = JS_IsString(hrefv) ? JS_ToCString(ctx, hrefv) : NULL;
+    char *url = dom_resolve_url(base && base[0] ? base : (g_cyber_start_url ? g_cyber_start_url : ""), href);
+    if (base) JS_FreeCString(ctx, base);
+    return url;
+}
+
 static char* dom_resolve_url(const char *base, const char *href) {
     if (!href || !href[0]) return base ? strdup(base) : NULL;
     if (url_has_scheme(href)) return strdup(href);
@@ -1584,6 +1597,12 @@ int dom_poll_stylesheet_loads(JSContextHandle ctx) {
  * goes on, and load fires from the event loop once it is in. */
 static void dom_maybe_load_stylesheet(JSContextHandle ctx, GCValue node) {
     NodeId n = dom_node_of(node);
+    /* (a <style>: its sheet is there; load comes in a task) */
+    if (dom_tag_is(n, "style") && dom_node_is_connected(ctx, node)) {
+        GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberStyleInserted");
+        if (JS_IsFunction(ctx, fn) && JS_IsException(JS_Call(ctx, fn, JS_UNDEFINED, 1, &node))) JS_GetException(ctx);
+        return;
+    }
     if (!dom_tag_is(n, "link") || !dom_node_is_connected(ctx, node)) return;
     const char *rel = dom_attr(n, "rel");
     const char *href = dom_attr(n, "href");
@@ -1622,7 +1641,7 @@ static void dom_maybe_load_stylesheet(JSContextHandle ctx, GCValue node) {
             return;
         }
     }
-    bool ok = url && url_is_network_url(url) && css_layout_fetch_stylesheet_url(url);
+    bool ok = url && (!strncasecmp(url, "data:", 5) || (url_is_network_url(url) && css_layout_fetch_stylesheet_url(url)));
     free(url);
     dom_dispatch_script_event(ctx, node, ok ? "load" : "error");
 }
@@ -1775,7 +1794,10 @@ bool dom_api_remove(JSContextHandle ctx, NodeId parent, NodeId child) {
     /* (a subtree observer of another kind still follows it) */
     if (!observers) mo_note_removal(ctx, parent_js, child_js);
     dom_detach(child, false);
-    if (was_connected && !g_dom_moving) frame_api_on_disconnect();
+    if (was_connected && !g_dom_moving) {
+        frame_api_on_disconnect();
+        anim_node_removed(child);
+    }
     dom_request_layout();
     if (dom_tag_is(parent, "picture")) {
         image_api_picture_changed(parent);
@@ -2883,6 +2905,11 @@ static void attr_changed_ns(JSContextHandle ctx, GCValue el, NodeId n, const cha
     dom_query_note_attr(n, name);
     invoke_attribute_changed(ctx, el, name, old_value, new_value);
     mo_notify_attribute_ns(ctx, el, name, ns ? dom_name_str(ns) : NULL, old_value);
+    /* (a link that has just become a stylesheet loads) */
+    if (!ns && (!strcasecmp(name, "rel") || !strcasecmp(name, "href")) && dom_tag_is(n, "link")) dom_maybe_load_stylesheet(ctx, el);
+    /* (a media element's src set: it loads; removed: it does not) */
+    if (!ns && new_value && !strcasecmp(name, "src") && (dom_tag_is(n, "video") || dom_tag_is(n, "audio")))
+        js_video_src_attr_changed(ctx, el, new_value);
     dom_request_layout();
 }
 

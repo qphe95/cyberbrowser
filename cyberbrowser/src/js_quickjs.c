@@ -731,57 +731,24 @@ GCValue js_video_constructor(JSContextHandle ctx, GCValue new_target, int argc, 
 static GCValue js_video_load(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id);
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
-    /* A MediaSource drives its own load (sourceopen, loadedmetadata, ...). */
-    if (media_element_active(this_val)) return JS_UNDEFINED;
-
-    SAFE_SET(vid, HTMLVideoElementHandle, network_state, 2); // NETWORK_LOADING
-    SAFE_SET(vid, HTMLVideoElementHandle, ready_state, 1);   // HAVE_METADATA
-    
-    // Trigger standard media load events
-    GCValue onloadstart = SAFE_GET_OR(vid, HTMLVideoElementHandle, onloadstart, JS_NULL);
-    if (!JS_IsNull(onloadstart)) {
-        JS_Call(ctx, onloadstart, this_val, 0, NULL);
-    }
-    GCValue onloadedmetadata = SAFE_GET_OR(vid, HTMLVideoElementHandle, onloadedmetadata, JS_NULL);
-    if (!JS_IsNull(onloadedmetadata)) {
-        JS_Call(ctx, onloadedmetadata, this_val, 0, NULL);
-    }
-    
+    media_element_load(ctx, this_val);
     return JS_UNDEFINED;
 }
 
 static GCValue js_video_play(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id);
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
-    if (media_element_active(this_val)) {
+    if (media_element_source_attached(this_val)) {
         media_element_play(this_val);
         return js_create_empty_resolved_promise(ctx);
     }
-
-    SAFE_SET(vid, HTMLVideoElementHandle, paused, false);
-    SAFE_SET(vid, HTMLVideoElementHandle, ready_state, 4); // HAVE_ENOUGH_DATA
-    
-    GCValue onplay = SAFE_GET_OR(vid, HTMLVideoElementHandle, onplay, JS_NULL);
-    if (!JS_IsNull(onplay)) {
-        JS_Call(ctx, onplay, this_val, 0, NULL);
-    }
-    GCValue onplaying = SAFE_GET_OR(vid, HTMLVideoElementHandle, onplaying, JS_NULL);
-    if (!JS_IsNull(onplaying)) {
-        JS_Call(ctx, onplaying, this_val, 0, NULL);
-    }
-    GCValue oncanplay = SAFE_GET_OR(vid, HTMLVideoElementHandle, oncanplay, JS_NULL);
-    if (!JS_IsNull(oncanplay)) {
-        JS_Call(ctx, oncanplay, this_val, 0, NULL);
-    }
-    
-    return JS_UNDEFINED;
+    return media_element_play_resource(ctx, this_val);
 }
 
 static GCValue js_video_pause(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id);
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
-    if (media_element_active(this_val)) media_element_pause(this_val);
-    SAFE_SET(vid, HTMLVideoElementHandle, paused, true);
+    if (media_element_active(this_val)) media_element_pause(ctx, this_val);
     return JS_UNDEFINED;
 }
 
@@ -790,44 +757,63 @@ static GCValue js_video_set_src(JSContextHandle ctx, GCValue this_val, GCValue v
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
     
     const char *src = JS_ToCString(ctx, val);
-    if (src) {
-        SAFE_SET_STR(vid, HTMLVideoElementHandle, src, src);
-        record_captured_url(src);
-        /* src lives here, not in an attribute: the layout mirror reads it
-         * from the element when the element is dirty. */
-        NodeId node = dom_node_of(this_val);
-        if (node) dom_mark_dirty(node, DOMF_DIRTY_ATTR);
-        
-        // Resolve blob: URLs back to the registered object (MediaSource, Blob, etc.)
-        if (strncmp(src, "blob:", 5) == 0) {
-            GCValue global_obj = JS_GetGlobalObject(ctx);
-            GCValue registry = JS_GetPropertyStr(ctx, global_obj, "__blobRegistry");
-            if (!JS_IsUndefined(registry) && !JS_IsNull(registry)) {
-                GCValue obj = JS_GetPropertyStr(ctx, registry, src);
-                if (!JS_IsUndefined(obj) && !JS_IsNull(obj)) {
-                    JS_SetPropertyStr(ctx, this_val, "__mediaSource", obj);
-                    /* A MediaSource attaches: it opens and the player runs. */
-                    MediaSourceDataHandle ms = JS_GetOpaqueHandle(obj, js_media_source_class_id);
-                    if (!SAFE_IS_NULL(ms)) {
-                        JS_SetPropertyStr(ctx, this_val, "__blobUrl", JS_NewString(ctx, src));
-                        media_element_attach(ctx, this_val, obj);
-                        return JS_UNDEFINED;
-                    }
+    /* (the attribute: its change starts the load, js_video_src_attr_changed) */
+    GCValue arg[2] = { JS_NewString(ctx, "src"), JS_NewString(ctx, src ? src : "") };
+    GCValue r = JS_Call(ctx, JS_GetPropertyStr(ctx, this_val, "setAttribute"), this_val, 2, arg);
+    return JS_IsException(r) ? r : JS_UNDEFINED;
+}
+
+/* The src attribute was set (browser/dom_api.c): the media element loads. */
+void js_video_src_attr_changed(JSContextHandle ctx, GCValue el, const char *src) {
+    HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, el, js_video_class_id);
+    if (SAFE_IS_NULL(vid)) { JS_GetException(ctx); return; }
+    SAFE_SET_STR(vid, HTMLVideoElementHandle, src, src);
+    record_captured_url(src);
+
+    // Resolve blob: URLs back to the registered object (MediaSource, Blob, etc.)
+    if (strncmp(src, "blob:", 5) == 0) {
+        GCValue global_obj = JS_GetGlobalObject(ctx);
+        GCValue registry = JS_GetPropertyStr(ctx, global_obj, "__blobRegistry");
+        if (!JS_IsUndefined(registry) && !JS_IsNull(registry)) {
+            GCValue obj = JS_GetPropertyStr(ctx, registry, src);
+            if (!JS_IsUndefined(obj) && !JS_IsNull(obj)) {
+                JS_SetPropertyStr(ctx, el, "__mediaSource", obj);
+                /* A MediaSource attaches: it opens and the player runs. */
+                MediaSourceDataHandle ms = JS_GetOpaqueHandle(obj, js_media_source_class_id);
+                if (!SAFE_IS_NULL(ms)) {
+                    JS_SetPropertyStr(ctx, el, "__blobUrl", JS_NewString(ctx, src));
+                    media_element_attach(ctx, el, obj);
+                    return;
                 }
             }
         }
-        media_element_detach(ctx, this_val);
-    } else {
-        SAFE_SET_STR(vid, HTMLVideoElementHandle, src, "");
-        media_element_detach(ctx, this_val);
     }
-    return JS_UNDEFINED;
+    media_element_detach(ctx, el);
+    media_element_load(ctx, el);
 }
 
 static GCValue js_video_get_src(JSContextHandle ctx, GCValue this_val) {
     HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id);
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
-    return JS_NewString(ctx, SAFE_GET_OR(vid, HTMLVideoElementHandle, src, ""));
+    const char *attr = dom_attr(dom_node_of(this_val), "src");
+    if (!attr) return JS_NewString(ctx, "");
+    char *url = dom_resolve_document_url(ctx, attr);
+    GCValue v = JS_NewString(ctx, url ? url : attr);
+    free(url);
+    return v;
+}
+
+static GCValue js_video_get_current_src(JSContextHandle ctx, GCValue this_val) {
+    return JS_NewString(ctx, media_element_url(this_val));
+}
+
+static GCValue js_video_get_seeking(JSContextHandle ctx, GCValue this_val) {
+    (void)ctx;
+    return JS_NewBool(ctx, media_element_seeking(this_val));
+}
+
+static GCValue js_video_get_error(JSContextHandle ctx, GCValue this_val) {
+    return media_element_error(ctx, this_val);
 }
 
 static GCValue js_video_get_current_time(JSContextHandle ctx, GCValue this_val) {
@@ -842,7 +828,7 @@ static GCValue js_video_set_current_time(JSContextHandle ctx, GCValue this_val, 
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
     double time;
     JS_ToFloat64(ctx, &time, val);
-    if (media_element_active(this_val)) media_element_seek(this_val, time);
+    media_element_seek(ctx, this_val, time);
     SAFE_SET(vid, HTMLVideoElementHandle, current_time, time);
     return JS_UNDEFINED;
 }
@@ -850,15 +836,13 @@ static GCValue js_video_set_current_time(JSContextHandle ctx, GCValue this_val, 
 static GCValue js_video_get_duration(JSContextHandle ctx, GCValue this_val) {
     HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id);
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
-    if (media_element_active(this_val)) return JS_NewFloat64(ctx, media_element_duration(this_val));
-    return JS_NewFloat64(ctx, SAFE_GET_OR(vid, HTMLVideoElementHandle, duration, 0.0));
+    return JS_NewFloat64(ctx, media_element_duration(this_val));
 }
 
 static GCValue js_video_get_paused(JSContextHandle ctx, GCValue this_val) {
     HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id);
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
-    if (media_element_active(this_val)) return JS_NewBool(ctx, media_element_paused(this_val));
-    return JS_NewBool(ctx, SAFE_GET_OR(vid, HTMLVideoElementHandle, paused, true));
+    return JS_NewBool(ctx, media_element_paused(this_val));
 }
 
 static GCValue js_video_get_ready_state(JSContextHandle ctx, GCValue this_val) {
@@ -883,7 +867,8 @@ static GCValue js_video_get_video_height(JSContextHandle ctx, GCValue this_val) 
 static GCValue js_video_get_network_state(JSContextHandle ctx, GCValue this_val) {
     HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id);
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
-    int state = SAFE_GET_OR(vid, HTMLVideoElementHandle, network_state, 0);
+    int state = media_element_network_state(this_val);
+    if (state < 0) state = SAFE_GET_OR(vid, HTMLVideoElementHandle, network_state, 0);
     /* (a <source> child and no src: resource selection's first step is done) */
     NodeId n = state ? DOM_NULL : dom_node_of(this_val);
     if (n && !dom_get_attr_str(n, "src"))
@@ -900,14 +885,6 @@ static GCValue js_video_can_play_type(JSContextHandle ctx, GCValue this_val, int
     /* What the decoders handle (src/media/media_buffer.c); no HLS. */
     return JS_NewString(ctx, media_type_supported(type) ? "probably" : "");
 }
-
-static void js_video_dispatch_simple_event(JSContextHandle ctx, GCValue this_val, const char *prop_name) {
-    GCValue handler = JS_GetPropertyStr(ctx, this_val, prop_name);
-    if (JS_IsFunction(ctx, handler)) {
-        JS_Call(ctx, handler, this_val, 0, NULL);
-    }
-}
-
 
 static GCValue js_video_create_time_ranges_start(JSContextHandle c, GCValue t, int argc_unused, GCValue *argv_unused)
 {
@@ -976,7 +953,7 @@ static GCValue js_video_get_played(JSContextHandle ctx, GCValue this_val) {
 static GCValue js_video_get_seekable(JSContextHandle ctx, GCValue this_val) {
     HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id);
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
-    double dur = SAFE_GET_OR(vid, HTMLVideoElementHandle, duration, 0.0);
+    double dur = media_element_duration(this_val);
     if (dur > 0)
         return js_video_create_time_ranges(ctx, 0.0, dur);
     return js_video_create_time_ranges(ctx, 0.0, 0.0);
@@ -1003,20 +980,37 @@ static GCValue js_video_get_ended(JSContextHandle ctx, GCValue this_val) {
         return JS_UNDEFINED; \
     }
 
-DEFINE_VIDEO_BOOL_PROP(autoplay, autoplay)
-DEFINE_VIDEO_BOOL_PROP(loop, loop)
+/* (a boolean attribute, reflected) */
+static GCValue video_set_bool_attr(JSContextHandle ctx, GCValue this_val, const char *name, GCValue val) {
+    bool on = JS_ToBool(ctx, val);
+    GCValue arg[2] = { JS_NewString(ctx, name), JS_NewString(ctx, "") };
+    GCValue r = JS_Call(ctx, JS_GetPropertyStr(ctx, this_val, on ? "setAttribute" : "removeAttribute"), this_val, on ? 2 : 1, arg);
+    return JS_IsException(r) ? r : JS_UNDEFINED;
+}
+
+static GCValue js_video_get_autoplay(JSContextHandle ctx, GCValue this_val) {
+    return JS_NewBool(ctx, dom_attr(dom_node_of(this_val), "autoplay") != NULL);
+}
+static GCValue js_video_set_autoplay(JSContextHandle ctx, GCValue this_val, GCValue val) {
+    return video_set_bool_attr(ctx, this_val, "autoplay", val);
+}
+static GCValue js_video_get_loop(JSContextHandle ctx, GCValue this_val) {
+    return JS_NewBool(ctx, dom_attr(dom_node_of(this_val), "loop") != NULL);
+}
+static GCValue js_video_set_loop(JSContextHandle ctx, GCValue this_val, GCValue val) {
+    return video_set_bool_attr(ctx, this_val, "loop", val);
+}
 
 static GCValue js_video_get_muted(JSContextHandle ctx, GCValue this_val) {
     HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id);
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
-    return JS_NewBool(ctx, SAFE_GET_OR(vid, HTMLVideoElementHandle, muted, false));
+    return JS_NewBool(ctx, media_element_muted(this_val));
 }
 
 static GCValue js_video_set_muted(JSContextHandle ctx, GCValue this_val, GCValue val) {
     HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id);
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
-    SAFE_SET(vid, HTMLVideoElementHandle, muted, JS_ToBool(ctx, val));
-    js_video_dispatch_simple_event(ctx, this_val, "onvolumechange");
+    media_element_set_muted(this_val, JS_ToBool(ctx, val));
     return JS_UNDEFINED;
 }
 
@@ -1033,7 +1027,7 @@ static GCValue js_video_set_volume(JSContextHandle ctx, GCValue this_val, GCValu
     if (v < 0.0) v = 0.0;
     if (v > 1.0) v = 1.0;
     SAFE_SET(vid, HTMLVideoElementHandle, volume, v);
-    js_video_dispatch_simple_event(ctx, this_val, "onvolumechange");
+    media_element_volume_changed(this_val);
     return JS_UNDEFINED;
 }
 
@@ -1048,7 +1042,7 @@ static GCValue js_video_set_playback_rate(JSContextHandle ctx, GCValue this_val,
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
     double v = 1.0; JS_ToFloat64(ctx, &v, val);
     SAFE_SET(vid, HTMLVideoElementHandle, playback_rate, v);
-    if (media_element_active(this_val)) media_element_set_rate(this_val, v);
+    media_element_set_rate(ctx, this_val, v);
     return JS_UNDEFINED;
 }
 
@@ -1118,29 +1112,6 @@ static GCValue js_video_activate(JSContextHandle ctx, GCValue this_val, int argc
     return JS_UNDEFINED;
 }
 
-// Generic getter/setter for event callbacks
-// NOTE: With GCValue, we just copy the handle. The GC manages the actual object.
-#define DEFINE_VIDEO_EVENT_HANDLER(name, field) \
-    static GCValue js_video_get_##name(JSContextHandle ctx, GCValue this_val) { \
-        HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id); \
-        if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error"); \
-        return SAFE_GET_OR(vid, HTMLVideoElementHandle, field, JS_NULL); \
-    } \
-    static GCValue js_video_set_##name(JSContextHandle ctx, GCValue this_val, GCValue val) { \
-        HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id); \
-        if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error"); \
-        SAFE_SET(vid, HTMLVideoElementHandle, field, val); \
-        return JS_UNDEFINED; \
-    }
-
-DEFINE_VIDEO_EVENT_HANDLER(onloadstart, onloadstart)
-DEFINE_VIDEO_EVENT_HANDLER(onloadedmetadata, onloadedmetadata)
-DEFINE_VIDEO_EVENT_HANDLER(oncanplay, oncanplay)
-DEFINE_VIDEO_EVENT_HANDLER(onplay, onplay)
-DEFINE_VIDEO_EVENT_HANDLER(onplaying, onplaying)
-DEFINE_VIDEO_EVENT_HANDLER(onerror, onerror)
-DEFINE_VIDEO_EVENT_HANDLER(onvolumechange, onvolumechange)
-
 const JSCFunctionListEntry js_video_proto_funcs[] = {
     JS_CFUNC_DEF("load", 0, js_video_load),
     JS_CFUNC_DEF("play", 0, js_video_play),
@@ -1151,7 +1122,9 @@ const JSCFunctionListEntry js_video_proto_funcs[] = {
     JS_CGETSET_DEF("audioTracks", js_video_get_audio_tracks, NULL),
     JS_CGETSET_DEF("videoTracks", js_video_get_video_tracks, NULL),
     JS_CGETSET_DEF("src", js_video_get_src, js_video_set_src),
-    JS_CGETSET_DEF("currentSrc", js_video_get_src, NULL),
+    JS_CGETSET_DEF("currentSrc", js_video_get_current_src, NULL),
+    JS_CGETSET_DEF("seeking", js_video_get_seeking, NULL),
+    JS_CGETSET_DEF("error", js_video_get_error, NULL),
     JS_CGETSET_DEF("currentTime", js_video_get_current_time, js_video_set_current_time),
     JS_CGETSET_DEF("duration", js_video_get_duration, NULL),
     JS_CGETSET_DEF("paused", js_video_get_paused, NULL),
@@ -1171,12 +1144,6 @@ const JSCFunctionListEntry js_video_proto_funcs[] = {
     JS_CGETSET_DEF("defaultPlaybackRate", js_video_get_default_playback_rate, js_video_set_default_playback_rate),
     JS_CGETSET_DEF("preload", js_video_get_preload, js_video_set_preload),
     JS_CGETSET_DEF("crossOrigin", js_video_get_crossOrigin, js_video_set_crossOrigin),
-    JS_CGETSET_DEF("onloadstart", js_video_get_onloadstart, js_video_set_onloadstart),
-    JS_CGETSET_DEF("onloadedmetadata", js_video_get_onloadedmetadata, js_video_set_onloadedmetadata),
-    JS_CGETSET_DEF("oncanplay", js_video_get_oncanplay, js_video_set_oncanplay),
-    JS_CGETSET_DEF("onplay", js_video_get_onplay, js_video_set_onplay),
-    JS_CGETSET_DEF("onplaying", js_video_get_onplaying, js_video_set_onplaying),
-    JS_CGETSET_DEF("onerror", js_video_get_onerror, js_video_set_onerror),
 };
 const size_t js_video_proto_funcs_count = sizeof(js_video_proto_funcs) / sizeof(js_video_proto_funcs[0]);
 
@@ -1985,12 +1952,15 @@ typedef struct NetReq {
     char origin[512];
     JsNetDoneFn done;
     void *done_user;
+    bool background;    /* not in g_net_inflight */
+    unsigned gen;       /* g_net_gen when it started */
 } NetReq;
 
 static pthread_mutex_t g_net_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_net_cond = PTHREAD_COND_INITIALIZER;
 static NetReq *g_net_done;          /* finished, waiting to be settled */
 static int g_net_inflight;          /* started and not yet settled */
+static unsigned g_net_gen;          /* the document (js_quickjs_net_forget) */
 
 static void net_req_free(NetReq *r)
 {
@@ -2008,6 +1978,7 @@ static NetReq *net_req_new(const char *url, const char *method, const char *body
                            const char **headers, int nheaders)
 {
     NetReq *r = calloc(1, sizeof(*r));
+    if (r) r->gen = g_net_gen;
     if (!r) return NULL;
     r->url = strdup(url);
     r->method = strdup(method);
@@ -2139,21 +2110,24 @@ static GCValue net_req_start(JSContextHandle ctx, NetReq *r)
     return promise;
 }
 
-bool js_quickjs_net_get(const char *url, JsNetDoneFn done, void *user)
+static bool net_get(const char *url, JsNetDoneFn done, void *user, bool background)
 {
     NetReq *r = net_req_new(url, "GET", NULL, 0, NULL, 0);
     if (!r) return false;
     r->done = done;
     r->done_user = user;
+    r->background = background;
     static int sync = -1;
     if (sync < 0) {
         const char *e = cyber_getenv("CYBER_SYNC_FETCH");
         sync = e && e[0] == '1';
     }
     pthread_t th;
-    pthread_mutex_lock(&g_net_mutex);
-    g_net_inflight++;
-    pthread_mutex_unlock(&g_net_mutex);
+    if (!background) {
+        pthread_mutex_lock(&g_net_mutex);
+        g_net_inflight++;
+        pthread_mutex_unlock(&g_net_mutex);
+    }
     if (sync || pthread_create(&th, NULL, net_req_thread, r) != 0) {
         net_req_thread(r);          /* inline: settled on the next poll */
     } else {
@@ -2162,6 +2136,9 @@ bool js_quickjs_net_get(const char *url, JsNetDoneFn done, void *user)
     return true;
 }
 
+bool js_quickjs_net_get(const char *url, JsNetDoneFn done, void *user) { return net_get(url, done, user, false); }
+bool js_quickjs_net_get_background(const char *url, JsNetDoneFn done, void *user) { return net_get(url, done, user, true); }
+
 int js_quickjs_network_pending(void)
 {
     pthread_mutex_lock(&g_net_mutex);
@@ -2169,6 +2146,9 @@ int js_quickjs_network_pending(void)
     pthread_mutex_unlock(&g_net_mutex);
     return n + dom_pending_stylesheet_loads();
 }
+
+/* The heap is about to go: requests still out are left to finish unheard. */
+void js_quickjs_net_forget(void) { g_net_gen++; }
 
 int js_quickjs_net_poll(JSContextHandle ctx)
 {
@@ -2183,10 +2163,12 @@ int js_quickjs_net_poll(JSContextHandle ctx)
     int count = 0;
     while (rev) {
         NetReq *n = rev->next;
-        net_req_settle(ctx, rev);
+        /* (one of a document gone: its promise and callbacks went with its heap) */
+        if (rev->gen == g_net_gen) net_req_settle(ctx, rev);
+        bool counted = !rev->background;
         net_req_free(rev);
         pthread_mutex_lock(&g_net_mutex);
-        g_net_inflight--;
+        if (counted) g_net_inflight--;
         pthread_mutex_unlock(&g_net_mutex);
         count++;
         rev = n;

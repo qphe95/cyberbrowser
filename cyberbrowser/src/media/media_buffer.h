@@ -34,6 +34,10 @@ void media_buffer_destroy(MediaBuffer *mb);
  * added to the media timestamps.  False on bytes that cannot be parsed. */
 bool media_buffer_append(MediaBuffer *mb, const uint8_t *data, size_t len, double timestamp_offset);
 
+/* A whole file (a plain video.src, ordinary MP4 or WebM rather than segments):
+ * its samples and parameters.  False on bytes that cannot be parsed. */
+bool media_buffer_load_whole(MediaBuffer *mb, const uint8_t *data, size_t len);
+
 /* SourceBuffer.remove(): drop the samples presented in [start, end). */
 void media_buffer_remove(MediaBuffer *mb, double start, double end);
 

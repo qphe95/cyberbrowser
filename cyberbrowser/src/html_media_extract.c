@@ -1631,6 +1631,13 @@ HtmlPageStream *html_page_stream_begin(void) {
     return page_stream_begin(g_js_context, NULL);
 }
 
+/* A new document in this process: a stream its predecessor left open (a frame
+ * navigated away from mid-parse) is over, and would keep this page from
+ * streaming. */
+void html_page_stream_abandon(void) {
+    g_page = NULL;
+}
+
 /* A frame's page (browser/frame_api.c): parsed into ctx's document, its
  * scripts run in ctx, its URLs resolved against base_url.  It may begin
  * while another page is parsed (that one resumes when this one finishes). */

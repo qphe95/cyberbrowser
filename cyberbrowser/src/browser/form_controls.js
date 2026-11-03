@@ -128,11 +128,12 @@
         }, function (v) {
             var s = state(this);
             s.checked = !!v; s.dirtyChecked = true;
+            syncChecked(this, s);
             if (s.checked && inputType(this) === 'radio') uncheckGroup(this);
         });
         reflectBool(IP, 'defaultChecked', 'checked');
         accessor(IP, 'indeterminate', function () { return !!state(this).indeterminate; },
-                 function (v) { state(this).indeterminate = !!v; });
+                 function (v) { state(this).indeterminate = !!v; global.__cyberElState(this, 256, !!v); });
         ['name', 'placeholder', 'autocomplete', 'min', 'max', 'step', 'pattern', 'accept', 'alt', 'src',
          'inputMode', 'enterKeyHint', 'dirName', 'formAction', 'formMethod', 'formTarget'].forEach(function (p) {
             reflectString(IP, p);
@@ -143,6 +144,31 @@
         reflectInt(IP, 'minLength', 'minlength', -1);
         reflectInt(IP, 'size', 'size', 20);
         accessor(IP, 'form', function () { return formOwner(this); });
+        /* (type=image: its image, as an img element's: load or error at it) */
+        var inputImage = function (el) {
+            if (inputType(el) !== 'image' || !global.Image) return;
+            var src = el.getAttribute('src');
+            if (!src) return;
+            var img = new global.Image(), s = state(el);
+            s.image = img;
+            var E = global.Event;
+            img.onload = function () { el.dispatchEvent(new E('load')); };
+            img.onerror = function () { el.dispatchEvent(new E('error')); };
+            img.src = src;
+        };
+        accessor(IP, 'src', function () {
+            var v = this.getAttribute('src');
+            if (v === null) return '';
+            try { return new global.URL(v, this.baseURI).href; } catch (e) { return v; }
+        }, function (v) { this.setAttribute('src', String(v)); inputImage(this); });
+        accessor(IP, 'width', function () {
+            var a = parseInt(this.getAttribute('width'), 10), s = state(this);
+            return a >= 0 ? a : s.image ? s.image.width : 0;
+        }, function (v) { this.setAttribute('width', String(v >>> 0)); });
+        accessor(IP, 'height', function () {
+            var a = parseInt(this.getAttribute('height'), 10), s = state(this);
+            return a >= 0 ? a : s.image ? s.image.height : 0;
+        }, function (v) { this.setAttribute('height', String(v >>> 0)); });
         accessor(IP, 'valueAsNumber', function () {
             var t = inputType(this);
             if (t !== 'number' && t !== 'range') return NaN;
@@ -162,6 +188,11 @@
         var step = Number(el.getAttribute('step')) || 1, v = Number(el.value) || 0;
         el.value = String(v + step * n);
     }
+    /* (what selectors see: :checked) */
+    function syncChecked(el, s) {
+        global.__cyberElState(el, 128, s.dirtyChecked);
+        global.__cyberElState(el, 64, s.dirtyChecked && s.checked);
+    }
     function uncheckGroup(el) {
         var name = el.getAttribute('name');
         if (!name) return;
@@ -172,6 +203,7 @@
             var r = all[i];
             if (r !== el && inputType(r) === 'radio' && r.getAttribute('name') === name && formOwner(r) === f) {
                 var s = state(r); s.checked = false; s.dirtyChecked = true;
+                syncChecked(r, s);
             }
         }
     }
@@ -269,7 +301,10 @@
         var s = state(o);
         return s.dirtySelected ? s.selected : o.hasAttributeNS(null, 'selected');
     }
-    function setSelected(o, v) { var s = state(o); s.selected = !!v; s.dirtySelected = true; }
+    function setSelected(o, v) {
+        var s = state(o); s.selected = !!v; s.dirtySelected = true;
+        global.__cyberElState(o, 128, true); global.__cyberElState(o, 64, s.selected);
+    }
     /* the selectedness setting algorithm, for a single select: the last
      * selected option, else the first non-disabled one (display size 1) */
     function selectedIndexOf(sel, opts) {
@@ -392,8 +427,10 @@
             if (!this.dispatchEvent(new E('reset', { bubbles: true, cancelable: true }))) return;
             elementsOf(this).forEach(function (el) {
                 var s = el[STATE];
-                if (s) { s.dirtyValue = false; s.dirtyChecked = false; }
-                if (el.localName === 'select') optionsOf(el).forEach(function (o) { if (o[STATE]) o[STATE].dirtySelected = false; });
+                if (s) { s.dirtyValue = false; s.dirtyChecked = false; syncChecked(el, s); }
+                if (el.localName === 'select') optionsOf(el).forEach(function (o) {
+                    if (o[STATE]) { o[STATE].dirtySelected = false; global.__cyberElState(o, 128, false); }
+                });
             });
         });
         /* (each control's, all of them: each invalid one fires its event) */
@@ -442,6 +479,7 @@
             setChecked: function (el, v) {
                 var s = state(el);
                 s.checked = !!v; s.dirtyChecked = true;
+                syncChecked(el, s);
                 if (s.checked && el.localName === 'input' && inputType(el) === 'radio') uncheckGroup(el);
             }
         }) });

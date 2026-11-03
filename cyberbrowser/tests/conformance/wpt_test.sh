@@ -22,6 +22,8 @@ dir=$(cd "$(dirname "$0")" && pwd)
 # A page of the site a tab is on loads in its process (CYBER_TAB_REUSE=0:
 # a process each, as the browser's default).
 export CYBER_TAB_REUSE=${CYBER_TAB_REUSE-1}
+# (window.open with a URL: a browser would block it without a user gesture)
+export CYBER_ALLOW_POPUPS=1
 [ "$CYBER_TAB_REUSE" = 0 ] && unset CYBER_TAB_REUSE
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
