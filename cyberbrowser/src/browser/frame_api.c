@@ -59,6 +59,7 @@ typedef struct Frame {
     NodeId doc;                 /* the frame's document */
     FrameState state;
     char url[2048];             /* the navigation's (or the loaded page's) URL */
+    bool popup;                 /* window.open's: its element is in no document */
     char fallback_base[2048];   /* an about: frame: its base URL when it has no <base> */
     bool dead;                  /* its document is no longer fully active */
 } Frame;
@@ -191,7 +192,7 @@ static void frame_mark_dead(Frame *f) {
  * script of theirs may be what's running). */
 void frame_api_on_disconnect(void) {
     for (Frame *f = g_frames; f; f = f->next)
-        if (!f->dead && SAFE_VALID(f->ctx) && !dom_is_connected(f->iframe)) {
+        if (!f->dead && !f->popup && SAFE_VALID(f->ctx) && !dom_is_connected(f->iframe)) {
             frame_mark_dead(f);
             /* (window[i] has one less) */
             frame_index_define(f->parent);
@@ -530,6 +531,15 @@ static const char frame_window_js[] =
     "  Object.defineProperty(w, 'innerHeight', { get: function () { return size('height', 'height', 150); }, configurable: true });"
     "  Object.defineProperty(w, 'outerWidth', { get: function () { return w.innerWidth; }, configurable: true });"
     "  Object.defineProperty(w, 'outerHeight', { get: function () { return w.innerHeight; }, configurable: true });"
+    /* (a frame's location navigates it; a fragment alone doesn't) */
+    "  var loc = w.location, hd = loc && Object.getOwnPropertyDescriptor(loc, 'href'), nav = w.__cyberFrameNavigate;"
+    "  if (hd && hd.set && hd.configurable && nav) {"
+    "    var go = function (u) { if (!nav(String(u))) hd.set.call(loc, u); };"
+    "    Object.defineProperty(loc, 'href', { get: hd.get, set: go, enumerable: true, configurable: true });"
+    "    ['assign', 'replace'].forEach(function (k) {"
+    "      Object.defineProperty(loc, k, { value: function (u) { go(u); }, enumerable: true, configurable: true, writable: true });"
+    "    });"
+    "  }"
     "})";
 
 /* The frame's window: its location, its place among windows (parent, top,
@@ -543,7 +553,7 @@ static void frame_setup_window(Frame *f) {
     bool same = realms_same_origin(ctx, f->parent);
     GCValue parent_win = window_seen_from(ctx, window_id(f->parent));
     GCValue top = window_seen_from(ctx, PAGE_WINDOW);
-    GCValue iframe = same ? dom_js(f->parent, f->iframe) : JS_NULL;
+    GCValue iframe = same && !f->popup ? dom_js(f->parent, f->iframe) : JS_NULL;
     GCValue setup = JS_Eval(ctx, frame_window_js, sizeof(frame_window_js) - 1, "<frame_window>",
                             JS_EVAL_TYPE_GLOBAL);
     if (JS_IsFunction(ctx, setup)) {
@@ -612,6 +622,13 @@ static char *wurl_percent_decode(const char *s) {
 static void frame_load(Frame *f) {
     char url[2048];
     snprintf(url, sizeof(url), "%s", f->url);
+    /* (the document going: its window hears) */
+    if (SAFE_VALID(f->ctx) && !f->dead) {
+        GCValue was = JS_GetGlobalObject(f->ctx);
+        frame_fire(f->ctx, was, "beforeunload");
+        frame_fire(f->ctx, was, "pagehide");
+        frame_fire(f->ctx, was, "unload");
+    }
     frame_discard_realm(f);
     f->state = FRAME_LOADED;
     /* (what its base URL falls back on, as it is now) */
@@ -808,13 +825,18 @@ static bool parent_scripts_pending(const Frame *f) {
     return loading;
 }
 
+/* (an XML page's nodes going back in, as its parser would have: its iframes
+ * out of the tree meanwhile aren't gone) */
+static bool g_frames_held;
+void frame_api_hold(bool hold) { g_frames_held = hold; }
+
 int frame_api_process(void) {
-    if (g_processing || (!g_frames && !g_messages)) return 0;
+    if (g_processing || g_frames_held || (!g_frames && !g_messages)) return 0;
     g_processing = true;
     int done = deliver_messages();
     for (Frame **pp = &g_frames; *pp; ) {
         Frame *f = *pp;
-        if (!dom_valid(f->iframe) || !dom_is_connected(f->iframe)) {
+        if (!dom_valid(f->iframe) || (!f->popup && !dom_is_connected(f->iframe))) {
             /* the iframe left its document: its browsing context goes */
             frame_discard_realm(f);
             *pp = f->next;
@@ -850,7 +872,7 @@ uint32_t frame_indexed_child(JSContextHandle ctx, uint32_t index) {
  * script looks first). */
 static void frame_ensure(Frame *f) {
     if (!f || f->state != FRAME_PENDING || g_processing || SAFE_VALID(f->ctx)) return;
-    if (strncmp(f->url, "about:", 6) != 0 || !dom_valid(f->iframe) || !dom_is_connected(f->iframe)) return;
+    if (strncmp(f->url, "about:", 6) != 0 || !dom_valid(f->iframe) || (!f->popup && !dom_is_connected(f->iframe))) return;
     if (parent_scripts_pending(f)) return;
     g_processing = true;
     frame_load(f);
@@ -975,7 +997,99 @@ void frame_api_on_connect(JSContextHandle ctx, NodeId subtree) {
     }
 }
 
+/* A frame's location set: it navigates, unless only the fragment differs
+ * (false: the location takes it as it is). */
+static GCValue js_frame_navigate_to(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    Frame *f = frame_of_realm(ctx);
+    const char *u = argc ? JS_ToCString(ctx, argv[0]) : NULL;
+    if (!f || !u) return JS_FALSE;
+    char *base = realm_url(ctx);
+    char *abs = wurl_resolve(base, u);
+    const char *to = abs ? abs : u, *hash = strchr(to, '#');
+    size_t n = hash ? (size_t)(hash - to) : strlen(to), bn = strcspn(base, "#");
+    bool same = hash && n == bn && !strncmp(to, base, n);
+    if (!same) {
+        snprintf(f->url, sizeof(f->url), "%s", to);
+        f->state = FRAME_PENDING;
+    }
+    free(abs);
+    free(base);
+    JS_FreeCString(ctx, u);
+    return same ? JS_FALSE : JS_TRUE;
+}
+
+/* window.open: only an empty window, a browsing context with no element in
+ * a document (a page with a URL for one gets none: as a blocked popup). */
+static GCValue js_window_open(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc > 0 && !JS_IsUndefined(argv[0])) {
+        const char *u = JS_ToCString(ctx, argv[0]);
+        if (!u) return JS_EXCEPTION;
+        bool blank = !u[0] || !strcmp(u, "about:blank");
+        JS_FreeCString(ctx, u);
+        if (!blank) return JS_NULL;
+    }
+    GCValue g = JS_GetGlobalObject(ctx), doc = JS_GetPropertyStr(ctx, g, "document");
+    GCValue create = JS_IsObject(doc) ? JS_GetPropertyStr(ctx, doc, "createElement") : JS_UNDEFINED;
+    if (!JS_IsFunction(ctx, create)) return JS_NULL;
+    GCValue tag = JS_NewString(ctx, "iframe");
+    GCValue el = JS_Call(ctx, create, doc, 1, &tag);
+    if (JS_IsException(el)) return el;
+    NodeId n = dom_node_of(el);
+    if (!n) return JS_NULL;
+    /* (what keeps its element) */
+    GCValue keep = JS_GetPropertyStr(ctx, g, "__cyberPopups");
+    if (!JS_IsObject(keep)) {
+        keep = JS_NewArray(ctx);
+        JS_DefinePropertyValueStr(ctx, g, "__cyberPopups", keep, JS_PROP_CONFIGURABLE);
+    }
+    uint32_t have = 0;
+    JS_ToUint32(ctx, &have, JS_GetPropertyStr(ctx, keep, "length"));
+    JS_SetPropertyUint32(ctx, keep, have, el);
+    frame_navigate(ctx, n, "about:blank");
+    Frame *f = frame_of_iframe(n);
+    if (!f) return JS_NULL;
+    f->popup = true;
+    frame_ensure(f);
+    return SAFE_VALID(f->ctx) ? window_seen_from(ctx, f->id) : JS_NULL;
+}
+
+/* Input into a frame's document, whatever its origin (the page gets no way
+ * into it: numbers go in, nothing comes out).  No method: is there a window
+ * there to take it? */
+static GCValue js_input_into(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    NodeId n = argc > 0 && JS_IsObject(argv[0]) ? dom_node_of(argv[0]) : DOM_NULL;
+    Frame *f = n ? frame_of_iframe(n) : NULL;
+    if (f) frame_ensure(f);
+    if (!f || f->dead || !SAFE_VALID(f->ctx)) return JS_FALSE;
+    GCValue input = JS_GetPropertyStr(f->ctx, JS_GetGlobalObject(f->ctx), "__cyberInput");
+    if (!JS_IsObject(input)) return JS_FALSE;
+    if (argc < 2) return JS_TRUE;
+    static const char *const methods[] = { "move", "down", "up", "wheel", "touchDown", "touchMove", "touchUp", NULL };
+    const char *name = JS_ToCString(ctx, argv[1]);
+    if (!name) return JS_EXCEPTION;
+    GCValue fn = JS_UNDEFINED;
+    for (int i = 0; methods[i]; i++) if (!strcmp(name, methods[i])) fn = JS_GetPropertyStr(f->ctx, input, methods[i]);
+    JS_FreeCString(ctx, name);
+    if (!JS_IsFunction(f->ctx, fn)) return JS_FALSE;
+    GCValue args[4];
+    int k = 0;
+    for (int i = 2; i < argc && k < 4; i++) {
+        double d = 0;
+        if (JS_ToFloat64(ctx, &d, argv[i])) return JS_EXCEPTION;
+        args[k++] = JS_NewFloat64(f->ctx, d);
+    }
+    if (JS_IsException(JS_Call(f->ctx, fn, input, k, args))) JS_GetException(f->ctx);
+    return JS_TRUE;
+}
+
 void frame_api_install(JSContextHandle ctx, GCValue global) {
+    JS_DefinePropertyValueStr(ctx, global, "__cyberFrameNavigate", JS_NewCFunction(ctx, js_frame_navigate_to, "__cyberFrameNavigate", 1), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberInputInto", JS_NewCFunction(ctx, js_input_into, "__cyberInputInto", 6), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "open", JS_NewCFunction(ctx, js_window_open, "open", 0),
+                              JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     if (!g_main_doc) g_main_doc = g_dom_document;
     if (g_dom_document == g_main_doc && dom_valid(g_main_doc)) g_dom.realm[dom_slot(g_main_doc)] = dom_realm_index(ctx);
     dom_wrap_set_realm_resolver(realm_of_document);

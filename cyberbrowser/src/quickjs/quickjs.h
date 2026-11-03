@@ -1033,6 +1033,9 @@ void JS_SetContextOpaque(JSContextHandle ctx, void *opaque);
 JSRuntimeHandle JS_GetRuntime(JSContextHandle ctx);
 /* The realm (context) a function was created in (ECMA-262 GetFunctionRealm). */
 JSContextHandle JS_GetFunctionRealmOf(JSContextHandle ctx, GCValue func_obj);
+/* The realm of the script frame `level` frames down (0: the top one; C
+ * functions' don't count); none past the bottom. */
+JSContextHandle JS_GetScriptFrameRealm(JSContextHandle ctx, int level);
 /* The script frames on the stack (C functions' don't count). */
 int JS_CountScriptFrames(JSContextHandle ctx);
 /* The realm a proxy was made in, revoked or not; none for anything else. */

@@ -39134,6 +39134,22 @@ static int js_link_module(JSContextHandle ctx, JSModuleDefHandle m)
 
 /* return JS_ATOM_NULL if the name cannot be found. Only works with
    not striped bytecode functions. */
+JSContextHandle JS_GetScriptFrameRealm(JSContextHandle ctx, int level)
+{
+    for (JSStackFrame *sf = js_rt_current_stack_frame(ctx_rt); sf; sf = JS_SF_PREV(sf)) {
+        if (JS_VALUE_GET_TAG(sf->cur_func) != JS_TAG_OBJECT)
+            continue;
+        JSObjectHandle p = JS_VALUE_GET_OBJ(sf->cur_func);
+        if (!js_class_has_bytecode(SAFE_GET_OR(p, JSObjectHandle, class_id, 0)))
+            continue;
+        if (level-- > 0)
+            continue;
+        JSFunctionBytecodeHandle b = (JSFunctionBytecodeHandle)(SAFE_GET_OR(p, JSObjectHandle, u.func.function_bytecode_handle, GC_HANDLE_NULL));
+        return (JSContextHandle)(SAFE_GET_OR(b, JSFunctionBytecodeHandle, realm_handle, GC_HANDLE_NULL));
+    }
+    return GC_HANDLE_NULL;
+}
+
 int JS_CountScriptFrames(JSContextHandle ctx)
 {
     int n = 0;

@@ -1862,6 +1862,22 @@ static void lq_scroll_fire(JSContextHandle ctx, NodeId id, const char *type)
     timer_microtask_checkpoint(ctx);
 }
 
+/* Does the box snap (platform_api.js)?  True: it moved, so it isn't ending yet. */
+static bool lq_scroll_snap(JSContextHandle ctx, NodeId id)
+{
+    if (dom_kind(id) != DOM_K_ELEMENT) return false;
+    GCValue target = dom_js(ctx, id);
+    if (!JS_IsObject(target)) return false;
+    GCValue dispatch = JS_GetPropertyStr(ctx, target, "dispatchEvent");
+    JSContextHandle realm = JS_IsFunction(ctx, dispatch) ? JS_GetFunctionRealmOf(ctx, dispatch) : ctx;
+    if (!realm) realm = ctx;
+    GCValue snap = JS_GetPropertyStr(realm, JS_GetGlobalObject(realm), "__cyberScrollSnap");
+    if (!JS_IsFunction(realm, snap)) return false;
+    GCValue r = JS_Call(realm, snap, JS_UNDEFINED, 1, &target);
+    if (JS_IsException(r)) { JS_GetException(realm); return false; }
+    return JS_ToBool(realm, r) > 0;
+}
+
 int layout_scroll_tick(JSContextHandle ctx)
 {
     uint32_t n = g_scroll_q.n;
@@ -1883,7 +1899,7 @@ int layout_scroll_tick(JSContextHandle ctx)
         if (due[i] == 1) lq_scroll_fire(ctx, ids[i], "scroll");
     /* (not for a box removed since) */
     for (uint32_t i = 0; i < n; i++)
-        if (due[i] == 2 && !g_scroll_hold && dom_is_connected(ids[i]))
+        if (due[i] == 2 && !g_scroll_hold && dom_is_connected(ids[i]) && !lq_scroll_snap(ctx, ids[i]))
             lq_scroll_fire(ctx, ids[i], "scrollend");
     free(ids);
     free(due);

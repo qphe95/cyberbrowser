@@ -1146,7 +1146,9 @@
      * caller's window (the realm of the function called) */
     function originOf(w) { try { return w.location.origin; } catch (e) { return 'null'; } }
     define(global, 'postMessage', function postMessage(message, options) {
-        var target = this == null ? global : this, source = global;
+        var target = this == null ? global : this;
+        /* (from who called: a parent posting to its frame calls the frame's own function) */
+        var source = global.__cyberCallerGlobal() || global;
         var targetOrigin = typeof options === 'object' && options !== null ? options.targetOrigin : options;
         if (targetOrigin === undefined) targetOrigin = '/';
         var data = clone(message);
@@ -1402,13 +1404,13 @@
     }
     /* A frame at a point: its document takes the input, at its coordinates. */
     function frameInput(t) {
-        if (!t || !/^i?frame$/.test(t.localName || '')) return null;
-        try {
-            var input = t.contentWindow && t.contentWindow.__cyberInput;
-            if (!input) return null;
-            var r = t.getBoundingClientRect();
-            return { input: input, left: r.left + t.clientLeft, top: r.top + t.clientTop };
-        } catch (e) { return null; }
+        if (!t || !/^i?frame$/.test(t.localName || '') || !global.__cyberInputInto(t)) return null;
+        var input = {};
+        ['move', 'down', 'up', 'wheel', 'touchDown', 'touchMove', 'touchUp'].forEach(function (k) {
+            input[k] = function (a, b, c, d) { global.__cyberInputInto(t, k, a, b, c === undefined ? 0 : c, d === undefined ? 0 : d); };
+        });
+        var r = t.getBoundingClientRect();
+        return { input: input, left: r.left + t.clientLeft, top: r.top + t.clientTop };
     }
     /* The scrollbar of a box at a point: which way, and how far along. */
     function scrollbarAt(t, x, y) {
@@ -1554,7 +1556,17 @@
             }
             return;
         }
-        if (el && /^(input|textarea)$/.test(el.localName)) return;
+        if (el && /^(input|textarea)$/.test(el.localName)) {
+            /* (the caret moves, and the text scrolls to keep it in view; its
+             * place is estimated: controls aren't laid out by character here) */
+            if (!dx || typeof el.selectionEnd !== 'number') return;
+            var caret = Math.max(0, Math.min(el.value.length, el.selectionEnd + (dx > 0 ? 1 : -1)));
+            el.setSelectionRange(caret, caret);
+            var cx = caret * (parseFloat(global.getComputedStyle(el).fontSize) || 13) * 0.5;
+            if (cx > el.scrollLeft + el.clientWidth) el.scrollLeft = cx - el.clientWidth;
+            else if (cx < el.scrollLeft) el.scrollLeft = cx;
+            return;
+        }
         wheelScroll(el || d.documentElement, dx, dy);
     }
     Object.defineProperty(global, '__cyberInput', { configurable: true, value: {

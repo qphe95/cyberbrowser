@@ -4188,8 +4188,8 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         "    try { origin = new URL(docUrl).origin; } catch(e){}\n"
         "\n"
         "    if (req.mode !== 'no-cors' && !headers['Origin']) headers['Origin'] = origin;\n"
-        "    if (req.referrer && req.referrer !== 'no-referrer' && !headers['Referer']) {\n"
-        "      headers['Referer'] = (req.referrer === 'about:client') ? docUrl : req.referrer;\n"
+        "    if (req.referrer && req.referrer !== 'no-referrer' && req.referrer !== 'about:client' && !headers['Referer']) {\n"
+        "      headers['Referer'] = req.referrer;\n"
         "    }\n"
         /* Cookies are the native fetch's to add (by credentials mode), from
          * the jar: document.cookie would leave out HttpOnly ones. */

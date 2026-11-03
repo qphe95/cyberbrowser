@@ -1538,7 +1538,72 @@ static GCValue js_document_close(JSContextHandle ctx, GCValue this_val, int argc
     return JS_UNDEFINED;
 }
 
+extern GCValue throw_dom_exception(JSContextHandle ctx, const char *name, const char *msg);
+extern void frame_api_hold(bool hold);
+extern bool mo_any_observing(JSContextHandle ctx);
+extern bool mo_child_list_observed(JSContextHandle ctx, GCValue target);
+extern void mo_notify_child_list(JSContextHandle ctx, GCValue target, GCValue added, GCValue removed, GCValue prev, GCValue next);
+
+/* A document that isn't a page's (a clone, say): what is written goes into
+ * it, its previous content gone at the first write, its scripts not run. */
+static struct { NodeId doc; DomStream *st; } g_doc_write;
+
+static void doc_write_end(void) {
+    if (!g_doc_write.st) return;
+    dom_stream_pump(g_doc_write.st, true);
+    dom_stream_end(g_doc_write.st);
+    g_doc_write.st = NULL;
+    g_doc_write.doc = DOM_NULL;
+}
+
+static GCValue js_document_proto_write(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv, int newline) {
+    NodeId d = dom_node_of(this_val);
+    if (!d || dom_kind(d) != DOM_K_DOCUMENT) return JS_ThrowTypeError(ctx, "Illegal invocation");
+    if (dom_flags(d) & DOMF_XML_DOCUMENT)
+        return throw_dom_exception(ctx, "InvalidStateError", "Only HTML documents support write().");
+    if (d == dom_node_of(JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document")))
+        return js_document_write_common(ctx, argc, argv, newline != 0);
+    if (g_doc_write.doc != d) {
+        doc_write_end();
+        for (NodeId c = dom_first_child(d); c; c = dom_first_child(d)) dom_detach(c, false);
+        g_doc_write.doc = d;
+        g_doc_write.st = dom_stream_begin(d, d);
+    }
+    for (int i = 0; i < argc; i++) {
+        size_t n = 0;
+        const char *s = JS_ToCStringLen(ctx, &n, argv[i]);
+        if (!s) return JS_EXCEPTION;
+        dom_stream_append(g_doc_write.st, s, n);
+    }
+    if (newline) dom_stream_append(g_doc_write.st, "\n", 1);
+    while (dom_stream_pump(g_doc_write.st, false)) { /* (its scripts aren't run) */ }
+    return JS_UNDEFINED;
+}
+
+static GCValue js_document_proto_w(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) { return js_document_proto_write(ctx, this_val, argc, argv, 0); }
+static GCValue js_document_proto_wl(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) { return js_document_proto_write(ctx, this_val, argc, argv, 1); }
+
+static GCValue js_document_proto_open(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)ctx; (void)argc; (void)argv;
+    if (g_doc_write.doc == dom_node_of(this_val)) doc_write_end();
+    return this_val;
+}
+
+static GCValue js_document_proto_close(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)ctx; (void)argc; (void)argv;
+    if (g_doc_write.doc == dom_node_of(this_val)) doc_write_end();
+    return JS_UNDEFINED;
+}
+
 static void install_document_write(JSContextHandle ctx, GCValue doc) {
+    GCValue dc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "Document");
+    GCValue dp = JS_IsObject(dc) ? JS_GetPropertyStr(ctx, dc, "prototype") : JS_UNDEFINED;
+    if (JS_IsObject(dp)) {
+        JS_SetPropertyStr(ctx, dp, "write", JS_NewCFunction(ctx, js_document_proto_w, "write", 1));
+        JS_SetPropertyStr(ctx, dp, "writeln", JS_NewCFunction(ctx, js_document_proto_wl, "writeln", 1));
+        JS_SetPropertyStr(ctx, dp, "open", JS_NewCFunction(ctx, js_document_proto_open, "open", 0));
+        JS_SetPropertyStr(ctx, dp, "close", JS_NewCFunction(ctx, js_document_proto_close, "close", 0));
+    }
     JS_SetPropertyStr(ctx, doc, "write", JS_NewCFunction(ctx, js_document_write, "write", 1));
     JS_SetPropertyStr(ctx, doc, "writeln", JS_NewCFunction(ctx, js_document_writeln, "writeln", 1));
     JS_SetPropertyStr(ctx, doc, "open", JS_NewCFunction(ctx, js_document_open, "open", 0));
@@ -1609,24 +1674,55 @@ bool html_page_stream_finish(HtmlPageStream *ps, JsExecResult *out_result) {
     if (!ps) return false;
     JSContextHandle ctx = ps->ctx;
     if (ps->xml) {
-        /* (the whole document, then its scripts in tree order, as the XML
-         * parser would have met them) */
+        /* (the whole document is parsed first; then from its first script on,
+         * the nodes go in one at a time as the XML parser would have put them,
+         * with their mutation records, each script running at its end tag) */
         html_doc_stream_xml(ps->doc, ps->xml_buf ? ps->xml_buf : "", ps->xml_len, ps->xml_mime);
         free(ps->xml_buf);
         ps->xml_buf = NULL;
         GCValue doc_js = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document");
         NodeId doc = dom_node_of(doc_js);
-        uint32_t n = 0, cap = 0, *scripts = NULL;
-        for (uint32_t s = dom_next_in_subtree(dom_slot(doc), dom_slot(doc)); s; s = dom_next_in_subtree(s, dom_slot(doc)))
-            if (g_dom.kind[s] == DOM_K_ELEMENT && !strcmp(dom_local_name(dom_id_of(s)), "script")) {
-                if (n == cap) { cap = cap ? cap * 2 : 16; scripts = (uint32_t *)realloc(scripts, cap * sizeof(uint32_t)); }
-                scripts[n++] = s;
+        /* (each node after the first script, and its parent, in tree order) */
+        uint32_t n = 0, cap = 0, *nodes = NULL, *parents = NULL, root = dom_slot(doc), pending = 0;
+        for (uint32_t s = dom_next_in_subtree(root, root); s; s = dom_next_in_subtree(s, root)) {
+            if (!pending) {
+                if (g_dom.kind[s] == DOM_K_ELEMENT && !strcmp(dom_local_name(dom_id_of(s)), "script")) pending = s;
+                continue;
             }
-        for (uint32_t i = 0; i < n; i++) {
-            NodeId sid = dom_id_of(scripts[i]);
-            if (dom_valid(sid)) dispatch_parser_script(ps, dom_js(ctx, sid));
+            if (n == cap) {
+                cap = cap ? cap * 2 : 256;
+                nodes = (uint32_t *)realloc(nodes, cap * sizeof(uint32_t));
+                parents = (uint32_t *)realloc(parents, cap * sizeof(uint32_t));
+            }
+            nodes[n] = s;
+            parents[n++] = g_dom.parent[s];
         }
-        free(scripts);
+        frame_api_hold(true);
+        for (uint32_t i = n; i-- > 0; ) dom_detach(dom_id_of(nodes[i]), false);
+        for (uint32_t i = 0; i < n; i++) {
+            /* (past the script's own content: its end tag) */
+            if (pending && parents[i] != pending) {
+                dispatch_parser_script(ps, dom_js(ctx, dom_id_of(pending)));
+                pending = 0;
+            }
+            NodeId node = dom_id_of(nodes[i]), parent = dom_id_of(parents[i]);
+            if (!dom_valid(node) || !dom_valid(parent)) continue;
+            dom_attach(parent, node, DOM_NULL);
+            if (mo_any_observing(ctx)) {
+                GCValue parent_js = dom_js(ctx, parent);
+                if (mo_child_list_observed(ctx, parent_js)) {
+                    GCValue added = JS_NewArray(ctx);
+                    JS_SetPropertyUint32(ctx, added, 0, dom_js(ctx, node));
+                    mo_notify_child_list(ctx, parent_js, added, JS_NewArray(ctx),
+                                         g_dom.prev[nodes[i]] ? dom_js(ctx, dom_id_of(g_dom.prev[nodes[i]])) : JS_NULL, JS_NULL);
+                }
+            }
+            if (g_dom.kind[nodes[i]] == DOM_K_ELEMENT && !strcmp(dom_local_name(node), "script")) pending = nodes[i];
+        }
+        if (pending) dispatch_parser_script(ps, dom_js(ctx, dom_id_of(pending)));
+        frame_api_hold(false);
+        free(nodes);
+        free(parents);
     } else {
         page_stream_run(ps, true);
     }

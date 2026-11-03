@@ -294,6 +294,7 @@ const PY = {
         return [url.searchParams.get('type') + '/' + url.searchParams.get('subtype'),
                 '<head>' + (mime ? `<meta http-equiv="Content-Type" content="${escapeHtml(mime)}; charset=utf-8"/>` : '') + '</head>'];
     },
+    '/html/infrastructure/urls/terminology-0/resources/echo-referrer-text.py': (url, req) => ['text/plain', req.headers.referer || ''],
     '/dom/nodes/encoding.py': url => ['text/html', `<!doctype html><meta charset="${escapeHtml(url.searchParams.get('label') || '')}">`],
 };
 
@@ -389,7 +390,7 @@ const server = http.createServer((req, res) => {
         return res.end();
     }
     if (PY[url.pathname]) {
-        const [type, body] = PY[url.pathname](url);
+        const [type, body] = PY[url.pathname](url, req);
         res.writeHead(200, { 'content-type': type });
         return res.end(body);
     }

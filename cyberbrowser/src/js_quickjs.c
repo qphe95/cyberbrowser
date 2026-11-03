@@ -241,6 +241,7 @@ static pthread_mutex_t g_url_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* Global QuickJS runtime and context - initialized once in android_main */
 JSRuntimeHandle g_js_runtime = GC_HANDLE_NULL;
 JSContextHandle g_js_context = GC_HANDLE_NULL;
+extern void dom_referrer_apply(JSContextHandle ctx, char *url, size_t cap);
 
 // Record a captured URL
 // BUG FIX #1: Fixed buffer overflow using memcpy with explicit length validation
@@ -447,6 +448,7 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
                     JS_FreeCString(ctx, s);
                 }
             }
+            dom_referrer_apply(ctx, doc_url, sizeof(doc_url));
             if (doc_url[0]) {
                 snprintf(referer_header, sizeof(referer_header), "Referer: %s", doc_url);
                 if (header_count < 24) headers[header_count++] = referer_header;
@@ -2390,6 +2392,7 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
                     JS_FreeCString(ctx, s);
                 }
             }
+            dom_referrer_apply(ctx, doc_url, sizeof(doc_url));
             if (doc_url[0]) {
                 snprintf(referer_header, sizeof(referer_header), "Referer: %s", doc_url);
                 if (header_count < 24) headers[header_count++] = referer_header;

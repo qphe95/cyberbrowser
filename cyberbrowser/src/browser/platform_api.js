@@ -347,6 +347,235 @@
         } });
     }
 
+    /* ---- Blob, File (File API): the bytes, in a Uint8Array ---- */
+    var blobBytes = new WeakMap();
+    function bytesOfBlob(b) {
+        var by = b !== null && typeof b === 'object' ? blobBytes.get(b) : undefined;
+        if (!by) throw new TypeError('Illegal invocation');
+        return by;
+    }
+    function Blob(parts, options) {
+        if (!new.target) throw new TypeError("Failed to construct 'Blob': Please use the 'new' operator");
+        var chunks = [], size = 0, text = [];
+        /* (strings next to each other encode as one; each is well formed on
+         * its own first: half a surrogate pair in a part is a replacement) */
+        var flush = function () {
+            if (!text.length) return;
+            var c = new global.TextEncoder().encode(text.join(''));
+            text = [];
+            chunks.push(c);
+            size += c.length;
+        };
+        if (parts !== undefined) {
+            if (parts === null || typeof parts !== 'object' && typeof parts !== 'function' || typeof parts[Symbol.iterator] !== 'function')
+                throw new TypeError("Failed to construct 'Blob': The provided value cannot be converted to a sequence.");
+            for (var p of parts) {
+                var c;
+                if (p !== null && typeof p === 'object' && blobBytes.has(p)) c = blobBytes.get(p);
+                else if (p instanceof ArrayBuffer) c = new Uint8Array(p);
+                else if (ArrayBuffer.isView(p)) c = new Uint8Array(p.buffer, p.byteOffset, p.byteLength);
+                else { text.push(String(p).toWellFormed()); continue; }
+                flush();
+                chunks.push(c);
+                size += c.length;
+            }
+            flush();
+        }
+        var bytes = new Uint8Array(size), at = 0;
+        chunks.forEach(function (c) { bytes.set(c, at); at += c.length; });
+        blobBytes.set(this, bytes);
+        var type = options !== undefined && options !== null && options.type !== undefined ? String(options.type) : '';
+        Object.defineProperty(this, '__type', { value: /[^\x20-\x7e]/.test(type) ? '' : type.toLowerCase() });
+    }
+    Object.defineProperty(Blob.prototype, 'size', { configurable: true, enumerable: true, get: function () { return bytesOfBlob(this).length; } });
+    Object.defineProperty(Blob.prototype, 'type', { configurable: true, enumerable: true, get: function () { bytesOfBlob(this); return this.__type; } });
+    [['slice', function slice(start, end, contentType) {
+        var by = bytesOfBlob(this), n = by.length;
+        var rel = function (v, dflt) {
+            if (v === undefined) return dflt;
+            v = Math.trunc(Number(v)) || 0;
+            return v < 0 ? Math.max(n + v, 0) : Math.min(v, n);
+        };
+        var from = rel(start, 0), to = rel(end, n);
+        return new Blob([by.subarray(from, Math.max(from, to))], { type: contentType === undefined ? '' : contentType });
+    }], ['text', function text() {
+        try { return Promise.resolve(new global.TextDecoder().decode(bytesOfBlob(this))); } catch (e) { return Promise.reject(e); }
+    }], ['arrayBuffer', function arrayBuffer() {
+        try { return Promise.resolve(bytesOfBlob(this).slice().buffer); } catch (e) { return Promise.reject(e); }
+    }], ['bytes', function bytes() {
+        try { return Promise.resolve(bytesOfBlob(this).slice()); } catch (e) { return Promise.reject(e); }
+    }], ['stream', function stream() {
+        var by = bytesOfBlob(this);
+        return new global.ReadableStream({ start: function (c) { if (by.length) c.enqueue(by.slice()); c.close(); } });
+    }]].forEach(function (m) { Object.defineProperty(Blob.prototype, m[0], { configurable: true, enumerable: true, writable: true, value: m[1] }); });
+    Object.defineProperty(Blob.prototype, Symbol.toStringTag, { value: 'Blob', configurable: true });
+    function File(bits, name, options) {
+        if (!new.target) throw new TypeError("Failed to construct 'File': Please use the 'new' operator");
+        if (arguments.length < 2) throw new TypeError("Failed to construct 'File': 2 arguments required.");
+        var self = Reflect.construct(Blob, [bits, options], new.target);
+        Object.defineProperty(self, '__name', { value: String(name) });
+        Object.defineProperty(self, '__lastModified', { value: options && options.lastModified !== undefined ? Number(options.lastModified) : Date.now() });
+        return self;
+    }
+    File.prototype = Object.create(Blob.prototype, { constructor: { value: File, writable: true, configurable: true } });
+    Object.setPrototypeOf(File, Blob);
+    Object.defineProperty(File.prototype, 'name', { configurable: true, enumerable: true, get: function () { return this.__name; } });
+    Object.defineProperty(File.prototype, 'lastModified', { configurable: true, enumerable: true, get: function () { return this.__lastModified; } });
+    Object.defineProperty(File.prototype, Symbol.toStringTag, { value: 'File', configurable: true });
+    expose('Blob', Blob);
+    expose('File', File);
+
+    /* FileReader: a read ends in a task of its own, with the events File API 8 says. */
+    if (global.EventTarget) {
+        var readers = new WeakMap();
+        var readerOf = function (r) {
+            var s = r !== null && typeof r === 'object' ? readers.get(r) : undefined;
+            if (!s) throw new TypeError('Illegal invocation');
+            return s;
+        };
+        var FileReader = function FileReader() {
+            if (!new.target) throw new TypeError("Failed to construct 'FileReader': Please use the 'new' operator");
+            var self = Reflect.construct(global.EventTarget, [], new.target);
+            readers.set(self, { state: 0, result: null, error: null, run: 0, on: {} });
+            return self;
+        };
+        FileReader.prototype = Object.create(global.EventTarget.prototype, { constructor: { value: FileReader, writable: true, configurable: true } });
+        [['EMPTY', 0], ['LOADING', 1], ['DONE', 2]].forEach(function (k) {
+            [FileReader, FileReader.prototype].forEach(function (o) { Object.defineProperty(o, k[0], { value: k[1], enumerable: true }); });
+        });
+        var fireReader = function (r, type) {
+            var PE = global.ProgressEvent || global.Event;
+            r.dispatchEvent(new PE(type));
+        };
+        var startRead = function (r, blob, convert) {
+            var s = readerOf(r);
+            if (blob === null || typeof blob !== 'object' || !blobBytes.has(blob))
+                throw new TypeError("Failed to execute 'read' on 'FileReader': parameter 1 is not of type 'Blob'.");
+            if (s.state === 1) throw new global.DOMException('The object is already busy reading.', 'InvalidStateError');
+            s.state = 1; s.result = null; s.error = null;
+            var run = ++s.run, by = blobBytes.get(blob);
+            global.setTimeout(function () {
+                if (s.run !== run) return;
+                fireReader(r, 'loadstart');
+                if (s.run !== run) return;
+                global.setTimeout(function () {
+                    if (s.run !== run) return;
+                    s.state = 2;
+                    s.result = convert(by, blob);
+                    fireReader(r, 'progress');
+                    fireReader(r, 'load');
+                    if (s.state === 2) fireReader(r, 'loadend');
+                }, 0);
+            }, 0);
+        };
+        var binaryOf = function (by) {
+            var parts = [];
+            for (var i = 0; i < by.length; i += 8192) parts.push(String.fromCharCode.apply(null, by.subarray(i, i + 8192)));
+            return parts.join('');
+        };
+        var readerMethods = {
+            readAsArrayBuffer: function readAsArrayBuffer(blob) { startRead(this, blob, function (by) { return by.slice().buffer; }); },
+            readAsBinaryString: function readAsBinaryString(blob) { startRead(this, blob, binaryOf); },
+            readAsDataURL: function readAsDataURL(blob) {
+                startRead(this, blob, function (by, b) { return 'data:' + (b.type || 'application/octet-stream') + ';base64,' + global.btoa(binaryOf(by)); });
+            },
+            readAsText: function readAsText(blob, encoding) {
+                startRead(this, blob, function (by) {
+                    try { return new global.TextDecoder(encoding === undefined ? 'utf-8' : String(encoding)).decode(by); }
+                    catch (e) { return new global.TextDecoder().decode(by); }
+                });
+            },
+            abort: function abort() {
+                var s = readerOf(this);
+                if (s.state !== 1) return;
+                s.run++; s.state = 2; s.result = null;
+                s.error = new global.DOMException('The read was aborted.', 'AbortError');
+                fireReader(this, 'abort');
+                if (s.state === 2) fireReader(this, 'loadend');
+            }
+        };
+        Object.keys(readerMethods).forEach(function (k) {
+            Object.defineProperty(FileReader.prototype, k, { configurable: true, enumerable: true, writable: true, value: readerMethods[k] });
+        });
+        ['readyState', 'result', 'error'].forEach(function (k, i) {
+            var field = ['state', 'result', 'error'][i];
+            Object.defineProperty(FileReader.prototype, k, { configurable: true, enumerable: true, get: function () { return readerOf(this)[field]; } });
+        });
+        ['loadstart', 'progress', 'load', 'abort', 'error', 'loadend'].forEach(function (type) {
+            Object.defineProperty(FileReader.prototype, 'on' + type, { configurable: true, enumerable: true,
+                get: function () { return readerOf(this).on[type] || null; },
+                set: function (v) { readerOf(this).on[type] = typeof v === 'function' || (v !== null && typeof v === 'object') ? v : null; } });
+        });
+        Object.defineProperty(FileReader.prototype, Symbol.toStringTag, { value: 'FileReader', configurable: true });
+        expose('FileReader', FileReader);
+    }
+
+    /* A <?xml-stylesheet?> in a document's prolog: its sheet (LinkStyle, its
+     * pseudo-attributes parsed; its rules aren't fetched or applied here). */
+    if (global.ProcessingInstruction) {
+        var piSheets = new WeakMap();
+        var piRefs = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+        var piDecode = function (v) {
+            return v.replace(/&(?:#x([0-9a-fA-F]+)|#([0-9]+)|(amp|lt|gt|quot|apos));/g, function (m, hex, dec, name) {
+                return name ? piRefs[name] : String.fromCodePoint(hex ? parseInt(hex, 16) : parseInt(dec, 10));
+            });
+        };
+        Object.defineProperty(global.ProcessingInstruction.prototype, 'sheet', { configurable: true, enumerable: true, get: function () {
+            if (this.target !== 'xml-stylesheet' || this.parentNode !== this.ownerDocument) return null;
+            if (piSheets.has(this)) return piSheets.get(this);
+            var attrs = {}, m, re = /([^\s=]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+            while ((m = re.exec(this.data))) attrs[m[1]] = piDecode(m[2] !== undefined ? m[2] : m[3]);
+            if (attrs.href === undefined || (attrs.type !== undefined && attrs.type !== 'text/css') || !global.CSSStyleSheet) return null;
+            var sheet = new global.CSSStyleSheet();
+            Object.defineProperty(sheet, 'href', { value: attrs.href, configurable: true });
+            Object.defineProperty(sheet, 'ownerNode', { value: this, configurable: true });
+            piSheets.set(this, sheet);
+            return sheet;
+        } });
+    }
+
+    /* Scroll snap (CSS Scroll Snap 1), as a scroll ends: to the nearest snap
+     * position on each axis the box snaps on; true if it moved. */
+    Object.defineProperty(global, '__cyberScrollSnap', { configurable: true, value: function (el) {
+        var cs = global.getComputedStyle(el), type = cs.scrollSnapType;
+        if (!type || type === 'none') return false;
+        var snapX = /\b(x|inline|both)\b/.test(type), snapY = /\b(y|block|both)\b/.test(type);
+        var proximity = /proximity/.test(type);
+        var r = el.getBoundingClientRect(), left = r.left + el.clientLeft, top = r.top + el.clientTop;
+        var sx = el.scrollLeft, sy = el.scrollTop, cw = el.clientWidth, ch = el.clientHeight;
+        var maxX = el.scrollWidth - cw, maxY = el.scrollHeight - ch, bestX = null, bestY = null;
+        var at = function (align, a, b, view) { return align === 'start' ? a : align === 'end' ? b - view : (a + b - view) / 2; };
+        var all = el.querySelectorAll('*');
+        for (var i = 0; i < all.length; i++) {
+            var align = global.getComputedStyle(all[i]).scrollSnapAlign;
+            if (!align || align === 'none') continue;
+            var parts = align.split(' '), block = parts[0], inline = parts[1] || parts[0], b = all[i].getBoundingClientRect();
+            if (snapX && inline !== 'none') {
+                var x = Math.max(0, Math.min(maxX, at(inline, b.left - left + sx, b.right - left + sx, cw)));
+                if (bestX === null || Math.abs(x - sx) < Math.abs(bestX - sx)) bestX = x;
+            }
+            if (snapY && block !== 'none') {
+                var y = Math.max(0, Math.min(maxY, at(block, b.top - top + sy, b.bottom - top + sy, ch)));
+                if (bestY === null || Math.abs(y - sy) < Math.abs(bestY - sy)) bestY = y;
+            }
+        }
+        if (proximity) {
+            if (bestX !== null && Math.abs(bestX - sx) > cw / 3) bestX = null;
+            if (bestY !== null && Math.abs(bestY - sy) > ch / 3) bestY = null;
+        }
+        var moved = false;
+        if (bestX !== null && Math.abs(bestX - sx) >= 1) { el.scrollLeft = bestX; moved = true; }
+        if (bestY !== null && Math.abs(bestY - sy) >= 1) { el.scrollTop = bestY; moved = true; }
+        return moved;
+    } });
+
+    /* (HTMLMetaElement reflects its attributes) */
+    if (global.HTMLMetaElement) [['name', 'name'], ['content', 'content'], ['httpEquiv', 'http-equiv'], ['media', 'media'], ['scheme', 'scheme']].forEach(function (m) {
+        Object.defineProperty(global.HTMLMetaElement.prototype, m[0], { configurable: true, enumerable: true,
+            get: function () { var v = this.getAttribute(m[1]); return v === null ? '' : v; },
+            set: function (v) { this.setAttribute(m[1], String(v)); } });
+    });
+
     /* (Performance is an EventTarget) */
     var PERF = global.performance;
     if (PERF && global.EventTarget && !PERF.addEventListener) {

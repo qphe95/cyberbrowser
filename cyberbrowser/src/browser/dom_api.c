@@ -7,6 +7,7 @@
  */
 #include "cyber_env.h"
 #include <string.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <time.h>
@@ -1483,12 +1484,17 @@ static void post_insert_queue(NodeId id) {
     g_post_insert.ids[g_post_insert.n++] = id;
 }
 
+static CssAtom g_meta_tag;
 static CssAtom g_script_tag, g_iframe_tag, g_frame_tag;
 /* (a shadow tree comes along: it's connected with its host) */
 static void post_insert_subtree(uint32_t r) {
     for (uint32_t s = r; s; s = dom_next_in_subtree(s, r)) {
         if (g_dom.kind[s] != DOM_K_ELEMENT) continue;
         if (g_dom.tag[s] == g_iframe_tag || g_dom.tag[s] == g_frame_tag) post_insert_queue(dom_id_of(s));
+        else if (g_dom.tag[s] == g_meta_tag) {
+            g_dom.flags[s] |= DOMF_META_PENDING;
+            post_insert_queue(dom_id_of(s));
+        }
         else if (g_dom.tag[s] == g_script_tag && g_dom_dynamic_scripts_enabled && !(g_dom.flags[s] & DOMF_PARSER_SCRIPT))
             post_insert_queue(dom_id_of(s));
         if (g_dom.shadow[s]) post_insert_subtree(g_dom.shadow[s]);
@@ -1503,7 +1509,8 @@ static void post_insert_collect(NodeId parent, NodeId child) {
         return;
     }
     if (!g_script_tag) {
-        css_atom_reserve(3);
+        css_atom_reserve(4);
+        g_meta_tag = css_atom_intern("meta", 4);
         g_script_tag = css_atom_intern("script", 6);
         g_iframe_tag = css_atom_intern("iframe", 6);
         g_frame_tag = css_atom_intern("frame", 5);
@@ -1520,6 +1527,11 @@ void dom_post_insert_flush(JSContextHandle ctx) {
         g_post_insert.n = g_post_insert.cap = 0;
         for (uint32_t i = 0; i < n; i++) {
             if (!dom_valid(ids[i])) continue;
+            /* (a meta's post-insertion steps: it counts from here) */
+            if (dom_tag(ids[i]) == g_meta_tag) {
+                g_dom.flags[dom_slot(ids[i])] &= (uint16_t)~DOMF_META_PENDING;
+                continue;
+            }
             if (dom_tag(ids[i]) == g_iframe_tag || dom_tag(ids[i]) == g_frame_tag) {
                 bool was = g_frame_blank_now;
                 g_frame_blank_now = true;
@@ -4131,6 +4143,31 @@ static int control_validity(NodeId n) {
     return JS_ToBool(ctx, JS_GetPropertyStr(ctx, v, "valid")) > 0 ? 1 : 2;
 }
 
+/* The Referer for a request from this document, its URL in url: changed as
+ * the last <meta name=referrer> in effect says (empty: none is sent). */
+void dom_referrer_apply(JSContextHandle ctx, char *url, size_t cap) {
+    NodeId doc = dom_node_of(JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document"));
+    if (!doc) return;
+    static const char sel[] = "meta[name=referrer i]";
+    DomNodeList l = dom_query_all(doc, sel, sizeof sel - 1, false);
+    const char *policy = NULL;
+    for (uint32_t i = 0; i < l.n; i++)
+        if (!(g_dom.flags[dom_slot(l.ids[i])] & DOMF_META_PENDING)) {
+            const char *c = dom_get_attr_str(l.ids[i], "content");
+            if (c && c[0]) policy = c;
+        }
+    dom_node_list_free(&l);
+    if (!policy) return;
+    if (!strcasecmp(policy, "no-referrer") || !strcasecmp(policy, "never")) {
+        url[0] = 0;
+    } else if (!strcasecmp(policy, "origin") || !strcasecmp(policy, "strict-origin")) {
+        /* (scheme://host:port/) */
+        char *p = strstr(url, "://");
+        p = p ? strchr(p + 3, '/') : NULL;
+        if (p && (size_t)(p + 1 - url) < cap) p[1] = 0;
+    }
+}
+
 void attr_api_install(JSContextHandle ctx, GCValue global) {
     g_dom_query_validity = control_validity;
     GCValue node = JS_GetPropertyStr(ctx, global, "Node");
@@ -5060,6 +5097,42 @@ static void hit_test_begin(LayoutContext *layout, double x, double y) {
     if (rn) dom_scroll_get(dom_owner(rn->store_id), &g_hit_vx, &g_hit_vy);
 }
 
+static GCValue hit_test_layout_node(JSContextHandle ctx, LayoutContext *layout, int idx, double x, double y);
+
+static GCValue hit_child(JSContextHandle ctx, LayoutContext *layout, const LayoutBox *box, int child, double x, double y,
+                         float sx, float sy) {
+    const LayoutStyle *cs = layout->boxes[child].s;
+    bool away = cs->position == CSS_POSITION_ABSOLUTE && box->s->position == CSS_POSITION_STATIC;
+    double cx = away ? x : x + sx, cy = away ? y : y + sy;
+    if (cs->position == CSS_POSITION_FIXED) { cx = g_hit_x - g_hit_vx; cy = g_hit_y - g_hit_vy; }
+    return hit_test_layout_node(ctx, layout, child, cx, cy);
+}
+
+/* The positioned children with z-index at or over zero (or under it), highest first. */
+static GCValue hit_positioned(JSContextHandle ctx, LayoutContext *layout, const LayoutBox *box, int last_child, double x,
+                              double y, float sx, float sy, bool under) {
+    int limit = INT_MAX;
+    for (;;) {
+        bool any = false;
+        int z = 0;
+        for (int c = last_child; c >= 0; c = layout->tree.nodes[c].prev_sibling_idx) {
+            const LayoutStyle *cs = layout->boxes[c].s;
+            if (cs->position == CSS_POSITION_STATIC) continue;
+            int cz = cs->z_index_set ? cs->z_index : 0;
+            if ((cz < 0) != under || cz >= limit) continue;
+            if (!any || cz > z) { any = true; z = cz; }
+        }
+        if (!any) return JS_NULL;
+        for (int c = last_child; c >= 0; c = layout->tree.nodes[c].prev_sibling_idx) {
+            const LayoutStyle *cs = layout->boxes[c].s;
+            if (cs->position == CSS_POSITION_STATIC || (cs->z_index_set ? cs->z_index : 0) != z) continue;
+            GCValue hit = hit_child(ctx, layout, box, c, x, y, sx, sy);
+            if (!JS_IsNull(hit)) return hit;
+        }
+        limit = z;
+    }
+}
+
 static GCValue hit_test_layout_node(JSContextHandle ctx, LayoutContext *layout, int idx, double x, double y) {
     if (!layout || idx < 0 || idx >= layout->tree.count) return JS_NULL;
     LayoutBox *box = &layout->boxes[idx];
@@ -5075,15 +5148,18 @@ static GCValue hit_test_layout_node(JSContextHandle ctx, LayoutContext *layout, 
     int last_child = -1;
     for (int child = ref->first_child_idx; child >= 0; child = layout->tree.nodes[child].next_sibling_idx)
         last_child = child;
-    while (last_child >= 0) {
-        const LayoutStyle *cs = layout->boxes[last_child].s;
-        bool away = cs->position == CSS_POSITION_ABSOLUTE && box->s->position == CSS_POSITION_STATIC;
-        double cx = away ? x : x + sx, cy = away ? y : y + sy;
-        if (cs->position == CSS_POSITION_FIXED) { cx = g_hit_x - g_hit_vx; cy = g_hit_y - g_hit_vy; }
-        GCValue child_hit = hit_test_layout_node(ctx, layout, last_child, cx, cy);
+    /* (front to back: positioned children by z-index, those under zero behind
+     * the rest; at one level, last in the tree first) */
+    GCValue over = hit_positioned(ctx, layout, box, last_child, x, y, sx, sy, false);
+    if (!JS_IsNull(over)) return over;
+    for (int child = last_child; child >= 0; child = layout->tree.nodes[child].prev_sibling_idx) {
+        if (layout->boxes[child].s->position != CSS_POSITION_STATIC) continue;
+        GCValue child_hit = hit_child(ctx, layout, box, child, x, y, sx, sy);
         if (!JS_IsNull(child_hit)) return child_hit;
-        last_child = layout->tree.nodes[last_child].prev_sibling_idx;
     }
+    over = hit_positioned(ctx, layout, box, last_child, x, y, sx, sy, true);
+    if (!JS_IsNull(over)) return over;
+
     if (inside && box->s->visibility != CSS_VISIBILITY_HIDDEN && ref->dom_node_idx >= 0 && layout->doc) {
         HtmlNode *hnode = (HtmlNode *)po_array_payload(&layout->doc->array, ref->dom_node_idx);
         if (hnode && hnode->type == HTML_NODE_ELEMENT && dom_valid(hnode->store_id) &&

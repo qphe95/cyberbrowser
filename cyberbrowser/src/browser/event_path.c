@@ -147,6 +147,14 @@ static GCValue js_microtasks(JSContextHandle ctx, GCValue this_val, int argc, GC
     return JS_UNDEFINED;
 }
 
+/* The window of the script calling the script that asks (HTML's incumbent,
+ * near enough); null when C called it. */
+static GCValue js_caller_global(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    JSContextHandle realm = JS_GetScriptFrameRealm(ctx, 1);
+    return realm ? JS_GetGlobalObject(realm) : JS_NULL;
+}
+
 extern void layout_scroll_hold(JSContextHandle ctx, bool hold);
 
 static GCValue js_scroll_hold(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
@@ -262,6 +270,8 @@ void event_path_install(JSContextHandle ctx, GCValue global) {
                               JS_NewCFunction(ctx, js_script_frames, "__cyberScriptFrames", 0), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberMicrotasks",
                               JS_NewCFunction(ctx, js_microtasks, "__cyberMicrotasks", 0), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberCallerGlobal",
+                              JS_NewCFunction(ctx, js_caller_global, "__cyberCallerGlobal", 0), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberScrollHold",
                               JS_NewCFunction(ctx, js_scroll_hold, "__cyberScrollHold", 1), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberRealmCall",
