@@ -387,15 +387,35 @@ GCValue dom_js_existing(NodeId id) {
     return h ? GC_MKHANDLE(JS_TAG_OBJECT, h) : JS_NULL;
 }
 
+static struct { JSContextHandle *ctx; uint32_t n; } g_realms;
+
+uint16_t dom_realm_index(JSContextHandle ctx) {
+    for (uint32_t i = 1; i < g_realms.n; i++) if (g_realms.ctx[i] == ctx) return (uint16_t)i;
+    if (g_realms.n >= 0xFFFF) return 0;
+    if (!g_realms.n) g_realms.n = 1;
+    g_realms.ctx = realloc(g_realms.ctx, (g_realms.n + 1) * sizeof(*g_realms.ctx));
+    g_realms.ctx[g_realms.n] = ctx;
+    return (uint16_t)g_realms.n++;
+}
+
+void dom_realm_drop(JSContextHandle ctx) {
+    for (uint32_t i = 1; i < g_realms.n; i++) if (g_realms.ctx[i] == ctx) g_realms.ctx[i] = GC_HANDLE_NULL;
+}
+
+JSContextHandle dom_realm_of_node(NodeId id) {
+    if (!dom_valid(id)) return GC_HANDLE_NULL;
+    uint16_t r = g_dom.realm[dom_slot(id)];
+    if (r && r < g_realms.n && SAFE_VALID(g_realms.ctx[r])) return g_realms.ctx[r];
+    NodeId doc = dom_kind(id) == DOM_K_DOCUMENT ? id : dom_owner(id);
+    return g_realm_of && doc ? g_realm_of(doc) : GC_HANDLE_NULL;
+}
+
 GCValue dom_js(JSContextHandle ctx, NodeId id) {
     if (!dom_valid(id)) return JS_NULL;
     uint32_t h = g_dom.wrapper[dom_slot(id)];
     if (h) return GC_MKHANDLE(JS_TAG_OBJECT, h);
-    if (g_realm_of) {
-        NodeId doc = dom_kind(id) == DOM_K_DOCUMENT ? id : dom_owner(id);
-        JSContextHandle realm = doc ? g_realm_of(doc) : GC_HANDLE_NULL;
-        if (SAFE_VALID(realm)) ctx = realm;
-    }
+    JSContextHandle realm = dom_realm_of_node(id);
+    if (SAFE_VALID(realm)) ctx = realm;
     g_ctx = ctx;
     if (!g_factory) return JS_NULL;
     GCValue obj = g_factory(ctx, id);

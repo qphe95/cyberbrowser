@@ -759,6 +759,13 @@ static bool simple_ok(uint32_t s, const SelSimple *ss, uint32_t scope) {
         for (uint32_t k = 0; k < nc; k++) {
             if (c[k] != ss->atom) continue;
             if (ss->ci != 2 && !dom_cls_upper(s)) return true;
+            /* (quirks mode: as they are) */
+            NodeId cd = dom_owner(dom_id_of(s));
+            if (dom_is_html_document(cd)) {
+                NodeId cc = dom_first_child(cd);
+                while (cc && dom_kind(cc) != DOM_K_DOCTYPE) cc = dom_next_sibling(cc);
+                if (!cc) return true;
+            }
             uint32_t n = 0;
             const char *v = attr_val(s, g_a_class, &n);
             return v && word_in(v, n, ss->val, ss->vlen, false);
@@ -1270,14 +1277,23 @@ DomNodeList dom_query_by_class_in(NodeId root, const char *cls, size_t len) {
     /* "a b" means elements with both classes: build ".a.b". */
     DomNodeList out = { 0 };
     if (!dom_valid(root)) return out;
-    char *sel = malloc(2 * len + 2);
+    char *sel = malloc(5 * len + 2);
     size_t k = 0, i = 0;
+#define CLASS_WS(c) ((c) == ' ' || (c) == '\t' || (c) == '\n' || (c) == '\f' || (c) == '\r')
     while (i < len) {
-        while (i < len && isspace((unsigned char)cls[i])) i++;
+        while (i < len && CLASS_WS(cls[i])) i++;
         size_t b = i;
-        while (i < len && !isspace((unsigned char)cls[i])) i++;
-        if (i > b) { sel[k++] = '.'; memcpy(sel + k, cls + b, i - b); k += i - b; }
+        while (i < len && !CLASS_WS(cls[i])) i++;
+        if (i > b) sel[k++] = '.';
+        for (size_t q = b; q < i; q++) {
+            /* (what isn't an identifier's, as an escape) */
+            unsigned char c = (unsigned char)cls[q];
+            if (c >= 0x80 || c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                (q > b && (c == '-' || (c >= '0' && c <= '9')))) sel[k++] = (char)c;
+            else k += (size_t)snprintf(sel + k, 5, "\\%02x ", c);
+        }
     }
+#undef CLASS_WS
     sel[k] = '\0';
     if (k) out = dom_query_all(root, sel, k, false);
     free(sel);

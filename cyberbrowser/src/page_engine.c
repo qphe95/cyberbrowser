@@ -1446,10 +1446,12 @@ void page_request_layout(void) {
 
 GCValue dom_element_at(JSContextHandle ctx, LayoutContext *layout, double x, double y);
 
-int dom_wheel(JSContextHandle ctx, LayoutContext *layout, double x, double y, int dy);
-
-int page_wheel(double x, double y, int dy) {
-    return g_frame.valid ? dom_wheel(g_ctx, &g_frame.layout, x, y, dy) : dy;
+void page_wheel(double x, double y, int dy) {
+    GCValue input = JS_GetPropertyStr(g_ctx, JS_GetGlobalObject(g_ctx), "__cyberInput");
+    GCValue fn = JS_IsObject(input) ? JS_GetPropertyStr(g_ctx, input, "wheel") : JS_UNDEFINED;
+    if (!JS_IsFunction(g_ctx, fn)) return;
+    GCValue args[4] = { JS_NewFloat64(g_ctx, x), JS_NewFloat64(g_ctx, y), JS_NewInt32(g_ctx, 0), JS_NewInt32(g_ctx, dy) };
+    if (JS_IsException(JS_Call(g_ctx, fn, input, 4, args))) JS_GetException(g_ctx);
 }
 
 uint32_t page_wheel_boxes(int32_t (*out)[4], uint32_t max) {

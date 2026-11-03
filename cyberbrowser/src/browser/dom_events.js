@@ -78,7 +78,8 @@
     getter(EP, 'cancelable', function () { return st(this).cancelable; });
     getter(EP, 'composed', function () { return st(this).composed; });
     getter(EP, 'defaultPrevented', function () { return st(this).canceled; });
-    getter(EP, 'timeStamp', function () { return st(this).timeStamp; });
+    /* (coarsened to 5 microseconds, as High Resolution Time asks) */
+    getter(EP, 'timeStamp', function () { return Math.floor(st(this).timeStamp * 200) / 200; });
     Object.defineProperty(EP, 'returnValue', { configurable: true, enumerable: true,
         get: function () { return !st(this).canceled; },
         set: function (v) { if (!v) cancel(st(this)); } });
@@ -104,6 +105,7 @@
         if (s.dispatching) return;
         s.type = String(type); s.bubbles = !!bubbles; s.cancelable = !!cancelable;
         s.stop = s.stopImmediate = s.canceled = false; s.target = null;
+        s.initialized = true;
     });
     Object.defineProperty(EP, Symbol.toStringTag, { value: 'Event', configurable: true });
 
@@ -145,7 +147,12 @@
         this.initEvent(type, bubbles, cancelable);
         st(this).detail = detail === undefined ? null : detail;
     });
-    var UIEvent = eventClass('UIEvent', Event, { view: nul(), detail: int(0), which: int(0) });
+    var UIEvent = eventClass('UIEvent', Event, { view: function (v) {
+        if (v === undefined || v === null) return null;
+        if (typeof v !== 'object' || !('window' in v))
+            throw new TypeError("Failed to construct 'UIEvent': Failed to read the 'view' property: not of type 'Window'.");
+        return v;
+    }, detail: int(0), which: int(0) });
     define(UIEvent.prototype, 'initUIEvent', function initUIEvent(type, bubbles, cancelable, view, detail) {
         if (st(this).dispatching) return;
         if (arguments.length < 1) throw new TypeError("Failed to execute 'initUIEvent' on 'UIEvent': 1 argument required, but only 0 present.");
@@ -266,8 +273,10 @@
 
     /* ---- EventTarget ---- */
     function flatten(options, adding) {
-        if (typeof options === 'boolean') return { capture: options };
-        if (!options || typeof options !== 'object') return { capture: false };
+        /* (any other value: it's the capture flag, as a boolean) */
+        if (!options || (typeof options !== 'object' && typeof options !== 'function')) return { capture: !!options };
+        /* (removeEventListener reads capture alone) */
+        if (!adding) return { capture: !!options.capture };
         /* (signal: an AbortSignal when given; null is a TypeError) */
         if (adding && options.signal !== undefined && (options.signal === null || typeof options.signal !== 'object'))
             throw new TypeError("Failed to read the 'signal' property from 'AddEventListenerOptions': Failed to convert value to 'AbortSignal'.");
@@ -666,7 +675,10 @@
     if (global.document) [global, win].forEach(function (o) {
         if (!o || Object.getOwnPropertyDescriptor(o, 'event')) return;
         Object.defineProperty(o, 'event', { configurable: true, enumerable: true,
-            get: function () { return currentEvent; },
+            get: function () {
+                if (this !== undefined && this !== null && this !== global && this !== win) throw new TypeError('Illegal invocation');
+                return currentEvent;
+            },
             set: function (v) { Object.defineProperty(this, 'event', { value: v, writable: true, configurable: true, enumerable: true }); } });
     });
 
@@ -746,9 +758,6 @@
         if (!C) throw DOMExceptionOr("Failed to execute 'createEvent': The provided event type ('" + iface + "') is invalid.", 'NotSupportedError');
         var e = new C('');
         st(e).initialized = false;
-        var s = st(e);
-        var init = e.initEvent;
-        define(e, 'initEvent', function (type, bubbles, cancelable) { init.call(this, type, bubbles, cancelable); s.initialized = true; });
         return e;
     }
     var DP = global.Document && global.Document.prototype;
@@ -1350,6 +1359,162 @@
     define(AbortController.prototype, 'abort', function abort(reason) { signalAbort(controllerSignal(this), reason); });
     Object.defineProperty(AbortController.prototype, Symbol.toStringTag, { value: 'AbortController', configurable: true });
     expose('AbortController', AbortController);
+
+    /* ---- input: pointer, wheel and keys as the browser gets them (the tab's
+     * wheel and clicks, and testdriver in the WPT runs) ---- */
+    var pointer = { over: null, pressed: null, buttons: 0 };
+    function trusted(target, Ctor, type, init) {
+        init.bubbles = init.bubbles !== false;
+        init.composed = true;
+        return global.__cyberDispatchTrusted(target, new Ctor(type, init));
+    }
+    function hitAt(x, y) {
+        var d = global.document;
+        return d ? d.elementFromPoint(x, y) || d.documentElement : null;
+    }
+    function flatParent(n) { return n.assignedSlot || n.parentNode || n.host || null; }
+    /* (a disabled form control gets no mouse events, HTML 4.10.18.5) */
+    function controlDisabled(el) {
+        return /^(button|input|select|textarea|optgroup|option|fieldset)$/.test(el.localName || '') && el.matches(':disabled');
+    }
+    function mouseInit(x, y, button, related) {
+        return { cancelable: true, clientX: x, clientY: y, screenX: x, screenY: y, button: button,
+                 buttons: pointer.buttons, view: global, relatedTarget: related || null };
+    }
+    function pointerInit(x, y, button, related) {
+        var i = mouseInit(x, y, button, related);
+        i.pointerId = 1; i.pointerType = 'mouse'; i.isPrimary = true; i.pressure = pointer.buttons ? 0.5 : 0;
+        return i;
+    }
+    function bothEvents(t, x, y, button, ptype, mtype, related) {
+        trusted(t, global.PointerEvent, ptype, pointerInit(x, y, button, related));
+        if (controlDisabled(t)) return true;
+        return trusted(t, MouseEvent, mtype, mouseInit(x, y, button, related));
+    }
+    function focusTarget(t, canceled) {
+        if (canceled) return;
+        for (var a = t; a; a = flatParent(a)) {
+            if (a.nodeType === 1 && (a.tabIndex >= 0 || a.isContentEditable)) {
+                if (!controlDisabled(a) && typeof a.focus === 'function') a.focus();
+                return;
+            }
+        }
+        var ae = global.document && global.document.activeElement;
+        if (ae && typeof ae.blur === 'function') ae.blur();
+    }
+    function commonAncestor(a, b) {
+        for (var x = a; x; x = flatParent(x)) {
+            for (var y = b; y; y = flatParent(y)) if (x === y) return x;
+        }
+        return null;
+    }
+    /* The wheel's event may be cancelled only when a listener for it isn't
+     * passive (or there's a handler). */
+    function wheelBlocked(t) {
+        var path = [];
+        for (var a = t; a; a = flatParent(a)) path.push(a);
+        path.push(global);
+        return path.some(function (o) {
+            if (o.onwheel || o.onmousewheel) return true;
+            var map = o[LISTENERS];
+            return ['wheel', 'mousewheel'].some(function (type) {
+                return map && map[type] && map[type].some(function (l) { return !l.removed && !l.passive; });
+            });
+        });
+    }
+    /* What the wheel moves: the nearest box the user can scroll that has room,
+     * going out to the viewport. */
+    function wheelScroll(t, dx, dy) {
+        for (var a = t; a && (dx || dy); a = flatParent(a)) {
+            if (a.nodeType !== 1 || a === a.ownerDocument.documentElement || a === a.ownerDocument.body) continue;
+            var cs = global.getComputedStyle(a);
+            if (!/auto|scroll/.test(cs.overflow || cs.overflowY || '')) continue;
+            if (dy && (dy > 0 ? a.scrollTop < a.scrollHeight - a.clientHeight : a.scrollTop > 0)) { a.scrollTop += dy; dy = 0; }
+            if (dx && (dx > 0 ? a.scrollLeft < a.scrollWidth - a.clientWidth : a.scrollLeft > 0)) { a.scrollLeft += dx; dx = 0; }
+        }
+        if (dx || dy) global.scrollBy(dx, dy);
+    }
+    var KEYS = { '\uE003': 'Backspace', '\uE004': 'Tab', '\uE006': 'Enter', '\uE007': 'Enter', '\uE008': 'Shift', '\uE009': 'Control',
+                 '\uE00A': 'Alt', '\uE00C': 'Escape', '\uE00D': ' ', '\uE00E': 'PageUp', '\uE00F': 'PageDown', '\uE010': 'End',
+                 '\uE011': 'Home', '\uE012': 'ArrowLeft', '\uE013': 'ArrowUp', '\uE014': 'ArrowRight', '\uE015': 'ArrowDown',
+                 '\uE017': 'Delete', '\uE03D': 'Meta' };
+    function keyOf(k) { return KEYS[k] || k; }
+    function keyDefault(key, el) {
+        var d = global.document, h = global.innerHeight, dx = 0, dy = 0;
+        switch (key) {
+        case 'ArrowDown': dy = 40; break;
+        case 'ArrowUp': dy = -40; break;
+        case 'ArrowRight': dx = 40; break;
+        case 'ArrowLeft': dx = -40; break;
+        case 'PageDown': case ' ': dy = h * 0.9; break;
+        case 'PageUp': dy = -h * 0.9; break;
+        case 'End': dy = 1e8; break;
+        case 'Home': dy = -1e8; break;
+        default:
+            /* (typed into a text control) */
+            if (key.length === 1 && el && /^(input|textarea)$/.test(el.localName) && !el.disabled && !el.readOnly) {
+                el.value += key;
+                trusted(el, global.InputEvent || Event, 'input', { cancelable: false, data: key, inputType: 'insertText' });
+            }
+            return;
+        }
+        if (el && /^(input|textarea)$/.test(el.localName)) return;
+        wheelScroll(el || d.documentElement, dx, dy);
+    }
+    Object.defineProperty(global, '__cyberInput', { configurable: true, value: {
+        move: function (x, y) {
+            var t = hitAt(x, y);
+            if (!t) return;
+            var was = pointer.over;
+            if (was !== t) {
+                if (was && was.isConnected) bothEvents(was, x, y, 0, 'pointerout', 'mouseout', t);
+                pointer.over = t;
+                bothEvents(t, x, y, 0, 'pointerover', 'mouseover', was);
+            }
+            bothEvents(t, x, y, 0, 'pointermove', 'mousemove');
+        },
+        down: function (x, y, button) {
+            var t = hitAt(x, y);
+            if (!t) return;
+            pointer.buttons |= 1 << button;
+            pointer.pressed = t;
+            focusTarget(t, !bothEvents(t, x, y, button, 'pointerdown', 'mousedown'));
+        },
+        up: function (x, y, button) {
+            var t = hitAt(x, y);
+            if (!t) return;
+            pointer.buttons &= ~(1 << button);
+            bothEvents(t, x, y, button, 'pointerup', 'mouseup');
+            var on = pointer.pressed && commonAncestor(pointer.pressed, t);
+            pointer.pressed = null;
+            if (on && on.nodeType === 1 && !controlDisabled(on)) {
+                var i = mouseInit(x, y, button);
+                i.detail = 1;
+                trusted(on, MouseEvent, button === 0 ? 'click' : 'auxclick', i);
+            }
+        },
+        wheel: function (x, y, dx, dy) {
+            var t = hitAt(x, y);
+            if (!t) return;
+            var i = mouseInit(x, y, 0);
+            i.cancelable = wheelBlocked(t);
+            i.deltaX = dx; i.deltaY = dy; i.deltaMode = 0;
+            var go = trusted(t, WheelEvent, 'wheel', i);
+            if (go) go = trusted(t, WheelEvent, 'mousewheel', i);
+            if (go) wheelScroll(t, dx, dy);
+        },
+        keyDown: function (k, el) {
+            var key = keyOf(k), t = el || (global.document && (global.document.activeElement || global.document.body));
+            if (!t) return;
+            var go = trusted(t, KeyboardEvent, 'keydown', { cancelable: true, key: key, view: global });
+            if (go && key.length === 1) go = trusted(t, KeyboardEvent, 'keypress', { cancelable: true, key: key, view: global });
+            if (go) keyDefault(key, t);
+        },
+        keyUp: function (k, el) {
+            var t = el || (global.document && (global.document.activeElement || global.document.body));
+            if (t) trusted(t, KeyboardEvent, 'keyup', { cancelable: true, key: keyOf(k), view: global });
+        }
+    } });
 
     /* for the C entry points (event_api.c), which forward here */
     Object.defineProperty(global, '__cyberEventTarget', { value: Object.freeze({

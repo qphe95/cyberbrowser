@@ -338,6 +338,7 @@ bool mo_child_list_observed(JSContextHandle ctx, GCValue target);
  * once), queued when the outermost operation ends. */
 void mo_batch_begin(JSContextHandle ctx);
 void mo_batch_end(JSContextHandle ctx);
+void mo_note_removal(JSContextHandle ctx, GCValue parent, GCValue node);
 bool mo_batch_active(void);
 /* Run the scripts insertions have queued (dom_api.c). */
 void dom_post_insert_flush(JSContextHandle ctx);

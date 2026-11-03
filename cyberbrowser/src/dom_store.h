@@ -118,6 +118,7 @@ typedef struct DomStore {
     uint32_t *tree;         /* roots only: tree record index (0 = none yet) */
     uint32_t *wrapper;      /* GC handle of the node's wrapper, 0 = none */
     uint32_t *wrap_idx;     /* index of the wrapper in its tree object */
+    uint16_t *realm;        /* the realm it was created in (dom_wrap.c's table), its document's; 0 = unknown */
     DomStr   *text;         /* text / comment data */
     DomAttrList *attrs;
     CssAtom  *id_atom;      /* atom of the id attribute (lower-cased), 0 = none */

@@ -260,6 +260,48 @@
             return this.compatMode === 'BackCompat' ? this.body : this.documentElement;
         } });
 
+    /* Range.expand(unit): to the word or sentence around its ends, in their
+     * text; anything longer, to its container's contents.  (Never out of the
+     * ends' trees: they stay where they are.) */
+    var RP = global.Range && global.Range.prototype;
+    if (RP && !RP.expand)
+        Object.defineProperty(RP, 'expand', { configurable: true, enumerable: true, writable: true, value: function (unit) {
+            unit = unit === undefined ? 'word' : String(unit);
+            var isWord = unit === 'word', isSentence = unit === 'sentence';
+            if (!isWord && !isSentence) {
+                if (unit === 'block' || unit === 'document' || unit === 'documentboundary') {
+                    var c = this.commonAncestorContainer;
+                    if (c.nodeType !== 1 && c.nodeType !== 11 && c.nodeType !== 9) c = c.parentNode;
+                    if (c) this.selectNodeContents(c);
+                }
+                return;
+            }
+            var inside = isWord ? /[\p{L}\p{N}_']/u : /[^.!?]/;
+            function back(n, o) {
+                var t = n.data;
+                while (o > 0 && inside.test(t.charAt(o - 1))) o--;
+                if (isSentence) while (o < t.length && /\s/.test(t.charAt(o))) o++;
+                return o;
+            }
+            function ahead(n, o) {
+                var t = n.data;
+                while (o < t.length && inside.test(t.charAt(o))) o++;
+                if (isSentence && o < t.length) o++;
+                return o;
+            }
+            var sc = this.startContainer, ec = this.endContainer, so = this.startOffset, eo = this.endOffset;
+            if (sc.nodeType === 3) this.setStart(sc, back(sc, so));
+            if (ec.nodeType === 3) this.setEnd(ec, ahead(ec, eo));
+        } });
+
+    /* (Performance is an EventTarget) */
+    var PERF = global.performance;
+    if (PERF && global.EventTarget && !PERF.addEventListener) {
+        var PERFP = Object.getPrototypeOf(PERF);
+        if (PERFP === Object.prototype) Object.setPrototypeOf(PERF, global.EventTarget.prototype);
+        else Object.setPrototypeOf(PERFP, global.EventTarget.prototype);
+    }
+
     /* (HTML 4.11.1) */
     var DETP = global.HTMLDetailsElement && global.HTMLDetailsElement.prototype;
     if (DETP && !('open' in DETP))

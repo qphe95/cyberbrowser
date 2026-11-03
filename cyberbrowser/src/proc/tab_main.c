@@ -259,7 +259,7 @@ static const char CLICK_JS[] =
     "  try { ev = new MouseEvent('click', {bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0}); }"
     "  catch (e) { ev = new Event('click', {bubbles: true, cancelable: true}); }"
     "  var go = true;"
-    "  try { go = el.dispatchEvent(ev); } catch (e) {}"
+    "  try { go = __cyberDispatchTrusted(el, ev); } catch (e) {}"
     "  if (!go || ev.defaultPrevented) return '';"
     "  var a = el.closest ? el.closest('a[href]') : null;"
     "  if (!a) return '';"
@@ -310,8 +310,13 @@ static void handle(const ChanMsg *m) {
         if (m->len != sizeof(UtScroll)) return;
         UtScroll sc;
         memcpy(&sc, m->data, sizeof(sc));
-        /* (a box under the wheel first) */
-        if (sc.x >= 0) sc.dy = page_wheel((double)sc.x, (double)sc.y + g_scroll, sc.dy);
+        /* (at a place: the page's to act on, scrolling itself as it goes) */
+        if (sc.x >= 0) {
+            g_scroll_seq = sc.seq;
+            page_wheel((double)sc.x, (double)sc.y, sc.dy);
+            g_need_paint = true;
+            return;
+        }
         int64_t y = (int64_t)g_scroll + sc.dy;
         g_scroll = y < 0 ? 0 : (uint32_t)(y > 100000000 ? 100000000 : y);
         clamp_scroll();

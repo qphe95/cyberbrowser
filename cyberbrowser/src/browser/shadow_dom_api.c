@@ -333,6 +333,9 @@ static bool is_valid_shadow_host_local_name(const char *name) {
 /* The ShadowRoot object of sr (bound to its store fragment), host's. */
 static GCValue shadow_root_wrap(JSContextHandle ctx, GCValue this_val, ShadowRootDataHandle sr) {
     NodeId host_node = dom_node_of(this_val);
+    /* (in the realm of the host's document) */
+    JSContextHandle doc_realm = dom_realm_of_document(dom_owner(host_node));
+    if (SAFE_VALID(doc_realm)) ctx = doc_realm;
     GCValue shadow_root = JS_NewObjectClass(ctx, js_shadow_root_class_id);
     JS_SetOpaqueHandle(shadow_root, sr);
     SAFE_SET(sr, ShadowRootDataHandle, host, this_val);     /* (ShadowRoot.prototype.host) */

@@ -21,6 +21,7 @@
 #include "browser_api_impl_internal.h"
 #include "dom_js.h"
 #include "dom_store.h"
+#include "dom_wrap.h"
 #include "xml_parse.h"
 
 extern NodeId g_dom_document;
@@ -260,6 +261,7 @@ static GCValue adopt_new(JSContextHandle ctx, GCValue this_val, NodeId n) {
 /* createCDATASection(data): not in HTML documents, nor with "]]>". */
 static GCValue js_create_cdata_section(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     THIS_DOC(d);
+    if (SAFE_VALID(dom_realm_of_node(d))) ctx = dom_realm_of_node(d);
     if (argc < 1) return JS_ThrowTypeError(ctx, "Failed to execute 'createCDATASection' on 'Document': 1 argument required.");
     if (dom_is_html_document(d))
         return throw_dom_exception(ctx, "NotSupportedError", "This operation is not supported for HTML documents.");
@@ -332,6 +334,7 @@ static GCValue js_compat_mode(JSContextHandle ctx, GCValue this_val, int argc, G
  * content type, at about:blank. */
 static GCValue new_document(JSContextHandle ctx, bool xml, const char *content_type) {
     NodeId d = dom_create_document();
+    g_dom.realm[dom_slot(d)] = dom_realm_index(ctx);
     if (xml) g_dom.flags[dom_slot(d)] |= DOMF_XML_DOCUMENT;
     GCValue doc = dom_js(ctx, d);
     if (!JS_IsObject(doc)) return JS_EXCEPTION;
@@ -385,7 +388,8 @@ static GCValue impl_document(JSContextHandle ctx, GCValue this_val) {
 
 #define THIS_IMPL(doc)                                                       \
     GCValue doc = impl_document(ctx, this_val);                              \
-    if (JS_IsUndefined(doc)) return JS_ThrowTypeError(ctx, "Illegal invocation")
+    if (JS_IsUndefined(doc)) return JS_ThrowTypeError(ctx, "Illegal invocation"); \
+    if (SAFE_VALID(dom_realm_of_node(dom_node_of(doc)))) ctx = dom_realm_of_node(dom_node_of(doc))
 
 /* createDocumentType(name, publicId, systemId) */
 static GCValue js_create_document_type(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {

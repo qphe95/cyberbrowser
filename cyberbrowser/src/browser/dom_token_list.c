@@ -435,6 +435,9 @@ void dom_token_list_install(JSContextHandle ctx, GCValue global, GCValue window)
         JS_NewClass(rt, js_dom_token_list_class_id, &js_dom_token_list_class_def);
     GCValue proto = JS_NewObject(ctx);
     JS_SetPropertyFunctionList(ctx, proto, g_methods, (int)(sizeof g_methods / sizeof g_methods[0]));
+    /* (a stringifier is enumerable) */
+    JS_DefinePropertyValueStr(ctx, proto, "toString", JS_NewCFunction(ctx, js_get_value, "toString", 0),
+                              JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JSAtom a = JS_NewAtom(ctx, "length");
     JS_DefinePropertyGetSet(ctx, proto, a, JS_NewCFunction(ctx, js_length, "get length", 0), JS_UNDEFINED,
                             JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);

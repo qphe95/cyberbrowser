@@ -195,6 +195,7 @@ static void frame_discard_realm(Frame *f) {
     if (f->factory_made) root_value(f->factory, false);
     f->factory_made = false;
     timer_cancel_realm(f->ctx);
+    dom_realm_drop(f->ctx);
     gc_remove_root((GCHandle)f->ctx);
     f->ctx = GC_HANDLE_NULL;
     f->doc = DOM_NULL;
@@ -218,6 +219,7 @@ static JSContextHandle frame_new_realm(Frame *f) {
     NodeId main_doc = g_dom_document;
     init_browser_api_impl(ctx, JS_GetGlobalObject(ctx));
     f->doc = g_dom_document;
+    if (f->doc) g_dom.realm[dom_slot(f->doc)] = dom_realm_index(ctx);
     g_dom_document = main_doc;
     f->ctx = ctx;
     return ctx;
@@ -635,6 +637,10 @@ static void frame_load(Frame *f) {
     char mime[128];
     response_mime(fetched ? buf.headers : NULL, mime, sizeof mime);
     if (data) snprintf(mime, sizeof mime, "%s", data_mime);
+    if ((fetched || data) && mime[0]) {
+        GCValue fd = dom_js(ctx, f->doc);
+        if (JS_IsObject(fd)) JS_DefinePropertyValueStr(ctx, fd, "__cyber_ct", JS_NewString(ctx, mime), JS_PROP_CONFIGURABLE);
+    }
     HtmlPageStream *ps = html_page_stream_begin_frame(ctx, url);
     if (ps && fetched && xml_mime(mime)) html_page_stream_set_xml(ps, mime);
     if (ps) {
@@ -882,15 +888,19 @@ bool g_frame_blank_now;
  * each iframe in it without a browsing context yet navigates to its src, or
  * to about:blank (at once when g_frame_blank_now; srcdoc aside). */
 void frame_api_on_connect(JSContextHandle ctx, NodeId subtree) {
-    static CssAtom iframe_tag;
-    if (!iframe_tag) iframe_tag = css_atom_intern("iframe", 6);
+    static CssAtom iframe_tag, frame_tag;
+    if (!iframe_tag) {
+        css_atom_reserve(2);
+        iframe_tag = css_atom_intern("iframe", 6);
+        frame_tag = css_atom_intern("frame", 5);
+    }
     if (!dom_valid(subtree)) return;
     /* (only in a document with a browsing context: the realm's own, not one
      * made by createHTMLDocument or DOMParser) */
     NodeId realm_doc = dom_node_of(JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document"));
     if (!realm_doc || dom_id_of(dom_tree_root_slot(dom_slot(subtree))) != realm_doc) return;
     for (NodeId n = subtree; n; ) {
-        if (dom_kind(n) == DOM_K_ELEMENT && dom_tag(n) == iframe_tag && !frame_of_iframe(n)) {
+        if (dom_kind(n) == DOM_K_ELEMENT && (dom_tag(n) == iframe_tag || dom_tag(n) == frame_tag) && !frame_of_iframe(n)) {
             const char *src = dom_get_attr_str(n, "src");
             if (dom_get_attr_str(n, "srcdoc")) {
                 frame_navigate(ctx, n, "about:srcdoc");
@@ -916,21 +926,28 @@ void frame_api_on_connect(JSContextHandle ctx, NodeId subtree) {
 
 void frame_api_install(JSContextHandle ctx, GCValue global) {
     if (!g_main_doc) g_main_doc = g_dom_document;
+    if (g_dom_document == g_main_doc && dom_valid(g_main_doc)) g_dom.realm[dom_slot(g_main_doc)] = dom_realm_index(ctx);
     dom_wrap_set_realm_resolver(realm_of_document);
     JS_DefinePropertyValueStr(ctx, global, "__cyberInactive", JS_NewCFunction(ctx, js_inactive, "__cyberInactive", 2),
                               JS_PROP_CONFIGURABLE);
     anim_api_init();
-    GCValue ctor = JS_GetPropertyStr(ctx, global, "HTMLIFrameElement");
-    GCValue proto = JS_IsObject(ctor) ? JS_GetPropertyStr(ctx, ctor, "prototype") : JS_UNDEFINED;
-    if (!JS_IsObject(proto)) return;
     static const struct { const char *name; JSCFunction *get; } getters[] = {
         { "contentWindow", js_iframe_get_content_window },
         { "contentDocument", js_iframe_get_content_document },
     };
+    /* (<frame> has them too) */
+    GCValue fctor = JS_GetPropertyStr(ctx, global, "HTMLFrameElement");
+    GCValue fproto = JS_IsObject(fctor) ? JS_GetPropertyStr(ctx, fctor, "prototype") : JS_UNDEFINED;
+    GCValue ctor = JS_GetPropertyStr(ctx, global, "HTMLIFrameElement");
+    GCValue proto = JS_IsObject(ctor) ? JS_GetPropertyStr(ctx, ctor, "prototype") : JS_UNDEFINED;
+    if (!JS_IsObject(proto)) return;
     for (size_t i = 0; i < sizeof(getters) / sizeof(getters[0]); i++) {
         JSAtom a = JS_NewAtom(ctx, getters[i].name);
         JS_DefinePropertyGetSet(ctx, proto, a, JS_NewCFunction(ctx, getters[i].get, getters[i].name, 0),
                                 JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+        if (JS_IsObject(fproto))
+            JS_DefinePropertyGetSet(ctx, fproto, a, JS_NewCFunction(ctx, getters[i].get, getters[i].name, 0),
+                                    JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
         JS_FreeAtom(ctx, a);
     }
     JSAtom src = JS_NewAtom(ctx, "src");

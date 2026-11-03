@@ -2794,7 +2794,7 @@ bool mo_batch_active(void) { return g_mob_depth > 0; }
 /* DOM 4.2.3 "remove" step: each removed node gets a transient registration
  * of every subtree registration on the parent or above (observed until its
  * observer is next notified). */
-static void mo_add_transients(JSContextHandle ctx, GCValue parent, GCValue removed) {
+static void mo_add_transients(JSContextHandle ctx, GCValue parent, GCValue removed, bool notify) {
     uint32_t nrem = 0;
     if (!JS_IsArray(ctx, removed)) return;
     JS_ToUint32(ctx, &nrem, JS_GetPropertyStr(ctx, removed, "length"));
@@ -2824,6 +2824,8 @@ static void mo_add_transients(JSContextHandle ctx, GCValue parent, GCValue remov
                 JS_ToUint32(ctx, &len, JS_GetPropertyStr(ctx, regs, "length"));
                 JS_SetPropertyUint32(ctx, regs, len, t);
             }
+            /* (it's next notified: then they go) */
+            if (notify) mo_schedule_callback(ctx, obs);
         }
     }
 }
@@ -2846,9 +2848,18 @@ static void mo_drop_transients(JSContextHandle ctx, GCValue observer, GCValue so
     if (k != n) JS_SetPropertyStr(ctx, regs, "length", JS_NewUint32(ctx, k));
 }
 
+void mo_note_removal(JSContextHandle ctx, GCValue parent, GCValue node) {
+    GCValue reg = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyber_mo_registry");
+    uint32_t nobs = 0;
+    if (!JS_IsArray(ctx, reg) || JS_ToUint32(ctx, &nobs, JS_GetPropertyStr(ctx, reg, "length")) < 0 || !nobs) return;
+    GCValue list = JS_NewArray(ctx);
+    JS_SetPropertyUint32(ctx, list, 0, node);
+    mo_add_transients(ctx, parent, list, true);
+}
+
 void mo_notify_child_list(JSContextHandle ctx, GCValue target, GCValue added, GCValue removed, GCValue prev,
                           GCValue next) {
-    mo_add_transients(ctx, target, removed);
+    mo_add_transients(ctx, target, removed, false);
     if (g_mob_depth <= 0) {
         mo_notify_child_list_now(ctx, target, added, removed, prev, next);
         return;
@@ -3642,7 +3653,8 @@ GCValue js_performance_now(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     (void)argc; (void)argv;
     // Return high resolution timestamp relative to time origin
     double now = performance_get_time_ms() + (double)JS_time_offset_ms - g_performance_time_origin;
-    return JS_NewFloat64(ctx, now);
+    /* (coarsened to 5 microseconds, High Resolution Time; Event.timeStamp is too) */
+    return JS_NewFloat64(ctx, floor(now * 200.0) / 200.0);
 }
 
 // Performance.timeOrigin getter

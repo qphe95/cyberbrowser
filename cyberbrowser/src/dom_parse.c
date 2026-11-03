@@ -915,6 +915,10 @@ static void merge_attrs(uint32_t s, const DomTok *t) {
  * the markup left out.  True when the token was taken (a second html or
  * body, a head after one), false to build it at the new top. */
 static bool doc_before(Builder *b, const DomTok *t, CssAtom tag) {
+    /* (in a template in the head: its content, whatever it is) */
+    if (b->phase == DOC_IN_HEAD)
+        for (uint32_t i = 0; i < (uint32_t)b->sp; i++)
+            if (g_dom.tag[b->stack[i]] == g_template_atom) return false;
     for (;;) {
         switch (b->phase) {
         case DOC_INITIAL:
@@ -1199,7 +1203,7 @@ static bool build_tokens(Builder *b, TokChunk *c, size_t *pi, size_t *detour) {
             break;
         case TK_COMMENT:
             if (top) build_comment(b, t, top, top_fresh);
-            else if (b->keep_top_text) build_comment(b, t, b->frag, false);
+            else if (b->keep_top_text || (b->doc_mode && b->phase == DOC_INITIAL)) build_comment(b, t, b->frag, false);
             break;
         case TK_DOCTYPE:
             /* (a document's, not a fragment's; at the start) */

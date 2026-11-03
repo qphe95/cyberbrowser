@@ -207,6 +207,7 @@ static void store_grow(uint32_t need) {
     GROW(tree, uint32_t);
     GROW(wrapper, uint32_t);
     GROW(wrap_idx, uint32_t);
+    GROW(realm, uint16_t);
     GROW(text, DomStr);
     GROW(attrs, DomAttrList);
     GROW(id_atom, CssAtom);
@@ -253,6 +254,7 @@ uint32_t dom_alloc_slot(int kind, NodeId owner) {
     g_dom.tree[s] = 0;
     g_dom.wrapper[s] = 0;
     g_dom.wrap_idx[s] = 0;
+    g_dom.realm[s] = g_dom.owner[s] ? g_dom.realm[g_dom.owner[s]] : 0;
     g_dom.text[s] = (DomStr){ NULL, 0, 0 };
     g_dom.attrs[s] = (DomAttrList){ NULL, 0, 0, 0 };
     g_dom.id_atom[s] = CSS_ATOM_NONE;

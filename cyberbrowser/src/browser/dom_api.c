@@ -1471,21 +1471,22 @@ static void post_insert_queue(NodeId id) {
 
 /* The scripts and iframes in child's subtree (tree order), or its parent
  * script when text went into one. */
-static CssAtom g_script_tag, g_iframe_tag;
+static CssAtom g_script_tag, g_iframe_tag, g_frame_tag;
 static void post_insert_collect(NodeId parent, NodeId child) {
     if (dom_kind(child) != DOM_K_ELEMENT) {
         if (g_dom_dynamic_scripts_enabled && dom_tag_is(parent, "script")) post_insert_queue(parent);
         return;
     }
     if (!g_script_tag) {
-        css_atom_reserve(2);
+        css_atom_reserve(3);
         g_script_tag = css_atom_intern("script", 6);
         g_iframe_tag = css_atom_intern("iframe", 6);
+        g_frame_tag = css_atom_intern("frame", 5);
     }
     uint32_t r = dom_slot(child);
     for (uint32_t s = r; s; s = dom_next_in_subtree(s, r)) {
         if (g_dom.kind[s] != DOM_K_ELEMENT) continue;
-        if (g_dom.tag[s] == g_iframe_tag) post_insert_queue(dom_id_of(s));
+        if (g_dom.tag[s] == g_iframe_tag || g_dom.tag[s] == g_frame_tag) post_insert_queue(dom_id_of(s));
         else if (g_dom.tag[s] == g_script_tag && g_dom_dynamic_scripts_enabled && !(g_dom.flags[s] & DOMF_PARSER_SCRIPT))
             post_insert_queue(dom_id_of(s));
     }
@@ -1500,7 +1501,7 @@ void dom_post_insert_flush(JSContextHandle ctx) {
         g_post_insert.n = g_post_insert.cap = 0;
         for (uint32_t i = 0; i < n; i++) {
             if (!dom_valid(ids[i])) continue;
-            if (dom_tag(ids[i]) == g_iframe_tag) {
+            if (dom_tag(ids[i]) == g_iframe_tag || dom_tag(ids[i]) == g_frame_tag) {
                 bool was = g_frame_blank_now;
                 g_frame_blank_now = true;
                 if (dom_is_connected(ids[i])) frame_api_on_connect(ctx, ids[i]);
@@ -1736,6 +1737,8 @@ bool dom_api_remove(JSContextHandle ctx, NodeId parent, NodeId child) {
         }
     }
     bool was_connected = dom_api_is_connected(ctx, parent);
+    /* (a subtree observer of another kind still follows it) */
+    if (!observers) mo_note_removal(ctx, parent_js, child_js);
     dom_detach(child, false);
     if (was_connected && !g_dom_moving) frame_api_on_disconnect();
     dom_request_layout();
@@ -4278,6 +4281,7 @@ static GCValue call_method(JSContextHandle ctx, GCValue obj, const char *m, int 
 
 /* document.createAttribute(localName): lower-cased in an HTML document. */
 GCValue js_document_create_attribute(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (SAFE_VALID(dom_realm_of_node(dom_node_of(this_val)))) ctx = dom_realm_of_node(dom_node_of(this_val));
     if (argc < 1) return JS_ThrowTypeError(ctx, "Failed to execute 'createAttribute' on 'Document': 1 argument required.");
     size_t n = 0;
     const char *raw = JS_ToCStringLen(ctx, &n, argv[0]);
@@ -4991,13 +4995,11 @@ GCValue js_document_import_node(JSContextHandle ctx, GCValue this_val, int argc,
 /* (where the test began, and the viewport's scroll: a fixed box is on the viewport) */
 static double g_hit_x, g_hit_y;
 static float g_hit_vx, g_hit_vy;
-static int g_hit_box;
 
 static void hit_test_begin(LayoutContext *layout, double x, double y) {
     g_hit_x = x;
     g_hit_y = y;
     g_hit_vx = g_hit_vy = 0.0f;
-    g_hit_box = -1;
     HtmlNode *rn = g_dom_scrolls.n ? css_layout_box_node(layout, layout->tree.root_idx) : NULL;
     if (rn) dom_scroll_get(dom_owner(rn->store_id), &g_hit_vx, &g_hit_vy);
 }
@@ -5009,7 +5011,8 @@ static GCValue hit_test_layout_node(JSContextHandle ctx, LayoutContext *layout, 
     if (box->s->display == CSS_DISPLAY_NONE) return JS_NULL;   /* not laid out (or styled) */
     bool inside = (x >= box->x && x <= box->x + box->width &&
                    y >= box->y && y <= box->y + box->height);
-    if (!inside) return JS_NULL;
+    /* (what overflows a box is still there, unless it clips) */
+    if (!inside && box->s->overflow != 0) return JS_NULL;
     /* (its children are where its scroll offset has them) */
     float sx = 0.0f, sy = 0.0f;
     css_layout_box_offset(layout, idx, &sx, &sy);
@@ -5025,48 +5028,14 @@ static GCValue hit_test_layout_node(JSContextHandle ctx, LayoutContext *layout, 
         if (!JS_IsNull(child_hit)) return child_hit;
         last_child = layout->tree.nodes[last_child].prev_sibling_idx;
     }
-    if (ref->dom_node_idx >= 0 && layout->doc) {
+    if (inside && box->s->visibility != CSS_VISIBILITY_HIDDEN && ref->dom_node_idx >= 0 && layout->doc) {
         HtmlNode *hnode = (HtmlNode *)po_array_payload(&layout->doc->array, ref->dom_node_idx);
         if (hnode && hnode->type == HTML_NODE_ELEMENT && dom_valid(hnode->store_id) &&
             dom_kind(hnode->store_id) == DOM_K_ELEMENT) {
-            g_hit_box = idx;
             return dom_js(ctx, hnode->store_id);
         }
     }
     return JS_NULL;
-}
-
-/* A wheel's dy at (x, y) of a layout (document coordinates): the nearest box
- * there the user can scroll and that has room takes it.  What's left for the
- * viewport: 0, or dy. */
-int dom_wheel(JSContextHandle ctx, LayoutContext *layout, double x, double y, int dy) {
-    if (!layout || layout->tree.root_idx < 0) return dy;
-    hit_test_begin(layout, x, y);
-    hit_test_layout_node(ctx, layout, layout->tree.root_idx, x, y);
-    for (int i = g_hit_box; i >= 0; ) {
-        const LayoutStyle *s = layout->boxes[i].s;
-        if (s->overflow >= 2 && css_layout_box_scrolls(layout, i)) {
-            HtmlNode *n = css_layout_box_node(layout, i);
-            double mx, my;
-            css_layout_box_max(layout, i, &mx, &my);
-            float ox = 0.0f, oy = 0.0f;
-            if (n) dom_scroll_get(n->store_id, &ox, &oy);
-            double to = (double)oy + dy;
-            to = to > my ? my : to < 0.0 ? 0.0 : to;
-            if (n && (float)to != oy) {
-                dom_scroll_set(n->store_id, ox, (float)to);
-                layout_scroll_queue(ctx, n->store_id);
-                return 0;
-            }
-        }
-        int p = layout->tree.nodes[i].parent_idx;
-        if (s->position == CSS_POSITION_FIXED) break;
-        if (s->position == CSS_POSITION_ABSOLUTE)
-            while (p >= 0 && layout->tree.nodes[p].parent_idx >= 0 && layout->boxes[p].s->position == CSS_POSITION_STATIC)
-                p = layout->tree.nodes[p].parent_idx;
-        i = p;
-    }
-    return dy;
 }
 
 /* The element under (x, y) of a layout (document coordinates), or null. */
@@ -5102,7 +5071,10 @@ GCValue js_document_element_from_point(JSContextHandle ctx, GCValue this_val, in
         if (!doc) return doc_elem;
         g_hit_cache.doc = doc;
         g_hit_cache.key = key;
-        g_hit_cache.ok = css_layout_run(&g_hit_cache.layout, doc, NULL, 1920.0, 1080.0);
+        double vw = 1920.0, vh = 1080.0;
+        JS_ToFloat64(ctx, &vw, JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "innerWidth"));
+        JS_ToFloat64(ctx, &vh, JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "innerHeight"));
+        g_hit_cache.ok = css_layout_run(&g_hit_cache.layout, doc, NULL, vw, vh);
     }
     GCValue result = doc_elem;
     LayoutContext *layout = &g_hit_cache.layout;

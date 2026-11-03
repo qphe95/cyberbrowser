@@ -121,4 +121,10 @@ uint32_t dom_tree_object_count(void);
 }
 #endif
 
+/* Realms by index, for DomStore.realm.  The realm a node is wrapped in is the
+ * one it was created in while that's alive, else its document's. */
+uint16_t dom_realm_index(JSContextHandle ctx);
+void dom_realm_drop(JSContextHandle ctx);
+JSContextHandle dom_realm_of_node(NodeId id);
+
 #endif /* DOM_WRAP_H */

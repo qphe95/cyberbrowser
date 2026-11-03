@@ -231,7 +231,8 @@ function record(r) {
 
 /* Stands in for /resources/testharnessreport.js. */
 const REPORT = `(function () {
-  if (typeof setup === 'function' && ${MULT} !== 1) setup({ timeout_multiplier: ${MULT} });
+  /* (as wptrunner: no results table, which a page's own body.innerHTML would break) */
+  if (typeof setup === 'function') setup({ output: false, timeout_multiplier: ${MULT} });
   var start = Date.now();
   var TEST = ['PASS', 'FAIL', 'TIMEOUT', 'NOTRUN', 'PRECONDITION_FAILED'];
   var HARNESS = ['OK', 'ERROR', 'TIMEOUT', 'PRECONDITION_FAILED'];
@@ -287,6 +288,12 @@ const escapeHtml = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/
     .replace(/'/g, '&#x27;');
 const PY = {
     /* a document whose <meta charset> is the label */
+    /* a document of this content type, its meta saying another */
+    '/dom/nodes/Document-contentType/support/contenttype_setter.py': url => {
+        const mime = url.searchParams.get('mime') || url.searchParams.get('mimeHead');
+        return [url.searchParams.get('type') + '/' + url.searchParams.get('subtype'),
+                '<head>' + (mime ? `<meta http-equiv="Content-Type" content="${escapeHtml(mime)}; charset=utf-8"/>` : '') + '</head>'];
+    },
     '/dom/nodes/encoding.py': url => ['text/html', `<!doctype html><meta charset="${escapeHtml(url.searchParams.get('label') || '')}">`],
 };
 
@@ -342,6 +349,11 @@ const server = http.createServer((req, res) => {
     }
     /* (wpt serve's alias for the WebIDL parser idlharness.js loads) */
     if (url.pathname === '/resources/WebIDLParser.js') url.pathname = '/resources/webidl2/lib/webidl2.js';
+    /* (WPT's is empty: an implementation brings its own) */
+    if (url.pathname === '/resources/testdriver-vendor.js') {
+        res.writeHead(200, { 'content-type': 'text/javascript' });
+        return res.end(fs.readFileSync(path.join(__dirname, 'testdriver-vendor.js')));
+    }
     if (url.pathname === '/resources/testharnessreport.js') {
         res.writeHead(200, { 'content-type': 'text/javascript' });
         return res.end(REPORT);
@@ -371,6 +383,10 @@ const server = http.createServer((req, res) => {
     if (url.pathname === '/' + BLANK) {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
         return res.end('<!DOCTYPE html><html><head></head><body>' + (REFTEST ? REFREADY : '') + '</body></html>');
+    }
+    if (url.pathname === '/common/redirect.py') {
+        res.writeHead(+(url.searchParams.get('status') || 302), { location: url.searchParams.get('location') });
+        return res.end();
     }
     if (PY[url.pathname]) {
         const [type, body] = PY[url.pathname](url);
