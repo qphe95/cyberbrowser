@@ -982,10 +982,34 @@ static bool atom_in(CssAtom a, const CssAtom *set, int n) {
     return false;
 }
 
+/* A declarative shadow root (HTML 13.2.6.4.7, a template start tag with
+ * shadowrootmode): when the parser closes template t, its content becomes
+ * its parent's shadow root (open or closed) and the template goes. */
+static void declarative_shadow(Builder *b, uint32_t t) {
+    if (!b->streaming || g_dom.kind[t] != DOM_K_ELEMENT || g_dom.tag[t] != g_template_atom) return;
+    const char *mode = dom_get_attr_str(dom_id_of(t), "shadowrootmode");
+    if (!mode) return;
+    bool closed = !strcasecmp(mode, "closed");
+    if (!closed && strcasecmp(mode, "open")) return;
+    uint32_t host = g_dom.parent[t];
+    if (!host || g_dom.kind[host] != DOM_K_ELEMENT || g_dom.shadow[host]) return;
+    NodeId frag = dom_template_content(dom_id_of(t));
+    if (!frag) frag = dom_create_fragment(dom_id_of(b->owner));
+    uint32_t f = dom_slot(frag);
+    g_dom.content[t] = 0;
+    g_dom.host[f] = 0;
+    g_dom.flags[f] &= (uint16_t)~DOMF_TEMPLATE_CONTENT;
+    dom_attach_shadow(dom_id_of(host), frag);
+    if (closed) g_dom.flags[f] |= DOMF_SHADOW_CLOSED;
+    dom_detach(dom_id_of(t), false);
+}
+
 /* Pop the open elements down to (and including) stack index k. */
 static void pop_to(Builder *b, uint32_t k) {
-    for (uint32_t i = b->sp; i-- > k; )
+    for (uint32_t i = b->sp; i-- > k; ) {
         if (b->doc_mode && b->stack[i] == b->el_head && b->phase == DOC_IN_HEAD) b->phase = DOC_AFTER_HEAD;
+        if (g_dom.tag[b->stack[i]] == g_template_atom) declarative_shadow(b, b->stack[i]);
+    }
     b->sp = k;
 }
 

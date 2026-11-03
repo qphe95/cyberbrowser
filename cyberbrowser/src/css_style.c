@@ -617,6 +617,9 @@ struct CssStyleSet {
     double vw, vh;
     struct KeyItem *bkeys, *bakeys; size_t nbkeys, nbakeys;
     uint32_t *buni, *bauni; size_t nbuni, nbauni;
+    /* The sheets' @keyframes rules, in cascade order (in the sheets, like
+     * the rules). */
+    CssKfRef *kf; int nkf;
 };
 
 typedef struct Builder {
@@ -1342,6 +1345,19 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
     S->nsheets = count;
     S->vw = vw;
     S->vh = vh;
+    {
+        int nkf = from ? from->nkf : 0;
+        for (int s = 0; s < count; s++)
+            if (!have[s] && sheets[s]) nkf += sheets[s]->kf_n;
+        S->kf = nkf ? (CssKfRef *)malloc((size_t)nkf * sizeof(CssKfRef)) : NULL;
+        if (S->kf && from && from->nkf) memcpy(S->kf, from->kf, (size_t)from->nkf * sizeof(CssKfRef));
+        S->nkf = S->kf && from ? from->nkf : 0;
+        for (int s = 0; S->kf && s < count; s++) {
+            if (have[s] || !sheets[s]) continue;
+            for (int k = 0; k < sheets[s]->kf_n; k++)
+                S->kf[S->nkf++] = (CssKfRef){ &sheets[s]->kf[k], sheets[s]->frames + sheets[s]->kf[k].first };
+        }
+    }
     S->bkeys = (KeyItem *)dup_array(keys.v, keys.n * sizeof(KeyItem)); S->nbkeys = keys.n;
     S->buni = (uint32_t *)dup_array(uni.v, uni.n * sizeof(uint32_t)); S->nbuni = uni.n;
     S->bakeys = (KeyItem *)dup_array(akeys.v, akeys.n * sizeof(KeyItem)); S->nbakeys = akeys.n;
@@ -1387,12 +1403,20 @@ void css_styleset_free(CssStyleSet *S)
     free(S->comps); free(S->chains); free(S->lists); free(S->atoms);
     free(S->rules); free(S->afters); free(S->reval);
     free(S->bkeys); free(S->bakeys); free(S->buni); free(S->bauni);
+    free(S->kf);
     bucket_free(&S->rule_buckets);
     bucket_free(&S->after_buckets);
     free(S);
 }
 
 int css_styleset_rule_count(const CssStyleSet *S) { return S->nrules; }
+
+const CssKfRef *css_styleset_keyframes(const CssStyleSet *S, const char *name)
+{
+    for (int i = S && name ? S->nkf - 1 : -1; i >= 0; i--)
+        if (!strcmp(S->kf[i].k->name, name)) return &S->kf[i];
+    return NULL;
+}
 const CssRule *css_styleset_rule(const CssStyleSet *S, int g) { return S->rules[g].rule; }
 int css_styleset_rule_order(const CssStyleSet *S, int g)
 {

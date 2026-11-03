@@ -68,6 +68,9 @@ uint64_t layout_api_style_all_layouts(void);
 
 /* Drop the cached layout (the next query lays out again). */
 void layout_api_invalidate(void);
+/* Bring realm ctx's document's layout up to date (style changes start
+ * transitions there: anim_api.c). */
+void layout_api_update(JSContextHandle ctx);
 
 #ifdef __cplusplus
 }

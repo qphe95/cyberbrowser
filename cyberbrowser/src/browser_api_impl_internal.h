@@ -224,6 +224,7 @@ GCValue js_element_get_children(JSContextHandle ctx, GCValue this_val, int argc,
 GCValue js_element_append(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_prepend(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_replaceChildren(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_node_move_before(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_before(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_after(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_replaceWith(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
@@ -609,6 +610,9 @@ void timer_api_reset(void);
 int timer_process_due(JSContextHandle ctx);
 /* IntersectionObserver per-frame re-evaluation (misc_api.c). */
 int intersection_observers_tick(JSContextHandle ctx);
+/* CSS transitions and animations: their events and frames (anim_api.c). */
+int anim_api_tick(JSContextHandle ctx);
+void anim_api_init(void);
 /* Run every queued promise job (HTML microtask checkpoint). */
 void timer_microtask_checkpoint(JSContextHandle ctx);
 int timer_has_pending(void);

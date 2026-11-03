@@ -60,6 +60,8 @@ void dom_wrap_set_factory(DomWrapFactory f);
  * whichever realm first touches it. */
 typedef JSContextHandle (*DomRealmOfDocument)(NodeId doc);
 void dom_wrap_set_realm_resolver(DomRealmOfDocument f);
+/* The realm of document doc (NULL handle: not known). */
+JSContextHandle dom_realm_of_document(NodeId doc);
 
 /* New DomWrap record (GC data) for `id`. */
 DomWrapHandle dom_wrap_new(NodeId id);

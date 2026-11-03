@@ -129,6 +129,15 @@ char *display_list_image_source(const char *base_url, struct HtmlNode *node, flo
 /* The srcset candidate (malloc'd URL text) for a layout width; NULL if none. */
 char *display_list_pick_srcset(const char *srcset, float css_width);
 
+/* The srcset of the <source> an <img> (store id) in a <picture> takes (HTML
+ * 4.8.4.3 "update the source set": the first before it with a srcset whose
+ * media matches the viewport and whose type is an image's); NULL when it is
+ * not in a <picture> or none does. */
+const char *display_list_picture_srcset(uint32_t img);
+/* The viewport media queries of <source> are evaluated against (the last
+ * layout's). */
+void display_list_set_media_viewport(double vw, double vh);
+
 /* Set a TTF font to use when rendering text nodes. Pass NULL to unload. */
 bool display_list_set_default_font(const char *ttf_path, float size_pixels);
 struct TextShaper;

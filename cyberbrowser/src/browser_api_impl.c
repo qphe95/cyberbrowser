@@ -1623,6 +1623,8 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_element_prepend, "prepend", 1));
     JS_SetPropertyStr(ctx, doc_fragment_proto, "replaceChildren",
         JS_NewCFunction(ctx, js_element_replaceChildren, "replaceChildren", 1));
+    JS_SetPropertyStr(ctx, doc_fragment_proto, "moveBefore",
+        JS_NewCFunction(ctx, js_node_move_before, "moveBefore", 2));
 
     JS_SetPropertyStr(ctx, doc_fragment_ctor, "prototype", doc_fragment_proto);
     JS_SetPropertyStr(ctx, global, "DocumentFragment", doc_fragment_ctor);
@@ -1639,6 +1641,8 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, document_proto, "prepend", JS_NewCFunction(ctx, js_element_prepend, "prepend", 1));
     JS_SetPropertyStr(ctx, document_proto, "replaceChildren",
         JS_NewCFunction(ctx, js_element_replaceChildren, "replaceChildren", 1));
+    JS_SetPropertyStr(ctx, document_proto, "moveBefore",
+        JS_NewCFunction(ctx, js_node_move_before, "moveBefore", 2));
 
     JS_SetPropertyStr(ctx, document_ctor, "prototype", document_proto);
     JS_SetPropertyStr(ctx, global, "Document", document_ctor);
@@ -1988,6 +1992,8 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_element_prepend, "prepend", 1));
     JS_SetPropertyStr(ctx, element_proto, "replaceChildren",
         JS_NewCFunction(ctx, js_element_replaceChildren, "replaceChildren", 1));
+    JS_SetPropertyStr(ctx, element_proto, "moveBefore",
+        JS_NewCFunction(ctx, js_node_move_before, "moveBefore", 2));
     // ChildNode mixin
     JS_SetPropertyStr(ctx, element_proto, "before",
         JS_NewCFunction(ctx, js_element_before, "before", 1));

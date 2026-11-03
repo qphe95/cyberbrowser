@@ -340,6 +340,13 @@ GCValue css_style_decl_new_computed(JSContextHandle ctx, NodeId el) {
     return obj;
 }
 
+GCValue css_style_decl_new_computed_pseudo(JSContextHandle ctx, NodeId el, int ps) {
+    GCValue obj = css_style_decl_new_computed(ctx, el);
+    StyleBlock *b = block_of(ctx, obj);
+    if (b) computed_style_set_pseudo(b->cs, ps);
+    return obj;
+}
+
 GCValue css_style_decl_new(JSContextHandle ctx, NodeId owner, const char *text) {
     GCValue proto = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__CSSStyleDeclarationProto");
     GCValue obj = JS_IsObject(proto) ? JS_NewObjectProtoClass(ctx, proto, js_css_style_decl_class_id)

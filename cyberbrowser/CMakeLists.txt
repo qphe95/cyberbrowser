@@ -100,6 +100,7 @@ set(BE_SOURCES
     src/browser/frame_api.c
     src/browser/fetch_api.c
     src/browser/timer_api.c
+    src/browser/anim_api.c
     src/browser_api_impl.c
     src/html_dom.c
     src/preorder_compaction_array.c
@@ -119,6 +120,7 @@ set(BE_SOURCES
     src/import_map.c
     src/css_props.c
     src/css_layout.c
+    src/css_anim.c
     src/display_list.c
     src/text_shaper.c
     src/glyph_atlas.c

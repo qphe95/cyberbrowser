@@ -19,6 +19,15 @@ void image_api_scan(JSContextHandle ctx);
  * connected <img> elements that show it.  Main thread. */
 void image_api_notify(JSContextHandle ctx, const char *url);
 
+/* A relevant mutation of <img> img (HTML 4.8.4.3: its src or srcset set,
+ * its <picture>'s sources changed, moved into or out of one): it picks its
+ * source again and fires load (or error) again, from the event loop. */
+void image_api_relevant(uint32_t img);
+/* The same for every <img> child of <picture> picture. */
+void image_api_picture_changed(uint32_t picture);
+/* Fire what the relevant mutations call for (event loop turn); how many. */
+int image_api_tick(JSContextHandle ctx);
+
 #ifdef __cplusplus
 }
 #endif

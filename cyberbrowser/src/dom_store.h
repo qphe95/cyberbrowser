@@ -281,6 +281,7 @@ const char *dom_prefix(NodeId id);
 void dom_set_element_name(NodeId id, uint32_t ns, const char *prefix, size_t pn, const char *local, size_t ln);
 /* Is the document an XML document (not an HTML document)? */
 #define DOMF_XML_DOCUMENT (1u << 12)   /* (on document nodes) */
+#define DOMF_SHADOW_CLOSED (1u << 13)  /* (on shadow roots) mode "closed" */
 static inline bool dom_is_html_document(NodeId doc) { return !(dom_flags(doc) & DOMF_XML_DOCUMENT); }
 
 /* ---- attributes ---- */

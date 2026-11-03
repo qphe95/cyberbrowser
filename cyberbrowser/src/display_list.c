@@ -11,6 +11,8 @@
 #include "image_cache.h"
 #include "svg_render.h"
 #include "browser_api_impl_types.h"
+#include "dom_store.h"
+#include "css_parser.h"
 #include "browser/webgpu_bridge.h"
 
 /* The frame a <video> shows now (browser/media_source_api.c). */
@@ -946,13 +948,41 @@ bool display_list_object_image(const HtmlNode *node)
     return false;
 }
 
+static double g_media_vw = 1024.0, g_media_vh = 768.0;
+
+void display_list_set_media_viewport(double vw, double vh)
+{
+    g_media_vw = vw;
+    g_media_vh = vh;
+}
+
+const char *display_list_picture_srcset(uint32_t img)
+{
+    NodeId p = dom_parent(img);
+    const char *pt = p && dom_kind(p) == DOM_K_ELEMENT ? css_atom_str(dom_tag(p)) : NULL;
+    if (!pt || strcmp(pt, "picture")) return NULL;
+    for (NodeId c = dom_first_child(p); c && c != img; c = dom_next_sibling(c)) {
+        if (dom_kind(c) != DOM_K_ELEMENT || strcmp(css_atom_str(dom_tag(c)), "source")) continue;
+        const char *ss = dom_get_attr_str(c, "srcset");
+        if (!ss || !ss[0]) continue;
+        const char *media = dom_get_attr_str(c, "media");
+        if (media && media[0] && !css_media_query_matches(media, g_media_vw, g_media_vh)) continue;
+        const char *type = dom_get_attr_str(c, "type");
+        if (type && type[0] && strncasecmp(type, "image/", 6)) continue;
+        return ss;
+    }
+    return NULL;
+}
+
 char *display_list_image_source(const char *base_url, HtmlNode *node, float css_width)
 {
     if (!node || node->type != HTML_NODE_ELEMENT) return NULL;
     const char *src = node_attribute_value(node, display_list_object_image(node) ? "data" : "src");
     /* srcset, when present, overrides src with the candidate that best
-     * matches the laid-out width (or the 1x candidate). */
-    const char *srcset = node_attribute_value(node, "srcset");
+     * matches the laid-out width (or the 1x candidate); a <picture>'s
+     * <source> overrides both. */
+    const char *pic = node->store_id ? display_list_picture_srcset(node->store_id) : NULL;
+    const char *srcset = pic ? pic : node_attribute_value(node, "srcset");
     char *picked = srcset ? srcset_pick(srcset, css_width) : NULL;
     if (picked) src = picked;
     char *url = NULL;

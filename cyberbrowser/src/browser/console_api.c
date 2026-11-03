@@ -592,11 +592,23 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
     if (!id) return js_get_computed_style_legacy(ctx, this_val, argc, argv);
     if (dom_kind(id) != DOM_K_ELEMENT)
         return JS_ThrowTypeError(ctx, "Failed to execute 'getComputedStyle' on 'Window': parameter 1 is not of type 'Element'.");
-    GCValue cached = JS_GetPropertyStr(ctx, element, "__cyber_cs");
+    /* (a pseudo-element: ::before / ::after, the legacy one-colon forms too) */
+    int ps = 0;
+    if (argc > 1 && JS_IsString(argv[1])) {
+        const char *p = JS_ToCString(ctx, argv[1]);
+        if (p) {
+            const char *q = p[0] == ':' ? (p[1] == ':' ? p + 2 : p + 1) : NULL;
+            if (q && !strcasecmp(q, "before")) ps = 1;
+            else if (q && !strcasecmp(q, "after")) ps = 2;
+            JS_FreeCString(ctx, p);
+        }
+    }
+    const char *key = ps == 1 ? "__cyber_cs_before" : ps == 2 ? "__cyber_cs_after" : "__cyber_cs";
+    GCValue cached = JS_GetPropertyStr(ctx, element, key);
     if (css_style_decl_is(ctx, cached)) return cached;
-    GCValue cs = css_style_decl_new_computed(ctx, id);
+    GCValue cs = ps ? css_style_decl_new_computed_pseudo(ctx, id, ps) : css_style_decl_new_computed(ctx, id);
     if (JS_IsException(cs)) return cs;
-    JS_DefinePropertyValueStr(ctx, element, "__cyber_cs", cs, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, element, key, cs, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
     return cs;
 }
 

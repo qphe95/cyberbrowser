@@ -66,6 +66,10 @@ CssStyleSet *css_styleset_extend(const CssStyleSet *from, CssStylesheet *const *
 int  css_styleset_sheet_count(const CssStyleSet *set);
 void css_styleset_free(CssStyleSet *set);
 int  css_styleset_rule_count(const CssStyleSet *set);
+/* The last @keyframes rule named name (CSS Animations 1 section 3), its
+ * frames in offset order; NULL for none. */
+typedef struct CssKfRef { const CssKeyframes *k; const CssKeyframe *frames; } CssKfRef;
+const CssKfRef *css_styleset_keyframes(const CssStyleSet *set, const char *name);
 const CssRule *css_styleset_rule(const CssStyleSet *set, int g);
 /* Legacy cascade order of rule g's first declaration (sheet*1e6 + rule*1e3). */
 int css_styleset_rule_order(const CssStyleSet *set, int g);

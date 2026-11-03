@@ -16,6 +16,7 @@ static DomWrapFactory g_factory;
 static DomRealmOfDocument g_realm_of;
 
 void dom_wrap_set_realm_resolver(DomRealmOfDocument f) { g_realm_of = f; }
+JSContextHandle dom_realm_of_document(NodeId doc) { return g_realm_of && doc ? g_realm_of(doc) : GC_HANDLE_NULL; }
 static JSContextHandle g_ctx;          /* the engine's context (one per process) */
 static uint32_t g_wrappers, g_tree_objects;
 

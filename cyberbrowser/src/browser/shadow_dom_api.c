@@ -314,6 +314,37 @@ static bool is_valid_shadow_host_local_name(const char *name) {
     return false;
 }
 
+/* The ShadowRoot object of sr (bound to its store fragment), host's. */
+static GCValue shadow_root_wrap(JSContextHandle ctx, GCValue this_val, ShadowRootDataHandle sr) {
+    NodeId host_node = dom_node_of(this_val);
+    GCValue shadow_root = JS_NewObjectClass(ctx, js_shadow_root_class_id);
+    JS_SetOpaqueHandle(shadow_root, sr);
+    {
+        GCValue global = JS_GetGlobalObject(ctx);
+        GCValue sr_ctor = JS_GetPropertyStr(ctx, global, "ShadowRoot");
+        GCValue sr_proto = JS_IsObject(sr_ctor) ? JS_GetPropertyStr(ctx, sr_ctor, "prototype") : JS_UNDEFINED;
+        if (JS_IsObject(sr_proto)) JS_SetPrototype(ctx, shadow_root, sr_proto);
+    }
+
+    // Bind the shadow root object to its store fragment.
+    {
+        DomWrapHandle wd = SAFE_GET_OR(sr, ShadowRootDataHandle, dom_node, GC_HANDLE_NULL);
+        DomWrap *w = wd ? (DomWrap *)gc_deref(wd) : NULL;
+        NodeId frag = w ? w->id : DOM_NULL;
+        if (dom_valid(frag)) {
+            dom_bind(ctx, frag, shadow_root);
+            g_dom.owner[dom_slot(frag)] = g_dom.owner[dom_slot(host_node)];
+        }
+    }
+
+    // Keep the host accessible to DOM connectivity checks (e.g. isConnected).
+    JS_SetPropertyStr(ctx, shadow_root, "host", this_val);
+
+    // Store shadowRoot reference on the element.
+    JS_SetPropertyStr(ctx, this_val, "__shadowRoot", shadow_root);
+    return shadow_root;
+}
+
 // Element.prototype.attachShadow()
 GCValue js_element_attach_shadow(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1 || !JS_IsObject(argv[0])) {
@@ -360,39 +391,14 @@ GCValue js_element_attach_shadow(JSContextHandle ctx, GCValue this_val, int argc
     }
 
     // 3. Create ShadowRoot instance.
-    ShadowRootDataHandle sr = shadow_root_create(ctx, this_val, mode);
+    ShadowRootDataHandle sr = shadow_root_create(ctx, this_val, mode, DOM_NULL);
     JS_FreeCString(ctx, mode);
     if (SAFE_IS_NULL(sr)) {
         return JS_ThrowInternalError(ctx, "attachShadow: failed to create ShadowRoot");
     }
     SAFE_SET(sr, ShadowRootDataHandle, delegates_focus, delegates_focus);
     SAFE_SET(sr, ShadowRootDataHandle, manual_slot_assignment, manual_slot_assignment);
-
-    GCValue shadow_root = JS_NewObjectClass(ctx, js_shadow_root_class_id);
-    JS_SetOpaqueHandle(shadow_root, sr);
-    {
-        GCValue global = JS_GetGlobalObject(ctx);
-        GCValue sr_ctor = JS_GetPropertyStr(ctx, global, "ShadowRoot");
-        GCValue sr_proto = JS_IsObject(sr_ctor) ? JS_GetPropertyStr(ctx, sr_ctor, "prototype") : JS_UNDEFINED;
-        if (JS_IsObject(sr_proto)) JS_SetPrototype(ctx, shadow_root, sr_proto);
-    }
-
-    // Bind the shadow root object to its store fragment.
-    {
-        DomWrapHandle wd = SAFE_GET_OR(sr, ShadowRootDataHandle, dom_node, GC_HANDLE_NULL);
-        DomWrap *w = wd ? (DomWrap *)gc_deref(wd) : NULL;
-        NodeId frag = w ? w->id : DOM_NULL;
-        if (dom_valid(frag)) {
-            dom_bind(ctx, frag, shadow_root);
-            g_dom.owner[dom_slot(frag)] = g_dom.owner[dom_slot(host_node)];
-        }
-    }
-
-    // Keep the host accessible to DOM connectivity checks (e.g. isConnected).
-    JS_SetPropertyStr(ctx, shadow_root, "host", this_val);
-
-    // Store shadowRoot reference on the element.
-    JS_SetPropertyStr(ctx, this_val, "__shadowRoot", shadow_root);
+    GCValue shadow_root = shadow_root_wrap(ctx, this_val, sr);
 
     // Polymer's _attachDom passes a pre-built fragment as `shadyUpgradeFragment`.
     // Move its children into the new shadow root so the composed tree is ready.
@@ -472,8 +478,14 @@ GCValue js_element_get_shadow_root(JSContextHandle ctx, GCValue this_val, int ar
     (void)argc; (void)argv;
     GCValue shadow = JS_GetPropertyStr(ctx, this_val, "__shadowRoot");
     if (JS_IsUndefined(shadow)) {
-
-        return JS_NULL;
+        /* (a declarative shadow root the parser attached: its object now) */
+        NodeId f = dom_shadow_root(dom_node_of(this_val));
+        if (!f || dom_has_wrapper(f)) return JS_NULL;
+        bool closed = (dom_flags(f) & DOMF_SHADOW_CLOSED) != 0;
+        ShadowRootDataHandle sr = shadow_root_create(ctx, this_val, closed ? "closed" : "open", f);
+        if (SAFE_IS_NULL(sr)) return JS_NULL;
+        shadow = shadow_root_wrap(ctx, this_val, sr);
+        return closed ? JS_NULL : shadow;
     }
     
     // Check if mode is "open" - if closed, return null

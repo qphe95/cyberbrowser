@@ -50,7 +50,32 @@ typedef struct CssStylesheet {
     int rule_count;
     int rule_capacity;
     bool user_agent;    /* the user agent's: below every author rule in the cascade */
+    /* @keyframes rules (CSS Animations 1 section 3): each a name and a run
+     * of frames (frames[first .. first + count), in offset order).  A frame
+     * listed under several selectors ("0%, 100% {}") is one frame per
+     * offset; the first of them owns the declarations. */
+    struct CssKeyframes *kf;
+    int kf_n, kf_cap;
+    struct CssKeyframe *frames;
+    int frame_n, frame_cap;
 } CssStylesheet;
+
+typedef struct CssKeyframe {
+    float offset;               /* 0 .. 1 */
+    bool owns;                  /* frees decls */
+    CssDeclaration *decls;
+    int n;
+} CssKeyframe;
+
+typedef struct CssKeyframes {
+    char *name;
+    int first, count;
+} CssKeyframes;
+
+/* The last @keyframes named name in sheet (NULL: none). */
+const CssKeyframes *css_keyframes_find(const CssStylesheet *sheet, const char *name);
+/* Move src's @keyframes to the end of dst's (src keeps none). */
+void css_keyframes_take(CssStylesheet *dst, CssStylesheet *src);
 
 /* Parse a full stylesheet. Returns NULL on empty/invalid input. */
 CssStylesheet* css_stylesheet_parse(const char *css, size_t len);

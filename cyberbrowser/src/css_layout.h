@@ -412,6 +412,9 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * ancestors, computed after layout for painting. */
     double opacity;
     unsigned char opacity_set;
+    /* transition-* and animation-* (css_anim.h's specification; interned,
+     * NULL: all initial). */
+    const char *anim_spec;
     /* z-index (when z_index_set; auto otherwise). */
     int z_index;
     unsigned char z_index_set;

@@ -23,6 +23,8 @@
 #include "dom_js.h"
 #include "layout_api.h"
 #include "computed_style.h"
+#include "css_anim.h"
+#include "js_quickjs.h"
 
 uint64_t dom_change_stamp(void);
 #define CST(...) do { if (getenv("CS_TRACE")) { fprintf(stderr, "[cs] " __VA_ARGS__); fputc('\n', stderr); fflush(stderr); } } while (0)
@@ -40,12 +42,17 @@ struct ComputedStyle {
     LayoutQueryUsed used;
     double root_font_size, vw, vh;
     struct ComputedStyle *parent;
+    int pseudo;
 };
 
 ComputedStyle *computed_style_new(NodeId el) {
     ComputedStyle *cs = calloc(1, sizeof *cs);
     if (cs) cs->el = el;
     return cs;
+}
+
+void computed_style_set_pseudo(ComputedStyle *cs, int ps) {
+    if (cs) cs->pseudo = ps;
 }
 
 static void snapshot_clear(ComputedStyle *cs) {
@@ -125,8 +132,13 @@ static void refresh(JSContextHandle ctx, ComputedStyle *cs) {
     cs->taken = true;
     GCValue el = dom_js(ctx, cs->el);
     CST("query");
-    cs->styled = JS_IsObject(el) && dom_kind(cs->el) == DOM_K_ELEMENT &&
-                 layout_query_cascade(ctx, el, collect, cs, &cs->used);
+    if (cs->pseudo) {
+        memset(&cs->used, 0, sizeof cs->used);
+        cs->styled = JS_IsObject(el) && dom_kind(cs->el) == DOM_K_ELEMENT;
+    } else {
+        cs->styled = JS_IsObject(el) && dom_kind(cs->el) == DOM_K_ELEMENT &&
+                     layout_query_cascade(ctx, el, collect, cs, &cs->used);
+    }
     CST("queried %d", cs->styled);
     cs->stamp = dom_change_stamp();     /* (the query may have laid out) */
     GCValue win = JS_GetGlobalObject(ctx);
@@ -142,7 +154,7 @@ static void refresh(JSContextHandle ctx, ComputedStyle *cs) {
 
 static ComputedStyle *parent_of(JSContextHandle ctx, ComputedStyle *cs) {
     if (cs->parent) return cs->parent;
-    NodeId p = dom_parent(cs->el);
+    NodeId p = cs->pseudo ? cs->el : dom_parent(cs->el);
     /* (a shadow root's host is its children's parent for inheritance) */
     if (p && dom_kind(p) != DOM_K_ELEMENT) p = DOM_NULL;
     if (!p) return NULL;
@@ -326,6 +338,15 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
             if (!strcmp(n, m)) { free(r); r = px(cs->used.margin[k]); }
             else if (!strcmp(n, pd)) { free(r); r = px(cs->used.padding[k]); }
         }
+    }
+    /* a running transition or animation's value (css_anim.h) */
+    int ap = anim_prop_of(n);
+    AnimVal av;
+    if (ap >= 0 && anim_value(cs->el, cs->pseudo, ap, (double)page_time_ms(), &av)) {
+        char b[96];
+        anim_val_css(ap, &av, b, sizeof b);
+        free(r);
+        r = strdup(b);
     }
     return r;
 }

@@ -17,6 +17,7 @@
 #include "gc_value_helpers.h"
 #include "platform.h"
 #include "js_quickjs.h"
+#include "image_api.h"
 #include <pthread.h>
 
 /* Diagnostic: last property read on undefined/null before a TypeError. */
@@ -677,7 +678,10 @@ int timer_process_due(JSContextHandle ctx) {
         timer_microtask_checkpoint(ctx);
     }
 
-    /* A rendering opportunity: intersection observers see layout changes. */
+    /* A rendering opportunity: transitions and animations fire their
+     * events, intersection observers see layout changes. */
+    processed += anim_api_tick(ctx);
+    processed += image_api_tick(ctx);
     processed += intersection_observers_tick(ctx);
     return processed;
 }
@@ -811,6 +815,22 @@ static unsigned long long raf_frame_ms(void) {
         ms = v >= 1 && v <= 1000 ? (unsigned long long)v : 16ull;
     }
     return ms;
+}
+
+static GCValue anim_wake_noop(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    return JS_UNDEFINED;
+}
+
+/* A frame for running transitions and animations (anim_api.c): a turn at
+ * the next frame time, which virtual time skips to when the page is idle. */
+void timer_anim_wake(JSContextHandle ctx) {
+    static unsigned long long wake_at;
+    unsigned long long now = page_time_ms();
+    if (wake_at > now) return;
+    unsigned long long frame = (now / raf_frame_ms() + 1) * raf_frame_ms();
+    if (add_timer(ctx, TIMER_TYPE_RAF, JS_NewCFunction(ctx, anim_wake_noop, "", 0), frame - now, 0, NULL))
+        wake_at = frame;
 }
 
 // requestAnimationFrame(callback)

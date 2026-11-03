@@ -24,6 +24,7 @@
 #include "font_registry.h"
 #include "image_cache.h"
 #include "css_style.h"
+#include "css_anim.h"
 #include "frame_arena.h"
 #include "job_system.h"
 #include "gc_platform.h"
@@ -2767,6 +2768,43 @@ static int decl_key(const char *prop)
 }
 #define PK(k) (pk == (k))
 
+/* transition / animation and their longhands: into the box's
+ * specification (css_anim.h).  False: not one of them. */
+static bool layout_anim_declaration(LayoutBox *box, const char *prop, const char *value)
+{
+    const char *p = strncasecmp(prop, "-webkit-", 8) ? prop : prop + 8;
+    int f = anim_spec_field(p);
+    bool shorthand = !strcasecmp(p, "transition") || !strcasecmp(p, "animation");
+    if (f < 0 && !shorthand) return false;
+    const char *cur = box->s->anim_spec;
+    char *spec = NULL;
+    if (f >= 0) {
+        spec = anim_spec_with(cur, f, value);
+    } else {
+        const CssPropDef *d = css_prop_find(p, strlen(p));
+        const char **names;
+        char **vals = NULL;
+        int n = d ? css_prop_longhands(d, &names) : 0;
+        if (n <= 0 || css_prop_expand(d, value, &vals) != n) return true;
+        for (int i = 0; i < n; i++) {
+            int g = anim_spec_field(names[i]);
+            if (g >= 0) {
+                char *t = anim_spec_with(spec ? spec : cur, g, vals[i]);
+                free(spec);
+                spec = t;
+            }
+            free(vals[i]);
+        }
+        free(vals);
+    }
+    if (!spec) return true;
+    size_t l = strlen(spec), k = 0;
+    while (k < l && spec[k] == 0x1F) k++;
+    box->s->anim_spec = k == l ? NULL : layout_intern(spec, l);
+    free(spec);
+    return true;
+}
+
 static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                                      double parent_width, double viewport_width,
                                      const char *base_url)
@@ -2779,6 +2817,9 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     if (css_prop_non_negative(prop) && css_value_has_negative(value)) return;
     /* (an invalid value is ignored: the declaration before it stays) */
     if (layout_decl_invalid(decl)) return;
+    if ((prop[0] == 't' || prop[0] == 'a' || prop[0] == '-' || prop[0] == 'T' || prop[0] == 'A') &&
+        layout_anim_declaration(box, prop, value))
+        return;
 
     if (PK(0)) {
         /* The shorthand as its longhands (each reset when not given). */
@@ -4259,6 +4300,7 @@ static void parse_merge_cont(Job *j)
         if (c->rule_count)
             memcpy(sheet->rules + sheet->rule_count, c->rules, (size_t)c->rule_count * sizeof(CssRule));
         sheet->rule_count += c->rule_count;
+        css_keyframes_take(sheet, c);
         free(c->rules);
         free(c);
     }
@@ -4411,7 +4453,7 @@ static void layout_sheet_list_resolve(LayoutStyleSheetList *list)
                 }
             }
         }
-        if (!sh || sh->rule_count == 0) continue;
+        if (!sh || (sh->rule_count == 0 && sh->kf_n == 0)) continue;
         if (!e) list->all_cached = false;
         list->sheets[list->count] = sh;
         list->entries[list->count] = e;
@@ -10039,7 +10081,9 @@ static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
             /* The last layout's box, when what it depends on is as it was:
              * its element's style slot left as it was (its attributes too,
              * which attr() reads) and the same rules. */
-            int j = ptab && !dyn && ctx->style_left[owner] ? layout_parked_find(ctx, ptab, ptab_cap, ctx->ids[owner], side) : -1;
+            /* (an animated one is styled again: what it animates changes) */
+            int j = ptab && !dyn && ctx->style_left[owner] && !anim_has(ctx->ids[owner], side + 1)
+                        ? layout_parked_find(ctx, ptab, ptab_cap, ctx->ids[owner], side) : -1;
             LayoutParkedPseudo *pk = j >= 0 ? &ctx->parked[j] : NULL;
             if (pk && (pk->used || pk->content != ps->content || pk->n != ps->n ||
                        (ps->n && memcmp(pk->decls, ps->decls, (size_t)ps->n * sizeof(*ps->decls)) != 0)))
@@ -10593,6 +10637,7 @@ static char *layout_text_transform(const char *s, int t, bool *in_word)
 }
 
 static void layout_collapse_borders(LayoutContext *ctx);
+static void layout_animate(LayoutContext *ctx, const CssStyleSet *set);
 
 static void layout_text_transforms(LayoutContext *ctx)
 {
@@ -11124,6 +11169,7 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
     layout_text_transforms(ctx);
     layout_anon_tables(ctx, P.em_defer);
     layout_collapse_borders(ctx);
+    layout_animate(ctx, P.set);
     STAGE("pseudo boxes");
     layout_blockify(ctx);
     STAGE("blockify");
@@ -17661,6 +17707,134 @@ static void layout_collapse_table(LayoutContext *ctx, int idx)
     table_free(&T);
 }
 
+/* ---- Transitions and animations (css_anim.h) ---- */
+
+static const uint32_t k_anim_side[4] = { LAYOUT_SIDE_LEFT, LAYOUT_SIDE_TOP, LAYOUT_SIDE_RIGHT, LAYOUT_SIDE_BOTTOM };
+static const unsigned char k_anim_pct[4] = { 8, 1, 2, 4 };
+
+/* What style s gives the properties that animate. */
+static void layout_anim_read(const LayoutStyle *s, AnimVal v[ANIM_NPROP])
+{
+    const double side[4] = { s->left, s->top, s->right, s->bottom };
+    for (int k = 0; k < 4; k++)
+        v[k] = (AnimVal){ (float)side[k], 0,
+                          (s->positioned_sides & k_anim_side[k]) && !(s->inset_pct_bits & k_anim_pct[k]) };
+    v[ANIM_OPACITY] = (AnimVal){ s->opacity_set ? (float)s->opacity : 1.0f, 0, 1 };
+    v[ANIM_TRANSFORM] = s->has_translate ? (AnimVal){ (float)s->translate_x, (float)s->translate_y,
+                                                      s->translate_xpct == 0 && s->translate_ypct == 0 }
+                                         : (AnimVal){ 0, 0, 1 };
+}
+
+static void layout_anim_write(LayoutStyle *s, int p, const AnimVal *v)
+{
+    if (p < 4) {
+        double *f[4] = { &s->left, &s->top, &s->right, &s->bottom };
+        *f[p] = v->x;
+        s->positioned_sides |= k_anim_side[p];
+        s->inset_pct_bits &= (unsigned char)~k_anim_pct[p];
+    } else if (p == ANIM_OPACITY) {
+        s->opacity = v->x < 0 ? 0 : v->x > 1 ? 1 : v->x;
+        s->opacity_set = 1;
+    } else {
+        s->translate_x = v->x;
+        s->translate_y = v->y;
+        s->translate_xpct = s->translate_ypct = 0;
+        s->has_translate = 1;
+    }
+}
+
+typedef struct LayoutAnimUd {
+    LayoutContext *ctx;
+    const CssStyleSet *set;
+    LayoutBox *box;
+    float offs[32];
+    const void *decls[32];
+    int counts[32];
+} LayoutAnimUd;
+
+static int layout_anim_keyframes(void *ud, const char *name, const float **offs, const void *const **decls,
+                                 const int **counts)
+{
+    LayoutAnimUd *u = (LayoutAnimUd *)ud;
+    const CssKfRef *k = css_styleset_keyframes(u->set, name);
+    if (!k) return -1;
+    int n = k->k->count < 32 ? k->k->count : 32;
+    for (int i = 0; i < n; i++) {
+        u->offs[i] = k->frames[i].offset;
+        u->decls[i] = k->frames[i].decls;
+        u->counts[i] = k->frames[i].n;
+    }
+    *offs = u->offs;
+    *decls = u->decls;
+    *counts = u->counts;
+    return n;
+}
+
+/* A keyframe's values: its declarations applied to the box's style. */
+static void layout_anim_frame(void *ud, const void *decls, int n, AnimVal out[ANIM_NPROP], bool has[ANIM_NPROP])
+{
+    LayoutAnimUd *u = (LayoutAnimUd *)ud;
+    LayoutStyle tmp = *u->box->s;
+    LayoutBox tb = *u->box;
+    tb.s = &tmp;
+    const CssDeclaration *d = (const CssDeclaration *)decls;
+    for (int i = 0; i < n; i++) {
+        int p = d[i].property ? anim_prop_of(d[i].property) : -1;
+        if (p < 0) continue;
+        has[p] = true;
+        layout_apply_declaration(&tb, &d[i], u->ctx->viewport_width, u->ctx->viewport_width, u->ctx->base_url);
+    }
+    layout_anim_read(&tmp, out);
+}
+
+/* The boxes with transitions or animations: their styles told to the store
+ * (which starts what a change calls for), then given what runs.  A style
+ * so changed is not the cascade's: the next style pass styles it again. */
+static void layout_animate(LayoutContext *ctx, const CssStyleSet *set)
+{
+    bool any = anim_any();
+    int base = ctx->base_count, pn = ctx->pseudo_nodes_n;
+    if (!ctx->ids) return;
+    double now = anim_now();
+    LayoutAnimUd u;
+    u.ctx = ctx;
+    u.set = set;
+    for (int i = 0; i < ctx->tree.count; i++) {
+        LayoutBox *box = &ctx->boxes[i];
+        if (!box->s->anim_spec && !any) continue;
+        NodeId el;
+        int ps = 0;
+        if (i < base) {
+            el = ctx->ids[i];
+        } else if (i - base < pn && !((i - base) & 1) && ctx->pseudo_pairs) {
+            const LayoutPseudoPair *pp = &ctx->pseudo_pairs[(i - base) / 2];
+            if (pp->side > 1) continue;
+            el = ctx->ids[pp->owner];
+            ps = pp->side + 1;
+        } else {
+            continue;
+        }
+        if (!el || dom_kind(el) != DOM_K_ELEMENT) continue;
+        bool rows = any && anim_has(el, ps);
+        /* (a style left as it was, with nothing running: as it was) */
+        if (!rows && (!box->s->anim_spec || (i < base && ctx->style_left && ctx->style_left[i]))) continue;
+        AnimVal was[ANIM_NPROP], cur[ANIM_NPROP];
+        bool set_p[ANIM_NPROP];
+        layout_anim_read(box->s, was);
+        u.box = box;
+        const char *spec = box->s->display == CSS_DISPLAY_NONE ? NULL : box->s->anim_spec;
+        anim_box(el, ps, spec, was, !ctx->cache_readonly, now, layout_anim_keyframes, layout_anim_frame, &u, cur, set_p);
+        bool wrote = false;
+        for (int p = 0; p < ANIM_NPROP; p++)
+            if (set_p[p]) { layout_anim_write(box->s, p, &cur[p]); wrote = true; }
+        if (wrote) {
+            if (i < base && ctx->slot_ver) ctx->slot_ver[i] = 0;
+            if (ctx->style_left) ctx->style_left[i] = 0;
+        }
+        any = anim_any();
+    }
+}
+
 static void layout_collapse_borders(LayoutContext *ctx)
 {
     int n = 0;
@@ -19703,6 +19877,7 @@ bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
     uint64_t seq = html_mirror_change_seq();
     bool kept_tree = false;
     double _run_t0 = layout_now_ms(), lph_tree_prev = 0.0;
+    display_list_set_media_viewport(viewport_width, viewport_height);
     JSContextHandle saved_js_ctx = ctx->js_ctx;
     const char *saved_dump_path = ctx->dump_path;
     bool saved_style_all = ctx->style_all, saved_serial = ctx->serial, saved_readonly = ctx->cache_readonly;

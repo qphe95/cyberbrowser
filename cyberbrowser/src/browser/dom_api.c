@@ -36,6 +36,7 @@
 #include "dom_fetch.h"
 #include "dom_query.h"
 #include "code_cache.h"
+#include "image_api.h"
 
 // createElement lives in js_quickjs.c and is used by the outerHTML setter.
 extern GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
@@ -1502,6 +1503,10 @@ void dom_api_adopt(JSContextHandle ctx, NodeId node, NodeId doc) {
     JS_FreeAtom(ctx, od);
 }
 
+/* Set while moveBefore moves a node: its removal and insertion run none of
+ * the removing and inserting steps (it stays connected throughout). */
+static bool g_dom_moving;
+
 /* Insert `child` under `parent` before `ref` (DOM_NULL appends), with the
  * DOM API's side effects.  `child` must not be a fragment. */
 bool dom_api_insert(JSContextHandle ctx, NodeId parent, NodeId child, NodeId ref) {
@@ -1530,10 +1535,17 @@ bool dom_api_insert(JSContextHandle ctx, NodeId parent, NodeId child, NodeId ref
     if (pdoc && dom_owner(child) != pdoc) dom_api_adopt(ctx, child, pdoc);
     dom_attach(parent, child, ref);
     dom_request_layout();
+    /* (an <img>'s <picture> changed: it picks its source again) */
+    if (dom_tag_is(parent, "picture")) image_api_picture_changed(parent);
 
     // CEReactions frame for this insertion: any connectedCallback and upgrade
     // reactions queued below are flushed before we return, so a parent
     // constructor can rely on its inserted children being upgraded.
+    if (g_dom_moving) {
+        if (observers)
+            notify_child_list(ctx, parent_js, child_js, false, dom_prev_sibling(child), dom_next_sibling(child));
+        return true;
+    }
     js_cyber_ce_push_stack(ctx);
     if (dom_api_is_connected(ctx, child)) {
         bool was = g_frame_blank_now;
@@ -1584,10 +1596,14 @@ bool dom_api_remove(JSContextHandle ctx, NodeId parent, NodeId child) {
     bool was_connected = dom_api_is_connected(ctx, parent);
     dom_detach(child, false);
     dom_request_layout();
+    if (dom_tag_is(parent, "picture")) {
+        image_api_picture_changed(parent);
+        image_api_relevant(child);
+    }
     /* Every custom element of the removed subtree is disconnected, not just
      * its root (HTML "remove" steps), in tree order.  Components that clear
      * their rendering on disconnect then render once when reinserted. */
-    if (was_connected) {
+    if (was_connected && !g_dom_moving) {
         uint32_t *ids = NULL, n = 0;
         collect_ce_candidates(child, &ids, &n);
         bool root_listed = false;
@@ -1907,6 +1923,82 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
     if (ref == c) ref = dom_next_sibling(c);
     if (!dom_api_insert(ctx, parent, c, ref)) return JS_EXCEPTION;
     return new_child;
+}
+
+/* The root of n, through shadow roots to their hosts. */
+static NodeId shadow_including_root(NodeId n) {
+    for (;;) {
+        NodeId p = dom_parent(n);
+        if (!p && dom_kind(n) == DOM_K_FRAGMENT) p = dom_host(n);
+        if (!p) return n;
+        n = p;
+    }
+}
+
+/* ParentNode.moveBefore(node, child) (DOM 4.2.6 "move"): node out of where
+ * it is and in before child, keeping its state (no removing or inserting
+ * steps: focus, transitions, iframes and custom elements stay as they were,
+ * but for connectedMoveCallback). */
+GCValue js_node_move_before(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 2) return JS_ThrowTypeError(ctx, "Failed to execute 'moveBefore' on 'Node': 2 arguments required.");
+    NodeId parent = dom_node_of(this_val);
+    NodeId node = JS_IsObject(argv[0]) ? dom_node_of(argv[0]) : DOM_NULL;
+    if (!parent || !node)
+        return JS_ThrowTypeError(ctx, "Failed to execute 'moveBefore' on 'Node': parameter 1 is not of type 'Node'.");
+    NodeId child = DOM_NULL;
+    if (!JS_IsNull(argv[1]) && !JS_IsUndefined(argv[1])) {
+        child = JS_IsObject(argv[1]) ? dom_node_of(argv[1]) : DOM_NULL;
+        if (!child) return JS_ThrowTypeError(ctx, "Failed to execute 'moveBefore' on 'Node': parameter 2 is not of type 'Node'.");
+    }
+    /* "ensure pre-move validity" */
+    int pk = dom_kind(parent), nk = dom_kind(node);
+    const char *bad = NULL;
+    if (shadow_including_root(parent) != shadow_including_root(node)) bad = "The node is in another tree.";
+    else if (pk != DOM_K_DOCUMENT && pk != DOM_K_FRAGMENT && pk != DOM_K_ELEMENT) bad = "The parent cannot have children.";
+    else if (host_including_ancestor(node, parent)) bad = "The node contains the parent.";
+    if (bad) return throw_dom_exception(ctx, "HierarchyRequestError", bad);
+    if (child && dom_parent(child) != parent)
+        return throw_dom_exception(ctx, "NotFoundError", "The reference node is not a child of this node.");
+    if (nk != DOM_K_ELEMENT && !dom_kind_is_chardata(nk)) bad = "The node cannot be moved.";
+    else if (nk == DOM_K_TEXT && pk == DOM_K_DOCUMENT) bad = "The document cannot have text children.";
+    else if (pk == DOM_K_DOCUMENT && nk == DOM_K_ELEMENT) {
+        bool doctype_after = false;
+        for (NodeId c = child; c; c = dom_next_sibling(c))
+            if (dom_kind(c) == DOM_K_DOCTYPE) doctype_after = true;
+        for (NodeId c = dom_first_child(parent); c && !bad; c = dom_next_sibling(c))
+            if (dom_kind(c) == DOM_K_ELEMENT) bad = "The document has an element already.";
+        if (!bad && doctype_after) bad = "The element would come before the doctype.";
+    }
+    if (bad) return throw_dom_exception(ctx, "HierarchyRequestError", bad);
+    NodeId ref = child == node ? dom_next_sibling(node) : child;
+    bool connected = dom_api_is_connected(ctx, node);
+    bool was = g_dom_moving;
+    g_dom_moving = true;
+    NodeId old_parent = dom_parent(node);
+    if (old_parent) dom_api_remove(ctx, old_parent, node);
+    bool ok = dom_api_insert(ctx, parent, node, ref);
+    g_dom_moving = was;
+    if (!ok) return JS_EXCEPTION;
+    /* (custom elements: connectedMoveCallback, or else disconnected and
+     * connected again) */
+    if (connected && !was) {
+        uint32_t *ids = NULL, n = 0;
+        collect_ce_candidates(node, &ids, &n);
+        for (uint32_t i = 0; i < n; i++) {
+            if (!dom_has_wrapper(ids[i])) continue;
+            GCValue el = dom_js(ctx, ids[i]);
+            GCValue mv = JS_GetPropertyStr(ctx, el, "connectedMoveCallback");
+            if (JS_IsFunction(ctx, mv)) {
+                invoke_custom_element_callback(ctx, el, "connectedMoveCallback");
+            } else {
+                invoke_custom_element_callback(ctx, el, "disconnectedCallback");
+                invoke_custom_element_callback(ctx, el, "connectedCallback");
+            }
+        }
+        free(ids);
+        dom_flush_ce_reactions(ctx);
+    }
+    return JS_UNDEFINED;
 }
 
 // Real replaceChild implementation
@@ -2855,12 +2947,6 @@ GCValue js_document_querySelectorAll(JSContextHandle ctx, GCValue this_val, int 
 GCValue js_element_click(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)ctx; (void)this_val; (void)argc; (void)argv;
     return JS_UNDEFINED;
-}
-
-// Element.prototype.getAnimations
-GCValue js_element_get_animations(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)this_val; (void)argc; (void)argv;
-    return JS_NewArray(ctx);
 }
 
 bool matches_selector(JSContextHandle ctx, GCValue elem, const char* selector) {

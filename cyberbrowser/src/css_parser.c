@@ -1058,6 +1058,141 @@ static bool css_at_known(const char *n, size_t l)
 static size_t css_rule_list(const char *s, size_t len, size_t pos, size_t stop, bool nested,
                             CssStylesheet *sheet, const char *cond);
 
+/* ---- @keyframes (CSS Animations 1 section 3) ---- */
+
+/* The offsets of a keyframe selector list ("from", "to", "N%", comma
+ * separated): how many (at most cap), 0 when one is invalid. */
+static int css_keyframe_offsets(const char *sel, float *out, int cap)
+{
+    int n = 0;
+    for (const char *p = sel; *p;) {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\f') p++;
+        const char *q = p;
+        while (*q && *q != ',') q++;
+        const char *e = q;
+        while (e > p && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n' || e[-1] == '\r' || e[-1] == '\f')) e--;
+        float v;
+        if (e - p == 4 && !strncasecmp(p, "from", 4)) v = 0;
+        else if (e - p == 2 && !strncasecmp(p, "to", 2)) v = 1;
+        else {
+            char *end = NULL;
+            double d = strtod(p, &end);
+            if (end == p || end + 1 != e || *end != '%' || d < 0 || d > 100) return 0;
+            v = (float)(d / 100.0);
+        }
+        if (n == cap) return 0;
+        out[n++] = v;
+        p = *q ? q + 1 : q;
+    }
+    return n;
+}
+
+static int css_frame_cmp(const void *a, const void *b)
+{
+    float x = ((const CssKeyframe *)a)->offset, y = ((const CssKeyframe *)b)->offset;
+    return x < y ? -1 : x > y;
+}
+
+/* An @keyframes rule: prelude s[pre .. pre_end), its block from body
+ * (after the '{').  Returns where it ends. */
+static size_t css_keyframes_rule(const char *s, size_t len, size_t pre, size_t pre_end, size_t body,
+                                 CssStylesheet *sheet)
+{
+    char *name = css_strndup_trim(s + pre, pre_end - pre);
+    if (name && strstr(name, "/*")) css_strip_comments(name);
+    if (name && (name[0] == '"' || name[0] == '\'')) {
+        size_t l = strlen(name);
+        if (l >= 2 && name[l - 1] == name[0]) { memmove(name, name + 1, l - 2); name[l - 2] = 0; }
+    }
+    size_t pos = body;
+    int first = sheet->frame_n;
+    while (pos < len) {
+        css_skip_space_and_comments(s, len, &pos);
+        if (pos >= len) break;
+        if (s[pos] == '}') { pos++; break; }
+        size_t st = pos;
+        while (pos < len && s[pos] != '{' && s[pos] != '}') pos++;
+        if (pos >= len || s[pos] == '}') continue;
+        char *sel = css_strndup_trim(s + st, pos - st);
+        if (sel && strstr(sel, "/*")) css_strip_comments(sel);
+        pos++;
+        float off[32];
+        int k = sel ? css_keyframe_offsets(sel, off, 32) : 0;
+        free(sel);
+        CssRule r;
+        memset(&r, 0, sizeof r);
+        css_parse_declaration_block(s, len, &pos, &r);
+        if (!k || !name || !name[0]) {
+            css_declarations_free(r.declarations, r.declaration_count);
+            continue;
+        }
+        if (sheet->frame_n + k > sheet->frame_cap) {
+            int cap = sheet->frame_cap ? sheet->frame_cap * 2 : 8;
+            while (cap < sheet->frame_n + k) cap *= 2;
+            CssKeyframe *f = (CssKeyframe *)realloc(sheet->frames, (size_t)cap * sizeof *f);
+            if (!f) { css_declarations_free(r.declarations, r.declaration_count); continue; }
+            sheet->frames = f;
+            sheet->frame_cap = cap;
+        }
+        for (int i = 0; i < k; i++)
+            sheet->frames[sheet->frame_n++] = (CssKeyframe){ off[i], i == 0, r.declarations, r.declaration_count };
+    }
+    if (!name || !name[0] || !strcasecmp(name, "none")) {
+        for (int i = first; i < sheet->frame_n; i++)
+            if (sheet->frames[i].owns) css_declarations_free(sheet->frames[i].decls, sheet->frames[i].n);
+        sheet->frame_n = first;
+        free(name);
+        return pos;
+    }
+    /* (stable: frames at one offset keep their order, the last wins) */
+    for (int i = first + 1; i < sheet->frame_n; i++)
+        for (int j = i; j > first && css_frame_cmp(&sheet->frames[j - 1], &sheet->frames[j]) > 0; j--) {
+            CssKeyframe t = sheet->frames[j];
+            sheet->frames[j] = sheet->frames[j - 1];
+            sheet->frames[j - 1] = t;
+        }
+    if (sheet->kf_n == sheet->kf_cap) {
+        int cap = sheet->kf_cap ? sheet->kf_cap * 2 : 4;
+        CssKeyframes *a = (CssKeyframes *)realloc(sheet->kf, (size_t)cap * sizeof *a);
+        if (!a) { free(name); return pos; }
+        sheet->kf = a;
+        sheet->kf_cap = cap;
+    }
+    sheet->kf[sheet->kf_n++] = (CssKeyframes){ name, first, sheet->frame_n - first };
+    return pos;
+}
+
+const CssKeyframes *css_keyframes_find(const CssStylesheet *sheet, const char *name)
+{
+    if (!sheet || !name) return NULL;
+    for (int i = sheet->kf_n - 1; i >= 0; i--)
+        if (!strcmp(sheet->kf[i].name, name)) return &sheet->kf[i];
+    return NULL;
+}
+
+void css_keyframes_take(CssStylesheet *dst, CssStylesheet *src)
+{
+    if (!src->kf_n && !src->frame_n) return;
+    int fn = dst->frame_n + src->frame_n, kn = dst->kf_n + src->kf_n;
+    CssKeyframe *f = (CssKeyframe *)realloc(dst->frames, (size_t)(fn ? fn : 1) * sizeof *f);
+    if (f) dst->frames = f;
+    CssKeyframes *k = (CssKeyframes *)realloc(dst->kf, (size_t)(kn ? kn : 1) * sizeof *k);
+    if (k) dst->kf = k;
+    if (!f || !k) return;
+    if (src->frame_n) memcpy(dst->frames + dst->frame_n, src->frames, (size_t)src->frame_n * sizeof *f);
+    for (int i = 0; i < src->kf_n; i++) {
+        dst->kf[dst->kf_n + i] = src->kf[i];
+        dst->kf[dst->kf_n + i].first += dst->frame_n;
+    }
+    dst->frame_n = dst->frame_cap = fn;
+    dst->kf_n = dst->kf_cap = kn;
+    free(src->frames);
+    free(src->kf);
+    src->frames = NULL;
+    src->kf = NULL;
+    src->frame_n = src->frame_cap = src->kf_n = src->kf_cap = 0;
+}
+
 /* The at-rule at pos (its '@').  Its style rules go to sheet (when not
  * NULL) under cond.  *counts: it is one an @import cannot follow.  Returns
  * where it ends. */
@@ -1126,6 +1261,8 @@ static size_t css_at_rule(const char *s, size_t len, size_t pos, bool nested, Cs
     bool is_namespace = nl == 9 && !strncasecmp(name, "namespace", 9);
     if (counts) *counts = css_at_known(name, nl) && !is_charset && !is_import && (block ? true : is_namespace);
     if (!block) return end;
+    if (sheet && ((nl == 9 && !strncasecmp(name, "keyframes", 9)) || (nl == 17 && !strncasecmp(name, "-webkit-keyframes", 17))))
+        return css_keyframes_rule(s, len, pre, pre_end, end, sheet);
     if (kind == AT_SKIP || !sheet) {
         size_t e;
         if (css_block_skip_fast(s, len, end, &e)) return e;
@@ -1253,8 +1390,8 @@ size_t css_sheet_item_skip(const char *css, size_t len, size_t pos, bool *counts
 CssStylesheet* css_stylesheet_parse(const char *css, size_t len) {
     size_t end = 0;
     CssStylesheet *sheet = css_stylesheet_parse_range(css, len, 0, len, &end);
-    if (sheet && sheet->rule_count == 0) {
-        free(sheet);
+    if (sheet && sheet->rule_count == 0 && sheet->kf_n == 0) {
+        css_stylesheet_free(sheet);
         return NULL;
     }
     return sheet;
@@ -1288,6 +1425,11 @@ void css_stylesheet_free(CssStylesheet *sheet) {
         css_rule_compiled_free(rule);
     }
     free(sheet->rules);
+    for (int i = 0; i < sheet->frame_n; i++)
+        if (sheet->frames[i].owns) css_declarations_free(sheet->frames[i].decls, sheet->frames[i].n);
+    for (int i = 0; i < sheet->kf_n; i++) free(sheet->kf[i].name);
+    free(sheet->frames);
+    free(sheet->kf);
     free(sheet);
 }
 

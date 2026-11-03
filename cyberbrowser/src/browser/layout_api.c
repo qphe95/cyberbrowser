@@ -45,6 +45,7 @@
 #include <string.h>
 
 #include "css_layout.h"
+#include "css_anim.h"
 #include "dom_store.h"
 #include "dom_wrap.h"
 #include "html_dom.h"
@@ -1030,12 +1031,21 @@ static bool lq_who_affected_at(int qi)
     return false;
 }
 
+extern uint64_t g_anim_frame;
+static uint64_t g_lq_anim_frame;
+
+/* (a frame of running transitions or animations since the last layout) */
+static bool lq_anim_moved(void)
+{
+    return g_anim_frame != g_lq_anim_frame && anim_any();
+}
+
 /* Add the regions of every change since the cached layout; false when one
  * can reach anywhere (`why` says which). */
 static bool lq_note_changes(HtmlDocument *doc, char *why, size_t cap)
 {
     snprintf(why, cap, "?");
-    if (g_dom_relayout_requests != g_lq_relayouts) { snprintf(why, cap, "relayout request"); return false; }
+    if (g_dom_relayout_requests != g_lq_relayouts || lq_anim_moved()) { snprintf(why, cap, "relayout request"); return false; }
     const HtmlMirrorChange *ch = NULL;
     size_t n = 0;
     if (!html_mirror_changes(doc, g_lq_change_pos, &ch, &n)) { snprintf(why, cap, "change log reset"); return false; }
@@ -1209,7 +1219,8 @@ static bool lq_ensure(JSContextHandle ctx)
     HtmlDocument *doc = NULL;
     /* (a relayout request, e.g. a style sheet changed through the CSSOM,
      * leaves the document as it was but not its layout) */
-    bool relayout = g_lq_valid && g_dom_relayout_requests != g_lq_relayouts;
+    /* (and a frame of running transitions or animations: their values moved on) */
+    bool relayout = g_lq_valid && (g_dom_relayout_requests != g_lq_relayouts || lq_anim_moved());
     if (relayout) snprintf(why, sizeof(why), "relayout request");
     if (!relayout && g_lq_valid && g_lq_cheap_ok && now - g_lq_full_at < LQ_FULL_CHECK_MS &&
         memcmp(cheap, g_lq_cheap, sizeof(cheap)) == 0) {
@@ -1350,6 +1361,7 @@ static bool lq_ensure(JSContextHandle ctx)
         }
         g_lq_change_pos = html_mirror_change_seq();
         g_lq_relayouts = g_dom_relayout_requests;
+        g_lq_anim_frame = g_anim_frame;
         g_lq_change_pos0 = g_lq_change_pos;
     } else {
         lq_free();
@@ -1364,6 +1376,11 @@ static bool lq_ensure(JSContextHandle ctx)
                 (unsigned long long)(took / 1000));
     g_lq_running = false;
     return g_lq_valid;
+}
+
+void layout_api_update(JSContextHandle ctx)
+{
+    lq_ensure(ctx);
 }
 
 /* Layout box index of a store element, or -1. */

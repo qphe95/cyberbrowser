@@ -135,7 +135,9 @@ static inline MapDataHandle map_data_create(JSContextHandle ctx) {
  * ShadowRootDataHandle  (ShadowRootData)
  * ------------------------------------------------------------------------ */
 
-static inline ShadowRootDataHandle shadow_root_create(JSContextHandle ctx, GCValue host, const char* mode) {
+/* (frag: a shadow root the store has already, from a declarative one; else
+ * DOM_NULL, a new one) */
+static inline ShadowRootDataHandle shadow_root_create(JSContextHandle ctx, GCValue host, const char* mode, NodeId frag) {
     GCHandle h = gc_alloc(sizeof(ShadowRootData), JS_GC_OBJ_TYPE_DATA);
     if (h != GC_HANDLE_NULL) {
         ShadowRootData* sr = (ShadowRootData*)gc_deref(h);
@@ -148,9 +150,10 @@ static inline ShadowRootDataHandle shadow_root_create(JSContextHandle ctx, GCVal
 
         // Back the shadow root with a store fragment attached to the host,
         // so the normal tree mutation/traversal code works on it.
-        NodeId frag = dom_create_fragment(DOM_NULL);
+        bool fresh = !frag;
+        if (fresh) frag = dom_create_fragment(DOM_NULL);
         NodeId hn = dom_node_of(host);
-        if (hn) {
+        if (hn && fresh) {
             g_dom.owner[dom_slot(frag)] = g_dom.owner[dom_slot(hn)];
             dom_attach_shadow(hn, frag);
         }

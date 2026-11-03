@@ -773,6 +773,7 @@ void frame_api_on_connect(JSContextHandle ctx, NodeId subtree) {
 void frame_api_install(JSContextHandle ctx, GCValue global) {
     if (!g_main_doc) g_main_doc = g_dom_document;
     dom_wrap_set_realm_resolver(realm_of_document);
+    anim_api_init();
     GCValue ctor = JS_GetPropertyStr(ctx, global, "HTMLIFrameElement");
     GCValue proto = JS_IsObject(ctor) ? JS_GetPropertyStr(ctx, ctor, "prototype") : JS_UNDEFINED;
     if (!JS_IsObject(proto)) return;

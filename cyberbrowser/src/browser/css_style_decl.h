@@ -20,6 +20,8 @@ GCValue css_style_decl_new(JSContextHandle ctx, NodeId owner, const char *text);
 bool css_style_decl_is(JSContextHandle ctx, GCValue obj);
 /* getComputedStyle(el): a read-only, live declaration block of its resolved values. */
 GCValue css_style_decl_new_computed(JSContextHandle ctx, NodeId el);
+/* The same for a pseudo-element of el (1 ::before, 2 ::after). */
+GCValue css_style_decl_new_computed_pseudo(JSContextHandle ctx, NodeId el, int ps);
 void css_style_decl_set_owner(JSContextHandle ctx, GCValue obj, NodeId owner);
 
 /* cssText (malloc'd), or NULL when obj is not a block. */

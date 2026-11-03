@@ -33,11 +33,13 @@
 extern const char *g_cyber_start_url;
 GCValue js_event_target_dispatchEvent(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 
-/* Resolved URL an <img> node shows (srcset candidate, else src). */
+/* Resolved URL an <img> node shows (its <picture>'s source, its srcset
+ * candidate, else src). */
 static char *img_url_of(NodeId id)
 {
     const char *src = dom_get_attr_str(id, "src");
-    const char *srcset = dom_get_attr_str(id, "srcset");
+    const char *srcset = display_list_picture_srcset(id);
+    if (!srcset) srcset = dom_get_attr_str(id, "srcset");
     char *picked = srcset && srcset[0] ? display_list_pick_srcset(srcset, 0.0f) : NULL;
     if (picked) src = picked;
     char *url = NULL;
@@ -145,6 +147,7 @@ static GCValue img_set_attr(JSContextHandle ctx, GCValue this_val, const char *n
     js_element_set_attribute(ctx, this_val, 2, args);
     /* Start the fetch right away (as the browser's image loader does). */
     NodeId id = dom_node_of(this_val);
+    image_api_relevant(id);
     ImageCache *ic = display_list_get_image_cache();
     if (id && ic && dom_is_connected(id)) {
         char *url = img_url_of(id);
@@ -233,6 +236,71 @@ static void fire(JSContextHandle ctx, GCValue el, const char *type)
     js_event_target_dispatchEvent(ctx, el, 1, &ev);
 }
 
+/* The <img> elements with a relevant mutation since the last turn. */
+static NodeId *g_relevant;
+static int g_relevant_n, g_relevant_cap;
+
+void image_api_relevant(uint32_t img)
+{
+    if (!is_img(img)) return;
+    for (int i = 0; i < g_relevant_n; i++)
+        if (g_relevant[i] == img) return;
+    if (g_relevant_n == g_relevant_cap) {
+        int cap = g_relevant_cap ? g_relevant_cap * 2 : 16;
+        NodeId *a = (NodeId *)realloc(g_relevant, (size_t)cap * sizeof *a);
+        if (!a) return;
+        g_relevant = a;
+        g_relevant_cap = cap;
+    }
+    g_relevant[g_relevant_n++] = img;
+}
+
+void image_api_picture_changed(uint32_t picture)
+{
+    for (NodeId c = dom_first_child(picture); c; c = dom_next_sibling(c))
+        if (is_img(c)) image_api_relevant(c);
+}
+
+int image_api_tick(JSContextHandle ctx)
+{
+    if (!g_relevant_n) return 0;
+    ImageCache *ic = display_list_get_image_cache();
+    /* (taken first: the events may queue more, for the next turn) */
+    NodeId local[64];
+    int n = g_relevant_n < 64 ? g_relevant_n : 64;
+    memcpy(local, g_relevant, (size_t)n * sizeof(NodeId));
+    memmove(g_relevant, g_relevant + n, (size_t)(g_relevant_n - n) * sizeof(NodeId));
+    g_relevant_n -= n;
+    int fired = 0;
+    for (int i = 0; i < n; i++) {
+        NodeId id = local[i];
+        if (!dom_valid(id) || !is_img(id) || !dom_has_wrapper(id)) continue;
+        GCValue el = dom_js_existing(id);
+        if (!JS_IsObject(el)) continue;
+        JSAtom fa = JS_NewAtom(ctx, "__cyber_img_fired");
+        JS_DeleteProperty(ctx, el, fa, 0);
+        JS_FreeAtom(ctx, fa);
+        char *url = img_url_of(id);
+        if (!url || !ic) { free(url); continue; }
+        int st = image_cache_status(ic, url);
+        if (st == 0) {
+            /* (not here yet: its fetch's notify fires load) */
+            if (dom_is_connected(id)) {
+                int w, h;
+                image_cache_natural_size(ic, url, &w, &h);
+            }
+            free(url);
+            continue;
+        }
+        JS_DefinePropertyValueStr(ctx, el, "__cyber_img_fired", JS_NewString(ctx, url),
+                                  JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE);
+        free(url);
+        fire(ctx, el, st > 0 ? "load" : "error");
+        fired++;
+    }
+    return fired;
+}
+
 void image_api_notify(JSContextHandle ctx, const char *url)
 {
     ImageCache *ic = display_list_get_image_cache();
@@ -256,7 +324,8 @@ void image_api_notify(JSContextHandle ctx, const char *url)
         nimg++;
         if (seg_len) {
             bool maybe = false;
-            const char *raw[2] = { dom_get_attr_str(id, "src"), dom_get_attr_str(id, "srcset") };
+            const char *pic = display_list_picture_srcset(id);
+            const char *raw[2] = { dom_get_attr_str(id, "src"), pic ? pic : dom_get_attr_str(id, "srcset") };
             for (int r = 0; r < 2 && !maybe; r++) {
                 const char *t = raw[r];
                 if (!t) continue;

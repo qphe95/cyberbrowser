@@ -13,6 +13,9 @@
 typedef struct ComputedStyle ComputedStyle;
 
 ComputedStyle *computed_style_new(NodeId el);
+/* A pseudo-element's (1 ::before, 2 ::after): what it inherits from the
+ * element, initial values otherwise, and what animates it. */
+void computed_style_set_pseudo(ComputedStyle *cs, int ps);
 void computed_style_free(ComputedStyle *cs);
 /* The resolved value of a property (or custom property) prop[0..len),
  * malloc'd: "" when the element has no style or prop is unknown. */
