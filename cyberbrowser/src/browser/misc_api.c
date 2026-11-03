@@ -2318,6 +2318,7 @@ JSClassDef js_mutation_observer_class_def = {
 static void mo_registry_add(JSContextHandle ctx, GCValue observer);
 static void mo_registry_remove(JSContextHandle ctx, GCValue observer);
 static void mo_schedule_callback(JSContextHandle ctx, GCValue observer);
+static void mo_drop_transients(JSContextHandle ctx, GCValue observer, GCValue source);
 
 // MutationObserver constructor
 GCValue js_mutation_observer_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
@@ -2409,7 +2410,14 @@ GCValue js_mutation_observer_observe(JSContextHandle ctx, GCValue this_val, int 
         JS_ToUint32(ctx, &rlen, rlen_val);
         for (ri = 0; ri < rlen; ri++) {
             GCValue r = JS_GetPropertyUint32(ctx, regs, ri);
-            if (JS_StrictEq(ctx, JS_GetPropertyStr(ctx, r, "target"), target)) break;
+            if (JS_StrictEq(ctx, JS_GetPropertyStr(ctx, r, "target"), target) &&
+                !JS_ToBool(ctx, JS_GetPropertyStr(ctx, r, "transient"))) {
+                mo_drop_transients(ctx, this_val, r);
+                JS_ToUint32(ctx, &rlen, JS_GetPropertyStr(ctx, regs, "length"));
+                for (ri = 0; ri < rlen; ri++)
+                    if (JS_StrictEq(ctx, JS_GetPropertyUint32(ctx, regs, ri), r)) break;
+                break;
+            }
         }
         GCValue reg = JS_NewObject(ctx);
         JS_SetPropertyStr(ctx, reg, "target", target);
@@ -2531,7 +2539,7 @@ static bool mo_filter_allows(JSContextHandle ctx, GCValue opts, const char *name
  * mutation record" step 4: attributes through its filter)?  *want_old: does
  * any that takes it ask for the old value (old_flag, its option)? */
 static bool mo_match(JSContextHandle ctx, GCValue observer, GCValue target, const char *type, const char *name,
-                     const char *old_flag, bool *want_old) {
+                     bool ns_attr, const char *old_flag, bool *want_old) {
     *want_old = false;
     GCValue regs = JS_GetPropertyStr(ctx, observer, "__mo_regs");
     if (!JS_IsArray(ctx, regs)) return false;
@@ -2542,6 +2550,8 @@ static bool mo_match(JSContextHandle ctx, GCValue observer, GCValue target, cons
         GCValue r = JS_GetPropertyUint32(ctx, regs, i);
         GCValue opts = JS_GetPropertyStr(ctx, r, "options");
         if (!mo_registration_interested(ctx, JS_GetPropertyStr(ctx, r, "target"), opts, target, type)) continue;
+        /* (an attribute in a namespace never passes an attributeFilter) */
+        if (ns_attr && JS_IsArray(ctx, JS_GetPropertyStr(ctx, opts, "attributeFilter"))) continue;
         if (name && !mo_filter_allows(ctx, opts, name)) continue;
         any = true;
         if (JS_ToBool(ctx, JS_GetPropertyStr(ctx, opts, old_flag))) *want_old = true;
@@ -2695,6 +2705,7 @@ static GCValue js_mutation_observer_job(JSContextHandle ctx, int argc, GCValue *
     if (argc < 1) return JS_UNDEFINED;
     GCValue observer = argv[0];
     JS_SetPropertyStr(ctx, observer, "__mo_scheduled", JS_FALSE);
+    mo_drop_transients(ctx, observer, JS_UNDEFINED);
     GCValue records = JS_GetPropertyStr(ctx, observer, "__mo_records");
     if (!JS_IsArray(ctx, records)) return JS_UNDEFINED;
     uint32_t nrec = 0;
@@ -2770,8 +2781,64 @@ void mo_batch_end(JSContextHandle ctx) {
     }
 }
 
+/* DOM 4.2.3 "remove" step: each removed node gets a transient registration
+ * of every subtree registration on the parent or above (observed until its
+ * observer is next notified). */
+static void mo_add_transients(JSContextHandle ctx, GCValue parent, GCValue removed) {
+    uint32_t nrem = 0;
+    if (!JS_IsArray(ctx, removed)) return;
+    JS_ToUint32(ctx, &nrem, JS_GetPropertyStr(ctx, removed, "length"));
+    if (!nrem) return;
+    GCValue reg = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyber_mo_registry");
+    if (!JS_IsArray(ctx, reg)) return;
+    uint32_t nobs = 0;
+    JS_ToUint32(ctx, &nobs, JS_GetPropertyStr(ctx, reg, "length"));
+    for (uint32_t o = 0; o < nobs; o++) {
+        GCValue obs = JS_GetPropertyUint32(ctx, reg, o);
+        GCValue regs = JS_GetPropertyStr(ctx, obs, "__mo_regs");
+        if (!JS_IsArray(ctx, regs)) continue;
+        uint32_t n = 0;
+        JS_ToUint32(ctx, &n, JS_GetPropertyStr(ctx, regs, "length"));
+        for (uint32_t i = 0; i < n; i++) {         /* (the ones there now, not those added here) */
+            GCValue r = JS_GetPropertyUint32(ctx, regs, i);
+            GCValue opts = JS_GetPropertyStr(ctx, r, "options");
+            if (!JS_ToBool(ctx, JS_GetPropertyStr(ctx, opts, "subtree"))) continue;
+            if (!mo_node_contains(ctx, JS_GetPropertyStr(ctx, r, "target"), parent)) continue;
+            for (uint32_t k = 0; k < nrem; k++) {
+                GCValue t = JS_NewObject(ctx);
+                JS_SetPropertyStr(ctx, t, "target", JS_GetPropertyUint32(ctx, removed, k));
+                JS_SetPropertyStr(ctx, t, "options", opts);
+                JS_SetPropertyStr(ctx, t, "transient", JS_TRUE);
+                JS_SetPropertyStr(ctx, t, "source", r);
+                uint32_t len = 0;
+                JS_ToUint32(ctx, &len, JS_GetPropertyStr(ctx, regs, "length"));
+                JS_SetPropertyUint32(ctx, regs, len, t);
+            }
+        }
+    }
+}
+
+/* The observer's registrations without its transient ones (all of them,
+ * or those whose source is source). */
+static void mo_drop_transients(JSContextHandle ctx, GCValue observer, GCValue source) {
+    GCValue regs = JS_GetPropertyStr(ctx, observer, "__mo_regs");
+    if (!JS_IsArray(ctx, regs)) return;
+    uint32_t n = 0, k = 0;
+    JS_ToUint32(ctx, &n, JS_GetPropertyStr(ctx, regs, "length"));
+    for (uint32_t i = 0; i < n; i++) {
+        GCValue r = JS_GetPropertyUint32(ctx, regs, i);
+        bool drop = JS_ToBool(ctx, JS_GetPropertyStr(ctx, r, "transient")) &&
+                    (JS_IsUndefined(source) || JS_StrictEq(ctx, JS_GetPropertyStr(ctx, r, "source"), source));
+        if (drop) continue;
+        if (k != i) JS_SetPropertyUint32(ctx, regs, k, r);
+        k++;
+    }
+    if (k != n) JS_SetPropertyStr(ctx, regs, "length", JS_NewUint32(ctx, k));
+}
+
 void mo_notify_child_list(JSContextHandle ctx, GCValue target, GCValue added, GCValue removed, GCValue prev,
                           GCValue next) {
+    mo_add_transients(ctx, target, removed);
     if (g_mob_depth <= 0) {
         mo_notify_child_list_now(ctx, target, added, removed, prev, next);
         return;
@@ -2829,7 +2896,7 @@ void mo_notify_character_data(JSContextHandle ctx, GCValue target, const char *o
     for (uint32_t i = 0; i < len; i++) {
         GCValue observer = JS_GetPropertyUint32(ctx, reg, i);
         bool want_old;
-        if (mo_match(ctx, observer, target, "characterData", NULL, "characterDataOldValue", &want_old)) {
+        if (mo_match(ctx, observer, target, "characterData", NULL, false, "characterDataOldValue", &want_old)) {
             GCValue empty = JS_NewArray(ctx);
             GCValue record = mo_create_record_full(ctx, target, empty, empty, "characterData", NULL,
                                                    want_old ? old_value : NULL);
@@ -2840,6 +2907,12 @@ void mo_notify_character_data(JSContextHandle ctx, GCValue target, const char *o
 }
 
 void mo_notify_attribute(JSContextHandle ctx, GCValue target, const char *name, const char *old_value) {
+    mo_notify_attribute_ns(ctx, target, name, NULL, old_value);
+}
+
+/* (ns: the attribute's namespace, the record's attributeNamespace; NULL none) */
+void mo_notify_attribute_ns(JSContextHandle ctx, GCValue target, const char *name, const char *ns,
+                            const char *old_value) {
     GCValue reg = mo_registry(ctx);
     GCValue len_val = JS_GetPropertyStr(ctx, reg, "length");
     uint32_t len = 0;
@@ -2847,10 +2920,11 @@ void mo_notify_attribute(JSContextHandle ctx, GCValue target, const char *name, 
     for (uint32_t i = 0; i < len; i++) {
         GCValue observer = JS_GetPropertyUint32(ctx, reg, i);
         bool want_old;
-        if (mo_match(ctx, observer, target, "attributes", name ? name : "", "attributeOldValue", &want_old)) {
+        if (mo_match(ctx, observer, target, "attributes", name ? name : "", ns != NULL, "attributeOldValue", &want_old)) {
             GCValue empty = JS_NewArray(ctx);
             GCValue record = mo_create_record_full(ctx, target, empty, empty, "attributes", name,
                                                    want_old ? old_value : NULL);
+            if (ns) mr_set(ctx, record, 7, JS_NewString(ctx, ns));
             mo_push_record(ctx, observer, record);
             mo_schedule_callback(ctx, observer);
         }

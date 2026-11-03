@@ -277,6 +277,16 @@ void range_api_install(JSContextHandle ctx, GCValue global);
 void mutation_record_install(JSContextHandle ctx, GCValue global);
 /* The Attr interface (dom_api.c). */
 void attr_api_install(JSContextHandle ctx, GCValue global);
+/* NodeList and HTMLCollection objects (live_list.c): live ones over a
+ * root (LL_TAG/LL_TAG_NS/LL_CLASS keyed by key; ns for LL_TAG_NS), static
+ * ones over nodes or an array of node objects. */
+enum { LL_STATIC, LL_CHILD_NODES, LL_CHILDREN, LL_TAG, LL_TAG_NS, LL_CLASS };
+GCValue live_list_new(JSContextHandle ctx, int kind, NodeId root, const char *key, uint32_t ns, bool any_ns,
+                      bool collection);
+GCValue live_list_static(JSContextHandle ctx, const NodeId *ids, uint32_t n, bool collection);
+GCValue live_list_of_array(JSContextHandle ctx, GCValue arr, bool collection);
+GCValue live_list_of_node(JSContextHandle ctx, GCValue node, int kind);
+void live_list_install(JSContextHandle ctx, GCValue global);
 /* The NamedNodeMap interface (dom_api.c). */
 void named_node_map_install(JSContextHandle ctx, GCValue global);
 /* The window of the index-th child frame of realm ctx's document (frame_api.c); 0 for none. */
@@ -330,6 +340,8 @@ bool mo_any_observing(JSContextHandle ctx);
 void mo_notify_character_data(JSContextHandle ctx, GCValue target, const char *old_value);
 /* old_value: NULL when the attribute was absent. */
 void mo_notify_attribute(JSContextHandle ctx, GCValue target, const char *name, const char *old_value);
+void mo_notify_attribute_ns(JSContextHandle ctx, GCValue target, const char *name, const char *ns,
+                            const char *old_value);
 GCValue js_queue_microtask(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_create_document_fragment(JSContextHandle ctx);
 GCValue js_document_import_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);

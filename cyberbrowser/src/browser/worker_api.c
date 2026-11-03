@@ -161,7 +161,7 @@ static GCValue js_worker_import(JSContextHandle ctx, GCValue this_val, int argc,
 static const char k_worker_setup[] =
     "(function (g, url, windowOnly, shared) {\n"
     "  for (var i = 0; i < windowOnly.length; i++) delete g[windowOnly[i]];\n"
-    "  delete g.document; delete g.Window; delete g.window;\n"
+    "  delete g.document; delete g.Window; delete g.window; delete g.event;\n"
     "  function scope(name, parent) {\n"
     "    var c = function () { throw new TypeError('Illegal constructor'); };\n"
     "    Object.defineProperty(c, 'name', { value: name });\n"

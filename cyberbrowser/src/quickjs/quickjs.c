@@ -3828,6 +3828,23 @@ static BOOL JS_AtomIsArrayIndex(JSContextHandle ctx, uint32_t *pval, JSAtom atom
     }
 }
 
+/* An exotic [[DefineOwnProperty]]'s refusal: a TypeError when flags say to
+ * throw (JS_PROP_THROW, or JS_PROP_THROW_STRICT in strict code), else FALSE. */
+int JS_RefuseProperty(JSContextHandle ctx, int flags, const char *msg)
+{
+    if ((flags & JS_PROP_THROW) || ((flags & JS_PROP_THROW_STRICT) && is_strict_mode(ctx))) {
+        JS_ThrowTypeError(ctx, "%s", msg);
+        return -1;
+    }
+    return FALSE;
+}
+
+/* Whether atom is an array index (0 .. 2^32-2), and which. */
+int JS_AtomArrayIndex(JSContextHandle ctx, JSAtom atom, uint32_t *pval)
+{
+    return JS_AtomIsArrayIndex(ctx, pval, atom);
+}
+
 /* This test must be fast if atom is not a numeric index (e.g. a
    method name). Return JS_UNDEFINED if not a numeric
    index. JS_EXCEPTION can also be returned. */

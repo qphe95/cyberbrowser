@@ -96,6 +96,7 @@ set(BE_SOURCES
     src/svg_render.c
     src/browser/url_api.c
     src/browser/platform_api.c
+    src/browser/live_list.c
     src/browser/webgpu_api.c
     src/browser/frame_api.c
     src/browser/fetch_api.c

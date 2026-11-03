@@ -1100,6 +1100,10 @@ void JS_DumpMemoryUsage(FILE *fp, const JSMemoryUsage *s, JSRuntimeHandle rt);
 JSAtom JS_NewAtomLen(JSContextHandle ctx, const char *str, size_t len);
 JSAtom JS_NewAtom(JSContextHandle ctx, const char *str);
 JSAtom JS_NewAtomUInt32(JSContextHandle ctx, uint32_t n);
+/* Whether atom is an array index (0 .. 2^32-2), its value in *pval. */
+int JS_AtomArrayIndex(JSContextHandle ctx, JSAtom atom, uint32_t *pval);
+/* An exotic define_own_property's refusal: -1 with a TypeError if flags say to throw, else FALSE. */
+int JS_RefuseProperty(JSContextHandle ctx, int flags, const char *msg);
 JSAtom JS_DupAtom(JSContextHandle ctx, JSAtom v);
 void JS_FreeAtom(JSContextHandle ctx, JSAtom v);
 void JS_FreeAtomRT(JSRuntimeHandle rt, JSAtom v);

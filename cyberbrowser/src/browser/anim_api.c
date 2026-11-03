@@ -55,7 +55,11 @@ static void anim_dispatch(JSContextHandle ctx, const AnimEvent *e)
     GCValue args[2] = { JS_NewString(realm, k_types[e->type]), init };
     GCValue ev = JS_CallConstructor(realm, ctor, 2, args);
     if (JS_IsException(ev)) { JS_GetException(realm); return; }
-    GCValue r = JS_Call(ctx, dispatch, target, 1, &ev);
+    /* (trusted: the realm's engine dispatch, else the page's dispatchEvent) */
+    GCValue trusted = JS_GetPropertyStr(realm, JS_GetGlobalObject(realm), "__cyberDispatchTrusted");
+    GCValue targs[2] = { target, ev };
+    GCValue r = JS_IsFunction(realm, trusted) ? JS_Call(realm, trusted, JS_UNDEFINED, 2, targs)
+                                              : JS_Call(ctx, dispatch, target, 1, &ev);
     if (JS_IsException(r)) JS_GetException(ctx);
 }
 

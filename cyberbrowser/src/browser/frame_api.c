@@ -579,6 +579,8 @@ static void frame_load(Frame *f) {
 
 /* The frame of the i-th iframe with a browsing context in ctx's document
  * (or the count of them, with i < 0). */
+static void frame_ensure(Frame *f);
+
 static Frame *child_frame(JSContextHandle ctx, int i, int *count) {
     NodeId doc = dom_node_of(JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document"));
     int k = 0;
@@ -587,6 +589,7 @@ static Frame *child_frame(JSContextHandle ctx, int i, int *count) {
         for (uint32_t s = r; s; s = dom_next_in_subtree(s, r)) {
             if (g_dom.kind[s] != DOM_K_ELEMENT) continue;
             Frame *f = frame_of_iframe(dom_id_of(s));
+            if (f && f->parent == ctx) frame_ensure(f);
             if (!f || f->parent != ctx || !SAFE_VALID(f->ctx)) continue;
             if (k++ == i) return f;
         }
@@ -703,6 +706,19 @@ uint32_t frame_indexed_child(JSContextHandle ctx, uint32_t index) {
     return f ? f->id : 0;
 }
 
+/* A frame whose about:blank document isn't made yet gets it now, when its
+ * window or document is asked for (HTML makes an iframe's initial
+ * about:blank document as it is inserted; here the event loop does, unless
+ * script looks first). */
+static void frame_ensure(Frame *f) {
+    if (!f || f->state != FRAME_PENDING || g_processing || SAFE_VALID(f->ctx)) return;
+    if (strncmp(f->url, "about:", 6) != 0 || !dom_valid(f->iframe) || !dom_is_connected(f->iframe)) return;
+    if (parent_scripts_pending(f)) return;
+    g_processing = true;
+    frame_load(f);
+    g_processing = false;
+}
+
 bool frame_api_pending(void) {
     for (Frame *f = g_frames; f; f = f->next)
         if (f->state == FRAME_PENDING && !parent_scripts_pending(f)) return true;
@@ -714,12 +730,14 @@ bool frame_api_pending(void) {
 static GCValue js_iframe_get_content_window(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     Frame *f = frame_of_iframe(dom_node_of(this_val));
+    frame_ensure(f);
     return f && SAFE_VALID(f->ctx) ? window_seen_from(ctx, f->id) : JS_NULL;
 }
 
 static GCValue js_iframe_get_content_document(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     Frame *f = frame_of_iframe(dom_node_of(this_val));
+    frame_ensure(f);
     if (!f || !SAFE_VALID(f->ctx) || !realms_same_origin(ctx, f->ctx)) return JS_NULL;
     return JS_GetPropertyStr(f->ctx, JS_GetGlobalObject(f->ctx), "document");
 }

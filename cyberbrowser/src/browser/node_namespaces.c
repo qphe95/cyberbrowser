@@ -138,16 +138,7 @@ static GCValue js_is_default_namespace(JSContextHandle ctx, GCValue this_val, in
 
 /* An HTMLCollection of the array's elements (array-like, not an Array). */
 static GCValue collection(JSContextHandle ctx, GCValue arr) {
-    GCValue ctor = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "HTMLCollection");
-    GCValue proto = JS_IsObject(ctor) ? JS_GetPropertyStr(ctx, ctor, "prototype") : JS_UNDEFINED;
-    GCValue list = JS_IsObject(proto) ? JS_NewObjectProto(ctx, proto) : JS_NewObject(ctx);
-    if (JS_IsException(list)) return list;
-    uint32_t n = 0;
-    JS_ToUint32(ctx, &n, JS_GetPropertyStr(ctx, arr, "length"));
-    for (uint32_t i = 0; i < n; i++)
-        JS_DefinePropertyValueUint32(ctx, list, i, JS_GetPropertyUint32(ctx, arr, i), JS_PROP_ENUMERABLE);
-    JS_DefinePropertyValueStr(ctx, list, "length", JS_NewUint32(ctx, n), 0);
-    return list;
+    return live_list_of_array(ctx, arr, true);
 }
 
 /* The root's descendant elements that match, in tree order.  qualified:
@@ -155,6 +146,8 @@ static GCValue collection(JSContextHandle ctx, GCValue arr) {
  * else by namespace (NULL with any_ns: any) and local name ("*": any). */
 static GCValue elements_by(JSContextHandle ctx, NodeId root, bool qualified, const char *name, bool any_ns,
                            uint32_t ns) {
+    /* (live: an HTMLCollection over the root, live_list.c) */
+    if (root) return live_list_new(ctx, qualified ? LL_TAG : LL_TAG_NS, root, name, ns, any_ns, true);
     GCValue arr = JS_NewArray(ctx);
     if (!root) return collection(ctx, arr);
     NodeId doc = dom_kind(root) == DOM_K_DOCUMENT ? root : (dom_owner(root) ? dom_owner(root) : g_dom_document);

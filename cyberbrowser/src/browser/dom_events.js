@@ -140,12 +140,20 @@
 
     var CustomEvent = eventClass('CustomEvent', Event, { detail: nul() });
     define(CustomEvent.prototype, 'initCustomEvent', function initCustomEvent(type, bubbles, cancelable, detail) {
-        st(this);
+        if (st(this).dispatching) return;    /* (init* do nothing while it is dispatched) */
         if (arguments.length < 1) throw new TypeError("Failed to execute 'initCustomEvent' on 'CustomEvent': 1 argument required, but only 0 present.");
         this.initEvent(type, bubbles, cancelable);
         st(this).detail = detail === undefined ? null : detail;
     });
     var UIEvent = eventClass('UIEvent', Event, { view: nul(), detail: int(0), which: int(0) });
+    define(UIEvent.prototype, 'initUIEvent', function initUIEvent(type, bubbles, cancelable, view, detail) {
+        if (st(this).dispatching) return;
+        if (arguments.length < 1) throw new TypeError("Failed to execute 'initUIEvent' on 'UIEvent': 1 argument required, but only 0 present.");
+        this.initEvent(type, bubbles, cancelable);
+        var s = st(this);
+        s.view = view === undefined ? null : view;
+        s.detail = detail | 0;
+    });
     var FocusEvent = eventClass('FocusEvent', UIEvent, { relatedTarget: nul() });
     var modifiers = { ctrlKey: bool(false), shiftKey: bool(false), altKey: bool(false), metaKey: bool(false) };
     function withModifiers(o) { for (var k in modifiers) o[k] = modifiers[k]; return o; }
@@ -179,6 +187,7 @@
     define(MEP, 'getModifierState', getModifierState);
     define(MEP, 'initMouseEvent', function initMouseEvent(type, bubbles, cancelable, view, detail, sx, sy, cx, cy,
                                                           ctrl, alt, shift, meta, button, related) {
+        if (st(this).dispatching) return;
         this.initEvent(type, bubbles, cancelable);
         var s = st(this);
         s.view = view === undefined ? null : view; s.detail = detail | 0;
@@ -208,6 +217,17 @@
         Object.defineProperty(KeyboardEvent.prototype, c[0], { value: c[1], enumerable: true });
     });
     define(KeyboardEvent.prototype, 'getModifierState', getModifierState);
+    define(KeyboardEvent.prototype, 'initKeyboardEvent', function initKeyboardEvent(type, bubbles, cancelable, view, key,
+                                                                                     location, ctrl, alt, shift, meta) {
+        if (st(this).dispatching) return;
+        if (arguments.length < 1) throw new TypeError("Failed to execute 'initKeyboardEvent' on 'KeyboardEvent': 1 argument required, but only 0 present.");
+        this.initEvent(type, bubbles, cancelable);
+        var s = st(this);
+        s.view = view === undefined ? null : view;
+        s.key = key === undefined ? '' : String(key);
+        s.location = location >>> 0;
+        s.ctrlKey = !!ctrl; s.altKey = !!alt; s.shiftKey = !!shift; s.metaKey = !!meta;
+    });
     eventClass('InputEvent', UIEvent, { data: nul(), inputType: str(''), isComposing: bool(false),
                                          dataTransfer: nul() });
     define(global.InputEvent.prototype, 'getTargetRanges', function () { return []; });
@@ -398,10 +418,18 @@
     }
     Object.defineProperty(global, 'reportError', { value: reportError, writable: true, configurable: true, enumerable: true });
 
+    /* The legacy (prefixed) types of a trusted event that has no listener of
+     * its own type on an object (DOM 2.9 "invoke"), and their handlers'
+     * names (lower-case: onwebkitanimationend). */
+    var LEGACY = { animationend: 'webkitAnimationEnd', animationiteration: 'webkitAnimationIteration',
+                   animationstart: 'webkitAnimationStart', transitionend: 'webkitTransitionEnd' };
+    var HANDLER_NAME = { webkitAnimationEnd: 'webkitanimationend', webkitAnimationIteration: 'webkitanimationiteration',
+                         webkitAnimationStart: 'webkitanimationstart', webkitTransitionEnd: 'webkittransitionend' };
+
     function handlerProp(item, type) {
         /* an on<type> event handler: an own or inherited data/accessor value */
         var h;
-        try { h = item['on' + type]; } catch (e) { return null; }
+        try { h = item['on' + (HANDLER_NAME[type] || type)]; } catch (e) { return null; }
         return typeof h === 'function' ? h : null;
     }
 
@@ -415,44 +443,77 @@
         s.currentTarget = item;
         s.phase = phase;
         if (s.stop) return;
+        if (innerInvoke(ev, s, entry, item, capturePass) || !s.isTrusted || !LEGACY[s.type]) return;
+        /* (none of its own type here: the legacy type's, under that type) */
+        var type = s.type;
+        s.type = LEGACY[type];
+        try { innerInvoke(ev, s, entry, item, capturePass); } finally { s.type = type; }
+    }
+
+    /* window.event (HTML 8.1.8 "current event"): the event whose listener
+     * runs, unless its object is in a shadow tree (DOM 2.10 "inner invoke") */
+    var currentEvent;
+    function inShadowTree(item) {
+        var SR = global.ShadowRoot;
+        if (!SR || !item || typeof item.getRootNode !== 'function') return false;
+        try { return item.getRootNode() instanceof SR; } catch (e) { return false; }
+    }
+
+    /* The listeners of s.type at item (and its handler); whether it has any. */
+    function innerInvoke(ev, s, entry, item, capturePass) {
+        var shadow;
         var map = item[LISTENERS];
         var list = map && map[s.type];
+        var found = false;
+        if (list) for (var k = 0; k < list.length && !found; k++) found = !list[k].removed;
         if (list) {
             for (var i = 0; i < list.length; i++) {
                 var l = list[i];
                 if (l.removed) continue;
                 if (l.capture !== capturePass) continue;
                 if (l.once) removeListener(item, s.type, l);
-                var fn = l.callback, thisArg = item;
-                if (typeof fn !== 'function') {
-                    thisArg = fn;
-                    try { fn = fn.handleEvent; } catch (e) { report(e); continue; }
-                    if (typeof fn !== 'function') { report(new TypeError("'handleEvent' is not a function")); continue; }
+                var prevEvent = currentEvent;
+                if (shadow === undefined) shadow = inShadowTree(item);
+                if (!shadow) currentEvent = ev;
+                try {
+                    var fn = l.callback, thisArg = item;
+                    if (typeof fn !== 'function') {
+                        thisArg = fn;
+                        try { fn = fn.handleEvent; } catch (e) { report(e); continue; }
+                        if (typeof fn !== 'function') { report(new TypeError("'handleEvent' is not a function")); continue; }
+                    }
+                    if (l.passive) s.inPassive = true;
+                    try { fn.call(thisArg, ev); } catch (e) { report(e); }
+                } finally {
+                    s.inPassive = false;
+                    currentEvent = prevEvent;
                 }
-                if (l.passive) s.inPassive = true;
-                try { fn.call(thisArg, ev); } catch (e) { report(e); }
-                s.inPassive = false;
-                if (s.stopImmediate) return;
+                if (s.stopImmediate) return true;
             }
         }
         /* the on<type> handler, in the non-capture pass: read through its
          * property unless the native path says there is no content attribute
          * and none was set (nor forwarded from <body> to the window) */
+        /* (a native path's flags say whether a handler may be set) */
+        var h = entry.flags === undefined || (entry.flags & (EP_ON_ATTR | EP_HANDLER | EP_ALWAYS | EP_ON_PROP))
+                ? handlerProp(item, s.type) : null;
+        if (h) found = true;
         if (!capturePass) {
-            /* (a native path's flags say whether a handler may be set) */
-            var h = entry.flags === undefined || (entry.flags & (EP_ON_ATTR | EP_HANDLER | EP_ALWAYS | EP_ON_PROP))
-                    ? handlerProp(item, s.type) : null;
             if (h) {
-                var r;
+                var r, prevEv = currentEvent;
+                if (shadow === undefined) shadow = inShadowTree(item);
+                if (!shadow) currentEvent = ev;
                 try {
                     r = s.type === 'error' && ev instanceof global.ErrorEvent && item === global
                         ? h.call(item, ev.message, ev.filename, ev.lineno, ev.colno, ev.error)
                         : h.call(item, ev);
                 } catch (e) { report(e); r = undefined; }
+                finally { currentEvent = prevEv; }
                 if (s.type === 'error' && item === global ? r === true : r === false) cancel(s);
                 else if (s.type === 'beforeunload' && r != null) cancel(s);
             }
         }
+        return found;
     }
 
     function dispatch(target, ev) {
@@ -460,14 +521,15 @@
         if (s.dispatching || !s.initialized)
             throw new DOMExceptionOr("Failed to execute 'dispatchEvent': The event is already being dispatched.", 'InvalidStateError');
         s.dispatching = true;
-        s.stop = s.stopImmediate = false;
         var origRelated = s.relatedTarget;
         var path = [];
         var t = target, related = retarget(origRelated, target);
         var guard = 0;
         s.path = path;
         /* a node's path comes from the node store in one call (event_path.c) */
-        var flat = nativePath ? nativePath(target, s.type, s.composed, origRelated || null, HANDLER_TYPE[s.type] === true) : null;
+        /* (a trusted event with a legacy type: every object, for its listeners of either type) */
+        var flat = nativePath && !(s.isTrusted && LEGACY[s.type]) && !HANDLER_NAME[s.type]
+                   ? nativePath(target, s.type, s.composed, origRelated || null, HANDLER_TYPE[s.type] === true) : null;
         if (flat) return dispatchFlat(ev, s, target, origRelated, flat);
         {
             while (t && guard++ < 4096) {
@@ -535,6 +597,19 @@
         if (typeof global.DOMException === 'function') return new global.DOMException(msg, name);
         var e = new Error(msg); e.name = name; return e;
     }
+    /* window.event: [Replaceable], the current event or undefined */
+    if (global.document) [global, win].forEach(function (o) {
+        if (!o || Object.getOwnPropertyDescriptor(o, 'event')) return;
+        Object.defineProperty(o, 'event', { configurable: true, enumerable: true,
+            get: function () { return currentEvent; },
+            set: function (v) { Object.defineProperty(this, 'event', { value: v, writable: true, configurable: true, enumerable: true }); } });
+    });
+
+    /* (the engine's events: trusted ones, anim_api.c) */
+    Object.defineProperty(global, '__cyberDispatchTrusted', { configurable: true, value: function (target, event) {
+        st(event).isTrusted = true;
+        return dispatch(target, event);
+    } });
     function dispatchEvent(event) {
         var target = this == null ? global : this;
         if (!event || !event[STATE])
@@ -822,6 +897,10 @@
         if (P) GLOBAL_HANDLERS.forEach(function (t) { handlerAccessor(P, t); });
     });
     if (DOC_P) DOCUMENT_HANDLERS.forEach(function (t) { handlerAccessor(DOC_P, t); });
+    /* (the legacy prefixed handlers: GlobalEventHandlers' too) */
+    [ELEMENT_P, global.SVGElement && global.SVGElement.prototype, DOC_P, Object.getPrototypeOf(global) !== Object.prototype ? Object.getPrototypeOf(global) : null].forEach(function (P) {
+        if (P) Object.keys(HANDLER_NAME).forEach(function (k) { handlerAccessor(P, HANDLER_NAME[k]); });
+    });
     /* (the Fullscreen API's on Element and Document; slotchange on ShadowRoot) */
     [global.Element && global.Element.prototype, DOC_P].forEach(function (P) {
         if (P) ['fullscreenchange', 'fullscreenerror'].forEach(function (t) { handlerAccessor(P, t); });
@@ -984,13 +1063,25 @@
         ['state', 'length'].forEach(function (k) {
             if (Object.prototype.hasOwnProperty.call(hist, k)) delete hist[k];
         });
-        define(HP, 'pushState', function pushState(state, unused, url) { updateState('pushState', state, url, true); });
-        define(HP, 'replaceState', function replaceState(state, unused, url) { updateState('replaceState', state, url, false); });
-        define(HP, 'back', function back() { traverse(-1); });
-        define(HP, 'forward', function forward() { traverse(1); });
-        define(HP, 'go', function go(delta) { traverse(delta | 0); });
-        Object.defineProperty(HP, 'state', { configurable: true, enumerable: true, get: function () { return entries[index].state; } });
-        Object.defineProperty(HP, 'length', { configurable: true, enumerable: true, get: function () { return entries.length; } });
+        /* (the methods act on the History object they are called on: its
+         * realm's session history, kept on it under a registered symbol, so
+         * a frame's pushState called on the page's history is the page's) */
+        var HIST = Symbol.for('cyber.history');
+        Object.defineProperty(hist, HIST, { value: {
+            update: updateState, traverse: traverse,
+            state: function () { return entries[index].state; }, length: function () { return entries.length; } } });
+        var histOf = function (h) {
+            var impl = h !== null && (typeof h === 'object' || typeof h === 'function') ? h[HIST] : undefined;
+            if (!impl) throw new TypeError('Illegal invocation');
+            return impl;
+        };
+        define(HP, 'pushState', function pushState(state, unused, url) { histOf(this).update('pushState', state, url, true); });
+        define(HP, 'replaceState', function replaceState(state, unused, url) { histOf(this).update('replaceState', state, url, false); });
+        define(HP, 'back', function back() { histOf(this).traverse(-1); });
+        define(HP, 'forward', function forward() { histOf(this).traverse(1); });
+        define(HP, 'go', function go(delta) { histOf(this).traverse(delta | 0); });
+        Object.defineProperty(HP, 'state', { configurable: true, enumerable: true, get: function () { return histOf(this).state(); } });
+        Object.defineProperty(HP, 'length', { configurable: true, enumerable: true, get: function () { return histOf(this).length(); } });
         /* location: hash, and href/assign/replace that only change the fragment */
         Object.defineProperty(loc, 'hash', { configurable: true, enumerable: true,
             get: hashDesc.get,
