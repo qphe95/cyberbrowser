@@ -581,6 +581,7 @@ extern const JSCFunctionListEntry js_shadow_root_native_funcs[];
 extern const size_t js_shadow_root_native_funcs_count;
 void timer_install_rejection_tracker(JSRuntimeHandle rt);
 int frame_api_process(void);
+int frame_api_resize_tick(void);
 bool frame_api_pending(void);
 GCValue js_request_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
 GCValue js_response_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
@@ -671,6 +672,7 @@ void timer_api_reset(void);
 int timer_process_due(JSContextHandle ctx);
 /* IntersectionObserver per-frame re-evaluation (misc_api.c). */
 int intersection_observers_tick(JSContextHandle ctx);
+int resize_observers_tick(JSContextHandle ctx);
 /* CSS transitions and animations: their events and frames (anim_api.c). */
 int anim_api_tick(JSContextHandle ctx);
 void anim_api_init(void);

@@ -49,18 +49,27 @@
         const finger = s => s.type === 'pointer' && s.parameters && s.parameters.pointerType && s.parameters.pointerType !== 'mouse';
         const input = w.__cyberInput;
         const ticks = actions.reduce((n, s) => Math.max(n, s.actions.length), 0);
-        const last = new Map();
+        /* (WebDriver's input state: a pointer stays where an earlier chain left it) */
+        const last = w.__cyberPointers || (w.__cyberPointers = new Map());
+        /* (each chain numbers its sources anew: the nth pointer of a kind is the same one) */
+        const place = new Map(), kinds = new Map();
+        for (const s of actions) {
+            const kind = s.type + ':' + (s.parameters && s.parameters.pointerType || 'mouse');
+            const n = kinds.get(kind) || 0;
+            kinds.set(kind, n + 1);
+            place.set(s, kind + ':' + n);
+        }
         for (let t = 0; t < ticks; t++) {
             let wait = 0;
             for (const source of actions) {
                 const a = source.actions[t];
                 if (!a) continue;
                 if (a.duration > wait) wait = a.duration;
-                const pos = last.get(source.id) || [0, 0];
+                const pos = last.get(place.get(source)) || [0, 0];
                 switch (a.type) {
                 case 'pointerMove': {
                     const p = at(w, a, pos);
-                    last.set(source.id, p);
+                    last.set(place.get(source), p);
                     if (!finger(source)) input.move(p[0], p[1]);
                     else if (source.down) input.touchMove(p[0], p[1]);
                     break;

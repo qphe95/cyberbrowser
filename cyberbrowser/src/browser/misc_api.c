@@ -2209,7 +2209,23 @@ const JSCFunctionListEntry js_font_face_proto_funcs[] = {
 const size_t js_font_face_proto_funcs_count = sizeof(js_font_face_proto_funcs) / sizeof(js_font_face_proto_funcs[0]);
 
 // FontFaceSet.load(fontSpec)
+/* (platform_api.js: the error for a font list that can't be parsed, or null) */
+static GCValue font_spec_error(JSContextHandle ctx, int argc, GCValue *argv) {
+    GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberFontSpecError");
+    if (!JS_IsFunction(ctx, fn) || argc < 1) return JS_NULL;
+    GCValue e = JS_Call(ctx, fn, JS_UNDEFINED, 1, argv);
+    if (JS_IsException(e)) { JS_GetException(ctx); return JS_NULL; }
+    return e;
+}
+
 GCValue js_font_face_set_load(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    GCValue bad = font_spec_error(ctx, argc, argv);
+    if (JS_IsObject(bad)) {
+        GCValue funcs[2] = { GC_UNDEFINED_INIT, GC_UNDEFINED_INIT };
+        GCValue p = JS_NewPromiseCapability(ctx, funcs);
+        JS_Call(ctx, funcs[1], JS_UNDEFINED, 1, &bad);
+        return p;
+    }
     // Return a resolved promise with empty array (all fonts "loaded")
     GCValue empty_array = JS_NewArray(ctx);
     GCValue result = js_create_resolved_promise(ctx, empty_array);
@@ -2219,6 +2235,8 @@ GCValue js_font_face_set_load(JSContextHandle ctx, GCValue this_val, int argc, G
 
 // FontFaceSet.check(fontSpec)
 GCValue js_font_face_set_check(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    GCValue bad = font_spec_error(ctx, argc, argv);
+    if (JS_IsObject(bad)) return JS_Throw(ctx, bad);
     // Always return true (fonts are available)
     return JS_TRUE;
 }
@@ -3184,6 +3202,65 @@ static void js_resize_observer_schedule(JSContextHandle ctx, GCValue observer) {
     JS_EnqueueJob(ctx, js_resize_observer_job, 1, args);
 }
 
+static bool ro_size_changed(JSContextHandle ctx, GCValue observer) {
+    GCValue targets = js_resize_observer_targets(ctx, observer);
+    GCValue seen_sizes = JS_GetPropertyStr(ctx, observer, "__ro_last");
+    if (!JS_IsArray(ctx, targets) || !JS_IsArray(ctx, seen_sizes)) return false;
+    uint32_t n = 0;
+    JS_ToUint32(ctx, &n, JS_GetPropertyStr(ctx, targets, "length"));
+    for (uint32_t i = 0; i < n; i++) {
+        double w, h, pw = -1.0, ph = -1.0;
+        if (!layout_query_box_size(dom_node_of(JS_GetPropertyUint32(ctx, targets, i)), &w, &h)) continue;
+        GCValue prev = JS_GetPropertyUint32(ctx, seen_sizes, i);
+        if (JS_IsArray(ctx, prev)) {
+            JS_ToFloat64(ctx, &pw, JS_GetPropertyUint32(ctx, prev, 0));
+            JS_ToFloat64(ctx, &ph, JS_GetPropertyUint32(ctx, prev, 1));
+        }
+        if (fabs(pw - w) >= 1.0 || fabs(ph - h) >= 1.0) return true;
+    }
+    return false;
+}
+
+/* Called from the event loop: the observers look at their targets again when
+ * layout may have moved them ("gather active resize observations"). */
+int resize_observers_tick(JSContextHandle ctx) {
+    static uint64_t seen;
+    static unsigned long long last;
+    if (seen == g_frame_layouts) return 0;
+    unsigned long long now = (unsigned long long)page_clock_now_ms();
+    if (now - last < (g_dom.live >= 5000 ? 1000u : 100u)) return 0;
+    GCValue reg = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyber_ro_observers");
+    if (!JS_IsArray(ctx, reg)) return 0;
+    last = now;
+    seen = g_frame_layouts;
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, JS_GetPropertyStr(ctx, reg, "length"));
+    bool big = g_dom.live >= 5000;
+    for (uint32_t i = 0; i < len; i++) {
+        GCValue observer = JS_GetPropertyUint32(ctx, reg, i);
+        /* (a big page: the sizes the last layout has, so that a report, with
+         * what it takes to make one, is only for what changed) */
+        if (big && !ro_size_changed(ctx, observer)) continue;
+        js_resize_observer_schedule(ctx, observer);
+    }
+    return 0;
+}
+
+static void ro_register(JSContextHandle ctx, GCValue observer) {
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue reg = JS_GetPropertyStr(ctx, global, "__cyber_ro_observers");
+    if (!JS_IsArray(ctx, reg)) {
+        reg = JS_NewArray(ctx);
+        JSAtom a = JS_NewAtom(ctx, "__cyber_ro_observers");
+        JS_DefinePropertyValue(ctx, global, a, reg, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+        JS_FreeAtom(ctx, a);
+    }
+    if (js_observer_targets_contains(ctx, reg, observer)) return;
+    uint32_t n = 0;
+    JS_ToUint32(ctx, &n, JS_GetPropertyStr(ctx, reg, "length"));
+    JS_SetPropertyUint32(ctx, reg, n, observer);
+}
+
 // ResizeObserver.prototype.observe(target)
 GCValue js_resize_observer_observe(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1) return JS_UNDEFINED;
@@ -3200,6 +3277,7 @@ GCValue js_resize_observer_observe(JSContextHandle ctx, GCValue this_val, int ar
         JS_ToUint32(ctx, &len, len_val);
         JS_SetPropertyUint32(ctx, targets, len, target);
     }
+    ro_register(ctx, this_val);
     js_resize_observer_schedule(ctx, this_val);
     return JS_UNDEFINED;
 }

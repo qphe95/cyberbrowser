@@ -19,6 +19,12 @@
 extern "C" {
 #endif
 
+/* Features the rendering tick looks after (layout_render_tick), seen in any
+ * declaration parsed: a page without them pays nothing. */
+enum { CSS_FEAT_SNAP = 1, CSS_FEAT_CONTENT_VIS = 2, CSS_FEAT_INITIAL_TARGET = 4 };
+extern volatile int g_css_render_features;
+void css_note_property(const char *prop);
+
 /* One property/value pair. */
 typedef struct CssDeclaration {
     char *property;

@@ -149,7 +149,8 @@ static GCValue img_set_attr(JSContextHandle ctx, GCValue this_val, const char *n
     NodeId id = dom_node_of(this_val);
     image_api_relevant(id);
     ImageCache *ic = display_list_get_image_cache();
-    if (id && ic && dom_is_connected(id)) {
+    /* (connected or not: new Image().src loads) */
+    if (id && ic) {
         char *url = img_url_of(id);
         if (url) {
             int w, h;
@@ -197,12 +198,16 @@ void image_api_install(JSContextHandle ctx, GCValue img_proto)
         "(function(P){"
         "  if (!P.decode) Object.defineProperty(P, 'decode', {configurable:true, writable:true,"
         "    value: function(){ return Promise.resolve(); }});"
-        "  if (typeof Image === 'undefined') {"
-        "    var I = function Image(w, h){ var e = document.createElement('img');"
-        "      if (w !== undefined) e.setAttribute('width', String(w));"
-        "      if (h !== undefined) e.setAttribute('height', String(h)); return e; };"
-        "    I.prototype = P; globalThis.Image = I;"
-        "  }"
+        "  ['width', 'height'].forEach(function(n){ if (n in P) return;"
+        "    var natural = n === 'width' ? 'naturalWidth' : 'naturalHeight', offset = n === 'width' ? 'offsetWidth' : 'offsetHeight';"
+        "    Object.defineProperty(P, n, {configurable:true, enumerable:true,"
+        "      get: function(){ if (this.isConnected && this.getClientRects().length) return this[offset];"
+        "        var a = parseInt(this.getAttribute(n), 10); return a >= 0 ? a : this[natural]; },"
+        "      set: function(v){ this.setAttribute(n, String(v >>> 0)); }}); });"
+        "  var I = function Image(w, h){ var e = document.createElement('img');"
+        "    if (w !== undefined) e.setAttribute('width', String(w));"
+        "    if (h !== undefined) e.setAttribute('height', String(h)); return e; };"
+        "  I.prototype = P; globalThis.Image = I;"
         "})";
     GCValue fn = JS_Eval(ctx, js, strlen(js), "<image_api>", JS_EVAL_TYPE_GLOBAL);
     if (JS_IsFunction(ctx, fn)) JS_Call(ctx, fn, JS_UNDEFINED, 1, &img_proto);
@@ -285,10 +290,8 @@ int image_api_tick(JSContextHandle ctx)
         int st = image_cache_status(ic, url);
         if (st == 0) {
             /* (not here yet: its fetch's notify fires load) */
-            if (dom_is_connected(id)) {
-                int w, h;
-                image_cache_natural_size(ic, url, &w, &h);
-            }
+            int w, h;
+            image_cache_natural_size(ic, url, &w, &h);
             free(url);
             continue;
         }
@@ -341,7 +344,7 @@ void image_api_notify(JSContextHandle ctx, const char *url)
         }
         char *u = img_url_of(id);
         if (dbg == 1 && u) fprintf(stderr, "[IMG] cand w=%d c=%d %.100s\n", dom_has_wrapper(id), dom_is_connected(id), u);
-        if (!dom_has_wrapper(id) || !dom_is_connected(id)) { free(u); continue; }
+        if (!dom_has_wrapper(id)) { free(u); continue; }
         bool match = u && strcmp(u, url) == 0;
         free(u);
         if (!match) continue;

@@ -686,6 +686,9 @@ int timer_process_due(JSContextHandle ctx) {
     processed += image_api_tick(ctx);
     processed += worker_api_tick(ctx);
     processed += intersection_observers_tick(ctx);
+    processed += resize_observers_tick(ctx);
+    processed += frame_api_resize_tick();
+    processed += layout_render_tick(ctx);
     return processed;
 }
 

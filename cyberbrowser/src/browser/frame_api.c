@@ -538,6 +538,14 @@ static const char frame_window_js[] =
     "  Object.defineProperty(w, 'innerHeight', { get: function () { return size('height', 'height', 150); }, configurable: true });"
     "  Object.defineProperty(w, 'outerWidth', { get: function () { return w.innerWidth; }, configurable: true });"
     "  Object.defineProperty(w, 'outerHeight', { get: function () { return w.innerHeight; }, configurable: true });"
+    /* (its element's size changed: a resize at it, frame_api_resize_tick) */
+    "  var lastW = w.innerWidth, lastH = w.innerHeight;"
+    "  Object.defineProperty(w, '__cyberFrameResized', { configurable: true, value: function () {"
+    "    var a = w.innerWidth, b = w.innerHeight;"
+    "    if (a === lastW && b === lastH) return;"
+    "    lastW = a; lastH = b;"
+    "    w.dispatchEvent(new w.Event('resize'));"
+    "  } });"
     /* (a frame's location navigates it; a fragment alone doesn't) */
     "  var loc = w.location, hd = loc && Object.getOwnPropertyDescriptor(loc, 'href'), nav = w.__cyberFrameNavigate;"
     "  if (hd && hd.set && hd.configurable && nav) {"
@@ -849,6 +857,19 @@ static bool parent_scripts_pending(const Frame *f) {
  * out of the tree meanwhile aren't gone) */
 static bool g_frames_held;
 void frame_api_hold(bool hold) { g_frames_held = hold; }
+
+/* The frames whose size changed, when anything in the page changed. */
+int frame_api_resize_tick(void) {
+    static uint64_t seen;
+    if (seen == g_dom_relayout_requests || !g_frames) return 0;
+    seen = g_dom_relayout_requests;
+    for (Frame *f = g_frames; f; f = f->next) {
+        if (f->dead || f->popup || !f->ctx || f->state != FRAME_LOADED) continue;
+        GCValue fn = JS_GetPropertyStr(f->ctx, JS_GetGlobalObject(f->ctx), "__cyberFrameResized");
+        if (JS_IsFunction(f->ctx, fn) && JS_IsException(JS_Call(f->ctx, fn, JS_UNDEFINED, 0, NULL))) JS_GetException(f->ctx);
+    }
+    return 0;
+}
 
 int frame_api_process(void) {
     if (g_processing || g_frames_held || (!g_frames && !g_messages)) return 0;

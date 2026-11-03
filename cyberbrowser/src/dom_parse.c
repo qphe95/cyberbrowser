@@ -967,6 +967,7 @@ static bool doc_before(Builder *b, const DomTok *t, CssAtom tag) {
 
 typedef struct TreeAtoms {
     CssAtom li, dd, dt, p, option, optgroup, tr, td, th, button, address, div, select;
+    CssAtom table, tbody, thead, tfoot, caption, colgroup, col, html, tmpl;
     CssAtom special[96], scope[12], p_closer[40];
     int nspecial, nscope, np_closer;
 } TreeAtoms;
@@ -992,6 +993,9 @@ static void tree_atoms(void) {
     g_t.dd = T("dd"); g_t.dt = T("dt"); g_t.p = T("p"); g_t.option = T("option"); g_t.optgroup = T("optgroup");
     g_t.tr = T("tr"); g_t.td = T("td"); g_t.th = T("th"); g_t.button = T("button"); g_t.address = T("address");
     g_t.div = T("div"); g_t.select = T("select");
+    g_t.table = T("table"); g_t.tbody = T("tbody"); g_t.thead = T("thead"); g_t.tfoot = T("tfoot");
+    g_t.caption = T("caption"); g_t.colgroup = T("colgroup"); g_t.col = T("col"); g_t.html = T("html");
+    g_t.tmpl = T("template");
     for (size_t i = 0; i < sizeof special / sizeof special[0]; i++) g_t.special[g_t.nspecial++] = T(special[i]);
     for (size_t i = 0; i < sizeof scope / sizeof scope[0]; i++) g_t.scope[g_t.nscope++] = T(scope[i]);
     for (size_t i = 0; i < sizeof p_closer / sizeof p_closer[0]; i++) g_t.p_closer[g_t.np_closer++] = T(p_closer[i]);
@@ -1046,20 +1050,54 @@ static int in_scope(const Builder *b, CssAtom tag, bool button) {
     return -1;
 }
 
+static bool is_table_never(CssAtom a) { (void)a; return false; }
+static bool is_section(CssAtom a) { return a == g_t.tbody || a == g_t.thead || a == g_t.tfoot; }
+static bool is_table_part(CssAtom a) {
+    return a == g_t.tr || a == g_t.td || a == g_t.th || is_section(a) || a == g_t.caption || a == g_t.colgroup;
+}
+
+/* The lowest of what a table's start or end tag closes within the current
+ * table (table scope), keeping what stop says stays: its stack index, or -1. */
+static int table_part_below(const Builder *b, bool (*closes)(CssAtom), bool (*stop)(CssAtom)) {
+    int k = -1;
+    for (uint32_t i = b->sp; i-- > 0; ) {
+        CssAtom a = g_dom.tag[b->stack[i]];
+        if (a == g_t.table || a == g_t.tmpl || a == g_t.html || stop(a)) break;
+        if (closes(a)) k = (int)i;
+    }
+    return k;
+}
+static bool is_cell(CssAtom a) { return a == g_t.td || a == g_t.th; }
+static bool is_cell_or_head(CssAtom a) { return is_cell(a) || a == g_t.caption || a == g_t.colgroup; }
+static bool is_row_or_cell(CssAtom a) { return a == g_t.tr || is_cell_or_head(a); }
+static bool is_row(CssAtom a) { return a == g_t.tr; }
+
 /* A start tag closes what it implies the end of. */
 static void close_implied(Builder *b, CssAtom tag) {
     if (!b->sp) return;
     CssAtom top = g_dom.tag[b->stack[b->sp - 1]];
+    /* (HTML 13.2.6.4.13-15: a table's parts end those before them, and
+     * whatever is still open inside them) */
+    if (tag == g_t.td || tag == g_t.th || tag == g_t.tr || is_section(tag) || tag == g_t.caption || tag == g_t.colgroup) {
+        /* (a caption or colgroup ends at any of them) */
+        int k = tag == g_t.td || tag == g_t.th ? table_part_below(b, is_cell_or_head, is_row)
+              : tag == g_t.tr ? table_part_below(b, is_row_or_cell, is_section)
+              : table_part_below(b, is_table_part, is_table_never);
+        if (k >= 0) pop_to(b, (uint32_t)k);
+        /* (the parts a table's row or cell implies) */
+        top = b->sp ? g_dom.tag[b->stack[b->sp - 1]] : 0;
+        if (b->sp && top == g_t.table && (tag == g_t.tr || tag == g_t.td || tag == g_t.th)) {
+            implied(b, g_t.tbody, b->stack[b->sp - 1]);
+            top = g_t.tbody;
+        }
+        if (b->sp && is_section(top) && (tag == g_t.td || tag == g_t.th)) implied(b, g_t.tr, b->stack[b->sp - 1]);
+        return;
+    }
+    if (tag == g_t.col && top == g_t.table) { implied(b, g_t.colgroup, b->stack[b->sp - 1]); return; }
     if (tag == g_t.option) { if (top == g_t.option) pop_to(b, b->sp - 1); return; }
     if (tag == g_t.optgroup) {
         if (top == g_t.option) { pop_to(b, b->sp - 1); top = b->sp ? g_dom.tag[b->stack[b->sp - 1]] : 0; }
         if (top == g_t.optgroup) pop_to(b, b->sp - 1);
-        return;
-    }
-    if (tag == g_t.td || tag == g_t.th) { if (top == g_t.td || top == g_t.th) pop_to(b, b->sp - 1); return; }
-    if (tag == g_t.tr) {
-        if (top == g_t.td || top == g_t.th) { pop_to(b, b->sp - 1); top = b->sp ? g_dom.tag[b->stack[b->sp - 1]] : 0; }
-        if (top == g_t.tr) pop_to(b, b->sp - 1);
         return;
     }
     if (tag == g_t.li || tag == g_t.dd || tag == g_t.dt) {
@@ -1093,6 +1131,16 @@ static void close_end_tag(Builder *b, const DomTok *t) {
     if (!whole && n + 1 >= sizeof name) return;     /* (a name longer still: ignored) */
     CssAtom tag = n ? css_atom_find(name, n) : 0;
     if (!tag) return;
+    /* (table scope: an open cell doesn't stop a row's or the table's end tag,
+     * and what is left open in it ends with it) */
+    if (tag == g_t.table || is_table_part(tag)) {
+        for (uint32_t i = b->sp; i-- > 0; ) {
+            CssAtom a = g_dom.tag[b->stack[i]];
+            if (a == tag) { pop_to(b, i); return; }
+            if (a == g_t.table || a == g_t.tmpl || a == g_t.html) return;
+        }
+        return;
+    }
     if (atom_in(tag, g_t.special, g_t.nspecial)) {
         int k = in_scope(b, tag, tag == g_t.p);
         if (tag == g_t.select) {        /* (select scope: anything but option/optgroup bounds it) */

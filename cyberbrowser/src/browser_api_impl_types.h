@@ -365,6 +365,9 @@ void dom_request_layout(void);
  * adopted sheets, an image that loaded.  Bumps g_dom_relayout_requests as
  * well (layout_api never keeps a layout across one). */
 extern uint64_t g_dom_relayout_requests;
+/* Layouts of the frame shown (page_engine.c): what rendering steps go by, so
+ * that they force no layouts of their own. */
+extern uint64_t g_frame_layouts;
 void dom_request_relayout(void);
 
 /* Inserted <link rel=stylesheet>: their sheets download in the background

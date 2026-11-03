@@ -20053,7 +20053,7 @@ static void client_rects_walk(const LayoutContext *ctx, int p, double (*r)[4], i
     }
 }
 
-void css_layout_extent(const LayoutContext *ctx, int idx, double *right, double *bottom)
+static void extent_walk(const LayoutContext *ctx, int idx, double *right, double *bottom)
 {
     const LayoutNodeRef *nodes = ctx->tree.nodes;
     for (int c = nodes[idx].first_child_idx; c >= 0; c = nodes[c].next_sibling_idx) {
@@ -20061,8 +20061,37 @@ void css_layout_extent(const LayoutContext *ctx, int idx, double *right, double 
         if (cb->s->display == CSS_DISPLAY_NONE) continue;
         if (cb->x + cb->width > *right) *right = cb->x + cb->width;
         if (cb->y + cb->height > *bottom) *bottom = cb->y + cb->height;
-        css_layout_extent(ctx, c, right, bottom);
+        extent_walk(ctx, c, right, bottom);
     }
+}
+
+void css_layout_extent(const LayoutContext *ctx, int idx, double *right, double *bottom)
+{
+    /* (CSS Overflow 3: a block container's in-flow children reach it with their
+     * margins, and its end padding comes after them; not an overflow: visible
+     * block's, whose children's margins may collapse through it, nor a flex or
+     * grid container's) */
+    const LayoutNodeRef *nodes = ctx->tree.nodes;
+    const LayoutBox *b = &ctx->boxes[idx];
+    double was_end = 0.0, was_margin = 0.0;     /* the child before, for one whose margins collapse through it */
+    bool flows = b->s->display != CSS_DISPLAY_FLEX && b->s->display != CSS_DISPLAY_GRID &&
+                 (b->s->overflow != 0 || b->s->display != CSS_DISPLAY_BLOCK);
+    for (int c = flows ? nodes[idx].first_child_idx : -1; c >= 0; c = nodes[c].next_sibling_idx) {
+        const LayoutBox *cb = &ctx->boxes[c];
+        if (cb->s->display == CSS_DISPLAY_NONE || cb->s->display == CSS_DISPLAY_INLINE) continue;
+        if (cb->s->position == CSS_POSITION_ABSOLUTE || cb->s->position == CSS_POSITION_FIXED) continue;
+        double mb = cb->margin_bottom;
+        double r = cb->x + cb->width + cb->margin_right + b->s->padding_right;
+        double end = cb->y + cb->height;
+        /* (a self-collapsing block: its margin with the one before it) */
+        if (cb->height <= 0.0 && was_end > 0.0) { end = was_end; if (was_margin > mb) mb = was_margin; }
+        double e = end + mb + b->s->padding_bottom;
+        was_end = end;
+        was_margin = mb;
+        if (r > *right) *right = r;
+        if (e > *bottom) *bottom = e;
+    }
+    extent_walk(ctx, idx, right, bottom);
 }
 
 bool css_layout_box_scrolls(const LayoutContext *ctx, int idx)
@@ -20070,8 +20099,13 @@ bool css_layout_box_scrolls(const LayoutContext *ctx, int idx)
     const LayoutBox *b = &ctx->boxes[idx];
     if (b->s->overflow == 0 || b->s->display == CSS_DISPLAY_NONE || b->s->display == CSS_DISPLAY_INLINE) return false;
     const HtmlNode *n = ctx->doc ? css_layout_box_node(ctx, idx) : NULL;
-    return !(n && n->type == HTML_NODE_ELEMENT && n->tag_name &&
-             (strcasecmp(n->tag_name, "html") == 0 || strcasecmp(n->tag_name, "body") == 0));
+    if (!n || n->type != HTML_NODE_ELEMENT || !n->tag_name) return true;
+    if (strcasecmp(n->tag_name, "html") == 0) return false;
+    if (strcasecmp(n->tag_name, "body") != 0) return true;
+    /* (the root's overflow goes to the viewport, and if it has none, the
+     * body's does instead; otherwise the body keeps its own) */
+    int p = ctx->tree.nodes[idx].parent_idx;
+    return p >= 0 && ctx->boxes[p].s->overflow != 0;
 }
 
 void css_layout_box_max(const LayoutContext *ctx, int idx, double *x, double *y)

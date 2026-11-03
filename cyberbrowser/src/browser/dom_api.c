@@ -1498,12 +1498,15 @@ static void post_insert_queue(NodeId id) {
 }
 
 static CssAtom g_meta_tag;
-static CssAtom g_script_tag, g_iframe_tag, g_frame_tag;
+static CssAtom g_script_tag, g_iframe_tag, g_frame_tag, g_link_tag, g_style_tag;
 /* (a shadow tree comes along: it's connected with its host) */
 static void post_insert_subtree(uint32_t r) {
     for (uint32_t s = r; s; s = dom_next_in_subtree(s, r)) {
         if (g_dom.kind[s] != DOM_K_ELEMENT) continue;
         if (g_dom.tag[s] == g_iframe_tag || g_dom.tag[s] == g_frame_tag) post_insert_queue(dom_id_of(s));
+        /* (one inside what went in: the node itself is looked at by its insertion) */
+        else if ((g_dom.tag[s] == g_link_tag || g_dom.tag[s] == g_style_tag) && s != r && g_dom_dynamic_scripts_enabled)
+            post_insert_queue(dom_id_of(s));
         else if (g_dom.tag[s] == g_meta_tag) {
             g_dom.flags[s] |= DOMF_META_PENDING;
             post_insert_queue(dom_id_of(s));
@@ -1522,7 +1525,9 @@ static void post_insert_collect(NodeId parent, NodeId child) {
         return;
     }
     if (!g_script_tag) {
-        css_atom_reserve(4);
+        css_atom_reserve(6);
+        g_link_tag = css_atom_intern("link", 4);
+        g_style_tag = css_atom_intern("style", 5);
         g_meta_tag = css_atom_intern("meta", 4);
         g_script_tag = css_atom_intern("script", 6);
         g_iframe_tag = css_atom_intern("iframe", 6);
@@ -1532,6 +1537,8 @@ static void post_insert_collect(NodeId parent, NodeId child) {
 }
 
 /* (each run takes the queue: an insertion by one of them has its own) */
+static void dom_maybe_load_stylesheet(JSContextHandle ctx, GCValue node);
+
 void dom_post_insert_flush(JSContextHandle ctx) {
     while (g_post_insert.n) {
         uint32_t n = g_post_insert.n;
@@ -1550,6 +1557,8 @@ void dom_post_insert_flush(JSContextHandle ctx) {
                 g_frame_blank_now = true;
                 if (dom_is_connected(ids[i])) frame_api_on_connect(ctx, ids[i]);
                 g_frame_blank_now = was;
+            } else if (dom_tag(ids[i]) == g_link_tag || dom_tag(ids[i]) == g_style_tag) {
+                dom_maybe_load_stylesheet(ctx, dom_js(ctx, ids[i]));
             } else {
                 dom_maybe_load_script(ctx, dom_js(ctx, ids[i]));
             }
@@ -2907,6 +2916,9 @@ static void attr_changed_ns(JSContextHandle ctx, GCValue el, NodeId n, const cha
     mo_notify_attribute_ns(ctx, el, name, ns ? dom_name_str(ns) : NULL, old_value);
     /* (a link that has just become a stylesheet loads) */
     if (!ns && (!strcasecmp(name, "rel") || !strcasecmp(name, "href")) && dom_tag_is(n, "link")) dom_maybe_load_stylesheet(ctx, el);
+    /* (a class may bring a transition: what the element looked like before is
+     * where it would start) */
+    if (!ns && !strcasecmp(name, "class") && dom_has_wrapper(n)) layout_query_anim_seed(n);
     /* (a media element's src set: it loads; removed: it does not) */
     if (!ns && new_value && !strcasecmp(name, "src") && (dom_tag_is(n, "video") || dom_tag_is(n, "audio")))
         js_video_src_attr_changed(ctx, el, new_value);
@@ -4827,12 +4839,12 @@ GCValue js_element_closest(JSContextHandle ctx, GCValue this_val,
 // ============================================================================
 
 static GCValue slot_find_host(JSContextHandle ctx, GCValue slot) {
+    /* (the root of its tree, however deep: an <a>'s host is a string) */
     GCValue parent = JS_GetPropertyStr(ctx, slot, "parentNode");
-    if (!JS_IsNull(parent) && !JS_IsUndefined(parent) && JS_IsObject(parent)) {
+    while (JS_IsObject(parent)) {
         GCValue host = JS_GetPropertyStr(ctx, parent, "host");
-        if (!JS_IsNull(host) && !JS_IsUndefined(host) && JS_IsObject(host)) {
-            return host;
-        }
+        if (JS_IsObject(host)) return host;
+        parent = JS_GetPropertyStr(ctx, parent, "parentNode");
     }
     return JS_NULL;
 }
@@ -5160,6 +5172,16 @@ static GCValue hit_positioned(JSContextHandle ctx, LayoutContext *layout, const 
     }
 }
 
+static GCValue hit_fixed_inside(JSContextHandle ctx, LayoutContext *layout, int idx) {
+    for (int c = layout->tree.nodes[idx].first_child_idx; c >= 0; c = layout->tree.nodes[c].next_sibling_idx) {
+        GCValue hit = layout->boxes[c].s->position == CSS_POSITION_FIXED
+            ? hit_test_layout_node(ctx, layout, c, g_hit_x - g_hit_vx, g_hit_y - g_hit_vy)
+            : hit_fixed_inside(ctx, layout, c);
+        if (!JS_IsNull(hit)) return hit;
+    }
+    return JS_NULL;
+}
+
 static GCValue hit_test_layout_node(JSContextHandle ctx, LayoutContext *layout, int idx, double x, double y) {
     if (!layout || idx < 0 || idx >= layout->tree.count) return JS_NULL;
     LayoutBox *box = &layout->boxes[idx];
@@ -5167,8 +5189,9 @@ static GCValue hit_test_layout_node(JSContextHandle ctx, LayoutContext *layout, 
     if (box->s->display == CSS_DISPLAY_NONE) return JS_NULL;   /* not laid out (or styled) */
     bool inside = (x >= box->x && x <= box->x + box->width &&
                    y >= box->y && y <= box->y + box->height);
-    /* (what overflows a box is still there, unless it clips) */
-    if (!inside && css_layout_box_scrolls(layout, idx)) return JS_NULL;
+    /* (what overflows a box is still there, unless it clips: what is fixed
+     * is on the viewport, whatever box it is in) */
+    if (!inside && css_layout_box_scrolls(layout, idx)) return hit_fixed_inside(ctx, layout, idx);
     /* (its children are where its scroll offset has them) */
     float sx = 0.0f, sy = 0.0f;
     css_layout_box_offset(layout, idx, &sx, &sy);

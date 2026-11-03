@@ -1789,6 +1789,10 @@ static void ser_element_attrs(JSContextHandle ctx, SerNode n, const char *tag_lo
                     if (strcasecmp(loose_in->names[k], extra_attrs[i].attr) == 0) { has = true; break; }
             }
             if (has) continue;
+            /* (an img's or input's width and height are its layout's answer,
+             * which asking here would need) */
+            if (n.id && (!strcmp(extra_attrs[i].attr, "width") || !strcmp(extra_attrs[i].attr, "height")) &&
+                (!strcmp(tag_lower, "img") || !strcmp(tag_lower, "input"))) continue;
             JSAtom pa = html_atom(ctx, &extra_atoms[i], extra_attrs[i].prop);
             char *value = own_only ? js_object_get_own_string_atom(ctx, n.obj, pa)
                                    : js_object_get_string_atom(ctx, n.obj, pa);
@@ -2617,9 +2621,48 @@ static bool mir_has_content(NodeId root) {
     return false;
 }
 
+/* A <slot> below the top of a shadow tree (those at the top are unwrapped by
+ * their host's mir_compose): what is assigned to it, if it has any. */
+static bool mir_compose_nested_slot(NodeId s, NodeList *out) {
+    NodeId root = s;
+    while (dom_parent(root)) root = dom_parent(root);
+    if (root == s || !(g_dom.flags[dom_slot(root)] & DOMF_SHADOW_ROOT)) return false;
+    if (dom_parent(s) == root) return false;
+    uint32_t host = g_dom.host[dom_slot(root)];
+    if (!host) return false;
+    const char *name = dom_attr(s, "name");
+    if (!name) name = "";
+    /* (the first slot of a name gets them) */
+    uint32_t r = dom_slot(root), self = dom_slot(s);
+    for (uint32_t x = g_dom.first[r]; x; x = dom_next_in_subtree(x, r)) {
+        if (x == self) break;
+        if (g_dom.kind[x] != DOM_K_ELEMENT || !mir_is_tag(dom_id_of(x), "slot")) continue;
+        const char *other = dom_attr(dom_id_of(x), "name");
+        if (!strcmp(other ? other : "", name)) return false;
+    }
+    int had = out->n;
+    for (NodeId c = dom_first_child(dom_id_of(host)); c; c = dom_next_sibling(c)) {
+        const char *ls = dom_kind(c) == DOM_K_ELEMENT ? dom_attr(c, "slot") : NULL;
+        if (!strcmp(ls ? ls : "", name)) nl_push(out, c);
+    }
+    return out->n > had;
+}
+
+/* What changed in a host may change what its nested slots show. */
+static void mir_touch_nested_slots(NodeId sid) {
+    uint32_t r = dom_slot(sid);
+    for (uint32_t x = g_dom.first[r]; x; x = dom_next_in_subtree(x, r))
+        if (g_dom.parent[x] != r && g_dom.kind[x] == DOM_K_ELEMENT && mir_is_tag(dom_id_of(x), "slot"))
+            dom_mark_dirty(dom_id_of(x), DOMF_DIRTY_CHILDREN);
+}
+
 /* The nodes element s renders as children, in order (as the serializer
  * composes them); sets the host kind of mirror node m. */
 static void mir_compose(NodeId s, int m, NodeList *out) {
+    if (mir_is_tag(s, "slot") && mir_compose_nested_slot(s, out)) {
+        mir_set_host(s, 0);
+        return;
+    }
     SerNode sn = ser_of_node(s);
     unsigned char kind = 0;
     GCValue shadow = JS_NULL;
@@ -2647,6 +2690,7 @@ static void mir_compose(NodeId s, int m, NodeList *out) {
         }
         kind = 2;
         if (mir_has_content(sid)) {
+            mir_touch_nested_slots(sid);
             /* Light children distributed to the shadow tree's slots. */
             NodeList light = {0};
             for (NodeId c = dom_first_child(s); c; c = dom_next_sibling(c)) nl_push(&light, c);

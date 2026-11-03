@@ -414,6 +414,7 @@ bool css_style_decl_at(JSContextHandle ctx, GCValue obj, int i, const char **nam
 bool css_style_decl_set(JSContextHandle ctx, GCValue obj, const char *prop, const char *value, const char *priority) {
     StyleBlock *b = block_of(ctx, obj);
     if (!b || !prop || !value) return false;
+    css_note_property(prop);
     bool ok = block_set(b, prop, strlen(prop), value, priority);
     if (ok) block_changed(ctx, obj, b);
     return ok;

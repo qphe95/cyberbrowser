@@ -716,6 +716,8 @@ static bool frame_images_in_same_frame(void) {
     return on;
 }
 
+uint64_t g_frame_layouts;
+
 void page_frame_build(PageFrame *f, HtmlDocument *doc, ImageCache *images, int width, int height) {
     /* The same document again (the layout mirror, updated in place): the
      * layout keeps its tree, restyles what changed and reuses the subtrees
@@ -728,6 +730,7 @@ void page_frame_build(PageFrame *f, HtmlDocument *doc, ImageCache *images, int w
         memset(&f->layout, 0, sizeof(f->layout));
     }
     printf("Running CSS layout (%dx%d) ...\n", width, height);
+    g_frame_layouts++;
     f->layout.js_ctx = g_ctx;
     f->layout.dump_path = layout_dump_path();
     bool ok;
@@ -1292,6 +1295,7 @@ bool page_engine_reset(void) {
     dom_api_reset();
     frame_api_reset();
     media_api_reset();
+    g_css_render_features = 0;
     g_dom_needs_layout = 0;
     bool ok = init_browser_context();
     if (getenv("CYBER_TAB_CPU"))

@@ -956,6 +956,7 @@
         /* same-document navigation: a fragment change */
         if (url.origin === cur.origin && url.pathname === cur.pathname && url.search === cur.search) {
             if (url.hash !== cur.hash) loc.hash = url.hash;
+            else scrollToFragment(view, url.hash);
             return;
         }
         if (typeof view.__cyberNavigate === 'function') view.__cyberNavigate(url.href, a);
@@ -980,7 +981,8 @@
         'mouseover', 'mouseup', 'paste', 'pause', 'play', 'playing', 'progress', 'ratechange', 'reset',
         'resize', 'scroll', 'scrollend', 'securitypolicyviolation', 'seeked', 'seeking', 'select',
         'slotchange', 'stalled', 'submit', 'suspend', 'timeupdate', 'toggle', 'volumechange', 'waiting',
-        'wheel', 'animationstart', 'animationiteration', 'animationend', 'animationcancel',
+        'wheel', 'scrollsnapchange', 'scrollsnapchanging', 'contentvisibilityautostatechange',
+        'animationstart', 'animationiteration', 'animationend', 'animationcancel',
         'transitionrun', 'transitionstart', 'transitionend', 'transitioncancel', 'pointerover',
         'pointerenter', 'pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'pointerout',
         'pointerleave', 'gotpointercapture', 'lostpointercapture', 'touchstart', 'touchend',
@@ -1213,8 +1215,14 @@
             entries.push({ url: newURL, state: null });
             index++;
             setHref(newURL);
+            scrollToFragment(global, new global.URL(newURL).hash);
             fireHistoryEvents(oldURL, newURL, null, true);
         };
+        /* (the URL's fragment as the document finishes loading) */
+        global.addEventListener('load', function () {
+            var h = new global.URL(getHref()).hash;
+            if (h) scrollToFragment(global, h);
+        }, { once: true });
         var HP = Object.getPrototypeOf(hist) && Object.getPrototypeOf(hist) !== Object.prototype ? Object.getPrototypeOf(hist) : hist;
         ['pushState', 'replaceState', 'back', 'forward', 'go'].forEach(function (k) {
             if (Object.prototype.hasOwnProperty.call(hist, k)) delete hist[k];
@@ -1527,15 +1535,22 @@
             });
         });
     }
-    /* What the wheel moves: the nearest box the user can scroll that has room,
-     * going out to the viewport. */
+    /* What the wheel moves: on each axis, the nearest box the user can scroll
+     * that has room, going out to the viewport (overscroll-behavior stops it). */
     function wheelScroll(t, dx, dy) {
         for (var a = t; a && (dx || dy); a = flatParent(a)) {
-            if (a.nodeType !== 1 || a === a.ownerDocument.documentElement || a === a.ownerDocument.body) continue;
-            var cs = global.getComputedStyle(a);
-            if (!/auto|scroll/.test(cs.overflow || cs.overflowY || '')) continue;
-            if (dy && (dy > 0 ? a.scrollTop < a.scrollHeight - a.clientHeight : a.scrollTop > 0)) { a.scrollTop += dy; dy = 0; }
-            if (dx && (dx > 0 ? a.scrollLeft < a.scrollWidth - a.clientWidth : a.scrollLeft > 0)) { a.scrollLeft += dx; dx = 0; }
+            if (a.nodeType !== 1 || a === a.ownerDocument.documentElement) continue;
+            /* (the viewport has a body's overflow when the root has none) */
+            if (a === a.ownerDocument.body && global.getComputedStyle(a.parentNode).overflowY === 'visible') continue;
+            var cs = global.getComputedStyle(a), byX = /auto|scroll/.test(cs.overflowX), byY = /auto|scroll/.test(cs.overflowY);
+            if (dy && byY) {
+                if (dy > 0 ? a.scrollTop < a.scrollHeight - a.clientHeight : a.scrollTop > 0) { a.scrollTop += dy; dy = 0; }
+                else if (/contain|none/.test(cs.overscrollBehaviorY)) dy = 0;
+            }
+            if (dx && byX) {
+                if (dx > 0 ? a.scrollLeft < a.scrollWidth - a.clientWidth : a.scrollLeft > 0) { a.scrollLeft += dx; dx = 0; }
+                else if (/contain|none/.test(cs.overscrollBehaviorX)) dx = 0;
+            }
         }
         if (!dx && !dy) return;
         var was = [global.scrollX, global.scrollY];
@@ -1545,6 +1560,20 @@
             var outer = global.parent && global.parent.__cyberInput;
             if (outer) outer.chain(global.frameElement, dx, dy);
         }
+    }
+    /* (HTML: "scroll to the fragment") */
+    function scrollToFragment(view, hash) {
+        var name = String(hash || '').slice(1), d = view.document, el = null;
+        try { name = decodeURIComponent(name); } catch (e) { /* (as it is) */ }
+        if (name) {
+            el = d.getElementById(name);
+            if (!el) {
+                var named = d.getElementsByName ? d.getElementsByName(name) : [];
+                for (var i = 0; i < named.length && !el; i++) if (named[i].localName === 'a') el = named[i];
+            }
+        }
+        if (el) el.scrollIntoView({ block: 'start', inline: 'nearest' });
+        else if (!name || name.toLowerCase() === 'top') view.scrollTo(0, 0);
     }
     var KEYS = { '\uE003': 'Backspace', '\uE004': 'Tab', '\uE006': 'Enter', '\uE007': 'Enter', '\uE008': 'Shift', '\uE009': 'Control',
                  '\uE00A': 'Alt', '\uE00C': 'Escape', '\uE00D': ' ', '\uE00E': 'PageUp', '\uE00F': 'PageDown', '\uE010': 'End',
@@ -1596,7 +1625,9 @@
             else if (cx < el.scrollLeft) el.scrollLeft = cx;
             return;
         }
-        wheelScroll(el || d.documentElement, dx, dy);
+        /* (nothing focused: what was last clicked is where the keys go) */
+        var from = el && el !== d.body ? el : pointer.lastDown && pointer.lastDown.isConnected ? pointer.lastDown : el;
+        wheelScroll(from || d.documentElement, dx, dy);
     }
     Object.defineProperty(global, '__cyberInput', { configurable: true, value: {
         move: function (x, y) {
@@ -1634,6 +1665,7 @@
             if (into) { into.input.down(x - into.left, y - into.top, button); return; }
             pointer.buttons |= 1 << button;
             pointer.pressed = t;
+            pointer.lastDown = t;
             if (button === 0) { chainState(t, 2, true); pointer.active = t; }
             global.__cyberLastInput = 'mouse';
             var canceled = !bothEvents(t, x, y, button, 'pointerdown', 'mousedown');
