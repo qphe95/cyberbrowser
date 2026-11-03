@@ -100,6 +100,7 @@ set(BE_SOURCES
     src/browser/frame_api.c
     src/browser/fetch_api.c
     src/browser/timer_api.c
+    src/browser/range_api.c
     src/browser/anim_api.c
     src/browser_api_impl.c
     src/html_dom.c
@@ -111,6 +112,7 @@ set(BE_SOURCES
     src/cyber_env.c
     src/det_clock.c
     src/dom_store.c
+    src/dom_range.c
     src/dom_parse.c
     src/dom_snapshot.c
     src/dom_wrap.c

@@ -1717,6 +1717,8 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_node_contains_real, "contains", 1));
     JS_SetPropertyStr(ctx, node_proto, "getRootNode",
         JS_NewCFunction(ctx, js_node_getRootNode_real, "getRootNode", 0));
+    JS_SetPropertyStr(ctx, node_proto, "hasChildNodes",
+        JS_NewCFunction(ctx, js_node_has_child_nodes, "hasChildNodes", 0));
     
     // ===== Node Tree Navigation Properties (REAL) =====
     // firstChild getter
@@ -1929,6 +1931,8 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // getElementsByTagName method
     JS_SetPropertyStr(ctx, element_proto, "getElementsByTagName",
         JS_NewCFunction(ctx, js_element_get_elements_by_tag_name, "getElementsByTagName", 1));
+    JS_SetPropertyStr(ctx, element_proto, "getElementsByClassName",
+        JS_NewCFunction(ctx, js_document_getElementsByClassName, "getElementsByClassName", 1));
     
     // style getter / setter ([PutForwards=cssText]: el.style = "..." sets cssText)
     GCValue style_getter = JS_NewCFunction(ctx, js_element_get_style, "get style", 0);
@@ -3221,13 +3225,8 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, global, "ProgressEvent", progress_event_ctor);
     JS_SetPropertyStr(ctx, window, "ProgressEvent", progress_event_ctor);
     
-    // Range constructor and prototype
-    GCValue range_proto = JS_NewObject(ctx);
-    JS_SetPropertyFunctionList(ctx, range_proto, js_range_proto_funcs, js_range_proto_funcs_count);
-    GCValue range_ctor = JS_NewCFunction2(ctx, js_range_constructor, "Range", 0, JS_CFUNC_constructor, 0);
-    JS_SetPropertyStr(ctx, range_ctor, "prototype", range_proto);
-    JS_SetPropertyStr(ctx, global, "Range", range_ctor);
-    JS_SetPropertyStr(ctx, window, "Range", range_ctor);
+    // AbstractRange, Range, StaticRange
+    range_api_install(ctx, global);
 
     // ===== Shadow DOM APIs =====
     // Native shadow DOM: Element.prototype.attachShadow and ShadowRoot

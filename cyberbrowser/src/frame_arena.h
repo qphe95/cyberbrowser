@@ -31,6 +31,7 @@ typedef struct FrameArenaBlock {
 typedef struct FrameArena {
     FrameArenaBlock *head;          /* current block first */
     size_t bytes;                   /* total allocated, for statistics */
+    size_t cap;                     /* its blocks' sizes: the memory it holds */
 } FrameArena;
 
 void *frame_arena_alloc(FrameArena *a, size_t n);          /* 16-byte aligned */

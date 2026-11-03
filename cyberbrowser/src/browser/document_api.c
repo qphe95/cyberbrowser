@@ -521,9 +521,32 @@ static GCValue interface(JSContextHandle ctx, GCValue global, const char *name, 
     return proto;
 }
 
+/* new Document() (DOM 4.5): an empty XML document, a Document (not an
+ * XMLDocument), of content type application/xml. */
+static GCValue js_document_ctor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    if (JS_IsUndefined(new_target))
+        return JS_ThrowTypeError(ctx, "Failed to construct 'Document': Please use the 'new' operator.");
+    GCValue doc = new_document(ctx, true, "application/xml");
+    if (JS_IsException(doc)) return doc;
+    GCValue proto = JS_GetPropertyStr(ctx, new_target, "prototype");
+    if (!JS_IsObject(proto)) proto = global_proto(ctx, "Document");
+    if (JS_IsObject(proto)) JS_SetPrototype(ctx, doc, proto);
+    return doc;
+}
+
 void document_api_install(JSContextHandle ctx, GCValue global) {
     GCValue dp = global_proto(ctx, "Document");
     if (!JS_IsObject(dp)) return;
+    {
+        /* (the constructor the setup made did nothing) */
+        GCValue c = JS_NewCFunction2(ctx, js_document_ctor, "Document", 0, JS_CFUNC_constructor, 0);
+        JS_SetConstructor(ctx, c, dp);
+        JS_DefinePropertyValueStr(ctx, global, "Document", c, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+        GCValue win = JS_GetPropertyStr(ctx, global, "window");
+        if (JS_IsObject(win) && !JS_StrictEq(ctx, win, global))
+            JS_DefinePropertyValueStr(ctx, win, "Document", c, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    }
     getter(ctx, dp, "documentElement", plain_getter, 0);
     getter(ctx, dp, "doctype", plain_getter, 1);
     getter(ctx, dp, "characterSet", plain_getter, 2);

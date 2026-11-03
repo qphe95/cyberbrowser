@@ -224,6 +224,7 @@ GCValue js_element_get_children(JSContextHandle ctx, GCValue this_val, int argc,
 GCValue js_element_append(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_prepend(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_replaceChildren(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_node_has_child_nodes(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_node_move_before(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_before(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_after(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
@@ -270,8 +271,16 @@ GCValue js_node_get_data(JSContextHandle ctx, GCValue this_val, int argc, GCValu
 GCValue js_node_set_data(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_document_create_range(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_range_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
-extern const JSCFunctionListEntry js_range_proto_funcs[];
-extern const size_t js_range_proto_funcs_count;
+/* AbstractRange, Range and StaticRange (range_api.c). */
+void range_api_install(JSContextHandle ctx, GCValue global);
+GCValue js_range_set_start(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_range_set_end(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_range_select_node_contents(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_range_delete_contents(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_range_to_string(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+/* The next data set on a CharacterData replaces [off, off + count) of it
+ * with len code units (its live ranges move so); else it replaces all. */
+void dom_api_note_replace_data(uint32_t off, uint32_t count, uint32_t len);
 GCValue js_document_create_tree_walker(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_tree_walker_next_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_tree_walker_previous_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);

@@ -356,8 +356,10 @@ void job_graph_run(Job *root)
     for (int i = 0; i < g_nthreads; i++) { jobs += g_thr[i].jobs; steals += g_thr[i].steals; }
     g_last_jobs = jobs;
     g_last_steals = steals;
-    /* Every job of the graph has finished: the arenas can be recycled. */
+    /* Every job of the graph has finished: the arenas can be recycled (the
+     * root's too, made on this thread before it joined the pool). */
     for (int i = 0; i < g_nthreads; i++) frame_arena_reset(&g_thr[i].arena);
+    frame_arena_reset(&tl_inline_arena);
     tl_index = -1;
     atomic_store(&g_owner_busy, 0);
 }

@@ -19,6 +19,7 @@
 #include "browser_api_impl_internal.h"
 #include "dom_js.h"
 #include "dom_store.h"
+#include "dom_range.h"
 
 extern NodeId g_dom_document;
 
@@ -75,6 +76,9 @@ static GCValue replace_data(JSContextHandle ctx, GCValue this_val, uint32_t off,
     if (count > len - off) count = len - off;
     GCValue s = str_concat3(ctx, str_slice(ctx, d, 0, off), repl, str_slice(ctx, d, off + count, len));
     if (JS_IsException(s)) return s;
+    uint32_t rl = 0;
+    JS_ToUint32(ctx, &rl, JS_GetPropertyStr(ctx, repl, "length"));
+    dom_api_note_replace_data(off, count, rl);
     return js_node_set_data(ctx, this_val, 1, &s);
 }
 
@@ -211,6 +215,11 @@ static GCValue js_split_text(JSContextHandle ctx, GCValue this_val, int argc, GC
         GCValue args[2] = { node, dom_js(ctx, dom_next_sibling(n)) };
         GCValue r = js_node_insertBefore_real(ctx, parent, 2, args);
         if (JS_IsException(r)) return r;
+        /* (live ranges in the moved data go with it: DOM 4.11 step 7) */
+        NodeId nn = dom_node_of(node);
+        uint32_t idx = 0;
+        for (NodeId x = dom_prev_sibling(nn); x; x = dom_prev_sibling(x)) idx++;
+        if (g_dom_ranges_live) dom_range_split(n, off, nn, dom_parent(n), idx);
     }
     GCValue r = replace_data(ctx, this_val, off, len - off, JS_NewString(ctx, ""));
     if (JS_IsException(r)) return r;

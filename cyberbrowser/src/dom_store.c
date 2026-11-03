@@ -1,5 +1,6 @@
 /* Node store.  See dom_store.h and PARALLEL_DOM.md §4. */
 #include "dom_store.h"
+#include "dom_range.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -773,6 +774,12 @@ void dom_link_before(NodeId parent, NodeId child, NodeId ref) {
     }
     g_dom.structure_version++;
     dom_note_connected_change(p);
+    if (g_dom_ranges_live) {
+        /* (live ranges after it move on: DOM 4.2.3 "insert" step 7) */
+        uint32_t i = 0;
+        for (uint32_t x = g_dom.prev[c]; x; x = g_dom.prev[x]) i++;
+        dom_range_inserted(parent, i, 1);
+    }
 }
 
 void dom_link_append(NodeId parent, NodeId child) {
@@ -784,12 +791,17 @@ void dom_unlink(NodeId child) {
     uint32_t c = dom_slot(child), p = g_dom.parent[c];
     if (!p) return;
     dom_note_connected_change(p);
+    uint32_t index = 0;
+    if (g_dom_ranges_live)
+        for (uint32_t x = g_dom.prev[c]; x; x = g_dom.prev[x]) index++;
     if (g_dom.prev[c]) g_dom.next[g_dom.prev[c]] = g_dom.next[c];
     else g_dom.first[p] = g_dom.next[c];
     if (g_dom.next[c]) g_dom.prev[g_dom.next[c]] = g_dom.prev[c];
     else g_dom.last[p] = g_dom.prev[c];
     g_dom.parent[c] = g_dom.next[c] = g_dom.prev[c] = 0;
     g_dom.structure_version++;
+    /* (live ranges in it move out to where it was: DOM 4.2.3 "remove") */
+    if (g_dom_ranges_live) dom_range_removed(dom_id_of(p), index, child);
 }
 
 static void free_subtree_slot(uint32_t root) {

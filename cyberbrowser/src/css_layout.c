@@ -11008,7 +11008,10 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
             }
             P.retain = retain_env && ctx->tree_kept && !verify_env && !ctx->style_all && ctx->sc_entry &&
                        ctx->dom_map && g_sc.order && ctx->sc_order == g_sc.order && ctx->sc_global == sc_global &&
-                       ctx->arena.bytes < ((size_t)16 << 20);
+                       /* (each pass's style threads leave their blocks in it, a
+                        * block a thread that styled anything: its blocks, not
+                        * what is used of them, bound it) */
+                       ctx->arena.cap < ((size_t)16 << 20);
             if (P.retain) {
                 P.kept = (unsigned char *)calloc((size_t)n + 1, 1);
                 if (!P.kept) P.retain = false;

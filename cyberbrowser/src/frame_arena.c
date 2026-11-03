@@ -80,6 +80,7 @@ void *frame_arena_alloc(FrameArena *a, size_t n)
     if (!b || b->used + n > b->cap) {
         FrameArenaBlock *nb = block_new(n);
         if (!nb) return NULL;
+        a->cap += nb->cap;
         if (b && !nb->pooled) {
             /* Oversized block: keep the current block in front. */
             nb->next = b->next;
@@ -131,8 +132,10 @@ void frame_arena_absorb(FrameArena *dst, FrameArena *src)
         dst->head = src->head;
     }
     dst->bytes += src->bytes;
+    dst->cap += src->cap;
     src->head = NULL;
     src->bytes = 0;
+    src->cap = 0;
 }
 
 void frame_arena_reset(FrameArena *a)
@@ -146,4 +149,5 @@ void frame_arena_reset(FrameArena *a)
     }
     a->head = NULL;
     a->bytes = 0;
+    a->cap = 0;
 }
