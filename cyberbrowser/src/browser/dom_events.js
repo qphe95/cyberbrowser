@@ -265,9 +265,12 @@
     expose('Event', Event);
 
     /* ---- EventTarget ---- */
-    function flatten(options) {
+    function flatten(options, adding) {
         if (typeof options === 'boolean') return { capture: options };
         if (!options || typeof options !== 'object') return { capture: false };
+        /* (signal: an AbortSignal when given; null is a TypeError) */
+        if (adding && options.signal !== undefined && (options.signal === null || typeof options.signal !== 'object'))
+            throw new TypeError("Failed to read the 'signal' property from 'AddEventListenerOptions': Failed to convert value to 'AbortSignal'.");
         return { capture: !!options.capture, once: !!options.once, passive: options.passive,
                  signal: options.signal };
     }
@@ -298,7 +301,7 @@
     function addEventListener(type, callback, options) {
         var target = etThis(this, 'addEventListener', arguments.length);
         listenerChanges++;
-        var o = flatten(options);
+        var o = flatten(options, true);
         if (callback === null || callback === undefined) return;
         if (typeof callback !== 'function' && typeof callback !== 'object')
             throw new TypeError("Failed to execute 'addEventListener': parameter 2 is not of type 'Object'.");
@@ -516,7 +519,24 @@
         return found;
     }
 
+    /* DOM 2.9 "dispatch" with activation: a click MouseEvent's activation
+     * target (the target, else, as it bubbles, the nearest ancestor with
+     * activation behavior) gets its legacy-pre-activation behavior first,
+     * then its activation behavior, or (canceled) its legacy-canceled one. */
     function dispatch(target, ev) {
+        var s = st(ev), act = null, saved;
+        if (s.type === 'click' && !s.dispatching && s.initialized && global.MouseEvent && ev instanceof global.MouseEvent) {
+            act = activationTargetOf(target, s.bubbles);
+            if (act) saved = preActivate(act);
+        }
+        var r = dispatchEvent0(target, ev);
+        if (act) {
+            if (s.canceled) canceledActivate(act, saved);
+            else runActivation(act, saved);
+        }
+        return r;
+    }
+    function dispatchEvent0(target, ev) {
         var s = st(ev);
         if (s.dispatching || !s.initialized)
             throw new DOMExceptionOr("Failed to execute 'dispatchEvent': The event is already being dispatched.", 'InvalidStateError');
@@ -696,18 +716,18 @@
         var e = new (Ctor || Event)(type, init || { bubbles: true });
         return target.dispatchEvent(e);
     }
-    function closestAnchor(n) {
-        for (; n && n.nodeType === 1; n = n.parentNode)
-            if ((n.localName === 'a' || n.localName === 'area') && n.hasAttribute('href')) return n;
-        return null;
-    }
     function disabledControl(el) {
         var n = el.localName;
         return (n === 'button' || n === 'input' || n === 'select' || n === 'textarea' ||
                 n === 'optgroup' || n === 'option' || n === 'fieldset') && el.hasAttribute('disabled');
     }
+    /* a control's form owner: its form="" element, else its nearest form ancestor */
     function formOf(el) {
-        if (el.form !== undefined) return el.form;
+        var id = el.getAttribute && el.getAttribute('form');
+        if (id !== null && id !== undefined) {
+            var f = el.isConnected && el.ownerDocument ? el.ownerDocument.getElementById(id) : null;
+            return f && f.localName === 'form' ? f : null;
+        }
         for (var n = el.parentNode; n; n = n.parentNode) if (n.localName === 'form') return n;
         return null;
     }
@@ -719,13 +739,17 @@
             return r !== el && r.getAttribute('name') === name && formOf(r) === formOf(el);
         });
     }
-    var clicking = false;
+    /* click() (HTML 6.5.3): a synthetic click at the element, unless it is a
+     * disabled form control or its click is in progress */
+    var CLICKING = Symbol('clicking');
     function click() {
-        if (disabledControl(this)) return;
-        if (clicking && this.__cyberClickInProgress) return;
-        this.__cyberClickInProgress = true;
-        clicking = true;
-        try { activate(this); } finally { this.__cyberClickInProgress = false; clicking = false; }
+        if (disabledControl(this) || this[CLICKING]) return;
+        var view = this.ownerDocument && this.ownerDocument.defaultView || global;
+        Object.defineProperty(this, CLICKING, { value: true, configurable: true });
+        try {
+            this.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true,
+                                                         view: view, detail: 1 }));
+        } finally { delete this[CLICKING]; }
     }
     /* checkedness as the user agent changes it: the control's state, not
      * its `checked` setter (browser/form_controls.js) */
@@ -737,50 +761,98 @@
         var fi = global[Symbol.for('cyber.formInternals')];
         if (fi) fi.setChecked(el, v); else el.checked = v;
     }
-    function activate(el) {
-        var view = el.ownerDocument && el.ownerDocument.defaultView || global;
-        var isInput = el.localName === 'input', type = isInput ? inputType(el) : '';
-        /* legacy-pre-activation behavior */
-        var oldChecked, oldRadio = null;
-        if (type === 'checkbox') {
-            oldChecked = getChecked(el); setChecked(el, !oldChecked);
-        } else if (type === 'radio') {
-            oldChecked = getChecked(el);
-            radioGroup(el).forEach(function (r) { if (getChecked(r)) oldRadio = r; });
+    var HTML_NS = 'http://www.w3.org/1999/xhtml';
+    var ACTIVATING_INPUT = { checkbox: 1, radio: 1, submit: 1, image: 1, reset: 1, button: 1 };
+    function buttonType(el) {
+        var t = String(el.getAttribute('type') || 'submit').toLowerCase();
+        return t === 'reset' || t === 'button' ? t : 'submit';
+    }
+    /* Whether a node has activation behavior (HTML: input, button, a and
+     * area with href, label, a details element's summary). */
+    function hasActivation(n) {
+        if (!n || n.nodeType !== 1 || n.namespaceURI !== HTML_NS) return false;
+        switch (n.localName) {
+        case 'input': return ACTIVATING_INPUT[inputType(n)] === 1;
+        case 'button': case 'label': return true;
+        case 'a': case 'area': return n.hasAttribute('href');
+        case 'summary': return summaryOf(n) !== null;
+        }
+        return false;
+    }
+    /* the details element a summary is the summary for (its first summary child), or null */
+    function summaryOf(n) {
+        var d = n.parentNode;
+        if (!d || d.localName !== 'details' || d.namespaceURI !== HTML_NS) return null;
+        for (var c = d.firstElementChild; c; c = c.nextElementSibling)
+            if (c.localName === 'summary' && c.namespaceURI === HTML_NS) return c === n ? d : null;
+        return null;
+    }
+    function activationTargetOf(target, bubbles) {
+        if (hasActivation(target)) return target;
+        if (!bubbles) return null;
+        for (var n = target.parentNode || target.host; n; n = n.parentNode || n.host)
+            if (hasActivation(n)) return n;
+        return null;
+    }
+    /* legacy-pre-activation behavior: a checkbox toggles, a radio is checked */
+    function preActivate(el) {
+        if (el.localName !== 'input') return null;
+        var type = inputType(el), saved = { type: type, checked: getChecked(el), radio: null };
+        if (type === 'checkbox') setChecked(el, !saved.checked);
+        else if (type === 'radio') {
+            radioGroup(el).forEach(function (r) { if (getChecked(r)) saved.radio = r; });
             setChecked(el, true);
         }
-        var ok = el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true,
-                                                            view: view, detail: 1 }));
-        if (!ok) {
-            /* canceled: the legacy-canceled-activation behavior */
-            if (type === 'checkbox') setChecked(el, oldChecked);
-            else if (type === 'radio') { setChecked(el, oldChecked); if (oldRadio) setChecked(oldRadio, true); }
+        return saved;
+    }
+    function canceledActivate(el, saved) {
+        if (!saved) return;
+        if (saved.type === 'checkbox') setChecked(el, saved.checked);
+        else if (saved.type === 'radio') { setChecked(el, saved.checked); if (saved.radio) setChecked(saved.radio, true); }
+    }
+    function runActivation(el, saved) {
+        var view = el.ownerDocument && el.ownerDocument.defaultView || global;
+        var isInput = el.localName === 'input', type = isInput ? inputType(el) : '';
+        if (type === 'checkbox' || type === 'radio') {
+            /* (a disconnected one changes, with no events) */
+            if (!el.isConnected) return;
+            if (type === 'checkbox' || (saved && !saved.checked)) {
+                fire(el, 'input', Event, { bubbles: true, composed: true });
+                fire(el, 'change', Event, { bubbles: true });
+            }
             return;
         }
-        if (type === 'checkbox' || (type === 'radio' && !oldChecked)) {
-            fire(el, 'input', Event, { bubbles: true, composed: true });
-            fire(el, 'change', Event, { bubbles: true });
+        if ((isInput && (type === 'submit' || type === 'image')) || (el.localName === 'button' && buttonType(el) === 'submit')) {
+            var form = disabledControl(el) ? null : formOf(el);
+            if (form && form.isConnected) requestSubmit(form, el);
             return;
         }
-        if ((isInput && (type === 'submit' || type === 'image')) ||
-            (el.localName === 'button' && String(el.getAttribute('type') || 'submit').toLowerCase() === 'submit')) {
-            var form = formOf(el);
-            if (form) requestSubmit(form, el);
+        if ((isInput && type === 'reset') || (el.localName === 'button' && buttonType(el) === 'reset')) {
+            var f2 = disabledControl(el) ? null : formOf(el);
+            if (f2 && f2.isConnected && typeof f2.reset === 'function') f2.reset();
             return;
         }
-        if (isInput && type === 'reset' || (el.localName === 'button' && String(el.getAttribute('type')).toLowerCase() === 'reset')) {
-            var f2 = formOf(el);
-            if (f2 && typeof f2.reset === 'function') f2.reset();
-            return;
-        }
+        if (isInput || el.localName === 'button') return;
         if (el.localName === 'label') {
             var control = el.control !== undefined ? el.control
                 : (el.htmlFor ? (el.ownerDocument.getElementById(el.htmlFor)) : el.querySelector('input,button,select,textarea'));
             if (control && control !== el && typeof control.click === 'function') control.click();
             return;
         }
-        var a = closestAnchor(el);
-        if (a) followHyperlink(a, view);
+        if (el.localName === 'summary') {
+            var d = summaryOf(el);
+            if (d) {
+                var was = d.hasAttribute('open');
+                if (was) d.removeAttribute('open'); else d.setAttribute('open', '');
+                /* (details' toggle event, in a task) */
+                global.setTimeout(function () {
+                    fire(d, 'toggle', global.ToggleEvent || Event, { oldState: was ? 'open' : 'closed',
+                                                                     newState: was ? 'closed' : 'open' });
+                }, 0);
+            }
+            return;
+        }
+        followHyperlink(el, view);
     }
     function requestSubmit(form, submitter) {
         var ok = form.dispatchEvent(new global.SubmitEvent('submit', { bubbles: true, cancelable: true,

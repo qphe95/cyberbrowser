@@ -152,6 +152,16 @@ void dom_range_replaced(NodeId node, uint32_t off, uint32_t count, uint32_t len)
     }
 }
 
+void dom_range_merged(NodeId node, uint32_t len, NodeId next, NodeId parent, uint32_t index)
+{
+    FOR_LIVE(r) {
+        if (R.sn[r] == next) { R.sn[r] = node; R.so[r] += len; }
+        if (R.en[r] == next) { R.en[r] = node; R.eo[r] += len; }
+        if (R.sn[r] == parent && R.so[r] == index) { R.sn[r] = node; R.so[r] = len; }
+        if (R.en[r] == parent && R.eo[r] == index) { R.en[r] = node; R.eo[r] = len; }
+    }
+}
+
 void dom_range_split(NodeId node, uint32_t off, NodeId new_node, NodeId parent, uint32_t index)
 {
     if (!parent) return;

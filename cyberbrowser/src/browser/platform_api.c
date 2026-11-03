@@ -91,6 +91,7 @@ void platform_api_install(JSContextHandle ctx, GCValue global, GCValue window)
 {
     platform_api_run(ctx, platform_api_js, "<platform_api>", global, window);
     live_list_install(ctx, global);
+    dom_string_map_install(ctx, global);
     traversal_install(ctx, global);
     document_api_install(ctx, global);
     node_namespaces_install(ctx, global);

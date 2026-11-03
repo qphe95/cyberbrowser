@@ -379,6 +379,10 @@ void dom_element_setup_wrapper(JSContextHandle ctx, NodeId id, GCValue obj) {
 static const char *element_interface_name(NodeId id) {
     /* (other namespaces' elements: SVG's are SVGElements, the rest Elements) */
     if (dom_ns(id) != DOM_NS_HTML) return dom_ns(id) == DOM_NS_SVG ? "SVGElement" : "Element";
+    /* (HTML's element names are lower-case: an upper-case local name, as
+     * createElementNS makes, is no HTML element's) */
+    for (const char *p = dom_local_name(id); p && *p; p++)
+        if (*p >= 'A' && *p <= 'Z') return "HTMLUnknownElement";
     /* HTML's elements and their interfaces (HTML section 4, "DOM
      * interface"); the others are HTMLElement. */
     static const struct { const char *tag, *iface; } map[] = {
@@ -1729,11 +1733,26 @@ static GCValue attr_child_error(JSContextHandle ctx) {
     return throw_dom_exception(ctx, "HierarchyRequestError", "An attribute cannot be a child.");
 }
 
+/* Whether v is an object that is no Node (no store node, not an Attr, no
+ * Node.prototype on its chain): a Node argument's TypeError. */
+static bool not_a_node(JSContextHandle ctx, GCValue v) {
+    if (!JS_IsObject(v) || dom_node_of(v) || is_attr_value(ctx, v)) return !JS_IsObject(v);
+    GCValue np = global_proto(ctx, "Node");
+    GCValue p = JS_GetPrototype(ctx, v);
+    for (int depth = 0; JS_IsObject(p) && depth < 64; depth++) {
+        if (JS_StrictEq(ctx, p, np)) return false;
+        p = JS_GetPrototype(ctx, p);
+    }
+    return true;
+}
+
 GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1 || JS_IsNull(argv[0]) || JS_IsUndefined(argv[0])) {
         return JS_ThrowTypeError(ctx, "appendChild: invalid argument");
     }
     if (is_attr_value(ctx, argv[0])) return attr_child_error(ctx);
+    if (not_a_node(ctx, argv[0]) && !JS_IsString(argv[0]))
+        return JS_ThrowTypeError(ctx, "Failed to execute 'appendChild' on 'Node': parameter 1 is not of type 'Node'.");
     GCValue child = argv[0];
     if (CYBER_ENV(CYBER_T_ROOTINS)) trace_root_insertion(ctx, this_val, child, "ROOT-INS");
 
@@ -1937,6 +1956,8 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
     GCValue new_child = argv[0];
     /* WebIDL: refChild is `Node?` — undefined converts to null (append at end). */
     GCValue ref_child = JS_IsUndefined(argv[1]) ? JS_NULL : argv[1];
+    if (not_a_node(ctx, new_child) || (!JS_IsNull(ref_child) && not_a_node(ctx, ref_child)))
+        return JS_ThrowTypeError(ctx, "Failed to execute 'insertBefore' on 'Node': parameter is not of type 'Node'.");
     if (CYBER_ENV(CYBER_T_ROOTINS)) trace_root_insertion(ctx, this_val, new_child, "ROOT-INS-BEFORE");
 
     NodeId parent = dom_node_ensure(ctx, this_val, DOM_K_ELEMENT);
@@ -2113,15 +2134,30 @@ GCValue js_node_normalize_real(JSContextHandle ctx, GCValue this_val, int argc, 
             child = next;
             continue;
         }
+        /* (an empty one goes first: the next keeps its node) */
+        uint32_t clen = 0;
+        dom_text(child, &clen);
+        if (clen == 0) {
+            dom_api_remove_discard(ctx, parent, child);
+            child = next;
+            continue;
+        }
         if (next && dom_kind(next) == DOM_K_TEXT) {
             uint32_t l1 = 0, l2 = 0;
             const char *t1 = dom_text(child, &l1);
             const char *t2 = dom_text(next, &l2);
+            uint32_t u1 = g_dom_ranges_live ? dom_utf16_len(t1, l1) : 0;
             char *merged = (char *)malloc(l1 + l2 + 1);
             memcpy(merged, t1, l1);
             memcpy(merged + l1, t2, l2);
             dom_set_text(child, merged, l1 + l2);
             free(merged);
+            /* (live ranges in next, or at it, move into child: DOM normalize()) */
+            if (g_dom_ranges_live) {
+                uint32_t idx = 0;
+                for (NodeId x = dom_prev_sibling(next); x; x = dom_prev_sibling(x)) idx++;
+                dom_range_merged(child, u1, next, parent, idx);
+            }
             dom_api_remove_discard(ctx, parent, next);
             continue;
         }
@@ -2224,9 +2260,12 @@ static void clone_copy_styles(JSContextHandle ctx, NodeId src, NodeId dst) {
 }
 
 // Real cloneNode implementation
+static GCValue attr_clone(JSContextHandle ctx, GCValue attr);
+
 GCValue js_node_cloneNode_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     bool deep = argc > 0 && JS_ToBool(ctx, argv[0]);
     NodeId original = dom_node_of(this_val);
+    if (!original && is_attr_value(ctx, this_val)) return attr_clone(ctx, this_val);
     if (!original) return JS_NewObject(ctx);
     /* The clone belongs to the same document as the original (DOM spec:
      * cloneNode keeps the node document; importNode re-documents it). */
@@ -3122,15 +3161,7 @@ void query_selector_all_recursive(JSContextHandle ctx, GCValue elem, const char*
 // Element Content Getters/Setters
 // ============================================================================
 
-// dataset getter - returns DOMStringMap stub
-GCValue js_element_get_dataset(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)argc; (void)argv;
-    GCValue existing = JS_GetPropertyStr(ctx, this_val, "__dataset");
-    if (!JS_IsUndefined(existing) && !JS_IsNull(existing)) return existing;
-    GCValue dataset = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, this_val, "__dataset", dataset);
-    return dataset;
-}
+// (element.dataset: dom_string_map.c)
 
 /* ---- serialization (innerHTML / outerHTML getters, XMLSerializer) ---- */
 
@@ -3948,6 +3979,20 @@ void attr_api_install(JSContextHandle ctx, GCValue global) {
 
 static GCValue create_attr_obj(JSContextHandle ctx, GCValue owner_element,
                                const char *name, const char *value);
+
+/* An Attr's clone (DOM "clone a node"): its names and value, no owner. */
+static GCValue attr_clone(JSContextHandle ctx, GCValue attr) {
+    const char *name = JS_ToCString(ctx, JS_GetPropertyStr(ctx, attr, "__a_name"));
+    const char *value = JS_ToCString(ctx, JS_GetPropertyStr(ctx, attr, "value"));
+    GCValue c = create_attr_obj(ctx, JS_NULL, name ? name : "", value ? value : "");
+    if (name) JS_FreeCString(ctx, name);
+    if (value) JS_FreeCString(ctx, value);
+    if (JS_IsException(c)) return c;
+    static const char *const f[] = { "namespaceURI", "prefix", "localName", "ownerDocument" };
+    for (int i = 0; i < 4; i++) attr_set(ctx, c, f[i], JS_GetPropertyStr(ctx, attr, f[i]));
+    JS_DefinePropertyValueStr(ctx, c, "__value", JS_GetPropertyStr(ctx, attr, "value"), JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    return c;
+}
 
 /* ---- an element's Attr objects ----
  * One Attr per attribute while it is the element's: the element keeps them,
@@ -4781,6 +4826,10 @@ GCValue js_document_import_node(JSContextHandle ctx, GCValue this_val, int argc,
     GCValue deep_val = JS_NewBool(ctx, deep);
     GCValue clone = js_node_cloneNode_real(ctx, argv[0], 1, &deep_val);
     if (JS_IsException(clone)) return clone;
+    if (is_attr_value(ctx, clone)) {
+        attr_set(ctx, clone, "ownerDocument", this_val);
+        return clone;
+    }
     dom_node_set_owner_document(ctx, clone, this_val);
     /* Imported into the document: its custom elements upgrade now. */
     NodeId cn = dom_node_of(clone);

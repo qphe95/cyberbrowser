@@ -188,9 +188,52 @@ static void rng_set_collapsed(GCValue range, NodeId n, uint32_t o) {
     dom_range_set(range_row(range), n, o, n, o);
 }
 
-/* A node argument: its store node, or a TypeError thrown (0). */
+/* ---- Attr nodes as boundary points ----
+ * An Attr is no store node: a range's point in one is at its stand-in, an
+ * empty fragment of its own (its root, of length 0, as an Attr is), whose
+ * object names the Attr (__cyber_attr) and which the Attr keeps (__a_range).
+ * The range's attributes give the Attr back. */
+
+static bool is_attr_obj(JSContextHandle ctx, GCValue v) {
+    if (!JS_IsObject(v) || dom_node_of(v)) return false;
+    JSAtom a = JS_NewAtom(ctx, "__a_name");
+    int own = JS_GetOwnProperty(ctx, NULL, v, a);
+    JS_FreeAtom(ctx, a);
+    return own > 0;
+}
+
+static NodeId attr_stand_in(JSContextHandle ctx, GCValue attr) {
+    GCValue have = JS_GetPropertyStr(ctx, attr, "__a_range");
+    NodeId n = JS_IsObject(have) ? dom_node_of(have) : DOM_NULL;
+    if (n) return n;
+    GCValue od = JS_GetPropertyStr(ctx, attr, "ownerDocument");
+    n = dom_create_fragment(JS_IsObject(od) ? dom_node_of(od) : DOM_NULL);
+    GCValue w = dom_js(ctx, n);
+    if (!JS_IsObject(w)) return DOM_NULL;
+    JS_DefinePropertyValueStr(ctx, w, "__cyber_attr", attr, JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, attr, "__a_range", w, JS_PROP_CONFIGURABLE);
+    return n;
+}
+
+/* The Attr a node stands in for (undefined: none). */
+static GCValue stand_in_attr(JSContextHandle ctx, NodeId n) {
+    if (dom_kind(n) != DOM_K_FRAGMENT || dom_first_child(n)) return JS_UNDEFINED;
+    GCValue w = dom_js(ctx, n);
+    GCValue a = JS_IsObject(w) ? JS_GetPropertyStr(ctx, w, "__cyber_attr") : JS_UNDEFINED;
+    return JS_IsObject(a) ? a : JS_UNDEFINED;
+}
+
+/* A boundary point's node as script sees it (an Attr for its stand-in). */
+static GCValue point_js(JSContextHandle ctx, NodeId n) {
+    GCValue a = stand_in_attr(ctx, n);
+    return JS_IsUndefined(a) ? dom_js(ctx, n) : a;
+}
+
+/* A node argument: its store node (an Attr's stand-in), or a TypeError
+ * thrown (0). */
 static NodeId node_arg(JSContextHandle ctx, int argc, GCValue *argv, int i, const char *method) {
     NodeId n = argc > i && JS_IsObject(argv[i]) ? dom_node_of(argv[i]) : DOM_NULL;
+    if (!n && argc > i && is_attr_obj(ctx, argv[i])) n = attr_stand_in(ctx, argv[i]);
     if (!n) JS_ThrowTypeError(ctx, "Failed to execute '%s' on 'Range': parameter %d is not of type 'Node'.", method, i + 1);
     return n;
 }
@@ -572,6 +615,8 @@ static GCValue js_range_clone_contents(JSContextHandle ctx, GCValue this_val, in
 static GCValue rng_insert(JSContextHandle ctx, GCValue range, GCValue node) {
     RangeBP s, e;
     if (!rng_get(range, &s, &e)) return JS_ThrowTypeError(ctx, "Illegal invocation");
+    if (is_attr_obj(ctx, node) || !JS_IsUndefined(stand_in_attr(ctx, s.n)))
+        return throw_dom_exception(ctx, "HierarchyRequestError", "An attribute cannot have or be a child.");
     NodeId n = JS_IsObject(node) ? dom_node_of(node) : DOM_NULL;
     if (!n) return JS_ThrowTypeError(ctx, "Failed to execute 'insertNode' on 'Range': parameter 1 is not of type 'Node'.");
     int sk = dom_kind(s.n);
@@ -622,6 +667,8 @@ GCValue js_range_surround_contents(JSContextHandle ctx, GCValue this_val, int ar
     if (!np) return JS_ThrowTypeError(ctx, "Failed to execute 'surroundContents' on 'Range': parameter 1 is not of type 'Node'.");
     RangeBP s, e;
     rng_get_row(r, &s, &e);
+    if (!JS_IsUndefined(stand_in_attr(ctx, s.n)))
+        return throw_dom_exception(ctx, "HierarchyRequestError", "An attribute cannot have a child.");
     /* (a node other than a Text partly in it) */
     NodeId common = s.n;
     while (common && !rng_inclusive_ancestor(common, e.n)) common = dom_parent(common);
@@ -665,15 +712,15 @@ static GCValue js_range_attr(JSContextHandle ctx, GCValue this_val, int argc, GC
     RangeBP s, e;
     rng_get_row(r, &s, &e);
     switch (magic) {
-    case 0: return dom_js(ctx, s.n);
+    case 0: return point_js(ctx, s.n);
     case 1: return JS_NewUint32(ctx, s.o);
-    case 2: return dom_js(ctx, e.n);
+    case 2: return point_js(ctx, e.n);
     case 3: return JS_NewUint32(ctx, e.o);
     case 4: return JS_NewBool(ctx, s.n == e.n && s.o == e.o);
     default: {
         NodeId c = s.n;
         while (c && !rng_inclusive_ancestor(c, e.n)) c = dom_parent(c);
-        return dom_js(ctx, c);
+        return point_js(ctx, c);
     }
     }
 }

@@ -287,6 +287,8 @@ GCValue live_list_static(JSContextHandle ctx, const NodeId *ids, uint32_t n, boo
 GCValue live_list_of_array(JSContextHandle ctx, GCValue arr, bool collection);
 GCValue live_list_of_node(JSContextHandle ctx, GCValue node, int kind);
 void live_list_install(JSContextHandle ctx, GCValue global);
+/* The DOMStringMap interface (dom_string_map.c; element.dataset). */
+void dom_string_map_install(JSContextHandle ctx, GCValue global);
 /* The NamedNodeMap interface (dom_api.c). */
 void named_node_map_install(JSContextHandle ctx, GCValue global);
 /* The window of the index-th child frame of realm ctx's document (frame_api.c); 0 for none. */

@@ -41,5 +41,8 @@ void dom_range_replaced(NodeId node, uint32_t off, uint32_t count, uint32_t len)
  * when it has one) holds the rest; called after the insertion and before
  * node's data is cut. */
 void dom_range_split(NodeId node, uint32_t off, NodeId new_node, NodeId parent, uint32_t index);
+/* normalize() merging Text next (at index in parent) into node, whose data
+ * was len code units: points in next, or at next in parent, move to node. */
+void dom_range_merged(NodeId node, uint32_t len, NodeId next, NodeId parent, uint32_t index);
 
 #endif

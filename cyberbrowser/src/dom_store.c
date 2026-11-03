@@ -507,11 +507,19 @@ const DomAttr *dom_attr_at(NodeId id, int i) {
     return (i >= 0 && i < l->n) ? &l->a[i] : NULL;
 }
 
+/* (an attribute in a namespace is the one asked for only by a prefixed name,
+ * xlink:href say: a namespaced "type" or "style" is no element's type or
+ * style) */
 const char *dom_get_attr(NodeId id, CssAtom name, uint32_t *len) {
     if (!dom_valid(id) || !name) return NULL;
     DomAttrList *l = &g_dom.attrs[dom_slot(id)];
+    int prefixed = -1;
     for (int i = 0; i < l->n; i++)
         if (l->a[i].name == name) {
+            if (l->a[i].ns && l->a[i].ns != DOM_NS_XMLNS) {     /* (xmlns: a declaration, read by name) */
+                if (prefixed < 0) { const char *ns = css_atom_str(name); prefixed = ns && strchr(ns, ':') != NULL; }
+                if (!prefixed) continue;
+            }
             if (len) *len = l->a[i].value.len;
             return l->a[i].value.s ? l->a[i].value.s : "";
         }

@@ -199,6 +199,18 @@ GCValue js_promise_reject(JSContextHandle ctx, GCValue this_val, int argc, GCVal
     return JS_ThrowTypeError(ctx, "not supported");
 }
 
+/* slot.name = v: reflects name="" (through the store: setAttribute would
+ * set the element's name property, this setter, again) */
+static GCValue js_slot_set_name(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    NodeId n = dom_node_of(this_val);
+    if (!n) return JS_ThrowTypeError(ctx, "Illegal invocation");
+    const char *v = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED);
+    if (!v) return JS_EXCEPTION;
+    dom_element_set_attr(ctx, n, "name", v);
+    JS_FreeCString(ctx, v);
+    return JS_UNDEFINED;
+}
+
 /* An interface object that cannot be constructed (new CSSStyleDeclaration()). */
 static GCValue js_illegal_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
@@ -1602,7 +1614,8 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_slot_assigned_elements, "assignedElements", 1));
     GCValue slot_name_getter = JS_NewCFunction(ctx, js_slot_get_name, "get name", 0);
     JSAtom slot_name_atom = JS_NewAtom(ctx, "name");
-    JS_DefinePropertyGetSet(ctx, slot_proto, slot_name_atom, slot_name_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, slot_proto, slot_name_atom, slot_name_getter,
+                            JS_NewCFunction(ctx, js_slot_set_name, "set name", 1), JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, slot_name_atom);
     JS_SetPropertyStr(ctx, slot_ctor, "prototype", slot_proto);
     JS_SetPropertyStr(ctx, global, "HTMLSlotElement", slot_ctor);
