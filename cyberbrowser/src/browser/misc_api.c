@@ -3764,7 +3764,7 @@ double g_performance_time_origin = 0.0;
  * (det_clock.h). */
 #ifdef _MSC_VER
 double performance_get_time_ms(void) {
-    if (det_clock_on()) return page_clock_ms();
+    if (det_clock_on() || page_clock_virtual()) return page_clock_ms();
     LARGE_INTEGER freq, count;
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&count);
@@ -3772,7 +3772,7 @@ double performance_get_time_ms(void) {
 }
 #else
 double performance_get_time_ms(void) {
-    if (det_clock_on()) return page_clock_ms();
+    if (det_clock_on() || page_clock_virtual()) return page_clock_ms();
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;

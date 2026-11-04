@@ -2003,6 +2003,8 @@ static void layout_resolve_insets(LayoutBox *box, double cb_w, double cb_h)
     if (box->s->inset_pct_bits & 8) box->left = box->s->inset_pct[3] * cb_w + box->s->left;
 }
 
+extern volatile int g_layout_zoom_any, g_css_scroll_pseudos;
+
 /* Process-lifetime string interning for values boxes point at (mask
  * images): style application runs on many threads. */
 static const char *layout_intern(const char *s, size_t n)
@@ -4901,7 +4903,8 @@ static char* layout_resolve_url(const char *base_url, const char *href) {
 
 /* Fetched stylesheet texts, by URL, for the life of the process: a layout
  * (hit test, re-render) never re-downloads a sheet. */
-typedef struct UrlSheet { char *url; char *text; size_t len; uint64_t hash; uint64_t id; const char *enc; } UrlSheet;
+typedef struct UrlSheet { char *url; char *text; size_t len; uint64_t hash; uint64_t id; const char *enc;     uint32_t face_gen;  /* font_registry_face_generation it was last scanned in */
+} UrlSheet;
 static uint64_t sheet_hash(const char *s, size_t n);
 #define URL_SHEET_MAX 64
 static UrlSheet g_url_sheets[URL_SHEET_MAX];
@@ -4912,7 +4915,15 @@ static int g_url_sheet_n, g_url_sheet_next;
  * referrer's, when nothing in the response says). */
 static const UrlSheet *url_sheet_get_ex(const char *url, const char *fallback_label) {
     for (int i = 0; i < g_url_sheet_n; i++)
-        if (strcmp(g_url_sheets[i].url, url) == 0) return &g_url_sheets[i];
+        if (strcmp(g_url_sheets[i].url, url) == 0) {
+            UrlSheet *u = &g_url_sheets[i];
+            /* (fetched for an earlier document: its faces are this one's too) */
+            if (u->face_gen != font_registry_face_generation()) {
+                u->face_gen = font_registry_face_generation();
+                font_registry_scan_css(u->text, u->len, url);
+            }
+            return u;
+        }
 
     /* A prefetched download (waiting for it if still in flight), else a
      * download now. */
@@ -4937,6 +4948,7 @@ static const UrlSheet *url_sheet_get_ex(const char *url, const char *fallback_la
         static uint64_t s_fetches;
         u->id = ++s_fetches;
         /* Its @font-face rules, once per fetch (relative to the sheet). */
+        u->face_gen = font_registry_face_generation();
         font_registry_scan_css(u->text, u->len, url);
         out = u;
     } else {
@@ -5836,6 +5848,10 @@ static inline int sc_row_of(const StyleCacheEntry *e) { return e ? (int)(e - g_s
 void css_layout_forget_document(void)
 {
     g_sc.global = 0;
+    /* (what the last document used: the next one pays only for what it does) */
+    g_layout_zoom_any = 0;
+    g_layout_anchor_any = 0;
+    g_css_scroll_pseudos = 0;
 }
 
 static StyleCacheEntry *style_cache_find(NodeId id)

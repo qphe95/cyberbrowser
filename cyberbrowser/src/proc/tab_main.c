@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
+#include <timeapi.h>
 #include <psapi.h>
 
 #include "chan.h"
@@ -97,6 +98,80 @@ static void memory_report(const char *what) {
     fflush(stderr);
 }
 
+/* CYBER_SAMPLE: the main thread's instruction pointer every millisecond, as
+ * offsets into the image; a slow page's most frequent are logged as it ends
+ * (addr2line them: base 0x140000000). */
+enum { SAMPLE_N = 1 << 16 };
+static uint32_t g_sample_rva[SAMPLE_N], g_sample_hits[SAMPLE_N];
+static volatile LONG g_sample_total;
+static HANDLE g_sample_thread;
+
+static DWORD WINAPI sampler_thread(LPVOID unused)
+{
+    (void)unused;
+    uintptr_t base = (uintptr_t)GetModuleHandleW(NULL);
+    /* (the first section, .text, in the image's own headers) */
+    const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)(base + ((const IMAGE_DOS_HEADER *)base)->e_lfanew);
+    uintptr_t text_end = IMAGE_FIRST_SECTION(nt)->VirtualAddress + IMAGE_FIRST_SECTION(nt)->Misc.VirtualSize;
+    HANDLE t = g_sample_thread;
+    timeBeginPeriod(1);
+    for (;;) {
+        Sleep(1);
+        if (SuspendThread(t) == (DWORD)-1) break;
+        CONTEXT c;
+        memset(&c, 0, sizeof c);
+        c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        BOOL ok = GetThreadContext(t, &c);
+        /* (outside the image: a system function; the return address on its stack) */
+        uintptr_t ip = ok ? (uintptr_t)c.Rip : 0;
+        if (ok && (ip < base + 0x1000 || ip >= base + text_end)) {
+            uintptr_t *sp = (uintptr_t *)c.Rsp;
+            ip = 0;
+            for (int k = 0; k < 400; k++) {
+                uintptr_t v = sp[k];
+                if (v >= base + 0x1000 && v < base + text_end) { ip = v; break; }
+            }
+        }
+        ResumeThread(t);
+        if (!ip) continue;
+        uint32_t rva = (uint32_t)(ip - base), h = (rva * 2654435761u) >> 16;
+        for (uint32_t i = 0; i < SAMPLE_N; i++, h = (h + 1) & (SAMPLE_N - 1)) {
+            if (!g_sample_rva[h]) g_sample_rva[h] = rva;
+            if (g_sample_rva[h] == rva) { g_sample_hits[h]++; break; }
+        }
+        InterlockedIncrement(&g_sample_total);
+    }
+    return 0;
+}
+
+static void sampler_start(void)
+{
+    if (!getenv("CYBER_SAMPLE")) return;
+    if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &g_sample_thread, 0, FALSE, DUPLICATE_SAME_ACCESS)) return;
+    CloseHandle(CreateThread(NULL, 0, sampler_thread, NULL, 0, NULL));
+}
+
+static void sampler_report(const char *url)
+{
+    if (!getenv("CYBER_SAMPLE")) return;
+    LONG total = InterlockedExchange(&g_sample_total, 0);
+    if (total > 100) {
+        fprintf(stderr, "[sample] %s %ld:", url, total);
+        for (int shown = 0; shown < 60; shown++) {
+            uint32_t best = 0;
+            int at = -1;
+            for (int k = 0; k < SAMPLE_N; k++) if (g_sample_hits[k] > best) { best = g_sample_hits[k]; at = k; }
+            if (at < 0) break;
+            fprintf(stderr, " %x*%u", g_sample_rva[at], best);
+            g_sample_hits[at] = 0;
+        }
+        fprintf(stderr, "\n");
+        memset(g_sample_hits, 0, sizeof g_sample_hits);
+    } else {
+        InterlockedAdd(&g_sample_total, total);   /* (small pages add up) */
+    }
+}
+
 static void send_state(uint32_t state) {
     TuState s = { state };
     chan_send(&g_chan, TU_STATE, &s, sizeof(s), 1000);
@@ -162,6 +237,8 @@ static void shift_frame(const DisplayList *dl, float dy, uint32_t h) {
  * next goes when it has (GT_FRAME_DONE).  The UI hears the frame's size and
  * scroll position. */
 static void paint(void) {
+    /* (a test run's: nobody watching, and a frame shown waits for the screen) */
+    if (page_clock_virtual()) { g_need_paint = false; return; }
     PageFrame *f = page_frame();
     if (!f->valid) return;
     clamp_scroll();
@@ -572,6 +649,21 @@ static DWORD WINAPI net_receiver(void *arg) {
     return 0;
 }
 
+/* How long the main thread waits for a resource that holds up script (a
+ * stylesheet, say) before going on without it, in ms; 0: as long as it takes.
+ * (What holds it up might be waiting on this very page's script.) */
+static unsigned g_net_main_limit;
+
+static unsigned net_main_limit(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("CYBER_SYNC_NET_LIMIT_MS");
+        v = e ? atoi(e) : 30000;
+    }
+    return (unsigned)v;
+}
+
 /* Send a message that expects a response, and wait for it (malloc'd). */
 static uint8_t *net_call(uint16_t type, uint32_t id, const void *a, uint32_t alen, const void *b, uint32_t blen,
                          const void *c, uint32_t clen, uint32_t *len) {
@@ -589,6 +681,8 @@ static uint8_t *net_call(uint16_t type, uint32_t id, const void *a, uint32_t ale
      * what is there is painted (load_progress), even while a script holds
      * the parser. */
     bool main = GetCurrentThreadId() == g_main_thread;
+    ULONGLONG wait_start = GetTickCount64();
+    unsigned limit = main ? g_net_main_limit : 0;
     EnterCriticalSection(&g_net_lock);
     while (sent && !g_net_broken) {
         Part *parts = p.parts;
@@ -608,6 +702,7 @@ static uint8_t *net_call(uint16_t type, uint32_t id, const void *a, uint32_t ale
             continue;
         }
         if (p.done) break;
+        if (limit && GetTickCount64() - wait_start > limit) break;
         if (main) {
             LeaveCriticalSection(&g_net_lock);
             load_progress();
@@ -665,7 +760,9 @@ static bool net_request(const char *url, const char *method, const char *body, s
                      (uint32_t)nheaders, (uint32_t)body_len, (uint32_t)rc.mode, (uint32_t)ilen };
     uint32_t len = 0;
     ULONGLONG t0 = GetTickCount64();
+    g_net_main_limit = rc.mode == HTTP_MODE_NAVIGATE ? 0 : net_main_limit();
     uint8_t *m = net_call(TN_REQUEST, q.id, &q, sizeof(q), strs, (uint32_t)o, body, (uint32_t)body_len, &len);
+    g_net_main_limit = 0;
     free(strs);
     if (net_log())
         fprintf(stderr, "[net] %llu ms +%llu ms %s %u bytes %s %.120s\n", t0 - g_start_tick, GetTickCount64() - t0,
@@ -1005,6 +1102,7 @@ int main(int argc, char **argv) {
     page_set_frame_image_wait(getenv("CYBER_FRAME_IMAGE_WAIT") != NULL);
     memory_report("engine ready");
     bool reused = false;
+    sampler_start();
 load:
     if (reused) fprintf(stderr, "[tab %u] %s, in the same process\n", g_tab, url);
     page_prepare(url);
@@ -1108,6 +1206,7 @@ load:
                     g_tab, GetTickCount64() - g_start_tick, cpu_t, cpu_p);
             video_started = true;
         }
+        bool virtual_time = page_clock_virtual();
         if (g_need_paint && !g_in_flight && !g_hidden) paint();
         if (!settled && GetTickCount64() - content_at > 3000) {
             page_frame_stats(&frames, &frames_wall, &frames_cpu);
@@ -1128,7 +1227,13 @@ load:
         save_local_storage();
         fflush(stdout);
         fflush(stderr);
-        if (input || t.had_timers || t.had_images || t.new_frame || page_needs_layout()) continue;
+        /* (CYBER_VIRTUAL_TIME: a frame with nothing else going on is an animation
+         * running; its time needn't be waited for either) */
+        /* (virtual time: a turn takes a moment, or a chain of 0 ms timers waiting
+         * for time to pass never would see it) */
+        if (virtual_time && t.had_timers) page_time_advance(1);
+        if (input || t.had_timers || t.had_images) continue;
+        if ((t.new_frame || page_needs_layout()) && !virtual_time) continue;
         /* Idle: a script this page compiled goes into the bytecode cache
          * (one a turn: each is a full compile). */
         if (code_cache_flush(page_engine_context(), 1)) continue;
@@ -1136,10 +1241,31 @@ load:
          * image in flight) a short while. */
         DWORD ms = 50;
         unsigned long long next = timer_next_due_ms(), now = page_time_ms();
+        /* CYBER_VIRTUAL_TIME (a test run's): only a timer left to wait for, and
+         * nothing it could overtake: its time comes now.  Timers, Date,
+         * animations all go by the same clock, so the page sees the wait.
+         * (A frame's worth at most: what a turn looks at by the clock, with no
+         * timer behind it, observers say, gets its turns.) */
+        if (virtual_time && !g_in_flight && !g_need_paint && page_virtual_time_idle() &&
+            !image_cache_has_pending(page_image_cache()) && !page_video_playing()) {
+            if (next != (unsigned long long)-1) {
+                if (next > now) page_time_advance(next - now < 16 ? next - now : 16);
+                continue;
+            }
+            if (t.new_frame || page_needs_layout()) {
+                page_time_advance(16);
+                continue;
+            }
+        }
+        if (t.new_frame || page_needs_layout()) continue;
         if (next != (unsigned long long)-1) ms = next > now ? (DWORD)(next - now < 50 ? next - now : 50) : 0;
         if (js_quickjs_network_pending() > 0 || image_cache_has_pending(page_image_cache())) ms = ms < 5 ? ms : 5;
         if (page_video_playing()) ms = ms < 8 ? ms : 8;         /* (its next frame) */
-        if (ms) wait_input(ms);
+        if (ms) {
+            unsigned long long begun = page_clock_wait_begin();
+            wait_input(ms);
+            page_clock_wait_end(begun);
+        }
     }
 
 next:
@@ -1152,6 +1278,7 @@ next:
         g_next_url[0] = 0;
         url = next_url;
     }
+    sampler_report(url);
     if (!page_engine_reset()) {
         send_state(TAB_LOAD_FAILED);
         return 1;

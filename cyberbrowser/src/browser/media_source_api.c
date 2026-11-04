@@ -1381,6 +1381,10 @@ bool media_refresh_video_frames(ImageCache *cache) {
     return any;
 }
 
+bool media_any_player(void) {
+    return g_nplayers > 0;
+}
+
 bool media_video_playing(void) {
     for (int i = 0; i < g_nplayers; i++) {
         MediaPlayer *p = g_players[i];

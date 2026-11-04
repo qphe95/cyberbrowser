@@ -3237,7 +3237,7 @@ bool js_quickjs_exec_script(JSContextHandle ctx, const char *script, size_t scri
     log_to_file("js_quickjs", "Executing script %d: %zu bytes", i, script_len);
     platform_log(LOG_LEVEL_INFO, "js_quickjs",
         "[EXEC] Executing script %d: %zu bytes", i, script_len);
-    fprintf(stderr, "[js_quickjs] >>> EVAL script %d/%d size=%zu\n",
+    if (!getenv("CYBER_QUIET")) fprintf(stderr, "[js_quickjs] >>> EVAL script %d/%d size=%zu\n",
             i, script_count, script_len);
     fflush(stderr);
 
@@ -3248,6 +3248,9 @@ bool js_quickjs_exec_script(JSContextHandle ctx, const char *script, size_t scri
     clock_gettime(CLOCK_MONOTONIC, &timeout_state.start);
     timeout_state.limit_seconds = 10.0 + (script_len / (1024.0 * 1024.0)) * 4.0;
     if (timeout_state.limit_seconds > 120.0) timeout_state.limit_seconds = 120.0;
+    /* (a test run's: how long a heavy test takes depends on what runs beside it) */
+    const char *script_limit = cyber_getenv("CYBER_SCRIPT_LIMIT_S");
+    if (script_limit) timeout_state.limit_seconds = atof(script_limit);
     JS_SetInterruptHandler(JS_GetRuntime(ctx), js_exec_timeout_handler, &timeout_state);
 
     // Reset diagnostic for property-on-undefined errors
@@ -3307,7 +3310,7 @@ bool js_quickjs_exec_script(JSContextHandle ctx, const char *script, size_t scri
             "[EXEC] Script %d executed successfully", i);
 
     }
-    fprintf(stderr, "[js_quickjs] <<< EVAL script %d/%d result=%s\n",
+    if (!getenv("CYBER_QUIET")) fprintf(stderr, "[js_quickjs] <<< EVAL script %d/%d result=%s\n",
             i, script_count, JS_IsException(result) ? "exception" : "ok");
     fflush(stderr);
 

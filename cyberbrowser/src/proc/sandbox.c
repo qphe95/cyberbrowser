@@ -51,6 +51,9 @@ static PSID profile_sid(const wchar_t *name) {
         if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS))
             hr = DeriveAppContainerSidFromAppContainerName(name, &sid);
         if (SUCCEEDED(hr)) break;
+        /* (denied: it will stay so, or nearly always; a second out of every
+         * start otherwise, wherever profiles can't be made) */
+        if (hr == E_ACCESSDENIED && tries >= 2) break;
         Sleep(20 + 20 * tries);
     }
     if (FAILED(hr)) {

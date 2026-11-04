@@ -388,6 +388,7 @@ typedef struct GNode {
     double rmin, rmax;          /* <type [min,max]> */
     unsigned char has_range;
     int idx;                    /* the node's position among its parent's children */
+    int ti;                     /* G_TYPE: its index in g_types + 1 (-1: none; 0: not looked for) */
     struct GNode **kids;
     int nk;
 } GNode;
@@ -1248,13 +1249,14 @@ static bool match_once(Matcher *m, const GNode *g, int pos, int end, Cont k, voi
             if (b) ok = close_and_continue(m, hit, tok_next(ts, pos), end, k, ud);
             break;
         }
-        int ti = type_index(g->text);
+        if (!g->ti) { int found = type_index(g->text); ((GNode *)g)->ti = found >= 0 ? found + 1 : -1; }
+        int ti = g->ti - 1;
         if (ti >= 0) {
             CloseUd c = { hit, k, ud };
             ok = match_node(m, type_grammar(ti), pos, end, close_cont, &c);
             break;
         }
-        fprintf(stderr, "[css_props] unknown type <%s>\n", g->text);
+        /* (a builtin type, as often as not, that didn't match here) */
         break;
     }
     case G_PROP: {
@@ -3040,7 +3042,9 @@ static char *prop_parse_raw(const CssPropDef *p, const char *value) {
     if (match_value(pi, &ts, &m)) {
         Ser S;
         ser_init(&S, &m);
-        if (getenv("CSS_PROPS_DEBUG"))
+        static int debug = -1;
+        if (debug < 0) debug = getenv("CSS_PROPS_DEBUG") != NULL;
+        if (debug)
             for (int i = 0; i < m.nh; i++)
                 fprintf(stderr, "  hit %d kind %d text %s [%d,%d) parent %d\n", i, m.hits[i].node->kind,
                         m.hits[i].node->text ? m.hits[i].node->text : "-", m.hits[i].start, m.hits[i].end, m.hits[i].parent);

@@ -29,7 +29,9 @@
 #include "js_quickjs.h"
 
 uint64_t dom_change_stamp(void);
-#define CST(...) do { if (getenv("CS_TRACE")) { fprintf(stderr, "[cs] " __VA_ARGS__); fputc('\n', stderr); fflush(stderr); } } while (0)
+/* (read once: a call for every declaration otherwise, and each one walks the environment) */
+static int g_cs_trace = -1;
+#define CST(...) do { if (g_cs_trace < 0) g_cs_trace = getenv("CS_TRACE") != NULL; if (g_cs_trace) { fprintf(stderr, "[cs] " __VA_ARGS__); fputc('\n', stderr); fflush(stderr); } } while (0)
 
 typedef struct Custom { char *name, *value; } Custom;
 
@@ -59,7 +61,7 @@ void computed_style_set_pseudo(ComputedStyle *cs, int ps) {
 
 static void snapshot_clear(ComputedStyle *cs) {
     int n = css_prop_count();
-    for (int i = 0; cs->spec && i < n; i++) { free(cs->spec[i]); free(cs->comp[i]); cs->spec[i] = cs->comp[i] = NULL; }
+    for (int i = 0; cs->spec && i < n; i++) if (cs->spec[i] || cs->comp[i]) { free(cs->spec[i]); free(cs->comp[i]); cs->spec[i] = cs->comp[i] = NULL; }
     for (int i = 0; i < cs->ncustom; i++) { free(cs->custom[i].name); free(cs->custom[i].value); }
     free(cs->custom);
     cs->custom = NULL;
@@ -436,6 +438,22 @@ static char *before_swap(NodeId el, const CssPropDef *p, const char *now)
 }
 
 static int g_in_hook, g_in_calc;
+
+/* A new document: nothing read of the last one's elements counts. */
+void computed_style_reset(void)
+{
+    extern int css_layout_take_restyled(NodeId *out, int cap);
+    extern bool g_css_saw_transition;
+    NodeId none[1];
+    css_layout_take_restyled(none, 0);
+    g_css_saw_transition = false;
+    for (int i = 0; i < BEFORE_N; i++) {
+        free(g_before[i].v);
+        g_before[i].v = NULL;
+        g_before[i].el = 0;
+        g_before[i].p = NULL;
+    }
+}
 
 /* A style pass styled these elements: of what was read of them, what it comes
  * to now, and a transition from what it was (that is when they start). */

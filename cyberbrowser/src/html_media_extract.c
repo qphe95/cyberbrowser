@@ -1209,7 +1209,7 @@ static char *load_parser_script(NodeId node, size_t *out_len) {
             CP_SCOPE_CAT("fetch-external-script", "net");
             ok = dom_fetch_script(url, &buffer, error, sizeof(error));
         }
-        fprintf(stderr, "[html_extract] FETCH external script: %.200s result=%s size=%zu\n",
+        if (!getenv("CYBER_QUIET")) fprintf(stderr, "[html_extract] FETCH external script: %.200s result=%s size=%zu\n",
                 url, ok ? "ok" : "fail", ok ? buffer.size : 0);
         if (!ok || !buffer.data || !buffer.size) {
             LOG_WARN("Failed to fetch script %.200s: %s", url, error);
@@ -1754,7 +1754,7 @@ bool html_page_stream_finish(HtmlPageStream *ps, JsExecResult *out_result) {
         platform_log(LOG_LEVEL_INFO, "frame", "Ran %d frame scripts (%d without an exception) for %s",
                      ps->run, ps->ok, ps->base_url);
     else
-        printf("Ran %d page scripts as the page was parsed (%d without an exception)\n", ps->run, ps->ok);
+        if (!getenv("CYBER_QUIET")) printf("Ran %d page scripts as the page was parsed (%d without an exception)\n", ps->run, ps->ok);
     if (out_result) {
         memset(out_result, 0, sizeof(*out_result));
         out_result->captured_url_count = js_quickjs_get_captured_urls(out_result->captured_urls, JS_MAX_CAPTURED_URLS);

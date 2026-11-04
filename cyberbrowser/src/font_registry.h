@@ -49,6 +49,10 @@ int font_registry_resolve_style(const char *family_list, int weight, bool italic
 /* Register the @font-face rules in `css` (relative URLs against base_url).
  * Duplicates are ignored. */
 void font_registry_scan_css(const char *css, size_t len, const char *base_url);
+/* A new document: the faces declared so far are gone (the files stay loaded). */
+void font_registry_forget_faces(void);
+/* Which forgetting this is: a sheet kept across documents is scanned again in a new one. */
+uint32_t font_registry_face_generation(void);
 
 /* Fetch and decode the web fonts queued by font_registry_resolve (in
  * parallel).  Returns how many became usable. */

@@ -229,6 +229,7 @@ static int upgrade_timeout_handler(JSRuntimeHandle rt, void *opaque) {
     return elapsed > uts->limit ? 1 : 0;
 }
 
+static bool page_quiet(void);
 static bool init_browser_context(void) {
     if (!gc_init()) {
         printf("FATAL: gc_init() failed\n");
@@ -386,7 +387,7 @@ static void page_observe(void *user, const char *data, size_t len) {
 }
 
 static char *fetch_start_page(const char *url, size_t *out_size, HtmlPageStream *page) {
-    printf("Fetching %s ...\n", url);
+    if (!page_quiet()) printf("Fetching %s ...\n", url);
 
     HttpBuffer buffer = {0};
     char error[512] = {0};
@@ -450,7 +451,17 @@ static const char *get_title_text(HtmlDocument *doc) {
     return NULL;
 }
 
+/* CYBER_QUIET: no running commentary (a test run's many pages: each line a
+ * write to a file, thousands a page where a script forces layouts). */
+static bool page_quiet(void)
+{
+    static int q = -1;
+    if (q < 0) q = getenv("CYBER_QUIET") != NULL;
+    return q != 0;
+}
+
 static void print_body_snippet(HtmlDocument *doc) {
+    if (page_quiet()) return;
     HtmlNode *body = html_document_body(doc);
     if (!body) return;
 
@@ -496,6 +507,12 @@ static bool virtual_time_idle(void) {
      * top of each event-loop turn. */
     if (g_loop_images && image_cache_has_work(g_loop_images)) return false;
     return true;
+}
+
+bool page_virtual_time_idle(void) {
+    extern bool media_any_player(void);
+    /* (a media element's data comes on threads of its own, in real time) */
+    return virtual_time_idle() && !media_any_player();
 }
 
 /* CYBER_LOOP_LOG=1: log every real wait of the event loop (what it waits
@@ -583,6 +600,7 @@ static bool pump_event_loop(JSContextHandle ctx, bool wait) {
                 if (wait <= 200 && elapsed + wait <= 3000) {
                     loop_log_wait(js_quickjs_network_pending() > 0 ? "net" :
                                   virtual_time_idle() ? NULL : "sleep", wait);
+                    unsigned long long begun = page_clock_wait_begin();
                     if (js_quickjs_network_pending() > 0)
                         js_quickjs_net_wait((unsigned int)(wait ? wait : 1));
                     else if (virtual_time_idle())
@@ -593,6 +611,7 @@ static bool pump_event_loop(JSContextHandle ctx, bool wait) {
                         image_cache_wait_progress(g_loop_images, (int)(wait ? wait : 1));
                     else
                         platform_sleep_ms((unsigned int)(wait ? wait : 1));
+                    page_clock_wait_end(begun);
                     continue;
                 }
             }
@@ -600,7 +619,9 @@ static bool pump_event_loop(JSContextHandle ctx, bool wait) {
             if (js_quickjs_network_pending() > 0 &&
                 page_time_ms() - pump_start <= 3000) {
                 loop_log_wait("net (no timer)", 50);
+                unsigned long long begun = page_clock_wait_begin();
                 js_quickjs_net_wait(50);
+                page_clock_wait_end(begun);
                 continue;
             }
             break;
@@ -729,7 +750,7 @@ void page_frame_build(PageFrame *f, HtmlDocument *doc, ImageCache *images, int w
         page_frame_free(f);
         memset(&f->layout, 0, sizeof(f->layout));
     }
-    printf("Running CSS layout (%dx%d) ...\n", width, height);
+    if (!page_quiet()) printf("Running CSS layout (%dx%d) ...\n", width, height);
     g_frame_layouts++;
     f->layout.js_ctx = g_ctx;
     f->layout.dump_path = layout_dump_path();
@@ -745,7 +766,7 @@ void page_frame_build(PageFrame *f, HtmlDocument *doc, ImageCache *images, int w
         css_layout_tree_free(&f->layout);
         return;
     }
-    printf("Layout boxes: %d\n", f->layout.tree.count);
+    if (!page_quiet()) printf("Layout boxes: %d\n", f->layout.tree.count);
     display_list_init(&f->dl);
     {
         CP_SCOPE("build-display-list");
@@ -924,7 +945,7 @@ bool page_load(void) {
     /* Phase 3: execute page scripts, drain timers, dispatch lifecycle events,
      * and upgrade any custom elements defined during script execution. */
     {
-        printf("Executing page scripts ...\n");
+        if (!page_quiet()) printf("Executing page scripts ...\n");
         if (!scripts_prepared) prepare_page_scripts();
         JsExecResult js_result;
         bool exec_ok = false;
@@ -936,7 +957,7 @@ bool page_load(void) {
             exec_ok = html_execute_page_scripts(html, &js_result);
         }
         if (exec_ok) {
-            printf("Scripts executed: %d captured URLs\n", js_result.captured_url_count);
+            if (!page_quiet()) printf("Scripts executed: %d captured URLs\n", js_result.captured_url_count);
         } else {
             printf("WARNING: page script execution did not complete successfully\n");
         }
@@ -1027,7 +1048,7 @@ bool page_load(void) {
             else JS_RunGC(JS_GetRuntime(g_ctx));
         }
 
-        printf("Dispatching DOMContentLoaded and load events ...\n");
+        if (!page_quiet()) printf("Dispatching DOMContentLoaded and load events ...\n");
         page_mark("scripts done");
         {
             CP_SCOPE("lifecycle-events");
@@ -1045,7 +1066,7 @@ bool page_load(void) {
         // on the existing server-rendered skeleton.
         {
             CP_SCOPE("upgrade-custom-elements");
-            fprintf(stderr, "[UPGRADE-DOC] invoking customElements.upgrade\n");
+            if (!page_quiet()) fprintf(stderr, "[UPGRADE-DOC] invoking customElements.upgrade\n");
             fflush(stderr);
 
             const char *upgrade_doc_js =
@@ -1075,7 +1096,7 @@ bool page_load(void) {
                     fflush(stderr);
                 }
             }
-            fprintf(stderr, "[UPGRADE-DOC] done\n");
+            if (!page_quiet()) fprintf(stderr, "[UPGRADE-DOC] done\n");
             fflush(stderr);
 
             /* Everything from here to the end of this scope is YouTube-app
@@ -1299,6 +1320,11 @@ bool page_engine_reset(void) {
     media_api_reset();
     anim_api_reset();
     layout_scroll_reset();
+    {
+        extern void computed_style_reset(void);
+        computed_style_reset();
+        font_registry_forget_faces();
+    }
     g_css_render_features = 0;
     css_media_set_color_scheme(NULL);
     g_dom_needs_layout = 0;
@@ -1431,9 +1457,11 @@ void page_turn(bool run_timers, bool wait, int width, int height, PageTurn *out)
         if (new_doc) {
 
             /* Print metadata from the rebuilt native document. */
-            const char *title = get_title_text(g_doc);
-            printf("Title: %s\n", title ? title : "(none)");
-            printf("DOM nodes: %d\n", g_doc->array.count);
+            if (!page_quiet()) {
+                const char *title = get_title_text(g_doc);
+                printf("Title: %s\n", title ? title : "(none)");
+                printf("DOM nodes: %d\n", g_doc->array.count);
+            }
             print_body_snippet(g_doc);
 
             /* CSS is applied by the layout engine (css_layout_run) which
@@ -1578,6 +1606,7 @@ bool page_video_playing(void) {
 
 void page_wait_for_work(unsigned long long quiet_from, unsigned long long quiet_ms) {
     CP_SCOPE("wait-images");
+    unsigned long long begun = page_clock_wait_begin();
     if (js_quickjs_network_pending() > 0) js_quickjs_net_wait(50);
     else if (virtual_time_idle()) {
         /* Nothing in flight: skip ahead to the next timer, or to the end
@@ -1588,4 +1617,5 @@ void page_wait_for_work(unsigned long long quiet_from, unsigned long long quiet_
         if (next != (unsigned long long)-1 && next < target) target = next;
         page_time_advance(target > now ? target - now : 1);
     } else image_cache_wait_progress(g_loop_images, 100);
+    page_clock_wait_end(begun);
 }

@@ -59,7 +59,7 @@ for (let i = 0; i < n; i++) {
         if (js) script += `go ${url.replace(/^http:\/\/[^/]+/, origin)}\nwaitfile ${W}/step-${k}.flag ${+ms + 5000}\n`;
         else script += `go ${url}\nwaitfile ${W}/step-${k}.flag ${ms}\nshotc ${shot}\n`;
     }
-    if (js) script += `go ${origin}/end\nwait 1500\n`;
+    if (js) script += `go ${origin}/end\nwaitfile ${W}/end-${+portArg + i}.flag 2000\n`;
     fs.writeFileSync(path.join(out, `script-${i}.txt`), script + 'quit\n');
     fs.writeFileSync(path.join(out, `pages-${i}.txt`), mine.join('\n') + '\n');
 }

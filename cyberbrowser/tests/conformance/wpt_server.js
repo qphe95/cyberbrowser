@@ -245,6 +245,7 @@ if (fs.existsSync(journalFile)) {
 const NPORTS = Math.max(1, +(process.env.PORTS || 1));
 const pageIndex = new Map(pages.map((p, i) => [p.id, i]));
 const currentOf = {}, ended = new Set();
+const openedAt = {};
 const left = REFTEST ? [] : pages.map((p, i) => i).filter(i => !results[pages[i].id]);
 if (REFTEST) {
     const todo = steps.filter(st => !fs.existsSync(st.shot));
@@ -375,13 +376,17 @@ const server = http.createServer((req, res) => {
         if (current >= 0 && current !== i && !results[pages[current].id])
             record({ page: pages[current].id, status: 'crash', pass: 0, fail: 0, skip: 0 });
         currentOf[lport] = i;
+        openedAt[lport] = Date.now();
     };
     if (url.pathname === '/end') {
         opened(-1);
         ended.add(lport);
         res.writeHead(200, { 'content-type': 'text/html' });
         res.end('<p>done</p>');
-        if (ended.size >= NPORTS) setTimeout(() => { save(); process.exit(0); }, 1000);
+        /* (saved first: the flag lets this browser quit, and then the run ends) */
+        if (ended.size >= NPORTS) save();
+        fs.writeFileSync(path.join(out, `end-${lport}.flag`), 'end');
+        if (ended.size >= NPORTS) setTimeout(() => process.exit(0), 50);
         return;
     }
     const id = (url.pathname + url.search).slice(1);
@@ -395,6 +400,8 @@ const server = http.createServer((req, res) => {
                 const r = JSON.parse(body);
                 const cur = currentOf[lport] === undefined ? -1 : currentOf[lport];
                 if (cur >= 0 && r.page === pages[cur].id && !results[r.page]) {
+                    /* (real time: the page's clock skips what it only waits for) */
+                    if (openedAt[lport]) r.ms = Date.now() - openedAt[lport];
                     record(r);
                     fs.writeFileSync(path.join(out, `step-${cur + 1}.flag`), r.status);
                 }

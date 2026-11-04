@@ -47485,6 +47485,7 @@ typedef struct LazyUnit {
     _Atomic uint32_t state;
     _Atomic int refs;
     struct LazyUnit *next_dead;
+    struct LazyUnit *all_prev, *all_next;   /* every unit (lazy_units_free_all) */
     uint64_t t_start, compile_ns;   /* stats: when a worker started it, how long it took */
     uint64_t t_queued;              /* stats: when it was queued */
     uint8_t from_body;              /* stats: spawned by a body's instantiation (not a script) */
@@ -47606,11 +47607,34 @@ static void lazy_unit_out_free(LazyUnit *u)
     u->out = NULL;
 }
 
+/* Every unit there is.  A unit belongs to its stub, whose finalizer never runs
+ * when the heap is wiped whole (a new page in this process): those go here. */
+static LazyUnit *g_lu_all;
+static pthread_mutex_t g_lu_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static void lazy_unit_register(LazyUnit *u)
+{
+    pthread_mutex_lock(&g_lu_mu);
+    u->all_next = g_lu_all;
+    if (g_lu_all)
+        g_lu_all->all_prev = u;
+    g_lu_all = u;
+    pthread_mutex_unlock(&g_lu_mu);
+}
+
 /* On the JS thread. */
 static void lazy_unit_free(LazyUnit *u)
 {
     if (!u)
         return;
+    pthread_mutex_lock(&g_lu_mu);
+    if (u->all_prev)
+        u->all_prev->all_next = u->all_next;
+    else if (g_lu_all == u)
+        g_lu_all = u->all_next;
+    if (u->all_next)
+        u->all_next->all_prev = u->all_prev;
+    pthread_mutex_unlock(&g_lu_mu);
     lazy_unit_out_free(u);
     cenv_free(&u->env);
     js_plain_free(u->cvs);
@@ -47676,6 +47700,7 @@ static LazyUnit *lazy_unit_new(JSContextHandle ctx, JSFunctionBytecodeHandle stu
     u = (LazyUnit *)js_plain_calloc(1, sizeof(LazyUnit));
     if (!u)
         return NULL;
+    lazy_unit_register(u);
     atomic_init(&u->refs, 1);
     atomic_init(&u->state, LU_IDLE);
     cenv_init_stencil(&u->env);
@@ -48071,10 +48096,30 @@ static int lq_threads(void)
  * ones and forget the rest (they belong to the runtime's heap). */
 static void g_ss_quiesce(void);
 
+/* The heap goes next and with it every stub: all the units, workers stopped.
+ * (Each held while the definitions they keep are freed, as those can hold others.) */
+static void lazy_units_free_all(void)
+{
+    LazyUnit *u;
+    if (!g_free_rt_before_wipe)
+        return;
+    for (u = g_lu_all; u; u = u->all_next)
+        atomic_fetch_add_explicit(&u->refs, 1, memory_order_relaxed);
+    for (u = g_lu_all; u; u = u->all_next)
+        lazy_unit_out_free(u);
+    while (g_lu_all) {
+        u = g_lu_all;
+        u->src = GC_HANDLE_NULL;
+        lazy_unit_free(u);
+    }
+}
+
 static void lazy_units_quiesce(void)
 {
-    if (g_lq_nthreads <= 0)
+    if (g_lq_nthreads <= 0) {
+        lazy_units_free_all();
         return;
+    }
     atomic_store_explicit(&g_lq_paused, 1, memory_order_seq_cst);
     for (;;) {
         uint32_t n = atomic_load_explicit(&g_lq_running, memory_order_seq_cst);
@@ -48097,6 +48142,7 @@ static void lazy_units_quiesce(void)
         gc_os_wait((volatile uint32_t *)&g_lq_running, n, 10);
     }
     atomic_store_explicit(&g_lazy_dead, NULL, memory_order_release);
+    lazy_units_free_all();
     g_ss_quiesce();
     {
         int i;
@@ -48396,6 +48442,7 @@ static LazyUnit *lazy_unit_from_fd(ScriptStencil *ss, JSFunctionDef *fd)
     int i;
     if (!u)
         return NULL;
+    lazy_unit_register(u);
     atomic_init(&u->refs, 1);
     atomic_init(&u->state, LU_IDLE);
     cenv_init_stencil(&u->env);

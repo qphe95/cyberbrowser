@@ -31,6 +31,15 @@ extern uint64_t g_det_calls;
 extern "C" {
 #endif
 
+/* CYBER_VIRTUAL_TIME=1 (a test run's): the page's clock moves only when told,
+ * not with the work the page does, so how busy the machine is makes no
+ * difference to what a page sees.  An idle wait is skipped (the event loop
+ * moves the clock to the next timer, a frame at a time); a wait for something
+ * real, a response or a media element's data, passes as long as it took. */
+bool page_clock_virtual(void);
+/* Around a real wait: its time passes on a virtual clock (nothing otherwise). */
+unsigned long long page_clock_wait_begin(void);
+void page_clock_wait_end(unsigned long long begun);
 /* CYBER_DET_TIME is set (read once). */
 bool det_clock_on(void);
 /* The thread calling this is the one whose reads advance the clock (the

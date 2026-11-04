@@ -112,6 +112,8 @@ void page_set_rendering(bool on);
 /* Ready the engine for another document in this process (after
  * page_engine_init and a page_load): page_prepare and page_load follow. */
 bool page_engine_reset(void);
+/* Nothing in flight that time passing would overtake (so an idle wait can be skipped). */
+bool page_virtual_time_idle(void);
 /* Changes with every DOM mutation. */
 uint64_t page_dom_version(void);
 /* On (the default): building a frame waits (up to 1.5 s) for the images it

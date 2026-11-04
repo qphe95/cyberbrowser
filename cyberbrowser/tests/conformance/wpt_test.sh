@@ -22,12 +22,20 @@ dir=$(cd "$(dirname "$0")" && pwd)
 # A page of the site a tab is on loads in its process (CYBER_TAB_REUSE=0:
 # a process each, as the browser's default).
 export CYBER_TAB_REUSE=${CYBER_TAB_REUSE-1}
+# (no running commentary in the tab logs: thousands of lines a page otherwise)
+export CYBER_QUIET=${CYBER_QUIET-1}
+# (a heavy page's script isn't cut off for what the other browsers are doing)
+export CYBER_SCRIPT_LIMIT_S=${CYBER_SCRIPT_LIMIT_S-30}
+# (a page only waiting for a timer doesn't wait: it and its clock skip ahead)
+[ -z "$REFTEST" ] && export CYBER_VIRTUAL_TIME=${CYBER_VIRTUAL_TIME-1}
+# (a resource holding up script gives way: render-blocking tests hold one until script says)
+export CYBER_SYNC_NET_LIMIT_MS=${CYBER_SYNC_NET_LIMIT_MS-2000}
 # (window.open with a URL: a browser would block it without a user gesture)
 export CYBER_ALLOW_POPUPS=1
 [ "$CYBER_TAB_REUSE" = 0 ] && unset CYBER_TAB_REUSE
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
-rm -f "$out"/step-*.flag "$out"/pages.txt
+rm -f "$out"/step-*.flag "$out"/end-*.flag "$out"/pages.txt
 
 # (each phase's time, printed at the end)
 t0=$EPOCHREALTIME; times=
@@ -62,7 +70,7 @@ script() {   # <pages file>: the UI script for its pages
             echo "waitfile $W/step-$k.flag $((ms + 5000))"
         fi
     done < "$1"
-    [ -z "$REFTEST" ] && echo "go http://127.0.0.1:$P/end" && echo "wait 2000"
+    [ -z "$REFTEST" ] && echo "go http://127.0.0.1:$P/end" && echo "waitfile $W/end-$P.flag 2000"
     echo "quit"
 }
 mkdir -p "$out/logs"

@@ -828,7 +828,12 @@ static void add_face_rule(const char *body, const char *end, const char *base)
     char *src = NULL;
     const char *p = body;
     while (p < end) {
-        while (p < end && (isspace((unsigned char)*p) || *p == ';')) p++;
+        for (;;) {
+            while (p < end && (isspace((unsigned char)*p) || *p == ';')) p++;
+            if (end - p < 2 || p[0] != '/' || p[1] != '*') break;
+            for (p += 2; p < end && !(p[0] == '*' && p + 1 < end && p[1] == '/'); p++) {}
+            p = p + 2 < end ? p + 2 : end;
+        }
         const char *ns = p;
         while (p < end && *p != ':' && *p != ';') p++;
         if (p >= end || *p != ':') break;
@@ -943,6 +948,49 @@ static void add_face_rule(const char *body, const char *end, const char *base)
     free(url);
 }
 
+/* Sheets scanned already (font_registry_scan_css). */
+static uint64_t g_scan_seen[1024];
+static int g_scan_nseen;
+static uint32_t g_face_generation;
+
+uint32_t font_registry_face_generation(void) { return g_face_generation; }
+
+void font_registry_forget_faces(void)
+{
+    pthread_mutex_lock(&g_mu);
+    int n = 0;
+    for (int i = 0; i < g_nweb; i++) {
+        WebFace *w = &g_web[i];
+        bool keep = w->state == WEB_READY;
+        for (int j = 0; keep && j < n; j++) {
+            if (strcmp(g_web[j].url, w->url) != 0) continue;
+            /* (the same file: its instances, whichever face asked for them) */
+            if (w->ninst > g_web[j].ninst) {
+                memcpy(g_web[j].inst, w->inst, sizeof(w->inst));
+                g_web[j].ninst = w->ninst;
+            }
+            keep = false;
+        }
+        free(w->ranges);
+        w->ranges = NULL;
+        w->nranges = 0;
+        if (!keep) {
+            free(w->url);
+            /* (a shaper of a variable font's file lives on, with it) */
+            if (w->state != WEB_READY) free(w->var_sfnt);
+            continue;
+        }
+        /* (no family: no page finds it; its file is there for the next that asks) */
+        w->family[0] = 0;
+        g_web[n++] = *w;
+    }
+    g_nweb = n;
+    g_scan_nseen = 0;
+    g_face_generation++;
+    cache_clear_locked();
+    pthread_mutex_unlock(&g_mu);
+}
+
 void font_registry_scan_css(const char *css, size_t len, const char *base_url)
 {
     if (!css || len < 10) return;
@@ -957,13 +1005,11 @@ void font_registry_scan_css(const char *css, size_t len, const char *base_url)
             key *= 1099511628211ull;
         }
         for (const char *b = base_url ? base_url : ""; *b; b++) { key ^= (unsigned char)*b; key *= 1099511628211ull; }
-        static uint64_t seen[1024];
-        static int nseen;
         pthread_mutex_lock(&g_mu);
-        for (int k = 0; k < nseen; k++) {
-            if (seen[k] == key) { pthread_mutex_unlock(&g_mu); return; }
+        for (int k = 0; k < g_scan_nseen; k++) {
+            if (g_scan_seen[k] == key) { pthread_mutex_unlock(&g_mu); return; }
         }
-        seen[nseen < 1024 ? nseen++ : (int)(key % 1024)] = key;
+        g_scan_seen[g_scan_nseen < 1024 ? g_scan_nseen++ : (int)(key % 1024)] = key;
         pthread_mutex_unlock(&g_mu);
     }
     const char *end = css + len;
@@ -1066,8 +1112,12 @@ int font_registry_load_pending(void)
         if (g_web[i].state != WEB_QUEUED) continue;
         /* (a file already here: the same shaper; slots run out, and go by file) */
         for (int j = 0; j < g_nweb; j++) {
-            if (j == i || g_web[j].state != WEB_READY || g_web[j].var_sfnt || strcmp(g_web[j].url, g_web[i].url)) continue;
+            if (j == i || g_web[j].state != WEB_READY || strcmp(g_web[j].url, g_web[i].url)) continue;
             g_web[i].slot = g_web[j].slot;
+            g_web[i].var_sfnt = g_web[j].var_sfnt;
+            g_web[i].var_len = g_web[j].var_len;
+            memcpy(g_web[i].inst, g_web[j].inst, sizeof(g_web[i].inst));
+            g_web[i].ninst = g_web[j].ninst;
             g_web[i].state = WEB_READY;
             shared++;
             break;
