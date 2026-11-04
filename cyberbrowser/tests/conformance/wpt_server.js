@@ -304,15 +304,28 @@ const REPORT = `(function () {
 
 /* {{...}} in .sub. files, for the one host and port there is. */
 const stalledResumes = new Set();
+const echoHeaders = new Map();
+const renderBlockKeys = new Set();
 const dispatcherQueues = new Map();
+const REMOTE_PORT_OFFSET = 200;
 function substitute(s, url) {
     const port = url.port, origin = url.origin;
-    /* (get-host-info's REMOTE_HOST is www1.<host>: no name for an address) */
-    s = s.replace(/'www1\.' \+ ORIGINAL_HOST/g, 'ORIGINAL_HOST');
+    /* (a page on the second origin's port: the first is the one below it) */
+    const base = +port >= +process.argv[3] + REMOTE_PORT_OFFSET ? +port - REMOTE_PORT_OFFSET : +port;
+    /* (get-host-info's REMOTE_HOST is www1.<host>: no name for an address.
+     * Its origin is this host on a second port; no TLS here, so https is http) */
+    if (/function get_host_info/.test(s)) {
+        s = s.replace(/'www1\.' \+ ORIGINAL_HOST/g, 'ORIGINAL_HOST')
+             .replace(/'https:\/\/(foo:bar@)?' \+/g, "'http://$1' +")
+             .replace(/(\+ (?:REMOTE_HOST|NOTSAMESITE_HOST|OTHER_NOTSAMESITE_HOST|OTHER_HOST) \+ )[A-Z_]*PORT[A-Z_0-9]*ELIDED/g, "$1':" + (base + REMOTE_PORT_OFFSET) + "'");
+    } else {
+        s = s.replace(/'www1\.' \+ ORIGINAL_HOST/g, 'ORIGINAL_HOST');
+    }
     return s.replace(/\{\{([^}]*)\}\}/g, (all, expr) => {
         expr = expr.trim();
         if (/^host$|^domains\[[^\]]*\]$|^hosts\[[^\]]*\]\[[^\]]*\]$/.test(expr)) return '127.0.0.1';
-        if (/^ports\[[^\]]*\]\[\d+\]$/.test(expr)) return port;
+        if (/^ports\[[^\]]*\]\[0\]$/.test(expr)) return String(base);
+        if (/^ports\[[^\]]*\]\[\d+\]$/.test(expr)) return String(base + REMOTE_PORT_OFFSET);
         if (expr === 'location[host]') return '127.0.0.1:' + port;
         if (expr === 'location[hostname]') return '127.0.0.1';
         if (expr === 'location[port]') return port;
@@ -353,8 +366,9 @@ const PY = {
 
 const server = http.createServer((req, res) => {
     if (process.env.TRACE) console.log(req.method + ' ' + req.url);
-    const lport = req.socket.localPort;
-    const url = new URL(req.url, 'http://127.0.0.1:' + lport);
+    /* (a page on a port's second origin is that port's browser's) */
+    const sock = req.socket.localPort, lport = sock >= +port + REMOTE_PORT_OFFSET ? sock - REMOTE_PORT_OFFSET : sock;
+    const url = new URL(req.url, 'http://127.0.0.1:' + sock);
     const current = currentOf[lport] === undefined ? -1 : currentOf[lport];
     /* Page i is opened: the one before it is done, answered or not. */
     const opened = i => {
@@ -438,6 +452,50 @@ const server = http.createServer((req, res) => {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
         return res.end('<!DOCTYPE html><html><head></head><body>' + (REFTEST ? REFREADY : '') + '</body></html>');
     }
+    /* (remote-context-helper's window: its scripts, then its executor) */
+    if (url.pathname === '/html/browsers/browsing-the-web/remote-context-helper/resources/executor-window.py') {
+        const q = url.searchParams, esc = v => String(v).replace(/&/g, '&amp;').replace(/'/g, '&#x27;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const scripts = q.getAll('script').map(v => "<script src='" + esc(v) + "'></script>").join('\n');
+        const startOn = q.get('startOn');
+        const heads = Object.entries(req.headers).map(([k, v]) => 'window.__requestHeaders.append(' + JSON.stringify(k) + ', ' + JSON.stringify(String(v)) + ');').join('\n');
+        const href = 'http://' + req.headers.host + req.url;
+        res.writeHead(+(q.get('status') || 200), { 'content-type': 'text/html' });
+        return res.end('<!DOCTYPE HTML>\n<base href="' + esc(href) + '">\n<script src="/common/dispatcher/dispatcher.js"></script>\n' +
+            '<script src="./executor-common.js"></script>\n<script src="./executor-window.js"></script>\n' + scripts + '\n<body>\n<script>\n' +
+            'window.__requestHeaders = new Headers();\n' + heads + '\nrequestExecutor("' + q.get('uuid') + '", ' + (startOn ? "'" + startOn + "'" : 'null') + ');\n</script>\n');
+    }
+    /* (a GET that waits for the POST with its key) */
+    if (url.pathname.endsWith('/resources/render-blocking-stylesheet.py')) {
+        const key = url.searchParams.get('key');
+        if (req.method === 'POST') {
+            renderBlockKeys.add(key);
+            res.writeHead(200, { 'content-type': 'text/plain' });
+            return res.end('done');
+        }
+        const check = () => {
+            if (!renderBlockKeys.delete(key)) return void setTimeout(check, 50);
+            res.writeHead(200, { 'content-type': 'text/css' });
+            res.end('');
+        };
+        return check();
+    }
+    /* (css/fetching: what a request's headers were, by token) */
+    if (url.pathname === '/css/fetching/support/echo-headers.py') {
+        const token = url.searchParams.get('token'), location = url.searchParams.get('location');
+        const store = echoHeaders.get(token) || {};
+        if (location === 'echo') {
+            res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+            return res.end(JSON.stringify(store));
+        }
+        store[location] = req.headers;
+        echoHeaders.set(token, store);
+        res.writeHead(302, { location, 'cache-control': 'no-store' });
+        return res.end();
+    }
+    if (url.pathname === '/css/fetching/support/echo-css.py') {
+        res.writeHead(200, { 'content-type': 'text/css' });
+        return res.end(url.searchParams.get('content') || '');
+    }
     if (url.pathname === '/common/redirect.py') {
         res.writeHead(+(url.searchParams.get('status') || 302), { location: url.searchParams.get('location') });
         return res.end();
@@ -516,4 +574,6 @@ const server = http.createServer((req, res) => {
 for (let i = 0; i < NPORTS; i++) {
     const s = i === 0 ? server : http.createServer(server.listeners('request')[0]);
     s.listen(+port + i, '127.0.0.1');
+    /* (each port's second origin) */
+    http.createServer(server.listeners('request')[0]).listen(+port + i + REMOTE_PORT_OFFSET, '127.0.0.1');
 }

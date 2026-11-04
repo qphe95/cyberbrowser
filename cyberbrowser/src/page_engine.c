@@ -318,7 +318,7 @@ static void finish_browser_context(void) {
  * (The URL goes in as a string value, never as script text.) */
 static void reflect_location(const char *url) {
     static const char js[] =
-        "if (window.location) { window.location.href = globalThis.__cyber_doc_url; "
+        "if (window.location) { window.__cyberLocationInit = true; window.location.href = globalThis.__cyber_doc_url; window.__cyberLocationInit = false; "
         "if (document) { document.domain = window.location.hostname; "
         "document.baseURI = window.location.href; } } "
         "delete globalThis.__cyber_doc_url;";
@@ -1031,7 +1031,9 @@ bool page_load(void) {
         page_mark("scripts done");
         {
             CP_SCOPE("lifecycle-events");
-            dispatch_page_lifecycle_events(g_ctx);
+            /* (a script sent the page elsewhere as it loaded: its load won't come) */
+            extern bool frame_api_nav_pending(void);
+            if (!frame_api_nav_pending()) dispatch_page_lifecycle_events(g_ctx);
         }
         {
             CP_SCOPE("pump-after-lifecycle");

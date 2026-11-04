@@ -984,7 +984,50 @@
     /* ---- View transitions: the API and its promises; nothing is captured
      * or animated, the update simply happens ---- */
     function ViewTransition() { throw new TypeError('Illegal constructor'); }
-    var newViewTransition = function (update, types) {
+    /* What runs on each pseudo-element of a transition (the user agent's sheet,
+     * then the page's rules): animationstart on the root for each.  Nothing is
+     * captured or drawn. */
+    var viewTransitionEvents = function (doc) {
+        var root = doc.documentElement, names = [], seen = {};
+        if (!root || !global.AnimationEvent) return;
+        var all = doc.querySelectorAll('*');
+        for (var i = 0; i < all.length; i++) {
+            var n = global.getComputedStyle(all[i]).viewTransitionName;
+            if (all[i] === root && (!n || n === 'auto')) n = 'root';
+            if (n && n !== 'none' && n !== 'auto' && !seen[n]) { seen[n] = true; names.push(n); }
+        }
+        if (!names.length) return;
+        var rules = [];
+        var walk = function (list) {
+            for (var i = 0; i < list.length; i++) {
+                var r = list[i];
+                if (r.selectorText) {
+                    var m = /::view-transition-(group|image-pair|old|new)\(([^)]*)\)/.exec(r.selectorText);
+                    if (m && r.style.animationName) rules.push({ kind: m[1], name: m[2].trim(), anim: r.style.animationName });
+                } else if (r.cssRules) walk(r.cssRules);
+            }
+        };
+        for (var s = 0; s < doc.styleSheets.length; s++) {
+            try { walk(doc.styleSheets[s].cssRules); } catch (e) { /* (cross-origin) */ }
+        }
+        var ua = { group: function (n) { return ['-ua-view-transition-group-anim-' + n]; }, 'image-pair': function () { return []; },
+                   old: function () { return ['-ua-view-transition-fade-out', '-ua-mix-blend-mode-plus-lighter']; },
+                   new: function () { return ['-ua-view-transition-fade-in', '-ua-mix-blend-mode-plus-lighter']; } };
+        names.forEach(function (name) {
+            ['group', 'image-pair', 'old', 'new'].forEach(function (kind) {
+                var anims = ua[kind](name);
+                rules.forEach(function (r) {
+                    if (r.kind === kind && (r.name === '*' || r.name === name))
+                        anims = r.anim === 'none' ? [] : r.anim.split(',').map(function (x) { return x.trim(); });
+                });
+                anims.forEach(function (a) {
+                    root.dispatchEvent(new global.AnimationEvent('animationstart', { bubbles: true, animationName: a, elapsedTime: 0,
+                        pseudoElement: '::view-transition-' + kind + '(' + name + ')' }));
+                });
+            });
+        });
+    };
+    var newViewTransition = function (update, types, doc) {
         var vt = Object.create(ViewTransition.prototype), resolveReady, rejectReady, resolveFinished, rejectFinished,
             resolveDone, rejectDone, skipped = false, timedOut = false;
         var ready = new Promise(function (a, b) { resolveReady = a; rejectReady = b; });
@@ -1001,7 +1044,10 @@
             if (timedOut) return;
             resolveDone(v);
             if (skipped) rejectReady(new global.DOMException('Transition was skipped', 'AbortError'));
-            else resolveReady();
+            else {
+                resolveReady();
+                if (doc) global.setTimeout(function () { if (!skipped) viewTransitionEvents(doc); }, 0);
+            }
             resolveFinished();
         }, function (reason) {
             global.clearTimeout(timer);
@@ -1026,7 +1072,7 @@
                 var update = typeof arg === 'function' ? arg : arg && arg.update, types = arg && typeof arg === 'object' ? arg.types : null;
                 /* (a new one skips the one running) */
                 if (this.__cyberViewTransition) this.__cyberViewTransition.skipTransition();
-                var vt = newViewTransition(function () { return update ? update() : undefined; }, types);
+                var vt = newViewTransition(function () { return update ? update() : undefined; }, types, this);
                 Object.defineProperty(this, '__cyberViewTransition', { value: vt, configurable: true, writable: true });
                 return vt;
             } });
@@ -1063,10 +1109,11 @@
     if (global.Event && global.addEventListener) {
         var PageSwapEvent = pageTransitionEvent('PageSwapEvent'), PageRevealEvent = pageTransitionEvent('PageRevealEvent');
         var nothing = function () {};
-        Object.defineProperty(global, '__cyberPageSwap', { configurable: true, value: function (url, same) {
+        Object.defineProperty(global, '__cyberPageSwap', { configurable: true, value: function (url, same, how) {
             var rule = viewTransitionRule();
             var vt = same && rule && rule.navigation === 'auto' ? newViewTransition(nothing, rule.types) : null;
-            var activation = { entry: { url: url }, from: { url: global.location.href }, navigationType: 'replace' };
+            var activation = { entry: { url: url }, from: { url: global.location.href }, navigationType: how || 'replace' };
+            global.__cyberOutboundVT = vt;
             global.__cyberDispatchTrusted(global, new PageSwapEvent('pageswap', { viewTransition: vt, activation: activation }));
             return !!vt && !vt.__skipped;
         } });
@@ -1093,6 +1140,15 @@
         Object.defineProperty(DETP, 'open', { configurable: true, enumerable: true,
             get: function () { return this.hasAttributeNS(null, 'open'); },
             set: function (v) { if (v) this.setAttribute('open', ''); else this.removeAttribute('open'); } });
+
+    /* (window.location and document.location: [PutForwards=href]) */
+    var LOCATION = global.location;
+    if (LOCATION && typeof LOCATION === 'object') {
+        var locationAccessor = { configurable: true, enumerable: true, get: function () { return LOCATION; },
+                                 set: function (v) { LOCATION.href = String(v); } };
+        Object.defineProperty(global, 'location', locationAccessor);
+        if (global.document) { try { Object.defineProperty(global.document, 'location', locationAccessor); } catch (e) { /* (fixed) */ } }
+    }
 
     /* ---- scrolling (CSSOM View), over scrollTop and scrollLeft ---- */
     /* (smooth scrolling is an instant one) */
@@ -1146,8 +1202,15 @@
         if (lo < vlo || hi > vhi) return hi - lo > vhi - vlo === (lo < vlo) ? hi - vhi : lo - vlo;
         return 0;
     }
-    function scrollIntoViewOf(el, block, inline) {
+    /* (inner: where in el, a frame, what is scrolled to is) */
+    function scrollIntoViewOf(el, block, inline, inner) {
         var d = el.ownerDocument, root = d.documentElement;
+        var rectOf = function () {
+            var r = el.getBoundingClientRect();
+            if (!inner) return r;
+            var left = r.left + el.clientLeft + inner.left, top = r.top + el.clientTop + inner.top;
+            return { left: left, top: top, right: left + inner.right - inner.left, bottom: top + inner.bottom - inner.top };
+        };
         /* (a skipped box a descendant is scrolled to shows it, whatever it does then) */
         var marked = global.__cyberRenderElements(7);
         for (var mi = 0; mi < marked.length; mi++)
@@ -1157,17 +1220,21 @@
             if (a.scrollHeight <= a.clientHeight && a.scrollWidth <= a.clientWidth) continue;
             /* (overflow: clip and visible: no scrolling box) */
             if (!isScrollBox(global.getComputedStyle(a))) continue;
-            var r = el.getBoundingClientRect(), b = a.getBoundingClientRect();
+            var r = rectOf(), b = a.getBoundingClientRect();
             var l = b.left + a.clientLeft, t = b.top + a.clientTop;
             a.scrollLeft += scrollAlign(inline, r.left, r.right, l, l + a.clientWidth);
             a.scrollTop += scrollAlign(block, r.top, r.bottom, t, t + a.clientHeight);
         }
         var se = d.scrollingElement;
         if (!se) return;
-        var v = el.getBoundingClientRect();
+        var v = rectOf();
         se.scrollLeft += scrollAlign(inline, v.left, v.right, 0, global.innerWidth);
         se.scrollTop += scrollAlign(block, v.top, v.bottom, 0, global.innerHeight);
+        /* (the parent's too, if this window may reach it) */
+        var fe = global.frameElement, view = fe && fe.ownerDocument && fe.ownerDocument.defaultView;
+        if (view && view.__cyberScrollIntoView) view.__cyberScrollIntoView(fe, block, inline, rectOf());
     }
+    Object.defineProperty(global, '__cyberScrollIntoView', { configurable: true, value: scrollIntoViewOf });
     if (ELP) {
         Object.defineProperty(ELP, 'scrollIntoView', { configurable: true, enumerable: true, writable: true, value: function () {
             var arg = arguments[0], block = 'start', inline = 'nearest', LOGICAL = ['start', 'center', 'end', 'nearest'];
@@ -1443,9 +1510,120 @@
         throw new SyntaxError("The mark '" + m + "' does not exist.");
     }
 
+    /* Observers (Performance Timeline 2): each with what it has queued. */
+    /* (this realm's start: the process has served other pages) */
+    var observers = [], resources = [], resourcesSeen = global.__cyberResourceEntries ? global.__cyberResourceEntries() : 0;
+    function queueFor(o) {
+        if (o.scheduled) return;
+        o.scheduled = true;
+        global.setTimeout(function () {
+            o.scheduled = false;
+            if (!o.queue.length || !o.active) return;
+            var list = new PerformanceObserverEntryList(o.queue);
+            o.queue = [];
+            o.callback.call(o.self, list, o.self, { droppedEntriesCount: 0 });
+        }, 0);
+    }
+    function deliver(e) {
+        for (var i = 0; i < observers.length; i++) {
+            var o = observers[i];
+            if (o.active && o.types.indexOf(e.entryType) >= 0) { o.queue.push(e); queueFor(o); }
+        }
+    }
+    function PerformanceResourceTiming() { illegal(); }
+    PerformanceResourceTiming.prototype = Object.create(PerformanceEntry.prototype, { constructor: { value: PerformanceResourceTiming, writable: true, configurable: true } });
+    ['fetchStart', 'requestStart', 'responseStart', 'domainLookupStart', 'domainLookupEnd', 'connectStart', 'connectEnd', 'redirectStart', 'redirectEnd', 'secureConnectionStart', 'workerStart'].forEach(function (k, i) {
+        Object.defineProperty(PerformanceResourceTiming.prototype, k, { configurable: true, enumerable: true, get: function () {
+            return i < 3 ? this._d.startTime : 0; } });
+    });
+    Object.defineProperty(PerformanceResourceTiming.prototype, 'responseEnd', { configurable: true, enumerable: true, get: function () { return this._d.startTime + this._d.duration; } });
+    Object.defineProperty(PerformanceResourceTiming.prototype, 'initiatorType', { configurable: true, enumerable: true, get: function () { return 'other'; } });
+    Object.defineProperty(PerformanceResourceTiming.prototype, 'nextHopProtocol', { configurable: true, enumerable: true, get: function () { return 'http/1.1'; } });
+    ['transferSize', 'encodedBodySize', 'decodedBodySize'].forEach(function (k) {
+        Object.defineProperty(PerformanceResourceTiming.prototype, k, { configurable: true, enumerable: true, get: function () { return 0; } });
+    });
+    /* What has been fetched since the last look. */
+    function pollResources() {
+        if (!global.__cyberResourceEntries) return;
+        var got = global.__cyberResourceEntries(resourcesSeen), origin = perf.timeOrigin || 0;
+        for (var i = 0; i + 2 < got.length; i += 3) {
+            var e = entry(PerformanceResourceTiming.prototype, got[i], 'resource', got[i + 1] - origin, got[i + 2] - got[i + 1]);
+            resources.push(e);
+            deliver(e);
+        }
+        resourcesSeen += got.length / 3;
+    }
+    function resourcePoll(o) {
+        if (!o.active || o.types.indexOf('resource') < 0) return;
+        pollResources();
+        global.setTimeout(function () { resourcePoll(o); }, 50);
+    }
+    function PerformanceObserverEntryList(entries) {
+        Object.defineProperty(this, '_e', { value: entries.slice().sort(byTime) });
+    }
+    define(PerformanceObserverEntryList.prototype, 'getEntries', function getEntries() { return this._e.slice(); });
+    define(PerformanceObserverEntryList.prototype, 'getEntriesByType', function getEntriesByType(type) {
+        type = String(type);
+        return this._e.filter(function (x) { return x.entryType === type; });
+    });
+    define(PerformanceObserverEntryList.prototype, 'getEntriesByName', function getEntriesByName(name, type) {
+        name = String(name);
+        return this._e.filter(function (x) { return x.name === name && (type === undefined || x.entryType === String(type)); });
+    });
+    var SUPPORTED_TYPES = ['mark', 'measure', 'resource'];
+    var PO_STATE = new WeakMap();
+    function PerformanceObserver(callback) {
+        if (!(this instanceof PerformanceObserver)) throw new TypeError("Failed to construct 'PerformanceObserver': Please use the 'new' operator");
+        if (typeof callback !== 'function') throw new TypeError("Failed to construct 'PerformanceObserver': parameter 1 is not a function");
+        PO_STATE.set(this, { callback: callback, self: this, types: [], queue: [], active: false, scheduled: false, mode: null });
+    }
+    define(PerformanceObserver.prototype, 'observe', function observe(options) {
+        var o = PO_STATE.get(this), opt = options || {};
+        var hasList = opt.entryTypes !== undefined, hasType = opt.type !== undefined;
+        if (hasList === hasType) throw new TypeError("Failed to execute 'observe' on 'PerformanceObserver': exactly one of entryTypes and type");
+        if (hasList && opt.buffered !== undefined) { /* (ignored with entryTypes) */ }
+        var mode = hasList ? 'list' : 'single';
+        if (o.mode && o.mode !== mode) throw new (global.DOMException)('Cannot change the observer type', 'InvalidModificationError');
+        o.mode = mode;
+        var was = o.types;
+        if (hasList) {
+            o.types = Array.prototype.slice.call(opt.entryTypes).map(String).filter(function (t) { return SUPPORTED_TYPES.indexOf(t) >= 0; });
+            if (!o.types.length) return;
+        } else {
+            var t = String(opt.type);
+            if (SUPPORTED_TYPES.indexOf(t) < 0) return;
+            if (o.types.indexOf(t) < 0) o.types = o.types.concat([t]);
+        }
+        if (!o.active) { o.active = true; observers.push(o); }
+        if (hasType && opt.buffered) {
+            pollResources();
+            var old = opt.type === 'mark' ? marks : opt.type === 'measure' ? measures : resources;
+            for (var i = 0; i < old.length; i++) if (o.queue.indexOf(old[i]) < 0) o.queue.push(old[i]);
+            if (o.queue.length) queueFor(o);
+        }
+        if (o.types.indexOf('resource') >= 0 && was.indexOf('resource') < 0) resourcePoll(o);
+    });
+    define(PerformanceObserver.prototype, 'disconnect', function disconnect() {
+        var o = PO_STATE.get(this);
+        o.active = false;
+        o.queue = [];
+        o.types = [];
+        o.mode = null;
+        var at = observers.indexOf(o);
+        if (at >= 0) observers.splice(at, 1);
+    });
+    define(PerformanceObserver.prototype, 'takeRecords', function takeRecords() {
+        var o = PO_STATE.get(this), q = o.queue;
+        o.queue = [];
+        return q;
+    });
+    Object.defineProperty(PerformanceObserver, 'supportedEntryTypes', { configurable: true, enumerable: true,
+        get: function () { return Object.freeze(SUPPORTED_TYPES.slice()); } });
+
     define(PerfProto, 'mark', function mark(name, options) {
         var e = new PerformanceMark(name, options);
         marks.push(e);
+        deliver(e);
         return e;
     });
     define(PerfProto, 'measure', function measure(name, start, end) {
@@ -1473,6 +1651,7 @@
         }
         var m = entry(PerformanceMeasure.prototype, name, 'measure', s, e - s, detail);
         measures.push(m);
+        deliver(m);
         return m;
     });
     function named(list, name) {
@@ -1490,6 +1669,7 @@
         type = String(type);
         if (type === 'mark') return marks.slice();
         if (type === 'measure') return measures.slice();
+        if (type === 'resource') { pollResources(); return resources.slice(); }
         return nativeByType ? nativeByType.call(this, type) : [];
     });
     define(PerfProto, 'getEntriesByName', function getEntriesByName(name, type) {
@@ -1499,10 +1679,14 @@
     });
     define(PerfProto, 'getEntries', function getEntries() {
         var other = nativeAll ? Array.prototype.filter.call(nativeAll.call(this), function (x) {
-            return x.entryType !== 'mark' && x.entryType !== 'measure';
+            return x.entryType !== 'mark' && x.entryType !== 'measure' && x.entryType !== 'resource';
         }) : [];
-        return other.concat(marks, measures).sort(byTime);
+        pollResources();
+        return other.concat(marks, measures, resources).sort(byTime);
     });
+    expose('PerformanceObserver', PerformanceObserver);
+    expose('PerformanceObserverEntryList', PerformanceObserverEntryList);
+    expose('PerformanceResourceTiming', PerformanceResourceTiming);
     expose('PerformanceEntry', PerformanceEntry);
     expose('PerformanceMark', PerformanceMark);
     expose('PerformanceMeasure', PerformanceMeasure);

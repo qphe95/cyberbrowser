@@ -809,6 +809,8 @@ static bool is_math_fn(const char *n) {
     return false;
 }
 
+static bool anchor_fn_valid(const Toks *ts, int i, bool size_fn);
+
 /* The type of a calc expression over tokens [b, e): a D_* mask with a
  * percent that may resolve against `pct` (0 when the context has none);
  * -1 when it is not a valid expression. */
@@ -826,6 +828,8 @@ static int calc_value(const Toks *ts, int i, int pct) {
         return -1;
     case T_PAREN: return calc_sum(ts, t->first, t->end, pct);
     case T_FUNC: {
+        if (t->str && !strcasecmp(t->str, "anchor")) return anchor_fn_valid(ts, i, false) ? D_LENGTH : -1;
+        if (t->str && !strcasecmp(t->str, "anchor-size")) return anchor_fn_valid(ts, i, true) ? D_LENGTH : -1;
         if (!is_math_fn(t->str)) return -1;
         const char *f = t->str;
         if (strcasecmp(f, "calc") == 0 || strcasecmp(f, "-webkit-calc") == 0) return calc_sum(ts, t->first, t->end, pct);
@@ -929,6 +933,59 @@ static bool custom_ident_ok(const Tok *t) {
     return true;
 }
 
+/* ---- anchor() and anchor-size() (CSS Anchor Positioning) ---- */
+static bool anchor_fn_valid(const Toks *ts, int i, bool size_fn);
+
+static bool anchor_fallback_valid(const Toks *ts, int i, bool size_fn)
+{
+    const Tok *t = &ts->t[i];
+    if (t->type == T_PERCENT) return true;
+    if (t->type == T_NUMBER) return t->num == 0.0;
+    if (t->type == T_DIM) return unit_dim(t->str, NULL) == D_LENGTH;
+    if (t->type != T_FUNC) return false;
+    if (strcasecmp(t->str, size_fn ? "anchor-size" : "anchor") == 0) return anchor_fn_valid(ts, i, size_fn);
+    if (!strcasecmp(t->str, "anchor") || !strcasecmp(t->str, "anchor-size")) return false;
+    return is_math_fn(t->str) && calc_value(ts, i, D_LENGTH) == D_LENGTH;
+}
+
+static bool anchor_fn_valid(const Toks *ts, int i, bool size_fn)
+{
+    static const char *const sides[] = { "inside", "outside", "top", "left", "right", "bottom", "start", "end", "self-start", "self-end", "center", NULL };
+    static const char *const dims[] = { "width", "height", "block", "inline", "self-block", "self-inline", NULL };
+    const Tok *t = &ts->t[i];
+    if (t->type != T_FUNC || strcasecmp(t->str, size_fn ? "anchor-size" : "anchor")) return false;
+    bool name = false, what = false;
+    int j = t->first;
+    for (; j < t->end && ts->t[j].type != T_COMMA; j = tok_next(ts, j)) {
+        const Tok *a = &ts->t[j];
+        if (a->type == T_IDENT && a->str[0] == '-' && a->str[1] == '-') {
+            if (name) return false;
+            name = true;
+            continue;
+        }
+        if (what) return false;
+        what = true;
+        if (a->type == T_IDENT) {
+            bool known = false;
+            for (const char *const *k = size_fn ? dims : sides; *k && !known; k++) known = !strcasecmp(a->str, *k);
+            if (!known) return false;
+        } else if (size_fn) {
+            return false;
+        } else if (a->type != T_PERCENT && !(a->type == T_FUNC && is_math_fn(a->str) && calc_value(ts, j, D_PERCENT) == D_PERCENT)) {
+            return false;
+        }
+    }
+    if (!size_fn && !what) return false;
+    if (j < t->end) {
+        /* ", " and one value */
+        if (j == t->first) return false;
+        int f = tok_next(ts, j);
+        if (f >= t->end || tok_next(ts, f) < t->end) return false;
+        return anchor_fallback_valid(ts, f, size_fn);
+    }
+    return true;
+}
+
 /* Builtin single-token types: does token i match <name [min,max]>? */
 static int builtin_type(const GNode *g, const Toks *ts, int i) {
     const Tok *t = &ts->t[i];
@@ -1029,6 +1086,8 @@ static int builtin_type(const GNode *g, const Toks *ts, int i) {
         return t->type == T_FUNC && t->first < t->end && tok_ident(&ts->t[t->first], "from") &&
                color_tok_valid(ts, (int)(t - ts->t));
     if (!strcmp(n, "any-value")) return t->type != T_BAD && t->type != T_SEMI;
+    if (!strcmp(n, "anchor-fn")) return anchor_fn_valid(ts, i, false);
+    if (!strcmp(n, "anchor-size-fn")) return anchor_fn_valid(ts, i, true);
     return -1;      /* not a builtin */
 }
 
@@ -1397,6 +1456,28 @@ static void ser_tok(Ser *S, int i, Buf *b, const int *kids, int nk) {
     case T_IDENT: ser_ident(b, t->str); break;
     case T_FUNC: {
         if (is_math_fn(t->str) && calc_serialize(S->ts, i, b)) break;
+        if (!strcasecmp(t->str, "anchor") || !strcasecmp(t->str, "anchor-size")) {
+            const Toks *ts = S->ts;
+            buf_str(b, !strcasecmp(t->str, "anchor") ? "anchor(" : "anchor-size(");
+            int name = -1, what = -1, j = t->first;
+            for (; j < t->end && ts->t[j].type != T_COMMA; j = tok_next(ts, j)) {
+                if (ts->t[j].type == T_IDENT && ts->t[j].str[0] == '-' && ts->t[j].str[1] == '-') name = j;
+                else what = j;
+            }
+            if (name >= 0) ser_tok(S, name, b, kids, nk);
+            if (what >= 0) {
+                if (name >= 0) buf_ch(b, ' ');
+                ser_tok(S, what, b, kids, nk);
+            }
+            if (j < t->end) {
+                int f = tok_next(ts, j);
+                if (name >= 0 || what >= 0) buf_str(b, ", ");
+                if (ts->t[f].type == T_NUMBER && ts->t[f].num == 0.0) buf_str(b, "0px");
+                else ser_tok(S, f, b, kids, nk);
+            }
+            buf_ch(b, ')');
+            break;
+        }
         char *lower = strdup(t->str);
         for (char *p = lower; *p; p++) *p = (char)tolower((unsigned char)*p);
         buf_str(b, lower);
@@ -2831,7 +2912,77 @@ static bool match_value(int pi, const Toks *ts, Matcher *m) {
     return match_node(m, root, 0, ts->n, at_end, NULL);
 }
 
+/* position-area (CSS Anchor Positioning): which group a keyword is of (0: none);
+ * in a pair the first of the grammar goes first, and what adds nothing goes. */
+static int area_group(const char *w, bool *neutral)
+{
+    static const struct { const char *base; int g; } k[] = {
+        { "left", 1 }, { "right", 1 }, { "x-start", 1 }, { "x-end", 1 }, { "top", 2 }, { "bottom", 2 }, { "y-start", 2 }, { "y-end", 2 },
+        { "block-start", 3 }, { "block-end", 3 }, { "inline-start", 4 }, { "inline-end", 4 },
+        { "start", 5 }, { "end", 5 }, { NULL, 0 } };
+    *neutral = !strcmp(w, "center") || !strcmp(w, "span-all");
+    if (*neutral) return 0;
+    const char *c = !strncmp(w, "span-", 5) ? w + 5 : w;
+    bool self = !strncmp(c, "self-", 5);
+    if (self) c += 5;
+    for (int i = 0; k[i].base; i++) {
+        if (strcmp(c, k[i].base)) continue;
+        /* (self-: a group of its own, x and y with the rest) */
+        return k[i].g <= 2 ? k[i].g + (self ? 10 : 0) : k[i].g + (self ? 10 : 0);
+    }
+    return -1;
+}
+
+static char *position_area_canon(const char *value)
+{
+    char a[2][40] = { "", "" }, extra[8] = "";
+    int n = sscanf(value, " %39s %39s %7s", a[0], a[1], extra);
+    if (n < 1 || n > 2) return NULL;
+    for (int i = 0; i < n; i++) for (char *c = a[i]; *c; c++) *c = (char)tolower((unsigned char)*c);
+    char out[96];
+    if (n == 1 && !strcmp(a[0], "none")) return strdup("none");
+    bool n0, n1 = false;
+    int g0 = area_group(a[0], &n0), g1 = n == 2 ? area_group(a[1], &n1) : 0;
+    if (g0 < 0 || g1 < 0) return NULL;
+    if (n == 1) return strdup(a[0]);
+    if (!strcmp(a[0], a[1])) {
+        /* (the same word twice: only a word of no one axis) */
+        if (n0 || g0 == 5 || g0 == 15) return strdup(a[0]);
+        return NULL;
+    }
+    int base0 = g0 % 10, base1 = g1 % 10;
+    bool self0 = g0 > 10, self1 = g1 > 10;
+    /* start, end: either way round, as written */
+    if (base0 == 5 || base1 == 5) {
+        if ((n0 && base1 == 5) || (n1 && base0 == 5) || (base0 == 5 && base1 == 5 && self0 == self1)) {
+            snprintf(out, sizeof out, "%s %s", a[0], a[1]);
+            return strdup(out);
+        }
+        return NULL;
+    }
+    if (n0 && n1) { snprintf(out, sizeof out, "%s %s", a[0], a[1]); return strdup(out); }
+    if (n0 || n1) {
+        const char *word = n0 ? a[1] : a[0], *neutral = n0 ? a[0] : a[1];
+        int b = n0 ? base1 : base0;
+        if (!strcmp(neutral, "span-all")) return strdup(word);
+        /* (x before y, block before inline) */
+        if (b == 1 || b == 3) snprintf(out, sizeof out, "%s center", word);
+        else snprintf(out, sizeof out, "center %s", word);
+        return strdup(out);
+    }
+    if (self0 != self1) {
+        /* (x, y: self- each on its own terms) */
+        if (!((base0 <= 2 && base1 <= 2))) return NULL;
+    }
+    if ((base0 == 1 && base1 == 2) || (base0 == 3 && base1 == 4)) { snprintf(out, sizeof out, "%s %s", a[0], a[1]); return strdup(out); }
+    if ((base0 == 2 && base1 == 1) || (base0 == 4 && base1 == 3)) { snprintf(out, sizeof out, "%s %s", a[1], a[0]); return strdup(out); }
+    return NULL;
+}
+
 char *css_prop_parse(const CssPropDef *p, const char *value) {
+    if (p && value && !strcmp(p->name, "position-area") && strcasecmp(value, "inherit") && strcasecmp(value, "initial") &&
+        strcasecmp(value, "unset") && strcasecmp(value, "revert") && strcasecmp(value, "revert-layer"))
+        return position_area_canon(value);
     if (!p || !value) return NULL;
     char *v = trim_dup(value);
     if (!v[0]) { free(v); return NULL; }

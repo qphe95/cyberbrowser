@@ -1234,6 +1234,11 @@
         };
         var traverse = function (delta) {
             var to = index + delta;
+            /* (past this document's: another's, if the frame has one) */
+            if (delta && (to < 0 || to >= entries.length) && global.__cyberFrameTraverse) {
+                global.__cyberFrameTraverse(to < 0 ? to : to - entries.length + 1);
+                return;
+            }
             if (!delta || to < 0 || to >= entries.length) return;
             var from = entries[index], e = entries[to];
             index = to;
@@ -1294,6 +1299,14 @@
                 u.hash = v;
                 if (u.href !== getHref()) navigateToFragment(u.href);
             } });
+        /* (the page set elsewhere by script: the tab process has it go there) */
+        var leave = function (v) {
+            /* (the engine telling the page its own URL is no navigation) */
+            if (global.__cyberLocationInit) return false;
+            var abs;
+            try { abs = new global.URL(String(v), getHref()).href; } catch (e) { return false; }
+            return !!global.__cyberTabNavigate && global.__cyberTabNavigate(abs);
+        };
         var fragmentOnly = function (u) {
             var target;
             try { target = new global.URL(String(u), getHref()).href; } catch (e) { return null; }
@@ -1304,7 +1317,7 @@
             set: function (v) {
                 var t = fragmentOnly(v);
                 if (t) navigateToFragment(t);
-                else { setHref(String(v)); entries[index] = { url: getHref(), state: null }; }
+                else if (!leave(v)) { setHref(String(v)); entries[index] = { url: getHref(), state: null }; }
             } });
         ['assign', 'replace'].forEach(function (k) {
             var orig = loc[k];
@@ -1316,6 +1329,7 @@
                     else navigateToFragment(t);
                     return;
                 }
+                if (leave(v)) return;
                 return orig.call(loc, v);
             });
         });

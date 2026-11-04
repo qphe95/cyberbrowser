@@ -2,6 +2,7 @@
  * Display List - Implementation
  */
 
+#include "http_download.h"
 #include "display_list.h"
 #include "platform.h"
 #include "url_utils.h"
@@ -1746,6 +1747,13 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         float op = (float)box->opacity_eff;
         if (op < 0.004f) continue;
         if (box_or_ancestor_hidden(ctx, i)) continue;
+        /* (images a box has though nothing shows of them: fetched all the same) */
+        if (g_image_cache && box->s->shape_image_url) {
+            http_mark_cors_url(box->s->shape_image_url);
+            image_cache_request(g_image_cache, box->s->shape_image_url, 0, 0);
+        }
+        if (g_image_cache && box->s->background_image_url[0] && (box->width <= 0.0f || box->height <= 0.0f))
+            image_cache_request(g_image_cache, box->s->background_image_url, 0, 0);
 
         HtmlNode *node = NULL;
         if (ctx->doc) {

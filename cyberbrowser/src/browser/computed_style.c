@@ -20,6 +20,7 @@
 
 #include <quickjs.h>
 #include "css_props.h"
+#include "css_parser.h"
 #include "dom_js.h"
 #include "layout_api.h"
 #include "computed_style.h"
@@ -77,6 +78,12 @@ void computed_style_free(ComputedStyle *cs) {
 static int prop_idx(const CssPropDef *p) { return (int)(p - css_prop_at(0)); }
 
 static void set_spec(ComputedStyle *cs, const CssPropDef *p, const char *v) {
+    /* (logical: kept as the physical property it is here) */
+    char phys[64];
+    if (p->name && css_logical_physical(p->name, cs->used.writing_mode, cs->used.rtl, phys, sizeof phys)) {
+        const CssPropDef *pp = css_prop_find(phys, strlen(phys));
+        if (pp) p = pp;
+    }
     int i = prop_idx(p);
     free(cs->spec[i]);
     cs->spec[i] = strdup(v);
@@ -285,11 +292,28 @@ static bool display_blockified(JSContextHandle ctx, ComputedStyle *cs) {
 static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p) {
     CST("compute %s", p->name);
     if (!cs->styled) return strdup("");
+    {
+        char phys[64];
+        if (css_logical_physical(p->name, cs->used.writing_mode, cs->used.rtl, phys, sizeof phys))
+            return strdup(computed_of(ctx, cs, phys));
+    }
     int i = prop_idx(p);
     const char *s = cs->spec[i];
     const char *n = p->name;
     /* (an element's default display is the user agent's: what layout gave it) */
     if (!s && !strcmp(n, "display") && cs->used.display) s = cs->used.display;
+    /* (anchor(): the number it came to; none: auto) */
+    if (s && !cs->pseudo && strstr(s, "anchor") && (!strcmp(n, "top") || !strcmp(n, "right") || !strcmp(n, "bottom") || !strcmp(n, "left"))) {
+        double v = 0.0;
+        static __thread char anchor_px[48];
+        int side = n[0] == 't' ? 0 : n[0] == 'r' ? 1 : n[0] == 'b' ? 2 : 3;
+        if (layout_query_anchor_inset(cs->el, side, &v)) {
+            snprintf(anchor_px, sizeof anchor_px, "%.6gpx", v);
+            s = anchor_px;
+        } else {
+            s = "auto";
+        }
+    }
     /* (a pseudo-element's math is flow: only math elements have its layout) */
     if (s && cs->pseudo && !strcmp(n, "display") && strstr(s, "math")) s = strstr(s, "block") ? "block" : "inline";
     if (!s || !strcmp(s, "unset") || !strcmp(s, "revert") || !strcmp(s, "revert-layer"))
@@ -348,6 +372,14 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
     if (ap >= 0 && anim_value(cs->el, cs->pseudo, ap, (double)page_time_ms(), &av)) {
         char b[96];
         anim_val_css(ap, &av, b, sizeof b);
+        /* (translate: its numbers on their own) */
+        if (!strcmp(n, "translate")) {
+            double tx = 0.0, ty = 0.0;
+            if (sscanf(b, "matrix(1, 0, 0, 1, %lf, %lf)", &tx, &ty) == 2) {
+                if (ty != 0.0) snprintf(b, sizeof b, "%.6gpx %.6gpx", tx, ty);
+                else snprintf(b, sizeof b, "%.6gpx", tx);
+            }
+        }
         free(r);
         r = strdup(b);
     }

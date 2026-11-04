@@ -939,7 +939,7 @@ static void add_face_rule(const char *body, const char *end, const char *base)
     bool prefetch = latin && strncmp(src, "data:", 5) != 0;
     char *url = prefetch ? strdup(src) : NULL;
     pthread_mutex_unlock(&g_mu);
-    if (url) dom_fetch_prefetch_first(url);
+    if (url) { http_mark_cors_url(url); dom_fetch_prefetch_first(url); }
     free(url);
 }
 
@@ -1025,6 +1025,7 @@ static bool fetch_bytes(const char *url, uint8_t **out, size_t *len)
     }
     HttpBuffer buf = { 0 };
     char err[256] = { 0 };
+    http_mark_cors_url(url);
     if (!dom_fetch_script(url, &buf, err, sizeof(err)) || !buf.data || buf.size == 0) {
         fprintf(stderr, "[fonts] fetch failed %.120s: %s\n", url, err);
         http_free_buffer(&buf);

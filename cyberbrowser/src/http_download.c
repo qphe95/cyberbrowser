@@ -1,3 +1,6 @@
+#include <stdatomic.h>
+#include <time.h>
+#include <sys/time.h>
 #include "http_download.h"
 #include "tls_client.h"
 #include "url_whatwg.h"
@@ -1988,9 +1991,81 @@ static bool http_request(const char *url, HttpBuffer *outBuffer,
     return http_request_with_cookies(url, outBuffer, err, errLen, NULL, state, bodyStream);
 }
 
+/* ---- Resource Timing's log, and URLs fetched in cors mode (any thread) ---- */
+#define HTTP_RES_MAX 4096
+#define HTTP_CORS_MAX 256
+static struct { char *url; double start, end; } g_res_log[HTTP_RES_MAX];
+static size_t g_res_n;
+static char *g_cors_urls[HTTP_CORS_MAX];
+static size_t g_cors_n;
+static atomic_flag g_res_lock = ATOMIC_FLAG_INIT;
+static void res_lock(void) { while (atomic_flag_test_and_set(&g_res_lock)) { } }
+static void res_unlock(void) { atomic_flag_clear(&g_res_lock); }
+
+static double wall_ms(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (double)tv.tv_sec * 1000.0 + (double)tv.tv_usec / 1000.0;
+}
+
+size_t http_resource_log_count(void)
+{
+    res_lock();
+    size_t n = g_res_n;
+    res_unlock();
+    return n;
+}
+
+bool http_resource_log_read(size_t index, char *url, size_t url_cap, double *start, double *end)
+{
+    res_lock();
+    bool ok = index < g_res_n && index + HTTP_RES_MAX >= g_res_n;
+    if (ok) {
+        size_t k = index % HTTP_RES_MAX;
+        snprintf(url, url_cap, "%s", g_res_log[k].url);
+        *start = g_res_log[k].start;
+        *end = g_res_log[k].end;
+    }
+    res_unlock();
+    return ok;
+}
+
+void http_mark_cors_url(const char *url)
+{
+    char *c = url ? strdup(url) : NULL;
+    if (!c) return;
+    res_lock();
+    char **slot = &g_cors_urls[g_cors_n++ % HTTP_CORS_MAX];
+    char *old = *slot;
+    *slot = c;
+    res_unlock();
+    free(old);
+}
+
 bool http_get_to_memory(const char *url, HttpBuffer *outBuffer,
                         char *err, size_t errLen) {
-    return http_request(url, outBuffer, err, errLen, NULL, NULL);
+    double t0 = wall_ms();
+    bool cors = false;
+    res_lock();
+    for (size_t i = 0; i < g_cors_n && i < HTTP_CORS_MAX && !cors; i++) cors = !strcmp(g_cors_urls[i], url);
+    res_unlock();
+    static const char *const k_cors[] = { "Sec-Fetch-Mode: cors" };
+    bool ok = cors ? http_get_to_memory_with_headers(url, (const char **)k_cors, 1, outBuffer, err, errLen)
+                   : http_request(url, outBuffer, err, errLen, NULL, NULL);
+    char *c = strdup(url);
+    if (c) {
+        double t1 = wall_ms();
+        res_lock();
+        size_t k = g_res_n++ % HTTP_RES_MAX;
+        char *old = g_res_log[k].url;
+        g_res_log[k].url = c;
+        g_res_log[k].start = t0;
+        g_res_log[k].end = t1;
+        res_unlock();
+        free(old);
+    }
+    return ok;
 }
 
 bool http_get_to_memory_with_headers(const char *url, const char **headers, size_t headerCount,

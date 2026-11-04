@@ -118,6 +118,14 @@ typedef struct HttpRemote {
 } HttpRemote;
 void http_set_remote(const HttpRemote *remote);
 
+/* The resources this process has fetched, in order, for Resource Timing: the
+ * index-th one's URL and start and end (ms since the epoch); false past the end. */
+bool http_resource_log_read(size_t index, char *url, size_t url_cap, double *start, double *end);
+size_t http_resource_log_count(void);
+/* A URL that is fetched in cors mode wherever its request is made (a font, a
+ * shape image): it says so in Sec-Fetch-Mode. */
+void http_mark_cors_url(const char *url);
+
 /* What the requests this thread makes next are for (SANDBOX_DESIGN.md
  * section 2.4), which the network process needs for ORB, CORS and Private
  * Network Access.  The caller sets it before a request and restores the

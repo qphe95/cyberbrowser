@@ -48,11 +48,26 @@ void timer_anim_wake(JSContextHandle ctx);
 extern JSContextHandle g_js_context;
 extern const char *g_cyber_start_url;
 void timer_cancel_realm(JSContextHandle realm);
+void timer_freeze_realm(JSContextHandle realm, bool frozen);
+void timer_microtask_checkpoint(JSContextHandle ctx);
 
 typedef enum { FRAME_EMPTY, FRAME_PENDING, FRAME_LOADED } FrameState;
 
+/* One document of a frame's session history; a page in the back/forward
+ * cache has its realm here (rooted) and its timers frozen. */
+typedef struct FrameDoc {
+    char url[2048];
+    JSContextHandle ctx;
+    NodeId doc;
+} FrameDoc;
+#define FRAME_HISTORY_MAX 32
+
 typedef struct Frame {
     struct Frame *next;
+    FrameDoc *hist;             /* its documents, oldest first */
+    int hist_n, hist_i;         /* how many, and the current one */
+    int traverse;               /* the navigation due goes this far through them */
+    bool noopener;              /* a popup opened without an opener */
     uint32_t id;                /* its window's, for cross_window (the page's is 1) */
     GCValue factory;            /* its realm's cross_window maker (rooted when factory_made) */
     bool factory_made;
@@ -65,6 +80,7 @@ typedef struct Frame {
     bool popup;                 /* window.open's: its element is in no document */
     bool hidden;                /* its element is not rendered, as of the parent's last layout here */
     double box_w, box_h;        /* its content box then */
+    double zoom;                /* its zoom then */
     bool closing;               /* window.close(): gone at the next turn */
     bool view_transition;       /* the document it had opted into one to the next */
     char fallback_base[2048];   /* an about: frame: its base URL when it has no <base> */
@@ -206,6 +222,45 @@ void frame_api_on_disconnect(void) {
         }
 }
 
+/* A cached page goes for good. */
+static void frame_doc_drop(FrameDoc *d) {
+    if (!SAFE_VALID(d->ctx)) { d->ctx = GC_HANDLE_NULL; return; }
+    timer_freeze_realm(d->ctx, false);
+    timer_cancel_realm(d->ctx);
+    dom_realm_drop(d->ctx);
+    gc_remove_root((GCHandle)d->ctx);
+    d->ctx = GC_HANDLE_NULL;
+}
+
+static void frame_history_free(Frame *f) {
+    for (int i = 0; i < f->hist_n; i++) frame_doc_drop(&f->hist[i]);
+    free(f->hist);
+    f->hist = NULL;
+    f->hist_n = f->hist_i = 0;
+}
+
+/* The document just loaded takes its place: replacing the current one, or
+ * after it, in place of what came after. */
+static void frame_history_commit(Frame *f, const char *url, bool replace) {
+    if (!f->hist) f->hist = (FrameDoc *)calloc(FRAME_HISTORY_MAX, sizeof(FrameDoc));
+    if (!f->hist) return;
+    if (f->hist_n == 0) replace = false;
+    if (!replace) {
+        for (int i = f->hist_i + 1; i < f->hist_n; i++) frame_doc_drop(&f->hist[i]);
+        f->hist_i = f->hist_n ? f->hist_i + 1 : 0;
+        if (f->hist_i == FRAME_HISTORY_MAX) {
+            frame_doc_drop(&f->hist[0]);
+            memmove(f->hist, f->hist + 1, (FRAME_HISTORY_MAX - 1) * sizeof(FrameDoc));
+            f->hist_i--;
+        }
+        memset(&f->hist[f->hist_i], 0, sizeof(FrameDoc));
+        f->hist_n = f->hist_i + 1;
+    }
+    snprintf(f->hist[f->hist_i].url, sizeof f->hist[f->hist_i].url, "%s", url);
+}
+
+static void frame_freeze_children(JSContextHandle ctx, bool frozen);
+
 static void frame_discard_realm(Frame *f) {
     if (!SAFE_VALID(f->ctx)) return;
     frame_mark_dead(f);
@@ -285,7 +340,35 @@ static char *origin_url(JSContextHandle ctx) {
     return strdup("about:blank");
 }
 
+/* A sandboxed frame (without allow-same-origin), or one in one: its realm's
+ * origin is its own, like no other. */
+static bool realm_opaque(JSContextHandle ctx) {
+    for (int depth = 0; depth < 32; depth++) {
+        Frame *f = frame_of_realm(ctx);
+        if (!f || !SAFE_VALID(f->parent)) return false;
+        if (!f->popup && dom_valid(f->iframe)) {
+            const char *sb = dom_get_attr_str(f->iframe, "sandbox");
+            if (sb) {
+                bool allowed = false;
+                for (const char *p = sb; *p; ) {
+                    while (*p && isspace((unsigned char)*p)) p++;
+                    const char *e = p;
+                    while (*e && !isspace((unsigned char)*e)) e++;
+                    if (e - p == 16 && !strncasecmp(p, "allow-same-origin", 17)) allowed = true;
+                    if (e - p == 17 && !strncasecmp(p, "allow-same-origin", 17)) allowed = true;
+                    p = e;
+                }
+                if (!allowed) return true;
+            }
+        }
+        ctx = f->parent;
+    }
+    return false;
+}
+
 static bool realms_same_origin(JSContextHandle a, JSContextHandle b) {
+    if (a == b) return true;
+    if (realm_opaque(a) || realm_opaque(b)) return false;
     char *ua = origin_url(a), *ub = origin_url(b);
     bool same = same_origin(ua, ub);
     free(ua);
@@ -368,10 +451,13 @@ static void message_free(Message *m) {
 
 /* A new document in this process (page_engine_reset, the JS heap gone with
  * the last one's realms): no frames, no messages. */
+static bool g_tab_nav_pending;
 void frame_api_reset(void) {
+    g_tab_nav_pending = false;
     while (g_frames) {
         Frame *f = g_frames;
         g_frames = f->next;
+        free(f->hist);
         free(f);
     }
     while (g_messages) {
@@ -562,13 +648,16 @@ static const char frame_window_js[] =
     "  Object.defineProperty(w, 'outerHeight', { get: function () { return w.innerHeight; }, configurable: true });"
     /* (its element's size changed: a resize at it, frame_api_resize_tick) */
     "  var lastW = w.innerWidth, lastH = w.innerHeight;"
-    "  Object.defineProperty(w, '__cyberFrameResized', { configurable: true, value: function (nowHidden, boxW, boxH) {"
+    "  var zoom = 1, lastZ = 1, parentRatio = (parent && (function () { try { return parent.devicePixelRatio; } catch (e) { return 0; } })()) || 1;"
+    "  Object.defineProperty(w, 'devicePixelRatio', { configurable: true, enumerable: true, get: function () { return parentRatio * zoom; } });"
+    "  Object.defineProperty(w, '__cyberFrameResized', { configurable: true, value: function (nowHidden, boxW, boxH, z) {"
     "    if (nowHidden !== undefined) hidden = nowHidden;"
-    "    if (boxW > 0) box.width = boxW;"
-    "    if (boxH > 0) box.height = boxH;"
+    "    if (z > 0) zoom = z;"
+    "    if (boxW > 0) box.width = boxW / zoom;"
+    "    if (boxH > 0) box.height = boxH / zoom;"
     "    var a = w.innerWidth, b = w.innerHeight;"
-    "    if (a === lastW && b === lastH) return;"
-    "    lastW = a; lastH = b;"
+    "    if (a === lastW && b === lastH && zoom === lastZ) return;"
+    "    lastW = a; lastH = b; lastZ = zoom;"
     /* (CSS View Transitions: a new size ends the one running) */
     "    if (w.document && w.document.__cyberViewTransition) w.document.__cyberViewTransition.skipTransition();"
     "    w.dispatchEvent(new w.Event('resize'));"
@@ -608,7 +697,23 @@ static void frame_setup_window(Frame *f) {
     } else if (JS_IsException(setup)) {
         JS_GetException(ctx);
     }
-    (void)win;
+    /* (no opener: no one to ask, nor to be seen by; the window's own size) */
+    if (f->noopener) {
+        JS_DefinePropertyValueStr(ctx, win, "opener", JS_NULL, JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE);
+        GCValue fn = JS_GetPropertyStr(ctx, win, "__cyberFrameResized");
+        GCValue a[3] = { JS_FALSE, JS_NewFloat64(ctx, 800), JS_NewFloat64(ctx, 600) };
+        if (JS_IsFunction(ctx, fn) && JS_IsException(JS_Call(ctx, fn, JS_UNDEFINED, 3, a))) JS_GetException(ctx);
+    }
+    /* (no frameElement to measure across origins: the parent's layout says) */
+    if (!same && !f->popup && dom_valid(f->iframe) && SAFE_VALID(f->parent)) {
+        double bw = 0, bh = 0;
+        layout_api_update(f->parent);
+        if (layout_query_valid() && layout_query_content_size(f->iframe, &bw, &bh) && bw > 0 && bh > 0) {
+            GCValue fn = JS_GetPropertyStr(ctx, win, "__cyberFrameResized");
+            GCValue a[3] = { JS_FALSE, JS_NewFloat64(ctx, bw), JS_NewFloat64(ctx, bh) };
+            if (JS_IsFunction(ctx, fn) && JS_IsException(JS_Call(ctx, fn, JS_UNDEFINED, 3, a))) JS_GetException(ctx);
+        }
+    }
 }
 
 static void frame_fire(JSContextHandle ctx, GCValue target, const char *type) {
@@ -669,26 +774,50 @@ static char *wurl_percent_decode(const char *s) {
  * the first navigation.  Here the document gets a realm of its own, so the old
  * window passes on what is asked of it and hears the load. */
 static const char k_window_moved[] =
-    "(function (to) {"
-    "  ['document', 'location', 'scrollX', 'scrollY', 'pageXOffset', 'pageYOffset', 'innerWidth', 'innerHeight',"
-    "   'outerWidth', 'outerHeight', 'scrollTo', 'scrollBy', 'scroll', 'resizeTo', 'resizeBy', 'getComputedStyle',"
-    "   'requestAnimationFrame', 'cancelAnimationFrame', 'postMessage', 'close', 'matchMedia', 'navigation', 'history'].forEach(function (n) {"
+    "(function (id) {"
+    /* (what the engine runs its events by stays: the rest is its frame's window, as it is now) */
+    "  var own = /^(__cyber|addEventListener$|removeEventListener$|dispatchEvent$|onload$)/, me = window, cur = __cyberWindowById;"
+    "  Reflect.ownKeys(me).forEach(function (n) {"
+    "    if (typeof n !== 'string' || own.test(n)) return;"
     "    try {"
-    "      Object.defineProperty(window, n, { configurable: true, get: function () {"
-    "        var v = to[n];"
-    "        return typeof v === 'function' ? v.bind(to) : v;"
-    "      } });"
+    "      Object.defineProperty(me, n, { configurable: true,"
+    "        get: function () { var to = cur(id); if (!to) return undefined; var v = to[n]; return typeof v === 'function' && !/^[A-Z]/.test(n) ? v.bind(to) : v; },"
+    "        set: function (v) { var to = cur(id); if (to) to[n] = v; } });"
     "    } catch (e) { /* (one it can't redefine) */ }"
     "  });"
+    /* (and what is added there from now on) */
+    "  try {"
+    "    Object.setPrototypeOf(me, new Proxy({}, {"
+    "      get: function (t, p) { var to = cur(id); if (!to) return undefined; var v = to[p]; return typeof v === 'function' ? v.bind(to) : v; },"
+    "      has: function (t, p) { var to = cur(id); return !!to && p in to; },"
+    "      set: function (t, p, v) { var to = cur(id); if (to) to[p] = v; return true; } }));"
+    "  } catch (e) { /* (its prototype is fixed) */ }"
     "})";
 
 static bool g_frame_initial_only;   /* frame_load: the initial about:blank, no navigation's load */
+
+/* pagehide and pageshow, with whether the page is kept. */
+static void frame_fire_transition(JSContextHandle ctx, const char *type, bool persisted) {
+    char js[160];
+    snprintf(js, sizeof js, "dispatchEvent(new PageTransitionEvent('%s', { persisted: %s }));", type, persisted ? "true" : "false");
+    GCValue r = JS_Eval(ctx, js, strlen(js), "<page_transition>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(r)) JS_GetException(ctx);
+}
+
+static void frame_freeze_children(JSContextHandle ctx, bool frozen) {
+    timer_freeze_realm(ctx, frozen);
+    for (Frame *c = g_frames; c; c = c->next)
+        if (c->parent == ctx && SAFE_VALID(c->ctx)) frame_freeze_children(c->ctx, frozen);
+}
 
 static void frame_load(Frame *f) {
     JSContextHandle first_ctx = GC_HANDLE_NULL;
     GCValue first_win = JS_UNDEFINED;
     char url[2048];
     snprintf(url, sizeof(url), "%s", f->url);
+    int traverse = f->traverse;
+    f->traverse = 0;
+    bool reload = false, replace_entry = false, keep = false;
     /* (the document going: its window hears) */
     if (SAFE_VALID(f->ctx) && !f->dead) {
         GCValue was = JS_GetGlobalObject(f->ctx);
@@ -703,18 +832,55 @@ static void frame_load(Frame *f) {
             root_value(first_win, true);
         }
         free(from);
+        char *from_now = realm_url(f->ctx);
+        reload = !traverse && !strcmp(from_now, url);
+        replace_entry = reload || !strncmp(from_now, "about:blank", 11);
+        /* (a popup's page, with a document to come back to, stays: top-level
+         * pages are the ones the back/forward cache is for) */
+        keep = f->popup && !reload && !first_ctx && f->hist && strncmp(from_now, "about:", 6);
+        free(from_now);
         GCValue swap = JS_GetPropertyStr(f->ctx, was, "__cyberPageSwap");
         GCValue to = JS_NewString(f->ctx, url), sr = JS_FALSE;
-        GCValue sa[2] = { to, JS_NewBool(f->ctx, same) };
-        if (JS_IsFunction(f->ctx, swap)) sr = JS_Call(f->ctx, swap, JS_UNDEFINED, 2, sa);
+        GCValue sa[3] = { to, JS_NewBool(f->ctx, same), JS_NewString(f->ctx, traverse ? "traverse" : reload ? "reload" : "push") };
+        if (JS_IsFunction(f->ctx, swap)) sr = JS_Call(f->ctx, swap, JS_UNDEFINED, 3, sa);
         if (JS_IsException(sr)) { JS_GetException(f->ctx); sr = JS_FALSE; }
         f->view_transition = same && JS_ToBool(f->ctx, sr) > 0;
         frame_fire(f->ctx, was, "beforeunload");
-        frame_fire(f->ctx, was, "pagehide");
-        frame_fire(f->ctx, was, "unload");
+        frame_fire_transition(f->ctx, "pagehide", keep);
+        if (!keep) frame_fire(f->ctx, was, "unload");
     }
-    frame_discard_realm(f);
+    if (keep && SAFE_VALID(f->ctx) && f->hist_i < f->hist_n) {
+        /* Into the cache: as it is, its timers waiting. */
+        FrameDoc *d = &f->hist[f->hist_i];
+        d->ctx = f->ctx;
+        d->doc = f->doc;
+        /* (the transition it started for this doesn't go in with it) */
+        static const char skip_js[] = "if (window.__cyberOutboundVT) { __cyberOutboundVT.skipTransition(); window.__cyberOutboundVT = null; }";
+        GCValue sk = JS_Eval(f->ctx, skip_js, sizeof skip_js - 1, "<outbound_vt>", JS_EVAL_TYPE_GLOBAL);
+        if (JS_IsException(sk)) JS_GetException(f->ctx);
+        timer_microtask_checkpoint(f->ctx);
+        frame_freeze_children(f->ctx, true);
+        f->ctx = GC_HANDLE_NULL;
+        f->doc = DOM_NULL;
+    } else {
+        frame_discard_realm(f);
+    }
     f->state = FRAME_LOADED;
+    /* Through the history: from the cache if it is there. */
+    if (traverse && f->hist && f->hist_i + traverse >= 0 && f->hist_i + traverse < f->hist_n) {
+        f->hist_i += traverse;
+        FrameDoc *d = &f->hist[f->hist_i];
+        if (SAFE_VALID(d->ctx)) {
+            f->ctx = d->ctx;
+            f->doc = d->doc;
+            d->ctx = GC_HANDLE_NULL;
+            snprintf(f->url, sizeof f->url, "%s", d->url);
+            frame_freeze_children(f->ctx, false);
+            frame_fire_transition(f->ctx, "pageshow", true);
+            timer_anim_wake(f->ctx);
+            return;
+        }
+    }
     /* (what its base URL falls back on, as it is now) */
     if (!strncmp(url, "about:", 6)) {
         GCValue pd = JS_GetPropertyStr(f->parent, JS_GetGlobalObject(f->parent), "document");
@@ -763,6 +929,7 @@ static void frame_load(Frame *f) {
         http_free_buffer(&buf);
         return;
     }
+    if (!traverse) frame_history_commit(f, url, replace_entry);
     frame_setup_window(f);
     frame_index_define(f->parent);
     JSContextHandle ctx = f->ctx;
@@ -802,12 +969,13 @@ static void frame_load(Frame *f) {
         "__cyberDispatchTrusted(document, new Event('DOMContentLoaded', { bubbles: true }));"
         "document.readyState = 'complete';"
         "if (window.__cyberPageReveal) __cyberPageReveal();"
-        "window.dispatchEvent(new Event('load'));";
+        "window.dispatchEvent(new Event('load'));"
+        "window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: false }));";
     GCValue r = JS_Eval(ctx, lifecycle_js, sizeof(lifecycle_js) - 1, "<frame_lifecycle>", JS_EVAL_TYPE_GLOBAL);
     if (JS_IsException(r)) JS_GetException(ctx);
     if (first_ctx) {
         GCValue moved = JS_Eval(first_ctx, k_window_moved, sizeof k_window_moved - 1, "<window_moved>", JS_EVAL_TYPE_GLOBAL);
-        GCValue now = JS_GetGlobalObject(ctx);
+        GCValue now = JS_NewInt32(first_ctx, (int32_t)f->id);
         if (JS_IsFunction(first_ctx, moved) && JS_IsException(JS_Call(first_ctx, moved, JS_UNDEFINED, 1, &now))) JS_GetException(first_ctx);
         /* (it hears this one, gone as its realm is) */
         JS_SetProperty(first_ctx, first_win, inactive_atom(first_ctx), JS_FALSE);
@@ -951,6 +1119,7 @@ int frame_api_resize_tick(void) {
                 f->hidden = !layout_query_rendered(f->iframe);
                 f->box_w = f->box_h = 0.0;
                 layout_query_content_size(f->iframe, &f->box_w, &f->box_h);
+                f->zoom = layout_query_zoom(f->iframe);
             }
         }
     }
@@ -964,9 +1133,10 @@ int frame_api_resize_tick(void) {
         }
         GCValue fn = JS_GetPropertyStr(f->ctx, JS_GetGlobalObject(f->ctx), "__cyberFrameResized");
         if (!JS_IsFunction(f->ctx, fn)) continue;
-        GCValue args[3] = { check ? JS_NewBool(f->ctx, f->hidden) : JS_UNDEFINED,
+        GCValue args[4] = { check ? JS_NewBool(f->ctx, f->hidden) : JS_UNDEFINED,
                             JS_NewFloat64(f->ctx, check ? f->box_w : 0.0), JS_NewFloat64(f->ctx, check ? f->box_h : 0.0) };
-        if (JS_IsException(JS_Call(f->ctx, fn, JS_UNDEFINED, 3, args))) JS_GetException(f->ctx);
+        args[3] = JS_NewFloat64(f->ctx, check ? f->zoom : 0.0);
+        if (JS_IsException(JS_Call(f->ctx, fn, JS_UNDEFINED, 4, args))) JS_GetException(f->ctx);
     }
     return 0;
 }
@@ -980,6 +1150,7 @@ int frame_api_process(void) {
         if (!dom_valid(f->iframe) || f->closing || (!f->popup && !dom_is_connected(f->iframe))) {
             /* the iframe left its document: its browsing context goes */
             frame_discard_realm(f);
+            frame_history_free(f);
             *pp = f->next;
             free(f);
             continue;
@@ -1192,6 +1363,14 @@ static GCValue js_window_open(JSContextHandle ctx, GCValue this_val, int argc, G
         }
         JS_FreeCString(ctx, u);
     }
+    bool noopener = false;
+    if (argc > 2 && JS_IsString(argv[2])) {
+        const char *feat = JS_ToCString(ctx, argv[2]);
+        if (feat) {
+            noopener = strstr(feat, "noopener") || strstr(feat, "noreferrer");
+            JS_FreeCString(ctx, feat);
+        }
+    }
     GCValue g = JS_GetGlobalObject(ctx), doc = JS_GetPropertyStr(ctx, g, "document");
     GCValue create = JS_IsObject(doc) ? JS_GetPropertyStr(ctx, doc, "createElement") : JS_UNDEFINED;
     if (!JS_IsFunction(ctx, create)) return JS_NULL;
@@ -1213,6 +1392,7 @@ static GCValue js_window_open(JSContextHandle ctx, GCValue this_val, int argc, G
     Frame *f = frame_of_iframe(n);
     if (!f) return JS_NULL;
     f->popup = true;
+    f->noopener = noopener;
     frame_ensure(f);
     /* (its initial document first, as the opener can reach it at once) */
     if (to) {
@@ -1220,6 +1400,7 @@ static GCValue js_window_open(JSContextHandle ctx, GCValue this_val, int argc, G
         f->state = FRAME_PENDING;
         free(to);
     }
+    if (noopener) return JS_NULL;
     return SAFE_VALID(f->ctx) ? window_seen_from(ctx, f->id) : JS_NULL;
 }
 
@@ -1264,7 +1445,54 @@ static GCValue js_frame_close(JSContextHandle ctx, GCValue this_val, int argc, G
     return JS_UNDEFINED;
 }
 
+/* __cyberTabNavigate(url): the page itself goes there; false in a frame, or
+ * with no tab process to do it. */
+void (*g_tab_navigate_hook)(const char *url);
+/* The page's script has sent it elsewhere: it won't finish loading. */
+static bool g_tab_nav_pending;
+bool frame_api_nav_pending(void) { return g_tab_nav_pending; }
+static GCValue js_tab_navigate(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (!g_tab_navigate_hook || ctx != g_js_context || argc < 1) return JS_FALSE;
+    const char *u = JS_ToCString(ctx, argv[0]);
+    if (!u) return JS_FALSE;
+    g_tab_navigate_hook(u);
+    g_tab_nav_pending = true;
+    JS_FreeCString(ctx, u);
+    return JS_TRUE;
+}
+
+/* __cyberWindowById(id): that frame's window as this realm sees it now. */
+static GCValue js_window_by_id(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val; (void)ctx;
+    int32_t id = 0;
+    if (argc > 0) JS_ToInt32(ctx, &id, argv[0]);
+    /* (as its parent would: the realm asking is one its frame has left) */
+    Frame *f = id ? frame_of_window((uint32_t)id) : NULL;
+    return f && SAFE_VALID(f->parent) ? window_seen_from(f->parent, (uint32_t)id) : JS_NULL;
+}
+
+/* __cyberFrameTraverse(delta): back or forward to another document, if this
+ * window's frame has one there; the event loop runs it. */
+static GCValue js_frame_traverse(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    int32_t delta = 0;
+    if (argc > 0) JS_ToInt32(ctx, &delta, argv[0]);
+    Frame *f = frame_of_realm(ctx);
+    if (!f || !f->hist || !delta) return JS_FALSE;
+    int to = f->hist_i + delta;
+    if (to < 0 || to >= f->hist_n) return JS_FALSE;
+    snprintf(f->url, sizeof f->url, "%s", f->hist[to].url);
+    f->traverse = delta;
+    f->state = FRAME_PENDING;
+    timer_anim_wake(ctx);
+    return JS_TRUE;
+}
+
 void frame_api_install(JSContextHandle ctx, GCValue global) {
+    JS_DefinePropertyValueStr(ctx, global, "__cyberTabNavigate", JS_NewCFunction(ctx, js_tab_navigate, "__cyberTabNavigate", 1), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberWindowById", JS_NewCFunction(ctx, js_window_by_id, "__cyberWindowById", 1), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberFrameTraverse", JS_NewCFunction(ctx, js_frame_traverse, "__cyberFrameTraverse", 1), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberFrameClose", JS_NewCFunction(ctx, js_frame_close, "__cyberFrameClose", 0), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberFrameNavigate", JS_NewCFunction(ctx, js_frame_navigate_to, "__cyberFrameNavigate", 1), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberInputInto", JS_NewCFunction(ctx, js_input_into, "__cyberInputInto", 6), JS_PROP_CONFIGURABLE);

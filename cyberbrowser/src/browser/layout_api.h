@@ -39,6 +39,8 @@ void layout_api_run(JSContextHandle ctx);
  * containing chain's boxes with overflow, up to stop or the viewport. */
 int layout_query_clip_rects(JSContextHandle ctx, GCValue element, uint32_t stop, double (*out)[4], int cap);
 bool layout_query_valid(void);
+/* The zoom in force on the element's box. */
+double layout_query_zoom(uint32_t id);
 /* The element is rendered in the query layout's document (and it is that document's). */
 bool layout_query_rendered(uint32_t id);
 /* Its content box there, whole pixels (false without a box). */
@@ -63,9 +65,14 @@ typedef struct {
     double margin[4], padding[4], border[4];   /* top right bottom left */
     double font_size;
     const char *display;    /* the layout's display (the default of an element that declares none) */
+    int writing_mode;   /* its writing mode and direction: what logical names mean */
+    bool rtl;
 } LayoutQueryUsed;
 typedef void (*LayoutCascadeFn)(void *ud, const char *prop, const char *value, bool important);
+/* (LayoutQueryUsed: known before the cascade is walked) */
 bool layout_query_cascade(JSContextHandle ctx, GCValue element, LayoutCascadeFn fn, void *ud, LayoutQueryUsed *used);
+/* The used value of its top, right, bottom or left (0 to 3) that anchor() gave. */
+bool layout_query_anchor_inset(uint32_t id, int side, double *out);
 /* The same of its pseudo-element ps (css_layout_pseudo_decls). */
 bool layout_query_pseudo_cascade(JSContextHandle ctx, GCValue element, int ps, LayoutCascadeFn fn, void *ud);
 /* The computed value of custom property name on the element (malloc'd), or NULL. */

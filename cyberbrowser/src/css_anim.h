@@ -63,6 +63,8 @@ void anim_reset(void);
 
 /* Whether element el (pseudo ps) has rows. */
 bool anim_has(NodeId el, int ps);
+/* The writing mode and direction logical property names mean from now on, on this thread. */
+void anim_flow_set(int writing_mode, bool rtl);
 /* Whether any element has rows. */
 bool anim_any(void);
 

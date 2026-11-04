@@ -194,6 +194,21 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char overflow;
     /* overflow: clip (overflow is 1), and how far out it clips. */
     unsigned char overflow_clip;
+    /* What makes it a containing block for absolute and fixed descendants without
+     * being positioned: a bit per property (contain, transform, filter...). */
+    unsigned short abs_cb;
+    unsigned char height_stretch;   /* height: stretch */
+    /* writing-mode (0 horizontal-tb, 1 vertical-rl, 2 vertical-lr, 3 sideways-rl, 4 sideways-lr). */
+    unsigned char writing_mode, writing_mode_set;
+    /* Anchor positioning: anchor-name, position-anchor and position-area as
+     * written; insets and sizes that use anchor() or anchor-size() (top, right,
+     * bottom, left, width, height); self-alignment anchor-center (1 justify, 2 align). */
+    const char *anchor_name, *position_anchor, *position_area;
+    const char *anchor_expr[6];
+    unsigned char self_anchor;
+    unsigned char anchor_fail;      /* of those insets, the ones with no value: bit k */
+    /* zoom: its own (0: none), and what the box's lengths were last scaled by (0: 1). */
+    float zoom_own, zoom;
     /* overflow-anchor: none. */
     unsigned char overflow_anchor_none;
     /* scroll-marker-group: 1 before, 2 after. */
@@ -293,6 +308,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
 
     /* Background image URL, interned (lives for the process; "" none). */
     const char *background_image_url;
+    const char *shape_image_url;    /* shape-outside: url() */
     /* Its placement: no-repeat per axis (repeat otherwise); position as a
      * fraction of the free room plus a length per axis; size kind 0 auto,
      * 1 cover, 2 contain, 3 given (bg_size_w/h: px, or a fraction of the
@@ -828,6 +844,8 @@ bool css_layout_scroll_pseudo(const LayoutContext *ctx, int pair, int *box, int 
 /* box is such a pseudo box's: its owner box, else -1. */
 int css_layout_scroll_pseudo_owner(const LayoutContext *ctx, int box);
 extern volatile int g_css_scroll_pseudos;
+/* Some style has said zoom. */
+extern volatile int g_layout_zoom_any;
 void css_layout_box_max(const LayoutContext *ctx, int idx, double *x, double *y);
 bool css_layout_box_offset(const LayoutContext *ctx, int idx, float *x, float *y);
 void css_layout_box_scrolled(const LayoutContext *ctx, int idx, double *dx, double *dy, bool *fixed);

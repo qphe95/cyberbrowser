@@ -14,6 +14,7 @@
  * Freed rows go on a free list (through next) and are taken again.
  */
 #include "css_anim.h"
+#include "css_parser.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -72,24 +73,25 @@ static const char *const k_props[ANIM_NPROP] = { "left", "top", "right", "bottom
 
 const char *anim_prop_name(int p) { return p >= 0 && p < ANIM_NPROP ? k_props[p] : ""; }
 
+static __thread int t_flow_wm;
+static __thread bool t_flow_rtl;
+
+void anim_flow_set(int writing_mode, bool rtl)
+{
+    t_flow_wm = writing_mode;
+    t_flow_rtl = rtl;
+}
+
 int anim_prop_of(const char *name)
 {
     for (int p = 0; p < ANIM_NPROP; p++)
         if (!strcasecmp(name, k_props[p])) return p;
-    /* (logical names, in the horizontal flow that layout has) */
-    static const struct { const char *logical; int physical; } flow[] = {
-        { "block-size", ANIM_HEIGHT }, { "inline-size", ANIM_WIDTH },
-        { "inset-block-start", ANIM_TOP }, { "inset-block-end", ANIM_BOTTOM },
-        { "inset-inline-start", ANIM_LEFT }, { "inset-inline-end", ANIM_RIGHT },
-        { "margin-block-start", ANIM_MARGIN_TOP }, { "margin-block-end", ANIM_MARGIN_BOTTOM },
-        { "margin-inline-start", ANIM_MARGIN_LEFT }, { "margin-inline-end", ANIM_MARGIN_RIGHT },
-        { "padding-block-start", ANIM_PADDING_TOP }, { "padding-block-end", ANIM_PADDING_BOTTOM },
-        { "padding-inline-start", ANIM_PADDING_LEFT }, { "padding-inline-end", ANIM_PADDING_RIGHT },
-        { "border-block-start-width", ANIM_BORDER_TOP }, { "border-block-end-width", ANIM_BORDER_BOTTOM },
-        { "border-inline-start-width", ANIM_BORDER_LEFT }, { "border-inline-end-width", ANIM_BORDER_RIGHT },
-    };
-    for (size_t i = 0; i < sizeof flow / sizeof flow[0]; i++)
-        if (!strcasecmp(name, flow[i].logical)) return flow[i].physical;
+    /* (a translation: as the transform's) */
+    if (!strcasecmp(name, "translate")) return ANIM_TRANSFORM;
+    char phys[64];
+    if (css_logical_physical(name, t_flow_wm, t_flow_rtl, phys, sizeof phys))
+        for (int p = 0; p < ANIM_NPROP; p++)
+            if (!strcasecmp(phys, k_props[p])) return p;
     return -1;
 }
 
@@ -877,7 +879,11 @@ void anim_row_set_time(int r, uint32_t gen, double now, double t)
     double local = t - A.delay[r], active = isinf(A.iters[r]) ? INFINITY : A.dur[r] * A.iters[r];
     if (local < active) bset(A.ev_end, r, false);
     if (local < 0) { bset(A.ev_start, r, false); A.iter[r] = 0; }
-    else if (A.dur[r] > 0) A.iter[r] = (int)floor((local < active ? local : 0) / A.dur[r]);
+    /* (forward over an iteration's end: the next frame's event is for it; back: none) */
+    else if (A.dur[r] > 0) {
+        int it = (int)floor((local < active ? local : 0) / A.dur[r]);
+        if (it < A.iter[r] || !bit(A.ev_start, r)) A.iter[r] = it;
+    }
 }
 
 void anim_row_set_start(int r, uint32_t gen, double start)

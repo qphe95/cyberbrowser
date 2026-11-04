@@ -35,6 +35,7 @@
  * has no box and reports zeros, as display:none elements do in browsers.
  * Scrolling is not modelled: scrollTop/Left read 0 and ignore writes.
  */
+#include "http_download.h"
 #include "cyber_profile.h"
 #include "layout_api.h"
 #include "css_parser.h"
@@ -1534,7 +1535,10 @@ bool layout_query_cascade(JSContextHandle ctx, GCValue element, LayoutCascadeFn 
         return css_layout_dom_cascade(&g_lq_layout, dom, holder, fn, ud);
     }
     const LayoutBox *b = &g_lq_layout.boxes[idx];
-    used->font_size = b->s->font_size;
+    double uz = b->s->zoom > 0.0f ? (double)b->s->zoom : 1.0;
+    used->writing_mode = b->s->writing_mode;
+    used->rtl = b->s->direction == 1;
+    used->font_size = b->s->font_size / uz;
     static const char *const roles[] = { NULL, "table", "table-row-group", "table-row", "table-cell", "table-caption", "table-column" };
     switch (b->s->display) {
     case CSS_DISPLAY_BLOCK: used->display = "block"; break;
@@ -1550,11 +1554,11 @@ bool layout_query_cascade(JSContextHandle ctx, GCValue element, LayoutCascadeFn 
     }
     used->rendered = lq_rendered(idx) && !(b->flags & LAYOUT_STYLE_SKIPPED) && b->s->display != CSS_DISPLAY_NONE;
     if (used->rendered) {
-        used->content_width = b->content_width;
-        used->content_height = b->content_height;
-        double m[4] = { b->margin_top, b->margin_right, b->margin_bottom, b->margin_left };
-        double p[4] = { b->padding_top, b->padding_right, b->padding_bottom, b->padding_left };
-        double r[4] = { b->s->border_top, b->s->border_right, b->s->border_bottom, b->s->border_left };
+        used->content_width = b->content_width / uz;
+        used->content_height = b->content_height / uz;
+        double m[4] = { b->margin_top / uz, b->margin_right / uz, b->margin_bottom / uz, b->margin_left / uz };
+        double p[4] = { b->padding_top / uz, b->padding_right / uz, b->padding_bottom / uz, b->padding_left / uz };
+        double r[4] = { b->s->border_top / uz, b->s->border_right / uz, b->s->border_bottom / uz, b->s->border_left / uz };
         memcpy(used->margin, m, sizeof m);
         memcpy(used->padding, p, sizeof p);
         memcpy(used->border, r, sizeof r);
@@ -1720,14 +1724,15 @@ static GCValue lq_metric(JSContextHandle ctx, GCValue this_val, int which)
     }
     if (idx < 0) return JS_NewInt32(ctx, 0);
     const LayoutBox *b = &g_lq_layout.boxes[idx];
+    double mz = b->s->zoom > 0.0f ? (double)b->s->zoom : 1.0;
     /* (CSSOM View: "no CSS layout box or an inline box", which a replaced
      * element, inline or not, isn't) */
     bool inl = b->s->display == CSS_DISPLAY_INLINE &&
                !(is_tag(id, "iframe") || is_tag(id, "img") || is_tag(id, "video") || is_tag(id, "canvas") ||
                  is_tag(id, "embed") || is_tag(id, "object"));
     switch (which) {
-    case M_OFFSET_W: return lq_int(ctx, b->width);
-    case M_OFFSET_H: return lq_int(ctx, b->height);
+    case M_OFFSET_W: return lq_int(ctx, b->width / mz);
+    case M_OFFSET_H: return lq_int(ctx, b->height / mz);
     case M_OFFSET_T:
     case M_OFFSET_L: {
         NodeId op = lq_offset_parent(id, idx);
@@ -1739,18 +1744,18 @@ static GCValue lq_metric(JSContextHandle ctx, GCValue this_val, int which)
             const LayoutBox *pb = &g_lq_layout.boxes[pi];
             v -= which == M_OFFSET_T ? pb->y + pb->s->border_top : pb->x + pb->s->border_left;
         }
-        return lq_int(ctx, v);
+        return lq_int(ctx, v / mz);
     }
-    case M_CLIENT_W: return lq_int(ctx, inl ? 0 : b->width - b->s->border_left - b->s->border_right);
-    case M_CLIENT_H: return lq_int(ctx, inl ? 0 : b->height - b->s->border_top - b->s->border_bottom);
-    case M_CLIENT_T: return lq_int(ctx, inl ? 0 : b->s->border_top);
-    case M_CLIENT_L: return lq_int(ctx, inl ? 0 : b->s->border_left);
+    case M_CLIENT_W: return lq_int(ctx, inl ? 0 : (b->width - b->s->border_left - b->s->border_right) / mz);
+    case M_CLIENT_H: return lq_int(ctx, inl ? 0 : (b->height - b->s->border_top - b->s->border_bottom) / mz);
+    case M_CLIENT_T: return lq_int(ctx, inl ? 0 : b->s->border_top / mz);
+    case M_CLIENT_L: return lq_int(ctx, inl ? 0 : b->s->border_left / mz);
     case M_SCROLL_W:
     case M_SCROLL_H: {
         if (inl) return JS_NewInt32(ctx, 0);
         double cw, ch, sw, sh;
         lq_scroll_size(idx, root, &cw, &ch, &sw, &sh);
-        return lq_int(ctx, which == M_SCROLL_W ? sw : sh);
+        return lq_int(ctx, (which == M_SCROLL_W ? sw : sh) / mz);
     }
     }
     return JS_NewInt32(ctx, 0);
@@ -1902,6 +1907,24 @@ static GCValue js_scroll_left_set(JSContextHandle ctx, GCValue this_val, int arg
 
 bool layout_query_valid(void) { return g_lq_valid; }
 bool layout_query_rendered(uint32_t id) { return g_lq_valid && id && lq_rendered(lq_box_index(id)); }
+
+bool layout_query_anchor_inset(uint32_t id, int side, double *out)
+{
+    int idx = g_lq_valid && id ? lq_box_index(id) : -1;
+    if (idx < 0) return false;
+    const LayoutBox *b = &g_lq_layout.boxes[idx];
+    if (!b->s->anchor_expr[side] || (b->s->anchor_fail & (1u << side))) return false;
+    if (b->s->position != CSS_POSITION_ABSOLUTE && b->s->position != CSS_POSITION_FIXED) return false;
+    const double v[4] = { b->top, b->right, b->bottom, b->left };
+    *out = v[side];
+    return true;
+}
+
+double layout_query_zoom(uint32_t id)
+{
+    int idx = g_lq_valid && id ? lq_box_index(id) : -1;
+    return idx >= 0 && g_lq_layout.boxes[idx].s->zoom > 0.0f ? (double)g_lq_layout.boxes[idx].s->zoom : 1.0;
+}
 
 bool layout_query_content_size(uint32_t id, double *w, double *h)
 {
@@ -2201,6 +2224,27 @@ int layout_scroll_tick(JSContextHandle ctx)
     return (int)n;
 }
 
+/* __cyberResourceEntries(from): the resources fetched from that index on:
+ * [url, start, end, ...], times in ms since the epoch. */
+static GCValue js_resource_entries(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    int32_t from = 0;
+    if (argc > 0) JS_ToInt32(ctx, &from, argv[0]);
+    /* (no argument: how many so far) */
+    if (argc == 0) return JS_NewFloat64(ctx, (double)http_resource_log_count());
+    GCValue out = JS_NewArray(ctx);
+    char url[2048];
+    double s, e;
+    uint32_t k = 0;
+    for (size_t i = from < 0 ? 0 : (size_t)from; http_resource_log_read(i, url, sizeof url, &s, &e); i++) {
+        JS_SetPropertyUint32(ctx, out, k++, JS_NewString(ctx, url));
+        JS_SetPropertyUint32(ctx, out, k++, JS_NewFloat64(ctx, s));
+        JS_SetPropertyUint32(ctx, out, k++, JS_NewFloat64(ctx, e));
+    }
+    return out;
+}
+
 /* __cyberScrollPseudoAt(x, y): the ::scroll-marker or ::scroll-button at a
  * client point: [its owner, its kind], or null. */
 static GCValue js_scroll_pseudo_at(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
@@ -2324,6 +2368,8 @@ static void define_accessor(JSContextHandle ctx, GCValue proto, const char *name
 void layout_api_install(JSContextHandle ctx, GCValue element_proto)
 {
     if (!JS_IsObject(element_proto)) return;
+    JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberResourceEntries",
+                              JS_NewCFunction(ctx, js_resource_entries, "__cyberResourceEntries", 1), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberScrollPseudoAt",
                               JS_NewCFunction(ctx, js_scroll_pseudo_at, "__cyberScrollPseudoAt", 2), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberScrollMarkerTargets",

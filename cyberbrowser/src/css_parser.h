@@ -26,6 +26,13 @@ extern "C" {
 enum { CSS_FEAT_SNAP = 1, CSS_FEAT_CONTENT_VIS = 2, CSS_FEAT_INITIAL_TARGET = 4, CSS_FEAT_MEDIA_LISTENERS = 8,
        CSS_FEAT_SNAP_ALIGN = 16, CSS_FEAT_MARKER_GROUP = 32 };
 extern volatile int g_css_render_features;
+/* The physical longhand of a logical one, in a box of that writing mode
+ * (0 horizontal-tb, 1 vertical-rl, 2 vertical-lr, 3 sideways-rl, 4 sideways-lr)
+ * and direction; false when prop isn't logical. */
+bool css_logical_physical(const char *prop, int wm, bool rtl, char *out, size_t cap);
+/* A logical shorthand (margin-inline, inset-block, border-block-width...):
+ * its two longhands, start then end; false when prop isn't one. */
+bool css_logical_shorthand(const char *prop, char start[64], char end[64]);
 /* The feature bit of a property, noted as seen in this document. */
 unsigned char css_note_property(const char *prop);
 /* A page's <meta name=color-scheme> asking for one: prefers-color-scheme says

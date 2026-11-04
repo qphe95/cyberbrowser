@@ -316,12 +316,27 @@ void timer_cancel_realm(JSContextHandle realm) {
 // Find the next timer that should fire, returns its ID or 0 if none
 /* Not rendered (a hidden tab): animation frame callbacks wait, as in a
  * browser's background tab, until it is shown. */
+/* The realms of pages in the back/forward cache: their timers wait. */
+#define MAX_FROZEN 32
+static JSContextHandle g_frozen[MAX_FROZEN];
+static int g_frozen_n;
+void timer_freeze_realm(JSContextHandle realm, bool frozen) {
+    pthread_mutex_lock(&g_timer_state.mutex);
+    for (int i = 0; i < g_frozen_n; i++)
+        if (g_frozen[i] == realm) { g_frozen[i] = g_frozen[--g_frozen_n]; break; }
+    if (frozen && g_frozen_n < MAX_FROZEN) g_frozen[g_frozen_n++] = realm;
+    pthread_mutex_unlock(&g_timer_state.mutex);
+}
+static bool realm_frozen(JSContextHandle realm) {
+    for (int i = 0; i < g_frozen_n; i++) if (g_frozen[i] == realm) return true;
+    return false;
+}
 static bool g_raf_paused;
 
 void timer_set_raf_paused(bool paused) { g_raf_paused = paused; }
 
 static inline bool timer_waits(const Timer *t) {
-    return !t->active || (g_raf_paused && t->type == TIMER_TYPE_RAF);
+    return !t->active || (g_raf_paused && t->type == TIMER_TYPE_RAF) || (g_frozen_n && realm_frozen(t->realm));
 }
 
 int find_due_timer(unsigned long long current_time) {

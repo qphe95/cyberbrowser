@@ -166,12 +166,12 @@ static const CssTypeDef g_types[] = {
     { "self-position", "center | start | end | self-start | self-end | flex-start | flex-end" },
     { "size", "auto | <length-percentage [0,inf]> | min-content | max-content | fit-content | "
               "fit-content( <length-percentage [0,inf]> ) | stretch | -webkit-fill-available | -webkit-min-content | "
-              "-webkit-max-content | -webkit-fit-content" },
+              "-webkit-max-content | -webkit-fit-content | <anchor-size-fn>" },
     { "max-size", "none | <length-percentage [0,inf]> | min-content | max-content | fit-content | "
                   "fit-content( <length-percentage [0,inf]> ) | stretch | -webkit-fill-available | -webkit-min-content | "
-                  "-webkit-max-content | -webkit-fit-content" },
-    { "inset-value", "auto | <length-percentage> | anchor( <any-value>+ ) | anchor-size( <any-value>* )" },
-    { "margin-value", "<length-percentage> | auto | anchor-size( <any-value>* )" },
+                  "-webkit-max-content | -webkit-fit-content | <anchor-size-fn>" },
+    { "inset-value", "auto | <length-percentage> | <anchor-fn> | <anchor-size-fn>" },
+    { "margin-value", "<length-percentage> | auto | <anchor-size-fn>" },
 
     /* display */
     { "display-outside", "block | inline | run-in" },
@@ -582,7 +582,7 @@ static CssPropDef g_props[] = {
     S("place-self", "<'align-self'> <'justify-self'>?", "align-self justify-self", CSS_SH_PAIR),
     L("pointer-events", "auto | bounding-box | visiblepainted | visiblefill | visiblestroke | visible | painted | fill | stroke | all | none", "auto", 1),
     L("position", "static | relative | absolute | sticky | fixed", "static", 0),
-    L("position-anchor", "auto | none | <dashed-ident>", "auto", 0),
+    L("position-anchor", "auto | none | normal | <dashed-ident>", "auto", 0),
     L("position-area", "none | <any-value>+", "none", 0),
     L("position-try-fallbacks", "none | <any-value>+", "none", 0),
     L("position-try-order", "normal | most-width | most-height | most-block-size | most-inline-size", "normal", 0),

@@ -291,6 +291,20 @@ static void click(int32_t x, int32_t y) {
 
 }
 
+/* The page's own script sends it elsewhere (location, a form, a link clicked
+ * by script): as a click on a link would. */
+extern void (*g_tab_navigate_hook)(const char *url);
+static void tab_navigate(const char *s) {
+    if (s && strlen(s) <= PROTO_URL_MAX) {
+        static uint8_t msg[sizeof(TuNavigate) + PROTO_URL_MAX];
+        TuNavigate nav = { 0 };
+        memcpy(msg, &nav, sizeof(nav));
+        size_t n = strlen(s);
+        memcpy(msg + sizeof(nav), s, n);
+        chan_send(&g_chan, TU_NAVIGATE, msg, (uint32_t)(sizeof(nav) + n), 1000);
+    }
+}
+
 static void handle(const ChanMsg *m) {
     switch (m->type) {
     case UT_RESIZE: {
@@ -922,6 +936,7 @@ static LONG WINAPI tab_crash_filter(EXCEPTION_POINTERS *ep) {
 }
 
 int main(int argc, char **argv) {
+    g_tab_navigate_hook = tab_navigate;
     SetUnhandledExceptionFilter(tab_crash_filter);
     g_start_tick = GetTickCount64();
     fine_timer();

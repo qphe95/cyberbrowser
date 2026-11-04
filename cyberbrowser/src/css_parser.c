@@ -582,6 +582,69 @@ static void sink_rule(void *ctx, char *prop, char *value, bool important)
 
 volatile int g_css_render_features;
 
+static const char *flow_side(bool block, bool end, int wm, bool rtl)
+{
+    if (block) {
+        switch (wm) {
+        case 1: case 3: return end ? "left" : "right";
+        case 2: case 4: return end ? "right" : "left";
+        default: return end ? "bottom" : "top";
+        }
+    }
+    bool flip = rtl;
+    if (wm == 4) flip = !flip;      /* (sideways-lr: inline runs bottom to top) */
+    if (wm == 0) return end != flip ? "right" : "left";
+    return end != flip ? "bottom" : "top";
+}
+
+bool css_logical_physical(const char *prop, int wm, bool rtl, char *out, size_t cap)
+{
+    if (!strstr(prop, "block") && !strstr(prop, "inline")) return false;
+    bool vertical = wm != 0;
+    static const struct { const char *name, *h, *v; } sizes[] = {
+        { "block-size", "height", "width" }, { "inline-size", "width", "height" },
+        { "min-block-size", "min-height", "min-width" }, { "min-inline-size", "min-width", "min-height" },
+        { "max-block-size", "max-height", "max-width" }, { "max-inline-size", "max-width", "max-height" },
+        { NULL, NULL, NULL } };
+    for (int i = 0; sizes[i].name; i++)
+        if (!strcmp(prop, sizes[i].name)) { snprintf(out, cap, "%s", vertical ? sizes[i].v : sizes[i].h); return true; }
+    static const char *const pre[] = { "margin", "padding", "inset", "border", "scroll-margin", "scroll-padding", NULL };
+    for (int i = 0; pre[i]; i++) {
+        size_t n = strlen(pre[i]);
+        if (strncmp(prop, pre[i], n) || prop[n] != '-') continue;
+        const char *a = prop + n + 1;
+        bool block = !strncmp(a, "block-", 6);
+        if (!block && strncmp(a, "inline-", 7)) return false;
+        a += block ? 6 : 7;
+        bool end = !strncmp(a, "end", 3);
+        if (!end && strncmp(a, "start", 5)) return false;
+        const char *suffix = a + (end ? 3 : 5);
+        if (*suffix && *suffix != '-') return false;
+        const char *side = flow_side(block, end, wm, rtl);
+        if (i == 2) snprintf(out, cap, "%s%s", side, suffix);
+        else snprintf(out, cap, "%s-%s%s", pre[i], side, suffix);
+        return true;
+    }
+    return false;
+}
+
+bool css_logical_shorthand(const char *prop, char start[64], char end[64])
+{
+    static const char *const names[] = { "margin-block", "margin-inline", "padding-block", "padding-inline", "inset-block", "inset-inline",
+        "border-block-width", "border-inline-width", "border-block-style", "border-inline-style", "border-block-color", "border-inline-color", "border-block", "border-inline", NULL };
+    for (int i = 0; names[i]; i++) {
+        if (strcmp(prop, names[i])) continue;
+        /* (the name, with start or end before any -width) */
+        const char *axis = strstr(prop, "-block") ? "-block" : "-inline";
+        const char *at = strstr(prop, axis) + strlen(axis);
+        size_t head = (size_t)(at - prop);
+        snprintf(start, 64, "%.*s-start%s", (int)head, prop, at);
+        snprintf(end, 64, "%.*s-end%s", (int)head, prop, at);
+        return true;
+    }
+    return false;
+}
+
 unsigned char css_note_property(const char *p) {
     unsigned char bit = 0;
     if (p[0] == 'c') { if (!strcmp(p, "content-visibility")) bit = CSS_FEAT_CONTENT_VIS; }
