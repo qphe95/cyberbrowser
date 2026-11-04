@@ -1583,6 +1583,8 @@ static double relative_px(const char *u) {
         if (strcasecmp(u, rel[i].u)) continue;
         double base = rel[i].k == 0 ? em : rel[i].k == 1 ? e->root_font_size : rel[i].k == 2 ? vw :
                       rel[i].k == 3 ? vh : rel[i].k == 4 ? (vw < vh ? vw : vh) : (vw > vh ? vw : vh);
+        if (e->ch_ratio > 0 && !strcasecmp(u, "ch")) return em * e->ch_ratio;
+        if (e->ex_ratio > 0 && !strcasecmp(u, "ex")) return em * e->ex_ratio;
         return base * rel[i].f;
     }
     return 0;

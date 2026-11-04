@@ -2,6 +2,7 @@
 #ifndef LAYOUT_API_H
 #define LAYOUT_API_H
 
+#include <stdint.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include "quickjs.h"
@@ -24,6 +25,7 @@ bool layout_query_element_box(JSContextHandle ctx, GCValue element, LayoutQueryB
 /* The element's client rects (getClientRects) from the cached layout, up to
  * max as x, y, width, height: one per line an inline element is on, else
  * its border box; none without a box. */
+int layout_query_text_rects(JSContextHandle ctx, uint32_t id, size_t a, size_t b, double (*out)[4], int max);
 int layout_query_client_rects(JSContextHandle ctx, GCValue element, double (*out)[4], int max);
 
 /* A box or viewport (a document) has scrolled: its scroll event, then its

@@ -1664,6 +1664,40 @@ int layout_query_client_rects(JSContextHandle ctx, GCValue element, double (*out
     return n;
 }
 
+/* The box of text node id, under its parent's. */
+static int lq_text_box(int parent, NodeId id, int depth)
+{
+    for (int c = g_lq_layout.tree.nodes[parent].first_child_idx; c >= 0; c = g_lq_layout.tree.nodes[c].next_sibling_idx) {
+        HtmlNode *n = css_layout_box_node(&g_lq_layout, c);
+        if (n && n->type == HTML_NODE_TEXT && (NodeId)n->store_id == id) return c;
+        /* (an anonymous box between them) */
+        if (depth < 3 && (!n || n->type != HTML_NODE_ELEMENT)) {
+            int r = lq_text_box(c, id, depth + 1);
+            if (r >= 0) return r;
+        }
+    }
+    return -1;
+}
+
+/* The rectangles of the bytes [a, b) of text node id, in client coordinates. */
+int layout_query_text_rects(JSContextHandle ctx, uint32_t id, size_t a, size_t b, double (*out)[4], int max)
+{
+    NodeId parent = id ? dom_parent(id) : DOM_NULL;
+    if (!parent || dom_kind(parent) != DOM_K_ELEMENT || !lq_ensure(ctx)) return 0;
+    int pi = lq_box_index(parent);
+    int idx = pi >= 0 ? lq_text_box(pi, id, 0) : -1;
+    int n = idx < 0 ? 0 : css_layout_text_rects(&g_lq_layout, idx, a, b, out, max);
+    if (n) {
+        double dx, dy;
+        lq_client_shift(parent, pi, &dx, &dy);
+        for (int i = 0; i < n; i++) {
+            out[i][0] -= dx;
+            out[i][1] -= dy;
+        }
+    }
+    return n;
+}
+
 static bool is_tag(NodeId id, const char *tag)
 {
     return id && dom_kind(id) == DOM_K_ELEMENT && strcasecmp(dom_tag_name(id), tag) == 0;

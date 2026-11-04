@@ -21922,6 +21922,73 @@ void css_layout_box_scrolled(const LayoutContext *ctx, int idx, double *dx, doub
     }
 }
 
+/* Where byte off of a text node's data falls in the text its box paints
+ * (white space processed): the same characters in order, spaces dropped. */
+static size_t text_paint_offset(const char *raw, const char *t, size_t off)
+{
+    size_t i = 0, j = 0, tn = strlen(t);
+    while (i < off && raw[i]) {
+        unsigned char c = (unsigned char)raw[i];
+        if (j < tn && (unsigned char)t[j] == c) { i++; j++; continue; }
+        if (isspace(c)) {
+            /* (collapsed, or a line break turned into a space) */
+            if (j < tn && t[j] == ' ' && (i == 0 || !isspace((unsigned char)raw[i - 1]))) j++;
+            i++;
+            continue;
+        }
+        if (j < tn && isspace((unsigned char)t[j])) { j++; continue; }
+        /* (case changed, say: byte for byte) */
+        i++;
+        if (j < tn) j++;
+    }
+    return j;
+}
+
+/* The rectangles of the bytes [a, b) of text box idx's node's data, one per
+ * line (x, y, width, height), in the layout's coordinates. */
+int css_layout_text_rects(const LayoutContext *ctx, int idx, size_t a, size_t b, double (*out)[4], int max)
+{
+    if (!ctx || idx < 0 || idx >= ctx->tree.count || max <= 0) return 0;
+    const LayoutBox *box = &ctx->boxes[idx];
+    HtmlNode *node = css_layout_box_node(ctx, idx);
+    const char *raw = node ? css_layout_node_text(ctx, node) : NULL;
+    TextShaper *font;
+    float scale, adv;
+    const char *t;
+    if (!raw || !css_layout_text_paint(ctx, idx, &font, &scale, &adv, &t)) return 0;
+    size_t ta = text_paint_offset(raw, t, a), tb = text_paint_offset(raw, t, b), tn = strlen(t);
+    double fs = box->s->font_size > 0.0 ? box->s->font_size : 16.0;
+    double nlh = text_shaper_normal_line_height(font, (float)fs);
+    if (!(nlh > 0.5 * fs && nlh < 3.0 * fs)) nlh = fs * 1.5;
+    bool across = box->s->writing_mode != 0;
+    const LayoutTextFragList *tf = ctx->text_frags && idx < ctx->text_frags_n ? &ctx->text_frags[idx] : NULL;
+    int n = 0;
+    if (tf && tf->n > 0) {
+        for (int q = 0; q < tf->n && n < max; q++) {
+            const LayoutTextFrag *fr = &tf->f[q];
+            size_t s = ta > fr->start ? ta : fr->start, e = tb < fr->end ? tb : fr->end;
+            if (s > e || (s == e && ta != tb)) continue;
+            double before = text_shaper_span_width(font, t, fr->start, s, scale);
+            double w = text_shaper_span_width(font, t, s, e, scale);
+            bool rtl = fr->level & 1;
+            double along = fr->dx + (rtl ? fr->w - before - w : before);
+            double cross = fr->dy + (fs - nlh) / 2.0;
+            if (across) { out[n][0] = box->x; out[n][1] = box->y + along; out[n][2] = box->width; out[n][3] = w; }
+            else { out[n][0] = box->x + along; out[n][1] = box->y + cross; out[n][2] = w; out[n][3] = nlh; }
+            n++;
+        }
+        return n;
+    }
+    /* (a single run, its geometry the box's) */
+    if (ta > tn) ta = tn;
+    if (tb > tn) tb = tn;
+    double before = text_shaper_span_width(font, t, 0, ta, scale);
+    double w = text_shaper_span_width(font, t, ta, tb, scale);
+    if (across) { out[0][0] = box->x; out[0][1] = box->y + before; out[0][2] = box->width; out[0][3] = w; }
+    else { out[0][0] = box->x + before; out[0][1] = box->y; out[0][2] = w; out[0][3] = box->height > 0.0 ? box->height : nlh; }
+    return 1;
+}
+
 int css_layout_client_rects(const LayoutContext *ctx, int idx, double (*out)[4], int max)
 {
     if (!ctx || idx < 0 || idx >= ctx->tree.count || max <= 0) return 0;

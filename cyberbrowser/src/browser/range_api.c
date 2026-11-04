@@ -19,6 +19,7 @@
 #include "dom_range.h"
 #include "dom_store.h"
 #include "dom_wrap.h"
+#include "layout_api.h"
 
 extern NodeId g_dom_document;
 bool dom_api_insert_valid(JSContextHandle ctx, NodeId parent, NodeId node, NodeId child);
@@ -691,17 +692,89 @@ GCValue js_range_surround_contents(JSContextHandle ctx, GCValue this_val, int ar
     return js_range_select_node(ctx, this_val, 1, argv);
 }
 
+/* ---- geometry (CSSOM View 6.): what the range selects, box by box ---- */
+
+/* UTF-16 offset to the byte of a text node's data. */
+static size_t rng_byte_of(NodeId n, uint32_t units) {
+    uint32_t bl = 0, u = 0;
+    const unsigned char *t = (const unsigned char *)dom_text(n, &bl);
+    for (uint32_t i = 0; t && i < bl; i++) {
+        if ((t[i] & 0xC0) == 0x80) continue;
+        if (u >= units) return i;
+        u += t[i] >= 0xF0 ? 2 : 1;
+    }
+    return bl;
+}
+
+enum { RNG_RECTS = 256 };
+
+static void rng_rects_of(JSContextHandle ctx, NodeId n, RangeBP s, RangeBP e, double (*out)[4], int *nr) {
+    if (*nr >= RNG_RECTS) return;
+    if (is_text(n)) {
+        RangeBP a = { n, 0 }, z = { n, rng_length(n) };
+        RangeBP from = rng_cmp(s, a) > 0 ? s : a, to = rng_cmp(e, z) < 0 ? e : z;
+        if (rng_cmp(from, to) > 0) return;
+        if (from.n != n) from = a;
+        if (to.n != n) to = z;
+        *nr += layout_query_text_rects(ctx, n, rng_byte_of(n, from.o), rng_byte_of(n, to.o), out + *nr, RNG_RECTS - *nr);
+        return;
+    }
+    if (dom_kind(n) == DOM_K_ELEMENT && rng_contained(n, s, e)) {
+        *nr += layout_query_client_rects(ctx, dom_js(ctx, n), out + *nr, RNG_RECTS - *nr);
+        /* (and what's in it: its text's own lines are what matter to a selection) */
+        return;
+    }
+    for (NodeId c = dom_first_child(n); c; c = dom_next_sibling(c)) {
+        RangeBP before = { n, rng_index(c) }, after = { n, rng_index(c) + 1 };
+        if (rng_cmp(after, s) < 0 || rng_cmp(before, e) > 0) continue;
+        rng_rects_of(ctx, c, s, e, out, nr);
+    }
+}
+
+static int rng_rects(JSContextHandle ctx, GCValue this_val, double (*out)[4]) {
+    RangeBP s, e;
+    if (!rng_get(this_val, &s, &e)) return 0;
+    NodeId common = s.n;
+    while (common && !rng_inclusive_ancestor(common, e.n)) common = dom_parent(common);
+    int n = 0;
+    if (common) rng_rects_of(ctx, common, s, e, out, &n);
+    return n;
+}
+
+static GCValue rng_rect_object(JSContextHandle ctx, const double *r) {
+    GCValue ctor = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "DOMRect");
+    GCValue args[4] = { JS_NewFloat64(ctx, r[0]), JS_NewFloat64(ctx, r[1]), JS_NewFloat64(ctx, r[2]), JS_NewFloat64(ctx, r[3]) };
+    return JS_CallConstructor(ctx, ctor, 4, args);
+}
+
 GCValue js_range_get_bounding_client_rect(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)this_val; (void)argc; (void)argv;
-    GCValue rect = JS_NewObject(ctx);
-    static const char *const k[] = { "x", "y", "width", "height", "top", "left", "right", "bottom" };
-    for (size_t i = 0; i < sizeof k / sizeof k[0]; i++) JS_SetPropertyStr(ctx, rect, k[i], JS_NewFloat64(ctx, 0));
-    return rect;
+    (void)argc; (void)argv;
+    static double r[RNG_RECTS][4];
+    int n = rng_rects(ctx, this_val, r);
+    /* (the union of those with an area; else the first) */
+    double u[4] = { 0, 0, 0, 0 };
+    bool any = false;
+    if (n > 0) memcpy(u, r[0], sizeof u);
+    for (int i = 0; i < n; i++) {
+        if (r[i][2] <= 0 && r[i][3] <= 0) continue;
+        if (!any) { memcpy(u, r[i], sizeof u); any = true; continue; }
+        double x0 = u[0] < r[i][0] ? u[0] : r[i][0], y0 = u[1] < r[i][1] ? u[1] : r[i][1];
+        double x1 = u[0] + u[2] > r[i][0] + r[i][2] ? u[0] + u[2] : r[i][0] + r[i][2];
+        double y1 = u[1] + u[3] > r[i][1] + r[i][3] ? u[1] + u[3] : r[i][1] + r[i][3];
+        u[0] = x0; u[1] = y0; u[2] = x1 - x0; u[3] = y1 - y0;
+    }
+    return rng_rect_object(ctx, u);
 }
 
 GCValue js_range_get_client_rects(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)this_val; (void)argc; (void)argv;
-    return JS_NewArray(ctx);
+    (void)argc; (void)argv;
+    static double r[RNG_RECTS][4];
+    int n = rng_rects(ctx, this_val, r);
+    GCValue list = JS_NewArray(ctx);
+    for (int i = 0; i < n; i++) JS_SetPropertyUint32(ctx, list, (uint32_t)i, rng_rect_object(ctx, r[i]));
+    GCValue item = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberRectListItem");
+    if (JS_IsFunction(ctx, item)) JS_SetPropertyStr(ctx, list, "item", item);
+    return list;
 }
 
 /* ---- AbstractRange's attributes, Range's commonAncestorContainer ---- */

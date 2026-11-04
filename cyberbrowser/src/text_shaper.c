@@ -661,6 +661,52 @@ bool text_shaper_shape_to_display_list_scaled(const TextShaper *s,
 }
 
 /* Measure the advance of the span [start, end) at the loaded size (unscaled). */
+/* Fullwidth punctuation collapsing (css-text-4 text-spacing-trim, normal): of
+ * two side by side, half the space between them goes.  Which class a code
+ * point is of: 1 opening, 2 closing or a stop, 3 a middle dot or ideographic
+ * space; 0 none. */
+static int ts_cjk_punct(uint32_t c)
+{
+    switch (c) {
+    case 0x3008: case 0x300A: case 0x300C: case 0x300E: case 0x3010: case 0x3014: case 0x3016: case 0x3018:
+    case 0x301A: case 0x301D: case 0xFF08: case 0xFF3B: case 0xFF5B: case 0xFF5F:
+        return 1;
+    case 0x3009: case 0x300B: case 0x300D: case 0x300F: case 0x3011: case 0x3015: case 0x3017: case 0x3019:
+    case 0x301B: case 0x301E: case 0x301F: case 0xFF09: case 0xFF3D: case 0xFF5D: case 0xFF60:
+    case 0x3001: case 0x3002: case 0xFF0C: case 0xFF0E:
+        return 2;
+    case 0x30FB: case 0x3000: case 0xFF1A: case 0xFF1B:
+        return 3;
+    default:
+        return 0;
+    }
+}
+
+/* The start of the text a span is of, while one is measured or drawn: what
+ * comes before it counts. */
+static __thread const char *t_trim_text;
+
+/* How much of cp's advance goes, by its neighbours (at [at, after) in the
+ * text): first of the pair for a closing one, second for an opening one. */
+static float ts_trim_of(uint32_t cp, const char *at, const char *after, float xa, bool *shift)
+{
+    *shift = false;
+    int k = ts_cjk_punct(cp);
+    if (!k || !t_trim_text || xa < 15.0f) return 0.0f;
+    if (k == 2) {
+        const char *q = after;
+        uint32_t next = utf8_decode(&q);
+        int nk = ts_cjk_punct(next);
+        if (nk == 2 || nk == 3) return xa / 2.0f;
+    } else if (k == 1 && at > t_trim_text) {
+        const char *q = at - 1;
+        while (q > t_trim_text && ((unsigned char)*q & 0xC0) == 0x80) q--;
+        uint32_t prev = utf8_decode(&q);
+        if (ts_cjk_punct(prev)) { *shift = true; return xa / 2.0f; }
+    }
+    return 0.0f;
+}
+
 static float ts_measure_span(const TextShaper *s, const char *start, const char *end)
 {
     float x = 0.0f;
@@ -677,6 +723,8 @@ static float ts_measure_span(const TextShaper *s, const char *start, const char 
         if (prev_glyph >= 0 && owner == 0) {
             x += (float)ts_kern(s, prev_glyph, gi) * s->scale;
         }
+        bool trim_shift;
+        x -= ts_trim_of(cp, save, p, xa, &trim_shift);
         x += xa + ts_spacing(cp);
         prev_glyph = owner == 0 ? gi : -1;
     }
@@ -736,11 +784,24 @@ static bool ts_emit_span_glyphs(const TextShaper *s, const char *gp,
                                 DisplayList *dl)
 {
     while (gp < gend) {
+        const char *at = gp;
         uint32_t gc = utf8_decode(&gp);
         if (gc == 0) break;
         if (gc < 0x20 && gc != ' ') continue; /* control chars: no glyph */
+        /* (a trimmed opening one drawn into the half it gave up, a closing one
+         * with the half after it gone) */
+        float trim = 0.0f;
+        bool shift = false;
+        if (t_trim_text && ts_cjk_punct(gc)) {
+            int gi, owner;
+            float xa;
+            ts_metric_owned(s, gc, &gi, &xa, &owner);
+            trim = ts_trim_of(gc, at, gp, xa, &shift) * scale;
+        }
+        if (shift) *pen_x -= trim;
         if (!ts_emit_glyph(s, gc, pen_x, gy, scale, prev_glyph, r, g, b, a, dl))
             return false;
+        if (trim > 0.0f && !shift) *pen_x -= trim;
     }
     return true;
 }
@@ -1112,7 +1173,10 @@ int text_shaper_wrap_lines(const TextShaper *s, const char *utf8,
 float text_shaper_span_width(const TextShaper *s, const char *utf8, size_t start, size_t end, float scale)
 {
     if (!s || !utf8 || end <= start) return 0.0f;
-    return ts_measure_span(s, utf8 + start, utf8 + end) * (scale > 0.0f ? scale : 1.0f);
+    t_trim_text = utf8;
+    float w = ts_measure_span(s, utf8 + start, utf8 + end) * (scale > 0.0f ? scale : 1.0f);
+    t_trim_text = NULL;
+    return w;
 }
 
 bool text_shaper_shape_span(const TextShaper *s, const char *utf8, size_t start, size_t end,
@@ -1123,7 +1187,12 @@ bool text_shaper_shape_span(const TextShaper *s, const char *utf8, size_t start,
     if (scale <= 0.0f) scale = 1.0f;
     float pen_x = x, gy = y + s->baseline * scale;
     int prev_glyph = -1;
-    if (!rtl) return ts_emit_span_glyphs(s, utf8 + start, utf8 + end, &pen_x, gy, scale, &prev_glyph, r, g, b, a, dl);
+    if (!rtl) {
+        t_trim_text = utf8;
+        bool drew = ts_emit_span_glyphs(s, utf8 + start, utf8 + end, &pen_x, gy, scale, &prev_glyph, r, g, b, a, dl);
+        t_trim_text = NULL;
+        return drew;
+    }
     /* (right to left: the code points last first, each mirrored) */
     size_t cap = end - start;
     uint32_t stackbuf[256], *cps = cap <= 256 ? stackbuf : (uint32_t *)malloc(cap * sizeof(uint32_t));

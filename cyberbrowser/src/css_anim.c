@@ -112,7 +112,7 @@ static AnimVal val_mix(const AnimVal *x, const AnimVal *y, double t)
 void anim_val_css(int prop, const AnimVal *v, char *buf, size_t cap)
 {
     if (prop == ANIM_COLOR || prop == ANIM_BGCOLOR) {
-        #define ANIM_C8(c) ((c) < 0.0f ? 0 : (c) > 1.0f ? 255 : (int)lround((c) * 255.0f))
+        #define ANIM_C8(c) ((c) < 0.0f ? 0 : (c) > 1.0f ? 255 : (int)lround((c) * 255.0f + 0.002f))
         int r = ANIM_C8(v->x), g = ANIM_C8(v->y), b = (int)lround((v->z < 0.0f ? 0.0f : v->z > 1.0f ? 1.0f : v->z) * 255.0f);
         if (v->w >= 1.0f) snprintf(buf, cap, "rgb(%d, %d, %d)", r, g, b);
         else snprintf(buf, cap, "rgba(%d, %d, %d, %.6g)", r, g, b, v->w < 0.0f ? 0.0 : (double)v->w);

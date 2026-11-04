@@ -634,7 +634,8 @@
             if (prop === 'text-shadow') { x = x.replace(' 0px 0px 0px 0px', ' 0px 0px 0px'); y = y.replace(' 0px 0px 0px 0px', ' 0px 0px 0px'); }
             var v = combine(prop, x, y, how);
             if (v === null) return null;
-            out.push(v);
+            /* (a blur is never negative) */
+            out.push(v.replace(/(-?[\d.e-]+px\s+-?[\d.e-]+px\s+)-[\d.e-]+px/, '$10px'));
         }
         return out.join(', ') || 'none';
     }
@@ -900,8 +901,62 @@
         return trackMix(align(x), align(y), t).replace(/\s+/g, ' ').trim();
     }
     var TRACK_PROP = /^grid-template-(rows|columns)$/;
+    /* Colors other than sRGB's old forms go in oklab, premultiplied, and stay
+     * oklab() (css-color-4 12.1). */
+    var COLOR_FN = /\b(?:rgba?|color|oklab|oklch|lab|lch|hsla?|hwb)\((?:[^()]|\([^()]*\))*\)/g;
+    function oklabOf(el, c) {
+        if (!global.__cyberComputeLength) return null;
+        var got = global.__cyberComputeLength(el, 'color-mix(in oklab, ' + c + ')', 'color');
+        var m = got && /^oklab\(([-\d.e]+|none) ([-\d.e]+|none) ([-\d.e]+|none)(?: \/ ([\d.e]+|none))?\)/.exec(got);
+        if (!m) return null;
+        return { l: parseFloat(m[1]) || 0, a: parseFloat(m[2]) || 0, b: parseFloat(m[3]) || 0, al: m[4] === undefined ? 1 : parseFloat(m[4]) || 0 };
+    }
+    function wideColorPairs(a, b) {
+        var x = String(a).match(COLOR_FN), y = String(b).match(COLOR_FN);
+        if (!x || !y || x.length !== y.length) return null;
+        var wide = function (c) { return !/^(rgba?|hsla?|hwb)\(/.test(c); };
+        return x.some(wide) || y.some(wide) ? { x: x, y: y } : null;
+    }
+    function colorMixOklab(el, c0, c1, t) {
+        var p = oklabOf(el, c0), q = oklabOf(el, c1);
+        if (!p || !q) return t < 0.5 ? c0 : c1;
+        var al = p.al + (q.al - p.al) * t, A = Math.max(0, Math.min(1, al));
+        var ch = function (k) { var v = p[k] * p.al + (q[k] * q.al - p[k] * p.al) * t; return al > 0 ? v / al : 0; };
+        var L = Math.max(0, Math.min(1, ch('l')));
+        var n = function (v) { return +v.toFixed(6); };
+        return 'oklab(' + n(L) + ' ' + n(ch('a')) + ' ' + n(ch('b')) + (A < 1 ? ' / ' + n(A) : '') + ')';
+    }
+    /* superellipse(s) by where its curve crosses the corner's diagonal (css-borders-4). */
+    function superHalf(s) {
+        if (s === Infinity) return 1;
+        if (s === -Infinity) return 0;
+        return s >= 0 ? Math.pow(0.5, Math.pow(2, -s)) : 1 - Math.pow(0.5, Math.pow(2, s));
+    }
+    function superFrom(h) {
+        if (h >= 1) return Infinity;
+        if (h <= 0) return -Infinity;
+        var up = h >= 0.5, v = -Math.log2(Math.log(up ? h : 1 - h) / Math.log(0.5));
+        return up ? v : -v;
+    }
+    function superParam(v) {
+        var m = /superellipse\(\s*(-?infinity|-?[\d.e-]+)\s*\)/i.exec(v);
+        if (!m) return null;
+        return /infinity/i.test(m[1]) ? (m[1][0] === '-' ? -Infinity : Infinity) : parseFloat(m[1]);
+    }
     function interpolate(prop, a, b, t) {
         if (a === b) return a;
+        if (/color|shadow|background|border|outline|fill|stroke|caret|accent/.test(prop) && tfEl) {
+            var pairs = wideColorPairs(a, b);
+            if (pairs) {
+                /* (everything but the colors as usual, the colors put back after) */
+                var ia = 0, ib = 0;
+                var ra = String(a).replace(COLOR_FN, function () { return 'black'; });
+                var rb = String(b).replace(COLOR_FN, function () { return 'black'; });
+                var mixed = pairs.x.map(function (c, i) { return colorMixOklab(tfEl, c, pairs.y[i], t); });
+                var rest = ra === rb ? ra : interpolate(prop, ra, rb, t), k = 0;
+                return rest.replace(/\bblack\b|rgb\(0, 0, 0\)/g, function () { return mixed[k++] || 'black'; });
+            }
+        }
         if (TRACK_PROP.test(prop)) {
             var tr = trackInterpolate(a, b, t);
             return tr === null ? (t < 0.5 ? a : b) : tr;
@@ -941,7 +996,16 @@
             var fv = filterInterpolate(prop, a, b, lerpHow);
             return fv === null ? (t < 0.5 ? a : b) : fv;
         }
-        if (/^corner-.*-shape$/.test(prop)) { a = cornerShape(a); b = cornerShape(b); }
+        if (/^corner-.*-shape$/.test(prop)) {
+            a = cornerShape(a);
+            b = cornerShape(b);
+            var s0 = superParam(a), s1 = superParam(b);
+            if (s0 !== null && s1 !== null) {
+                var hc = superHalf(s0) + (superHalf(s1) - superHalf(s0)) * t;
+                var sv1 = superFrom(hc);
+                return 'superellipse(' + (sv1 === Infinity ? 'infinity' : sv1 === -Infinity ? '-infinity' : fmt(+sv1.toFixed(6))) + ')';
+            }
+        }
         if (prop === 'transform') {
             var tv = tfInterpolate(a, b, t);
             if (tv !== null) return tv;
@@ -1001,6 +1065,8 @@
     var COLORISH = /color|background|border|outline|shadow|fill|stroke|caret|accent/;
     var RELATIVE = /\b(inherit|initial|unset|revert|revert-layer|currentcolor)\b|var\(|calc\(|min\(|max\(|clamp\(|[\d.](em|rem|ex|ch|vw|vh|vmin|vmax|lh|rlh|cap|ic|dvh|dvw|svh|svw|lvh|lvw)\b/i;
     function needsResolving(prop, value) {
+        /* (what a keyword or a left-out color comes to, in the computed form) */
+        if (/^(box-shadow|text-shadow|font-stretch|font-width|corner-.*-shape)$/.test(prop) && value !== 'none') return true;
         if (/^(clip-path|shape-outside|offset-path)$/.test(prop) && /\bat\b|closest-|farthest-/.test(value)) return true;
         if (/^(min-|max-)?(width|height)$/.test(prop) && /calc-size\(|^\s*(auto|min-content|max-content|fit-content|stretch)\s*$/i.test(value)) return true;
         if (RELATIVE.test(value)) return true;
@@ -1211,6 +1277,8 @@
                            combine(prop, from, base, id) !== null);
                 if (SIZE_PROP.test(prop)) can = sizesInterpolate(el, prop, fromSpec, specNow);
                 if (TRACK_PROP.test(prop)) can = trackInterpolate(from, base, 0) !== null;
+                if (wideColorPairs(from, base)) can = true;
+                if (/^corner-.*-shape$/.test(prop)) can = true;
                 if (prop === 'filter' || prop === 'backdrop-filter') can = filterInterpolate(prop, from, base, id) !== null;
                 if (dur + delay > 0 && (can || discrete)) {
                     var easing;

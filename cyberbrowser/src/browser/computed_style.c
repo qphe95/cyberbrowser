@@ -21,6 +21,8 @@
 
 #include <quickjs.h>
 #include "css_props.h"
+#include "font_registry.h"
+#include "text_shaper.h"
 #include "css_parser.h"
 #include "dom_js.h"
 #include "layout_api.h"
@@ -221,6 +223,15 @@ static void env_of(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p, 
     ComputedStyle *par = (is_fs || is_color) ? parent_of(ctx, cs) : NULL;
     env->font_size = is_fs ? (par ? font_px(ctx, par) : 16) : font_px(ctx, cs);
     env->root_font_size = cs->root_font_size;
+    /* (ch and ex: of the font it has) */
+    if (!is_fs && strncmp(p->name, "font", 4) && v && (strstr(v, "ch") || strstr(v, "ex"))) {
+        const char *fam = computed_of(ctx, cs, "font-family");
+        TextShaper *f = fam && fam[0] ? font_registry_slot(font_registry_resolve(fam, 400, false)) : NULL;
+        if (f) {
+            env->ch_ratio = text_shaper_zero_advance(f);
+            env->ex_ratio = text_shaper_x_height(f);
+        }
+    }
     env->vw = cs->vw;
     env->vh = cs->vh;
     env->color[3] = 1;
@@ -450,6 +461,18 @@ static bool size_spec_special(const char *s)
     static const char *const kw[] = { "auto", "none", "min-content", "max-content", "fit-content", "stretch", "initial", "unset", "inherit", "revert", "revert-layer" };
     for (size_t i = 0; i < sizeof(kw) / sizeof(kw[0]); i++) if (!strcasecmp(s, kw[i])) return true;
     return false;
+}
+
+/* A color that isn't rgb(), rgba(), hsl(), hwb() or a name. */
+static bool color_spec_wide(const char *s)
+{
+    return s && (strstr(s, "color(") || strstr(s, "lab(") || strstr(s, "lch(") || strstr(s, "color-mix("));
+}
+
+static bool before_color_wide(NodeId el, const CssPropDef *p)
+{
+    size_t k = (((size_t)el * 2654435761u) ^ ((size_t)p >> 4)) % BEFORE_N;
+    return g_before[k].el == el && g_before[k].p == p && color_spec_wide(g_before[k].spec);
 }
 
 /* Whether what el's size was last read as was such a size. */
@@ -733,6 +756,13 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
         free(r);
         r = strdup(out);
     }
+    /* (a font's width: the percentage its keyword stands for) */
+    if (r && (!strcmp(n, "font-stretch") || !strcmp(n, "font-width"))) {
+        static const char *const fw[][2] = { { "ultra-condensed", "50%" }, { "extra-condensed", "62.5%" }, { "condensed", "75%" },
+            { "semi-condensed", "87.5%" }, { "normal", "100%" }, { "semi-expanded", "112.5%" }, { "expanded", "125%" },
+            { "extra-expanded", "150%" }, { "ultra-expanded", "200%" } };
+        for (size_t k = 0; k < 9; k++) if (!strcmp(r, fw[k][0])) { free(r); r = strdup(fw[k][1]); break; }
+    }
     /* (keywords of a corner's shape: the superellipse they are) */
     if (r && !strncmp(n, "corner-", 7) && strstr(n, "-shape")) {
         static const char *const kw[][2] = { { "round", "superellipse(1)" }, { "scoop", "superellipse(-1)" }, { "bevel", "superellipse(0)" },
@@ -800,10 +830,13 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
     /* (sizes between keywords or calc-size()s: over their lengths, in script) */
     bool sized_prop = !strcmp(n, "width") || !strcmp(n, "height") || !strcmp(n, "min-width") || !strcmp(n, "min-height") ||
                       !strcmp(n, "max-width") || !strcmp(n, "max-height");
+    /* (colors that interpolate in oklab: over what script works out) */
+    bool color_prop = !strcmp(n, "color") || !strcmp(n, "background-color");
+    bool wide_color = color_prop && !cs->pseudo && ((s && color_spec_wide(s)) || before_color_wide(cs->el, p));
     bool generic_size = sized_prop && !cs->pseudo && (has_calc_size || (s && (size_spec_special(s) || before_size_special(cs->el, p))) ||
                         !strcmp(computed_of(ctx, cs, "interpolate-size"), "allow-keywords"));
     /* (script working out what a declaration comes to: the declaration alone) */
-    int ap = is_transform || individual || generic_size || (sized_prop && (g_in_calc || g_in_hook)) ? -1 : anim_prop_of(n);
+    int ap = is_transform || individual || generic_size || wide_color || (sized_prop && (g_in_calc || g_in_hook)) ? -1 : anim_prop_of(n);
     AnimVal av;
     if (ap >= 0 && anim_value(cs->el, cs->pseudo, ap, (double)anim_time_ms(), &av)) {
         char b[96];
@@ -830,10 +863,10 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
         keyframes_only = true;
     }
     char *before_spec = NULL;
-    char *now_spec = sized_prop && s ? strdup(s) : NULL;
+    char *now_spec = (sized_prop || color_prop) && s ? strdup(s) : NULL;
     char *before = generic && !keyframes_only ? before_swap(cs->el, p, r, now_spec, &before_spec) : NULL;
     /* (a size read now may be what a later change transitions from) */
-    if (!generic && sized_prop && !in_hook && !g_in_calc && !cs->pseudo) {
+    if (!generic && (sized_prop || color_prop) && !in_hook && !g_in_calc && !cs->pseudo) {
         char *old_spec = NULL;
         free(before_swap(cs->el, p, r, now_spec, &old_spec));
         free(old_spec);
@@ -890,11 +923,12 @@ GCValue js_compute_length(JSContextHandle ctx, GCValue this_val, int argc, GCVal
     (void)this_val;
     NodeId id = argc > 1 ? dom_node_of(argv[0]) : 0;
     const char *v = argc > 1 ? JS_ToCString(ctx, argv[1]) : NULL;
+    const char *as = argc > 2 && JS_IsString(argv[2]) ? JS_ToCString(ctx, argv[2]) : "width";
     GCValue out = JS_NULL;
     if (id && v) {
         ComputedStyle *t = computed_style_new(id);
         refresh(ctx, t);
-        const CssPropDef *p = css_prop_find("width", 5);
+        const CssPropDef *p = css_prop_find(as, strlen(as));
         char *c = t->styled && p ? compute_value(ctx, t, p, v) : NULL;
         if (c) { out = JS_NewString(ctx, c); free(c); }
         computed_style_free(t);

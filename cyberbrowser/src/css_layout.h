@@ -864,6 +864,9 @@ void css_layout_box_scrolled(const LayoutContext *ctx, int idx, double *dx, doub
 /* Box idx's values as the transitions store's before-change style. */
 void css_layout_anim_seed(const LayoutContext *ctx, int idx, uint32_t el);
 
+/* The rectangles of the bytes [a, b) of text box idx's data, one per line. */
+int css_layout_text_rects(const LayoutContext *ctx, int idx, size_t a, size_t b, double (*out)[4], int max);
+
 /* The text a text box lays out and paints (white space processed). */
 const char *css_layout_box_text(const LayoutContext *ctx, int idx, const char *raw);
 
