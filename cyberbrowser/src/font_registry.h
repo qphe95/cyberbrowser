@@ -41,6 +41,10 @@ int font_registry_default_slot(void);
  * are not loaded yet are queued (see font_registry_load_pending) and the next
  * family in the list stands in.  Thread-safe. */
 int font_registry_resolve(const char *family_list, int weight, bool italic);
+/* The same with the rest of what picks a web face (CSS Fonts 4, 5.2): oblique
+ * rather than italic, at an angle, and a stretch in percent. */
+int font_registry_resolve_style(const char *family_list, int weight, bool italic, bool oblique, float angle,
+                                float stretch);
 
 /* Register the @font-face rules in `css` (relative URLs against base_url).
  * Duplicates are ignored. */

@@ -275,6 +275,13 @@
         st(this).data = data === undefined ? '' : String(data);
     });
     expose('Event', Event);
+    /* (the classes platform_api made from the Event there was then) */
+    ['SnapEvent', 'ContentVisibilityAutoStateChangeEvent', 'PageSwapEvent', 'PageRevealEvent'].forEach(function (n) {
+        var C = global[n];
+        if (!C) return;
+        Object.setPrototypeOf(C.prototype, EP);
+        Object.setPrototypeOf(C, Event);
+    });
 
     /* ---- EventTarget ---- */
     function flatten(options, adding) {

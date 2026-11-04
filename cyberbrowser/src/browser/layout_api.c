@@ -47,6 +47,7 @@
 #include <string.h>
 
 #include "css_layout.h"
+#include "image_cache.h"
 #include "css_anim.h"
 #include "dom_store.h"
 #include "dom_wrap.h"
@@ -1039,6 +1040,7 @@ static bool lq_who_affected_at(int qi)
 
 extern uint64_t g_anim_frame;
 static uint64_t g_lq_anim_frame;
+static uint64_t g_lq_img_gen;
 
 /* (a frame of running transitions or animations since the last layout) */
 static bool lq_anim_moved(void)
@@ -1229,7 +1231,9 @@ static bool lq_ensure(JSContextHandle ctx)
     /* (a relayout request, e.g. a style sheet changed through the CSSOM,
      * leaves the document as it was but not its layout) */
     /* (and a frame of running transitions or animations: their values moved on) */
-    bool relayout = g_lq_valid && (g_dom_relayout_requests != g_lq_relayouts || lq_anim_moved());
+    /* (and an image's size that the last layout asked for and didn't get) */
+    uint64_t img_gen = image_cache_size_generation();
+    bool relayout = g_lq_valid && (g_dom_relayout_requests != g_lq_relayouts || lq_anim_moved() || img_gen != g_lq_img_gen);
     if (relayout) snprintf(why, sizeof(why), "relayout request");
     if (!relayout && g_lq_valid && g_lq_cheap_ok && now - g_lq_full_at < LQ_FULL_CHECK_MS &&
         memcmp(cheap, g_lq_cheap, sizeof(cheap)) == 0) {
@@ -1370,6 +1374,7 @@ static bool lq_ensure(JSContextHandle ctx)
         }
         g_lq_change_pos = html_mirror_change_seq();
         g_lq_relayouts = g_dom_relayout_requests;
+        g_lq_img_gen = img_gen;
         g_lq_anim_frame = g_anim_frame;
         g_lq_change_pos0 = g_lq_change_pos;
     } else {
@@ -1659,7 +1664,11 @@ static GCValue lq_metric(JSContextHandle ctx, GCValue this_val, int which)
     }
     if (idx < 0) return JS_NewInt32(ctx, 0);
     const LayoutBox *b = &g_lq_layout.boxes[idx];
-    bool inl = b->s->display == CSS_DISPLAY_INLINE;
+    /* (CSSOM View: "no CSS layout box or an inline box", which a replaced
+     * element, inline or not, isn't) */
+    bool inl = b->s->display == CSS_DISPLAY_INLINE &&
+               !(is_tag(id, "iframe") || is_tag(id, "img") || is_tag(id, "video") || is_tag(id, "canvas") ||
+                 is_tag(id, "embed") || is_tag(id, "object"));
     switch (which) {
     case M_OFFSET_W: return lq_int(ctx, b->width);
     case M_OFFSET_H: return lq_int(ctx, b->height);
@@ -1835,6 +1844,16 @@ static GCValue js_scroll_left_set(JSContextHandle ctx, GCValue this_val, int arg
 
 bool layout_query_valid(void) { return g_lq_valid; }
 bool layout_query_rendered(uint32_t id) { return g_lq_valid && id && lq_rendered(lq_box_index(id)); }
+
+bool layout_query_content_size(uint32_t id, double *w, double *h)
+{
+    int idx = g_lq_valid && id ? lq_box_index(id) : -1;
+    if (idx < 0) return false;
+    const LayoutBox *b = &g_lq_layout.boxes[idx];
+    *w = floor(b->width - b->s->border_left - b->s->border_right - b->s->padding_left - b->s->padding_right + 0.5);
+    *h = floor(b->height - b->s->border_top - b->s->border_bottom - b->s->padding_top - b->s->padding_bottom + 0.5);
+    return true;
+}
 
 bool layout_query_box_size(uint32_t id, double *w, double *h)
 {

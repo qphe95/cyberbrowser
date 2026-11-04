@@ -186,6 +186,7 @@ struct CssStyleDoc {
     int32_t *prev_elem;   /* previous element sibling, -1 = none */
     int32_t *next_elem;   /* next element sibling, -1 = none */
     int32_t *sub_end;     /* one past the last descendant (preorder) */
+    uint64_t pass;        /* the style pass that has it (has_match's memo) */
     uint32_t *store_id;   /* the node's NodeId (a later build reuses its features by it) */
 };
 
@@ -464,6 +465,8 @@ static struct {
 } g_sdc;
 static CssStyleDocStats g_sdc_stats;
 
+static _Atomic uint64_t g_style_pass;
+
 const CssStyleDoc *css_styledoc_get(HtmlDocument *doc)
 {
     int n = (int)po_array_count(&doc->array);
@@ -508,6 +511,7 @@ const CssStyleDoc *css_styledoc_get(HtmlDocument *doc)
         g_sdc.count = n;
         g_sdc_stats.built++;
     }
+    d->pass = ++g_style_pass;
     static int verify = -1;
     if (verify < 0) verify = getenv("CYBER_STYLEDOC_VERIFY") ? 1 : 0;
     if (verify && d) {
@@ -873,8 +877,49 @@ static bool attr_test(const CssStyleSet *S, const CssStyleDoc *D, int n, CssAtom
 
 static bool list_match(const CssStyleSet *S, const CssStyleDoc *D, int32_t li, int node);
 
-/* :has(): some element in the relative position matches the argument. */
+/* :has(): some element in the relative position matches the argument.  An
+ * anchor's answer holds for the pass (the document doesn't change in one):
+ * main:has(x) span asks for it once per span, and each asking may look at every
+ * element under it.  Per thread, direct-mapped: a collision only asks again. */
+#define HAS_MEMO_SIZE 4096
+typedef struct HasMemo {
+    const CssStyleSet *set;
+    uint64_t pass;
+    uint32_t stamp;
+    uint32_t stamps[HAS_MEMO_SIZE];
+    uint64_t keys[HAS_MEMO_SIZE];
+    uint8_t vals[HAS_MEMO_SIZE];
+} HasMemo;
+static _Thread_local HasMemo *t_has_memo;
+
+static bool has_scan(const CssStyleSet *S, const CssStyleDoc *D, const CComp *c, int n);
+
 static bool has_match(const CssStyleSet *S, const CssStyleDoc *D, const CComp *c, int n)
+{
+    if (c->has_comb == '+') return D->next_elem[n] >= 0 && list_match(S, D, c->has, D->next_elem[n]);
+    HasMemo *m = t_has_memo;
+    if (!m) {
+        m = t_has_memo = (HasMemo *)calloc(1, sizeof(HasMemo));
+        if (!m) return has_scan(S, D, c, n);
+    }
+    if (m->set != S || m->pass != D->pass) {
+        m->set = S;
+        m->pass = D->pass;
+        m->stamp++;
+    }
+    /* (each :has() has a list of its own: it says how they are related too) */
+    uint64_t key = ((uint64_t)(uint32_t)c->has << 32) | (uint32_t)n;
+    uint32_t slot = (uint32_t)((key * 0x9E3779B97F4A7C15ull) >> 52);
+    if (m->stamps[slot] == m->stamp && m->keys[slot] == key) return m->vals[slot] != 0;
+    bool hit = has_scan(S, D, c, n);
+    /* (the scan may have asked for others: this slot's its own now) */
+    m->stamps[slot] = m->stamp;
+    m->keys[slot] = key;
+    m->vals[slot] = hit;
+    return hit;
+}
+
+static bool has_scan(const CssStyleSet *S, const CssStyleDoc *D, const CComp *c, int n)
 {
     switch (c->has_comb) {
     case '+':
@@ -889,7 +934,6 @@ static bool has_match(const CssStyleSet *S, const CssStyleDoc *D, const CComp *c
         return false;
     default: {
         int end = D->sub_end[n];
-        if (end - n > 20000) end = n + 20000;
         for (int k = n + 1; k < end; k++)
             if (D->is_elem[k] && list_match(S, D, c->has, k)) return true;
         return false;

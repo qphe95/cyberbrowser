@@ -112,8 +112,13 @@ GCValue js_event_get_target(JSContextHandle ctx, GCValue this_val) {
     } else {
         // Fallback for subclasses (CustomEvent, MouseEvent, FocusEvent) that do not
         // share the Event class id but still set the target/currentTarget properties.
+        /* (properties of its own: without them, this same getter would answer) */
+        static bool reading;
+        if (reading) return JS_NULL;
+        reading = true;
         actual = JS_GetPropertyStr(ctx, this_val, "target");
         current = JS_GetPropertyStr(ctx, this_val, "currentTarget");
+        reading = false;
     }
 
     GCValue global = JS_GetGlobalObject(ctx);
@@ -128,7 +133,12 @@ GCValue js_event_get_target(JSContextHandle ctx, GCValue this_val) {
 GCValue js_event_get_currentTarget(JSContextHandle ctx, GCValue this_val) {
     EventHandle ev = event_from_object_check(ctx, this_val);
     if (!SAFE_IS_NULL(ev)) return SAFE_GET_OR(ev, EventHandle, currentTarget, JS_NULL);
-    return JS_GetPropertyStr(ctx, this_val, "currentTarget");
+    static bool reading;
+    if (reading) return JS_NULL;
+    reading = true;
+    GCValue current = JS_GetPropertyStr(ctx, this_val, "currentTarget");
+    reading = false;
+    return current;
 }
 
 GCValue js_event_preventDefault(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {

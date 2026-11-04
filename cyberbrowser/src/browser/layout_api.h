@@ -38,6 +38,8 @@ void layout_api_run(JSContextHandle ctx);
 bool layout_query_valid(void);
 /* The element is rendered in the query layout's document (and it is that document's). */
 bool layout_query_rendered(uint32_t id);
+/* Its content box there, whole pixels (false without a box). */
+bool layout_query_content_size(uint32_t id, double *w, double *h);
 int layout_scroll_tick(JSContextHandle ctx);
 void layout_scroll_reset(void);
 /* Scroll snap, content-visibility and scroll-initial-target, when a page has

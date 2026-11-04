@@ -208,6 +208,10 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     /* Font weight 100..900 (400 = normal, 700 = bold) and italic flag. */
     int    font_weight;
     unsigned char font_italic;
+    unsigned char font_is_oblique;   /* font_italic from an oblique, of this angle */
+    float font_oblique_deg;
+    float font_stretch;              /* percent */
+    unsigned char font_stretch_set;
     /* Font-registry slot for the family / weight / style (resolved after
      * the cascade, before layout; -1 = not resolved). */
     int    font_slot;

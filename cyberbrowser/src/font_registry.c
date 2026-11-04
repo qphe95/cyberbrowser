@@ -47,6 +47,9 @@ typedef struct {
     char *url;
     int wmin, wmax;
     bool italic;
+    bool oblique;                 /* italic from an oblique descriptor: of angles amin..amax */
+    float amin, amax;
+    float smin, smax;             /* font-stretch, percent */
     uint32_t *ranges;             /* [lo, hi] pairs; NULL = everything */
     int nranges;
     int state;
@@ -490,18 +493,59 @@ static bool range_has(const WebFace *w, uint32_t cp)
     return false;
 }
 
+/* What resolving asks for besides weight and italic (under g_mu). */
+static struct { bool oblique; float angle, stretch; } g_ask = { false, 0.0f, 100.0f };
+
+/* Stretch: within the range, else narrower first up to 100%, wider first above. */
+static double stretch_score(float want, float lo, float hi)
+{
+    if (want >= lo && want <= hi) return 0;
+    bool wider = lo > want;
+    double d = wider ? lo - want : want - hi;
+    return ((want <= 100.0f) == wider ? 2000.0 : 0.0) + d;
+}
+
+/* An angle's order among a face's angles: towards what a slant of that sign and
+ * size would rather be, then away, then the other sign. */
+static double angle_score(float want, float lo, float hi)
+{
+    if (want >= lo && want <= hi) return 0;
+    bool above = lo > want;
+    double d = above ? lo - want : want - hi;
+    if (want >= 0) {
+        /* (0deg, upright, comes after every slant of this sign) */
+        if (!above && hi <= 0) return 4000.0 + (double)-hi;
+        bool first = want >= 20.0f ? above : !above;
+        return (first ? 0.0 : 2000.0) + d;
+    }
+    if (above && lo >= 0) return 4000.0 + (double)lo;
+    bool first = want <= -20.0f ? !above : above;
+    return (first ? 0.0 : 2000.0) + d;
+}
+
+static double style_score(const WebFace *w, bool italic)
+{
+    bool face_italic = w->italic && !w->oblique, face_normal = !w->italic;
+    float lo = w->oblique ? w->amin : 0.0f, hi = w->oblique ? w->amax : 0.0f;
+    if (g_ask.oblique) return face_italic ? 8000.0 : angle_score(g_ask.angle, lo, hi);
+    if (italic) return face_italic ? 0.0 : 1000.0 + angle_score(20.0f, lo, hi);
+    if (face_normal) return 0.0;
+    return face_italic ? 8000.0 : 1000.0 + angle_score(0.0f, lo, hi);
+}
+
 /* Best web face of `family`; -1 when there is none, -2 when the best one is
  * still loading (it has been queued). */
 static int match_web_locked(const char *family, int weight, bool italic)
 {
-    int best = -1, best_score = 1 << 30;
+    int best = -1;
+    double best_score = 1e30;
     for (int i = 0; i < g_nweb; i++) {
         WebFace *w = &g_web[i];
         if (w->state == WEB_FAILED || strcmp(w->family, family) != 0) continue;
         /* Text is mostly Latin: of faces split by unicode-range, the one
          * covering basic Latin wins; other subsets come from fallback. */
-        int score = weight_distance(weight, w->wmin, w->wmax) + (w->italic != italic ? 10000 : 0) +
-                    (range_has(w, 'a') ? 0 : 100000);
+        double score = (range_has(w, 'a') ? 0.0 : 1e15) + stretch_score(g_ask.stretch, w->smin, w->smax) * 1e10 +
+                       style_score(w, italic) * 1e5 + weight_distance(weight, w->wmin, w->wmax);
         if (score < best_score) { best_score = score; best = i; }
     }
     if (best < 0) return -1;
@@ -534,10 +578,21 @@ static int resolve_name_locked(const char *name, int weight, bool italic, bool *
 
 int font_registry_resolve(const char *family_list, int weight, bool italic)
 {
+    return font_registry_resolve_style(family_list, weight, italic, false, 0.0f, 100.0f);
+}
+
+int font_registry_resolve_style(const char *family_list, int weight, bool italic, bool oblique, float angle,
+                                float stretch)
+{
     font_registry_init();
     if (weight <= 0) weight = 400;
+    if (stretch <= 0.0f) stretch = 100.0f;
     char key[256];
-    snprintf(key, sizeof(key), "%d|%d|%s", weight, italic ? 1 : 0, family_list ? family_list : "");
+    if (oblique || stretch != 100.0f)
+        snprintf(key, sizeof(key), "%d|%d|%d|%.4g|%.4g|%s", weight, italic ? 1 : 0, oblique ? 1 : 0, angle, stretch,
+                 family_list ? family_list : "");
+    else
+        snprintf(key, sizeof(key), "%d|%d|%s", weight, italic ? 1 : 0, family_list ? family_list : "");
     uint32_t h = str_hash(key) & (RESOLVE_CACHE - 1);
     pthread_mutex_lock(&g_mu);
     if (g_override_slot >= 0) { pthread_mutex_unlock(&g_mu); return g_override_slot; }
@@ -546,6 +601,9 @@ int font_registry_resolve(const char *family_list, int weight, bool italic)
         if (!e->key) break;
         if (strcmp(e->key, key) == 0) { int s = e->slot; pthread_mutex_unlock(&g_mu); return s; }
     }
+    g_ask.oblique = oblique;
+    g_ask.angle = angle;
+    g_ask.stretch = stretch;
     bool pending = false;
     int slot = -1;
     const char *p = family_list ? family_list : "";
@@ -764,6 +822,7 @@ static void add_face_rule(const char *body, const char *end, const char *base)
     WebFace w;
     memset(&w, 0, sizeof(w));
     w.wmin = w.wmax = 400;
+    w.smin = w.smax = 100.0f;
     w.slot = -1;
 
     char *src = NULL;
@@ -805,8 +864,43 @@ static void add_face_rule(const char *body, const char *end, const char *base)
             w.wmax = sp < ve ? parse_weight_word(sp, ve) : w.wmin;
             if (w.wmax < w.wmin) { int t = w.wmin; w.wmin = w.wmax; w.wmax = t; }
         } else if (nl == 10 && strncasecmp(ns, "font-style", 10) == 0) {
-            w.italic = (ve - vs >= 6 && strncasecmp(vs, "italic", 6) == 0) ||
-                       (ve - vs >= 7 && strncasecmp(vs, "oblique", 7) == 0);
+            w.oblique = ve - vs >= 7 && strncasecmp(vs, "oblique", 7) == 0;
+            w.italic = w.oblique || (ve - vs >= 6 && strncasecmp(vs, "italic", 6) == 0);
+            if (w.oblique) {
+                char *e1 = NULL, *e2 = NULL, buf[64];
+                size_t bn = (size_t)(ve - vs) < sizeof(buf) ? (size_t)(ve - vs) : sizeof(buf) - 1;
+                memcpy(buf, vs, bn);
+                buf[bn] = 0;
+                double a = strtod(buf + 7, &e1);
+                if (e1 == buf + 7) a = 14.0;
+                while (*e1 && !isspace((unsigned char)*e1)) e1++;
+                double b = strtod(e1, &e2);
+                if (e2 == e1) b = a;
+                w.amin = (float)(a < b ? a : b);
+                w.amax = (float)(a < b ? b : a);
+            }
+        } else if ((nl == 12 && strncasecmp(ns, "font-stretch", 12) == 0) ||
+                   (nl == 10 && strncasecmp(ns, "font-width", 10) == 0)) {
+            static const struct { const char *n; float pct; } kw[] = {
+                { "ultra-condensed", 50 }, { "extra-condensed", 62.5f }, { "semi-condensed", 87.5f }, { "condensed", 75 },
+                { "semi-expanded", 112.5f }, { "extra-expanded", 150 }, { "ultra-expanded", 200 }, { "expanded", 125 } };
+            char buf[64], *e1 = NULL, *e2 = NULL;
+            size_t bn = (size_t)(ve - vs) < sizeof(buf) ? (size_t)(ve - vs) : sizeof(buf) - 1;
+            memcpy(buf, vs, bn);
+            buf[bn] = 0;
+            double a = strtod(buf, &e1);
+            if (e1 == buf) {
+                a = 100.0;
+                for (size_t k = 0; k < sizeof(kw) / sizeof(kw[0]); k++)
+                    if (!strncasecmp(buf, kw[k].n, strlen(kw[k].n))) { a = kw[k].pct; break; }
+                w.smin = w.smax = (float)a;
+            } else {
+                while (*e1 && !isspace((unsigned char)*e1)) e1++;
+                double b = strtod(e1, &e2);
+                if (e2 == e1) b = a;
+                w.smin = (float)(a < b ? a : b);
+                w.smax = (float)(a < b ? b : a);
+            }
         } else if (nl == 13 && strncasecmp(ns, "unicode-range", 13) == 0) {
             parse_unicode_range(&w, vs, ve);
         }
@@ -815,7 +909,9 @@ static void add_face_rule(const char *body, const char *end, const char *base)
     pthread_mutex_lock(&g_mu);
     for (int i = 0; i < g_nweb; i++) {
         if (strcmp(g_web[i].url, src) == 0 && strcmp(g_web[i].family, w.family) == 0 &&
-            g_web[i].wmin == w.wmin && g_web[i].italic == w.italic) {
+            g_web[i].wmin == w.wmin && g_web[i].wmax == w.wmax && g_web[i].italic == w.italic &&
+            g_web[i].oblique == w.oblique && g_web[i].amin == w.amin && g_web[i].amax == w.amax &&
+            g_web[i].smin == w.smin && g_web[i].smax == w.smax) {
             pthread_mutex_unlock(&g_mu);
             free(src);
             free(w.ranges);
@@ -851,11 +947,13 @@ void font_registry_scan_css(const char *css, size_t len, const char *base_url)
 {
     if (!css || len < 10) return;
     /* Layouts hand the same sheets over again and again: a text seen before
-     * (same length and sampled bytes, and base) is not rescanned. */
+     * (same length and bytes, and base) is not rescanned.  (Sheets a script
+     * writes can differ by a name alone; only a big one is sampled.) */
     {
         uint64_t key = (uint64_t)len * 1099511628211ull;
-        for (int k = 0; k < 64; k++) {
-            key ^= (unsigned char)css[(len - 1) * (size_t)k / 63];
+        size_t step = len > 65536 ? len / 65536 + 1 : 1;
+        for (size_t k = 0; k < len; k += step) {
+            key ^= (unsigned char)css[k];
             key *= 1099511628211ull;
         }
         for (const char *b = base_url ? base_url : ""; *b; b++) { key ^= (unsigned char)*b; key *= 1099511628211ull; }
@@ -962,9 +1060,21 @@ static void *fetch_thread(void *arg)
 int font_registry_load_pending(void)
 {
     pthread_mutex_lock(&g_mu);
-    int n = 0;
-    for (int i = 0; i < g_nweb; i++) if (g_web[i].state == WEB_QUEUED) n++;
-    if (!n) { pthread_mutex_unlock(&g_mu); return 0; }
+    int n = 0, shared = 0;
+    for (int i = 0; i < g_nweb; i++) {
+        if (g_web[i].state != WEB_QUEUED) continue;
+        /* (a file already here: the same shaper; slots run out, and go by file) */
+        for (int j = 0; j < g_nweb; j++) {
+            if (j == i || g_web[j].state != WEB_READY || g_web[j].var_sfnt || strcmp(g_web[j].url, g_web[i].url)) continue;
+            g_web[i].slot = g_web[j].slot;
+            g_web[i].state = WEB_READY;
+            shared++;
+            break;
+        }
+        if (g_web[i].state == WEB_QUEUED) n++;
+    }
+    if (shared) cache_clear_locked();
+    if (!n) { pthread_mutex_unlock(&g_mu); return shared; }
     FetchJob *jobs = (FetchJob *)calloc((size_t)n, sizeof(*jobs));
     int *which = (int *)calloc((size_t)n, sizeof(int));
     if (!jobs || !which) { free(jobs); free(which); pthread_mutex_unlock(&g_mu); return 0; }
@@ -998,7 +1108,7 @@ int font_registry_load_pending(void)
         }
     }
 
-    int ready = 0;
+    int ready = shared;
     pthread_mutex_lock(&g_mu);
     for (int t = 0; t < n; t++) {
         WebFace *w = &g_web[which[t]];

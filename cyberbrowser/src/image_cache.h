@@ -61,6 +61,9 @@ int image_cache_request(ImageCache *cache, const char *url_or_path, int want_w, 
 /* Natural (intrinsic) size of an image, available as soon as its header has
  * been fetched — before any pixels are decoded.  Starts the fetch when
  * needed.  Returns false while unknown.  Thread-safe (layout threads). */
+/* Moves when a natural size a layout asked for and didn't get arrives (on the
+ * loading thread): layouts from before it are out of date. */
+uint64_t image_cache_size_generation(void);
 bool image_cache_natural_size(ImageCache *cache, const char *url_or_path,
                               int *out_w, int *out_h);
 bool image_cache_get_natural(ImageCache *cache, int handle, int *out_w, int *out_h);

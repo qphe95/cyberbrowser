@@ -68,7 +68,7 @@ static const char *const k_props[ANIM_NPROP] = { "left", "top", "right", "bottom
                                                   "padding-top", "padding-right", "padding-bottom", "padding-left",
                                                   "margin-top", "margin-right", "margin-bottom", "margin-left",
                                                   "border-top-width", "border-right-width", "border-bottom-width",
-                                                  "border-left-width", "font-size", "letter-spacing", "word-spacing", "font-weight" };
+                                                  "border-left-width", "font-size", "letter-spacing", "word-spacing", "font-weight", "font-style" };
 
 const char *anim_prop_name(int p) { return p >= 0 && p < ANIM_NPROP ? k_props[p] : ""; }
 
@@ -99,6 +99,14 @@ void anim_val_css(int prop, const AnimVal *v, char *buf, size_t cap)
         int r = (int)lround(v->x * 255.0f), g = (int)lround(v->y * 255.0f), b = (int)lround(v->z * 255.0f);
         if (v->w >= 1.0f) snprintf(buf, cap, "rgb(%d, %d, %d)", r, g, b);
         else snprintf(buf, cap, "rgba(%d, %d, %d, %.6g)", r, g, b, v->w);
+        return;
+    }
+    if (prop == ANIM_FONT_STYLE) {
+        /* (x: the angle, y: italic) */
+        double deg = v->x < -90 ? -90 : v->x > 90 ? 90 : v->x;
+        if (v->y > 0.5f) snprintf(buf, cap, "italic");
+        else if (fabs(deg) < 1e-4) snprintf(buf, cap, "normal");
+        else snprintf(buf, cap, "oblique %.6gdeg", deg);
         return;
     }
     if (prop == ANIM_TRANSFORM) snprintf(buf, cap, "matrix(1, 0, 0, 1, %.6g, %.6g)", v->x, v->y);

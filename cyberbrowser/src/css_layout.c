@@ -473,6 +473,10 @@ static const LayoutBox *layout_box_template(void)
         box->s->font_family = "";
         box->s->font_weight = 400;
         box->s->font_italic = 0;
+        box->s->font_is_oblique = 0;
+        box->s->font_oblique_deg = 0.0f;
+        box->s->font_stretch = 100.0f;
+        box->s->font_stretch_set = 0;
         box->s->font_weight_set = 0;
         box->s->font_italic_set = 0;
         box->s->text_decoration = 0;
@@ -748,13 +752,18 @@ static __thread const LayoutBox *t_unit_parent;
 
 /* ex (the font's x-height) or ch (the advance of "0") in ems, for the
  * element t_unit_box with its font as styled so far; 0.5 without one. */
+static int style_font_slot(const LayoutStyle *s)
+{
+    return font_registry_resolve_style(s->font_family, s->font_weight, s->font_italic != 0, s->font_is_oblique != 0,
+                                       s->font_oblique_deg, s->font_stretch);
+}
+
 static double unit_font_ratio(bool ch)
 {
     const LayoutBox *b = t_unit_box;
     if (b && (!b->s->font_family || !b->s->font_family[0]) && t_unit_parent) b = t_unit_parent;
     if (!b || !b->s->font_family || !b->s->font_family[0]) return 0.5;
-    TextShaper *f = font_registry_slot(font_registry_resolve(b->s->font_family, b->s->font_weight,
-                                                             b->s->font_italic != 0));
+    TextShaper *f = font_registry_slot(style_font_slot(b->s));
     float r = f ? (ch ? text_shaper_zero_advance(f) : text_shaper_x_height(f)) : 0.0f;
     return r > 0.0f ? (double)r : 0.5;
 }
@@ -2814,6 +2823,21 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     const char *value = decl->value;
     if (!prop || !value) return;
     box->s->render_features |= decl->feature;
+    if (prop[0] == 'f' && prop[4] == '-' && (!strcasecmp(prop, "font-stretch") || !strcasecmp(prop, "font-width"))) {
+        static const struct { const char *n; float pct; } kw[] = {
+            { "ultra-condensed", 50 }, { "extra-condensed", 62.5f }, { "semi-condensed", 87.5f }, { "condensed", 75 },
+            { "normal", 100 }, { "semi-expanded", 112.5f }, { "extra-expanded", 150 }, { "ultra-expanded", 200 },
+            { "expanded", 125 }, { "initial", 100 } };
+        if (!strcasecmp(value, "inherit") || !strcasecmp(value, "unset")) { box->s->font_stretch_set = 0; return; }
+        char *end = NULL;
+        double pct = strtod(value, &end);
+        if (end == value || *end != '%') {
+            pct = -1;
+            for (size_t k = 0; k < sizeof(kw) / sizeof(kw[0]); k++) if (!strcasecmp(value, kw[k].n)) pct = kw[k].pct;
+        }
+        if (pct >= 0) { box->s->font_stretch = (float)pct; box->s->font_stretch_set = 1; }
+        return;
+    }
     int pk = decl_key(prop);   /* (the name's key: integer compares below) */
     t_unit_box = box;
     if (css_prop_non_negative(prop) && css_value_has_negative(value)) return;
@@ -3584,6 +3608,13 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     } else if (PK(107)) {
         box->s->font_italic = (strncasecmp(value, "italic", 6) == 0 ||
                             strncasecmp(value, "oblique", 7) == 0) ? 1 : 0;
+        box->s->font_is_oblique = strncasecmp(value, "oblique", 7) == 0;
+        box->s->font_oblique_deg = 0.0f;
+        if (box->s->font_is_oblique) {
+            char *end = NULL;
+            double deg = strtod(value + 7, &end);
+            box->s->font_oblique_deg = end && end != value + 7 ? (float)deg : 14.0f;
+        }
         box->s->font_italic_set = 1;
     } else if (PK(108) ||
                PK(109)) {
@@ -9058,7 +9089,12 @@ static void style_finish_box_em(bool em_defer, LayoutBox *box, const LayoutBox *
     if (parent) {
         if (!box->s->font_family[0]) box->s->font_family = parent->s->font_family;
         if (!box->s->font_weight_set) box->s->font_weight = parent->s->font_weight;
-        if (!box->s->font_italic_set) box->s->font_italic = parent->s->font_italic;
+        if (!box->s->font_stretch_set) box->s->font_stretch = parent->s->font_stretch;
+        if (!box->s->font_italic_set) {
+            box->s->font_italic = parent->s->font_italic;
+            box->s->font_is_oblique = parent->s->font_is_oblique;
+            box->s->font_oblique_deg = parent->s->font_oblique_deg;
+        }
         if (!box->s->text_decoration_set) box->s->text_decoration = parent->s->text_decoration;
         if (!box->s->line_height_set) {
             box->s->line_height = parent->s->line_height;
@@ -11678,7 +11714,7 @@ static int layout_font_slot(const LayoutBox *box)
 {
     if (!box) return font_registry_default_slot();
     if (box->s->font_slot >= 0) return box->s->font_slot;
-    return font_registry_resolve(box->s->font_family, box->s->font_weight, box->s->font_italic != 0);
+    return style_font_slot(box->s);
 }
 
 static void layout_resolve_fonts_pass(LayoutContext *ctx)
@@ -11688,11 +11724,12 @@ static void layout_resolve_fonts_pass(LayoutContext *ctx)
         LayoutBox *b = &ctx->boxes[i];
         if (b->flags & LAYOUT_STYLE_SKIPPED) continue;   /* a placeholder: no font */
         if (last && b->s->font_weight == last->s->font_weight && b->s->font_italic == last->s->font_italic &&
-            strcmp(b->s->font_family, last->s->font_family) == 0) {
+            b->s->font_is_oblique == last->s->font_is_oblique && b->s->font_oblique_deg == last->s->font_oblique_deg &&
+            b->s->font_stretch == last->s->font_stretch && strcmp(b->s->font_family, last->s->font_family) == 0) {
             b->s->font_slot = last->s->font_slot;
             continue;
         }
-        b->s->font_slot = font_registry_resolve(b->s->font_family, b->s->font_weight, b->s->font_italic != 0);
+        b->s->font_slot = style_font_slot(b->s);
         last = b;
     }
 }
@@ -17748,6 +17785,9 @@ static void layout_anim_read(const LayoutStyle *s, AnimVal v[ANIM_NPROP])
     }
     v[ANIM_FONT_SIZE] = (AnimVal){ (float)s->font_size, 0, 1 };
     v[ANIM_FONT_WEIGHT] = (AnimVal){ (float)s->font_weight, 0, 1 };
+    /* (italic flips over at the middle; the others are angles, normal's 0) */
+    bool italic = s->font_italic && !s->font_is_oblique;
+    v[ANIM_FONT_STYLE] = (AnimVal){ s->font_is_oblique ? s->font_oblique_deg : 0.0f, italic ? 1.0f : 0.0f, !italic };
     v[ANIM_LETTER_SPACING] = (AnimVal){ s->letter_spacing_set ? s->letter_spacing : 0.0f, 0, 1 };
     v[ANIM_WORD_SPACING] = (AnimVal){ s->word_spacing_set ? s->word_spacing : 0.0f, 0, 1 };
 }
@@ -17794,6 +17834,12 @@ static void layout_anim_write(LayoutStyle *s, int p, const AnimVal *v)
     } else if (p == ANIM_FONT_WEIGHT) {
         s->font_weight = (int)(v->x < 1 ? 1 : v->x > 1000 ? 1000 : v->x + 0.5f);
         s->font_weight_set = 1;
+    } else if (p == ANIM_FONT_STYLE) {
+        bool italic = v->y > 0.5f;
+        s->font_is_oblique = !italic && fabsf(v->x) >= 1e-4f;
+        s->font_oblique_deg = s->font_is_oblique ? v->x : 0.0f;
+        s->font_italic = italic || s->font_is_oblique;
+        s->font_italic_set = 1;
     } else if (p == ANIM_FONT_SIZE) {
         s->font_size = v->x < 0 ? 0 : v->x;
     } else if (p == ANIM_LETTER_SPACING) {

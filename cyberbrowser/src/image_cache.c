@@ -74,11 +74,15 @@ static _Atomic uint64_t g_pixels_gen;
 
 typedef enum { FMT_UNKNOWN = 0, FMT_JPEG, FMT_PNG, FMT_GIF, FMT_WEBP, FMT_BMP, FMT_SVG } ImageFormat;
 
+static _Atomic uint64_t g_size_generation;
+uint64_t image_cache_size_generation(void) { return atomic_load(&g_size_generation); }
+
 typedef struct ImageEntry {
     char *source;
     uint64_t hash;
     _Atomic int state;
     _Atomic int nat_w, nat_h;           /* natural size, 0 = unknown */
+    _Atomic int asked_unsized;          /* a layout asked and there was none */
     _Atomic unsigned dims;              /* its own width (1), height (2), ratio (4) */
     _Atomic float ratio;
     _Atomic int want_w, want_h;         /* largest requested paint size */
@@ -624,6 +628,7 @@ static void work_entry(ImageCache *c, ImageEntry *e)
         }
         atomic_store(&e->nat_w, w);
         atomic_store(&e->nat_h, h);
+        if (atomic_exchange(&e->asked_unsized, 0)) g_size_generation++;
         atomic_store(&e->dims, dims | 8u);   /* (8: known) */
         atomic_store(&e->ratio, dims & 4u && ratio > 0.0f ? ratio : h > 0 ? (float)w / (float)h : 0.0f);
         pthread_mutex_lock(&c->mu);
@@ -875,6 +880,7 @@ bool image_cache_natural_size(ImageCache *c, const char *url_or_path, int *out_w
         w = atomic_load(&e->nat_w);
         h = atomic_load(&e->nat_h);
         st = atomic_load(&e->state);
+        if (w <= 0) atomic_store(&e->asked_unsized, 1);
     }
     pthread_mutex_unlock(&c->mu);
     if (st == ST_ERROR || st == ST_QUEUED || st == ST_FETCHING) return false;

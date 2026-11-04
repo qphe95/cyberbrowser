@@ -307,6 +307,8 @@ const stalledResumes = new Set();
 const dispatcherQueues = new Map();
 function substitute(s, url) {
     const port = url.port, origin = url.origin;
+    /* (get-host-info's REMOTE_HOST is www1.<host>: no name for an address) */
+    s = s.replace(/'www1\.' \+ ORIGINAL_HOST/g, 'ORIGINAL_HOST');
     return s.replace(/\{\{([^}]*)\}\}/g, (all, expr) => {
         expr = expr.trim();
         if (/^host$|^domains\[[^\]]*\]$|^hosts\[[^\]]*\]\[[^\]]*\]$/.test(expr)) return '127.0.0.1';

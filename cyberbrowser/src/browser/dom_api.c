@@ -23,6 +23,7 @@
 #include "html_dom.h"
 #include "css_parser.h"
 #include "css_layout.h"
+#include "image_cache.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
 #include "cyber_profile.h"
@@ -5234,6 +5235,7 @@ static struct {
     HtmlDocument *doc;
     LayoutContext layout;
     bool ok;
+    uint64_t img_gen;
 } g_hit_cache;
 
 // document.elementFromPoint()
@@ -5243,9 +5245,26 @@ GCValue js_document_element_from_point(JSContextHandle ctx, GCValue this_val, in
     if (argc > 1) JS_ToFloat64(ctx, &y, argv[1]);
     GCValue doc_elem = JS_GetPropertyStr(ctx, this_val, "documentElement");
     if (JS_IsUndefined(doc_elem) || JS_IsNull(doc_elem)) return JS_NULL;
+    /* (outside the viewport nothing is there) */
+    double view_w = 0, view_h = 0;
+    GCValue view = JS_GetGlobalObject(ctx);
+    JS_ToFloat64(ctx, &view_w, JS_GetPropertyStr(ctx, view, "innerWidth"));
+    JS_ToFloat64(ctx, &view_h, JS_GetPropertyStr(ctx, view, "innerHeight"));
+    if (x < 0 || y < 0 || x >= view_w || y >= view_h) return JS_NULL;
     bool unchanged = false;
     uint64_t key = g_hit_cache.key;
     HtmlDocument *doc = html_document_from_js_dom_if_changed(ctx, this_val, &key, &unchanged);
+    uint64_t img_gen = image_cache_size_generation();
+    if (unchanged && g_hit_cache.ok && g_hit_cache.doc && g_hit_cache.img_gen != img_gen) {
+        /* (an image it had no size for has one) */
+        css_layout_tree_free(&g_hit_cache.layout);
+        memset(&g_hit_cache.layout, 0, sizeof(g_hit_cache.layout));
+        double vw = 1920.0, vh = 1080.0;
+        JS_ToFloat64(ctx, &vw, JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "innerWidth"));
+        JS_ToFloat64(ctx, &vh, JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "innerHeight"));
+        g_hit_cache.img_gen = img_gen;
+        g_hit_cache.ok = css_layout_run(&g_hit_cache.layout, g_hit_cache.doc, NULL, vw, vh);
+    }
     if (!unchanged) {
         if (g_hit_cache.ok) css_layout_tree_free(&g_hit_cache.layout);
         if (g_hit_cache.doc) html_document_free(g_hit_cache.doc);
@@ -5253,6 +5272,7 @@ GCValue js_document_element_from_point(JSContextHandle ctx, GCValue this_val, in
         if (!doc) return doc_elem;
         g_hit_cache.doc = doc;
         g_hit_cache.key = key;
+        g_hit_cache.img_gen = img_gen;
         double vw = 1920.0, vh = 1080.0;
         JS_ToFloat64(ctx, &vw, JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "innerWidth"));
         JS_ToFloat64(ctx, &vh, JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "innerHeight"));

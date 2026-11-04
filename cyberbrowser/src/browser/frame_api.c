@@ -36,6 +36,7 @@
 #include "dom_js.h"
 #include "dom_store.h"
 #include "layout_api.h"
+void timer_anim_wake(JSContextHandle ctx);
 #include "dom_wrap.h"
 #include "http_download.h"
 #include "url_utils.h"
@@ -63,6 +64,7 @@ typedef struct Frame {
     char url[2048];             /* the navigation's (or the loaded page's) URL */
     bool popup;                 /* window.open's: its element is in no document */
     bool hidden;                /* its element is not rendered, as of the parent's last layout here */
+    double box_w, box_h;        /* its content box then */
     bool closing;               /* window.close(): gone at the next turn */
     bool view_transition;       /* the document it had opted into one to the next */
     char fallback_base[2048];   /* an about: frame: its base URL when it has no <base> */
@@ -541,12 +543,18 @@ static const char frame_window_js[] =
     "  function px(v) { var n = parseFloat(v); return isFinite(n) ? n : NaN; }"
     "  var hidden = !!frameElement && !!frameElement.ownerDocument && frameElement.getClientRects && !frameElement.getClientRects().length;"
     "  var forced = {};"
+    /* (its element's content box, as of the parent's last look: a style sheet
+     * may size it.  What is on the element itself counts at once) */
+    "  var box = {};"
+    "  if (frameElement && !hidden) { box.width = frameElement.clientWidth; box.height = frameElement.clientHeight; }"
     "  function size(dim, attr, dflt) {"
     "    var f = frameElement, n = NaN;"
     "    if (hidden) return 0;"
     "    if (forced[dim] !== undefined) return forced[dim];"
     "    if (f) { n = px(f.style && f.style[dim]); if (isNaN(n)) n = px(f.getAttribute(attr)); }"
-    "    return isNaN(n) ? (opener ? (dim === 'width' ? opener.innerWidth : opener.innerHeight) : dflt) : Math.round(n);"
+    "    if (!isNaN(n)) return Math.round(n);"
+    "    if (box[dim] > 0) return box[dim];"
+    "    return opener ? (dim === 'width' ? opener.innerWidth : opener.innerHeight) : dflt;"
     "  }"
     "  Object.defineProperty(w, 'innerWidth', { get: function () { return size('width', 'width', 300); }, configurable: true });"
     "  Object.defineProperty(w, 'innerHeight', { get: function () { return size('height', 'height', 150); }, configurable: true });"
@@ -554,8 +562,10 @@ static const char frame_window_js[] =
     "  Object.defineProperty(w, 'outerHeight', { get: function () { return w.innerHeight; }, configurable: true });"
     /* (its element's size changed: a resize at it, frame_api_resize_tick) */
     "  var lastW = w.innerWidth, lastH = w.innerHeight;"
-    "  Object.defineProperty(w, '__cyberFrameResized', { configurable: true, value: function (nowHidden) {"
+    "  Object.defineProperty(w, '__cyberFrameResized', { configurable: true, value: function (nowHidden, boxW, boxH) {"
     "    if (nowHidden !== undefined) hidden = nowHidden;"
+    "    if (boxW > 0) box.width = boxW;"
+    "    if (boxH > 0) box.height = boxH;"
     "    var a = w.innerWidth, b = w.innerHeight;"
     "    if (a === lastW && b === lastH) return;"
     "    lastW = a; lastH = b;"
@@ -923,13 +933,19 @@ int frame_api_resize_tick(void) {
      * one document, and a frame's own, below, replaces it. */
     unsigned long long now = (unsigned long long)page_clock_now_ms();
     bool check = seen_rendered != changes && now - last >= 100;
+    /* (too soon: a turn must still come for it, on an idle page too) */
+    if (seen_rendered != changes && !check) timer_anim_wake(g_frames->parent);
     if (check) {
         last = now;
         seen_rendered = changes;
         for (Frame *f = g_frames; f; f = f->next) {
             if (f->dead || f->popup || !f->ctx || f->state != FRAME_LOADED) continue;
             layout_api_update(f->parent);
-            if (layout_query_valid()) f->hidden = !layout_query_rendered(f->iframe);
+            if (layout_query_valid()) {
+                f->hidden = !layout_query_rendered(f->iframe);
+                f->box_w = f->box_h = 0.0;
+                layout_query_content_size(f->iframe, &f->box_w, &f->box_h);
+            }
         }
     }
     for (Frame *f = g_frames; f; f = f->next) {
@@ -942,8 +958,9 @@ int frame_api_resize_tick(void) {
         }
         GCValue fn = JS_GetPropertyStr(f->ctx, JS_GetGlobalObject(f->ctx), "__cyberFrameResized");
         if (!JS_IsFunction(f->ctx, fn)) continue;
-        GCValue hidden = check ? JS_NewBool(f->ctx, f->hidden) : JS_UNDEFINED;
-        if (JS_IsException(JS_Call(f->ctx, fn, JS_UNDEFINED, 1, &hidden))) JS_GetException(f->ctx);
+        GCValue args[3] = { check ? JS_NewBool(f->ctx, f->hidden) : JS_UNDEFINED,
+                            JS_NewFloat64(f->ctx, check ? f->box_w : 0.0), JS_NewFloat64(f->ctx, check ? f->box_h : 0.0) };
+        if (JS_IsException(JS_Call(f->ctx, fn, JS_UNDEFINED, 3, args))) JS_GetException(f->ctx);
     }
     return 0;
 }
