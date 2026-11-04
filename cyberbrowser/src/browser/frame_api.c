@@ -62,6 +62,7 @@ typedef struct Frame {
     FrameState state;
     char url[2048];             /* the navigation's (or the loaded page's) URL */
     bool popup;                 /* window.open's: its element is in no document */
+    bool hidden;                /* its element is not rendered, as of the parent's last layout here */
     bool closing;               /* window.close(): gone at the next turn */
     bool view_transition;       /* the document it had opted into one to the next */
     char fallback_base[2048];   /* an about: frame: its base URL when it has no <base> */
@@ -553,8 +554,8 @@ static const char frame_window_js[] =
     "  Object.defineProperty(w, 'outerHeight', { get: function () { return w.innerHeight; }, configurable: true });"
     /* (its element's size changed: a resize at it, frame_api_resize_tick) */
     "  var lastW = w.innerWidth, lastH = w.innerHeight;"
-    "  Object.defineProperty(w, '__cyberFrameResized', { configurable: true, value: function (small) {"
-    "    hidden = small && !!frameElement && !frameElement.getClientRects().length;"
+    "  Object.defineProperty(w, '__cyberFrameResized', { configurable: true, value: function (nowHidden) {"
+    "    if (nowHidden !== undefined) hidden = nowHidden;"
     "    var a = w.innerWidth, b = w.innerHeight;"
     "    if (a === lastW && b === lastH) return;"
     "    lastW = a; lastH = b;"
@@ -911,19 +912,38 @@ void frame_api_hold(bool hold) { g_frames_held = hold; }
 
 /* The frames whose size changed, when anything in the page changed. */
 int frame_api_resize_tick(void) {
-    static uint64_t seen;
+    static uint64_t seen, seen_rendered;
+    static unsigned long long last;
     extern uint64_t g_dom_layout_requests;
-    if (seen == g_dom_layout_requests || !g_frames) return 0;
-    seen = g_dom_layout_requests;
+    uint64_t changes = g_dom_layout_requests;
+    if (!g_frames || (seen == changes && seen_rendered == changes)) return 0;
+    seen = changes;
+    /* Whether each frame's element is still rendered, from its parent's layout
+     * up to now.  Done first, and at most every 100 ms: the query layout holds
+     * one document, and a frame's own, below, replaces it. */
+    unsigned long long now = (unsigned long long)page_clock_now_ms();
+    bool check = seen_rendered != changes && now - last >= 100;
+    if (check) {
+        last = now;
+        seen_rendered = changes;
+        for (Frame *f = g_frames; f; f = f->next) {
+            if (f->dead || f->popup || !f->ctx || f->state != FRAME_LOADED) continue;
+            layout_api_update(f->parent);
+            if (layout_query_valid()) f->hidden = !layout_query_rendered(f->iframe);
+        }
+    }
     for (Frame *f = g_frames; f; f = f->next) {
         if (f->dead || f->popup || !f->ctx || f->state != FRAME_LOADED) continue;
-        /* (the page's frames lay out only the main document: a frame's style
-         * change is seen here, and a transition it starts with it) */
-        if (f->doc && dom_valid(f->doc) && (g_dom.flags[dom_slot(f->doc)] & DOMF_DIRTY_MASK)) layout_api_update(f->ctx);
+        /* (the page's frames lay out only the main document: a change in a
+         * frame's own is seen here, and a transition it starts with it) */
+        if (f->doc && dom_valid(f->doc) && (g_dom.flags[dom_slot(f->doc)] & DOMF_DOC_CHANGED)) {
+            g_dom.flags[dom_slot(f->doc)] &= (uint16_t)~DOMF_DOC_CHANGED;
+            layout_api_run(f->ctx);
+        }
         GCValue fn = JS_GetPropertyStr(f->ctx, JS_GetGlobalObject(f->ctx), "__cyberFrameResized");
-        /* (asking if it has a box lays out: not on a big page) */
-        GCValue small = JS_NewBool(f->ctx, g_dom.live < 1500);
-        if (JS_IsFunction(f->ctx, fn) && JS_IsException(JS_Call(f->ctx, fn, JS_UNDEFINED, 1, &small))) JS_GetException(f->ctx);
+        if (!JS_IsFunction(f->ctx, fn)) continue;
+        GCValue hidden = check ? JS_NewBool(f->ctx, f->hidden) : JS_UNDEFINED;
+        if (JS_IsException(JS_Call(f->ctx, fn, JS_UNDEFINED, 1, &hidden))) JS_GetException(f->ctx);
     }
     return 0;
 }

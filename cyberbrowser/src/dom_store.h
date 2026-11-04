@@ -318,6 +318,7 @@ void dom_set_element_name(NodeId id, uint32_t ns, const char *prefix, size_t pn,
 #define DOMF_MEDIA (1u << 12)          /* (on elements) video, audio */
 #define DOMF_SHADOW_CLOSED (1u << 13)  /* (on shadow roots) mode "closed" */
 #define DOMF_INERT_DOC (1u << 13)      /* (on document nodes) a template contents owner */
+#define DOMF_DOC_CHANGED (1u << 15)    /* (on document nodes) something in it marked dirty since the frame tick looked */
 #define DOMF_META_PENDING (1u << 14)   /* (on metas) inserted, its post-insertion steps to come */
 static inline bool dom_is_html_document(NodeId doc) { return !(dom_flags(doc) & DOMF_XML_DOCUMENT); }
 

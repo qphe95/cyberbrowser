@@ -680,20 +680,8 @@
         global.setTimeout(function () { set.onloadingdone(e); }, 0);
     } });
 
-    /* The flat tree, in order (Selectors: the snap targets in a shadow tree or
-     * slotted count where they show). */
-    function flatKids(n) {
-        if (n.shadowRoot) return n.shadowRoot.children;
-        if (n.localName === 'slot' && n.assignedElements) {
-            var as = n.assignedElements();
-            if (as.length) return as;
-        }
-        return n.children;
-    }
-    function flatWalk(n, fn) {
-        var k = flatKids(n);
-        for (var i = 0; i < k.length; i++) if (fn(k[i]) !== false) flatWalk(k[i], fn);
-    }
+    /* (the parent in the flat tree) */
+    function flatParent(n) { return n.assignedSlot || n.parentNode || n.host || null; }
     function isScrollBox(cs) { return /auto|scroll|hidden/.test(cs.overflowX + ' ' + cs.overflowY); }
 
     /* Scroll snap (CSS Scroll Snap 1 and 2): for each box, the targets it is
@@ -711,18 +699,21 @@
         var sx = el.scrollLeft, sy = el.scrollTop, cw = el.clientWidth, ch = el.clientHeight;
         var maxX = el.scrollWidth - cw, maxY = el.scrollHeight - ch, out = { x: [], y: [] };
         var at = function (align, lo, hi, view) { return align === 'start' ? lo : align === 'end' ? hi - view : (lo + hi - view) / 2; };
-        flatWalk(el, function (c) {
-            var cs = global.getComputedStyle(c), align = cs.scrollSnapAlign;
-            if (align && align !== 'none' && c.getClientRects().length) {
-                var parts = align.split(' '), block = parts[0], inline = parts[1] || parts[0], b = c.getBoundingClientRect();
-                if (axes.x && inline !== 'none')
-                    out.x.push({ t: c, pos: Math.max(0, Math.min(maxX, at(inline, b.left - left + sx, b.right - left + sx, cw))) });
-                if (axes.y && block !== 'none')
-                    out.y.push({ t: c, pos: Math.max(0, Math.min(maxY, at(block, b.top - top + sy, b.bottom - top + sy, ch))) });
-            }
-            /* (a nested scroller's targets are its own) */
-            return !isScrollBox(cs);
-        });
+        /* (what the cascade says has a scroll-snap-align, in tree order; a
+         * nested scroller's targets are its own) */
+        var aligned = global.__cyberRenderElements(16);
+        for (var i = 0; i < aligned.length; i++) {
+            var c = aligned[i], up = flatParent(c);
+            while (up && up !== el && !(up.nodeType === 1 && isScrollBox(global.getComputedStyle(up)))) up = flatParent(up);
+            if (up !== el || !c.getClientRects().length) continue;
+            var align = global.getComputedStyle(c).scrollSnapAlign;
+            if (!align || align === 'none') continue;
+            var parts = align.split(' '), block = parts[0], inline = parts[1] || parts[0], b = c.getBoundingClientRect();
+            if (axes.x && inline !== 'none')
+                out.x.push({ t: c, pos: Math.max(0, Math.min(maxX, at(inline, b.left - left + sx, b.right - left + sx, cw))) });
+            if (axes.y && block !== 'none')
+                out.y.push({ t: c, pos: Math.max(0, Math.min(maxY, at(block, b.top - top + sy, b.bottom - top + sy, ch))) });
+        }
         return out;
     }
     function snapNearest(list, cur) {
@@ -842,34 +833,24 @@
             global.scrollBy(r.left, r.top);
         }
     }
-    Object.defineProperty(global, '__cyberRenderTick', { configurable: true, value: function (features, scrollers, big) {
-        var root = global.document && global.document.documentElement, snappers = [], changed = [];
-        if (!root) return;
+    Object.defineProperty(global, '__cyberRenderTick', { configurable: true, value: function (features) {
+        var snappers = [], changed = [];
         if ((features & 8) && global.__cyberMediaCheck) global.__cyberMediaCheck();
-        if (big && !scrollers) return;
-        if (scrollers) {
-            for (var s = 0; s < scrollers.length; s++) {
-                var ax = snapAxes(global.getComputedStyle(scrollers[s]));
-                if (ax) snapFollow(scrollers[s], ax);
-            }
-            return;
-        }
-        flatWalk(root, function (c) {
-            var cs = global.getComputedStyle(c);
-            if (features & 1) {
-                var axes = snapAxes(cs);
-                if (axes) snappers.push(c, axes);
-                else if (snapStates.has(c)) snapStates.delete(c);
-            }
-            if ((features & 2) && cs.contentVisibility === 'auto' && c.getClientRects().length) {
+        var list = global.__cyberRenderElements(7);
+        for (var e = 0; e < list.length; e++) {
+            var c = list[e], cs = global.getComputedStyle(c);
+            var axes = snapAxes(cs);
+            if (axes) snappers.push(c, axes);
+            else if (snapStates.has(c)) snapStates.delete(c);
+            if (cs.contentVisibility === 'auto' && c.getClientRects().length) {
                 var skipped = !cvRelevant(c);
                 if (cvSkipped.get(c) !== skipped) { cvSkipped.set(c, skipped); changed.push(c, skipped); }
             }
-            if ((features & 4) && cs.scrollInitialTarget === 'nearest' && !initialDone.has(c) && c.getClientRects().length) {
+            if (cs.scrollInitialTarget === 'nearest' && !initialDone.has(c) && c.getClientRects().length) {
                 initialDone.add(c);
                 scrollToInitialTarget(c);
             }
-        });
+        }
         for (var i = 0; i < snappers.length; i += 2) snapFollow(snappers[i], snappers[i + 1]);
         for (var k = 0; k < changed.length; k += 2)
             global.__cyberDispatchTrusted(changed[k], new global.ContentVisibilityAutoStateChangeEvent('contentvisibilityautostatechange', { skipped: changed[k + 1] }));

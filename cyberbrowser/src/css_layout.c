@@ -2813,6 +2813,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     const char *prop = decl->property;
     const char *value = decl->value;
     if (!prop || !value) return;
+    box->s->render_features |= decl->feature;
     int pk = decl_key(prop);   /* (the name's key: integer compares below) */
     t_unit_box = box;
     if (css_prop_non_negative(prop) && css_value_has_negative(value)) return;
@@ -9263,6 +9264,7 @@ static void style_skip_descendants(StylePass *P, int pos, bool clean)
         LayoutBox *box = layout_box(ctx, idx);
         box->s->display = CSS_DISPLAY_NONE;
         box->s->skipped = 1;
+        box->s->render_features = 0;
         ctx->custom_props[idx] = ctx->custom_props[p];
         P->cls[idx] = idx;
         if (P->inc) P->out_changed[idx] = 1;
@@ -19951,6 +19953,49 @@ static void layout_keep_verify(LayoutContext *ctx, HtmlDocument *doc, CssStylesh
     css_layout_tree_free(&fresh);
 }
 
+/* ---- which elements use what the rendering tick looks after ---- */
+
+uint64_t g_layout_runs;
+static struct { uint32_t *el, *owner; unsigned char *bits; uint32_t n, cap; } g_render_list;
+
+void css_layout_render_list(const uint32_t **els, const unsigned char **bits, uint32_t *n)
+{
+    *els = g_render_list.el;
+    *bits = g_render_list.bits;
+    *n = g_render_list.n;
+}
+
+/* This layout's document's entries, anew. */
+static void render_list_update(const LayoutContext *ctx)
+{
+    uint32_t owner = 0, k = 0;
+    int root = ctx->tree.root_idx;
+    const HtmlNode *rn = root >= 0 ? css_layout_box_node(ctx, root) : NULL;
+    if (rn && dom_valid(rn->store_id)) owner = dom_owner(rn->store_id);
+    for (uint32_t i = 0; i < g_render_list.n; i++) {
+        if (g_render_list.owner[i] == owner || !dom_valid(g_render_list.el[i])) continue;
+        g_render_list.el[k] = g_render_list.el[i];
+        g_render_list.owner[k] = g_render_list.owner[i];
+        g_render_list.bits[k++] = g_render_list.bits[i];
+    }
+    g_render_list.n = k;
+    for (int i = 0; i < ctx->tree.count; i++) {
+        const LayoutStyle *s = ctx->boxes[i].s;
+        if (!s || !s->render_features) continue;
+        const HtmlNode *hn = css_layout_box_node(ctx, i);
+        if (!hn || hn->type != HTML_NODE_ELEMENT || !dom_valid(hn->store_id)) continue;
+        if (g_render_list.n == g_render_list.cap) {
+            g_render_list.cap = g_render_list.cap ? g_render_list.cap * 2 : 32;
+            g_render_list.el = realloc(g_render_list.el, g_render_list.cap * sizeof(uint32_t));
+            g_render_list.owner = realloc(g_render_list.owner, g_render_list.cap * sizeof(uint32_t));
+            g_render_list.bits = realloc(g_render_list.bits, g_render_list.cap);
+        }
+        g_render_list.el[g_render_list.n] = hn->store_id;
+        g_render_list.owner[g_render_list.n] = owner;
+        g_render_list.bits[g_render_list.n++] = s->render_features;
+    }
+}
+
 bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
                     double viewport_width, double viewport_height)
 {
@@ -20010,6 +20055,8 @@ again:
         if (verify_env && kept_tree) layout_keep_verify(ctx, doc, sheet);
     }
     if (g_lph_on) lph_flush(layout_now_ms() - _run_t0);
+    g_layout_runs++;
+    if (ok && g_css_render_features) render_list_update(ctx);
     return ok;
 }
 

@@ -3226,22 +3226,24 @@ static bool ro_size_changed(JSContextHandle ctx, GCValue observer) {
 int resize_observers_tick(JSContextHandle ctx) {
     static uint64_t seen;
     static unsigned long long last;
-    if (seen == g_frame_layouts) return 0;
+    /* (a change, or a frame: an animation changes sizes without a change) */
+    uint64_t version = g_frame_layouts + g_dom_relayout_requests;
+    if (seen == version) return 0;
     unsigned long long now = (unsigned long long)page_clock_now_ms();
-    if (now - last < (g_dom.live >= 1500 ? 1000u : 100u)) return 0;
+    if (now - last < 100) return 0;
     GCValue reg = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyber_ro_observers");
     if (!JS_IsArray(ctx, reg)) return 0;
     last = now;
-    seen = g_frame_layouts;
+    seen = version;
     uint32_t len = 0;
     JS_ToUint32(ctx, &len, JS_GetPropertyStr(ctx, reg, "length"));
-    bool big = g_dom.live >= 1500;
+    if (!len) return 0;
+    /* (the sizes of the layout up to now; a report, with what it takes to make
+     * one, is only for what changed) */
+    layout_api_update(ctx);
     for (uint32_t i = 0; i < len; i++) {
         GCValue observer = JS_GetPropertyUint32(ctx, reg, i);
-        /* (a big page: the sizes the last layout has, so that a report, with
-         * what it takes to make one, is only for what changed) */
-        if (big && !ro_size_changed(ctx, observer)) continue;
-        js_resize_observer_schedule(ctx, observer);
+        if (ro_size_changed(ctx, observer)) js_resize_observer_schedule(ctx, observer);
     }
     return 0;
 }

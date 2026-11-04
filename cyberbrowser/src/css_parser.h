@@ -19,11 +19,15 @@
 extern "C" {
 #endif
 
-/* Features the rendering tick looks after (layout_render_tick), seen in any
- * declaration parsed: a page without them pays nothing. */
-enum { CSS_FEAT_SNAP = 1, CSS_FEAT_CONTENT_VIS = 2, CSS_FEAT_INITIAL_TARGET = 4, CSS_FEAT_MEDIA_LISTENERS = 8 };
+/* Features the rendering tick looks after (layout_render_tick).  A declaration
+ * of one carries its bit, the cascade puts it on the box's style, and the end of
+ * layout lists the elements that have any (css_layout_render_list): what the
+ * tick costs goes by how many elements use them, not by the page's size. */
+enum { CSS_FEAT_SNAP = 1, CSS_FEAT_CONTENT_VIS = 2, CSS_FEAT_INITIAL_TARGET = 4, CSS_FEAT_MEDIA_LISTENERS = 8,
+       CSS_FEAT_SNAP_ALIGN = 16 };
 extern volatile int g_css_render_features;
-void css_note_property(const char *prop);
+/* The feature bit of a property, noted as seen in this document. */
+unsigned char css_note_property(const char *prop);
 /* A page's <meta name=color-scheme> asking for one: prefers-color-scheme says
  * so ("light", "dark", static strings; NULL: as usual).  True if it changed. */
 bool css_media_set_color_scheme(const char *scheme);
@@ -33,6 +37,7 @@ typedef struct CssDeclaration {
     char *property;
     char *value;
     bool important;
+    unsigned char feature;  /* CSS_FEAT_* this property is (css_note_property), or 0 */
     unsigned char invalid;  /* layout's cache of css_value_invalid: 0 not known yet, 1 valid, 2 invalid */
 } CssDeclaration;
 

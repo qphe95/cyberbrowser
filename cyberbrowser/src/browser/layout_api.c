@@ -976,8 +976,11 @@ static int lq_hidden_holder(NodeId id)
 }
 
 /* Does the query being answered read a box a change may have altered? */
+static bool g_lq_run_anyway;
+
 static bool lq_who_affected(void)
 {
+    if (g_lq_run_anyway) return true;
     if (!g_lq_ndirty && !g_lq_nanchor) return false;
     int qi = g_lq_who ? lq_box_index(g_lq_who) : -1;
     LqAsk ask = g_lq_ask;
@@ -1203,6 +1206,9 @@ static bool lq_ensure(JSContextHandle ctx)
     GCValue global = JS_GetGlobalObject(ctx);
     GCValue js_doc = JS_GetPropertyStr(ctx, global, "document");
     if (!JS_IsObject(js_doc)) return false;
+    /* (it holds one document: another realm's asks for a layout of its own,
+     * whatever has or hasn't changed) */
+    if (g_lq_valid && g_lq_layout.js_ctx != ctx) { g_lq_key = 0; g_lq_cheap_ok = false; }
     double vw = window_number(ctx, "innerWidth", 1024.0);
     double vh = window_number(ctx, "innerHeight", 768.0);
     if (vw != g_lq_vw || vh != g_lq_vh) {
@@ -1384,6 +1390,16 @@ static bool lq_ensure(JSContextHandle ctx)
 void layout_api_update(JSContextHandle ctx)
 {
     lq_ensure(ctx);
+}
+
+/* Lays out even if what changed moves no box: this is the document's only
+ * layout (a frame's), and what it does besides, starting an animation, is
+ * wanted. */
+void layout_api_run(JSContextHandle ctx)
+{
+    g_lq_run_anyway = true;
+    lq_ensure(ctx);
+    g_lq_run_anyway = false;
 }
 
 /* Layout box index of a store element, or -1. */
@@ -1751,7 +1767,18 @@ static GCValue lq_scroll_read(JSContextHandle ctx, GCValue this_val, bool top)
     /* (a snap container as the page first sees it: what it is snapped to, for
      * when those targets move) */
     static bool capturing;
+    bool snaps = false;
+    /* (style sheets are read by the first layout: only with one is it known
+     * whether the page snaps at all) */
+    static NodeId looked;
+    NodeId own = dom_owner(dom_node_of(this_val));
+    if (own != looked && !capturing) { looked = own; lq_ensure(ctx); }
     if ((g_css_render_features & CSS_FEAT_SNAP) && !capturing) {
+        lq_ensure(ctx);
+        int idx = g_lq_valid ? lq_box_index(dom_node_of(this_val)) : -1;
+        snaps = idx >= 0 && g_lq_layout.boxes[idx].s && (g_lq_layout.boxes[idx].s->render_features & CSS_FEAT_SNAP);
+    }
+    if (snaps) {
         capturing = true;
         GCValue cap = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberSnapCapture");
         if (JS_IsFunction(ctx, cap) && JS_IsException(JS_Call(ctx, cap, JS_UNDEFINED, 1, &this_val))) JS_GetException(ctx);
@@ -1806,6 +1833,9 @@ static GCValue js_scroll_top_set(JSContextHandle ctx, GCValue this_val, int argc
 static GCValue js_scroll_left_set(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
 { return lq_scroll_write(ctx, this_val, argc, argv, false); }
 
+bool layout_query_valid(void) { return g_lq_valid; }
+bool layout_query_rendered(uint32_t id) { return g_lq_valid && id && lq_rendered(lq_box_index(id)); }
+
 bool layout_query_box_size(uint32_t id, double *w, double *h)
 {
     int idx = g_lq_valid && id ? lq_box_index(id) : -1;
@@ -1849,8 +1879,6 @@ void layout_scroll_hold(JSContextHandle ctx, bool hold)
 }
 
 static bool g_render_tick_due;
-/* (real pages run to thousands of nodes: a replay of YouTube's home page has 3,200) */
-#define LQ_RENDER_WALK_NODES 1500
 
 void layout_scroll_queue(JSContextHandle ctx, uint32_t id)
 {
@@ -1939,42 +1967,53 @@ int layout_scroll_tick(JSContextHandle ctx)
     return (int)n;
 }
 
+/* __cyberRenderElements(mask): those of this realm's document with a bit of
+ * mask, in tree order. */
+static GCValue js_render_elements(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    int32_t mask = 0;
+    if (argc > 0) JS_ToInt32(ctx, &mask, argv[0]);
+    GCValue list = JS_NewArray(ctx);
+    GCValue doc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document");
+    NodeId own = JS_IsObject(doc) ? dom_node_of(doc) : DOM_NULL;
+    const uint32_t *els;
+    const unsigned char *bits;
+    uint32_t n, k = 0;
+    css_layout_render_list(&els, &bits, &n);
+    for (uint32_t i = 0; i < n; i++)
+        if ((bits[i] & mask) && dom_valid(els[i]) && dom_owner(els[i]) == own && dom_is_connected(els[i]))
+            JS_SetPropertyUint32(ctx, list, k++, dom_js(ctx, els[i]));
+    return list;
+}
+
 int layout_render_tick(JSContextHandle ctx)
 {
     int features = g_css_render_features;
     if (!features) return 0;
-    /* (a small page goes by any change: its frame may not come for a while; a
-     * big one's walk waits for the frame) */
-    static uint64_t seen;
+    /* When there is something to look at (a layout since, a scroll), at most
+     * each frame, and for only the elements that use these features.  With any
+     * in the page, a change gets its layout now rather than at the next frame:
+     * they are what depends on it. */
+    static uint64_t seen, seen_changes;
     static unsigned long long last;
-    uint64_t version = g_dom.live >= LQ_RENDER_WALK_NODES ? g_frame_layouts : g_frame_layouts + g_dom_relayout_requests;
-    if (seen == version && !g_render_tick_due) return 0;
+    const uint32_t *els;
+    const unsigned char *bits;
+    uint32_t n;
+    css_layout_render_list(&els, &bits, &n);
+    if (seen == g_layout_runs && !g_render_tick_due && (!n || seen_changes == g_dom_relayout_requests)) return 0;
     unsigned long long now = (unsigned long long)page_clock_now_ms();
-    if (now - last < (g_dom.live >= LQ_RENDER_WALK_NODES ? 400u : 16u)) return 0;
+    if (now - last < 16) return 0;
     last = now;
-    seen = version;
+    if (n && seen_changes != g_dom_relayout_requests) layout_api_update(ctx);
+    seen_changes = g_dom_relayout_requests;
+    seen = g_layout_runs;
     g_render_tick_due = false;
     GCValue global = JS_GetGlobalObject(ctx);
     GCValue tick = JS_GetPropertyStr(ctx, global, "__cyberRenderTick");
     if (!JS_IsFunction(ctx, tick)) return 0;
-    /* A small page is walked whole.  On a big one, reading every element's
-     * style each frame would cost more than the page's own layout: only the
-     * scroll containers of the last layout, for snapping; content-visibility's
-     * event and scroll-initial-target go without. */
-    bool big = g_dom.live >= LQ_RENDER_WALK_NODES;
-    GCValue args[3] = { JS_NewInt32(ctx, features), JS_NULL, JS_NewBool(ctx, big) };
-    if (big && (features & CSS_FEAT_SNAP) && g_lq_valid) {
-        GCValue list = JS_NewArray(ctx);
-        uint32_t n = 0;
-        for (int i = 0; i < g_lq_layout.tree.count; i++) {
-            if (!g_lq_layout.boxes[i].s || g_lq_layout.boxes[i].s->overflow == 0) continue;
-            const HtmlNode *hn = css_layout_box_node(&g_lq_layout, i);
-            if (hn && hn->type == HTML_NODE_ELEMENT && dom_valid(hn->store_id))
-                JS_SetPropertyUint32(ctx, list, n++, dom_js(ctx, hn->store_id));
-        }
-        if (n) args[1] = list;
-    }
-    if (JS_IsException(JS_Call(ctx, tick, JS_UNDEFINED, 3, args))) JS_GetException(ctx);
+    GCValue arg = JS_NewInt32(ctx, features);
+    if (JS_IsException(JS_Call(ctx, tick, JS_UNDEFINED, 1, &arg))) JS_GetException(ctx);
     timer_microtask_checkpoint(ctx);
     return 1;
 }
@@ -1995,6 +2034,8 @@ static void define_accessor(JSContextHandle ctx, GCValue proto, const char *name
 void layout_api_install(JSContextHandle ctx, GCValue element_proto)
 {
     if (!JS_IsObject(element_proto)) return;
+    JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberRenderElements",
+                              JS_NewCFunction(ctx, js_render_elements, "__cyberRenderElements", 1), JS_PROP_CONFIGURABLE);
     define_accessor(ctx, element_proto, "offsetWidth", js_offset_width, NULL);
     define_accessor(ctx, element_proto, "offsetHeight", js_offset_height, NULL);
     define_accessor(ctx, element_proto, "offsetTop", js_offset_top, NULL);

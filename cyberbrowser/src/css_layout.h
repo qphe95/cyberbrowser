@@ -237,6 +237,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     /* Left unstyled inside a display:none subtree (only display is set;
      * the box gets LAYOUT_STYLE_SKIPPED). */
     unsigned char skipped;
+    /* CSS_FEAT_* of the declarations that applied (css_note_property). */
+    unsigned char render_features;
 
     /* em-unit margins/paddings resolve against the element's FINAL computed
      * font-size, which is only known after the pass-3 font-size fixup.
@@ -798,6 +800,11 @@ struct HtmlNode *css_layout_box_node(const LayoutContext *ctx, int idx);
  * scrolled; and what its scrolled ancestors move it by (fixed: it is on the
  * viewport, whatever that has scrolled). */
 void css_layout_extent(const LayoutContext *ctx, int idx, double *right, double *bottom);
+/* The elements of the documents laid out whose style has a CSS_FEAT_* bit, in
+ * tree order (each document's as of its last layout), and how many layouts
+ * there have been. */
+void css_layout_render_list(const uint32_t **els, const unsigned char **bits, uint32_t *n);
+extern uint64_t g_layout_runs;
 bool css_layout_box_scrolls(const LayoutContext *ctx, int idx);
 void css_layout_box_max(const LayoutContext *ctx, int idx, double *x, double *y);
 bool css_layout_box_offset(const LayoutContext *ctx, int idx, float *x, float *y);

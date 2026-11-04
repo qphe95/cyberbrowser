@@ -972,6 +972,7 @@ void dom_mark_dirty(NodeId id, uint16_t bits) {
     if (!dom_valid(id)) return;
     uint32_t s = dom_slot(id);
     g_dom.flags[s] |= bits;
+    g_dom.flags[g_dom.owner[s]] |= DOMF_DOC_CHANGED;
     g_dom.dirty_version++;
     for (uint32_t p = g_dom.parent[s] ? g_dom.parent[s] : g_dom.host[s]; p;
          p = g_dom.parent[p] ? g_dom.parent[p] : g_dom.host[p]) {

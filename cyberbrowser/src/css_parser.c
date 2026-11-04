@@ -168,6 +168,7 @@ static bool css_declaration_add(CssRule *rule, const char *prop, size_t prop_len
     rule->declarations[rule->declaration_count].property = p;
     rule->declarations[rule->declaration_count].value = v;
     rule->declarations[rule->declaration_count].important = is_important;
+    rule->declarations[rule->declaration_count].feature = css_note_property(p);
     rule->declarations[rule->declaration_count].invalid = 0;
     rule->declaration_count++;
     return true;
@@ -535,27 +536,30 @@ static void sink_rule(void *ctx, char *prop, char *value, bool important)
     d->property = prop;
     d->value = value;
     d->important = important;
+    d->feature = css_note_property(prop);
     d->invalid = 0;
 }
 
 volatile int g_css_render_features;
 
-void css_note_property(const char *p) {
-    if (p[0] == 'c') { if (!strcmp(p, "content-visibility")) g_css_render_features |= CSS_FEAT_CONTENT_VIS; }
+unsigned char css_note_property(const char *p) {
+    unsigned char bit = 0;
+    if (p[0] == 'c') { if (!strcmp(p, "content-visibility")) bit = CSS_FEAT_CONTENT_VIS; }
     else if (p[0] == 's' && p[1] == 'c') {
-        if (!strcmp(p, "scroll-snap-type")) g_css_render_features |= CSS_FEAT_SNAP;
-        else if (!strcmp(p, "scroll-initial-target")) g_css_render_features |= CSS_FEAT_INITIAL_TARGET;
+        if (!strcmp(p, "scroll-snap-type")) bit = CSS_FEAT_SNAP;
+        else if (!strcmp(p, "scroll-snap-align")) bit = CSS_FEAT_SNAP_ALIGN;
+        else if (!strcmp(p, "scroll-initial-target")) bit = CSS_FEAT_INITIAL_TARGET;
     }
+    if (bit) g_css_render_features |= bit;
+    return bit;
 }
 
 /* Parse a declaration block between { and }. pos should point just past '{'. */
 static void css_parse_declaration_block(const char *s, size_t len, size_t *pos,
                                         CssRule *rule) {
-    int had = rule->declaration_count;
     /* (the plain blocks of real sheets as text; the rest from tokens) */
     if (!css_decl_block_fast(s, len, pos, rule))
         *pos = css_consume_declarations(s, len, *pos, true, sink_rule, rule);
-    for (int i = had; i < rule->declaration_count; i++) css_note_property(rule->declarations[i].property);
 }
 
 CssDeclaration* css_parse_inline_style(const char *style_attr, int *out_count) {
@@ -566,7 +570,6 @@ CssDeclaration* css_parse_inline_style(const char *style_attr, int *out_count) {
     CssRule r;
     memset(&r, 0, sizeof(r));
     css_consume_declarations(style_attr, len, 0, false, sink_rule, &r);
-    for (int i = 0; i < r.declaration_count; i++) css_note_property(r.declarations[i].property);
     *out_count = r.declaration_count;
     return r.declarations;
 }
