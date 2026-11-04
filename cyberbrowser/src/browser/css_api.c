@@ -7,6 +7,7 @@
 #include <ctype.h>
 #include <quickjs.h>
 #include <quickjs_gc_unified.h>
+#include "css_props.h"
 #include "browser_api_impl.h"
 #include "browser_api_impl_types.h"
 #include "browser_api_impl_handle_helpers.h"
@@ -26,6 +27,61 @@
 // Forward declaration for DOMTokenList.contains
 
 // CSS.supports(property, value) / CSS.supports(conditionText)
+extern uint64_t g_dom_relayout_requests;
+
+/* What CSS.registerProperty (typed_om.js) asks of the syntax matcher and registry. */
+GCValue js_css_syntax_valid(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    const char *s = argc > 0 ? JS_ToCString(ctx, argv[0]) : NULL;
+    if (!s) return JS_FALSE;
+    bool ok = css_syntax_valid(s);
+    JS_FreeCString(ctx, s);
+    return JS_NewBool(ctx, ok);
+}
+
+GCValue js_css_syntax_parse(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    const char *s = argc > 1 ? JS_ToCString(ctx, argv[0]) : NULL, *v = argc > 1 ? JS_ToCString(ctx, argv[1]) : NULL;
+    GCValue out = JS_NULL;
+    if (s && v) {
+        char *c = css_syntax_parse(s, v);
+        if (c) { out = JS_NewString(ctx, c); free(c); }
+    }
+    if (s) JS_FreeCString(ctx, s);
+    if (v) JS_FreeCString(ctx, v);
+    return out;
+}
+
+GCValue js_css_depends_on_context(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    const char *s = argc > 0 ? JS_ToCString(ctx, argv[0]) : NULL;
+    if (!s) return JS_FALSE;
+    bool dep = css_value_depends_on_context(s);
+    JS_FreeCString(ctx, s);
+    return JS_NewBool(ctx, dep);
+}
+
+GCValue js_css_register(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc < 4) return JS_FALSE;
+    const char *n = JS_ToCString(ctx, argv[0]), *s = JS_ToCString(ctx, argv[1]);
+    const char *i = JS_IsString(argv[3]) ? JS_ToCString(ctx, argv[3]) : NULL;
+    bool ok = false;
+    if (n && s) {
+        /* (a script's second registration of a name: refused) */
+        ok = !css_reg_scripted(n) && css_reg_add(n, s, JS_ToBool(ctx, argv[2]), i, false);
+    }
+    if (n) JS_FreeCString(ctx, n);
+    if (s) JS_FreeCString(ctx, s);
+    if (i) JS_FreeCString(ctx, i);
+    if (ok) {
+        g_dom_relayout_requests++;
+        extern void css_layout_retained_invalidate(void);
+        css_layout_retained_invalidate();      /* (every element's custom properties) */
+    }
+    return JS_NewBool(ctx, ok);
+}
+
 GCValue js_css_supports(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
     if (argc < 1) return JS_ThrowTypeError(ctx, "Failed to execute 'supports' on 'CSS': 1 argument required");

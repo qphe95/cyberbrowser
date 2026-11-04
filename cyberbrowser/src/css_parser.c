@@ -1935,6 +1935,27 @@ static void css_apply_pseudo(CssSimpleSelector *out,
         }
         return;
     }
+    if (css_pseudo_name_is(name, nl, "heading") && !out->where_active) {
+        /* (as a test of those tags: none, or the levels asked for) */
+        char list[64] = "";
+        size_t used = 0;
+        for (int level = 1; level <= 6; level++) {
+            bool want = al == 0;
+            for (size_t k = 0; k < al && !want; k++) {
+                if (arg[k] < '0' || arg[k] > '9') continue;
+                size_t j = k;
+                int v = 0;
+                while (j < al && arg[j] >= '0' && arg[j] <= '9') v = v * 10 + (arg[j++] - '0');
+                if (v == level) want = true;
+                k = j;
+            }
+            if (want) used += (size_t)snprintf(list + used, sizeof(list) - used, "%sh%d", used ? ", " : "", level);
+        }
+        snprintf(out->where_arg, sizeof(out->where_arg), "%s", used ? list : "h0:not(*)");
+        out->where_active = true;
+        out->has_substantive = true;
+        return;
+    }
     if (css_pseudo_name_is(name, nl, "lang")) {
         /* The element's language, its lang attribute's or the nearest
          * ancestor's (else the document's, from a content-language meta),
@@ -2944,6 +2965,28 @@ static bool mq_feature_lookup(const char *name, double vw, double vh, MqFeature 
     return true;
 }
 
+/* Whether v is one of the values feature name has. */
+static bool mq_ident_allowed(const char *name, const char *v) {
+    static const char *const values[][2] = {
+        { "orientation", " portrait landscape " }, { "prefers-color-scheme", " light dark " },
+        { "prefers-reduced-motion", " no-preference reduce " }, { "prefers-contrast", " no-preference less more custom " },
+        { "prefers-reduced-transparency", " no-preference reduce " }, { "prefers-reduced-data", " no-preference reduce " },
+        { "forced-colors", " none active " }, { "inverted-colors", " none inverted " },
+        { "hover", " none hover " }, { "any-hover", " none hover " },
+        { "pointer", " none coarse fine " }, { "any-pointer", " none coarse fine " },
+        { "display-mode", " fullscreen standalone minimal-ui browser picture-in-picture window-controls-overlay borderless unframed tabbed " },
+        { "color-gamut", " srgb p3 rec2020 " }, { "dynamic-range", " standard high " },
+        { "video-dynamic-range", " standard high " }, { "update", " none slow fast " },
+        { "overflow-block", " none scroll paged " }, { "overflow-inline", " none scroll " },
+        { "scripting", " none initial-only enabled " }, { "scan", " interlace progressive " },
+    };
+    char key[72];
+    snprintf(key, sizeof key, " %s ", v);
+    for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); i++)
+        if (!strcmp(name, values[i][0])) return strstr(values[i][1], key) != NULL;
+    return true;
+}
+
 /* An operand of a range feature's type; false when it does not parse. */
 static bool mq_value(const MqFeature *f, const char *s, const char *e, double *out) {
     switch (f->type) {
@@ -3011,10 +3054,15 @@ static int mq_feature(const char *s, const char *e, double vw, double vh) {
         if (f.type == MQ_IDENT) {
             char v[64];
             if (prefix || !mq_operand(colon + 1, e, v, sizeof(v), true)) return -1;
+            if (!mq_ident_allowed(n, v)) return -1;
             return strcmp(v, f.ident) == 0;
         }
         double v;
         if (!mq_value(&f, colon + 1, e, &v)) return -1;
+        /* (out of the feature's range: not a value of it) */
+        if ((f.type == MQ_RES || f.type == MQ_RATIO) && v < 0) return -1;
+        if (f.type == MQ_NUM && strcmp(n, "device-pixel-ratio") && (v < 0 || v != (double)(long long)v)) return -1;
+        if (!strcmp(n, "grid") && (prefix || (v != 0 && v != 1))) return -1;
         return mq_compare(f.num, prefix == 1 ? MQ_GE : prefix == 2 ? MQ_LE : MQ_EQ, v);
     }
 

@@ -2148,7 +2148,12 @@ int js_quickjs_network_pending(void)
 }
 
 /* The heap is about to go: requests still out are left to finish unheard. */
-void js_quickjs_net_forget(void) { g_net_gen++; }
+void js_quickjs_net_forget(void) {
+    pthread_mutex_lock(&g_net_mutex);
+    g_net_gen++;
+    g_net_inflight = 0;     /* (what the last document left out isn't this one's to wait for) */
+    pthread_mutex_unlock(&g_net_mutex);
+}
 
 int js_quickjs_net_poll(JSContextHandle ctx)
 {
@@ -2168,7 +2173,7 @@ int js_quickjs_net_poll(JSContextHandle ctx)
         bool counted = !rev->background;
         net_req_free(rev);
         pthread_mutex_lock(&g_net_mutex);
-        if (counted) g_net_inflight--;
+        if (counted && rev->gen == g_net_gen) g_net_inflight--;
         pthread_mutex_unlock(&g_net_mutex);
         count++;
         rev = n;

@@ -2828,6 +2828,14 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // Create CSS object
     GCValue css = JS_NewObject(ctx);
     DEF_FUNC(ctx, css, "supports", js_css_supports, 2);
+    {
+        extern GCValue js_compute_length(JSContextHandle, GCValue, int, GCValue *);
+        JS_DefinePropertyValueStr(ctx, window, "__cyberComputeLength", JS_NewCFunction(ctx, js_compute_length, "__cyberComputeLength", 2), JS_PROP_CONFIGURABLE);
+    }
+    DEF_FUNC(ctx, css, "__syntaxValid", js_css_syntax_valid, 1);
+    DEF_FUNC(ctx, css, "__syntaxParse", js_css_syntax_parse, 2);
+    DEF_FUNC(ctx, css, "__dependsOnContext", js_css_depends_on_context, 1);
+    DEF_FUNC(ctx, css, "__register", js_css_register, 4);
     DEF_FUNC(ctx, css, "escape", js_css_escape, 1);
     JS_SetPropertyStr(ctx, window, "CSS", css);
     

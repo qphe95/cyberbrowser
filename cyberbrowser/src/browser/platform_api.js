@@ -656,6 +656,44 @@
         } });
     }
 
+    /* Interfaces with nothing behind them yet but what scripts can see of them. */
+    function plainInterfaces(list) {
+        list.forEach(function (d) {
+            if (global[d[0]]) return;
+            var C = { f: function () { throw new TypeError('Illegal constructor'); } }.f;
+            Object.defineProperty(C, 'name', { value: d[0], configurable: true });
+            Object.defineProperty(C, 'length', { value: 0, configurable: true });
+            var parent = d[1] && global[d[1]];
+            if (parent) Object.setPrototypeOf(C, parent);
+            var proto = Object.create(parent ? parent.prototype : Object.prototype);
+            Object.defineProperty(C, 'prototype', { value: proto, writable: false, enumerable: false, configurable: false });
+            Object.defineProperty(proto, 'constructor', { value: C, writable: true, enumerable: false, configurable: true });
+            Object.defineProperty(proto, Symbol.toStringTag, { value: d[0], configurable: true });
+            d[2].forEach(function (name) {
+                var get = { get: function () { if (!(this instanceof C)) throw new TypeError('Illegal invocation'); return null; } };
+                var g = get.get;
+                Object.defineProperty(g, 'name', { value: 'get ' + name, configurable: true });
+                Object.defineProperty(proto, name, { get: g, set: undefined, enumerable: true, configurable: true });
+            });
+            d[3].forEach(function (k) {
+                Object.defineProperty(C, k[0], { value: k[1], enumerable: true });
+                Object.defineProperty(proto, k[0], { value: k[1], enumerable: true });
+            });
+            d[4].forEach(function (op) {
+                var fn = { m: function () {
+                    if (!(this instanceof C)) throw new TypeError('Illegal invocation');
+                    if (arguments.length < op[1]) throw new TypeError(op[0] + ': ' + op[1] + ' arguments required');
+                } }.m;
+                Object.defineProperty(fn, 'name', { value: op[0], configurable: true });
+                Object.defineProperty(fn, 'length', { value: op[1], configurable: true });
+                Object.defineProperty(proto, op[0], { value: fn, writable: true, enumerable: true, configurable: true });
+            });
+            Object.defineProperty(global, d[0], { value: C, writable: true, enumerable: false, configurable: true });
+        });
+    }
+    /* (filter-effects: its elements; a window's only) */
+    if (global.document) plainInterfaces([["SVGFilterElement","SVGElement",["filterUnits","primitiveUnits","x","y","width","height"],[],[]],["SVGFEBlendElement","SVGElement",["in1","in2","mode","x","y","width","height","result"],[["SVG_FEBLEND_MODE_UNKNOWN",0],["SVG_FEBLEND_MODE_NORMAL",1],["SVG_FEBLEND_MODE_MULTIPLY",2],["SVG_FEBLEND_MODE_SCREEN",3],["SVG_FEBLEND_MODE_DARKEN",4],["SVG_FEBLEND_MODE_LIGHTEN",5],["SVG_FEBLEND_MODE_OVERLAY",6],["SVG_FEBLEND_MODE_COLOR_DODGE",7],["SVG_FEBLEND_MODE_COLOR_BURN",8],["SVG_FEBLEND_MODE_HARD_LIGHT",9],["SVG_FEBLEND_MODE_SOFT_LIGHT",10],["SVG_FEBLEND_MODE_DIFFERENCE",11],["SVG_FEBLEND_MODE_EXCLUSION",12],["SVG_FEBLEND_MODE_HUE",13],["SVG_FEBLEND_MODE_SATURATION",14],["SVG_FEBLEND_MODE_COLOR",15],["SVG_FEBLEND_MODE_LUMINOSITY",16]],[]],["SVGFEColorMatrixElement","SVGElement",["in1","type","values","x","y","width","height","result"],[["SVG_FECOLORMATRIX_TYPE_UNKNOWN",0],["SVG_FECOLORMATRIX_TYPE_MATRIX",1],["SVG_FECOLORMATRIX_TYPE_SATURATE",2],["SVG_FECOLORMATRIX_TYPE_HUEROTATE",3],["SVG_FECOLORMATRIX_TYPE_LUMINANCETOALPHA",4]],[]],["SVGFEComponentTransferElement","SVGElement",["in1","x","y","width","height","result"],[],[]],["SVGComponentTransferFunctionElement","SVGElement",["type","tableValues","slope","intercept","amplitude","exponent","offset"],[["SVG_FECOMPONENTTRANSFER_TYPE_UNKNOWN",0],["SVG_FECOMPONENTTRANSFER_TYPE_IDENTITY",1],["SVG_FECOMPONENTTRANSFER_TYPE_TABLE",2],["SVG_FECOMPONENTTRANSFER_TYPE_DISCRETE",3],["SVG_FECOMPONENTTRANSFER_TYPE_LINEAR",4],["SVG_FECOMPONENTTRANSFER_TYPE_GAMMA",5]],[]],["SVGFEFuncRElement","SVGComponentTransferFunctionElement",[],[],[]],["SVGFEFuncGElement","SVGComponentTransferFunctionElement",[],[],[]],["SVGFEFuncBElement","SVGComponentTransferFunctionElement",[],[],[]],["SVGFEFuncAElement","SVGComponentTransferFunctionElement",[],[],[]],["SVGFECompositeElement","SVGElement",["in1","in2","operator","k1","k2","k3","k4","x","y","width","height","result"],[["SVG_FECOMPOSITE_OPERATOR_UNKNOWN",0],["SVG_FECOMPOSITE_OPERATOR_OVER",1],["SVG_FECOMPOSITE_OPERATOR_IN",2],["SVG_FECOMPOSITE_OPERATOR_OUT",3],["SVG_FECOMPOSITE_OPERATOR_ATOP",4],["SVG_FECOMPOSITE_OPERATOR_XOR",5],["SVG_FECOMPOSITE_OPERATOR_ARITHMETIC",6]],[]],["SVGFEConvolveMatrixElement","SVGElement",["in1","orderX","orderY","kernelMatrix","divisor","bias","targetX","targetY","edgeMode","kernelUnitLengthX","kernelUnitLengthY","preserveAlpha","x","y","width","height","result"],[["SVG_EDGEMODE_UNKNOWN",0],["SVG_EDGEMODE_DUPLICATE",1],["SVG_EDGEMODE_WRAP",2],["SVG_EDGEMODE_NONE",3]],[]],["SVGFEDiffuseLightingElement","SVGElement",["in1","surfaceScale","diffuseConstant","kernelUnitLengthX","kernelUnitLengthY","x","y","width","height","result"],[],[]],["SVGFEDistantLightElement","SVGElement",["azimuth","elevation"],[],[]],["SVGFEPointLightElement","SVGElement",["x","y","z"],[],[]],["SVGFESpotLightElement","SVGElement",["x","y","z","pointsAtX","pointsAtY","pointsAtZ","specularExponent","limitingConeAngle"],[],[]],["SVGFEDisplacementMapElement","SVGElement",["in1","in2","scale","xChannelSelector","yChannelSelector","x","y","width","height","result"],[["SVG_CHANNEL_UNKNOWN",0],["SVG_CHANNEL_R",1],["SVG_CHANNEL_G",2],["SVG_CHANNEL_B",3],["SVG_CHANNEL_A",4]],[]],["SVGFEDropShadowElement","SVGElement",["in1","dx","dy","stdDeviationX","stdDeviationY","x","y","width","height","result"],[],[["setStdDeviation",2]]],["SVGFEFloodElement","SVGElement",["x","y","width","height","result"],[],[]],["SVGFEGaussianBlurElement","SVGElement",["in1","stdDeviationX","stdDeviationY","edgeMode","x","y","width","height","result"],[["SVG_EDGEMODE_UNKNOWN",0],["SVG_EDGEMODE_DUPLICATE",1],["SVG_EDGEMODE_WRAP",2],["SVG_EDGEMODE_NONE",3]],[["setStdDeviation",2]]],["SVGFEImageElement","SVGElement",["preserveAspectRatio","crossOrigin","x","y","width","height","result","href"],[],[]],["SVGFEMergeElement","SVGElement",["x","y","width","height","result"],[],[]],["SVGFEMergeNodeElement","SVGElement",["in1"],[],[]],["SVGFEMorphologyElement","SVGElement",["in1","operator","radiusX","radiusY","x","y","width","height","result"],[["SVG_MORPHOLOGY_OPERATOR_UNKNOWN",0],["SVG_MORPHOLOGY_OPERATOR_ERODE",1],["SVG_MORPHOLOGY_OPERATOR_DILATE",2]],[]],["SVGFEOffsetElement","SVGElement",["in1","dx","dy","x","y","width","height","result"],[],[]],["SVGFESpecularLightingElement","SVGElement",["in1","surfaceScale","specularConstant","specularExponent","kernelUnitLengthX","kernelUnitLengthY","x","y","width","height","result"],[],[]],["SVGFETileElement","SVGElement",["in1","x","y","width","height","result"],[],[]],["SVGFETurbulenceElement","SVGElement",["baseFrequencyX","baseFrequencyY","numOctaves","seed","stitchTiles","type","x","y","width","height","result"],[["SVG_TURBULENCE_TYPE_UNKNOWN",0],["SVG_TURBULENCE_TYPE_FRACTALNOISE",1],["SVG_TURBULENCE_TYPE_TURBULENCE",2],["SVG_STITCHTYPE_UNKNOWN",0],["SVG_STITCHTYPE_STITCH",1],["SVG_STITCHTYPE_NOSTITCH",2]],[]]]);
+
     /* (css-font-loading: a font list load() and check() can parse) */
     Object.defineProperty(global, '__cyberFontSpecError', { configurable: true, value: function (spec) {
         spec = String(spec);

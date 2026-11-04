@@ -13,6 +13,7 @@
 #ifndef CSS_PROPS_H
 #define CSS_PROPS_H
 
+#include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -110,6 +111,25 @@ bool css_supports_condition(const char *cond);
 bool css_color_parse(const char *value, double rgba[4]);
 /* "rgb(r, g, b)" or "rgba(r, g, b, a)" (malloc'd). */
 char *css_color_serialize_rgba(const double rgba[4]);
+
+/* Registered custom properties. */
+int css_reg_count(void);
+uint64_t css_reg_signature(void);
+const char *css_reg_name(int r);
+const char *css_reg_syntax(int r);
+const char *css_reg_initial(int r);
+bool css_reg_inherits(int r);
+int css_reg_find(const char *name);
+bool css_reg_scripted(const char *name);
+bool css_reg_add(const char *name, const char *syntax, bool inherits, const char *initial, bool rule);
+void css_reg_forget_rules(void);
+void css_reg_reset(void);
+void css_reg_scan_css(const char *css, size_t len);
+bool css_syntax_valid(const char *syntax);
+char *css_syntax_parse(const char *syntax, const char *value);
+bool css_syntax_component(const char *syntax, const char *value, char *type, size_t cap, char *mult);
+bool css_value_depends_on_context(const char *v);
+bool css_calc_number(const char *v, double *out);
 
 #ifdef __cplusplus
 }

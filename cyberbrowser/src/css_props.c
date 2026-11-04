@@ -1095,7 +1095,8 @@ static int builtin_type(const GNode *g, const Toks *ts, int i) {
     if (!strcmp(n, "named-color")) return t->type == T_IDENT && css_color_named(t->str, NULL);
     if (!strcmp(n, "system-color")) return t->type == T_IDENT && css_color_system(t->str);
     if (!strcmp(n, "relative-color"))
-        return t->type == T_FUNC && t->first < t->end && tok_ident(&ts->t[t->first], "from") &&
+        return t->type == T_FUNC && ((t->first < t->end && tok_ident(&ts->t[t->first], "from")) ||
+                                     !strcasecmp(t->str, "color-layers") || !strcasecmp(t->str, "contrast-color")) &&
                color_tok_valid(ts, (int)(t - ts->t));
     if (!strcmp(n, "any-value")) return t->type != T_BAD && t->type != T_SEMI;
     if (!strcmp(n, "anchor-fn")) return anchor_fn_valid(ts, i, false);
@@ -2135,10 +2136,9 @@ static void from_xyz65(int cs, const double in[3], double o[3], bool *hue_none) 
 static int channel_kind(int cs, int i) {
     switch (cs) {
     case CS_HSL: return i == 0 ? 6 : i == 1 ? 5 : 4;
-    case CS_HWB: return i == 0 ? 6 : 0;
+    case CS_HWB: return i == 0 ? 6 : 9 + i;   /* (10 white, 11 black) */
     case CS_LAB: case CS_OKLAB: return i == 0 ? 4 : i == 1 ? 7 : 8;
     case CS_LCH: case CS_OKLCH: return i == 0 ? 4 : i == 1 ? 5 : 6;
-    case CS_XYZ_D50: case CS_XYZ_D65: return 0;
     default: return i + 1;
     }
 }
@@ -2168,6 +2168,18 @@ static Color color_convert(const Color *c, int cs) {
             if ((c->none >> j & 1) && channel_kind(c->cs, j) == k) r.none |= 1u << i;
     }
     if (hue_none && cs_hue(cs) >= 0) r.none |= 1u << cs_hue(cs);
+    /* (what the tests of CSS Color 4 12.2 carry beyond the plain analogues) */
+    unsigned sn = c->none & 7;
+    bool from_opposing = (c->cs == CS_LAB || c->cs == CS_OKLAB) && (sn & 6) == 6;
+    bool from_chroma = ((c->cs == CS_LCH || c->cs == CS_OKLCH) && (sn & 2)) || (c->cs == CS_HSL && (sn & 2));
+    bool from_whiteblack = c->cs == CS_HWB && (sn & 6) == 6;
+    if (sn == 7) r.none |= 7;
+    for (int i = 0; i < 3; i++) {
+        int k = channel_kind(cs, i);
+        if ((from_opposing || from_chroma) && (k == 5 || k == 6)) r.none |= 1u << i;
+        if (from_chroma && (k == 7 || k == 8)) r.none |= 1u << i;
+        if (from_whiteblack && (k == 4 || k == 5 || k == 10 || k == 11)) r.none |= 1u << i;
+    }
     return r;
 }
 
@@ -2280,6 +2292,34 @@ static int color_fn(const Toks *ts, const Tok *f, Color *out, int depth) {
              !strcasecmp(n, "hwb") ? CS_HWB : !strcasecmp(n, "lab") ? CS_LAB : !strcasecmp(n, "lch") ? CS_LCH :
              !strcasecmp(n, "oklab") ? CS_OKLAB : !strcasecmp(n, "oklch") ? CS_OKLCH :
              !strcasecmp(n, "color") ? -2 : -1;
+    /* alpha(from <color> [ / <alpha-value> ]) (CSS Color 5) */
+    if (cs == -1 && !strcasecmp(n, "alpha")) {
+        int j = f->first;
+        if (j >= f->end || !tok_ident(&ts->t[j], "from") || ++j >= f->end) return 0;
+        Color o;
+        int r = color_eval(ts, j, &o, depth + 1);
+        if (!r) return 0;
+        j = tok_next(ts, j);
+        if (r == 1) { *out = o; out->legacy = false; out->derived = true; }
+        else { memset(out, 0, sizeof *out); out->alpha = 1; out->derived = true; }
+        if (j >= f->end) return 0;
+        if (ts->t[j].type != T_DELIM || ts->t[j].delim != '/' || ++j >= f->end || tok_next(ts, j) < f->end) return 0;
+        ColorVars av;
+        memset(&av, 0, sizeof av);
+        av.name[3] = "alpha";
+        av.v[3] = out->none & 8 ? 0 : out->alpha;
+        av.none = out->none;
+        const ColorVars *was = t_color_vars;
+        t_color_vars = &av;
+        double v;
+        bool none;
+        bool ok = color_channel(ts, j, 'a', 1, false, &v, &none);
+        t_color_vars = was;
+        if (!ok) return 0;
+        out->none &= 7;
+        if (none) out->none |= 8; else out->alpha = clamp01(v);
+        return r;
+    }
     if (cs == -1) return 0;
     int i = f->first, res = 1;
     ColorVars vars;
@@ -2435,9 +2475,10 @@ static int color_mix(const Toks *ts, const Tok *f, Color *out, int depth) {
     else if (!has_p[0]) p[0] = 100 - p[1];
     else if (!has_p[1]) p[1] = nc == 2 ? 100 - p[0] : 0;
     double sum = p[0] + (nc == 2 ? p[1] : 0);
-    if (sum <= 0) return 0;
     if (res < 0) return -1;
+    /* (nothing of either: half and half, and transparent) */
     double mult = sum < 100 ? sum / 100 : 1;
+    if (sum <= 0) { p[0] = p[1] = 50; sum = 100; mult = 0; }
     Color a = color_convert(&c[0], cs);
     Color b = nc == 2 ? color_convert(&c[1], cs) : a;
     double t = nc == 2 ? p[1] / sum : 0;
@@ -2452,6 +2493,8 @@ static int color_mix(const Toks *ts, const Tok *f, Color *out, int depth) {
         else if (an) *av = *bv;
         else if (bn) *bv = *av;
     }
+    /* (no alpha on either: the channels aren't weighted by one) */
+    if (out->none & 8) a.alpha = b.alpha = 1;
     double alpha = a.alpha * (1 - t) + b.alpha * t;
     int hk = cs_hue(cs);
     if (hk >= 0 && !(out->none >> hk & 1)) {
@@ -2480,6 +2523,21 @@ static const struct { const char *n; double c[3]; } g_system_colors[] = {
     { "buttonborder", {118,118,118} }, { "accentcolor", {0,117,255} }, { "selecteditem", {0,117,255} },
     { "accentcolortext", {255,255,255} }, { "selecteditemtext", {255,255,255} },
 };
+
+/* Where a color-layers()'s colors start, past its blend mode; -1 if it has only that. */
+static int color_layers_first(const Toks *ts, const Tok *f) {
+    static const char *const modes[] = { "normal", "multiply", "screen", "overlay", "darken", "lighten", "color-dodge",
+        "color-burn", "hard-light", "soft-light", "difference", "exclusion", "hue", "saturation", "color", "luminosity" };
+    int j = f->first;
+    if (j >= f->end || ts->t[j].type != T_IDENT) return j;
+    for (size_t k = 0; k < sizeof modes / sizeof modes[0]; k++)
+        if (tok_ident(&ts->t[j], modes[k])) {
+            j = tok_next(ts, j);
+            if (j >= f->end || ts->t[j].type != T_COMMA) return -1;
+            return j + 1;
+        }
+    return j;
+}
 
 /* Any <color> token: 1 resolved into *out, -1 valid but not resolvable here
  * (currentcolor outside a computation), 0 not a color. */
@@ -2524,6 +2582,42 @@ static int color_eval(const Toks *ts, int i, Color *out, int depth) {
     }
     if (t->type != T_FUNC) return 0;
     if (!strcasecmp(t->str, "color-mix")) return color_mix(ts, t, out, depth);
+    if (!strcasecmp(t->str, "contrast-color")) {
+        /* (black or white, whichever stands out: WCAG luminance) */
+        int j = t->first;
+        Color in;
+        if (j >= t->end || tok_next(ts, j) < t->end) return 0;
+        int r = color_eval(ts, j, &in, depth + 1);
+        if (!r) return 0;
+        memset(out, 0, sizeof *out);
+        out->cs = CS_SRGB;
+        out->alpha = 1;
+        out->legacy = true;
+        if (r < 0) return -1;
+        Color s = color_convert(&in, CS_SRGB);
+        double lum = 0;
+        static const double w[3] = { 0.2126, 0.7152, 0.0722 };
+        for (int k = 0; k < 3; k++) {
+            double v = (s.none >> k & 1) ? 0 : clamp01(s.c[k]);
+            lum += w[k] * (v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4));
+        }
+        double on = lum > 0.179 ? 0 : 1;
+        for (int k = 0; k < 3; k++) out->c[k] = on;
+        return 1;
+    }
+    if (!strcasecmp(t->str, "color-layers")) {
+        /* ([ <blend-mode> , ]? <color>#): valid, not flattened here */
+        int j = color_layers_first(ts, t);
+        if (j < 0) return 0;
+        for (;;) {
+            Color layer;
+            if (j >= t->end || !color_eval(ts, j, &layer, depth + 1)) return 0;
+            j = tok_next(ts, j);
+            if (j >= t->end) return -1;
+            if (ts->t[j].type != T_COMMA) return 0;
+            j++;
+        }
+    }
     if (!strcasecmp(t->str, "light-dark")) {
         int j = t->first;
         if (j >= t->end) return 0;
@@ -2548,7 +2642,7 @@ static void color_serialize(Buf *b, const Color *c) {
         return;
     }
     Color s = *c;
-    if ((s.cs == CS_HSL || s.cs == CS_HWB) && (s.none & 7)) {
+    if ((s.cs == CS_HSL || s.cs == CS_HWB) && (s.none & 15)) {
         /* missing channels keep hsl() / hwb() */
         buf_str(b, cs_name[s.cs]);
         buf_ch(b, '(');
@@ -2594,9 +2688,15 @@ static void color_spec(Buf *b, const Toks *ts, int i);
 static void color_mix_spec(Buf *b, const Toks *ts, const Tok *f) {
     buf_str(b, "color-mix(");
     int i = f->first;
-    if (i < f->end && tok_ident(&ts->t[i], "in")) {
+    /* (the default space goes without saying) */
+    bool default_space = i + 1 < f->end && tok_ident(&ts->t[i], "in") && tok_ident(&ts->t[i + 1], "oklab");
+    if (default_space) {
+        i += 2;
+        if (i < f->end && ts->t[i].type == T_COMMA) i++;
+    } else if (i < f->end && tok_ident(&ts->t[i], "in")) {
         buf_str(b, "in ");
         for (i++; i < f->end && ts->t[i].type == T_IDENT; i++) {
+            if (tok_ident(&ts->t[i], "xyz")) { buf_str(b, "xyz-d65"); continue; }
             if (tok_ident(&ts->t[i], "shorter") && i + 1 < f->end && tok_ident(&ts->t[i + 1], "hue")) { i++; continue; }
             if (b->n && b->s[b->n - 1] != ' ') buf_ch(b, ' ');
             ser_ident(b, ts->t[i].str);
@@ -2604,9 +2704,11 @@ static void color_mix_spec(Buf *b, const Toks *ts, const Tok *f) {
         if (i < f->end && ts->t[i].type == T_COMMA) i++;
         buf_str(b, ", ");
     }
-    int col[2] = { -1, -1 }, pct[2] = { -1, -1 }, n = 0;
+    int col[16], pct[16], n = 0;
+    memset(col, -1, sizeof col);
+    memset(pct, -1, sizeof pct);
     bool plain = true;
-    for (; i < f->end && n < 2; n++) {
+    for (; i < f->end && n < 16; n++) {
         for (; i < f->end && ts->t[i].type != T_COMMA; i = tok_next(ts, i)) {
             if (ts->t[i].type == T_PERCENT) pct[n] = i;
             else if (ts->t[i].type == T_FUNC && is_math_fn(ts->t[i].str)) { pct[n] = i; plain = false; }
@@ -2614,7 +2716,8 @@ static void color_mix_spec(Buf *b, const Toks *ts, const Tok *f) {
         }
         if (i < f->end) i++;
     }
-    double p[2] = { pct[0] >= 0 ? ts->t[pct[0]].num : -1, pct[1] >= 0 ? ts->t[pct[1]].num : -1 };
+    double p[16];
+    for (int k = 0; k < 16; k++) p[k] = pct[k] >= 0 ? ts->t[pct[k]].num : -1;
     bool show = !plain || n != 2 || !((p[0] < 0 || p[0] == 50) && (p[1] < 0 || p[1] == 50));
     if (plain && n == 2 && show) {
         if (p[0] < 0) p[0] = 100 - p[1];
@@ -2639,10 +2742,29 @@ static void color_spec(Buf *b, const Toks *ts, int i) {
     Ser plain = { ts, NULL, 0, NULL, NULL };
     Color c;
     int r = color_eval(ts, i, &c, 0);
-    if (t->type == T_IDENT || (t->type != T_FUNC && r != 1)) { ser_tok(&plain, i, b, NULL, 0); return; }
+    if (t->type == T_IDENT) {
+        /* (keywords in lower case, except where a system color's is canonical as written) */
+        for (const char *q = t->str; *q; q++) buf_ch(b, (char)tolower((unsigned char)*q));
+        return;
+    }
+    if (t->type != T_FUNC && r != 1) { ser_tok(&plain, i, b, NULL, 0); return; }
     if (r == 1 && !c.derived && (c.legacy || !has_math_arg(ts, t))) { color_serialize(b, &c); return; }
     if (t->type != T_FUNC) { ser_tok(&plain, i, b, NULL, 0); return; }
     if (!strcasecmp(t->str, "color-mix")) { color_mix_spec(b, ts, t); return; }
+    if (!strcasecmp(t->str, "color-layers")) {
+        buf_str(b, "color-layers(");
+        int j = t->first, first = color_layers_first(ts, t);
+        if (first > j && !tok_ident(&ts->t[j], "normal")) {
+            ser_tok(&plain, j, b, NULL, 0);
+            buf_str(b, ", ");
+        }
+        for (j = first; j < t->end; j = tok_next(ts, j)) {
+            if (ts->t[j].type == T_COMMA) { buf_str(b, ", "); continue; }
+            color_spec(b, ts, j);
+        }
+        buf_ch(b, ')');
+        return;
+    }
     char name[16];
     snprintf(name, sizeof name, "%s", t->str);
     for (char *p = name; *p; p++) *p = (char)tolower((unsigned char)*p);
@@ -2658,6 +2780,7 @@ static void color_spec(Buf *b, const Toks *ts, int i) {
         space = true;
         if (from || !strcmp(name, "light-dark")) { color_spec(b, ts, j); from = false; continue; }
         if (tok_ident(a, "from")) from = true;
+        if (tok_ident(a, "xyz")) { buf_str(b, "xyz-d65"); continue; }
         ser_tok(&plain, j, b, NULL, 0);
     }
     buf_ch(b, ')');
@@ -3059,9 +3182,32 @@ static char *prop_parse_raw(const CssPropDef *p, const char *value) {
     return out;
 }
 
+/* What a relative color or color-mix() was written as, by its specified value:
+ * that has its origins in 8 bits (rgb()), and computing goes by the original. */
+enum { COLOR_RAW_N = 512 };
+static char *g_color_raw[COLOR_RAW_N][2];
+static int g_color_raw_next;
+
+static void color_raw_note(const char *canon, const char *raw) {
+    for (int i = 0; i < COLOR_RAW_N; i++)
+        if (g_color_raw[i][0] && !strcmp(g_color_raw[i][0], canon)) return;
+    int k = g_color_raw_next++ % COLOR_RAW_N;
+    free(g_color_raw[k][0]);
+    free(g_color_raw[k][1]);
+    g_color_raw[k][0] = strdup(canon);
+    g_color_raw[k][1] = strdup(raw);
+}
+
+static const char *color_raw_of(const char *value) {
+    if (!strstr(value, "from ") && !strstr(value, "color-mix(")) return value;
+    for (int i = 0; i < COLOR_RAW_N; i++)
+        if (g_color_raw[i][0] && !strcmp(g_color_raw[i][0], value)) return g_color_raw[i][1];
+    return value;
+}
+
 char *css_prop_compute(const CssPropDef *p, const char *value, const CssComputeEnv *env) {
     if (!p || !value || !env || p->longhands) return NULL;
-    char *v = trim_dup(value);
+    char *v = trim_dup(color_raw_of(value));
     int pi = (int)(p - g_props);
     Toks ts;
     char *out = NULL;
@@ -5036,6 +5182,7 @@ static void gradient_canon_one(const char *arg, const char *end, Buf *b)
 char *css_prop_parse(const CssPropDef *p, const char *value)
 {
     char *v = prop_parse_raw(p, value);
+    if (v && (strstr(value, "from ") || strstr(value, "color-mix(")) && strcmp(v, value)) color_raw_note(v, value);
     if (v && p && (!strcmp(p->name, "opacity") || strstr(p->name, "-opacity")) && strchr(v, '%') && !strchr(v, '(')) {
         char b[48];
         snprintf(b, sizeof b, "%.6g", atof(v) / 100.0);
@@ -5061,4 +5208,306 @@ char *css_prop_parse(const CssPropDef *p, const char *value)
     buf_ch(&b, 0);
     free(v);
     return b.s;
+}
+
+/* ============================================================================
+ * Registered custom properties (css-properties-values-api): the registry, flat
+ * ============================================================================ */
+
+enum { REG_MAX = 4096 };
+static char *g_reg_name[REG_MAX], *g_reg_syntax[REG_MAX], *g_reg_initial[REG_MAX];
+static bool g_reg_inherits[REG_MAX], g_reg_rule[REG_MAX];
+static int g_reg_n;
+
+int css_reg_count(void) { return g_reg_n; }
+
+/* What the registry holds, as a number: a change means every element's custom
+ * properties are to be worked out again. */
+uint64_t css_reg_signature(void) {
+    uint64_t h = 1469598103934665603ull;
+    #define MIX(s) for (const char *q = (s); q && *q; q++) { h ^= (unsigned char)*q; h *= 1099511628211ull; }
+    for (int r = 0; r < g_reg_n; r++) {
+        MIX(g_reg_name[r]);
+        MIX(g_reg_syntax[r]);
+        MIX(g_reg_initial[r]);
+        h ^= g_reg_inherits[r] ? 17 : 19;
+        h *= 1099511628211ull;
+    }
+    #undef MIX
+    return h;
+}
+const char *css_reg_name(int r) { return g_reg_name[r]; }
+const char *css_reg_syntax(int r) { return g_reg_syntax[r]; }
+const char *css_reg_initial(int r) { return g_reg_initial[r]; }
+bool css_reg_inherits(int r) { return g_reg_inherits[r]; }
+
+bool css_reg_scripted(const char *name) {
+    int r = css_reg_find(name);
+    return r >= 0 && !g_reg_rule[r];
+}
+
+/* A calc() of plain numbers, as its simplified serialization has it. */
+bool css_calc_number(const char *v, double *out) {
+    const CssPropDef *p = css_prop_find("opacity", 7);
+    char *t = p ? prop_parse_raw(p, v) : NULL;
+    if (!t) return false;
+    const char *n = !strncasecmp(t, "calc(", 5) ? t + 5 : t;
+    char *e = NULL;
+    *out = strtod(n, &e);
+    bool ok = e != n && (*e == 0 || *e == ')');
+    free(t);
+    return ok;
+}
+
+int css_reg_find(const char *name) {
+    for (int r = g_reg_n - 1; r >= 0; r--) if (!strcmp(g_reg_name[r], name)) return r;
+    return -1;
+}
+
+static void reg_free(int r) {
+    free(g_reg_name[r]);
+    free(g_reg_syntax[r]);
+    free(g_reg_initial[r]);
+}
+
+/* (rules: the last wins; a script's registration over any rule) */
+bool css_reg_add(const char *name, const char *syntax, bool inherits, const char *initial, bool rule) {
+    int r = css_reg_find(name);
+    if (r >= 0 && !g_reg_rule[r] && rule) return false;
+    if (r < 0) {
+        if (g_reg_n == REG_MAX) return false;
+        r = g_reg_n++;
+    } else reg_free(r);
+    g_reg_name[r] = strdup(name);
+    g_reg_syntax[r] = strdup(syntax);
+    g_reg_initial[r] = initial ? strdup(initial) : NULL;
+    g_reg_inherits[r] = inherits;
+    g_reg_rule[r] = rule;
+    return true;
+}
+
+void css_reg_forget_rules(void) {
+    int n = 0;
+    for (int r = 0; r < g_reg_n; r++) {
+        if (g_reg_rule[r]) { reg_free(r); continue; }
+        g_reg_name[n] = g_reg_name[r];
+        g_reg_syntax[n] = g_reg_syntax[r];
+        g_reg_initial[n] = g_reg_initial[r];
+        g_reg_inherits[n] = g_reg_inherits[r];
+        g_reg_rule[n] = false;
+        n++;
+    }
+    g_reg_n = n;
+}
+
+void css_reg_reset(void) {
+    for (int r = 0; r < g_reg_n; r++) reg_free(r);
+    g_reg_n = 0;
+}
+
+/* The compiled grammar of a syntax string (each is compiled once). */
+static GNode *syntax_grammar(const char *syntax) {
+    static char *names[1024];
+    static GNode *grammars[1024];
+    static int n;
+    for (int i = 0; i < n; i++) if (!strcmp(names[i], syntax)) return grammars[i];
+    GNode *g = g_compile(syntax);
+    if (n < 1024) { names[n] = strdup(syntax); grammars[n++] = g; }
+    return g;
+}
+
+static bool syntax_is_universal(const char *syntax) {
+    while (*syntax && isspace((unsigned char)*syntax)) syntax++;
+    if (*syntax != '*') return false;
+    syntax++;
+    while (*syntax && isspace((unsigned char)*syntax)) syntax++;
+    return !*syntax;
+}
+
+/* The value matched against a syntax string, serialized (malloc'd), or NULL. */
+char *css_syntax_parse(const char *syntax, const char *value) {
+    if (syntax_is_universal(syntax)) return trim_dup(value);
+    char *v = trim_dup(value);
+    GNode *g = v[0] ? syntax_grammar(syntax) : NULL;
+    Toks ts;
+    if (!g || !tokenize(v, strlen(v), &ts)) { free(v); return NULL; }
+    Matcher m;
+    memset(&m, 0, sizeof m);
+    m.ts = &ts;
+    m.cur = -1;
+    bool ok = ts.n > 0;
+    for (int i = 0; ok && i < ts.n; i++) if (ts.t[i].type == T_BAD || ts.t[i].type == T_SEMI) ok = false;
+    ok = ok && match_node(&m, g, 0, ts.n, at_end, NULL);
+    free(m.hits);
+    toks_free(&ts);
+    if (ok) return v;
+    free(v);
+    return NULL;
+}
+
+/* Which part of a syntax string the value is of: its <type> (without the
+ * brackets, into type) and multiplier ('+', '#' or 0). */
+bool css_syntax_component(const char *syntax, const char *value, char *type, size_t cap, char *mult) {
+    const char *s = syntax;
+    for (;;) {
+        const char *e = strchr(s, '|');
+        size_t n = e ? (size_t)(e - s) : strlen(s);
+        char part[128];
+        if (n < sizeof part) {
+            memcpy(part, s, n);
+            part[n] = 0;
+            char *p = part;
+            while (*p && isspace((unsigned char)*p)) p++;
+            size_t l = strlen(p);
+            while (l && isspace((unsigned char)p[l - 1])) p[--l] = 0;
+            char *got = css_syntax_parse(p, value);
+            if (got) {
+                free(got);
+                *mult = 0;
+                if (l && (p[l - 1] == '+' || p[l - 1] == '#')) { *mult = p[l - 1]; p[--l] = 0; }
+                if (l >= 2 && p[0] == '<' && p[l - 1] == '>') { p[l - 1] = 0; p++; }
+                snprintf(type, cap, "%s", p);
+                return true;
+            }
+        }
+        if (!e) return false;
+        s = e + 1;
+    }
+}
+
+/* The @property rules of a sheet's text: those with all they need are registered. */
+void css_reg_scan_css(const char *css, size_t len) {
+    const char *end = css + len, *p = css;
+    while (p < end) {
+        const char *at = NULL;
+        for (const char *q = p; q + 9 <= end; q++)
+            if (*q == '@' && !strncasecmp(q + 1, "property", 8)) { at = q; break; }
+        if (!at) return;
+        const char *q = at + 9;
+        while (q < end && isspace((unsigned char)*q)) q++;
+        const char *ns = q;
+        while (q < end && !isspace((unsigned char)*q) && *q != '{') q++;
+        char name[128] = "";
+        if ((size_t)(q - ns) < sizeof name) { memcpy(name, ns, (size_t)(q - ns)); name[q - ns] = 0; }
+        while (q < end && *q != '{') q++;
+        if (q >= end) return;
+        const char *body = ++q;
+        int depth = 1;
+        while (q < end && depth) { if (*q == '{') depth++; else if (*q == '}') depth--; q++; }
+        const char *bend = depth ? q : q - 1;
+        p = q;
+        char *syntax = NULL, *initial = NULL;
+        int inherits = -1;
+        for (const char *d = body; d < bend;) {
+            while (d < bend && (isspace((unsigned char)*d) || *d == ';')) d++;
+            if (bend - d >= 2 && d[0] == '/' && d[1] == '*') {
+                d += 2;
+                while (d + 1 < bend && !(d[0] == '*' && d[1] == '/')) d++;
+                d += 2;
+                continue;
+            }
+            const char *dn = d;
+            while (d < bend && *d != ':' && *d != ';') d++;
+            if (d >= bend || *d != ':') break;
+            size_t nl = (size_t)(d - dn);
+            while (nl && isspace((unsigned char)dn[nl - 1])) nl--;
+            const char *vs = ++d;
+            char quote = 0;
+            int nest = 0;
+            for (; d < bend; d++) {
+                if (quote) { if (*d == '\\') d++; else if (*d == quote) quote = 0; }
+                else if (*d == '"' || *d == '\'') quote = *d;
+                else if (*d == '(') nest++;
+                else if (*d == ')') nest--;
+                else if (*d == ';' && nest <= 0) break;
+            }
+            char *v = strndup(vs, (size_t)(d - vs));
+            char *t = trim_dup(v);
+            free(v);
+            size_t tl = strlen(t);
+            if (nl == 6 && !strncasecmp(dn, "syntax", 6) && tl >= 2 && (t[0] == '"' || t[0] == '\'')) {
+                free(syntax);
+                syntax = strndup(t + 1, tl - 2);
+            } else if (nl == 8 && !strncasecmp(dn, "inherits", 8)) {
+                inherits = !strcasecmp(t, "true") ? 1 : !strcasecmp(t, "false") ? 0 : -1;
+            } else if (nl == 13 && !strncasecmp(dn, "initial-value", 13)) {
+                free(initial);
+                initial = strdup(t);
+            }
+            free(t);
+        }
+        bool ok = name[0] == '-' && name[1] == '-' && name[2] && syntax && inherits >= 0 && css_syntax_valid(syntax);
+        if (ok && !syntax_is_universal(syntax)) {
+            char *c = initial ? css_syntax_parse(syntax, initial) : NULL;
+            ok = c && !css_value_depends_on_context(initial);
+            if (ok) { free(initial); initial = c; } else free(c);
+        }
+        if (ok) css_reg_add(name, syntax, inherits == 1, initial, true);
+        free(syntax);
+        free(initial);
+    }
+}
+
+/* A syntax string's own grammar (css-properties-values-api 5.3). */
+bool css_syntax_valid(const char *syntax) {
+    static const char *const types[] = { "angle", "color", "custom-ident", "image", "integer", "length",
+        "length-percentage", "number", "percentage", "resolution", "string", "time", "url",
+        "transform-function", "transform-list" };
+    if (syntax_is_universal(syntax)) return true;
+    const char *s = syntax;
+    if (!*s) return false;
+    for (;;) {
+        while (*s && isspace((unsigned char)*s)) s++;
+        const char *b = s;
+        const char *e = b;
+        while (*e && *e != '|' && !isspace((unsigned char)*e)) e++;
+        const char *after = e;
+        while (*after && isspace((unsigned char)*after)) after++;
+        if (*after && *after != '|') return false;
+        size_t n = (size_t)(e - b);
+        if (!n) return false;
+        char mult = (b[n - 1] == '+' || b[n - 1] == '#') ? b[n - 1] : 0;
+        if (mult) n--;
+        if (!n) return false;
+        if (b[0] == '<') {
+            if (n < 3 || b[n - 1] != '>') return false;
+            bool known = false;
+            for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); i++)
+                if (strlen(types[i]) == n - 2 && !strncmp(types[i], b + 1, n - 2)) known = true;
+            if (!known) return false;
+            if (mult && n - 2 == 14 && !strncmp(b + 1, "transform-list", 14)) return false;
+        } else {
+            /* (a custom ident, not a CSS-wide keyword) */
+            if (!(isalpha((unsigned char)b[0]) || b[0] == '-' || b[0] == '_' || (unsigned char)b[0] >= 0x80)) return false;
+            for (size_t i = 0; i < n; i++) {
+                unsigned char c = (unsigned char)b[i];
+                if (!(isalnum(c) || c == '-' || c == '_' || c >= 0x80 || c == '\\')) return false;
+            }
+            static const char *const wide[] = { "initial", "inherit", "unset", "revert", "revert-layer", "default" };
+            for (size_t i = 0; i < sizeof(wide) / sizeof(wide[0]); i++)
+                if (strlen(wide[i]) == n && !strncasecmp(wide[i], b, n)) return false;
+        }
+        if (!*after) return true;
+        s = after + 1;
+        while (*s && isspace((unsigned char)*s)) s++;
+        if (!*s) return false;
+    }
+}
+
+/* Whether a value depends on what it is computed for: font or viewport units, var(). */
+bool css_value_depends_on_context(const char *v) {
+    /* (the viewport is the same for all: its units are independent) */
+    static const char *const units[] = { "em", "ex", "ch", "ic", "cap", "lh", "rem", "rex", "rch", "ric", "rcap", "rlh",
+        "cqw", "cqh", "cqi", "cqb", "cqmin", "cqmax" };
+    if (strstr(v, "var(") || strstr(v, "env(")) return true;
+    Toks ts;
+    if (!tokenize(v, strlen(v), &ts)) return false;
+    bool dep = false;
+    for (int i = 0; i < ts.n && !dep; i++) {
+        if (ts.t[i].type != T_DIM) continue;
+        for (size_t u = 0; u < sizeof(units) / sizeof(units[0]); u++)
+            if (ts.t[i].str && !strcasecmp(ts.t[i].str, units[u])) dep = true;
+    }
+    toks_free(&ts);
+    return dep;
 }

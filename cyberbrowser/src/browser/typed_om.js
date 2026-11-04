@@ -510,6 +510,40 @@
     }
     variadic(CSSMathInvert, 'invert', function () { return typeInvert(this.__arg.__type()); });
 
+    /* CSS.registerProperty (css-properties-values-api 3.) */
+    if (global.CSS && global.CSS.__register) {
+        var hidden = {};
+        ['__syntaxValid', '__syntaxParse', '__dependsOnContext', '__register'].forEach(function (k) {
+            hidden[k] = global.CSS[k];
+            delete global.CSS[k];
+        });
+        Object.defineProperty(global, '__cyberCssSyntax', { value: hidden, configurable: true });
+        Object.defineProperty(global.CSS, 'registerProperty', { configurable: true, enumerable: true, writable: true, value: function registerProperty(def) {
+            if (arguments.length < 1) throw new TypeError('registerProperty: 1 argument required');
+            if (def === null || typeof def !== 'object') throw new TypeError('registerProperty: not a dictionary');
+            var has = {};
+            ['name', 'syntax', 'inherits', 'initialValue'].forEach(function (k) { has[k] = def[k]; });
+            if (has.name === undefined) throw new TypeError("registerProperty: 'name' is required");
+            if (has.inherits === undefined) throw new TypeError("registerProperty: 'inherits' is required");
+            var name = String(has.name), syntax = has.syntax === undefined ? '*' : String(has.syntax), inherits = !!has.inherits;
+            var initial = has.initialValue === undefined ? null : String(has.initialValue);
+            var err = function (m) { return new global.DOMException(m, 'SyntaxError'); };
+            if (name.slice(0, 2) !== '--' || name.length < 3) throw err("'" + name + "' is not a custom property name");
+            if (!hidden.__syntaxValid(syntax)) throw err("'" + syntax + "' is not a syntax");
+            var universal = /^\s*\*\s*$/.test(syntax);
+            if (initial === null) {
+                if (!universal) throw err('An initial value is required');
+            } else if (!universal) {
+                var parsed = hidden.__syntaxParse(syntax, initial);
+                if (parsed === null) throw err("'" + initial + "' is not a value of '" + syntax + "'");
+                if (hidden.__dependsOnContext(initial)) throw err("'" + initial + "' is not computationally independent");
+                initial = parsed;
+            } else if (/var\(/.test(initial)) throw err('An initial value cannot use var()');
+            if (!hidden.__register(name, syntax, inherits, initial))
+                throw new global.DOMException("'" + name + "' is already registered", 'InvalidModificationError');
+        } });
+    }
+
     /* factories */
     if (global.CSS) {
         Object.keys(UNITS).forEach(function (u) {

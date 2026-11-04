@@ -533,6 +533,60 @@
             .replace(/(^|\s)(and|or)(\s|\()/gi, function (m, a, w, b) { return a + w.toLowerCase() + b; })
             .replace(/(^|[\s(,])(all|screen|print|speech)\b/gi, function (m, a, w) { return a + w.toLowerCase(); });
     }
+    /* Whether q is a <media-query> (mediaqueries-5 2.); what it means is
+     * for the matching. */
+    function mediaValid(q) {
+        var s = q.trim(), i = 0;
+        function ws() { while (i < s.length && /\s/.test(s[i])) i++; }
+        function word(w) {
+            ws();
+            var t = s.substr(i, w.length);
+            if (t.toLowerCase() !== w) return false;
+            var c = s[i + w.length];
+            if (c !== undefined && !/[\s(]/.test(c)) return false;
+            i += w.length;
+            return true;
+        }
+        function blockEnd() {
+            var depth = 0;
+            for (; i < s.length; i++) {
+                if (s[i] === '(') depth++;
+                else if (s[i] === ')' && --depth === 0) { i++; return true; }
+                else if (s[i] === '[' || s[i] === ']' || s[i] === '{' || s[i] === '}') return false;
+            }
+            return true;       /* (the end of the input closes it) */
+        }
+        function inParens() {
+            ws();
+            if (s[i] === '(') return blockEnd();
+            /* (<general-enclosed>: a function) */
+            var m = /^-?[a-zA-Z_][\w-]*\(/.exec(s.slice(i));
+            if (!m) return false;
+            i += m[0].length - 1;
+            return blockEnd();
+        }
+        function condition(orOk) {
+            if (word('not')) return inParens();
+            if (!inParens()) return false;
+            if (word('and')) { do { if (!inParens()) return false; } while (word('and')); return true; }
+            if (orOk && word('or')) { do { if (!inParens()) return false; } while (word('or')); return true; }
+            return true;
+        }
+        function done() { ws(); return i >= s.length; }
+        ws();
+        var save = i;
+        if (s[i] === '(' || /^-?[a-zA-Z_][\w-]*\(/.test(s) || /^not[\s(]+[^\s]/i.test(s) && (function () {
+            word('not'); ws(); var c = s[i] === '(' || /^-?[a-zA-Z_][\w-]*\(/.test(s.slice(i)); i = save; return c; })()) {
+            return condition(true) && done();
+        }
+        if (!word('not')) word('only');
+        ws();
+        var m = /^-?[a-zA-Z_][\w-]*/.exec(s.slice(i));
+        if (!m || /^(and|or|not|only|layer)$/i.test(m[0])) return false;
+        i += m[0].length;
+        if (done()) return true;
+        return word('and') && condition(false) && done();
+    }
     function splitMedia(text) {
         var out = [], depth = 0, cur = '';
         for (var k = 0; k < text.length; k++) {
@@ -542,7 +596,8 @@
             if (c === ',' && !depth) { out.push(cur); cur = ''; } else cur += c;
         }
         out.push(cur);
-        return out.map(function (q) { return normalizeMedia(q); }).filter(function (q) { return q.length; });
+        if (out.length === 1 && !out[0].trim()) return [];
+        return out.map(function (q) { return mediaValid(q) ? normalizeMedia(q) : 'not all'; });
     }
     function MediaList() { throw new TypeError('Illegal constructor'); }
     function newMediaList(text, onChange) {
@@ -569,6 +624,9 @@
     define(MediaList.prototype, 'toString', function () { return this.mediaText; });
     Object.defineProperty(MediaList.prototype, Symbol.toStringTag, { value: 'MediaList', configurable: true });
     MediaList.prototype[Symbol.iterator] = Array.prototype[Symbol.iterator];
+    /* (a declaration block is a list of its property names) */
+    if (global.__CSSStyleDeclarationProto && !global.__CSSStyleDeclarationProto[Symbol.iterator])
+        Object.defineProperty(global.__CSSStyleDeclarationProto, Symbol.iterator, { value: Array.prototype.values, writable: true, configurable: true });
 
     /* ==================================================================
      * Rules
@@ -1032,8 +1090,19 @@
                     if (c < 0) return;
                     var key = d.slice(0, c).trim().toLowerCase(), val = d.slice(c + 1).trim();
                     if (key === 'syntax') { var sv = /^"(.*)"$|^'(.*)'$/.exec(val); if (sv) val = sv[1] !== undefined ? sv[1] : sv[2]; }
+                    if (key === 'syntax' && !sv) val = null;
                     descs[key] = val;
                 });
+                /* (syntax and inherits it must have; an initial value of that syntax) */
+                var reg = global.__cyberCssSyntax;
+                if (reg) {
+                    if (typeof descs.syntax !== 'string' || !reg.__syntaxValid(descs.syntax)) return null;
+                    if (descs.inherits !== 'true' && descs.inherits !== 'false') return null;
+                    if (!/^\s*\*\s*$/.test(descs.syntax)) {
+                        var iv = descs['initial-value'];
+                        if (iv === undefined || reg.__syntaxParse(descs.syntax, iv) === null || reg.__dependsOnContext(iv)) return null;
+                    } else if (/var\(/.test(descs['initial-value'] || '')) return null;
+                }
                 r = makeRule(CSSPropertyRule, 'property', { __name: p.prelude, __descs: descs });
                 break;
             case 'counter-style':

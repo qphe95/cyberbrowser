@@ -1232,7 +1232,8 @@ load:
         /* (virtual time: a turn takes a moment, or a chain of 0 ms timers waiting
          * for time to pass never would see it) */
         if (virtual_time && t.had_timers) page_time_advance(1);
-        if (input || t.had_timers || t.had_images) continue;
+        static ULONGLONG waiting_since;
+        if (input || t.had_timers || t.had_images) { waiting_since = 0; continue; }
         if ((t.new_frame || page_needs_layout()) && !virtual_time) continue;
         /* Idle: a script this page compiled goes into the bytecode cache
          * (one a turn: each is a full compile). */
@@ -1265,6 +1266,11 @@ load:
             unsigned long long begun = page_clock_wait_begin();
             wait_input(ms);
             page_clock_wait_end(begun);
+            /* (a virtual clock waits for what is out, but not for long: nothing has
+             * come for seconds, so a time limit of the page's own can come sooner) */
+            ULONGLONG real = GetTickCount64();
+            if (!waiting_since) waiting_since = real;
+            if (virtual_time && real - waiting_since > 3000) page_time_advance(16);
         }
     }
 

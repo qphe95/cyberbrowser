@@ -476,6 +476,9 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     const char *grid_rs, *grid_re, *grid_cs, *grid_ce;
     /* justify-items / justify-self: 0 = normal/auto, else CssAlignItems + 1. */
     unsigned char justify_items, justify_self;
+    /* The alignment keywords the enums above fold together (LAYOUT_ALIGN_KW_*,
+     * with 0x80: safe), for what they mean in each kind of container. */
+    unsigned char jc_kw, ac_kw, ai_kw, as_kw, ji_kw, js_kw;
     /* Table part (from the tag or display: table-*): 0 none, 1 table,
      * 2 row group, 3 row, 4 cell, 5 caption, 6 column (ignored).
      * border-spacing (when border_spacing_set; else the cellspacing

@@ -424,17 +424,39 @@ static char *transform_matrix(const char *list, double w, double h)
 /* What the properties script animates last read as, by element: a transition
  * starts from it, when the change comes before the element has one. */
 #define BEFORE_N 1024
-static struct { NodeId el; const CssPropDef *p; char *v; } g_before[BEFORE_N];
+static struct { NodeId el; const CssPropDef *p; char *v, *spec; } g_before[BEFORE_N];
 
-static char *before_swap(NodeId el, const CssPropDef *p, const char *now)
+/* (and what it was declared as: sizes interpolate by that) */
+static char *before_swap(NodeId el, const CssPropDef *p, const char *now, const char *spec, char **old_spec)
 {
     size_t k = (((size_t)el * 2654435761u) ^ ((size_t)p >> 4)) % BEFORE_N;
-    char *old = g_before[k].el == el && g_before[k].p == p ? g_before[k].v : NULL;
+    bool same = g_before[k].el == el && g_before[k].p == p;
+    char *old = same ? g_before[k].v : NULL;
     if (!old) free(g_before[k].v);
+    if (old_spec && same) *old_spec = g_before[k].spec;
+    else free(g_before[k].spec);
     g_before[k].el = el;
     g_before[k].p = p;
     g_before[k].v = strdup(now ? now : "");
+    g_before[k].spec = spec ? strdup(spec) : NULL;
     return old;
+}
+
+/* A size that takes more than a number to interpolate. */
+static bool size_spec_special(const char *s)
+{
+    if (!s) return true;
+    if (strstr(s, "calc-size(")) return true;
+    static const char *const kw[] = { "auto", "none", "min-content", "max-content", "fit-content", "stretch", "initial", "unset", "inherit", "revert", "revert-layer" };
+    for (size_t i = 0; i < sizeof(kw) / sizeof(kw[0]); i++) if (!strcasecmp(s, kw[i])) return true;
+    return false;
+}
+
+/* Whether what el's size was last read as was such a size. */
+static bool before_size_special(NodeId el, const CssPropDef *p)
+{
+    size_t k = (((size_t)el * 2654435761u) ^ ((size_t)p >> 4)) % BEFORE_N;
+    return g_before[k].el == el && g_before[k].p == p && size_spec_special(g_before[k].spec);
 }
 
 static int g_in_hook, g_in_calc;
@@ -450,6 +472,8 @@ void computed_style_reset(void)
     for (int i = 0; i < BEFORE_N; i++) {
         free(g_before[i].v);
         g_before[i].v = NULL;
+        free(g_before[i].spec);
+        g_before[i].spec = NULL;
         g_before[i].el = 0;
         g_before[i].p = NULL;
     }
@@ -490,12 +514,17 @@ void computed_style_after_restyle(JSContextHandle ctx)
         const char *now = t->styled && t->spec ? computed_of(ctx, t, g_before[i].p->name) : NULL;
         if (now && strcmp(now, g_before[i].v)) {
             if (JS_IsFunction(ctx, hook) && (anim_has(el, 0) || layout_query_has_anim_spec(el))) {
-                GCValue args[4] = { dom_js(ctx, el), JS_NewString(ctx, g_before[i].p->name), JS_NewString(ctx, now), JS_NewString(ctx, g_before[i].v) };
-                GCValue r = JS_Call(ctx, hook, JS_UNDEFINED, 4, args);
+                const char *spec_now = t->spec[prop_idx(g_before[i].p)];
+                GCValue args[7] = { dom_js(ctx, el), JS_NewString(ctx, g_before[i].p->name), JS_NewString(ctx, now), JS_NewString(ctx, g_before[i].v), JS_FALSE,
+                                    spec_now ? JS_NewString(ctx, spec_now) : JS_NULL,
+                                    g_before[i].spec ? JS_NewString(ctx, g_before[i].spec) : JS_NULL };
+                GCValue r = JS_Call(ctx, hook, JS_UNDEFINED, 7, args);
                 if (JS_IsException(r)) JS_GetException(ctx);
             }
             free(g_before[i].v);
             g_before[i].v = strdup(now);
+            free(g_before[i].spec);
+            g_before[i].spec = t->spec[prop_idx(g_before[i].p)] ? strdup(t->spec[prop_idx(g_before[i].p)]) : NULL;
         }
         computed_style_free(t);
     }
@@ -716,6 +745,7 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
         if (t < 0.0 || t > 1.0) { free(r); r = strdup(t < 0.0 ? "0" : "1"); }
     }
     /* (calc-size(): what it comes to, from what its basis would) */
+    bool has_calc_size = s && strstr(s, "calc-size(");
     {
         #define in_calc g_in_calc
         bool sized = !strcmp(n, "width") || !strcmp(n, "height") || !strcmp(n, "min-width") || !strcmp(n, "min-height") ||
@@ -727,6 +757,8 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
                 in_calc++;
                 GCValue got = JS_Call(ctx, fn, JS_UNDEFINED, 3, args);
                 in_calc--;
+                /* (reading it there took the snapshot again: the strings are new) */
+                s = cs->spec ? cs->spec[i] : NULL;
                 if (JS_IsException(got)) JS_GetException(ctx);
                 else if (JS_IsString(got)) {
                     const char *t = JS_ToCString(ctx, got);
@@ -768,9 +800,10 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
     /* (sizes between keywords or calc-size()s: over their lengths, in script) */
     bool sized_prop = !strcmp(n, "width") || !strcmp(n, "height") || !strcmp(n, "min-width") || !strcmp(n, "min-height") ||
                       !strcmp(n, "max-width") || !strcmp(n, "max-height");
-    bool generic_size = sized_prop && !cs->pseudo && ((s && strstr(s, "calc-size(")) ||
+    bool generic_size = sized_prop && !cs->pseudo && (has_calc_size || (s && (size_spec_special(s) || before_size_special(cs->el, p))) ||
                         !strcmp(computed_of(ctx, cs, "interpolate-size"), "allow-keywords"));
-    int ap = is_transform || individual || generic_size ? -1 : anim_prop_of(n);
+    /* (script working out what a declaration comes to: the declaration alone) */
+    int ap = is_transform || individual || generic_size || (sized_prop && (g_in_calc || g_in_hook)) ? -1 : anim_prop_of(n);
     AnimVal av;
     if (ap >= 0 && anim_value(cs->el, cs->pseudo, ap, (double)anim_time_ms(), &av)) {
         char b[96];
@@ -796,14 +829,24 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
         generic = true;
         keyframes_only = true;
     }
-    char *before = generic && !keyframes_only ? before_swap(cs->el, p, r) : NULL;
+    char *before_spec = NULL;
+    char *now_spec = sized_prop && s ? strdup(s) : NULL;
+    char *before = generic && !keyframes_only ? before_swap(cs->el, p, r, now_spec, &before_spec) : NULL;
+    /* (a size read now may be what a later change transitions from) */
+    if (!generic && sized_prop && !in_hook && !g_in_calc && !cs->pseudo) {
+        char *old_spec = NULL;
+        free(before_swap(cs->el, p, r, now_spec, &old_spec));
+        free(old_spec);
+    }
     if (generic && (anim_has(cs->el, 0) || layout_query_has_anim_spec(cs->el))) {
         GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberGenericAnim");
         if (JS_IsFunction(ctx, fn)) {
-            GCValue args[5] = { dom_js(ctx, cs->el), JS_NewString(ctx, n), JS_NewString(ctx, r ? r : ""),
-                                before ? JS_NewString(ctx, before) : JS_UNDEFINED, JS_NewBool(ctx, keyframes_only) };
+            GCValue args[7] = { dom_js(ctx, cs->el), JS_NewString(ctx, n), JS_NewString(ctx, r ? r : ""),
+                                before ? JS_NewString(ctx, before) : JS_UNDEFINED, JS_NewBool(ctx, keyframes_only),
+                                now_spec ? JS_NewString(ctx, now_spec) : JS_NULL,
+                                before_spec ? JS_NewString(ctx, before_spec) : JS_NULL };
             in_hook++;
-            GCValue got = JS_Call(ctx, fn, JS_UNDEFINED, 5, args);
+            GCValue got = JS_Call(ctx, fn, JS_UNDEFINED, 7, args);
             in_hook--;
             if (JS_IsException(got)) JS_GetException(ctx);
             else if (JS_IsString(got)) {
@@ -813,6 +856,24 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
         }
     }
     free(before);
+    free(before_spec);
+    free(now_spec);
+    /* (an opacity comes to a number from 0 to 1, however it was reached) */
+    if (r && strstr(n, "opacity") && !g_in_calc) {
+        const char *q = r;
+        bool pct = strchr(q, '%') != NULL;
+        if (!strncmp(q, "calc(", 5)) q += 5;
+        char *e = NULL;
+        double v = strtod(q, &e);
+        if (e != q) {
+            if (pct) v /= 100.0;
+            v = v < 0 ? 0 : v > 1 ? 1 : v;
+            char b[48];
+            snprintf(b, sizeof b, "%.6g", v);
+            free(r);
+            r = strdup(b);
+        }
+    }
     /* (read from script's own interpolating, it stays a list) */
     if (is_transform && !in_hook && !g_in_calc && r && strcmp(r, "none")) {
         double w = cs->used.rendered ? cs->used.content_width + cs->used.padding[1] + cs->used.padding[3] + cs->used.border[1] + cs->used.border[3] : 0.0;
@@ -822,6 +883,91 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
     }
     #undef in_hook
     return r;
+}
+
+/* A length as computed on an element, without touching its style or laying out. */
+GCValue js_compute_length(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    NodeId id = argc > 1 ? dom_node_of(argv[0]) : 0;
+    const char *v = argc > 1 ? JS_ToCString(ctx, argv[1]) : NULL;
+    GCValue out = JS_NULL;
+    if (id && v) {
+        ComputedStyle *t = computed_style_new(id);
+        refresh(ctx, t);
+        const CssPropDef *p = css_prop_find("width", 5);
+        char *c = t->styled && p ? compute_value(ctx, t, p, v) : NULL;
+        if (c) { out = JS_NewString(ctx, c); free(c); }
+        computed_style_free(t);
+    }
+    return out;
+}
+
+/* One value of a registered property's <type>, as the property that takes that
+ * type computes it. */
+static char *registered_item(JSContextHandle ctx, ComputedStyle *cs, const char *type, const char *v) {
+    const char *as = !strcmp(type, "length") ? "width" : !strcmp(type, "length-percentage") ? "width"
+                   : !strcmp(type, "color") ? "background-color" : !strcmp(type, "transform-function") ? "transform"
+                   : !strcmp(type, "transform-list") ? "transform" : !strcmp(type, "time") ? "transition-duration"
+                   : !strcmp(type, "angle") ? "rotate" : NULL;
+    if (!strcmp(type, "integer") || !strcmp(type, "number")) {
+        const char *b = v;
+        while (*b && isspace((unsigned char)*b)) b++;
+        if (strncasecmp(b, "calc(", 5)) return strdup(v);
+        double d;
+        if (!css_calc_number(v, &d)) return strdup(v);
+        char tmp[64];
+        if (!strcmp(type, "integer")) snprintf(tmp, sizeof tmp, "%lld", (long long)floor(d + 0.5));
+        else snprintf(tmp, sizeof tmp, "%.6g", d);
+        return strdup(tmp);
+    }
+    if (!as) return strdup(v);
+    const CssPropDef *p = css_prop_find(as, strlen(as));
+    if (!p) return strdup(v);
+    char *c = compute_value(ctx, cs, p, v);
+    if (!c) return strdup(v);
+    /* (a function's name as written in the specs: the property's value has it folded) */
+    if (!strcmp(as, "transform")) {
+        static const char *const names[] = { "translateX", "translateY", "translateZ", "translate3d", "scaleX", "scaleY",
+            "scaleZ", "scale3d", "rotateX", "rotateY", "rotateZ", "rotate3d", "skewX", "skewY", "matrix3d" };
+        for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+            size_t n = strlen(names[i]);
+            for (char *q = c; *q; q++) if (!strncasecmp(q, names[i], n)) memcpy(q, names[i], n);
+        }
+    }
+    return c;
+}
+
+/* A registered custom property's value as computed: each of its values by type. */
+static char *registered_computed(JSContextHandle ctx, ComputedStyle *cs, int reg, const char *v) {
+    const char *syntax = css_reg_syntax(reg);
+    char type[64], mult = 0;
+    if (!v[0] || !css_syntax_component(syntax, v, type, sizeof type, &mult)) return NULL;
+    refresh(ctx, cs);
+    if (!mult) return registered_item(ctx, cs, type, v);
+    /* (the list, each item computed; ", " or " " between) */
+    size_t cap = strlen(v) * 4 + 64, used = 0;
+    char *out = calloc(1, cap);
+    const char *s = v;
+    for (;;) {
+        while (*s && (isspace((unsigned char)*s) || (mult == '#' && *s == ','))) s++;
+        if (!*s) break;
+        const char *e = s;
+        int depth = 0;
+        for (; *e; e++) {
+            if (*e == '(') depth++;
+            else if (*e == ')') depth--;
+            else if (!depth && (mult == '#' ? *e == ',' : isspace((unsigned char)*e))) break;
+        }
+        char *item = strndup(s, (size_t)(e - s));
+        size_t il = strlen(item);
+        while (il && isspace((unsigned char)item[il - 1])) item[--il] = 0;
+        char *c = registered_item(ctx, cs, type, item);
+        used += (size_t)snprintf(out + used, used < cap ? cap - used : 0, "%s%s", used ? (mult == '#' ? ", " : " ") : "", c ? c : item);
+        free(c);
+        free(item);
+        s = e;
+    }
+    return out;
 }
 
 char *computed_style_value(JSContextHandle ctx, ComputedStyle *cs, const char *prop, size_t len) {
@@ -840,6 +986,13 @@ char *computed_style_value(JSContextHandle ctx, ComputedStyle *cs, const char *p
         while (n && isspace((unsigned char)b[n - 1])) n--;
         char *r = strndup(b, n);
         free(v);
+        name = strndup(prop, len);
+        int reg = css_reg_count() ? css_reg_find(name) : -1;
+        free(name);
+        if (reg >= 0) {
+            char *c = registered_computed(ctx, cs, reg, r);
+            if (c) { free(r); return c; }
+        }
         return r;
     }
     refresh(ctx, cs);

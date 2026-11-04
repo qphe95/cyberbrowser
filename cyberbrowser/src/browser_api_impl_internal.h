@@ -81,6 +81,10 @@ GCValue js_storage_remove_item(JSContextHandle ctx, GCValue this_val, int argc, 
 GCValue js_storage_clear(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_storage_key(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_storage_get_length(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_css_syntax_valid(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_css_syntax_parse(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_css_depends_on_context(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_css_register(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_css_supports(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_css_escape(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_css_style_sheet_insert_rule(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);

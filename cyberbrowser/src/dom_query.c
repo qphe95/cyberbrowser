@@ -45,6 +45,7 @@ enum {
     SS_LINK,         /* :link, :any-link: a and area with href */
     SS_TARGET,       /* :target: the element the URL's fragment names */
     SS_LANG,         /* :lang(val) */
+    SS_HEADING,      /* :heading, :heading(levels): a, a bit for each level */
     SS_HOST,         /* :host: only across a combinator out of a shadow tree */
     SS_VALID, SS_INVALID,
     SS_ANY,          /* unsupported pseudo-class: matches */
@@ -510,6 +511,16 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                 else if ((s.a = (int)css_state_bit(name, strlen(name))) != 0 && strcmp(name, "disabled") && strcmp(name, "enabled") &&
                          strcmp(name, "target")) s.kind = SS_STATE;
                 else if (strcmp(name, "target") == 0) s.kind = SS_TARGET;
+                else if (strcmp(name, "heading") == 0) {
+                    s.kind = SS_HEADING;
+                    s.a = args ? 0 : 0x7e;
+                    for (size_t k = 0; args && k < alen; k++) {
+                        if (args[k] < '0' || args[k] > '9') continue;
+                        int v = 0;
+                        while (k < alen && args[k] >= 0x30 && args[k] <= 0x39) { if (v < 100) v = v * 10 + (args[k] - 0x30); k++; }
+                        if (v >= 1 && v <= 6) s.a |= 1 << v;
+                    }
+                }
                 else if (strcmp(name, "lang") == 0) {
                     /* (the argument: an identifier or a string, trimmed) */
                     const char *a = args, *ae = args ? args + alen : NULL;
@@ -990,6 +1001,13 @@ static bool simple_ok(uint32_t s, const SelSimple *ss, uint32_t scope) {
         return g_dom.kind[r] == DOM_K_DOCUMENT;
     }
     case SS_LANG: return lang_ok(s, ss->val, ss->vlen);
+    case SS_HEADING: {
+        if (g_dom.ns[s] != DOM_NS_HTML) return false;
+        static uint32_t h[7];
+        if (!h[1]) for (int i = 1; i <= 6; i++) { char t[3] = { 'h', (char)('0' + i), 0 }; h[i] = css_atom_intern(t, 2); }
+        for (int i = 1; i <= 6; i++) if (g_dom.tag[s] == h[i]) return (ss->a >> i) & 1;
+        return false;
+    }
     case SS_VALID:
     case SS_INVALID: {
         if (g_dom.ns[s] != DOM_NS_HTML || !g_dom_query_validity) return false;

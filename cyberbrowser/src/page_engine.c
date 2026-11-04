@@ -26,6 +26,7 @@
 #include "css_layout.h"
 #include "display_list.h"
 #include "font_registry.h"
+#include "css_props.h"
 #include "text_shaper.h"
 #include "image_cache.h"
 #include "browser/image_api.h"
@@ -1324,6 +1325,7 @@ bool page_engine_reset(void) {
         extern void computed_style_reset(void);
         computed_style_reset();
         font_registry_forget_faces();
+        css_reg_reset();
     }
     g_css_render_features = 0;
     css_media_set_color_scheme(NULL);

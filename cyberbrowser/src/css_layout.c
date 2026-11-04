@@ -1640,6 +1640,36 @@ static CssFlexWrap css_parse_flex_wrap(const char *value) {
     return CSS_FLEX_WRAP_NOWRAP;
 }
 
+enum { ALIGN_KW_NONE, ALIGN_KW_START, ALIGN_KW_END, ALIGN_KW_LEFT, ALIGN_KW_RIGHT, ALIGN_KW_SELF_START,
+       ALIGN_KW_SELF_END, ALIGN_KW_BASELINE, ALIGN_KW_LAST_BASELINE, ALIGN_KW_SAFE = 0x80 };
+
+/* The keyword of an alignment value, past "safe", "unsafe", "first", "legacy". */
+static unsigned char css_align_kw(const char *v)
+{
+    unsigned char safe = 0;
+    if (!v) return 0;
+    for (;;) {
+        while (isspace((unsigned char)*v)) v++;
+        if (!strncasecmp(v, "safe", 4) && isspace((unsigned char)v[4])) { safe = ALIGN_KW_SAFE; v += 4; continue; }
+        if (!strncasecmp(v, "unsafe", 6) && isspace((unsigned char)v[6])) { v += 6; continue; }
+        if (!strncasecmp(v, "legacy", 6) && isspace((unsigned char)v[6])) { v += 6; continue; }
+        break;
+    }
+    size_t n = 0;
+    while (v[n] && !isspace((unsigned char)v[n]) && v[n] != ';') n++;
+    #define KW(w) (n == sizeof(w) - 1 && !strncasecmp(v, w, n))
+    if (KW("start")) return safe | ALIGN_KW_START;
+    if (KW("end")) return safe | ALIGN_KW_END;
+    if (KW("left")) return safe | ALIGN_KW_LEFT;
+    if (KW("right")) return safe | ALIGN_KW_RIGHT;
+    if (KW("self-start")) return safe | ALIGN_KW_SELF_START;
+    if (KW("self-end")) return safe | ALIGN_KW_SELF_END;
+    if (KW("baseline") || KW("first")) return ALIGN_KW_BASELINE;
+    if (KW("last")) return ALIGN_KW_LAST_BASELINE;
+    #undef KW
+    return safe;
+}
+
 static CssJustifyContent css_parse_justify_content(const char *value) {
     if (!value) return CSS_JUSTIFY_FLEX_START;
     if (strcasecmp(value, "flex-start") == 0 || strcasecmp(value, "start") == 0) return CSS_JUSTIFY_FLEX_START;
@@ -2366,8 +2396,8 @@ static void layout_apply_grid_declaration(LayoutBox *box, const char *prop, cons
         if (prop[5] == 'g') css_parse_shorthand_1_or_2(value, parent_width, viewport_width, s->font_size, r, c);
         else if (prop[5] == 'r') *r = css_parse_length(value, parent_width, viewport_width, s->font_size);
         else *c = css_parse_length(value, parent_width, viewport_width, s->font_size);
-    } else if (strcasecmp(prop, "justify-items") == 0) s->justify_items = css_parse_self_align(value);
-    else if (strcasecmp(prop, "justify-self") == 0) s->justify_self = css_parse_self_align(value);
+    } else if (strcasecmp(prop, "justify-items") == 0) { s->justify_items = css_parse_self_align(value); s->ji_kw = css_align_kw(value); }
+    else if (strcasecmp(prop, "justify-self") == 0) { s->justify_self = css_parse_self_align(value); s->js_kw = css_align_kw(value); }
     else if (strcasecmp(prop, "place-items") == 0 || strcasecmp(prop, "place-self") == 0 ||
              strcasecmp(prop, "place-content") == 0) {
         char first[64];
@@ -2380,14 +2410,20 @@ static void layout_apply_grid_declaration(LayoutBox *box, const char *prop, cons
         if (!*second) second = first;
         if (prop[6] == 'i') {
             s->align_items = css_parse_align_items(first);
+            s->ai_kw = css_align_kw(first);
             s->justify_items = css_parse_self_align(second);
+            s->ji_kw = css_align_kw(second);
         } else if (prop[6] == 's') {
             s->align_self = (strcasecmp(first, "auto") == 0 || strcasecmp(first, "normal") == 0)
                 ? 0 : (unsigned char)(css_parse_align_items(first) + 1);
+            s->as_kw = css_align_kw(first);
             s->justify_self = css_parse_self_align(second);
+            s->js_kw = css_align_kw(second);
         } else {
             s->justify_content = css_parse_justify_content(second);
+            s->jc_kw = css_align_kw(second);
             s->align_content = css_parse_justify_content(first);
+            s->ac_kw = css_align_kw(first);
             s->content_set = (unsigned char)((css_content_fills(second) ? 0 : 1) | (css_content_fills(first) ? 0 : 2));
         }
     } else if (strcasecmp(prop, "border-spacing") == 0) {
@@ -3066,6 +3102,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         box->s->table_group = !strcasecmp(value, "table-header-group") ? 1 : !strcasecmp(value, "table-footer-group") ? 2 : 0;
     } else if (strcasecmp(prop, "align-content") == 0) {
         box->s->align_content = css_parse_justify_content(value);
+        box->s->ac_kw = css_align_kw(value);
         box->s->content_set = (unsigned char)((box->s->content_set & 1) | (css_content_fills(value) ? 0 : 2));
     } else if (strncasecmp(prop, "grid", 4) == 0 || PK(2) ||
                PK(3) || strncasecmp(prop, "place-", 6) == 0 ||
@@ -3348,9 +3385,11 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         box->s->flex_wrap = css_parse_flex_wrap(value);
     } else if (PK(44)) {
         box->s->justify_content = css_parse_justify_content(value);
+        box->s->jc_kw = css_align_kw(value);
         box->s->content_set = (unsigned char)((box->s->content_set & 2) | (css_content_fills(value) ? 0 : 1));
     } else if (PK(45)) {
         box->s->align_items = css_parse_align_items(value);
+        box->s->ai_kw = css_align_kw(value);
     } else if (PK(46) || PK(47)) {
         css_parse_transform(box, value, parent_width, viewport_width);
     } else if (PK(48) || PK(49)) {
@@ -3379,6 +3418,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     } else if (PK(56)) {
         box->s->align_self = (strcasecmp(value, "auto") == 0 || strcasecmp(value, "normal") == 0)
             ? 0 : (unsigned char)(css_parse_align_items(value) + 1);
+        box->s->as_kw = css_align_kw(value);
     } else if (PK(57)) {
         box->s->order = atoi(value);
     } else if (PK(58)) {
@@ -4177,6 +4217,29 @@ static void css_custom_props_put(FrameArena *a, CssCustomProps *m, const char *n
     m->count++;
 }
 
+/* A declaration of a custom property, its var()s resolved.  A registered one
+ * takes values of its syntax; any other is invalid at computed-value time. */
+static void css_custom_prop_declare(FrameArena *a, CssCustomProps *m, const CssCustomProps *parent,
+                                    const char *prop, const char *value)
+{
+    int r = css_reg_count() ? css_reg_find(prop) : -1;
+    if (r < 0) { css_custom_props_put(a, m, prop, value); return; }
+    const char *v = value;
+    while (*v && isspace((unsigned char)*v)) v++;
+    const char *init = css_reg_initial(r);
+    const char *up = parent ? css_custom_props_get(parent, prop) : NULL;
+    const char *fallback = css_reg_inherits(r) && up ? up : init;
+    const char *to = NULL;
+    char *parsed = NULL;
+    if (!strcasecmp(v, "initial")) to = init;
+    else if (!strcasecmp(v, "inherit")) to = up ? up : init;
+    else if (!strcasecmp(v, "unset") || !strcasecmp(v, "revert") || !strcasecmp(v, "revert-layer")) to = fallback;
+    else if ((parsed = css_syntax_parse(css_reg_syntax(r), v)) != NULL) to = parsed;
+    else to = fallback;
+    if (to) css_custom_props_put(a, m, prop, to);
+    free(parsed);
+}
+
 /* Resolve var(--name, fallback) references in a CSS value.  Looks up custom
  * properties in the supplied map and falls back to the comma-separated fallback
  * if the variable is not defined.  Returns a newly allocated string or NULL if
@@ -4904,6 +4967,7 @@ static char* layout_resolve_url(const char *base_url, const char *href) {
 /* Fetched stylesheet texts, by URL, for the life of the process: a layout
  * (hit test, re-render) never re-downloads a sheet. */
 typedef struct UrlSheet { char *url; char *text; size_t len; uint64_t hash; uint64_t id; const char *enc;     uint32_t face_gen;  /* font_registry_face_generation it was last scanned in */
+    bool has_property;  /* (has @property rules) */
 } UrlSheet;
 static uint64_t sheet_hash(const char *s, size_t n);
 #define URL_SHEET_MAX 64
@@ -4945,6 +5009,7 @@ static const UrlSheet *url_sheet_get_ex(const char *url, const char *fallback_la
                   : NULL;
         if (!u->text) { u->text = strdup(""); u->len = 0; }
         u->hash = sheet_hash(u->text, u->len);
+        u->has_property = strstr(u->text, "@property") != NULL;
         static uint64_t s_fetches;
         u->id = ++s_fetches;
         /* Its @font-face rules, once per fetch (relative to the sheet). */
@@ -5181,6 +5246,7 @@ static void layout_fetch_stylesheet(LayoutStyleSheetList *list, const char *base
     char *url = layout_resolve_url(base_url, href);
     if (!url) return;
     const UrlSheet *u = url_sheet_get_ex(url, charset);
+    if (u && u->has_property) css_reg_scan_css(u->text, u->len);
     if (u) layout_sheet_imports(list, u->text, u->len, url, u->enc, 0);
     if (u && g_url_sheet_n < URL_SHEET_MAX) {
         /* The cache cannot evict while it has room: borrow its text and
@@ -5241,12 +5307,19 @@ static void layout_collect_stylesheets_recursive(LayoutContext *ctx, int dom_idx
     HtmlNode *node = layout_node_dom(ctx, dom_idx);
     if (!node || node->type != HTML_NODE_ELEMENT) goto next;
 
+    /* (a sheet for another medium or viewport applies nothing) */
+    if (strcasecmp(node->tag_name, "style") == 0 || strcasecmp(node->tag_name, "link") == 0) {
+        const char *media = layout_node_attribute(node, "media");
+        if (media && !css_media_query_matches(media, g_unit_vw, g_unit_vh)) goto next;
+    }
+
     char *cssom = (strcasecmp(node->tag_name, "style") == 0 || strcasecmp(node->tag_name, "link") == 0)
                    ? layout_cssom_sheet_text(ctx, node) : NULL;
     if (cssom) {
         const char *host = layout_find_host_tag(ctx, dom_idx);
         layout_sheet_list_add_text(list, cssom, strlen(cssom), host);
         font_registry_scan_css(cssom, strlen(cssom), base_url);
+        if (strstr(cssom, "@property")) css_reg_scan_css(cssom, strlen(cssom));
         free(cssom);
     } else if (strcasecmp(node->tag_name, "style") == 0 && node->text_content && node->text_content[0]) {
         /* If this <style> lives inside a stamped shadow root, scope :host,
@@ -5260,6 +5333,7 @@ static void layout_collect_stylesheets_recursive(LayoutContext *ctx, int dom_idx
         it->len = len;
         it->host = host ? strdup(host) : NULL;
         font_registry_scan_css(node->text_content, len, base_url);
+        if (strstr(node->text_content, "@property")) css_reg_scan_css(node->text_content, len);
     } else if (strcasecmp(node->tag_name, "link") == 0) {
         const char *rel = NULL;
         const char *href = NULL;
@@ -5493,6 +5567,7 @@ static bool layout_collect_document_stylesheets(LayoutContext *ctx, LayoutStyleS
     list->items[list->nitems - 1].ua = true;
 
     int root_dom_idx = ctx->tree.nodes[ctx->tree.root_idx].dom_node_idx;
+    css_reg_forget_rules();
     layout_collect_stylesheets_recursive(ctx, root_dom_idx, list, base_url);
     layout_collect_constructed_stylesheets(ctx, list);
     return true;
@@ -9050,19 +9125,34 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
 
         /* Custom properties: stylesheet declarations in cascade order, then
          * inline ones; each value resolves against the map built so far. */
-        if (n_custom > 0) {
+        int nreg = css_reg_count();
+        /* (registered and not inherited: an element gets its own map only if
+         * what it would inherit isn't the initial value already) */
+        bool reg_differs = false;
+        for (int r = 0; r < nreg && !reg_differs; r++) {
+            if (pv && css_reg_inherits(r)) continue;
+            const char *init = css_reg_initial(r), *up = pv ? css_custom_props_get(pv, css_reg_name(r)) : NULL;
+            reg_differs = init ? !up || strcmp(up, init) : up != NULL;
+        }
+        if (n_custom > 0 || reg_differs) {
             FrameArena *ma = T->maps ? T->maps : &T->arena;
-            CssCustomProps *m = css_custom_props_fork(ma, pv, n_custom);
+            CssCustomProps *m = css_custom_props_fork(ma, pv, n_custom + nreg);
             /* (inherited entries are the parent's strings: as long-lived only
              * if its map is) */
             if (T->maps && (!pv || pv->gen == g_cp_gen)) m->gen = g_cp_gen;
+            /* (registered: not inherited, or at the root: the initial value) */
+            for (int r = 0; r < nreg; r++) {
+                if (pv && css_reg_inherits(r)) continue;
+                const char *init = css_reg_initial(r);
+                if (init || css_custom_props_get(m, css_reg_name(r))) css_custom_props_put(ma, m, css_reg_name(r), init ? init : "");
+            }
             for (int d = 0; d < count; d++) {
                 const char *prop = applied[d].decl->property;
                 const char *val = applied[d].decl->value;
                 if (!(prop && prop[0] == '-' && prop[1] == '-')) continue;
                 if (css_var_is_self_reference(prop, val)) continue; /* invalid: unset */
                 char *resolved = css_var_resolve(val, m);
-                css_custom_props_put(ma, m, prop, resolved ? resolved : val);
+                css_custom_prop_declare(ma, m, pv, prop, resolved ? resolved : val);
                 free(resolved);
             }
             for (int b = 0; b < ninl; b++) {
@@ -9071,7 +9161,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
                     if (!(prop && prop[0] == '-' && prop[1] == '-')) continue;
                     if (css_var_is_self_reference(prop, inl[b].decls[i].value)) continue;
                     char *resolved = css_var_resolve(inl[b].decls[i].value, m);
-                    css_custom_props_put(ma, m, prop, resolved ? resolved : inl[b].decls[i].value);
+                    css_custom_prop_declare(ma, m, pv, prop, resolved ? resolved : inl[b].decls[i].value);
                     free(resolved);
                 }
             }
@@ -9097,6 +9187,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
         if (P->match_hash) {
             uint64_t h = 1469598103934665603ull;
             h = style_mix(h, &count, sizeof(count));
+            h = style_mix(h, &nreg, sizeof(nreg));
             for (int d = 0; d < count; d++) {
                 h = style_mix(h, &applied[d].decl, sizeof(applied[d].decl));
                 h = style_mix(h, &applied[d].rule, sizeof(applied[d].rule));
@@ -11481,7 +11572,11 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
                             g_has.universal ? ", universal" : "", g_has.universal_deep ? " (deep)" : "",
                             g_has.sibling_relative ? ", sibling-relative" : "");
             }
-            P.inc = !g_layout_zoom_any;
+            /* (a registration changes every element's custom properties) */
+            static uint64_t reg_seen = 1469598103934665603ull;     /* (an empty registry) */
+            uint64_t reg_now = css_reg_signature();
+            P.inc = !g_layout_zoom_any && reg_now == reg_seen;
+            reg_seen = reg_now;
             P.verify = verify_env;
             /* A kept tree whose notes are current (no other store moved the
              * entries since), and an arena not grown too large: start from
@@ -14597,7 +14692,7 @@ static double ifc_va_offset(const LayoutBox *b, const IfcVa *v, const IfcVa *p)
 /* The lowest (first: the highest) baseline of the text in box i's subtree
  * (not into floats, absolutely positioned boxes or boxes that clip), NAN
  * when none. */
-static double layout_last_baseline(LayoutContext *ctx, int i, int depth, bool first)
+static double layout_baseline_walk(LayoutContext *ctx, int i, int depth, bool first, bool atomic)
 {
     double best = NAN;
     if (depth > 40) return best;
@@ -14614,8 +14709,11 @@ static double layout_last_baseline(LayoutContext *ctx, int i, int depth, bool fi
                 if (isnan(v) || (first ? y < v : y > v)) v = y;
             }
         } else if (cb->s->overflow == 0) {
-            v = layout_last_baseline(ctx, c, depth + 1, first);
+            v = layout_baseline_walk(ctx, c, depth + 1, first, atomic);
         }
+        /* (for a flex or grid item: an atomic inline with no line in it has its
+         * bottom margin edge) */
+        if (atomic && isnan(v) && cb->s->display == CSS_DISPLAY_INLINE_BLOCK) v = cb->y + cb->height + cb->margin_bottom;
         HtmlNode *cn = css_layout_box_node(ctx, c);
         if (isnan(v) && cn && cn->type == HTML_NODE_TEXT && !ifc_text_blank(cb, css_layout_node_text(ctx, cn))) {
             /* (text drawn nowhere, as at font-size 0: where its line put it) */
@@ -14632,6 +14730,11 @@ static double layout_last_baseline(LayoutContext *ctx, int i, int depth, bool fi
         if (!isnan(v) && (isnan(best) || (first ? v < best : v > best))) best = v;
     }
     return best;
+}
+
+static double layout_last_baseline(LayoutContext *ctx, int i, int depth, bool first)
+{
+    return layout_baseline_walk(ctx, i, depth, first, false);
 }
 
 /* An atomic inline's A and D: an inline-block's (or other box's that is
@@ -16232,11 +16335,15 @@ typedef struct {
     double cross;                       /* border-box cross size */
     int align;
     int order, seq;
+    bool safe;                          /* (safe alignment: never past the line's start) */
+    int baseline;                       /* 1 first, 2 last baseline alignment */
+    double base_at;                     /* its baseline from its side of the line */
 } FlexItem;
 
 typedef struct {
     int start, count;
     double cross_size;
+    double base_above;                  /* the baseline group's, from the line's side */
     double cross_pos;
 } FlexLineSeg;
 
@@ -16279,6 +16386,21 @@ static double flex_clamp(double v, double mn, double mx)
     if (mx > 0.0 && v > mx) v = mx;
     if (v < mn) v = mn;
     return v;
+}
+
+/* A right to left flex or grid container: laid out from the left, then turned
+ * over within its content box. */
+static void layout_mirror_children(LayoutContext *ctx, int idx, double content_x, double cw)
+{
+    for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+        LayoutBox *child = layout_box(ctx, c);
+        if (child->s->display == CSS_DISPLAY_NONE) continue;
+        if (child->s->position == CSS_POSITION_ABSOLUTE || child->s->position == CSS_POSITION_FIXED) continue;
+        double outer_left = child->x - child->margin_left;
+        double outer_w = child->width + child->margin_left + child->margin_right;
+        double nx = 2.0 * content_x + cw - outer_left - outer_w + child->margin_left;
+        layout_move_box(ctx, c, nx, child->y);
+    }
 }
 
 static void layout_flex_container(LayoutContext *ctx, int idx)
@@ -16342,6 +16464,23 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
         it->grow = child->s->flex_grow;
         it->shrink = child->s->flex_shrink;
         it->align = child->s->align_self ? child->s->align_self - 1 : (int)ct->s->align_items;
+        {
+            int k = (child->s->align_self ? child->s->as_kw : ct->s->ai_kw) & 0x7f;
+            it->safe = ((child->s->align_self ? child->s->as_kw : ct->s->ai_kw) & ALIGN_KW_SAFE) != 0;
+            it->baseline = k == ALIGN_KW_BASELINE ? 1 : k == ALIGN_KW_LAST_BASELINE ? 2 : 0;
+            bool at_end = k == ALIGN_KW_END;
+            if (k == ALIGN_KW_SELF_START || k == ALIGN_KW_SELF_END) {
+                /* (the item's own start on the cross axis: in the container's terms) */
+                bool orth = child->s->writing_mode != ct->s->writing_mode;
+                bool own_rev = is_row ? (orth && child->s->direction == 1)
+                                      : (orth ? (child->s->writing_mode == 1 || child->s->writing_mode == 3) != (ct->s->direction == 1)
+                                              : child->s->direction != ct->s->direction);
+                at_end = (k == ALIGN_KW_SELF_END) != own_rev;
+                k = ALIGN_KW_START;
+            }
+            if (k == ALIGN_KW_START || k == ALIGN_KW_END) it->align = at_end != wrap_rev ? CSS_ALIGN_FLEX_END : CSS_ALIGN_FLEX_START;
+            if (k == ALIGN_KW_LAST_BASELINE) it->align = wrap_rev ? CSS_ALIGN_FLEX_START : CSS_ALIGN_FLEX_END;
+        }
 
         if (dom && dom->type == HTML_NODE_TEXT) {
             it->is_text = true;
@@ -16595,8 +16734,19 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
         double pos = 0.0, extra = 0.0, auto_m = 0.0;
         if (nauto > 0) {
             if (free_space > 0.0) auto_m = free_space / nauto;
-        } else {
-            switch (ct->s->justify_content) {
+        } else if (!((ct->s->jc_kw & ALIGN_KW_SAFE) && free_space < 0.0)) {
+            int jc = ct->s->justify_content;
+            int jk = ct->s->jc_kw & 0x7f;
+            /* (start and end go by the flow, whichever way the items are laid;
+             * left and right by the screen, where the main axis runs across it) */
+            bool across = is_row && ct->s->writing_mode == 0;
+            if (jk == ALIGN_KW_LEFT || jk == ALIGN_KW_RIGHT) {
+                if (!across) jk = ALIGN_KW_START;
+                else jk = (jk == ALIGN_KW_RIGHT) != (ct->s->direction == 1) ? ALIGN_KW_END : ALIGN_KW_START;
+            }
+            if (jk == ALIGN_KW_START || jk == ALIGN_KW_END)
+                jc = (jk == ALIGN_KW_END) != reverse ? CSS_JUSTIFY_FLEX_END : CSS_JUSTIFY_FLEX_START;
+            switch (jc) {
             case CSS_JUSTIFY_CENTER: pos = free_space / 2.0; break;
             case CSS_JUSTIFY_FLEX_END: pos = free_space; break;
             case CSS_JUSTIFY_SPACE_BETWEEN:
@@ -16677,12 +16827,25 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
     double inner_cross = is_row ? (cross_def ? chh : 0.0) : cw;
     double total_cross = 0.0;
     for (int li = 0; li < nlines; li++) {
-        double m = 0.0;
+        double m = 0.0, above = 0.0, below = 0.0;
         for (int j = 0; j < lines[li].count; j++) {
             FlexItem *it = &items[lines[li].start + j];
             double o = it->cross + it->cm_s + it->cm_e;
+            if (it->baseline && is_row && !ct->s->writing_mode && !(it->auto_cs || it->auto_ce)) {
+                /* (its baseline, from the line's side the group lines up at) */
+                double b = it->is_text ? NAN : layout_baseline_walk(ctx, it->idx, 0, it->baseline == 1, true);
+                /* (no line in it: its border box's edge stands in) */
+                b = isnan(b) ? it->cross : b - layout_box(ctx, it->idx)->y;
+                it->base_at = it->baseline == 1 ? it->cm_s + b : it->cm_e + it->cross - b;
+                if (wrap_rev && it->baseline == 1) it->base_at = it->cm_e + it->cross - b;
+                if (it->base_at > above) above = it->base_at;
+                if (o - it->base_at > below) below = o - it->base_at;
+                continue;
+            }
             if (o > m) m = o;
         }
+        lines[li].base_above = above;
+        if (above + below > m) m = above + below;
         lines[li].cross_size = m;
         total_cross += m;
     }
@@ -16702,8 +16865,11 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
         /* align-content: where the lines go in what is left (a single line
          * of a nowrap container fills its cross size, so has none) */
         double room = inner_cross - total_cross, first = 0.0, between = 0.0;
-        if ((ct->s->content_set & 2) && (do_wrap || nlines > 1)) {
-            switch (ct->s->align_content) {
+        if ((ct->s->content_set & 2) && (do_wrap || nlines > 1) && !((ct->s->ac_kw & ALIGN_KW_SAFE) && room < 0.0)) {
+            int ac = ct->s->align_content;
+            int ak = ct->s->ac_kw & 0x7f;
+            if (ak == ALIGN_KW_START || ak == ALIGN_KW_END) ac = (ak == ALIGN_KW_END) != wrap_rev ? CSS_JUSTIFY_FLEX_END : CSS_JUSTIFY_FLEX_START;
+            switch (ac) {
             case CSS_JUSTIFY_FLEX_END: first = room; break;
             case CSS_JUSTIFY_CENTER: first = room / 2.0; break;
             case CSS_JUSTIFY_SPACE_BETWEEN: if (room > 0.0 && nlines > 1) between = room / (nlines - 1); break;
@@ -16752,6 +16918,13 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
                 case CSS_ALIGN_FLEX_END: off = room - size; break;
                 default: break;
                 }
+                if (it->safe && off < 0.0) off = 0.0;
+                if (it->baseline && is_row && !ct->s->writing_mode && !it->is_text) {
+                    /* (the group's baselines in line, and it at its side of the line) */
+                    double shift = lines[li].base_above - it->base_at;
+                    off = (it->baseline == 1) != wrap_rev ? shift : room - size - shift;
+                    if (wrap_rev) off = room - size - off;
+                }
             }
             if (wrap_rev && it->align != CSS_ALIGN_STRETCH && !(it->auto_cs || it->auto_ce))
                 off = room - size - off;
@@ -16798,6 +16971,7 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
     free(lines);
     free(items);
     free(kids);
+    if (ct->s->direction == 1) layout_mirror_children(ctx, idx, content_x, ct->content_width);
 }
 
 /* ---- Grid layout (CSS Grid §7-§12) ----
@@ -17698,6 +17872,42 @@ static void grid_track_positions(const GridSize *t, int n, double gap, double av
     pos[n] = p;
 }
 
+/* A grid's justify-content or align-content, its keyword taken into account. */
+static CssJustifyContent grid_content_align(CssJustifyContent v, unsigned char kw, bool rtl)
+{
+    switch (kw & 0x7f) {
+    case ALIGN_KW_LEFT: return rtl ? CSS_JUSTIFY_FLEX_END : CSS_JUSTIFY_FLEX_START;
+    case ALIGN_KW_RIGHT: return rtl ? CSS_JUSTIFY_FLEX_START : CSS_JUSTIFY_FLEX_END;
+    default: return v;
+    }
+}
+
+/* An item's self alignment in a grid (0 start, 1 center, 2 end of its area, in
+ * the frame the grid is laid out in; -1 stretch), inline (justify) or block. */
+static int grid_self_mode(const LayoutBox *ct, const LayoutBox *child, bool inline_axis)
+{
+    int e = inline_axis ? (child->s->justify_self ? child->s->justify_self - 1 : (ct->s->justify_items ? ct->s->justify_items - 1 : CSS_ALIGN_STRETCH))
+                        : (child->s->align_self ? child->s->align_self - 1 : (int)ct->s->align_items);
+    int k = (inline_axis ? (child->s->justify_self ? child->s->js_kw : ct->s->ji_kw)
+                         : (child->s->align_self ? child->s->as_kw : ct->s->ai_kw)) & 0x7f;
+    bool orth = child->s->writing_mode != ct->s->writing_mode;
+    switch (k) {
+    case ALIGN_KW_START: return 0;
+    case ALIGN_KW_END: return 2;
+    case ALIGN_KW_LEFT: return ct->s->direction == 1 ? 2 : 0;
+    case ALIGN_KW_RIGHT: return ct->s->direction == 1 ? 0 : 2;
+    case ALIGN_KW_SELF_START: case ALIGN_KW_SELF_END: {
+        bool rev = inline_axis ? (orth ? (child->s->writing_mode == 1 || child->s->writing_mode == 3) != (ct->s->direction == 1)
+                                       : child->s->direction != ct->s->direction)
+                               : (orth && child->s->direction == 1);
+        return (k == ALIGN_KW_SELF_END) != rev ? 2 : 0;
+    }
+    case ALIGN_KW_LAST_BASELINE: return 2;
+    case ALIGN_KW_BASELINE: return 0;
+    default: return e == CSS_ALIGN_CENTER ? 1 : e == CSS_ALIGN_FLEX_END ? 2 : e == CSS_ALIGN_STRETCH ? -1 : 0;
+    }
+}
+
 static void layout_grid_container(LayoutContext *ctx, int idx)
 {
     LayoutBox *ct = layout_box(ctx, idx);
@@ -17719,7 +17929,7 @@ static void layout_grid_container(LayoutContext *ctx, int idx)
         free(cpos); free(rpos); free(todo); grid_state_free(&G);
         return;
     }
-    grid_track_positions(G.cols, G.ncols, gap_c, cw, ct->s->justify_content, cpos);
+    grid_track_positions(G.cols, G.ncols, gap_c, cw, grid_content_align(ct->s->justify_content, ct->s->jc_kw, ct->s->direction == 1), cpos);
 
     /* Items at their column widths; heights by their own layout. */
     int ntodo = 0;
@@ -17747,8 +17957,8 @@ static void layout_grid_container(LayoutContext *ctx, int idx)
         double ml = (ma & 8) ? 0.0 : child->margin_left, mr = (ma & 2) ? 0.0 : child->margin_right;
         double room = aw - ml - mr;
         if (room < 0.0) room = 0.0;
-        int js = child->s->justify_self ? child->s->justify_self - 1
-               : (ct->s->justify_items ? ct->s->justify_items - 1 : CSS_ALIGN_STRETCH);
+        int js_mode = grid_self_mode(ct, child, true);
+        int js = js_mode < 0 ? CSS_ALIGN_STRETCH : js_mode == 1 ? CSS_ALIGN_CENTER : js_mode == 2 ? CSS_ALIGN_FLEX_END : CSS_ALIGN_FLEX_START;
         if (!w_def) {
             if (js == CSS_ALIGN_STRETCH && !(ma & 0xA)) {
                 double w = room;
@@ -17786,7 +17996,7 @@ static void layout_grid_container(LayoutContext *ctx, int idx)
     }
 
     grid_size_tracks(G.rows, G.nrows, chh, gap_r, G.items, G.nitems, true, 0, !(ct->s->content_set & 2));
-    grid_track_positions(G.rows, G.nrows, gap_r, chh, ct->s->align_content, rpos);
+    grid_track_positions(G.rows, G.nrows, gap_r, chh, grid_content_align(ct->s->align_content, ct->s->ac_kw, false), rpos);
     grid_lines_record(idx, G.ncols, G.nrows, cpos, rpos, G.cols, G.rows);
 
     /* Block-axis alignment; stretched items whose contents depend on their
@@ -17802,7 +18012,8 @@ static void layout_grid_container(LayoutContext *ctx, int idx)
         unsigned char ma = child->s->margin_auto;
         double mt = (ma & 1) ? 0.0 : child->margin_top, mb = (ma & 4) ? 0.0 : child->margin_bottom;
         double room = ah - mt - mb;
-        int as = child->s->align_self ? child->s->align_self - 1 : (int)ct->s->align_items;
+        int as_mode = grid_self_mode(ct, child, false);
+        int as = as_mode < 0 ? CSS_ALIGN_STRETCH : as_mode == 1 ? CSS_ALIGN_CENTER : as_mode == 2 ? CSS_ALIGN_FLEX_END : CSS_ALIGN_FLEX_START;
         HtmlNode *dom = layout_node_dom(ctx, ctx->tree.nodes[it->idx].dom_node_idx);
         bool h_auto = layout_height_auto(child) && !layout_is_img(dom);
         double off = 0.0;
@@ -17821,6 +18032,24 @@ static void layout_grid_container(LayoutContext *ctx, int idx)
             else if (!(ma & 4)) {
                 if (as == CSS_ALIGN_CENTER) off = free_h / 2.0;
                 else if (as == CSS_ALIGN_FLEX_END) off = free_h;
+            }
+            /* (first baseline: with the others in its row that have it) */
+            int kb = (child->s->align_self ? child->s->as_kw : ct->s->ai_kw) & 0x7f;
+            if (kb == ALIGN_KW_BASELINE && !(ma & 5)) {
+                double most = 0.0, own = -1.0;
+                for (int o = 0; o < G.nitems; o++) {
+                    GridItem *ot = &G.items[o];
+                    if (ot->is_text || ot->r != it->r) continue;
+                    LayoutBox *oc = layout_box(ctx, ot->idx);
+                    int ok = (oc->s->align_self ? oc->s->as_kw : ct->s->ai_kw) & 0x7f;
+                    if (ok != ALIGN_KW_BASELINE) continue;
+                    double b = layout_baseline_walk(ctx, ot->idx, 0, true, true);
+                    b = isnan(b) ? oc->height : b - oc->y;
+                    b += (oc->s->margin_auto & 1) ? 0.0 : oc->margin_top;
+                    if (b > most) most = b;
+                    if (o == i) own = b;
+                }
+                if (own >= 0.0) off = most - own;
             }
         }
         layout_move_box(ctx, it->idx, child->x, content_y + ay + mt + off);
@@ -17852,6 +18081,7 @@ static void layout_grid_container(LayoutContext *ctx, int idx)
     free(cpos);
     free(rpos);
     free(todo);
+    if (ct->s->direction == 1) layout_mirror_children(ctx, idx, content_x, ct->content_width);
     grid_state_free(&G);
 }
 
@@ -18576,13 +18806,23 @@ static void layout_anim_frame(void *ud, const void *decls, int n, AnimVal out[AN
     LayoutBox tb = *u->box;
     tb.s = &tmp;
     const CssDeclaration *d = (const CssDeclaration *)decls;
+    bool script[ANIM_NPROP] = { 0 };
     for (int i = 0; i < n; i++) {
         int p = d[i].property ? anim_prop_of(d[i].property) : -1;
         if (p < 0) continue;
+        /* (a size that takes a layout to know: script's to animate) */
+        if (d[i].value && (strstr(d[i].property, "width") || strstr(d[i].property, "height")) &&
+            (strstr(d[i].value, "calc-size(") || strstr(d[i].value, "content") || strstr(d[i].value, "stretch") ||
+             !strcasecmp(d[i].value, "auto") || !strcasecmp(d[i].value, "initial") || !strcasecmp(d[i].value, "unset")) &&
+            !strstr(d[i].property, "border")) {
+            script[p] = has[p] = true;
+            continue;
+        }
         has[p] = true;
         layout_apply_declaration(&tb, &d[i], u->ctx->viewport_width, u->ctx->viewport_width, u->ctx->base_url);
     }
     layout_anim_read(&tmp, out);
+    for (int p = 0; p < ANIM_NPROP; p++) if (script[p]) out[p].ok = false;
 }
 
 static const PseudoSide *layout_marker_rule(const LayoutContext *ctx, int i)
