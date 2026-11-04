@@ -3502,6 +3502,16 @@ static GCValue io_compute(JSContextHandle ctx, GCValue observer, GCValue target,
     double ix0 = tb.x > l ? tb.x : l, iy0 = tb.y > t ? tb.y : t;
     double ix1 = tb.x + tb.width < r ? tb.x + tb.width : r;
     double iy1 = tb.y + tb.height < b ? tb.y + tb.height : b;
+    /* (what the boxes on the way to the root clip isn't seen) */
+    double clips[16][4];
+    int nclips = has_box && root_ok
+        ? layout_query_clip_rects(ctx, target, JS_IsObject(root) ? dom_node_of(root) : 0, clips, 16) : 0;
+    for (int c = 0; c < nclips; c++) {
+        if (clips[c][0] > ix0) ix0 = clips[c][0];
+        if (clips[c][1] > iy0) iy0 = clips[c][1];
+        if (clips[c][2] < ix1) ix1 = clips[c][2];
+        if (clips[c][3] < iy1) iy1 = clips[c][3];
+    }
     /* Edge-adjacent intersections count (zero-area targets inside the root). */
     bool hit = has_box && root_ok && ix1 >= ix0 && iy1 >= iy0;
     double area = tb.width * tb.height;

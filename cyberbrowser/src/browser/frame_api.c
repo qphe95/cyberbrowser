@@ -682,6 +682,8 @@ static const char k_window_moved[] =
     "  });"
     "})";
 
+static bool g_frame_initial_only;   /* frame_load: the initial about:blank, no navigation's load */
+
 static void frame_load(Frame *f) {
     JSContextHandle first_ctx = GC_HANDLE_NULL;
     GCValue first_win = JS_UNDEFINED;
@@ -693,7 +695,8 @@ static void frame_load(Frame *f) {
         /* (pageswap: whether a view transition goes on, same-origin only) */
         char *from = realm_url(f->ctx);
         bool same = same_origin(from, url);
-        if (f->popup && !strncmp(from, "about:blank", 11) && strncmp(url, "about:blank", 11)) {
+        if (!strncmp(from, "about:blank", 11) && strncmp(url, "about:blank", 11) &&
+            (f->popup || !strncmp(url, "about:", 6) || same)) {
             first_ctx = f->ctx;
             first_win = was;
             gc_add_root((GCHandle)first_ctx);
@@ -806,11 +809,14 @@ static void frame_load(Frame *f) {
         GCValue moved = JS_Eval(first_ctx, k_window_moved, sizeof k_window_moved - 1, "<window_moved>", JS_EVAL_TYPE_GLOBAL);
         GCValue now = JS_GetGlobalObject(ctx);
         if (JS_IsFunction(first_ctx, moved) && JS_IsException(JS_Call(first_ctx, moved, JS_UNDEFINED, 1, &now))) JS_GetException(first_ctx);
+        /* (it hears this one, gone as its realm is) */
+        JS_SetProperty(first_ctx, first_win, inactive_atom(first_ctx), JS_FALSE);
         frame_fire(first_ctx, first_win, "load");
+        JS_SetProperty(first_ctx, first_win, inactive_atom(first_ctx), JS_TRUE);
         root_value(first_win, false);
         gc_remove_root((GCHandle)first_ctx);
     }
-    frame_fire(f->parent, dom_js(f->parent, f->iframe), "load");
+    if (!g_frame_initial_only) frame_fire(f->parent, dom_js(f->parent, f->iframe), "load");
 }
 
 /* ---- window[i], window.length (HTML 7.2.3: the document-tree child
@@ -1010,7 +1016,20 @@ static void frame_ensure(Frame *f) {
     if (strncmp(f->url, "about:", 6) != 0 || !dom_valid(f->iframe) || (!f->popup && !dom_is_connected(f->iframe))) return;
     if (parent_scripts_pending(f)) return;
     g_processing = true;
-    frame_load(f);
+    /* (srcdoc comes in a task, as a navigation; until then the window asked
+     * for is the initial about:blank's, which then goes on as srcdoc's) */
+    if (!strncmp(f->url, "about:srcdoc", 12)) {
+        char target[sizeof f->url];
+        snprintf(target, sizeof target, "%s", f->url);
+        snprintf(f->url, sizeof f->url, "about:blank");
+        g_frame_initial_only = true;
+        frame_load(f);
+        g_frame_initial_only = false;
+        snprintf(f->url, sizeof f->url, "%s", target);
+        f->state = FRAME_PENDING;
+    } else {
+        frame_load(f);
+    }
     g_processing = false;
 }
 

@@ -76,6 +76,20 @@ int anim_prop_of(const char *name)
 {
     for (int p = 0; p < ANIM_NPROP; p++)
         if (!strcasecmp(name, k_props[p])) return p;
+    /* (logical names, in the horizontal flow that layout has) */
+    static const struct { const char *logical; int physical; } flow[] = {
+        { "block-size", ANIM_HEIGHT }, { "inline-size", ANIM_WIDTH },
+        { "inset-block-start", ANIM_TOP }, { "inset-block-end", ANIM_BOTTOM },
+        { "inset-inline-start", ANIM_LEFT }, { "inset-inline-end", ANIM_RIGHT },
+        { "margin-block-start", ANIM_MARGIN_TOP }, { "margin-block-end", ANIM_MARGIN_BOTTOM },
+        { "margin-inline-start", ANIM_MARGIN_LEFT }, { "margin-inline-end", ANIM_MARGIN_RIGHT },
+        { "padding-block-start", ANIM_PADDING_TOP }, { "padding-block-end", ANIM_PADDING_BOTTOM },
+        { "padding-inline-start", ANIM_PADDING_LEFT }, { "padding-inline-end", ANIM_PADDING_RIGHT },
+        { "border-block-start-width", ANIM_BORDER_TOP }, { "border-block-end-width", ANIM_BORDER_BOTTOM },
+        { "border-inline-start-width", ANIM_BORDER_LEFT }, { "border-inline-end-width", ANIM_BORDER_RIGHT },
+    };
+    for (size_t i = 0; i < sizeof flow / sizeof flow[0]; i++)
+        if (!strcasecmp(name, flow[i].logical)) return flow[i].physical;
     return -1;
 }
 

@@ -35,6 +35,9 @@ void layout_query_anim_seed(uint32_t id);
 /* A box's size in the last layout, with nothing laid out for it; false if none. */
 bool layout_query_box_size(uint32_t id, double *w, double *h);
 void layout_api_run(JSContextHandle ctx);
+/* The rectangles that clip the element (l, t, r, b, client coordinates): its
+ * containing chain's boxes with overflow, up to stop or the viewport. */
+int layout_query_clip_rects(JSContextHandle ctx, GCValue element, uint32_t stop, double (*out)[4], int cap);
 bool layout_query_valid(void);
 /* The element is rendered in the query layout's document (and it is that document's). */
 bool layout_query_rendered(uint32_t id);

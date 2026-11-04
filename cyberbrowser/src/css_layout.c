@@ -2823,6 +2823,15 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     const char *value = decl->value;
     if (!prop || !value) return;
     box->s->render_features |= decl->feature;
+    if (prop[0] == 'o' && !strcasecmp(prop, "overflow-clip-margin")) {
+        /* (a length, with or without a box to measure from: padding-box is where it starts anyway) */
+        const char *v = value;
+        while (*v && !(*v >= '0' && *v <= '9') && *v != '.') v++;
+        char *end = NULL;
+        double px = strtod(v, &end);
+        box->s->overflow_clip_margin = end != v && !strncasecmp(end, "px", 2) && px > 0 ? (float)px : 0.0f;
+        return;
+    }
     if (prop[0] == 'f' && prop[4] == '-' && (!strcasecmp(prop, "font-stretch") || !strcasecmp(prop, "font-width"))) {
         static const struct { const char *n; float pct; } kw[] = {
             { "ultra-condensed", 50 }, { "extra-condensed", 62.5f }, { "semi-condensed", 87.5f }, { "condensed", 75 },
@@ -3253,7 +3262,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         else if (strcasecmp(value, "hidden") == 0) box->s->overflow = 1;
         else if (strcasecmp(value, "auto") == 0) box->s->overflow = 2;
         else if (strcasecmp(value, "scroll") == 0) box->s->overflow = 3;
-        else if (strcasecmp(value, "clip") == 0) box->s->overflow = 1;
+        else if (strcasecmp(value, "clip") == 0) { box->s->overflow = 1; box->s->overflow_clip = 1; }
     } else if (PK(76)) {
         static const char *const kw[] = { "baseline", "middle", "top", "bottom", "sub", "super", "text-top",
                                           "text-bottom" };

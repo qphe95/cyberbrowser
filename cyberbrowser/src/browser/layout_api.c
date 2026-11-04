@@ -1557,6 +1557,35 @@ static void lq_client_shift(NodeId id, int idx, double *dx, double *dy)
     }
 }
 
+static bool is_tag(NodeId id, const char *tag);
+static bool is_root_element(NodeId id);
+
+int layout_query_clip_rects(JSContextHandle ctx, GCValue element, uint32_t stop, double (*out)[4], int cap)
+{
+    int idx = lq_query(ctx, element);
+    if (idx < 0) return 0;
+    int n = 0, cur = idx;
+    for (int p = g_lq_layout.tree.nodes[idx].parent_idx; p >= 0 && n < cap; p = g_lq_layout.tree.nodes[p].parent_idx) {
+        const LayoutBox *c = &g_lq_layout.boxes[cur], *b = &g_lq_layout.boxes[p];
+        const HtmlNode *hn = css_layout_box_node(&g_lq_layout, p);
+        NodeId id = hn && hn->type == HTML_NODE_ELEMENT ? hn->store_id : DOM_NULL;
+        if (stop && id == stop) break;
+        /* (fixed: the viewport's; absolute: only from its containing block out) */
+        if (c->s->position == CSS_POSITION_FIXED) break;
+        if (c->s->position == CSS_POSITION_ABSOLUTE && b->s->position == CSS_POSITION_STATIC) continue;
+        cur = p;
+        if (!id || !b->s->overflow || is_root_element(id) || is_tag(id, "body")) continue;
+        double dx, dy, m = b->s->overflow_clip ? b->s->overflow_clip_margin : 0.0;
+        lq_client_shift(id, p, &dx, &dy);
+        out[n][0] = b->x + dx + b->s->border_left - m;
+        out[n][1] = b->y + dy + b->s->border_top - m;
+        out[n][2] = b->x + dx + b->width - b->s->border_right + m;
+        out[n][3] = b->y + dy + b->height - b->s->border_bottom + m;
+        n++;
+    }
+    return n;
+}
+
 bool layout_query_element_box(JSContextHandle ctx, GCValue element, LayoutQueryBox *out)
 {
     memset(out, 0, sizeof(*out));

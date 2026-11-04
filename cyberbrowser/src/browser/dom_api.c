@@ -1631,9 +1631,8 @@ static void dom_maybe_load_stylesheet(JSContextHandle ctx, GCValue node) {
     if (JS_ToBool(ctx, done)) return;
     JS_SetPropertyStr(ctx, node, "__cyber_sheet_loaded", JS_TRUE);
 
-    GCValue global = JS_GetGlobalObject(ctx);
-    GCValue loc = JS_GetPropertyStr(ctx, global, "location");
-    GCValue hrefv = JS_GetPropertyStr(ctx, loc, "href");
+    GCValue owner = JS_GetPropertyStr(ctx, node, "ownerDocument");
+    GCValue hrefv = JS_IsObject(owner) ? JS_GetPropertyStr(ctx, owner, "baseURI") : JS_UNDEFINED;
     const char *base = JS_IsString(hrefv) ? JS_ToCString(ctx, hrefv) : NULL;
     char *url = dom_resolve_url(base && base[0] ? base : (g_cyber_start_url ? g_cyber_start_url : ""), href);
     if (base) JS_FreeCString(ctx, base);

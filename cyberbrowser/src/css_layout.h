@@ -192,6 +192,9 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * formatting context (CSS 2.1 §9.4.1), which blocks margin collapsing
      * with in-flow children (§8.3.1) and stops empty-box through-collapse. */
     unsigned char overflow;
+    /* overflow: clip (overflow is 1), and how far out it clips. */
+    unsigned char overflow_clip;
+    float overflow_clip_margin;
 
     /* vertical-align: 0=baseline, 1=middle, 2=top, 3=bottom, 4=sub,
      * 5=super, 6=text-top, 7=text-bottom, 8=a length (va_len px) or
