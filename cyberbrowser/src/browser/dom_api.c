@@ -5191,7 +5191,7 @@ static GCValue hit_test_layout_node(JSContextHandle ctx, LayoutContext *layout, 
                    y >= box->y && y <= box->y + box->height);
     /* (what overflows a box is still there, unless it clips: what is fixed
      * is on the viewport, whatever box it is in) */
-    if (!inside && css_layout_box_scrolls(layout, idx)) return hit_fixed_inside(ctx, layout, idx);
+    if (!inside && css_layout_box_clips(layout, idx)) return hit_fixed_inside(ctx, layout, idx);
     /* (its children are where its scroll offset has them) */
     float sx = 0.0f, sy = 0.0f;
     css_layout_box_offset(layout, idx, &sx, &sy);

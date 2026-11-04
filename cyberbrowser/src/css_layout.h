@@ -813,6 +813,7 @@ void css_layout_extent(const LayoutContext *ctx, int idx, double *right, double 
 void css_layout_render_list(const uint32_t **els, const unsigned char **bits, uint32_t *n);
 extern uint64_t g_layout_runs;
 bool css_layout_box_scrolls(const LayoutContext *ctx, int idx);
+bool css_layout_box_clips(const LayoutContext *ctx, int idx);
 void css_layout_box_max(const LayoutContext *ctx, int idx, double *x, double *y);
 bool css_layout_box_offset(const LayoutContext *ctx, int idx, float *x, float *y);
 void css_layout_box_scrolled(const LayoutContext *ctx, int idx, double *dx, double *dy, bool *fixed);

@@ -248,7 +248,7 @@
     eventClass('HashChangeEvent', Event, { oldURL: str(''), newURL: str('') });
     eventClass('MediaQueryListEvent', Event, { media: str(''), matches: bool(false) });
     eventClass('NavigateEvent', Event, { navigationType: str('push'), destination: nul(), canIntercept: bool(false),
-        userInitiated: bool(false), hashChange: bool(false), signal: nul(), formData: nul(), downloadRequest: nul(),
+        userInitiated: bool(false), hashChange: bool(false), signal: nul(), formData: nul(), downloadRequest: nul(), sourceElement: nul(),
         info: nul(), hasUAVisualTransition: bool(false) });
     eventClass('PopStateEvent', Event, { state: nul(), hasUAVisualTransition: bool(false) });
     eventClass('PageTransitionEvent', Event, { persisted: bool(false) });
@@ -971,12 +971,36 @@
             return;
         }
         if (typeof view.__cyberNavigate === 'function') view.__cyberNavigate(url.href, a);
+        else loc.href = url.href;
+    }
+    /* HTML "form submission": where it goes, from the form and its submitter. */
+    function submitForm(form, submitter) {
+        var d = form.ownerDocument, view = d.defaultView;
+        if (!view || !form.isConnected) return;
+        var attr = function (name, over) {
+            return submitter && submitter.hasAttribute(over) ? submitter.getAttribute(over) : form.getAttribute(name);
+        };
+        var method = String(attr('method', 'formmethod') || 'get').toLowerCase();
+        if (method === 'dialog') {
+            var dlg = form.closest('dialog');
+            if (dlg && dlg.open) dlg.close(submitter ? submitter.value : undefined);
+            return;
+        }
+        var action = attr('action', 'formaction'), url;
+        try { url = new global.URL(action || d.URL, form.baseURI); } catch (e) { return; }
+        var post = method === 'post', data = new global.FormData(form, submitter || undefined);
+        if (!post) url.search = new global.URLSearchParams(data).toString();
+        var target = attr('target', 'formtarget');
+        if (target && !/^_self$/i.test(target) && !post) { view.open(url.href, target); return; }
+        if (typeof view.__cyberNavigate === 'function') view.__cyberNavigate(url.href, submitter || form, post ? data : null);
+        else if (!post) view.location.href = url.href;
     }
     var HEP = global.HTMLElement && global.HTMLElement.prototype;
     if (HEP) define(HEP, 'click', click);
     var ELP = global.Element && global.Element.prototype;
     if (ELP && Object.prototype.hasOwnProperty.call(ELP, 'click')) define(ELP, 'click', click);
     var FP = global.HTMLFormElement && global.HTMLFormElement.prototype;
+    if (FP) define(FP, '__cyberSubmit', function (submitter) { submitForm(this, submitter); });
     if (FP) {
         define(FP, 'requestSubmit', function (submitter) { requestSubmit(this, submitter); });
     }
@@ -1348,7 +1372,7 @@
         var nav = Object.create(Navigation.prototype), navTransition = null;
         /* One navigation: its event, then what it does. commit(): the URL and
          * entry change, in this document; away(): it leaves the document. */
-        var navigateSteps = function (type, url, state, info, commit, away) {
+        var navigateSteps = function (type, url, state, info, commit, away, source, formData) {
             var committed = deferred(), finished = deferred();
             var sameDoc = stripHash(url) === stripHash(getHref());
             var hashChange = sameDoc && url !== getHref() && url.indexOf('#') >= 0;
@@ -1360,7 +1384,7 @@
             var handlers = null, precommits = null, controller = new global.AbortController();
             var ev = new global.NavigateEvent('navigate', { cancelable: true, navigationType: type, destination: dest,
                 canIntercept: sameOrigin(url, getHref()), userInitiated: false, hashChange: hashChange,
-                signal: controller.signal, formData: null, downloadRequest: null, info: info, hasUAVisualTransition: false });
+                signal: controller.signal, formData: formData || null, downloadRequest: null, sourceElement: source || null, info: info, hasUAVisualTransition: false });
             define(ev, 'intercept', function intercept(options) {
                 handlers = handlers || [];
                 precommits = precommits || [];
@@ -1420,21 +1444,29 @@
         Object.defineProperty(Navigation.prototype, 'activation', { configurable: true, enumerable: true, get: function () { return null; } });
         Object.defineProperty(Navigation.prototype, 'canGoBack', { configurable: true, enumerable: true, get: function () { return index > 0; } });
         Object.defineProperty(Navigation.prototype, 'canGoForward', { configurable: true, enumerable: true, get: function () { return index + 1 < entries.length; } });
-        define(Navigation.prototype, 'navigate', function navigate(u, options) {
-            var o = options || {}, url;
-            try { url = new global.URL(String(u), getHref()).href; }
-            catch (e) { var d = deferred(), x = new (global.DOMException)('Invalid URL', 'SyntaxError'); d.reject(x); return { committed: d.promise, finished: d.promise }; }
-            var type = o.history === 'replace' ? 'replace' : 'push', state = o.state === undefined ? undefined : clone(o.state);
-            return navigateSteps(type, url, state, o.info, function () {
+        var navigateTo = function (type, url, state, info, source, formData) {
+            return navigateSteps(type, url, state, info, function () {
                 var from = nav.currentEntry, entry = { url: url, state: null, navState: state };
                 if (type === 'push') { entries.length = index + 1; entries.push(entry); index++; }
                 else entries[index] = entry;
                 if (url !== getHref()) setHref(url);
                 entryChanged(type, from);
             }, function () {
-                loc.href = url;
-            });
+                if (!formData) loc.href = url;
+            }, source, formData);
+        };
+        define(Navigation.prototype, 'navigate', function navigate(u, options) {
+            var o = options || {}, url;
+            try { url = new global.URL(String(u), getHref()).href; }
+            catch (e) { var d = deferred(), x = new (global.DOMException)('Invalid URL', 'SyntaxError'); d.reject(x); return { committed: d.promise, finished: d.promise }; }
+            var type = o.history === 'replace' ? 'replace' : 'push', state = o.state === undefined ? undefined : clone(o.state);
+            return navigateTo(type, url, state, o.info);
         });
+        /* A link followed or a form submitted, from its element. (A POST the
+         * page doesn't take over has nowhere to go: loading is by URL here.) */
+        Object.defineProperty(global, '__cyberNavigate', { configurable: true, value: function (url, source, formData) {
+            navigateTo('push', url, undefined, undefined, source, formData);
+        } });
         define(Navigation.prototype, 'reload', function reload(options) {
             var o = options || {}, url = getHref();
             return navigateSteps('reload', url, o.state, o.info, function () {}, function () { loc.reload(); });
@@ -1623,6 +1655,12 @@
             if (hbar > 0 && y >= top + a.clientHeight && y < top + a.clientHeight + hbar && x >= left && x < left + a.clientWidth)
                 return { el: a, prop: 'scrollLeft', at: x - left, track: a.clientWidth, size: a.scrollWidth, last: x };
         }
+        /* (the viewport's take no room either: just past its edges) */
+        var root = t && t.ownerDocument && t.ownerDocument.scrollingElement;
+        if (root && x >= global.innerWidth && y < global.innerHeight)
+            return { el: root, prop: 'scrollTop', at: y, track: global.innerHeight, size: root.scrollHeight, last: y };
+        if (root && y >= global.innerHeight && x < global.innerWidth)
+            return { el: root, prop: 'scrollLeft', at: x, track: global.innerWidth, size: root.scrollWidth, last: x };
         return null;
     }
     /* A press on a scrollbar: on the thumb it drags; beside it, a page. */
@@ -1724,23 +1762,28 @@
     }
     /* What the wheel moves: on each axis, the nearest box the user can scroll
      * that has room, going out to the viewport (overscroll-behavior stops it). */
-    function wheelScroll(t, dx, dy) {
+    function wheelScroll(t, dx, dy, keyed) {
+        var aim = function (el) {
+            if (keyed && global.__cyberSnapIntent)
+                global.__cyberSnapIntent(el, el.scrollLeft, el.scrollTop, Math.sign(dx), Math.sign(dy));
+        };
         for (var a = t; a && (dx || dy); a = flatParent(a)) {
             if (a.nodeType !== 1 || a === a.ownerDocument.documentElement) continue;
             /* (the viewport has a body's overflow when the root has none) */
             if (a === a.ownerDocument.body && global.getComputedStyle(a.parentNode).overflowY === 'visible') continue;
             var cs = global.getComputedStyle(a), byX = /auto|scroll/.test(cs.overflowX), byY = /auto|scroll/.test(cs.overflowY);
             if (dy && byY) {
-                if (dy > 0 ? a.scrollTop < a.scrollHeight - a.clientHeight : a.scrollTop > 0) { a.scrollTop += dy; dy = 0; }
+                if (dy > 0 ? a.scrollTop < a.scrollHeight - a.clientHeight : a.scrollTop > 0) { aim(a); a.scrollTop += dy; dy = 0; }
                 else if (/contain|none/.test(cs.overscrollBehaviorY)) dy = 0;
             }
             if (dx && byX) {
-                if (dx > 0 ? a.scrollLeft < a.scrollWidth - a.clientWidth : a.scrollLeft > 0) { a.scrollLeft += dx; dx = 0; }
+                if (dx > 0 ? a.scrollLeft < a.scrollWidth - a.clientWidth : a.scrollLeft > 0) { aim(a); a.scrollLeft += dx; dx = 0; }
                 else if (/contain|none/.test(cs.overscrollBehaviorX)) dx = 0;
             }
         }
         if (!dx && !dy) return;
         var was = [global.scrollX, global.scrollY];
+        if (global.document.documentElement) aim(global.document.documentElement);
         global.scrollBy(dx, dy);
         /* (nothing left to scroll here: the frame's container) */
         if (global.scrollX === was[0] && global.scrollY === was[1] && global.frameElement) {
@@ -1814,7 +1857,8 @@
         }
         /* (nothing focused: what was last clicked is where the keys go) */
         var from = el && el !== d.body ? el : pointer.lastDown && pointer.lastDown.isConnected ? pointer.lastDown : el;
-        wheelScroll(from || d.documentElement, dx, dy);
+        /* (Home and End go to their ends) */
+        wheelScroll(from || d.documentElement, dx, dy, Math.abs(dy) < 1e8);
     }
     Object.defineProperty(global, '__cyberInput', { configurable: true, value: {
         move: function (x, y) {
@@ -1852,7 +1896,8 @@
             if (into) { into.input.down(x - into.left, y - into.top, button); return; }
             pointer.buttons |= 1 << button;
             pointer.pressed = t;
-            pointer.lastDown = t;
+            /* (a press outside the viewport is on nothing of the page's) */
+            if (x >= 0 && y >= 0 && x < global.innerWidth && y < global.innerHeight) pointer.lastDown = t;
             if (button === 0) { chainState(t, 2, true); pointer.active = t; }
             global.__cyberLastInput = 'mouse';
             var canceled = !bothEvents(t, x, y, button, 'pointerdown', 'mousedown');

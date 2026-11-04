@@ -1336,6 +1336,9 @@ static void html_serialize_children_impl(JSContextHandle ctx, SerNode host, Seri
         if (JS_IsNull(shadow) || JS_IsUndefined(shadow))
             shadow = JS_GetPropertyStr(ctx, host.obj, "__CE_shadowRoot");
     }
+    /* (a host no script has touched, or a closed root: the store has it) */
+    if (!JS_IsObject(shadow) && host.id && g_dom.shadow[dom_slot(host.id)])
+        shadow = dom_js(ctx, dom_id_of(g_dom.shadow[dom_slot(host.id)]));
     /* A store shadow root changes only through the store (its marks reach the
      * host); any other shadow object is composed through JS. */
     if (JS_IsObject(shadow)) {
@@ -2681,9 +2684,11 @@ static void mir_compose(NodeId s, int m, NodeList *out) {
         if (JS_IsNull(shadow) || JS_IsUndefined(shadow))
             shadow = JS_GetPropertyStr(g_mir.ctx, sn.obj, "__CE_shadowRoot");
     }
-    if (JS_IsObject(shadow)) {
-        NodeId sid = dom_node_of(shadow);
-        bool store_shadow = sid && g_dom.shadow[dom_slot(s)] == dom_slot(sid);
+    /* (a host no script has touched, or a closed root: the store has it) */
+    uint32_t stored = g_dom.shadow[dom_slot(s)];
+    if (JS_IsObject(shadow) || stored) {
+        NodeId sid = JS_IsObject(shadow) ? dom_node_of(shadow) : dom_id_of(stored);
+        bool store_shadow = sid && stored == dom_slot(sid);
         if (!store_shadow) {
             if (!g_mir.shady) { g_mir.unsupported = true; return; }
             /* ShadyDOM: the real children, top-level <slot>s unwrapped. */

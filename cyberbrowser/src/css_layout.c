@@ -3257,12 +3257,13 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             /* For shorthand semantics: overflow:visible on one axis paired
              * with a non-visible value on the other computes to auto, but
              * tracking per-axis is overkill here. */
-            if (PK(73)) box->s->overflow = 0;
+            if (PK(73)) { box->s->overflow = 0; box->s->overflow_clip = 0; }
         }
-        else if (strcasecmp(value, "hidden") == 0) box->s->overflow = 1;
-        else if (strcasecmp(value, "auto") == 0) box->s->overflow = 2;
-        else if (strcasecmp(value, "scroll") == 0) box->s->overflow = 3;
-        else if (strcasecmp(value, "clip") == 0) { box->s->overflow = 1; box->s->overflow_clip = 1; }
+        else if (strcasecmp(value, "hidden") == 0) { box->s->overflow = 1; box->s->overflow_clip = 0; }
+        else if (strcasecmp(value, "auto") == 0) { box->s->overflow = 2; box->s->overflow_clip = 0; }
+        else if (strcasecmp(value, "scroll") == 0) { box->s->overflow = 3; box->s->overflow_clip = 0; }
+        /* (clip beside a scrolling axis: it scrolls) */
+        else if (strcasecmp(value, "clip") == 0 && (box->s->overflow == 0 || box->s->overflow_clip)) { box->s->overflow = 1; box->s->overflow_clip = 1; }
     } else if (PK(76)) {
         static const char *const kw[] = { "baseline", "middle", "top", "bottom", "sub", "super", "text-top",
                                           "text-bottom" };
@@ -5425,7 +5426,7 @@ typedef struct PseudoSide {
     const CssDeclaration *const *decls;
 } PseudoSide;
 typedef struct PseudoRec {
-    PseudoSide side[4];   /* ::before, ::after, ::first-letter, ::first-line (no box) */
+    PseudoSide side[5];   /* ::before, ::after, ::first-letter, ::first-line, ::marker (those two no box) */
     bool owned;
 } PseudoRec;
 
@@ -8107,7 +8108,7 @@ static const PseudoRec *style_pseudo_rec(StylePass *P, StyleThread *T, const Css
     PseudoDecl *all = n * 8 <= 64 ? stack : NULL;
     int cap = all ? 64 : 0, cnt = 0;
     PseudoRec *rec = NULL;
-    for (int side = 0; side < 4; side++) {
+    for (int side = 0; side < 5; side++) {
         const char *content = NULL;
         int bi = -1, bs = -1, bo = -1;
         bool any = false;
@@ -8172,7 +8173,7 @@ static const PseudoRec *pseudo_rec_copy(const PseudoRec *r)
     if (!c) return NULL;
     *c = *r;
     c->owned = true;
-    for (int side = 0; side < 4; side++) {
+    for (int side = 0; side < 5; side++) {
         if (!r->side[side].n) continue;
         size_t b = (size_t)r->side[side].n * sizeof(CssDeclaration *);
         const CssDeclaration **ds = (const CssDeclaration **)frame_arena_alloc(&g_sc.arena, b);
@@ -8483,7 +8484,7 @@ static bool layout_apply_wide_keyword(LayoutBox *box, const LayoutBox *parent,
     };
     if (strcasecmp(prop, "display") == 0) {
         box->s->display = CSS_DISPLAY_INLINE;
-        box->s->inline_level = 1;
+        box->s->inline_level = 0;
         return true;
     }
     for (size_t i = 0; i < sizeof(initial_values) / sizeof(initial_values[0]); i++) {
@@ -17911,6 +17912,35 @@ static void layout_anim_frame(void *ud, const void *decls, int n, AnimVal out[AN
     layout_anim_read(&tmp, out);
 }
 
+static const PseudoSide *layout_marker_rule(const LayoutContext *ctx, int i)
+{
+    const PseudoRec *r = ctx->pseudo_rec ? (const PseudoRec *)ctx->pseudo_rec[i] : NULL;
+    return r && r->side[4].content ? &r->side[4] : NULL;
+}
+
+/* A list item's ::marker: its transitions and animations run (their events,
+ * and what scripts see of them), on a style of its own that nothing renders:
+ * markers are drawn from the list item's style. */
+static void layout_animate_marker(LayoutContext *ctx, LayoutAnimUd *u, int i, NodeId el, double now)
+{
+    const PseudoSide *ps = layout_marker_rule(ctx, i);
+    LayoutBox *box = &ctx->boxes[i];
+    LayoutStyle st = *box->s;
+    st.anim_spec = NULL;
+    LayoutBox tb = *box;
+    tb.s = &st;
+    for (int d = 0; d < ps->n; d++)
+        if (ps->decls[d]->property && ps->decls[d]->property[0] != '-')
+            layout_apply_declaration(&tb, ps->decls[d], ctx->viewport_width, ctx->viewport_width, ctx->base_url);
+    const char *spec = box->s->display == CSS_DISPLAY_LIST_ITEM ? st.anim_spec : NULL;
+    if (!spec && !anim_has(el, 3)) return;
+    AnimVal was[ANIM_NPROP], cur[ANIM_NPROP];
+    bool set_p[ANIM_NPROP];
+    layout_anim_read(&st, was);
+    u->box = &tb;
+    anim_box(el, 3, spec, was, !ctx->cache_readonly, now, layout_anim_keyframes, layout_anim_frame, u, cur, set_p);
+}
+
 /* The boxes with transitions or animations: their styles told to the store
  * (which starts what a change calls for), then given what runs.  A style
  * so changed is not the cascade's: the next style pass styles it again. */
@@ -17923,6 +17953,12 @@ static void layout_animate(LayoutContext *ctx, const CssStyleSet *set)
     LayoutAnimUd u;
     u.ctx = ctx;
     u.set = set;
+    for (int i = 0; i < base && ctx->pseudo_rec; i++) {
+        if (!layout_marker_rule(ctx, i)) continue;
+        NodeId el = ctx->ids[i];
+        if (el && dom_kind(el) == DOM_K_ELEMENT) layout_animate_marker(ctx, &u, i, el, now);
+        any = anim_any();
+    }
     for (int i = 0; i < ctx->tree.count; i++) {
         LayoutBox *box = &ctx->boxes[i];
         if (!box->s->anim_spec && !any) continue;
@@ -17961,6 +17997,8 @@ static void layout_animate(LayoutContext *ctx, const CssStyleSet *set)
     for (int i = 0; any && !ctx->cache_readonly && i < base; i++) {
         NodeId el = ctx->ids[i];
         if (!el || dom_kind(el) != DOM_K_ELEMENT) continue;
+        /* (::marker's rule gone) */
+        if (anim_has(el, 3) && !layout_marker_rule(ctx, i)) anim_pseudo_gone(el, 3, now);
         for (int ps = 1; ps <= 2; ps++) {
             if (!anim_has(el, ps)) continue;
             bool box = false;
@@ -20197,6 +20235,12 @@ void css_layout_extent(const LayoutContext *ctx, int idx, double *right, double 
 }
 
 bool css_layout_box_scrolls(const LayoutContext *ctx, int idx)
+{
+    /* (overflow: clip clips, with no scrolling box) */
+    return !ctx->boxes[idx].s->overflow_clip && css_layout_box_clips(ctx, idx);
+}
+
+bool css_layout_box_clips(const LayoutContext *ctx, int idx)
 {
     const LayoutBox *b = &ctx->boxes[idx];
     if (b->s->overflow == 0 || b->s->display == CSS_DISPLAY_NONE || b->s->display == CSS_DISPLAY_INLINE) return false;

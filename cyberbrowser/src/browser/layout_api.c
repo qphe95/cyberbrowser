@@ -1970,10 +1970,12 @@ static void lq_scroll_fire(JSContextHandle ctx, NodeId id, const char *type)
     timer_microtask_checkpoint(ctx);
 }
 
-/* Does the box snap (platform_api.js)?  True: it moved, so it isn't ending yet. */
+/* Does the box (or the document's root scroller) snap (platform_api.js)?
+ * True: it moved, so it isn't ending yet. */
 static bool lq_scroll_snap(JSContextHandle ctx, NodeId id)
 {
-    if (dom_kind(id) != DOM_K_ELEMENT) return false;
+    if (dom_kind(id) != DOM_K_ELEMENT && dom_kind(id) != DOM_K_DOCUMENT) return false;
+    if (!(g_css_render_features & CSS_FEAT_SNAP)) return false;
     GCValue target = dom_js(ctx, id);
     if (!JS_IsObject(target)) return false;
     GCValue dispatch = JS_GetPropertyStr(ctx, target, "dispatchEvent");
@@ -1984,6 +1986,19 @@ static bool lq_scroll_snap(JSContextHandle ctx, NodeId id)
     GCValue r = JS_Call(realm, snap, JS_UNDEFINED, 1, &target);
     if (JS_IsException(r)) { JS_GetException(realm); return false; }
     return JS_ToBool(realm, r) > 0;
+}
+
+/* A scroll under way: what it would snap to now (scrollsnapchanging). */
+static void lq_scroll_snap_progress(JSContextHandle ctx, NodeId id)
+{
+    if (!(g_css_render_features & CSS_FEAT_SNAP)) return;
+    GCValue target = dom_js(ctx, id);
+    if (!JS_IsObject(target)) return;
+    GCValue dispatch = JS_GetPropertyStr(ctx, target, "dispatchEvent");
+    JSContextHandle realm = JS_IsFunction(ctx, dispatch) ? JS_GetFunctionRealmOf(ctx, dispatch) : ctx;
+    if (!realm) realm = ctx;
+    GCValue f = JS_GetPropertyStr(realm, JS_GetGlobalObject(realm), "__cyberSnapProgress");
+    if (JS_IsFunction(realm, f) && JS_IsException(JS_Call(realm, f, JS_UNDEFINED, 1, &target))) JS_GetException(realm);
 }
 
 int layout_scroll_tick(JSContextHandle ctx)
@@ -2004,7 +2019,10 @@ int layout_scroll_tick(JSContextHandle ctx)
         }
     g_scroll_q.n = k;
     for (uint32_t i = 0; i < n; i++)
-        if (due[i] == 1) lq_scroll_fire(ctx, ids[i], "scroll");
+        if (due[i] == 1) {
+            lq_scroll_fire(ctx, ids[i], "scroll");
+            if (dom_is_connected(ids[i])) lq_scroll_snap_progress(ctx, ids[i]);
+        }
     /* (not for a box removed since) */
     for (uint32_t i = 0; i < n; i++)
         if (due[i] == 2 && !g_scroll_hold && dom_is_connected(ids[i]) && !lq_scroll_snap(ctx, ids[i]))
@@ -2061,7 +2079,9 @@ int layout_render_tick(JSContextHandle ctx)
     GCValue tick = JS_GetPropertyStr(ctx, global, "__cyberRenderTick");
     if (!JS_IsFunction(ctx, tick)) return 0;
     GCValue arg = JS_NewInt32(ctx, features);
-    if (JS_IsException(JS_Call(ctx, tick, JS_UNDEFINED, 1, &arg))) JS_GetException(ctx);
+    GCValue again = JS_Call(ctx, tick, JS_UNDEFINED, 1, &arg);
+    if (JS_IsException(again)) JS_GetException(ctx);
+    else if (JS_ToBool(ctx, again) > 0) g_render_tick_due = true;
     timer_microtask_checkpoint(ctx);
     return 1;
 }

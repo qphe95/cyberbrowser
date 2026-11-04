@@ -1168,7 +1168,7 @@ static char *ci_strstr(char *s, const char *kw)
 
 static int32_t after_base_list(Builder *b, const char *branch, size_t blen, int kind)
 {
-    static const char *const kw2[] = { "::after", "::before", "::first-letter", "::first-line" };
+    static const char *const kw2[] = { "::after", "::before", "::first-letter", "::first-line", "::marker" };
     char buf[512];
     if (blen == 0 || blen >= sizeof(buf)) return -1;
     memcpy(buf, branch, blen);
@@ -1320,7 +1320,7 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
 
             /* ::after branches (naive comma split, as the legacy code did). */
             if (ci_strstr((char *)sel, ":after") || ci_strstr((char *)sel, ":before") || ci_strstr((char *)sel, ":first-letter") ||
-                ci_strstr((char *)sel, ":first-line")) {
+                ci_strstr((char *)sel, ":first-line") || ci_strstr((char *)sel, ":marker")) {
                 const char *bp = sel;
                 while (*bp) {
                     const char *comma = strchr(bp, ',');
@@ -1333,6 +1333,7 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
                         if (li < 0) { li = after_base_list(&b, bp, blen, 1); is_before = 1; }
                         if (li < 0) { li = after_base_list(&b, bp, blen, 2); is_before = 2; }
                         if (li < 0) { li = after_base_list(&b, bp, blen, 3); is_before = 3; }
+                        if (li < 0) { li = after_base_list(&b, bp, blen, 4); is_before = 4; }
                         if (li >= 0) {
                             CAfter af = { g, 0, is_before };
                             if (blen < 512) {

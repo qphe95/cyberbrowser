@@ -53,7 +53,7 @@ static void anim_dispatch(JSContextHandle ctx, const AnimEvent *e)
     JS_SetPropertyStr(realm, init, trans ? "propertyName" : "animationName", JS_NewString(realm, e->name));
     JS_SetPropertyStr(realm, init, "elapsedTime", JS_NewFloat64(realm, e->elapsed));
     JS_SetPropertyStr(realm, init, "pseudoElement",
-                      JS_NewString(realm, e->ps == 1 ? "::before" : e->ps == 2 ? "::after" : ""));
+                      JS_NewString(realm, e->ps == 1 ? "::before" : e->ps == 2 ? "::after" : e->ps == 3 ? "::marker" : ""));
     GCValue args[2] = { JS_NewString(realm, k_types[e->type]), init };
     GCValue ev = JS_CallConstructor(realm, ctor, 2, args);
     if (JS_IsException(ev)) { JS_GetException(realm); return; }
@@ -332,7 +332,7 @@ GCValue js_element_get_animations(JSContextHandle ctx, GCValue this_val, int arg
         JS_SetPropertyStr(ctx, a, kind == 1 ? "transitionProperty" : "animationName", JS_NewString(ctx, name));
         JS_SetPropertyStr(ctx, a, "row", JS_NewInt32(ctx, rows[i]));
         JS_SetPropertyStr(ctx, a, "gen", JS_NewInt32(ctx, (int32_t)g));
-        JS_SetPropertyStr(ctx, a, "pseudo", JS_NewString(ctx, ps == 1 ? "::before" : ps == 2 ? "::after" : ""));
+        JS_SetPropertyStr(ctx, a, "pseudo", JS_NewString(ctx, ps == 1 ? "::before" : ps == 2 ? "::after" : ps == 3 ? "::marker" : ""));
         JS_SetPropertyStr(ctx, a, "commitStyles", JS_NewCFunction(ctx, js_anim_commit_styles, "commitStyles", 0));
         JS_SetPropertyStr(ctx, a, "cancel", JS_NewCFunction(ctx, js_anim_cancel, "cancel", 0));
         JS_SetPropertyStr(ctx, a, "play", JS_NewCFunction(ctx, js_anim_noop, "play", 0));

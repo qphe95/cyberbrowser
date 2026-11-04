@@ -687,7 +687,7 @@
     /* Scroll snap (CSS Scroll Snap 1 and 2): for each box, the targets it is
      * snapped to on each axis (those at the same position, in flat tree order)
      * and the offset they were for. */
-    var snapStates = new WeakMap(), snapReported = new WeakMap();
+    var snapStates = new WeakMap(), snapReported = new WeakMap(), snapChanging = new WeakMap(), snapIntents = new WeakMap();
     function snapAxes(cs) {
         var type = cs.scrollSnapType;
         if (!type || type === 'none') return null;
@@ -695,7 +695,9 @@
     }
     /* Each axis's snap positions, { t: the target, pos: the offset }. */
     function snapLists(el, axes) {
-        var r = el.getBoundingClientRect(), left = r.left + el.clientLeft, top = r.top + el.clientTop;
+        /* (the root's scrollport is the viewport, which its box moves in) */
+        var isRoot = el === el.ownerDocument.documentElement;
+        var r = el.getBoundingClientRect(), left = isRoot ? 0 : r.left + el.clientLeft, top = isRoot ? 0 : r.top + el.clientTop;
         var sx = el.scrollLeft, sy = el.scrollTop, cw = el.clientWidth, ch = el.clientHeight;
         var maxX = el.scrollWidth - cw, maxY = el.scrollHeight - ch, out = { x: [], y: [] };
         var at = function (align, lo, hi, view) { return align === 'start' ? lo : align === 'end' ? hi - view : (lo + hi - view) / 2; };
@@ -733,12 +735,25 @@
             if (targets[i] === active || targets[i].contains(active)) return targets[i];
         return targets[0] || null;
     }
+    /* (the root's go to its document, and bubble to the window) */
+    function snapFire(el, type, block, inline) {
+        var d = el.ownerDocument, root = el === d.documentElement;
+        global.__cyberDispatchTrusted(root ? d : el, new global.SnapEvent(type, { bubbles: root, snapTargetBlock: block, snapTargetInline: inline }));
+    }
     function snapReport(el, st) {
         var block = snapPreferred(st.y), inline = snapPreferred(st.x), was = snapReported.get(el);
         if (was && was.block === block && was.inline === inline) return;
-        snapReported.set(el, { block: block, inline: inline });
-        if (block || inline)
-            global.__cyberDispatchTrusted(el, new global.SnapEvent('scrollsnapchange', { snapTargetBlock: block, snapTargetInline: inline }));
+        var now = { block: block, inline: inline };
+        snapReported.set(el, now);
+        snapChanging.set(el, now);
+        if (block || inline) snapFire(el, 'scrollsnapchange', block, inline);
+    }
+    /* What a scroll is going to snap to, when that isn't what it was going to. */
+    function snapAnnounce(el, st) {
+        var block = snapPreferred(st.y), inline = snapPreferred(st.x), was = snapChanging.get(el) || snapReported.get(el);
+        if (was ? was.block === block && was.inline === inline : !block && !inline) return;
+        snapChanging.set(el, { block: block, inline: inline });
+        snapFire(el, 'scrollsnapchanging', block, inline);
     }
     function snapRemember(el, lists, x, y) {
         var st = { x: snapAt(lists.x, x), y: snapAt(lists.y, y), sx: el.scrollLeft, sy: el.scrollTop };
@@ -758,20 +773,49 @@
     }
     /* As a scroll ends: to the nearest snap position on each axis; true if it moved. */
     Object.defineProperty(global, '__cyberScrollSnap', { configurable: true, value: function (el) {
+        if (el.nodeType === 9) el = el.documentElement;
+        if (!el) return false;
         var axes = snapAxes(global.getComputedStyle(el));
         if (!axes) return false;
         var sx = el.scrollLeft, sy = el.scrollTop, lists = snapLists(el, axes);
-        var bestX = snapNearest(lists.x, sx), bestY = snapNearest(lists.y, sy);
+        /* (a key press goes on to a position that way, however short its step) */
+        var intent = snapIntents.get(el);
+        snapIntents.delete(el);
+        var ahead = function (list, from, sign) {
+            if (!sign) return list;
+            var on = list.filter(function (p) { return (p.pos - from) * sign >= 1; });
+            return on.length ? on : list;
+        };
+        var bestX = snapNearest(intent ? ahead(lists.x, intent.x, intent.dx) : lists.x, sx);
+        var bestY = snapNearest(intent ? ahead(lists.y, intent.y, intent.dy) : lists.y, sy);
         if (axes.proximity) {
             if (bestX !== null && Math.abs(bestX - sx) > el.clientWidth / 3) bestX = null;
             if (bestY !== null && Math.abs(bestY - sy) > el.clientHeight / 3) bestY = null;
         }
         var moved = false;
+        snapAnnounce(el, { x: snapAt(lists.x, bestX), y: snapAt(lists.y, bestY) });
         if (bestX !== null && Math.abs(bestX - sx) >= 1) { el.scrollLeft = bestX; moved = true; }
         if (bestY !== null && Math.abs(bestY - sy) >= 1) { el.scrollTop = bestY; moved = true; }
         var st = snapRemember(el, lists, bestX, bestY);
         if (!moved) snapReport(el, st);
         return moved;
+    } });
+    Object.defineProperty(global, '__cyberSnapIntent', { configurable: true, value: function (el, x, y, dx, dy) {
+        snapIntents.set(el, { x: x, y: y, dx: dx, dy: dy });
+    } });
+    /* A scroll under way: where it would snap now. */
+    Object.defineProperty(global, '__cyberSnapProgress', { configurable: true, value: function (el) {
+        if (el.nodeType === 9) el = el.documentElement;
+        if (!el) return;
+        var axes = snapAxes(global.getComputedStyle(el));
+        if (!axes) return;
+        var lists = snapLists(el, axes), sx = el.scrollLeft, sy = el.scrollTop;
+        var bestX = snapNearest(lists.x, sx), bestY = snapNearest(lists.y, sy);
+        if (axes.proximity) {
+            if (bestX !== null && Math.abs(bestX - sx) > el.clientWidth / 3) bestX = null;
+            if (bestY !== null && Math.abs(bestY - sy) > el.clientHeight / 3) bestY = null;
+        }
+        snapAnnounce(el, { x: snapAt(lists.x, bestX), y: snapAt(lists.y, bestY) });
     } });
     Object.defineProperty(global, '__cyberSnapCapture', { configurable: true, value: function (el) {
         if (!el || el.nodeType !== 1 || snapStates.has(el)) return;
@@ -800,7 +844,7 @@
 
     /* content-visibility: auto (CSS Contain 2): whether its contents are
      * relevant to the user, and the event when that changes. */
-    var cvSkipped = new WeakMap();
+    var cvSkipped = new WeakMap(), cvActivated = new WeakSet();
     if (!global.ContentVisibilityAutoStateChangeEvent) {
         var CVEvent = function ContentVisibilityAutoStateChangeEvent(type, init) {
             var e = new global.Event(type, init);
@@ -834,7 +878,7 @@
         }
     }
     Object.defineProperty(global, '__cyberRenderTick', { configurable: true, value: function (features) {
-        var snappers = [], changed = [];
+        var snappers = [], changed = [], again = false;
         if ((features & 8) && global.__cyberMediaCheck) global.__cyberMediaCheck();
         var list = global.__cyberRenderElements(7);
         for (var e = 0; e < list.length; e++) {
@@ -844,6 +888,7 @@
             else if (snapStates.has(c)) snapStates.delete(c);
             if (cs.contentVisibility === 'auto' && c.getClientRects().length) {
                 var skipped = !cvRelevant(c);
+                if (cvActivated.delete(c)) { skipped = false; again = true; }
                 if (cvSkipped.get(c) !== skipped) { cvSkipped.set(c, skipped); changed.push(c, skipped); }
             }
             if (cs.scrollInitialTarget === 'nearest' && !initialDone.has(c) && c.getClientRects().length) {
@@ -854,6 +899,9 @@
         for (var i = 0; i < snappers.length; i += 2) snapFollow(snappers[i], snappers[i + 1]);
         for (var k = 0; k < changed.length; k += 2)
             global.__cyberDispatchTrusted(changed[k], new global.ContentVisibilityAutoStateChangeEvent('contentvisibilityautostatechange', { skipped: changed[k + 1] }));
+        /* (true: the next rendering looks again) */
+        if (again) global.requestAnimationFrame(function () {});
+        return again;
     } });
 
     /* (the transition running in a document) */
@@ -1047,9 +1095,15 @@
     }
     function scrollIntoViewOf(el, block, inline) {
         var d = el.ownerDocument, root = d.documentElement;
+        /* (a skipped box a descendant is scrolled to shows it, whatever it does then) */
+        var marked = global.__cyberRenderElements(7);
+        for (var mi = 0; mi < marked.length; mi++)
+            if (marked[mi] !== el && marked[mi].contains(el) && global.getComputedStyle(marked[mi]).contentVisibility === 'auto') cvActivated.add(marked[mi]);
         for (var a = el.assignedSlot || el.parentNode || el.host; a && a !== d; a = a.assignedSlot || a.parentNode || a.host) {
             if (a.nodeType !== 1 || a === root || a === d.body) continue;
             if (a.scrollHeight <= a.clientHeight && a.scrollWidth <= a.clientWidth) continue;
+            /* (overflow: clip and visible: no scrolling box) */
+            if (!isScrollBox(global.getComputedStyle(a))) continue;
             var r = el.getBoundingClientRect(), b = a.getBoundingClientRect();
             var l = b.left + a.clientLeft, t = b.top + a.clientTop;
             a.scrollLeft += scrollAlign(inline, r.left, r.right, l, l + a.clientWidth);

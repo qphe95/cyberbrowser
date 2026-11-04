@@ -49,6 +49,8 @@
         const finger = s => s.type === 'pointer' && s.parameters && s.parameters.pointerType && s.parameters.pointerType !== 'mouse';
         const input = w.__cyberInput;
         const ticks = actions.reduce((n, s) => Math.max(n, s.actions.length), 0);
+        /* (from its start too: a chain sent while another is finishing) */
+        input.wheelEnd();
         /* (WebDriver's input state: a pointer stays where an earlier chain left it) */
         const last = w.__cyberPointers || (w.__cyberPointers = new Map());
         /* (each chain numbers its sources anew: the nth pointer of a kind is the same one) */
