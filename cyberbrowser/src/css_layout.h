@@ -194,6 +194,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char overflow;
     /* overflow: clip (overflow is 1), and how far out it clips. */
     unsigned char overflow_clip;
+    /* overflow-anchor: none. */
+    unsigned char overflow_anchor_none;
     /* scroll-marker-group: 1 before, 2 after. */
     unsigned char scroll_marker_group;
     float overflow_clip_margin;

@@ -2837,6 +2837,10 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         box->s->scroll_marker_group = !strcasecmp(value, "before") ? 1 : !strcasecmp(value, "after") ? 2 : 0;
         return;
     }
+    if (prop[0] == 'o' && !strcasecmp(prop, "overflow-anchor")) {
+        box->s->overflow_anchor_none = !strcasecmp(value, "none");
+        return;
+    }
     if (prop[0] == 'o' && !strcasecmp(prop, "overflow-clip-margin")) {
         /* (a length, with or without a box to measure from: padding-box is where it starts anyway) */
         const char *v = value;

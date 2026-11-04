@@ -52,7 +52,7 @@ if ! kill -0 "$server" 2> /dev/null; then echo "the server stopped:" >&2; tail -
 W=$(cygpath -m "$out")
 script() {   # <pages file>: the UI script for its pages
     echo "open about:blank"
-    [ -n "$REFTEST" ] && echo "viewport 800 600"
+    echo "viewport 800 600"
     while read -r k url ms shot; do
         echo "go $url"
         if [ -n "$shot" ]; then

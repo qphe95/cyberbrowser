@@ -976,13 +976,20 @@ static int lq_hidden_holder(NodeId id)
     return -1;
 }
 
+static void lq_anchors_note(JSContextHandle ctx);
+static void lq_anchors_apply(JSContextHandle ctx);
+
 /* Does the query being answered read a box a change may have altered? */
 static bool g_lq_run_anyway;
+
+/* (reading a scroll position: an adjustment may be due, so a change anywhere counts) */
+static bool g_lq_scroll_read;
 
 static bool lq_who_affected(void)
 {
     if (g_lq_run_anyway) return true;
     if (!g_lq_ndirty && !g_lq_nanchor) return false;
+    if (g_lq_scroll_read) return true;
     int qi = g_lq_who ? lq_box_index(g_lq_who) : -1;
     LqAsk ask = g_lq_ask;
     if (qi < 0) {
@@ -1338,6 +1345,7 @@ static bool lq_ensure(JSContextHandle ctx)
         int oi = lq_box_index(g_lq_who);
         if (oi >= 0 && lq_rendered(oi)) { asked_was = g_lq_layout.boxes[oi]; asked_had = true; }
     }
+    lq_anchors_note(ctx);
     lq_free_keeping(doc == g_lq_doc);
     g_lq_doc = doc;
     g_lq_layout.js_ctx = ctx;
@@ -1365,6 +1373,7 @@ static bool lq_ensure(JSContextHandle ctx)
             else lq_cheap_key(g_lq_cheap);
         }
         lq_map_slots();
+        lq_anchors_apply(ctx);
         if (asked_had) {
             int ni = lq_box_index(g_lq_who);
             const LayoutBox *nb = ni >= 0 && lq_rendered(ni) ? &g_lq_layout.boxes[ni] : NULL;
@@ -1797,7 +1806,9 @@ static NodeId lq_scroll_subject(JSContextHandle ctx, NodeId id, double *mx, doub
         box = dom_parent(id);
     }
     g_lq_ask = LQ_ASK_EXTENT;
+    g_lq_scroll_read = g_dom_scrolls.n != 0;
     int idx = lq_query(ctx, dom_js(ctx, box));
+    g_lq_scroll_read = false;
     g_lq_ask = LQ_ASK_POS;
     bool text_control = !view && (is_tag(id, "input") || is_tag(id, "textarea"));
     if (idx < 0 || (!view && !text_control && !css_layout_box_scrolls(&g_lq_layout, idx))) return DOM_NULL;
@@ -1963,6 +1974,145 @@ void layout_scroll_queue(JSContextHandle ctx, uint32_t id)
     timer_anim_wake(ctx);
 }
 
+/* ---- Scroll anchoring (CSS Scroll Anchoring 1) ----
+ * Before a layout, on the boxes of the last one: what each scrolled box shows
+ * first, and where.  After it: as far as that moved, the box scrolls.  Nothing
+ * is kept between layouts. */
+enum { LQ_ANCHORS_MAX = 16 };
+static struct {
+    NodeId subject[LQ_ANCHORS_MAX], anchor[LQ_ANCHORS_MAX];
+    double x[LQ_ANCHORS_MAX], y[LQ_ANCHORS_MAX];
+    uint64_t chain[LQ_ANCHORS_MAX];
+    int n;
+} g_lq_anchors;
+
+/* What moving a box by style would come from, up the way to its scroller
+ * (changing any of them doesn't get an adjustment: the "suppression triggers"). */
+static uint64_t lq_anchor_chain(int a, int stop)
+{
+    uint64_t h = 1469598103934665603ull;
+    for (int i = a; i >= 0 && i != stop; i = g_lq_layout.tree.nodes[i].parent_idx) {
+        const LayoutStyle *s = g_lq_layout.boxes[i].s;
+        const double v[] = { s->top, s->left, s->right, s->bottom, s->margin_top, s->margin_left, s->margin_right, s->margin_bottom,
+                             s->padding_top, s->padding_left, s->padding_right, s->padding_bottom,
+                             s->width_set ? s->css_width : -1.0, s->height_set ? s->css_height : -1.0, (double)s->position };
+        const unsigned char *p = (const unsigned char *)v;
+        for (size_t k = 0; k < sizeof v; k++) h = (h ^ p[k]) * 1099511628211ull;
+    }
+    return h;
+}
+
+/* The first box of p's that shows in its scrollport (at sx, sy, cw by ch from
+ * its content box's corner), as deep as one fits: -1 if none. */
+static int lq_anchor_select(int p, int scroller, double ox, double oy, double sx, double sy, double cw, double ch, int depth)
+{
+    if (depth > 200) return -1;
+    for (int c = g_lq_layout.tree.nodes[p].first_child_idx; c >= 0; c = g_lq_layout.tree.nodes[c].next_sibling_idx) {
+        const LayoutBox *b = &g_lq_layout.boxes[c];
+        if (b->s->display == CSS_DISPLAY_NONE || b->s->overflow_anchor_none || b->s->skipped) continue;
+        const HtmlNode *hn = css_layout_box_node(&g_lq_layout, c);
+        if (!hn || hn->type != HTML_NODE_ELEMENT || !hn->store_id) continue;
+        if (b->s->position == CSS_POSITION_FIXED || b->s->position == CSS_POSITION_STICKY) continue;
+        /* (absolute: only if its containing block is in the scroller) */
+        if (b->s->position == CSS_POSITION_ABSOLUTE) {
+            int a = g_lq_layout.tree.nodes[c].parent_idx;
+            while (a >= 0 && a != scroller && g_lq_layout.boxes[a].s->position == CSS_POSITION_STATIC) a = g_lq_layout.tree.nodes[a].parent_idx;
+            if (a < 0 || (a == scroller && g_lq_layout.boxes[a].s->position == CSS_POSITION_STATIC && g_lq_layout.tree.nodes[scroller].parent_idx >= 0)) continue;
+        }
+        double l = b->x - ox, t = b->y - oy, r = l + b->width, bm = t + b->height;
+        bool has_kids = g_lq_layout.tree.nodes[c].first_child_idx >= 0;
+        bool empty = b->width <= 0.0 || b->height <= 0.0;
+        /* (no box of its own to be: what overflows it may be) */
+        if (empty || b->s->display == CSS_DISPLAY_INLINE) {
+            if (!has_kids) { if (empty) continue; }
+            else {
+                int in = lq_anchor_select(c, scroller, ox, oy, sx, sy, cw, ch, depth + 1);
+                if (in >= 0) return in;
+                continue;
+            }
+        }
+        if (r <= sx || l >= sx + cw || bm <= sy || t >= sy + ch) continue;
+        if (l >= sx && t >= sy && r <= sx + cw && bm <= sy + ch) return c;
+        /* (a nested scroller: itself, not what it scrolls) */
+        if (b->s->overflow != 0 && b->s->overflow_clip == 0) return c;
+        int in = lq_anchor_select(c, scroller, ox, oy, sx, sy, cw, ch, depth + 1);
+        return in >= 0 ? in : c;
+    }
+    return -1;
+}
+
+static void lq_anchors_note(JSContextHandle ctx)
+{
+    g_lq_anchors.n = 0;
+    if (!g_lq_valid || !g_dom_scrolls.n || g_lq_layout.js_ctx != ctx) return;
+    int root = g_lq_layout.tree.root_idx;
+    const HtmlNode *rn = root >= 0 ? css_layout_box_node(&g_lq_layout, root) : NULL;
+    NodeId view = rn && rn->store_id ? dom_owner(rn->store_id) : DOM_NULL;
+    for (uint32_t i = 0; i < g_dom_scrolls.n && g_lq_anchors.n < LQ_ANCHORS_MAX; i++) {
+        NodeId id = g_dom_scrolls.id[i];
+        double sx = g_dom_scrolls.x[i], sy = g_dom_scrolls.y[i];
+        /* (at the very start, nothing is being kept in view) */
+        if (sx == 0.0 && sy == 0.0) continue;
+        bool is_view = id == view;
+        int p = is_view ? root : lq_box_index(id);
+        if (p < 0 || (!is_view && !css_layout_box_scrolls(&g_lq_layout, p))) continue;
+        const LayoutBox *sb = &g_lq_layout.boxes[p];
+        if (sb->s->overflow_anchor_none) continue;
+        if (is_view) {
+            /* (the document's: on the root or the body) */
+            bool off = false;
+            for (int c = g_lq_layout.tree.nodes[root].first_child_idx; c >= 0; c = g_lq_layout.tree.nodes[c].next_sibling_idx) {
+                const HtmlNode *cn = css_layout_box_node(&g_lq_layout, c);
+                if (cn && cn->type == HTML_NODE_ELEMENT && cn->store_id && is_tag(cn->store_id, "body")) off = g_lq_layout.boxes[c].s->overflow_anchor_none;
+            }
+            if (off) continue;
+        }
+        double cw, ch, sw, sh;
+        lq_scroll_size(p, is_view, &cw, &ch, &sw, &sh);
+        double ox = is_view ? 0.0 : sb->x + sb->s->border_left, oy = is_view ? 0.0 : sb->y + sb->s->border_top;
+        int a = lq_anchor_select(p, p, ox, oy, sx, sy, cw, ch, 0);
+        if (a < 0) continue;
+        int k = g_lq_anchors.n++;
+        g_lq_anchors.subject[k] = id;
+        g_lq_anchors.anchor[k] = css_layout_box_node(&g_lq_layout, a)->store_id;
+        g_lq_anchors.x[k] = g_lq_layout.boxes[a].x - ox;
+        g_lq_anchors.y[k] = g_lq_layout.boxes[a].y - oy;
+        g_lq_anchors.chain[k] = lq_anchor_chain(a, p);
+    }
+}
+
+static void lq_anchors_apply(JSContextHandle ctx)
+{
+    int n = g_lq_anchors.n, root = g_lq_layout.tree.root_idx;
+    g_lq_anchors.n = 0;
+    const HtmlNode *rn = n && root >= 0 ? css_layout_box_node(&g_lq_layout, root) : NULL;
+    NodeId view = rn && rn->store_id ? dom_owner(rn->store_id) : DOM_NULL;
+    for (int k = 0; k < n; k++) {
+        NodeId id = g_lq_anchors.subject[k], an = g_lq_anchors.anchor[k];
+        if (!dom_valid(id) || !dom_valid(an)) continue;
+        bool is_view = id == view;
+        int p = is_view ? root : lq_box_index(id), a = lq_box_index(an);
+        if (p < 0 || a < 0 || !lq_rendered(a) || g_lq_layout.boxes[a].s->overflow_anchor_none) continue;
+        const LayoutBox *sb = &g_lq_layout.boxes[p];
+        if (sb->s->overflow_anchor_none) continue;
+        if (lq_anchor_chain(a, p) != g_lq_anchors.chain[k]) continue;
+        double ox = is_view ? 0.0 : sb->x + sb->s->border_left, oy = is_view ? 0.0 : sb->y + sb->s->border_top;
+        double dx = g_lq_layout.boxes[a].x - ox - g_lq_anchors.x[k], dy = g_lq_layout.boxes[a].y - oy - g_lq_anchors.y[k];
+        if (fabs(dx) < 0.001 && fabs(dy) < 0.001) continue;
+        float x = 0.0f, y = 0.0f;
+        dom_scroll_get(id, &x, &y);
+        double cw, ch, sw, sh;
+        lq_scroll_size(p, is_view, &cw, &ch, &sw, &sh);
+        double mx = sw - cw > 0.0 ? sw - cw : 0.0, my = sh - ch > 0.0 ? sh - ch : 0.0;
+        double nx = x + dx, ny = y + dy;
+        nx = nx < 0.0 ? 0.0 : nx > mx ? mx : nx;
+        ny = ny < 0.0 ? 0.0 : ny > my ? my : ny;
+        if ((float)nx == x && (float)ny == y) continue;
+        dom_scroll_set(id, (float)nx, (float)ny);
+        layout_scroll_queue(ctx, id);
+    }
+}
+
 /* (a document's bubbles, to its window; an element's doesn't) */
 static void lq_scroll_fire(JSContextHandle ctx, NodeId id, const char *type)
 {
@@ -2122,6 +2272,12 @@ static GCValue js_render_elements(JSContextHandle ctx, GCValue this_val, int arg
 int layout_render_tick(JSContextHandle ctx)
 {
     int features = g_css_render_features;
+    /* (a scrolled page's changes get their layout now: an adjustment may be due) */
+    static uint64_t anchor_seen;
+    if (g_dom_scrolls.n && anchor_seen != g_dom_relayout_requests) {
+        anchor_seen = g_dom_relayout_requests;
+        layout_api_update(ctx);
+    }
     if (!features) return 0;
     /* When there is something to look at (a layout since, a scroll), at most
      * each frame, and for only the elements that use these features.  With any
