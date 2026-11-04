@@ -123,6 +123,8 @@
     var NONNEG = /^(border-image-(slice|width|outset)|mask-border-(slice|width|outset)|font-stretch|font-width|tab-size|hyphenate-limit-|width|height|min-|max-|padding|border(-[a-z]+)*-(width|radius)|font-size|line-height|flex-grow|flex-shrink|flex-basis|outline-width|column-width|column-gap|row-gap|gap$|perspective$|border-spacing|shape-margin|letter-spacing-none)/;
     var INTEGER = /^(z-index|order|orphans|widows|column-count|flood-none)$/;
     function finish(prop, v) {
+        /* (a gap rule's width snaps as a border's does) */
+        if (/^(column|row)-rule-width$/.test(prop)) return v <= 0 ? 0 : v < 1 ? 1 : Math.floor(v + 0.02);
         if (prop === 'opacity' || /-opacity$/.test(prop)) v = Math.max(0, Math.min(1, v));
         else if (INTEGER.test(prop)) v = Math.round(v);
         else if (NONNEG.test(prop) && v < 0) v = 0;
@@ -133,12 +135,20 @@
         return s.replace(/rgba?\(([^()]*)\)/g, function (all, body) {
             var v = body.split(',').map(parseFloat);
             if (v.length < 3 || v.some(isNaN)) return all;
-            var rgb = v.slice(0, 3).map(function (c) { return Math.max(0, Math.min(255, Math.round(c))); });
+            var rgb = v.slice(0, 3).map(function (c) { return Math.max(0, Math.min(255, Math.round(c + 0.002))); });
             if (v.length === 4 && v[3] < 1) return 'rgba(' + rgb.join(', ') + ', ' + fmt(Math.max(0, v[3])) + ')';
             return 'rgb(' + rgb.join(', ') + ')';
         });
     }
     function combine(prop, a, b, how) {
+        /* (a radius by keyword has nothing to interpolate) */
+        if (SHAPE_PROP.test(prop) && /(circle|ellipse)\([^()]*(closest|farthest)-/.test(String(a) + String(b))) return null;
+        /* (a polygon without rounding has it at nothing) */
+        if (SHAPE_PROP.test(prop) && /^\s*polygon\(/i.test(String(a)) && /^\s*polygon\(/i.test(String(b))) {
+            var hasR = /polygon\(\s*((?:nonzero|evenodd)\s*,?\s*)?round\b/i;
+            var addR = function (s) { return s.replace(/polygon\(\s*((?:nonzero|evenodd)\s*,\s*)?/i, 'polygon($1round 0px, '); };
+            if (hasR.test(a) !== hasR.test(b)) { if (hasR.test(a)) b = addR(b); else a = addR(a); }
+        }
         var ta = tokens(a), tb = tokens(b);
         if (ta.nums.length !== tb.nums.length || !ta.nums.length) return null;
         for (var i = 0; i < ta.lits.length; i++) if (ta.lits[i].toLowerCase() !== tb.lits[i].toLowerCase()) return null;
@@ -206,7 +216,7 @@
         var out = { px: 0, pct: 0 }, re = /([-+]?\s*(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)(%|[a-zA-Z]*)/g, m, s = String(t);
         while ((m = re.exec(s))) {
             var v = parseFloat(m[1].replace(/\s+/g, ''));
-            if (m[2] === '%') out.pct += v; else out.px += v;
+            if (m[2] === '%') { out.pct += v; out.has = true; } else out.px += v;
         }
         return out;
     }
@@ -631,6 +641,9 @@
             if (x === undefined) x = CLEAR_SHADOW + (inset.test(y) ? ' inset' : '');
             if (y === undefined) y = CLEAR_SHADOW + (inset.test(x) ? ' inset' : '');
             /* (text-shadow has no spread) */
+            /* (rgb() against rgba(): the same count of numbers) */
+            var withAlpha = function (s) { return s.replace(/rgb\(([^()]*)\)/, 'rgba($1, 1)'); };
+            if (/rgba\(/.test(x) !== /rgba\(/.test(y)) { x = withAlpha(x); y = withAlpha(y); }
             if (prop === 'text-shadow') { x = x.replace(' 0px 0px 0px 0px', ' 0px 0px 0px'); y = y.replace(' 0px 0px 0px 0px', ' 0px 0px 0px'); }
             var v = combine(prop, x, y, how);
             if (v === null) return null;
@@ -735,16 +748,19 @@
         var re = /([-+]?\s*(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)(%|px)?/g, m, s = String(t);
         while ((m = re.exec(s))) {
             var v = parseFloat(m[1].replace(/\s+/g, ''));
-            if (m[2] === '%') out.pct += v; else out.px += v;
+            if (m[2] === '%') { out.pct += v; out.has = true; } else out.px += v;
         }
         return out;
     }
+    /* (a percentage's zero where one was written) */
     function lpText(v) {
+        if (!v.pct && !v.px && v.zeroPct) return '0%';
         if (!v.pct) return fmt(v.px) + 'px';
         if (!v.px) return fmt(v.pct) + '%';
         return 'calc(' + fmt(v.pct) + '% ' + (v.px < 0 ? '- ' : '+ ') + fmt(Math.abs(v.px)) + 'px)';
     }
     function from100(v) { return { px: -v.px, pct: 100 - v.pct }; }
+    var BOX_AFTER = /\s+(border-box|padding-box|content-box|margin-box|fill-box|stroke-box|view-box)\s*$/;
     function insetParts(text) {
         var m = /^\s*(inset|rect|xywh)\(((?:[^()]|\([^()]*\))*)\)\s*$/i.exec(text);
         if (!m) return null;
@@ -758,7 +774,7 @@
             var p = a.map(lpParse);
             box = [p[0], p.length > 1 ? p[1] : p[0], p.length > 2 ? p[2] : p[0], p.length > 3 ? p[3] : (p.length > 1 ? p[1] : p[0])];
         } else if (fn === 'rect') {
-            var Z = { px: 0, pct: 0 }, F = { px: 0, pct: 100 };
+            var Z = { px: 0, pct: 0, zeroPct: true }, F = { px: 0, pct: 100 };
             box = [auto(a[0], Z), from100(auto(a[1], F)), from100(auto(a[2], F)), auto(a[3], Z)];
         } else {
             var x = lpParse(a[0]), y = lpParse(a[1]), w = lpParse(a[2]), h = lpParse(a[3]);
@@ -766,20 +782,207 @@
         }
         return { box: box, round: round };
     }
-    function insetInterpolate(a, b, t) {
+    function insetInterpolate(a, b, t, prop) {
+        var boxA = BOX_AFTER.exec(a), boxB = BOX_AFTER.exec(b);
+        if (boxA || boxB) {
+            if (!boxA || !boxB || boxA[1] !== boxB[1]) return null;
+            var inner = insetInterpolate(a.slice(0, boxA.index), b.slice(0, boxB.index), t, prop);
+            return inner === null ? null : inner + ' ' + boxA[1];
+        }
         var pa = insetParts(a), pb = insetParts(b);
         if (!pa || !pb) return null;
         var l = function (x, y) { return { px: x.px + (y.px - x.px) * t, pct: x.pct + (y.pct - x.pct) * t }; };
+        /* (rect() and xywh() stay what they are, against their own kind) */
+        var fa = /^\s*(rect|xywh)\(/i.exec(a), fb = /^\s*(rect|xywh)\(/i.exec(b);
+        if (prop !== 'shape-outside' && fa && fb && fa[1].toLowerCase() === fb[1].toLowerCase() && !/\bauto\b/i.test(a + b)) {
+            var args = function (s) { return tfArgs(s.slice(s.indexOf('(') + 1, s.lastIndexOf(')')).split(/\bround\b/)[0].trim()); };
+            var xa = args(a), xb = args(b);
+            var rr = '';
+            if (pa.round || pb.round) {
+                var r0 = combine('clip-path', pa.round || 'round 0px', pb.round || 'round 0px', function (x, y) { return finish('clip-path', x + (y - x) * t); });
+                if (r0 === null) return null;
+                if (!/^round -?0(px)?$/.test(r0)) rr = ' ' + r0;
+            }
+            return fa[1].toLowerCase() + '(' + xa.map(function (x, i) { return lpMixText(lpMix(lpParse(x), lpParse(xb[i]), t)); }).join(' ') + rr + ')';
+        }
         var v = pa.box.map(function (x, i) { return lpText(l(x, pb.box[i])); });
         var txt = v[3] !== v[1] ? v.join(' ') : v[2] !== v[0] ? v.slice(0, 3).join(' ') : v[1] !== v[0] ? v.slice(0, 2).join(' ') : v[0];
         var rv = '';
         if (pa.round || pb.round) {
             var ra = pa.round || 'round 0px', rb = pb.round || 'round 0px', c = combine('clip-path', ra, rb, function (x, y) { return x + (y - x) * t; });
             if (c === null) return null;
-            if (!/^round -?0(px|%)?$/.test(c)) rv = ' ' + c;
+            if (!/^round -?0(px)?$/.test(c)) rv = ' ' + c;
         }
         return 'inset(' + txt + rv + ')';
     }
+    /* ---- shape(): a list of commands, each number by number ---- */
+    function shapeWords(t) {
+        var out = [], d = 0, cur = '';
+        for (var i = 0; i < t.length; i++) {
+            var c = t[i];
+            if (c === '(') d++; else if (c === ')') d--;
+            if (!d && /\s/.test(c)) { if (cur) out.push(cur); cur = ''; } else cur += c;
+        }
+        if (cur) out.push(cur);
+        return out;
+    }
+    function shapeParts(text) {
+        var m = /^\s*shape\(([\s\S]*)\)\s*$/i.exec(text);
+        if (!m) return null;
+        var parts = splitTop(m[1]), out = { rule: '', from: null, cmds: [] };
+        var head = shapeWords(parts[0]);
+        if (head[0] === 'nonzero' || head[0] === 'evenodd') out.rule = head.shift();
+        if (head[0] !== 'from' || head.length !== 3) return null;
+        out.from = [lpParse(head[1]), lpParse(head[2])];
+        for (var i = 1; i < parts.length; i++) {
+            var w = shapeWords(parts[i]), c = { op: w[0], by: w[1] === 'by', pts: [] };
+            if (c.op === 'close') { out.cmds.push(c); continue; }
+            var k = 2;
+            if (c.op === 'hline' || c.op === 'vline') c.pts.push(lpParse(w[k]));
+            else if (c.op === 'line') c.pts.push(lpParse(w[k]), lpParse(w[k + 1]));
+            else if (c.op === 'curve' || c.op === 'smooth') {
+                c.pts.push(lpParse(w[k]), lpParse(w[k + 1]));
+                k += 2;
+                c.anchors = [];
+                c.ctrl = 0;
+                while (k < w.length) {
+                    if (w[k] === 'with' || w[k] === '/') {
+                        c.pts.push(lpParse(w[k + 1]), lpParse(w[k + 2]));
+                        c.ctrl++;
+                        k += 3;
+                        var anchor = c.by ? 'start' : 'origin';
+                        if (w[k] === 'from') { anchor = w[k + 1]; k += 2; }
+                        c.anchors.push(anchor);
+                    } else return null;
+                }
+            } else if (c.op === 'arc') {
+                c.pts.push(lpParse(w[k]), lpParse(w[k + 1]));
+                k += 2;
+                if (w[k] !== 'of') return null;
+                k++;
+                c.pts.push(lpParse(w[k]));
+                c.one = true;
+                k++;
+                if (k < w.length && !/^(cw|ccw|large|small|rotate)$/.test(w[k])) { c.pts.push(lpParse(w[k])); c.one = false; k++; }
+                else c.pts.push(c.pts[c.pts.length - 1]);
+                c.cw = 0; c.large = 0; c.rot = 0;
+                while (k < w.length) {
+                    if (w[k] === 'cw') c.cw = 1;
+                    else if (w[k] === 'large') c.large = 1;
+                    else if (w[k] === 'rotate') { k++; c.rot = parseFloat(w[k]); if (/rad$/.test(w[k])) c.rot *= 180 / Math.PI; else if (/turn$/.test(w[k])) c.rot *= 360; else if (/grad$/.test(w[k])) c.rot *= 0.9; }
+                    k++;
+                }
+            } else return null;
+            out.cmds.push(c);
+        }
+        return out;
+    }
+    /* A path as the commands it comes to, relative ones staying so. */
+    function pathAsShape(text) {
+        var m = PATH_FN.exec(text);
+        if (!m) return null;
+        var re = /([a-zA-Z])|([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)/g, g, toks = [];
+        while ((g = re.exec(m[2]))) toks.push(g[1] ? g[1] : parseFloat(g[2]));
+        var out = { rule: m[1] ? m[1].toLowerCase() : '', from: null, cmds: [] }, i = 0, letter = '';
+        var px = function (v) { return { px: v, pct: 0 }; };
+        var take = function (n) { var a = toks.slice(i, i + n); i += n; return a.map(px); };
+        while (i < toks.length) {
+            if (typeof toks[i] === 'string') letter = toks[i++];
+            var L = letter.toUpperCase(), by = letter !== L, p;
+            if (L === 'Z') { out.cmds.push({ op: 'close', by: false, pts: [] }); continue; }
+            if (L === 'M' && !out.from) { p = take(2); out.from = p; letter = by ? 'l' : 'L'; continue; }
+            if (L === 'L' || L === 'M') out.cmds.push({ op: 'line', by: by, pts: take(2) });
+            else if (L === 'H') out.cmds.push({ op: 'hline', by: by, pts: take(1) });
+            else if (L === 'V') out.cmds.push({ op: 'vline', by: by, pts: take(1) });
+            else if (L === 'C') { p = take(6); out.cmds.push({ op: 'curve', by: by, ctrl: 2, anchors: by ? ['start', 'start'] : ['origin', 'origin'], pts: [p[4], p[5], p[0], p[1], p[2], p[3]] }); }
+            else if (L === 'Q') { p = take(4); out.cmds.push({ op: 'curve', by: by, ctrl: 1, anchors: [by ? 'start' : 'origin'], pts: [p[2], p[3], p[0], p[1]] }); }
+            else if (L === 'S') { p = take(4); out.cmds.push({ op: 'smooth', by: by, ctrl: 1, anchors: [by ? 'start' : 'origin'], pts: [p[2], p[3], p[0], p[1]] }); }
+            else if (L === 'T') { p = take(2); out.cmds.push({ op: 'smooth', by: by, ctrl: 0, anchors: [], pts: [p[0], p[1]] }); }
+            else if (L === 'A') {
+                var a = toks.slice(i, i + 7);
+                i += 7;
+                out.cmds.push({ op: 'arc', by: by, one: false, cw: a[4] ? 1 : 0, large: a[3] ? 1 : 0, rot: a[2], pts: [px(a[5]), px(a[6]), px(a[0]), px(a[1])] });
+            } else return null;
+        }
+        return out.from ? out : null;
+    }
+    function lpMix(x, y, t) { return { px: x.px + (y.px - x.px) * t, pct: x.pct + (y.pct - x.pct) * t, has: x.has || y.has }; }
+    /* (a zero stays a percentage where one was in it) */
+    function lpMixText(v) { return !v.pct && !v.px && v.has ? '0%' : lpText(v); }
+    function shapeText(s, pts) {
+        return 'shape(' + (s.rule && s.rule !== 'nonzero' ? s.rule + ' ' : '') + 'from ' + lpMixText(s.from[0]) + ' ' + lpMixText(s.from[1]) + s.cmds.map(function (c) {
+            var o = ', ' + c.op;
+            if (c.op === 'close') return o;
+            o += c.by ? ' by ' : ' to ';
+            var p = c.pts.map(lpMixText);
+            if (c.op === 'hline' || c.op === 'vline') return o + p[0];
+            o += p[0] + ' ' + p[1];
+            if (c.op === 'line') return o;
+            if (c.op === 'arc') {
+                o += ' of ' + p[2];
+                if (!(c.one && p[2] === p[3])) o += ' ' + p[3];
+                if (c.cw) o += ' cw';
+                if (c.large) o += ' large';
+                if (c.rot) o += ' rotate ' + fmt(c.rot) + 'deg';
+                return o;
+            }
+            var dflt = c.by ? 'start' : 'origin';
+            for (var q = 0; q < c.ctrl; q++) {
+                o += (q ? ' / ' : ' with ') + p[2 + 2 * q] + ' ' + p[3 + 2 * q];
+                if (c.anchors[q] !== dflt) o += ' from ' + c.anchors[q];
+            }
+            return o;
+        }).join('') + ')';
+    }
+    function shapeInterpolate(a, b, t) {
+        var isA = /^\s*shape\(/i.test(a), isB = /^\s*shape\(/i.test(b);
+        if (!isA && !isB) return null;
+        var x = isA ? shapeParts(a) : pathAsShape(a), y = isB ? shapeParts(b) : pathAsShape(b);
+        if (!x || !y || (x.rule || 'nonzero') !== (y.rule || 'nonzero') || x.cmds.length !== y.cmds.length) return null;
+        var out = { rule: x.rule, from: [lpMix(x.from[0], y.from[0], t), lpMix(x.from[1], y.from[1], t)], cmds: [] };
+        for (var i = 0; i < x.cmds.length; i++) {
+            var c = x.cmds[i], d = y.cmds[i];
+            if (c.op !== d.op || c.by !== d.by || c.pts.length !== d.pts.length) return null;
+            if (c.anchors && c.anchors.join() !== d.anchors.join()) return null;
+            var m = { op: c.op, by: c.by, pts: c.pts.map(function (p, k) { return lpMix(p, d.pts[k], t); }), anchors: c.anchors, ctrl: c.ctrl };
+            if (c.op === 'arc') {
+                m.one = c.one && d.one;
+                m.cw = c.cw + (d.cw - c.cw) * t !== 0 ? 1 : 0;
+                m.large = c.large + (d.large - c.large) * t !== 0 ? 1 : 0;
+                m.rot = c.rot + (d.rot - c.rot) * t;
+            }
+            out.cmds.push(m);
+        }
+        return shapeText(out);
+    }
+    /* ---- gap rules: a list, its repeat()s written out; repeat(auto) stays in its place ---- */
+    function ruleExpand(text) {
+        var items = [], auto = null;
+        splitTop(text).forEach(function (w) {
+            var m = /^repeat\(\s*(\d+|auto)\s*,([\s\S]*)\)$/i.exec(w.trim());
+            if (!m) { items.push(w.trim()); return; }
+            var kids = splitTop(m[2]).map(function (x) { return x.trim(); });
+            if (m[1].toLowerCase() === 'auto') { auto = { at: items.length, kids: kids }; return; }
+            for (var i = 0; i < parseInt(m[1], 10); i++) items.push.apply(items, kids);
+        });
+        return { items: items, auto: auto };
+    }
+    function ruleInterpolate(prop, a, b, t) {
+        var x = ruleExpand(a), y = ruleExpand(b), one = function (p, q) { return p === q ? p : interpolate(prop, p, q, t); };
+        if (!x.auto && !y.auto) {
+            if (x.items.length === 1 && y.items.length === 1) return null;
+            var n = x.items.length * y.items.length / gcd(x.items.length, y.items.length), out = [];
+            for (var i = 0; i < n; i++) out.push(one(x.items[i % x.items.length], y.items[i % y.items.length]));
+            return out.join(', ');
+        }
+        if (!x.auto || !y.auto || x.auto.at !== y.auto.at || x.items.length !== y.items.length) return null;
+        var res = x.items.map(function (p, k) { return one(p, y.items[k]); });
+        var nk = x.auto.kids.length * y.auto.kids.length / gcd(x.auto.kids.length, y.auto.kids.length), kids = [];
+        for (var q = 0; q < nk; q++) kids.push(one(x.auto.kids[q % x.auto.kids.length], y.auto.kids[q % y.auto.kids.length]));
+        res.splice(x.auto.at, 0, 'repeat(auto, ' + kids.join(', ') + ')');
+        return res.join(', ');
+    }
+    var RULE_LIST = /^(column|row)-rule-(width|color)$/;
     var SHAPE_PROP = /^(clip-path|shape-outside|offset-path)$/;
     /* (four numbers that are one, or two, as box values come to) */
     function boxCollapse(v) {
@@ -950,6 +1153,10 @@
             a = two(a);
             b = two(b);
         }
+        if (RULE_LIST.test(prop) && /,|repeat\(/i.test(String(a) + String(b))) {
+            var rl = ruleInterpolate(prop, String(a), String(b), t);
+            if (rl !== null) return rl;
+        }
         if (a === b) return a;
         if (/color|shadow|background|border|outline|fill|stroke|caret|accent/.test(prop) && tfEl) {
             var pairs = wideColorPairs(a, b);
@@ -972,7 +1179,13 @@
         var lerpHow = function (x, y) { return x + (y - x) * t; };
         if (SHAPE_PROP.test(prop)) {
             var sh = pathInterpolate(a, b, t);
-            if (sh === null) sh = insetInterpolate(a, b, t);
+            if (sh === null) sh = shapeInterpolate(a, b, t);
+            if (sh === null) sh = insetInterpolate(a, b, t, prop);
+            /* (no rounding is no round at all) */
+            if (sh === null && /^\s*polygon\(/i.test(a)) {
+                var pg = combine(prop, a, b, lerpHow);
+                if (pg !== null) sh = pg.replace(/polygon\(((?:nonzero|evenodd),\s*)?round 0(px)?,\s*/i, 'polygon($1');
+            }
             if (sh !== null) return sh;
         }
         if (/^(border-image|mask-border)-(slice|width|outset)$/.test(prop)) {
@@ -1073,7 +1286,9 @@
     function needsResolving(prop, value) {
         /* (what a keyword or a left-out color comes to, in the computed form) */
         if (/^(box-shadow|text-shadow|font-stretch|font-width|corner-.*-shape)$/.test(prop) && value !== 'none') return true;
-        if (/^(clip-path|shape-outside|offset-path)$/.test(prop) && /\bat\b|closest-|farthest-/.test(value)) return true;
+        if (/^(clip-path|shape-outside|offset-path)$/.test(prop) && /\bat\b|closest-|farthest-|shape\(/.test(value)) return true;
+        if (/^(column|row)-rule-width$/.test(prop) && /thin|medium|thick/.test(value)) return true;
+        if (prop === 'zoom' && !/^\s*[\d.]+\s*$/.test(value)) return true;
         if (/^(min-|max-)?(width|height)$/.test(prop) && /calc-size\(|^\s*(auto|min-content|max-content|fit-content|stretch)\s*$/i.test(value)) return true;
         if (RELATIVE.test(value)) return true;
         if (COLORISH.test(prop) && !/^\s*[-+\d.]/.test(value) && value !== 'none') return true;
@@ -1293,7 +1508,8 @@
                 var discrete = listItem(cs.transitionBehavior || 'normal', at) === 'allow-discrete';
                 var id = function (x) { return x; };
                 var can = /^(transform|filter|backdrop-filter|translate|rotate|scale|transform-origin|font-palette)$/.test(prop) ||
-                          (SHAPE_PROP.test(prop) && (pathInterpolate(from, base, 0) !== null || insetInterpolate(from, base, 0) !== null)) ||
+                          (SHAPE_PROP.test(prop) && (pathInterpolate(from, base, 0) !== null || shapeInterpolate(from, base, 0) !== null || insetInterpolate(from, base, 0, prop) !== null)) ||
+                          (RULE_LIST.test(prop) && /repeat\(/i.test(from + base) && ruleInterpolate(prop, from, base, 0) !== null) ||
                           (REPEATABLE.test(prop) ? repeatableInterpolate(prop, from, base, id) !== null :
                            prop === 'box-shadow' || prop === 'text-shadow' ? shadowInterpolate(prop, from, base, id) !== null :
                            prop === 'aspect-ratio' ? (function () { var p0 = ratioParts(from), p1 = ratioParts(base); return !!(p0 && p1 && p0.auto === p1.auto && p0.w && p0.h && p1.w && p1.h); })() :

@@ -681,6 +681,176 @@
     var CSSNamespaceRule = subclass('CSSNamespaceRule', CSSRule);
     var CSSFontFaceRule = subclass('CSSFontFaceRule', CSSRule);
     var CSSPageRule = subclass('CSSPageRule', CSSGroupingRule);
+    /* @font-feature-values: the names of feature values, by kind */
+    var FFV_KINDS = { 'stylistic': 1, 'historical-forms': 1, 'styleset': 0, 'character-variant': 2, 'swash': 1, 'ornaments': 1, 'annotation': 1 };
+    var CSSFontFeatureValuesRule = subclass('CSSFontFeatureValuesRule', CSSRule);
+    getter(CSSFontFeatureValuesRule.prototype, 'fontFamily', function () { return this.__family; });
+    CSSFontFeatureValuesRule.prototype.__text = function () {
+        var maps = this.__maps, out = '@font-feature-values ' + this.__family + ' {';
+        Object.keys(FFV_KINDS).forEach(function (k) {
+            if (!maps[k] || !maps[k].length) return;
+            out += ' @' + k + ' {' + maps[k].map(function (e) { return ' ' + e[0] + ': ' + e[1].join(' ') + ';'; }).join('') + ' }';
+        });
+        return out + ' }';
+    };
+    function ffvFamily(prelude) {
+        var parts = prelude.split(','), out = [];
+        for (var i = 0; i < parts.length; i++) {
+            var t = parts[i].trim();
+            if (/^"[^"]*"$|^'[^']*'$/.test(t)) { out.push(t[0] === "'" ? '"' + t.slice(1, -1) + '"' : t); continue; }
+            if (!t || !/^(?:(?:[a-zA-Z_]|[^\x00-\x7f]|\\.)(?:[\w-]|[^\x00-\x7f]|\\.)*\s*)+$/.test(t)) return null;
+            if (/^(serif|sans-serif|monospace|cursive|fantasy|system-ui|math|emoji|fangsong|ui-serif|ui-sans-serif|ui-monospace|ui-rounded|initial|inherit|unset|revert|revert-layer|default)$/i.test(t)) return null;
+            out.push(t.replace(/\s+/g, ' '));
+        }
+        return out.length ? out.join(', ') : null;
+    }
+    function ffvIdent(s) {
+        s = s.trim().replace(/\\([0-9a-fA-F]{1,6})\s?/g, function (m, h) { return String.fromCodePoint(parseInt(h, 16)); });
+        s = s.replace(/\\([^:\s])/g, '$1');
+        if (!/^(?:[a-zA-Z_-]|[^\x00-\x7f]|\\.)(?:[\w-]|[^\x00-\x7f]|\\.)*$/.test(s) || /^--/.test(s)) return null;
+        return s;
+    }
+    function ffvBlock(block, maps) {
+        var i = 0, n = block.length;
+        while (i < n) {
+            if (block[i] !== '@') {
+                var semi = block.indexOf(';', i);
+                var brace = block.indexOf('{', i);
+                if (brace >= 0 && (semi < 0 || brace < semi)) {
+                    var dq = 1, eq = brace + 1;
+                    for (; eq < n && dq; eq++) { if (block[eq] === '{') dq++; else if (block[eq] === '}') dq--; }
+                    i = eq;
+                    continue;
+                }
+                i = semi < 0 ? n : semi + 1;
+                continue;
+            }
+            var o = i;
+            while (o < n && block[o] !== '{' && block[o] !== ';') o++;
+            var head = block.slice(i + 1, o).trim().toLowerCase();
+            if (o >= n || block[o] === ';') { i = o + 1; continue; }
+            var d = 1, e = o + 1;
+            for (; e < n && d; e++) { if (block[e] === '{') d++; else if (block[e] === '}') d--; }
+            var body = block.slice(o + 1, d ? e : e - 1);
+            i = e;
+            if (!Object.prototype.hasOwnProperty.call(FFV_KINDS, head)) continue;
+            var list = maps[head] || (maps[head] = []), max = FFV_KINDS[head];
+            body.split(';').forEach(function (decl) {
+                var c = decl.search(/(^|[^\\]):/);
+                if (c < 0) return;
+                if (decl[c] !== ':') c++;
+                var name = ffvIdent(decl.slice(0, c));
+                var vals = decl.slice(c + 1).trim();
+                if (!name || !/^\d+(\s+\d+)*$/.test(vals)) return;
+                var nums = vals.split(/\s+/);
+                if (max && nums.length > max) return;
+                var was = list.filter(function (x) { return x[0] === name; })[0];
+                if (was) was[1] = nums; else list.push([name, nums]);
+            });
+        }
+    }
+    /* @font-palette-values */
+    var CSSFontPaletteValuesRule = subclass('CSSFontPaletteValuesRule', CSSRule);
+    getter(CSSFontPaletteValuesRule.prototype, 'name', function () { return this.__name; });
+    getter(CSSFontPaletteValuesRule.prototype, 'fontFamily', function () { return this.__family; });
+    getter(CSSFontPaletteValuesRule.prototype, 'basePalette', function () { return this.__base; });
+    getter(CSSFontPaletteValuesRule.prototype, 'overrideColors', function () { return this.__colors; });
+    CSSFontPaletteValuesRule.prototype.__text = function () {
+        var s = '@font-palette-values ' + this.__name + ' {';
+        if (this.__family) s += ' font-family: ' + this.__family + ';';
+        if (this.__base) s += ' base-palette: ' + this.__base + ';';
+        if (this.__colors) s += ' override-colors: ' + this.__colors + ';';
+        return s + ' }';
+    };
+    function paletteColor(t) {
+        var probe = global.document && global.document.createElement('div');
+        if (!probe) return null;
+        probe.style.color = t;
+        return probe.style.color || null;
+    }
+    function paletteBlock(r, block) {
+        block.split(';').forEach(function (decl) {
+            var c = decl.indexOf(':');
+            if (c < 0) return;
+            var name = decl.slice(0, c).trim().toLowerCase(), val = decl.slice(c + 1).trim();
+            if (/!\s*important\s*$/i.test(val)) return;
+            if (name === 'font-family') {
+                if (!val || /^(serif|sans-serif|monospace|cursive|fantasy|system-ui|initial|inherit|unset|revert|revert-layer|default)$/i.test(val)) return;
+                if (/^(?:"[^"]*"|'[^']*'|[a-zA-Z_][\w-]*(?:\s+[a-zA-Z_][\w-]*)*)(?:\s*,\s*(?:"[^"]*"|'[^']*'|[a-zA-Z_][\w-]*(?:\s+[a-zA-Z_][\w-]*)*))*$/.test(val)) r.__family = val.replace(/'([^']*)'/g, '"$1"');
+            } else if (name === 'base-palette') {
+                if (/^(light|dark)$/i.test(val)) r.__base = val.toLowerCase();
+                else if (/^\+?\d+$/.test(val)) r.__base = String(parseInt(val, 10));
+            } else if (name === 'override-colors') {
+                var depth = 0, cur = '', parts = [];
+                for (var i = 0; i < val.length; i++) {
+                    var ch = val[i];
+                    if (ch === '(') depth++; else if (ch === ')') depth--;
+                    if (ch === ',' && !depth) { parts.push(cur); cur = ''; } else cur += ch;
+                }
+                parts.push(cur);
+                var out = [];
+                for (var k = 0; k < parts.length; k++) {
+                    var m = /^\s*(\d+)\s+([\s\S]+?)\s*$/.exec(parts[k]);
+                    if (!m) return;
+                    /* (nothing that depends on where it's used) */
+                    if (/currentcolor|^(?:Canvas|ButtonText)$/i.test(m[2])) return;
+                    var col = paletteColor(m[2]);
+                    if (!col) return;
+                    out.push(m[1] + ' ' + col);
+                }
+                r.__colors = out.join(', ');
+            }
+        });
+    }
+    /* unicode-range: its text in the short form, or null */
+    function urangeOne(t) {
+        t = t.replace(/\/\*[\s\S]*?\*\//g, '').trim();
+        var m = /^u\+([0-9a-f?]{1,6})(?:-([0-9a-f]{1,6}))?$/i.exec(t);
+        if (!m) return null;
+        var lo, hi;
+        if (/\?/.test(m[1])) {
+            if (m[2] || !/^[0-9a-f]*\?+$/i.test(m[1])) return null;
+            lo = parseInt(m[1].replace(/\?/g, '0'), 16);
+            hi = parseInt(m[1].replace(/\?/g, 'F'), 16);
+        } else {
+            lo = parseInt(m[1], 16);
+            hi = m[2] ? parseInt(m[2], 16) : lo;
+        }
+        if (hi > 0x10FFFF || lo > hi) return null;
+        return 'U+' + lo.toString(16).toUpperCase() + (hi !== lo ? '-' + hi.toString(16).toUpperCase() : '');
+    }
+    function urangeCanon(text) {
+        var parts = String(text).split(','), out = [];
+        for (var i = 0; i < parts.length; i++) {
+            var u = urangeOne(parts[i]);
+            if (u === null) return null;
+            out.push(u);
+        }
+        return out.join(', ');
+    }
+    /* A @font-face rule's style, with its unicode-range. */
+    function fontFaceStyle(style, block) {
+        var range = null;
+        var m = /(?:^|;)\s*unicode-range\s*:\s*([^;]*)/i.exec(block);
+        if (m) range = urangeCanon(m[1]);
+        var set = style.setProperty, get = style.getPropertyValue, remove = style.removeProperty;
+        var is = function (n) { return String(n).trim().toLowerCase() === 'unicode-range'; };
+        Object.defineProperty(style, 'setProperty', { configurable: true, writable: true, value: function setProperty(n, v, pri) {
+            if (!is(n)) return set.call(this, n, v, pri);
+            var c = urangeCanon(v);
+            if (c !== null) range = c;
+        } });
+        Object.defineProperty(style, 'getPropertyValue', { configurable: true, writable: true, value: function getPropertyValue(n) {
+            return is(n) ? (range === null ? '' : range) : get.call(this, n);
+        } });
+        Object.defineProperty(style, 'removeProperty', { configurable: true, writable: true, value: function removeProperty(n) {
+            if (!is(n)) return remove.call(this, n);
+            var was = range === null ? '' : range;
+            range = null;
+            return was;
+        } });
+        return style;
+    }
     /* @function (css-mixins) */
     var CSSFunctionRule = subclass('CSSFunctionRule', CSSGroupingRule);
     getter(CSSFunctionRule.prototype, 'name', function () { return fnUnescape(this.__name); });
@@ -1261,7 +1431,19 @@
             case 'font-face':
                 if (p.block === null || p.prelude) return null;
                 r = makeRule(CSSFontFaceRule, 'font-face', { __style: null });
-                r.__style = decls(p.block, r);
+                r.__style = fontFaceStyle(decls(p.block, r), p.block);
+                break;
+            case 'font-feature-values':
+                if (p.block === null) return null;
+                var ffam = ffvFamily(p.prelude);
+                if (ffam === null) return null;
+                r = makeRule(CSSFontFeatureValuesRule, 'font-feature-values', { __family: ffam, __maps: {} });
+                ffvBlock(p.block, r.__maps);
+                break;
+            case 'font-palette-values':
+                if (p.block === null || !/^--(?:[\w-]|[^\x00-\x7f]|\\.)+$/.test(p.prelude)) return null;
+                r = makeRule(CSSFontPaletteValuesRule, 'font-palette-values', { __name: p.prelude, __family: '', __base: '', __colors: '' });
+                paletteBlock(r, p.block);
                 break;
             case 'function':
                 if (p.block === null) return null;

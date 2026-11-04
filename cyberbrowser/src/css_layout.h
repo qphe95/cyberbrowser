@@ -839,6 +839,7 @@ struct HtmlNode *css_layout_box_node(const LayoutContext *ctx, int idx);
  * scrolled; and what its scrolled ancestors move it by (fixed: it is on the
  * viewport, whatever that has scrolled). */
 void css_layout_extent(const LayoutContext *ctx, int idx, double *right, double *bottom);
+void css_layout_extent_start(const LayoutContext *ctx, int idx, double *left, double *top);
 /* The elements of the documents laid out whose style has a CSS_FEAT_* bit, in
  * tree order (each document's as of its last layout), and how many layouts
  * there have been. */

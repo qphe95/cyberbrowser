@@ -176,6 +176,7 @@ static ComputedStyle *parent_of(JSContextHandle ctx, ComputedStyle *cs) {
     return cs->parent;
 }
 
+extern double css_length_value(const char *value, double base, double viewport, double font_size);
 static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p);
 
 static const char *computed_of(JSContextHandle ctx, ComputedStyle *cs, const char *name) {
@@ -662,7 +663,10 @@ static void grid_tracks_walk(const char *s, const char *e, const double *tr, int
             q++;
         }
         if (*s == '[') {
-            GT_PUT(s, (size_t)(q - s));
+            /* (no names: nothing to show) */
+            const char *ne = s + 1;
+            while (ne < q && (isspace((unsigned char)*ne))) ne++;
+            if (*ne != ']') GT_PUT(s, (size_t)(q - s));
         } else if (!strncasecmp(s, "repeat(", 7)) {
             const char *c = memchr(s, ',', (size_t)(q - s));
             if (c) {
@@ -889,6 +893,90 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
             }
         }
         #undef in_calc
+    }
+    /* (scale in percentages: as the numbers they are, the last ones if they add nothing) */
+    if (r && !strcmp(n, "scale") && strcmp(r, "none") && !strstr(r, "calc(")) {
+        double v[3];
+        int nv = 0;
+        char *q = r, *e;
+        while (nv < 3 && *q) {
+            v[nv] = strtod(q, &e);
+            if (e == q) { nv = -1; break; }
+            if (*e == '%') { v[nv] /= 100.0; e++; }
+            nv++;
+            q = e;
+            while (*q == ' ') q++;
+        }
+        if (nv > 0 && !*q) {
+            if (nv == 3 && v[2] == 1.0) nv = 2;
+            if (nv == 2 && v[0] == v[1]) nv = 1;
+            char t[96];
+            int o = 0;
+            for (int k = 0; k < nv; k++) o += snprintf(t + o, sizeof t - (size_t)o, "%s%.6g", k ? " " : "", v[k]);
+            free(r);
+            r = strdup(t);
+        }
+    }
+    /* (filter: amounts as the numbers they come to, each in its range) */
+    if (r && (!strcmp(n, "filter") || !strcmp(n, "backdrop-filter")) && strcmp(r, "none")) {
+        /* (left out: what does nothing) */
+        static const struct { const char *e, *full; } empties[] = { { "blur()", "blur(0px)" }, { "hue-rotate()", "hue-rotate(0deg)" } };
+        for (size_t k = 0; k < 2; k++) {
+            char *at = strstr(r, empties[k].e);
+            if (!at) continue;
+            size_t pre = (size_t)(at - r), el = strlen(empties[k].e), fl = strlen(empties[k].full), tail = strlen(at + el);
+            char *nr = (char *)malloc(pre + fl + tail + 1);
+            if (!nr) break;
+            memcpy(nr, r, pre);
+            memcpy(nr + pre, empties[k].full, fl);
+            memcpy(nr + pre + fl, at + el, tail + 1);
+            free(r);
+            r = nr;
+        }
+        static const struct { const char *f; bool capped; } am[] = {
+            { "brightness(", false }, { "contrast(", false }, { "saturate(", false },
+            { "grayscale(", true }, { "invert(", true }, { "opacity(", true }, { "sepia(", true } };
+        for (size_t k = 0; k < sizeof am / sizeof am[0]; k++) {
+            size_t fl = strlen(am[k].f);
+            for (char *at = strstr(r, am[k].f); at; at = strstr(at + 1, am[k].f)) {
+                char *open = at + fl, *close = open;
+                int d = 1;
+                while (*close && d) { if (*close == '(') d++; else if (*close == ')') d--; if (d) close++; }
+                if (!*close) break;
+                char arg[160];
+                size_t al = (size_t)(close - open);
+                if (al >= sizeof arg) continue;
+                memcpy(arg, open, al);
+                arg[al] = 0;
+                double val = al ? css_length_value(arg, 1.0, 0.0, 16.0) : 1.0;
+                if (al && strchr(arg, '%') && !strchr(arg, '(')) val = atof(arg) / 100.0;
+                else if (al && !strchr(arg, '(') && !strchr(arg, '%')) val = atof(arg);
+                if (val < 0.0) val = 0.0;
+                if (am[k].capped && val > 1.0) val = 1.0;
+                char num[48];
+                int nl = snprintf(num, sizeof num, "%.6g", val);
+                size_t pre = (size_t)(open - r), tail = strlen(close);
+                char *nr = (char *)malloc(pre + (size_t)nl + tail + 1);
+                if (!nr) break;
+                memcpy(nr, r, pre);
+                memcpy(nr + pre, num, (size_t)nl);
+                memcpy(nr + pre + (size_t)nl, close, tail + 1);
+                at = nr + (at - r);
+                free(r);
+                r = nr;
+            }
+        }
+    }
+    /* (shape(): the defaults of an arc go without saying) */
+    if (r && strstr(r, "shape(") && (!strcmp(n, "clip-path") || !strcmp(n, "offset-path") || !strcmp(n, "shape-outside"))) {
+        static const char *const words[] = { " ccw", " small" };
+        for (int k = 0; k < 2; k++) {
+            size_t wl = strlen(words[k]);
+            for (char *w = strstr(r, words[k]); w; w = strstr(w, words[k])) {
+                if (w[wl] == ',' || w[wl] == ' ' || w[wl] == ')') memmove(w, w + wl, strlen(w + wl) + 1);
+                else w += wl;
+            }
+        }
     }
     /* (position-area: logical words short when there are two; beside span-all
      * a word of either axis says which) */
