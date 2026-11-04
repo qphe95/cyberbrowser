@@ -135,6 +135,7 @@ static void refresh(JSContextHandle ctx, ComputedStyle *cs) {
     if (cs->pseudo) {
         memset(&cs->used, 0, sizeof cs->used);
         cs->styled = JS_IsObject(el) && dom_kind(cs->el) == DOM_K_ELEMENT;
+        if (cs->styled) layout_query_pseudo_cascade(ctx, el, cs->pseudo, collect, cs);
     } else {
         cs->styled = JS_IsObject(el) && dom_kind(cs->el) == DOM_K_ELEMENT &&
                      layout_query_cascade(ctx, el, collect, cs, &cs->used);
@@ -289,6 +290,8 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
     const char *n = p->name;
     /* (an element's default display is the user agent's: what layout gave it) */
     if (!s && !strcmp(n, "display") && cs->used.display) s = cs->used.display;
+    /* (a pseudo-element's math is flow: only math elements have its layout) */
+    if (s && cs->pseudo && !strcmp(n, "display") && strstr(s, "math")) s = strstr(s, "block") ? "block" : "inline";
     if (!s || !strcmp(s, "unset") || !strcmp(s, "revert") || !strcmp(s, "revert-layer"))
         s = p->inherited ? "inherit" : "initial";
     char *r;

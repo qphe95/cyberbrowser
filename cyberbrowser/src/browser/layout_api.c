@@ -1489,6 +1489,24 @@ static int lq_styled_holder(NodeId id)
     return h;
 }
 
+bool layout_query_pseudo_cascade(JSContextHandle ctx, GCValue element, int ps, LayoutCascadeFn fn, void *ud)
+{
+    NodeId id = dom_node_of(element);
+    if (!lq_style_ready(ctx, id)) return false;
+    int idx = lq_box_index(id);
+    if (idx < 0) return true;
+    for (int pass = 0; pass < 2; pass++) {
+        /* (::scroll-marker's :target-current ones, when it is) */
+        int side = pass ? ps + 1 : ps;
+        if (pass && !(ps == 6 && (g_dom.state[dom_slot(id)] & DOM_ST_TARGET_CURRENT))) break;
+        const CssDeclaration *const *ds = NULL;
+        int n = css_layout_pseudo_decls(&g_lq_layout, idx, side, &ds);
+        for (int d = 0; d < n; d++)
+            if (ds[d]->property && ds[d]->value) fn(ud, ds[d]->property, ds[d]->value, ds[d]->important);
+    }
+    return true;
+}
+
 bool layout_query_cascade(JSContextHandle ctx, GCValue element, LayoutCascadeFn fn, void *ud, LayoutQueryUsed *used)
 {
     memset(used, 0, sizeof(*used));
@@ -2033,6 +2051,54 @@ int layout_scroll_tick(JSContextHandle ctx)
     return (int)n;
 }
 
+/* __cyberScrollPseudoAt(x, y): the ::scroll-marker or ::scroll-button at a
+ * client point: [its owner, its kind], or null. */
+static GCValue js_scroll_pseudo_at(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    double x = 0, y = 0;
+    if (!g_css_scroll_pseudos || argc < 2 || JS_ToFloat64(ctx, &x, argv[0]) || JS_ToFloat64(ctx, &y, argv[1])) return JS_NULL;
+    lq_ensure(ctx);
+    if (!g_lq_valid) return JS_NULL;
+    for (int j = css_layout_pseudo_pair_count(&g_lq_layout) - 1; j >= 0; j--) {
+        int box, owner, side;
+        if (!css_layout_scroll_pseudo(&g_lq_layout, j, &box, &owner, &side) || side == 7) continue;
+        const HtmlNode *on = css_layout_box_node(&g_lq_layout, owner);
+        if (!on || !dom_valid(on->store_id)) continue;
+        const LayoutBox *b = &g_lq_layout.boxes[box];
+        double dx, dy;
+        lq_client_shift(on->store_id, box, &dx, &dy);
+        double l = b->x + dx, t = b->y + dy;
+        if (x < l || y < t || x >= l + b->width || y >= t + b->height) continue;
+        GCValue out = JS_NewArray(ctx);
+        JS_SetPropertyUint32(ctx, out, 0, dom_js(ctx, on->store_id));
+        JS_SetPropertyUint32(ctx, out, 1, JS_NewInt32(ctx, side));
+        return out;
+    }
+    return JS_NULL;
+}
+
+/* __cyberScrollMarkerTargets(scroller): the elements of its group's markers. */
+static GCValue js_scroll_marker_targets(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    GCValue list = JS_NewArray(ctx);
+    NodeId sc = argc > 0 ? dom_node_of(argv[0]) : DOM_NULL;
+    if (!sc || !g_css_scroll_pseudos) return list;
+    lq_ensure(ctx);
+    if (!g_lq_valid) return list;
+    int si = lq_box_index(sc);
+    uint32_t k = 0;
+    for (int j = 0, n = css_layout_pseudo_pair_count(&g_lq_layout); si >= 0 && j < n; j++) {
+        int box, owner, side;
+        if (!css_layout_scroll_pseudo(&g_lq_layout, j, &box, &owner, &side) || side != 5) continue;
+        if (css_layout_scroll_pseudo_owner(&g_lq_layout, g_lq_layout.tree.nodes[box].parent_idx) != si) continue;
+        const HtmlNode *on = css_layout_box_node(&g_lq_layout, owner);
+        if (on && dom_valid(on->store_id)) JS_SetPropertyUint32(ctx, list, k++, dom_js(ctx, on->store_id));
+    }
+    return list;
+}
+
 /* __cyberRenderElements(mask): those of this realm's document with a bit of
  * mask, in tree order. */
 static GCValue js_render_elements(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
@@ -2102,6 +2168,10 @@ static void define_accessor(JSContextHandle ctx, GCValue proto, const char *name
 void layout_api_install(JSContextHandle ctx, GCValue element_proto)
 {
     if (!JS_IsObject(element_proto)) return;
+    JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberScrollPseudoAt",
+                              JS_NewCFunction(ctx, js_scroll_pseudo_at, "__cyberScrollPseudoAt", 2), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberScrollMarkerTargets",
+                              JS_NewCFunction(ctx, js_scroll_marker_targets, "__cyberScrollMarkerTargets", 1), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberRenderElements",
                               JS_NewCFunction(ctx, js_render_elements, "__cyberRenderElements", 1), JS_PROP_CONFIGURABLE);
     define_accessor(ctx, element_proto, "offsetWidth", js_offset_width, NULL);

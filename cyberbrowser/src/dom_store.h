@@ -109,6 +109,7 @@ enum {
     DOM_ST_INDETERMINATE = 1 << 8, DOM_ST_PLAYING = 1 << 9, DOM_ST_MUTED = 1 << 10, DOM_ST_SEEKING = 1 << 11,
     DOM_ST_BUFFERING = 1 << 12, DOM_ST_STALLED = 1 << 13,
     DOM_ST_MUTE_SET = 1 << 14,      /* its mutedness is its own, not the attribute's */
+    DOM_ST_TARGET_CURRENT = 1 << 15, /* its ::scroll-marker is its group's active one */
     DOM_ST_PAUSED = 1 << 16, DOM_ST_ENABLED = 1 << 17, DOM_ST_DISABLED = 1 << 18, DOM_ST_READ_WRITE = 1 << 19,
     DOM_ST_READ_ONLY = 1 << 20, DOM_ST_REQUIRED = 1 << 21, DOM_ST_OPTIONAL = 1 << 22,
 };

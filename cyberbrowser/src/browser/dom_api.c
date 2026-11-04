@@ -5210,6 +5210,12 @@ static GCValue hit_test_layout_node(JSContextHandle ctx, LayoutContext *layout, 
     over = hit_positioned(ctx, layout, box, last_child, x, y, sx, sy, true);
     if (!JS_IsNull(over)) return over;
 
+    /* (a scroll marker or button, not in its owner's box: its owner) */
+    int scroll_owner = inside && g_css_scroll_pseudos ? css_layout_scroll_pseudo_owner(layout, idx) : -1;
+    if (scroll_owner >= 0) {
+        const HtmlNode *on = css_layout_box_node(layout, scroll_owner);
+        if (on && dom_valid(on->store_id)) return dom_js(ctx, on->store_id);
+    }
     if (inside && box->s->visibility != CSS_VISIBILITY_HIDDEN && ref->dom_node_idx >= 0 && layout->doc) {
         HtmlNode *hnode = (HtmlNode *)po_array_payload(&layout->doc->array, ref->dom_node_idx);
         if (hnode && hnode->type == HTML_NODE_ELEMENT && dom_valid(hnode->store_id) &&

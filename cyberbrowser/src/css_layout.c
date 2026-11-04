@@ -1383,6 +1383,8 @@ static unsigned layout_apply_shorthand_sides(LayoutBox *box, const char *value,
 
 static CssDisplay layout_default_display(const char *tag_name) {
     if (!tag_name || !tag_name[0]) return CSS_DISPLAY_BLOCK;
+    if (tag_name[0] == ':' && !strncmp(tag_name, "::scroll-", 9))
+        return !strcmp(tag_name, "::scroll-marker-group") ? CSS_DISPLAY_BLOCK : CSS_DISPLAY_INLINE_BLOCK;
     /* Sorted by name (binary search; it runs for every styled element):
      *   none: non-rendered metadata tags generate no boxes;
      *   inline-block: form controls (HTML UA stylesheet);
@@ -1959,6 +1961,14 @@ static void layout_set_inset(LayoutBox *box, int side, const char *value,
         box->s->inset_pct[side] = css_parse_percent_ratio(value);
         box->s->inset_pct_bits |= (unsigned char)(1u << side);
         *dst[side] = 0.0;
+    } else if (!strncasecmp(value, "calc(", 5) && strchr(value, '%')) {
+        /* (linear: its value at two sizes gives the percentage and the rest,
+         * until the containing block is known) */
+        double at0 = css_parse_length(value, 0.0, vw, box->s->font_size);
+        double at1000 = css_parse_length(value, 1000.0, vw, box->s->font_size);
+        box->s->inset_pct[side] = (float)((at1000 - at0) / 1000.0);
+        box->s->inset_pct_bits |= (unsigned char)(1u << side);
+        *dst[side] = at0;
     } else {
         *dst[side] = css_parse_length(value, pw, vw, box->s->font_size);
     }
@@ -1968,10 +1978,10 @@ static void layout_set_inset(LayoutBox *box, int side, const char *value,
 /* Resolve the used insets against a containing block. */
 static void layout_resolve_insets(LayoutBox *box, double cb_w, double cb_h)
 {
-    if (box->s->inset_pct_bits & 1) box->top = box->s->inset_pct[0] * cb_h;
-    if (box->s->inset_pct_bits & 2) box->right = box->s->inset_pct[1] * cb_w;
-    if (box->s->inset_pct_bits & 4) box->bottom = box->s->inset_pct[2] * cb_h;
-    if (box->s->inset_pct_bits & 8) box->left = box->s->inset_pct[3] * cb_w;
+    if (box->s->inset_pct_bits & 1) box->top = box->s->inset_pct[0] * cb_h + box->s->top;
+    if (box->s->inset_pct_bits & 2) box->right = box->s->inset_pct[1] * cb_w + box->s->right;
+    if (box->s->inset_pct_bits & 4) box->bottom = box->s->inset_pct[2] * cb_h + box->s->bottom;
+    if (box->s->inset_pct_bits & 8) box->left = box->s->inset_pct[3] * cb_w + box->s->left;
 }
 
 /* Process-lifetime string interning for values boxes point at (mask
@@ -2823,6 +2833,10 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     const char *value = decl->value;
     if (!prop || !value) return;
     box->s->render_features |= decl->feature;
+    if (prop[0] == 's' && !strcasecmp(prop, "scroll-marker-group")) {
+        box->s->scroll_marker_group = !strcasecmp(value, "before") ? 1 : !strcasecmp(value, "after") ? 2 : 0;
+        return;
+    }
     if (prop[0] == 'o' && !strcasecmp(prop, "overflow-clip-margin")) {
         /* (a length, with or without a box to measure from: padding-box is where it starts anyway) */
         const char *v = value;
@@ -5425,8 +5439,11 @@ typedef struct PseudoSide {
     int n;
     const CssDeclaration *const *decls;
 } PseudoSide;
+enum { PSEUDO_SIDES = 13, SIDE_MARKER = 5, SIDE_CURRENT = 6, SIDE_GROUP = 7, SIDE_BUTTONS = 8, SIDE_BUTTON0 = 9 };
 typedef struct PseudoRec {
-    PseudoSide side[5];   /* ::before, ::after, ::first-letter, ::first-line, ::marker (those two no box) */
+    /* ::before, ::after, ::first-letter, ::first-line, ::marker (those two no box), ::scroll-marker,
+     * its :target-current, ::scroll-marker-group, ::scroll-button(*, up, down, left, right) */
+    PseudoSide side[PSEUDO_SIDES];
     bool owned;
 } PseudoRec;
 
@@ -8108,7 +8125,7 @@ static const PseudoRec *style_pseudo_rec(StylePass *P, StyleThread *T, const Css
     PseudoDecl *all = n * 8 <= 64 ? stack : NULL;
     int cap = all ? 64 : 0, cnt = 0;
     PseudoRec *rec = NULL;
-    for (int side = 0; side < 5; side++) {
+    for (int side = 0; side < PSEUDO_SIDES; side++) {
         const char *content = NULL;
         int bi = -1, bs = -1, bo = -1;
         bool any = false;
@@ -8141,12 +8158,15 @@ static const PseudoRec *style_pseudo_rec(StylePass *P, StyleThread *T, const Css
                 all[cnt++] = (PseudoDecl){ decl, imp, am[i].specificity, order };
             }
         }
-        if (side >= 2) content = any ? "" : NULL;   /* (::first-letter: a box when a rule matched) */
+        /* (a button's may be in its (*) rule: "" here has none, for now) */
+        bool button = side >= SIDE_BUTTONS;
+        if (side >= 2 && side != SIDE_MARKER && !button) content = any ? "" : NULL;   /* (::first-letter: a box when a rule matched) */
         else if (content) {
             const char *v = content;
             while (isspace((unsigned char)*v)) v++;
             if (!strncasecmp(v, "none", 4) || !strncasecmp(v, "normal", 6)) content = NULL;
         }
+        if (button && any && !content) content = "";
         if (!content) continue;
         if (!rec) {
             rec = (PseudoRec *)frame_arena_alloc(&T->arena, sizeof(PseudoRec));
@@ -8173,7 +8193,7 @@ static const PseudoRec *pseudo_rec_copy(const PseudoRec *r)
     if (!c) return NULL;
     *c = *r;
     c->owned = true;
-    for (int side = 0; side < 5; side++) {
+    for (int side = 0; side < PSEUDO_SIDES; side++) {
         if (!r->side[side].n) continue;
         size_t b = (size_t)r->side[side].n * sizeof(CssDeclaration *);
         const CssDeclaration **ds = (const CssDeclaration **)frame_arena_alloc(&g_sc.arena, b);
@@ -9904,6 +9924,152 @@ static void layout_detach_keep(LayoutNodeRef *nodes, int base, int owner, int c,
     }
 }
 
+/* ---- ::scroll-marker-group, ::scroll-marker, ::scroll-button() (CSS Overflow 5) ----
+ * Boxes like ::before's, but beside the scroller rather than in it (in it, for
+ * the root): a group before or after it, its markers in the group, for the
+ * elements it is the nearest scroller of; the buttons after it. */
+volatile int g_css_scroll_pseudos;
+
+static bool layout_is_scroller(const LayoutContext *ctx, int i)
+{
+    const LayoutBox *b = &ctx->boxes[i];
+    return ctx->tree.nodes[i].parent_idx < 0 || (b->s->overflow != 0 && !b->s->overflow_clip);
+}
+
+/* The scroller box idx scrolls in; -1 when it isn't rendered. */
+static int layout_scroller_of(const LayoutContext *ctx, int idx)
+{
+    for (int p = ctx->tree.nodes[idx].parent_idx; p >= 0; p = ctx->tree.nodes[p].parent_idx) {
+        if (ctx->boxes[p].s->display == CSS_DISPLAY_NONE) return -1;
+        if (layout_is_scroller(ctx, p)) return p;
+    }
+    return -1;
+}
+
+static int layout_scroll_pseudo_add(LayoutContext *ctx, LayoutPseudoPair *pairs, HtmlNode *hn, int *kp, int owner, int side,
+                                    const char *tag, const char *content, int parent, int before,
+                                    const PseudoSide *a, const PseudoSide *b, bool em_defer)
+{
+    int k = *kp, base = ctx->base_count, pe = base + k, pt = pe + 1;
+    HtmlNode *on = layout_node_dom(ctx, ctx->tree.nodes[owner].dom_node_idx);
+    HtmlNode *he = &hn[k], *ht = &hn[k + 1];
+    bool dyn = strstr(content, "counter") || strstr(content, "quote");
+    pairs[k / 2] = (LayoutPseudoPair){ owner, (unsigned char)side, 1, dyn, 0, NULL, content };
+    char text[1024] = "";
+    if (content[0]) layout_pseudo_text(content, on, text, sizeof(text));
+    he->array_node.parent = he->array_node.first_child = he->array_node.next_sibling = he->array_node.prev_sibling = -1;
+    ht->array_node = he->array_node;
+    he->type = HTML_NODE_ELEMENT;
+    he->tag_name = tag;
+    ht->type = HTML_NODE_TEXT;
+    ht->tag_name = "";
+    ht->text_content = strdup(text);
+    ht->text_len = ht->text_content ? strlen(ht->text_content) : 0;
+    LayoutNodeRef *E = &ctx->tree.nodes[pe], *T = &ctx->tree.nodes[pt], *P = &ctx->tree.nodes[parent];
+    E->dom_node_idx = LAYOUT_PSEUDO_DOM0 + k;
+    T->dom_node_idx = LAYOUT_PSEUDO_DOM0 + k + 1;
+    E->parent_idx = parent;
+    E->first_child_idx = pt;
+    E->child_count = 1;
+    T->parent_idx = pe;
+    T->first_child_idx = T->next_sibling_idx = T->prev_sibling_idx = -1;
+    T->child_count = 0;
+    int prev = -1;
+    if (before >= 0) prev = ctx->tree.nodes[before].prev_sibling_idx;
+    else for (int c = P->first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) prev = c;
+    E->prev_sibling_idx = prev;
+    E->next_sibling_idx = before;
+    if (prev >= 0) ctx->tree.nodes[prev].next_sibling_idx = pe;
+    else P->first_child_idx = pe;
+    if (before >= 0) ctx->tree.nodes[before].prev_sibling_idx = pe;
+    P->child_count++;
+    for (int x = pe; x <= pt; x++) {
+        ctx->slot[x] = layout_slot_take(ctx);
+        memset(&ctx->boxes[x], 0, sizeof(LayoutBox));
+        ctx->boxes[x].s = ctx->slot[x];
+        ctx->custom_props[x] = ctx->custom_props[owner];
+    }
+    ctx->tree.count = pt + 1;
+    int na = a ? a->n : 0, nb = b ? b->n : 0;
+    const CssDeclaration **ds = na + nb ? (const CssDeclaration **)malloc((size_t)(na + nb) * sizeof(*ds)) : NULL;
+    if (ds) {
+        if (na) memcpy(ds, a->decls, (size_t)na * sizeof(*ds));
+        if (nb) memcpy(ds + na, b->decls, (size_t)nb * sizeof(*ds));
+    }
+    PseudoSide merged = { content, ds ? na + nb : 0, ds };
+    layout_pseudo_style(ctx, pe, owner, &merged, em_defer);
+    free(ds);
+    layout_box_init(ctx, pt);
+    style_finish_box_em(em_defer, &ctx->boxes[pt], &ctx->boxes[pe], false);
+    *kp = k + 2;
+    g_css_scroll_pseudos = 1;
+    return pe;
+}
+
+static void layout_scroll_pseudos_attach(LayoutContext *ctx, LayoutPseudoPair *pairs, HtmlNode *hn, int *kp, bool em_defer)
+{
+    static const char *const k_button_tag[4] = { "::scroll-button(up)", "::scroll-button(down)", "::scroll-button(left)", "::scroll-button(right)" };
+    int base = ctx->base_count;
+    for (int i = 0; i < base; i++) {
+        const LayoutBox *b = &ctx->boxes[i];
+        if (b->s->display == CSS_DISPLAY_NONE || b->s->skipped || !layout_is_scroller(ctx, i)) continue;
+        const PseudoRec *r = (const PseudoRec *)ctx->pseudo_rec[i];
+        int parent = ctx->tree.nodes[i].parent_idx;
+        bool root = parent < 0;
+        if (root) parent = i;
+        int next = root ? -1 : ctx->tree.nodes[i].next_sibling_idx;
+        /* The buttons, after it. */
+        for (int d = 0; r && d < 4; d++) {
+            const PseudoSide *any = &r->side[SIDE_BUTTONS], *dir = &r->side[SIDE_BUTTON0 + d];
+            const char *content = dir->content && dir->content[0] ? dir->content
+                                : any->content && any->content[0] ? any->content : NULL;
+            if (!content) continue;
+            layout_scroll_pseudo_add(ctx, pairs, hn, kp, i, SIDE_BUTTON0 + d, k_button_tag[d], content, parent, next, any, dir, em_defer);
+        }
+        if (!b->s->scroll_marker_group) continue;
+        int before = b->s->scroll_marker_group == 2 ? next : root ? ctx->tree.nodes[i].first_child_idx : i;
+        int group = layout_scroll_pseudo_add(ctx, pairs, hn, kp, i, SIDE_GROUP, "::scroll-marker-group", "", parent, before,
+                                             r ? &r->side[SIDE_GROUP] : NULL, NULL, em_defer);
+        for (int j = 0; j < base; j++) {
+            const PseudoRec *rj = (const PseudoRec *)ctx->pseudo_rec[j];
+            if (!rj || !rj->side[SIDE_MARKER].content || j == i) continue;
+            const LayoutBox *bj = &ctx->boxes[j];
+            if (bj->s->display == CSS_DISPLAY_NONE || bj->s->skipped || layout_scroller_of(ctx, j) != i) continue;
+            bool current = ctx->ids && ctx->ids[j] && (g_dom.state[dom_slot(ctx->ids[j])] & DOM_ST_TARGET_CURRENT);
+            layout_scroll_pseudo_add(ctx, pairs, hn, kp, j, SIDE_MARKER, "::scroll-marker", rj->side[SIDE_MARKER].content, group, -1,
+                                     &rj->side[SIDE_MARKER], current ? &rj->side[SIDE_CURRENT] : NULL, em_defer);
+        }
+    }
+}
+
+int css_layout_pseudo_decls(const LayoutContext *ctx, int idx, int ps, const CssDeclaration *const **decls)
+{
+    const PseudoRec *r = ctx->pseudo_rec && idx >= 0 && idx < ctx->base_count ? (const PseudoRec *)ctx->pseudo_rec[idx] : NULL;
+    if (!r || ps < 1 || ps > PSEUDO_SIDES) return 0;
+    *decls = r->side[ps - 1].decls;
+    return r->side[ps - 1].n;
+}
+
+int css_layout_pseudo_pair_count(const LayoutContext *ctx) { return ctx->pseudo_pairs ? ctx->pseudo_nodes_n / 2 : 0; }
+
+bool css_layout_scroll_pseudo(const LayoutContext *ctx, int pair, int *box, int *owner, int *side)
+{
+    const LayoutPseudoPair *pp = &ctx->pseudo_pairs[pair];
+    if (pp->side < SIDE_MARKER) return false;
+    *box = ctx->base_count + 2 * pair;
+    *owner = pp->owner;
+    *side = pp->side;
+    return true;
+}
+
+int css_layout_scroll_pseudo_owner(const LayoutContext *ctx, int box)
+{
+    int j = box - ctx->base_count;
+    if (j < 0 || j >= ctx->pseudo_nodes_n || (j & 1) || !ctx->pseudo_pairs) return -1;
+    const LayoutPseudoPair *pp = &ctx->pseudo_pairs[j / 2];
+    return pp->side >= SIDE_MARKER ? pp->owner : -1;
+}
+
 static void layout_pseudo_detach_ex(LayoutContext *ctx, bool park)
 {
     layout_parked_release(ctx);
@@ -9996,11 +10162,14 @@ static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
     int m = 0;
     for (int i = 0; i < base; i++) {
         const PseudoRec *r = (const PseudoRec *)ctx->pseudo_rec[i];
-        if (!r) continue;
         const LayoutBox *b = &ctx->boxes[i];
         if (b->s->display == CSS_DISPLAY_NONE || b->s->skipped) continue;
+        if (b->s->scroll_marker_group) m++;
+        if (!r) continue;
         if (!layout_pseudo_allowed(layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx))) continue;
         m += (r->side[0].content != NULL) + (r->side[1].content != NULL) + (r->side[2].content != NULL);
+        m += (r->side[SIDE_MARKER].content != NULL);
+        for (int d = 0; d < 4; d++) m += r->side[SIDE_BUTTONS].content || r->side[SIDE_BUTTON0 + d].content;
     }
     if (m == 0) { layout_parked_release(ctx); return; }
     int n = base + 2 * m;
@@ -10203,6 +10372,7 @@ static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
             k += 2;
         }
     }
+    layout_scroll_pseudos_attach(ctx, pairs, hn, &k, em_defer);
     /* (the first :has() target is a preorder position: the same box's in the
      * new order, and "none" stays past the end) */
     int target = ctx->has_target_first >= 0 && ctx->has_target_first < base && ctx->tree.preorder

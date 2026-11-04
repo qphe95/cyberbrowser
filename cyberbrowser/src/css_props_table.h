@@ -549,6 +549,7 @@ static CssPropDef g_props[] = {
     L("overflow-anchor", "auto | none", "auto", 0),
     L("overflow-block", "visible | hidden | clip | scroll | auto | overlay", "visible", 0),
     L("overflow-clip-margin", "<visual-box> || <length [0,inf]>", "0px", 0),
+    L("scroll-marker-group", "none | before | after", "none", 0),
     L("overflow-inline", "visible | hidden | clip | scroll | auto | overlay", "visible", 0),
     L("overflow-wrap", "normal | break-word | anywhere", "normal", 1),
     L("overflow-x", "visible | hidden | clip | scroll | auto | overlay", "visible", 0),

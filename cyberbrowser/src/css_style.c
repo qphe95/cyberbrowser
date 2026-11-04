@@ -1168,7 +1168,12 @@ static char *ci_strstr(char *s, const char *kw)
 
 static int32_t after_base_list(Builder *b, const char *branch, size_t blen, int kind)
 {
-    static const char *const kw2[] = { "::after", "::before", "::first-letter", "::first-line", "::marker" };
+    static const char *const kw2[] = { "::after", "::before", "::first-letter", "::first-line", "::marker",
+        "::scroll-marker", "::scroll-marker:target-current", "::scroll-marker-group", "::scroll-button(*)",
+        "::scroll-button(up)", "::scroll-button(down)", "::scroll-button(left)", "::scroll-button(right)",
+        /* (these from here on are the kinds k_after_kind gives) */
+        "::scroll-marker:checked", "::scroll-button(block-start)", "::scroll-button(block-end)",
+        "::scroll-button(inline-start)", "::scroll-button(inline-end)" };
     char buf[512];
     if (blen == 0 || blen >= sizeof(buf)) return -1;
     memcpy(buf, branch, blen);
@@ -1320,20 +1325,26 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
 
             /* ::after branches (naive comma split, as the legacy code did). */
             if (ci_strstr((char *)sel, ":after") || ci_strstr((char *)sel, ":before") || ci_strstr((char *)sel, ":first-letter") ||
-                ci_strstr((char *)sel, ":first-line") || ci_strstr((char *)sel, ":marker")) {
+                ci_strstr((char *)sel, ":first-line") || ci_strstr((char *)sel, ":marker") || ci_strstr((char *)sel, ":scroll-")) {
                 const char *bp = sel;
                 while (*bp) {
-                    const char *comma = strchr(bp, ',');
+                    const char *comma = bp;
+                    for (int dp = 0; *comma && (dp > 0 || *comma != ','); comma++)
+                        dp += *comma == '(' ? 1 : *comma == ')' && dp > 0 ? -1 : 0;
+                    if (!*comma) comma = NULL;
                     size_t blen = comma ? (size_t)(comma - bp) : strlen(bp);
                     while (blen > 0 && isspace((unsigned char)*bp)) { bp++; blen--; }
                     while (blen > 0 && isspace((unsigned char)bp[blen - 1])) blen--;
                     if (blen > 0) {
-                        int32_t is_before = 0;
-                        int32_t li = after_base_list(&b, bp, blen, 0);
-                        if (li < 0) { li = after_base_list(&b, bp, blen, 1); is_before = 1; }
-                        if (li < 0) { li = after_base_list(&b, bp, blen, 2); is_before = 2; }
-                        if (li < 0) { li = after_base_list(&b, bp, blen, 3); is_before = 3; }
-                        if (li < 0) { li = after_base_list(&b, bp, blen, 4); is_before = 4; }
+                        /* (logical buttons as physical: horizontal flow, all layout has) */
+                        static const unsigned char k_after_kind[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 6, 9, 10, 11, 12 };
+                        int32_t is_before = 0, li = -1;
+                        for (int kk = 0; li < 0 && kk < (int)sizeof k_after_kind; kk++) {
+                            /* (only those whose kind of name is in it) */
+                            if (kk >= 5 && !ci_strstr((char *)sel, ":scroll-")) break;
+                            li = after_base_list(&b, bp, blen, kk);
+                            is_before = k_after_kind[kk];
+                        }
                         if (li >= 0) {
                             CAfter af = { g, 0, is_before };
                             if (blen < 512) {

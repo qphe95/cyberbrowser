@@ -600,10 +600,13 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
             const char *q = p[0] == ':' ? (p[1] == ':' ? p + 2 : p + 1) : NULL;
             if (q && !strcasecmp(q, "before")) ps = 1;
             else if (q && !strcasecmp(q, "after")) ps = 2;
+            else if (q && p[1] == ':' && !strcasecmp(q, "scroll-marker")) ps = 6;
+            else if (q && p[1] == ':' && !strcasecmp(q, "scroll-marker-group")) ps = 8;
             JS_FreeCString(ctx, p);
         }
     }
-    const char *key = ps == 1 ? "__cyber_cs_before" : ps == 2 ? "__cyber_cs_after" : "__cyber_cs";
+    const char *key = ps == 1 ? "__cyber_cs_before" : ps == 2 ? "__cyber_cs_after" : ps == 6 ? "__cyber_cs_marker"
+                    : ps == 8 ? "__cyber_cs_marker_group" : "__cyber_cs";
     GCValue cached = JS_GetPropertyStr(ctx, element, key);
     if (css_style_decl_is(ctx, cached)) return cached;
     GCValue cs = ps ? css_style_decl_new_computed_pseudo(ctx, id, ps) : css_style_decl_new_computed(ctx, id);

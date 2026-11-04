@@ -24,7 +24,7 @@ extern "C" {
  * layout lists the elements that have any (css_layout_render_list): what the
  * tick costs goes by how many elements use them, not by the page's size. */
 enum { CSS_FEAT_SNAP = 1, CSS_FEAT_CONTENT_VIS = 2, CSS_FEAT_INITIAL_TARGET = 4, CSS_FEAT_MEDIA_LISTENERS = 8,
-       CSS_FEAT_SNAP_ALIGN = 16 };
+       CSS_FEAT_SNAP_ALIGN = 16, CSS_FEAT_MARKER_GROUP = 32 };
 extern volatile int g_css_render_features;
 /* The feature bit of a property, noted as seen in this document. */
 unsigned char css_note_property(const char *prop);

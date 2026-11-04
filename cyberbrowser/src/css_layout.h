@@ -194,6 +194,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char overflow;
     /* overflow: clip (overflow is 1), and how far out it clips. */
     unsigned char overflow_clip;
+    /* scroll-marker-group: 1 before, 2 after. */
+    unsigned char scroll_marker_group;
     float overflow_clip_margin;
 
     /* vertical-align: 0=baseline, 1=middle, 2=top, 3=bottom, 4=sub,
@@ -814,6 +816,16 @@ void css_layout_render_list(const uint32_t **els, const unsigned char **bits, ui
 extern uint64_t g_layout_runs;
 bool css_layout_box_scrolls(const LayoutContext *ctx, int idx);
 bool css_layout_box_clips(const LayoutContext *ctx, int idx);
+/* A pseudo-element's declarations (ps: 1 ::before, 2 ::after, 6 ::scroll-marker,
+ * 7 its current ones, 8 ::scroll-marker-group), in cascade order; their count. */
+int css_layout_pseudo_decls(const LayoutContext *ctx, int idx, int ps, const CssDeclaration *const **decls);
+/* The scroll pseudo boxes (::scroll-marker and -group, ::scroll-button): how
+ * many pair slots to look at, and for one its box, owner box and side. */
+int css_layout_pseudo_pair_count(const LayoutContext *ctx);
+bool css_layout_scroll_pseudo(const LayoutContext *ctx, int pair, int *box, int *owner, int *side);
+/* box is such a pseudo box's: its owner box, else -1. */
+int css_layout_scroll_pseudo_owner(const LayoutContext *ctx, int box);
+extern volatile int g_css_scroll_pseudos;
 void css_layout_box_max(const LayoutContext *ctx, int idx, double *x, double *y);
 bool css_layout_box_offset(const LayoutContext *ctx, int idx, float *x, float *y);
 void css_layout_box_scrolled(const LayoutContext *ctx, int idx, double *dx, double *dy, bool *fixed);

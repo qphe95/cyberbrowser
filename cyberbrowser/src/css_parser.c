@@ -463,6 +463,26 @@ static void decl_finish(const CssTz *tz, const TokBuf *b, DeclSink sink, void *c
     sink(ctx, prop, value, important);
 }
 
+/* A style rule's block (CSS Nesting): the rules and at-rules in it, as the
+ * declaration list goes by them, for css_parse_rule_block. */
+typedef struct { size_t start, brace; int decls; } CssNestItem;
+typedef struct { CssNestItem *v; int n, cap; bool on; } CssNestList;
+static __thread CssNestList t_nest;
+/* (inside a nested at-rule: the selector its declarations and rules are of) */
+static __thread const char *t_nest_parent;
+
+static void css_nest_push(size_t start, size_t brace, int decls)
+{
+    if (t_nest.n == t_nest.cap) {
+        int nc = t_nest.cap ? t_nest.cap * 2 : 8;
+        CssNestItem *nv = (CssNestItem *)realloc(t_nest.v, (size_t)nc * sizeof(CssNestItem));
+        if (!nv) return;
+        t_nest.v = nv;
+        t_nest.cap = nc;
+    }
+    t_nest.v[t_nest.n++] = (CssNestItem){ start, brace, decls };
+}
+
 /* Consume a list of declarations from s at pos: up to the } that ends its
  * block (in_block) or the end.  Returns the offset after it. */
 static size_t css_consume_declarations(const char *s, size_t len, size_t pos, bool in_block, DeclSink sink,
@@ -478,6 +498,9 @@ static size_t css_consume_declarations(const char *s, size_t len, size_t pos, bo
     int depth = 0;
     enum { NONE, DECL, SKIP, AT } mode = NONE;
     size_t mark = css_tz_arena_mark(&tz);
+    size_t item_start = 0, item_brace = 0;
+    bool nesting = t_nest.on && in_block;
+    t_nest.on = false;   /* (for this block only) */
     while (css_tz_next(&tz, &t)) {
         if (t.type == CT_EOF) {
             if (mode == DECL) decl_finish(&tz, &buf, sink, ctx);
@@ -490,9 +513,23 @@ static size_t css_consume_declarations(const char *s, size_t len, size_t pos, bo
             else if (t.type == CT_LBRACKET && depth < 64) closers[depth++] = ']';
             else if (t.type == CT_LBRACE && depth < 64) closers[depth++] = '}';
             if (mode == DECL) tokbuf_push(&buf, &t);
+            if (t.type == CT_LBRACE && !item_brace) item_brace = t.start;
             /* (an at-rule ends with its block, and so does anything else
              * that is not a declaration: it is read as a nested rule) */
-            if ((mode == AT || mode == SKIP) && depth == 0 && t.type == CT_RBRACE) mode = NONE;
+            if ((mode == AT || mode == SKIP) && depth == 0 && t.type == CT_RBRACE) {
+                if (nesting && item_brace) css_nest_push(item_start, item_brace, ((CssRule *)ctx)->declaration_count);
+                mode = NONE;
+            }
+            /* ("a:hover { }" starts as a declaration would; "--x: { }" is one) */
+            if (nesting && mode == DECL && depth == 0 && t.type == CT_RBRACE && item_brace && buf.n) {
+                size_t pl;
+                const char *pv = css_tok_val(&tz.arena, &buf.t[0], &pl);
+                if (!(pl >= 2 && pv[0] == '-' && pv[1] == '-')) {
+                    css_nest_push(item_start, item_brace, ((CssRule *)ctx)->declaration_count);
+                    mode = NONE;
+                    buf.n = 0;
+                }
+            }
             continue;
         }
         if (in_block && t.type == CT_RBRACE) {
@@ -511,7 +548,10 @@ static size_t css_consume_declarations(const char *s, size_t len, size_t pos, bo
             if (t.type == CT_WHITESPACE) continue;
             mode = t.type == CT_IDENT ? DECL : t.type == CT_AT_KEYWORD ? AT : SKIP;
             buf.n = 0;
+            item_start = t.start;
+            item_brace = 0;
         }
+        if (t.type == CT_LBRACE) item_brace = t.start;
         if (t.type == CT_FUNCTION || t.type == CT_LPAREN) closers[depth++] = ')';   /* (depth is 0 here) */
         else if (t.type == CT_LBRACKET) closers[depth++] = ']';
         else if (t.type == CT_LBRACE) closers[depth++] = '}';
@@ -549,6 +589,7 @@ unsigned char css_note_property(const char *p) {
         if (!strcmp(p, "scroll-snap-type")) bit = CSS_FEAT_SNAP;
         else if (!strcmp(p, "scroll-snap-align")) bit = CSS_FEAT_SNAP_ALIGN;
         else if (!strcmp(p, "scroll-initial-target")) bit = CSS_FEAT_INITIAL_TARGET;
+        else if (!strcmp(p, "scroll-marker-group")) bit = CSS_FEAT_MARKER_GROUP;
     }
     if (bit) g_css_render_features |= bit;
     return bit;
@@ -643,7 +684,8 @@ static bool css_pseudo_known(const char *n, size_t nl, bool elem)
         "local-link", "matches", "modal", "muted", "not", "nth-child", "nth-last-child", "nth-last-of-type",
         "nth-of-type", "only-child", "only-of-type", "open", "optional", "out-of-range", "past", "paused",
         "picture-in-picture", "placeholder-shown", "playing", "popover-open", "read-only", "read-write",
-        "required", "right", "root", "scope", "seeking", "stalled", "state", "target", "target-within",
+        "required", "right", "root", "scope", "seeking", "stalled", "state", "target", "target-after", "target-before",
+        "target-current", "target-within",
         "user-invalid", "user-valid", "valid", "visited", "volume-locked", "where", "xr-overlay", NULL };
     static const char *const elements[] = {
         "after", "backdrop", "before", "checkmark", "column", "cue", "cue-region", "details-content",
@@ -718,6 +760,8 @@ static bool css_prelude_invalid(const char *sel)
                 while (css_is_space(*a)) a++;
                 if (*a && *a != ',' && !(a == n + nl && *a == ':')) return true;
                 p = n + nl - 1;
+            } else if (pe && nl > 0) {
+                p = n + nl - 1;   /* (::name(: on to its argument) */
             }
         }
     }
@@ -1314,6 +1358,8 @@ static size_t css_at_rule(const char *s, size_t len, size_t pos, bool nested, Cs
 /* The qualified rule or at-rule at pos (white space and comments skipped):
  * added to sheet unless NULL.  *counts: a valid style rule or a known
  * at-rule.  Returns where it ends. */
+static void css_parse_rule_block(const char *s, size_t len, size_t *pos, CssRule *rule, CssStylesheet *sheet, const char *cond);
+
 static size_t css_rule_item(const char *s, size_t len, size_t pos, bool nested, CssStylesheet *sheet,
                             const char *cond, bool *counts)
 {
@@ -1351,8 +1397,151 @@ static size_t css_rule_item(const char *s, size_t len, size_t pos, bool nested, 
     }
     rule->selector_text = sel;
     rule->media_query = cond && cond[0] ? strdup(cond) : NULL;
-    css_parse_declaration_block(s, len, &pos, rule);
+    css_parse_rule_block(s, len, &pos, rule, sheet, cond);
     return pos;
+}
+
+/* ---- CSS Nesting: a nested rule becomes a rule of the sheet, its selector
+ * resolved against its parent's; declarations after it, a rule of the
+ * parent's selector after it. ---- */
+static void sel_append(char **buf, size_t *n, size_t *cap, const char *t, size_t l)
+{
+    if (*n + l + 1 > *cap) {
+        size_t nc = (*n + l + 1) * 2;
+        char *nb = (char *)realloc(*buf, nc);
+        if (!nb) return;
+        *buf = nb;
+        *cap = nc;
+    }
+    memcpy(*buf + *n, t, l);
+    *n += l;
+    (*buf)[*n] = 0;
+}
+
+/* A compound that "&" can be written out as, as it is, before what follows. */
+static bool nest_parent_plain(const char *p)
+{
+    if (*p != '.' && *p != '#') return false;
+    for (; *p; p++)
+        if (strchr(" \t\n\f\r,>+~()[\"'\\", *p) || (p[0] == ':' && p[1] == ':')) return false;
+    return true;
+}
+
+static char *nest_resolve(const char *parent, const char *child)
+{
+    size_t n = 0, cap = strlen(parent) + strlen(child) + 16;
+    char *out = (char *)malloc(cap);
+    if (!out) return NULL;
+    out[0] = 0;
+    bool plain = nest_parent_plain(parent);
+    const char *p = child;
+    while (*p) {
+        /* One selector of the list. */
+        const char *q = p;
+        int depth = 0;
+        char quote = 0;
+        bool amp = false;
+        for (; *q; q++) {
+            if (*q == '\\' && q[1]) { q++; continue; }
+            if (quote) { if (*q == quote) quote = 0; continue; }
+            if (*q == '"' || *q == '\'') quote = *q;
+            else if (*q == '(' || *q == '[') depth++;
+            else if ((*q == ')' || *q == ']') && depth > 0) depth--;
+            else if (*q == '&') amp = true;
+            else if (*q == ',' && depth == 0) break;
+        }
+        const char *a = p, *b = q;
+        while (a < b && css_is_space(*a)) a++;
+        while (b > a && css_is_space(b[-1])) b--;
+        if (n) sel_append(&out, &n, &cap, ", ", 2);
+        if (!amp) {
+            if (plain) sel_append(&out, &n, &cap, parent, strlen(parent));
+            else {
+                sel_append(&out, &n, &cap, ":is(", 4);
+                sel_append(&out, &n, &cap, parent, strlen(parent));
+                sel_append(&out, &n, &cap, ")", 1);
+            }
+            sel_append(&out, &n, &cap, " ", 1);
+            sel_append(&out, &n, &cap, a, (size_t)(b - a));
+        } else {
+            for (const char *c = a; c < b; c++) {
+                if (*c == '\\' && c + 1 < b) { sel_append(&out, &n, &cap, c, 2); c++; continue; }
+                if (*c != '&') { sel_append(&out, &n, &cap, c, 1); continue; }
+                /* (".a" before ".b", ":hover" or a combinator; not before a name) */
+                bool next_name = c + 1 < b && (isalnum((unsigned char)c[1]) || c[1] == '-' || c[1] == '_');
+                if (plain && !next_name) sel_append(&out, &n, &cap, parent, strlen(parent));
+                else {
+                    sel_append(&out, &n, &cap, ":is(", 4);
+                    sel_append(&out, &n, &cap, parent, strlen(parent));
+                    sel_append(&out, &n, &cap, ")", 1);
+                }
+            }
+        }
+        p = *q ? q + 1 : q;
+    }
+    return out;
+}
+
+/* A style rule's block, at pos (past its {): its declarations, then its rules. */
+static void css_parse_rule_block(const char *s, size_t len, size_t *pos, CssRule *rule, CssStylesheet *sheet, const char *cond)
+{
+    CssNestList saved = t_nest;
+    memset(&t_nest, 0, sizeof t_nest);
+    t_nest.on = sheet != NULL;
+    css_parse_declaration_block(s, len, pos, rule);
+    CssNestList mine = t_nest;
+    t_nest = saved;
+    if (!mine.n) { free(mine.v); return; }
+    /* (adding a rule may move this one) */
+    char *parent = strdup(rule->selector_text);
+    const char *outer = t_nest_parent;
+    /* (what comes after the first nested rule waits for the rules before it) */
+    int total = rule->declaration_count, first = mine.v[0].decls;
+    CssDeclaration *later = total > first ? (CssDeclaration *)malloc((size_t)(total - first) * sizeof(CssDeclaration)) : NULL;
+    if (later) {
+        memcpy(later, rule->declarations + first, (size_t)(total - first) * sizeof(CssDeclaration));
+        rule->declaration_count = first;
+    } else {
+        first = total;
+    }
+    for (int i = 0; parent && i < mine.n; i++) {
+        size_t a = mine.v[i].start, b = mine.v[i].brace;
+        if (s[a] == '@') {
+            t_nest_parent = parent;
+            css_at_rule(s, len, a, true, sheet, cond, NULL);
+            t_nest_parent = outer;
+        } else {
+            char *child = css_strndup_trim(s + a, b - a);
+            char *resolved = child && child[0] ? nest_resolve(parent, child) : NULL;
+            free(child);
+            size_t p = b + 1;
+            CssRule *r = resolved && !css_prelude_invalid(resolved) ? css_stylesheet_add_rule(sheet) : NULL;
+            if (r) {
+                r->selector_text = resolved;
+                r->media_query = cond && cond[0] ? strdup(cond) : NULL;
+                css_parse_rule_block(s, len, &p, r, sheet, cond);
+            } else {
+                free(resolved);
+            }
+        }
+        /* The declarations up to the next one. */
+        int from = mine.v[i].decls, to = i + 1 < mine.n ? mine.v[i + 1].decls : total;
+        if (later && to > from) {
+            CssRule *r = css_stylesheet_add_rule(sheet);
+            if (r) {
+                r->selector_text = strdup(parent);
+                r->media_query = cond && cond[0] ? strdup(cond) : NULL;
+                r->declarations = (CssDeclaration *)malloc((size_t)(to - from) * sizeof(CssDeclaration));
+                if (r->declarations) {
+                    memcpy(r->declarations, later + (from - first), (size_t)(to - from) * sizeof(CssDeclaration));
+                    r->declaration_count = r->declaration_capacity = to - from;
+                }
+            }
+        }
+    }
+    free(later);
+    free(parent);
+    free(mine.v);
 }
 
 /* At the top level: <!--, -->, <![CDATA[ or ]]> at pos, its length. */
@@ -1376,6 +1565,19 @@ static size_t css_top_ignored(const char *s, size_t len, size_t pos)
 static size_t css_rule_list(const char *s, size_t len, size_t pos, size_t stop, bool nested,
                             CssStylesheet *sheet, const char *cond)
 {
+    /* (in a nested at-rule the block is its parent's, under the condition) */
+    if (nested && t_nest_parent && sheet) {
+        CssRule *r = css_stylesheet_add_rule(sheet);
+        if (r) {
+            r->selector_text = strdup(t_nest_parent);
+            r->media_query = cond && cond[0] ? strdup(cond) : NULL;
+            const char *outer = t_nest_parent;
+            t_nest_parent = NULL;
+            css_parse_rule_block(s, len, &pos, r, sheet, cond);
+            t_nest_parent = outer;
+            return pos;
+        }
+    }
     while (pos < len && (nested || pos < stop)) {
         css_skip_space_and_comments(s, len, &pos);
         if (pos >= len) break;
@@ -3006,7 +3208,8 @@ static char* css_transform_one_selector(const char *sel, size_t len, const char 
         css_buf_append(&out, &out_len, &out_cap, sel + i, len - i);
     } else if (i + 9 <= len && strncasecmp(sel + i, "::slotted", 9) == 0) {
         /* ::slotted(<qualifier>) ... -> host_tag > <qualifier> ... */
-        size_t open = i + 8;
+        size_t open = i + 9;
+        if (open >= len || sel[open] != '(') { free(out); return css_strdup(""); }
         size_t close = css_match_paren(sel, open, len);
         css_buf_append_cstr(&out, &out_len, &out_cap, host_tag);
         css_buf_append_cstr(&out, &out_len, &out_cap, " > ");

@@ -66,6 +66,8 @@ typedef struct {
 } LayoutQueryUsed;
 typedef void (*LayoutCascadeFn)(void *ud, const char *prop, const char *value, bool important);
 bool layout_query_cascade(JSContextHandle ctx, GCValue element, LayoutCascadeFn fn, void *ud, LayoutQueryUsed *used);
+/* The same of its pseudo-element ps (css_layout_pseudo_decls). */
+bool layout_query_pseudo_cascade(JSContextHandle ctx, GCValue element, int ps, LayoutCascadeFn fn, void *ud);
 /* The computed value of custom property name on the element (malloc'd), or NULL. */
 char *layout_query_custom(JSContextHandle ctx, GCValue element, const char *name);
 

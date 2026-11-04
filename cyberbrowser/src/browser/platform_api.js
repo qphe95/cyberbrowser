@@ -862,6 +862,55 @@
         return !!active && active !== global.document.body && el.contains(active);
     }
 
+    /* Scroll markers (CSS Overflow 5): which is its group's active one, and
+     * what activating a marker or a button does. */
+    var ST_TARGET_CURRENT = 32768;
+    function scrollerSubject(el) {
+        var d = el.ownerDocument;
+        return el === d.documentElement ? d.scrollingElement || el : el;
+    }
+    function scrollOffsetOf(sc, t) {
+        var isRoot = sc === sc.ownerDocument.scrollingElement || sc === sc.ownerDocument.documentElement;
+        var b = sc.getBoundingClientRect(), r = t.getBoundingClientRect();
+        var left = isRoot ? 0 : b.left + sc.clientLeft, top = isRoot ? 0 : b.top + sc.clientTop;
+        return { x: r.left - left + sc.scrollLeft, y: r.top - top + sc.scrollTop };
+    }
+    function markersUpdate(el) {
+        var sc = scrollerSubject(el), list = global.__cyberScrollMarkerTargets(el);
+        var maxX = sc.scrollWidth - sc.clientWidth, maxY = sc.scrollHeight - sc.clientHeight, best = null, bestD = Infinity;
+        for (var i = 0; i < list.length; i++) {
+            var o = scrollOffsetOf(sc, list[i]);
+            var d = Math.abs(Math.max(0, Math.min(maxX, o.x)) - sc.scrollLeft) + Math.abs(Math.max(0, Math.min(maxY, o.y)) - sc.scrollTop);
+            if (d < bestD) { bestD = d; best = list[i]; }
+        }
+        for (var k = 0; k < list.length; k++) global.__cyberElState(list[k], ST_TARGET_CURRENT, list[k] === best);
+    }
+    function scrollerAround(el) {
+        var d = el.ownerDocument;
+        for (var a = flatParent(el); a && a !== d; a = flatParent(a))
+            if (a.nodeType === 1 && a !== d.documentElement && a !== d.body && isScrollBox(global.getComputedStyle(a))) return a;
+        return d.scrollingElement || d.documentElement;
+    }
+    /* A click at a point: true if on a marker or button, which it activates. */
+    Object.defineProperty(global, '__cyberScrollPseudoClick', { configurable: true, value: function (x, y) {
+        var hit = global.__cyberScrollPseudoAt(x, y);
+        if (!hit) return false;
+        var el = hit[0], kind = hit[1];
+        if (kind === 5) {
+            var sc = scrollerAround(el), o = scrollOffsetOf(sc, el);
+            if (sc.scrollWidth > sc.clientWidth) sc.scrollLeft = o.x;
+            if (sc.scrollHeight > sc.clientHeight) sc.scrollTop = o.y;
+            return true;
+        }
+        /* (a page: what most browsers take one to be) */
+        var s = scrollerSubject(el), page = 0.85;
+        if (kind === 9) s.scrollTop -= s.clientHeight * page;
+        else if (kind === 10) s.scrollTop += s.clientHeight * page;
+        else if (kind === 11) s.scrollLeft -= s.clientWidth * page;
+        else if (kind === 12) s.scrollLeft += s.clientWidth * page;
+        return true;
+    } });
+
     /* A rendering opportunity on a page with these features (layout_render_tick). */
     var initialDone = new WeakSet();
     function scrollToInitialTarget(el) {
@@ -897,6 +946,10 @@
             }
         }
         for (var i = 0; i < snappers.length; i += 2) snapFollow(snappers[i], snappers[i + 1]);
+        if (features & 32) {
+            var groups = global.__cyberRenderElements(32);
+            for (var g = 0; g < groups.length; g++) markersUpdate(groups[g]);
+        }
         for (var k = 0; k < changed.length; k += 2)
             global.__cyberDispatchTrusted(changed[k], new global.ContentVisibilityAutoStateChangeEvent('contentvisibilityautostatechange', { skipped: changed[k + 1] }));
         /* (true: the next rendering looks again) */

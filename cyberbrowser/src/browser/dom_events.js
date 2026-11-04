@@ -1920,7 +1920,8 @@
             if (on && on.nodeType === 1 && !controlDisabled(on)) {
                 var i = mouseInit(x, y, button);
                 i.detail = 1;
-                trusted(on, MouseEvent, button === 0 ? 'click' : 'auxclick', i);
+                var clicked = trusted(on, MouseEvent, button === 0 ? 'click' : 'auxclick', i);
+                if (clicked && button === 0 && global.__cyberScrollPseudoClick) global.__cyberScrollPseudoClick(x, y);
             }
         },
         /* A finger: a press, then a drag scrolls (the browser takes the
