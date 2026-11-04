@@ -47,6 +47,31 @@ function walk(rel, list) {
     }
 }
 
+/* What a test file's text says about it, kept from run to run (next to the
+ * results) while its size and time stay: reading every file of css/ takes
+ * longer than running most of them. */
+const classifyFile = path.join(path.dirname(path.resolve(out)), '.wpt-classify.json');
+let classified = {};
+try { classified = JSON.parse(fs.readFileSync(classifyFile, 'utf8')); } catch (e) { /* (none yet) */ }
+let classifyChanged = false;
+function classify(f) {
+    const abs = path.join(root, f), st = fs.statSync(abs), had = classified[f];
+    if (had && had.t === st.mtimeMs && had.n === st.size) return had;
+    const src = fs.readFileSync(abs, 'utf8');
+    const c = { t: st.mtimeMs, n: st.size, kind: 'none', long: false, variants: [] };
+    /* (flags=interact: it asks a person to act, as -manual does) */
+    if (/<meta\s[^>]*name\s*=\s*["']?flags\b[^>]*\binteract\b/i.test(src)) c.kind = 'none';
+    else if (/rel\s*=\s*["']?(match|mismatch)\b/i.test(src)) c.kind = 'ref';
+    else if (/\/resources\/testharness\.js/.test(src)) {
+        c.kind = 'page';
+        c.long = /<meta\s+name=["']?timeout["']?\s+content=["']?long/i.test(src);
+        c.variants = [...src.matchAll(/<meta\s+name=["']?variant["']?\s+content=["']([^"']*)["']/gi)].map(v => v[1]);
+    }
+    classified[f] = c;
+    classifyChanged = true;
+    return c;
+}
+
 const pages = [], reftests = [];
 function addPage(id, file, long) {
     pages.push({ id, url: '/' + id, ms: (long ? LONG_MS : SHORT_MS) + SLACK_MS, file });
@@ -76,16 +101,12 @@ for (const d of dirs) {
             continue;
         }
         if (!/\.(html?|xht|xhtml|xml|svg)$/.test(base)) continue;
-        const src = fs.readFileSync(path.join(root, f), 'utf8');
-        /* (flags=interact: it asks a person to act, as -manual does) */
-        if (/<meta\s[^>]*name\s*=\s*["']?flags\b[^>]*\binteract\b/i.test(src)) continue;
-        if (/rel\s*=\s*["']?(match|mismatch)\b/i.test(src)) { reftests.push(f); continue; }
-        if (!/\/resources\/testharness\.js/.test(src)) continue;
-        const long = /<meta\s+name=["']?timeout["']?\s+content=["']?long/i.test(src);
-        const variants = [...src.matchAll(/<meta\s+name=["']?variant["']?\s+content=["']([^"']*)["']/gi)].map(v => v[1]);
-        for (const v of variants.length ? variants : ['']) addPage(f + v, f, long);
+        const c = classify(f);
+        if (c.kind === 'ref') reftests.push(f);
+        else if (c.kind === 'page') for (const v of c.variants.length ? c.variants : ['']) addPage(f + v, f, c.long);
     }
 }
+if (classifyChanged) fs.writeFileSync(classifyFile, JSON.stringify(classified));
 
 /* "// META: key=value" lines of a .any.js / .window.js test. */
 function scriptMeta(src) {
@@ -208,9 +229,21 @@ fs.mkdirSync(out, { recursive: true });
 fs.writeFileSync(path.join(out, 'reftests.txt'), reftests.join('\n') + '\n');
 const resultsFile = path.join(out, 'results.json');
 const results = fs.existsSync(resultsFile) ? JSON.parse(fs.readFileSync(resultsFile, 'utf8')) : {};
+/* Each result goes on the end of a journal as it comes, and into results.json
+ * when the run ends (wpt_test.sh takes in what a run stopped short of): writing
+ * all of them for each one blocks every browser for the time it takes, which
+ * grows through the run. */
+const journalFile = path.join(out, 'results.journal');
+if (fs.existsSync(journalFile)) {
+    for (const line of fs.readFileSync(journalFile, 'utf8').split('\n')) {
+        if (!line) continue;
+        try { const r = JSON.parse(line); results[r.page] = r; } catch (e) { /* (the last line, cut short) */ }
+    }
+}
 /* Per port: the page its browser has open (-1: none), and the ports whose
  * browser is done (/end). */
 const NPORTS = Math.max(1, +(process.env.PORTS || 1));
+const pageIndex = new Map(pages.map((p, i) => [p.id, i]));
 const currentOf = {}, ended = new Set();
 const left = REFTEST ? [] : pages.map((p, i) => i).filter(i => !results[pages[i].id]);
 if (REFTEST) {
@@ -224,11 +257,23 @@ if (REFTEST) {
     console.log(`${left.length} of ${pages.length} pages to run (${reftests.length} reftests not run)`);
 }
 
-function save() { fs.writeFileSync(resultsFile, JSON.stringify(results, null, 1)); }
+function save() {
+    fs.writeFileSync(resultsFile, JSON.stringify(results, null, 1));
+    fs.rmSync(journalFile, { force: true });
+    /* (how long each took: the next run's shards are shared out by it) */
+    const timesFile = path.join(path.dirname(path.resolve(out)), '.wpt-page-ms.json');
+    let times = {};
+    try { times = JSON.parse(fs.readFileSync(timesFile, 'utf8')); } catch (e) { /* (none yet) */ }
+    for (const p of pages) {
+        const r = results[p.id];
+        if (r) times[p.id] = r.ms === undefined ? p.ms : r.ms;
+    }
+    fs.writeFileSync(timesFile, JSON.stringify(times));
+}
 function record(r) {
     results[r.page] = r;
     console.log(`${r.status} ${r.page} ${r.pass}/${r.pass + r.fail}` + (r.skip ? ` skip ${r.skip}` : ''));
-    save();
+    fs.appendFileSync(journalFile, JSON.stringify(r) + '\n');
 }
 
 /* Stands in for /resources/testharnessreport.js. */
@@ -317,11 +362,11 @@ const server = http.createServer((req, res) => {
         ended.add(lport);
         res.writeHead(200, { 'content-type': 'text/html' });
         res.end('<p>done</p>');
-        if (ended.size >= NPORTS) setTimeout(() => process.exit(0), 1000);
+        if (ended.size >= NPORTS) setTimeout(() => { save(); process.exit(0); }, 1000);
         return;
     }
     const id = (url.pathname + url.search).slice(1);
-    const page = pages.findIndex(p => p.id === id);
+    const page = pageIndex.has(id) ? pageIndex.get(id) : -1;
     if (page >= 0) opened(page);
     if (url.pathname === '/result' && req.method === 'POST') {
         let body = '';

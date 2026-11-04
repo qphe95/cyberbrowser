@@ -1296,6 +1296,7 @@ bool page_engine_reset(void) {
     frame_api_reset();
     media_api_reset();
     anim_api_reset();
+    layout_scroll_reset();
     g_css_render_features = 0;
     g_dom_needs_layout = 0;
     bool ok = init_browser_context();

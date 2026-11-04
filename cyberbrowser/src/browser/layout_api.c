@@ -1834,6 +1834,14 @@ static struct {
 /* (a drag under way: its boxes' scrollend waits for its end) */
 static bool g_scroll_hold;
 
+/* A new document in this process: what the last one had due goes with it, and
+ * a drag it left unfinished holds nothing back. */
+void layout_scroll_reset(void)
+{
+    g_scroll_q.n = 0;
+    g_scroll_hold = false;
+}
+
 void layout_scroll_hold(JSContextHandle ctx, bool hold)
 {
     g_scroll_hold = hold;

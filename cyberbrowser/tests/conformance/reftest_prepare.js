@@ -14,8 +14,29 @@ const [build, out, W, nArg, portArg] = process.argv.slice(2);
 const n = +nArg, js = !!portArg;
 const lines = fs.readFileSync(path.join(out, 'pages.txt'), 'utf8').split('\n').filter(Boolean);
 const exes = fs.readdirSync(build).filter(f => /^cb_.*\.exe$/.test(f) && !/^cb_(harness|webgpu_fuzz)\.exe$/.test(f));
+/* Shard of each page: every n-th, or with times from an earlier run (testharness
+ * pages), the longest first to the shard with the least so far: a run lasts as
+ * long as its slowest shard. */
+let times = null;
+if (js) {
+    try { times = JSON.parse(fs.readFileSync(path.join(path.dirname(path.resolve(out)), '.wpt-page-ms.json'), 'utf8')); }
+    catch (e) { /* (none yet) */ }
+}
+const shardOf = new Map();
+if (times) {
+    const load = new Array(n).fill(0);
+    const est = l => { const id = l.split(' ')[1].replace(/^http:\/\/[^/]+\//, ''); return (times[id] || 0) + 25; };
+    lines.map(l => [l, est(l)]).sort((a, b) => b[1] - a[1]).forEach(([l, t]) => {
+        let best = 0;
+        for (let i = 1; i < n; i++) if (load[i] < load[best]) best = i;
+        load[best] += t;
+        shardOf.set(l, best);
+    });
+} else {
+    lines.forEach((l, j) => shardOf.set(l, (j + 1) % n));
+}
 for (let i = 0; i < n; i++) {
-    const mine = lines.filter((l, j) => (j + 1) % n === i);
+    const mine = lines.filter(l => shardOf.get(l) === i);
     if (!mine.length) continue;
     const d = path.join(build, `shard-${i}`);
     fs.mkdirSync(d, { recursive: true });

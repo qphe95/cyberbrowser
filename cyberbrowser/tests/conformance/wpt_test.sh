@@ -130,6 +130,20 @@ else
     cp "$build"/logs/*.log "$out/logs/" 2> /dev/null
 fi
 kill $server 2> /dev/null
+# (a run the server didn't see the end of: what its journal has)
+wait $server 2> /dev/null
+if [ -f "$out/results.journal" ]; then
+    node -e '
+    const fs = require("fs"), out = process.argv[1], file = out + "/results.json";
+    const r = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+    for (const line of fs.readFileSync(out + "/results.journal", "utf8").split("\n")) {
+        if (!line) continue;
+        try { const x = JSON.parse(line); r[x.page] = x; } catch (e) { /* (cut short) */ }
+    }
+    fs.writeFileSync(file, JSON.stringify(r, null, 1));
+    fs.rmSync(out + "/results.journal");
+    ' "$out"
+fi
 mark logs
 [ -n "$REFTEST" ] && node "$dir/reftest_compare.js" "$out" && mark compare
 

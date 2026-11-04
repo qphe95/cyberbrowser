@@ -35,6 +35,7 @@ void layout_query_anim_seed(uint32_t id);
 /* A box's size in the last layout, with nothing laid out for it; false if none. */
 bool layout_query_box_size(uint32_t id, double *w, double *h);
 int layout_scroll_tick(JSContextHandle ctx);
+void layout_scroll_reset(void);
 /* Scroll snap, content-visibility and scroll-initial-target, when a page has
  * them and something changed (platform_api.js, __cyberRenderTick). */
 int layout_render_tick(JSContextHandle ctx);

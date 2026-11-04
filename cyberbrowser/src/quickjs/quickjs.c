@@ -47975,14 +47975,19 @@ static void lq_worker(void *arg)
         LazyUnit *u;
         if (ss_work(limit))
             continue;
-        u = lq_pop();
+        /* (counted as running before it looks at the queue: lazy_units_quiesce
+         * frees the batches and units once it has seen no one running, and
+         * either it sees this or this sees it pause) */
+        atomic_fetch_add_explicit(&g_lq_running, 1, memory_order_seq_cst);
+        u = atomic_load_explicit(&g_lq_paused, memory_order_seq_cst) ? NULL : lq_pop();
         if (!u) {
+            if (atomic_fetch_sub_explicit(&g_lq_running, 1, memory_order_acq_rel) == 1)
+                gc_os_wake_all((volatile uint32_t *)&g_lq_running);
             gc_os_wait((volatile uint32_t *)&g_lq_wake, seen, 100);
             continue;
         }
         {
             uint32_t expected = LU_QUEUED;
-            atomic_fetch_add_explicit(&g_lq_running, 1, memory_order_acq_rel);
             if (!atomic_load_explicit(&g_lq_paused, memory_order_acquire) &&
                 atomic_compare_exchange_strong_explicit(&u->state, &expected, LU_RUNNING,
                                                         memory_order_acq_rel, memory_order_acquire)) {
@@ -48070,9 +48075,9 @@ static void lazy_units_quiesce(void)
 {
     if (g_lq_nthreads <= 0)
         return;
-    atomic_store_explicit(&g_lq_paused, 1, memory_order_release);
+    atomic_store_explicit(&g_lq_paused, 1, memory_order_seq_cst);
     for (;;) {
-        uint32_t n = atomic_load_explicit(&g_lq_running, memory_order_acquire);
+        uint32_t n = atomic_load_explicit(&g_lq_running, memory_order_seq_cst);
         if (n == 0)
             break;
         gc_os_wait((volatile uint32_t *)&g_lq_running, n, 10);
