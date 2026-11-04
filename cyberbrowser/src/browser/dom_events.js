@@ -246,6 +246,10 @@
                                        error: any(undefined) });
     eventClass('PromiseRejectionEvent', Event, { promise: any(undefined), reason: any(undefined) });
     eventClass('HashChangeEvent', Event, { oldURL: str(''), newURL: str('') });
+    eventClass('MediaQueryListEvent', Event, { media: str(''), matches: bool(false) });
+    eventClass('NavigateEvent', Event, { navigationType: str('push'), destination: nul(), canIntercept: bool(false),
+        userInitiated: bool(false), hashChange: bool(false), signal: nul(), formData: nul(), downloadRequest: nul(),
+        info: nul(), hasUAVisualTransition: bool(false) });
     eventClass('PopStateEvent', Event, { state: nul(), hasUAVisualTransition: bool(false) });
     eventClass('PageTransitionEvent', Event, { persisted: bool(false) });
     eventClass('ProgressEvent', Event, { lengthComputable: bool(false), loaded: num(0), total: num(0) });
@@ -1284,6 +1288,181 @@
                 return orig.call(loc, v);
             });
         });
+
+        /* ---- the Navigation API (HTML 7.2), over this session history; only
+         * this document's entries are known ---- */
+        var navKeys = 0;
+        var entryIds = function (e) {
+            if (!e.key) { e.key = 'k' + (++navKeys); e.id = 'i' + (++navKeys); }
+            return e;
+        };
+        function NavigationHistoryEntry() { throw new TypeError('Illegal constructor'); }
+        NavigationHistoryEntry.prototype = Object.create(ETP);
+        define(NavigationHistoryEntry.prototype, 'constructor', NavigationHistoryEntry);
+        var ENTRY = Symbol('cyber.navEntry');
+        var entryObject = function (e) {
+            entryIds(e);
+            if (!e.object) {
+                e.object = Object.create(NavigationHistoryEntry.prototype);
+                Object.defineProperty(e.object, ENTRY, { value: e });
+            }
+            return e.object;
+        };
+        [['key', function (e) { return e.key; }], ['id', function (e) { return e.id; }], ['url', function (e) { return e.url; }],
+         ['index', function (e) { return entries.indexOf(e); }], ['sameDocument', function () { return true; }]].forEach(function (p) {
+            Object.defineProperty(NavigationHistoryEntry.prototype, p[0], { configurable: true, enumerable: true,
+                get: function () { return p[1](this[ENTRY]); } });
+        });
+        define(NavigationHistoryEntry.prototype, 'getState', function getState() {
+            var s = this[ENTRY].navState;
+            return s === undefined ? undefined : clone(s);
+        });
+        function Navigation() { throw new TypeError('Illegal constructor'); }
+        Navigation.prototype = Object.create(ETP);
+        define(Navigation.prototype, 'constructor', Navigation);
+        Object.defineProperty(Navigation.prototype, Symbol.toStringTag, { value: 'Navigation', configurable: true });
+        ['navigate', 'navigatesuccess', 'navigateerror', 'currententrychange'].forEach(function (t) {
+            var slot = Symbol(t);
+            Object.defineProperty(Navigation.prototype, 'on' + t, { configurable: true, enumerable: true,
+                get: function () { return this[slot] || null; },
+                set: function (f) { this[slot] = typeof f === 'function' ? f : null; } });
+        });
+        function NavigationDestination() { throw new TypeError('Illegal constructor'); }
+        var settled = function (d) {
+            d.promise.catch(function () {});
+            return d;
+        };
+        var deferred = function () {
+            var d = {};
+            d.promise = new Promise(function (res, rej) { d.resolve = res; d.reject = rej; });
+            return settled(d);
+        };
+        var navAbort = function () { return new (global.DOMException)('The navigation was aborted', 'AbortError'); };
+        var nav = Object.create(Navigation.prototype), navTransition = null;
+        /* One navigation: its event, then what it does. commit(): the URL and
+         * entry change, in this document; away(): it leaves the document. */
+        var navigateSteps = function (type, url, state, info, commit, away) {
+            var committed = deferred(), finished = deferred();
+            var sameDoc = stripHash(url) === stripHash(getHref());
+            var hashChange = sameDoc && url !== getHref() && url.indexOf('#') >= 0;
+            var dest = Object.create(NavigationDestination.prototype);
+            Object.defineProperties(dest, {
+                url: { value: url, enumerable: true }, key: { value: '', enumerable: true }, id: { value: '', enumerable: true },
+                index: { value: -1, enumerable: true }, sameDocument: { value: hashChange, enumerable: true } });
+            define(dest, 'getState', function getState() { return state === undefined ? undefined : clone(state); });
+            var handlers = null, precommits = null, controller = new global.AbortController();
+            var ev = new global.NavigateEvent('navigate', { cancelable: true, navigationType: type, destination: dest,
+                canIntercept: sameOrigin(url, getHref()), userInitiated: false, hashChange: hashChange,
+                signal: controller.signal, formData: null, downloadRequest: null, info: info, hasUAVisualTransition: false });
+            define(ev, 'intercept', function intercept(options) {
+                handlers = handlers || [];
+                precommits = precommits || [];
+                if (options && options.handler) handlers.push(options.handler);
+                if (options && options.precommitHandler) precommits.push(options.precommitHandler);
+            });
+            define(ev, 'scroll', function scroll() {});
+            var go = dispatch(nav, ev);
+            if (!go) {
+                var e = navAbort();
+                committed.reject(e);
+                finished.reject(e);
+                return { committed: committed.promise, finished: finished.promise };
+            }
+            if (handlers) {
+                var runAll = function (list) {
+                    return Promise.all(list.map(function (h) { try { return h(); } catch (x) { return Promise.reject(x); } }));
+                };
+                navTransition = { navigationType: type, from: nav.currentEntry, committed: committed.promise, finished: finished.promise };
+                var mine = navTransition;
+                var failed = function (x) {
+                    if (navTransition === mine) navTransition = null;
+                    var f = new Event('navigateerror');
+                    Object.defineProperty(f, 'error', { value: x, enumerable: true });
+                    dispatch(nav, f);
+                    committed.reject(x);
+                    finished.reject(x);
+                };
+                /* (the entry changes once the precommit handlers are through) */
+                runAll(precommits).then(function () {
+                    commit();
+                    committed.resolve(nav.currentEntry);
+                    return runAll(handlers);
+                }).then(function () {
+                    if (navTransition === mine) navTransition = null;
+                    dispatch(nav, new Event('navigatesuccess'));
+                    finished.resolve(nav.currentEntry);
+                }, failed);
+            } else if (hashChange || type === 'traverse' || url === getHref() && type === 'replace') {
+                commit();
+                committed.resolve(nav.currentEntry);
+                finished.resolve(nav.currentEntry);
+            } else {
+                away();
+            }
+            return { committed: committed.promise, finished: finished.promise };
+        };
+        var entryChanged = function (type, from) {
+            var e = new Event('currententrychange');
+            Object.defineProperty(e, 'navigationType', { value: type, enumerable: true });
+            Object.defineProperty(e, 'from', { value: from, enumerable: true });
+            dispatch(nav, e);
+        };
+        define(Navigation.prototype, 'entries', function entriesOf() { return entries.map(entryObject); });
+        Object.defineProperty(Navigation.prototype, 'currentEntry', { configurable: true, enumerable: true, get: function () { return entryObject(entries[index]); } });
+        Object.defineProperty(Navigation.prototype, 'transition', { configurable: true, enumerable: true, get: function () { return navTransition; } });
+        Object.defineProperty(Navigation.prototype, 'activation', { configurable: true, enumerable: true, get: function () { return null; } });
+        Object.defineProperty(Navigation.prototype, 'canGoBack', { configurable: true, enumerable: true, get: function () { return index > 0; } });
+        Object.defineProperty(Navigation.prototype, 'canGoForward', { configurable: true, enumerable: true, get: function () { return index + 1 < entries.length; } });
+        define(Navigation.prototype, 'navigate', function navigate(u, options) {
+            var o = options || {}, url;
+            try { url = new global.URL(String(u), getHref()).href; }
+            catch (e) { var d = deferred(), x = new (global.DOMException)('Invalid URL', 'SyntaxError'); d.reject(x); return { committed: d.promise, finished: d.promise }; }
+            var type = o.history === 'replace' ? 'replace' : 'push', state = o.state === undefined ? undefined : clone(o.state);
+            return navigateSteps(type, url, state, o.info, function () {
+                var from = nav.currentEntry, entry = { url: url, state: null, navState: state };
+                if (type === 'push') { entries.length = index + 1; entries.push(entry); index++; }
+                else entries[index] = entry;
+                if (url !== getHref()) setHref(url);
+                entryChanged(type, from);
+            }, function () {
+                loc.href = url;
+            });
+        });
+        define(Navigation.prototype, 'reload', function reload(options) {
+            var o = options || {}, url = getHref();
+            return navigateSteps('reload', url, o.state, o.info, function () {}, function () { loc.reload(); });
+        });
+        var traverseBy = function (delta, info) {
+            var to = index + delta, d = deferred();
+            if (to < 0 || to >= entries.length) {
+                var x = new (global.DOMException)('Cannot traverse there', 'InvalidStateError');
+                d.reject(x);
+                return { committed: d.promise, finished: d.promise };
+            }
+            return navigateSteps('traverse', entries[to].url, entries[to].navState, info, function () {
+                var from = nav.currentEntry;
+                traverse(delta);
+                entryChanged('traverse', from);
+            }, function () {});
+        };
+        define(Navigation.prototype, 'back', function back(o) { return traverseBy(-1, o && o.info); });
+        define(Navigation.prototype, 'forward', function forward(o) { return traverseBy(1, o && o.info); });
+        define(Navigation.prototype, 'traverseTo', function traverseTo(key, o) {
+            for (var i = 0; i < entries.length; i++) if (entryIds(entries[i]).key === String(key)) return traverseBy(i - index, o && o.info);
+            var d = deferred(), x = new (global.DOMException)('No such entry', 'InvalidStateError');
+            d.reject(x);
+            return { committed: d.promise, finished: d.promise };
+        });
+        define(Navigation.prototype, 'updateCurrentEntry', function updateCurrentEntry(o) {
+            if (!o || !('state' in o)) throw new TypeError("Failed to execute 'updateCurrentEntry': required member state is undefined.");
+            var from = nav.currentEntry;
+            entries[index].navState = clone(o.state);
+            entryChanged(null, from);
+        });
+        expose('Navigation', Navigation);
+        expose('NavigationHistoryEntry', NavigationHistoryEntry);
+        expose('NavigationDestination', NavigationDestination);
+        Object.defineProperty(global, 'navigation', { configurable: true, enumerable: true, get: function () { return nav; } });
     }
 
     /* ---- AbortController / AbortSignal (DOM 3.1-3.2) ---- */
@@ -1780,6 +1959,69 @@
         if (!el.onload && !(map && map.load)) return;
         task(function () { global.__cyberDispatchTrusted(el, new Event('load')); });
     } });
+
+    /* ---- MediaQueryList (CSSOM View 4.2): live, with change events; the query
+     * itself is evaluated natively ---- */
+    var evalMedia = global.matchMedia;
+    if (typeof evalMedia === 'function') {
+        var liveQueries = new Set();
+        var MQL_PRIVATE = new WeakMap();
+        var syncScheme = function () {
+            var d = global.document, m = d && d.querySelector && d.querySelector('meta[name="color-scheme" i]');
+            var words = m ? String(m.getAttribute('content') || '').trim().toLowerCase().split(/\s+/) : [];
+            var one = words.length === 1 && (words[0] === 'dark' || words[0] === 'light') ? words[0] : null;
+            if (global.__cyberColorScheme) global.__cyberColorScheme(one);
+        };
+        var mqlMatches = function (mql) {
+            var p = MQL_PRIVATE.get(mql);
+            if (/prefers-color-scheme/i.test(p.query)) syncScheme();
+            return !!evalMedia.call(global, p.query).matches;
+        };
+        var MediaQueryList = function MediaQueryList() { throw new TypeError('Illegal constructor'); };
+        MediaQueryList.prototype = Object.create(ETP);
+        define(MediaQueryList.prototype, 'constructor', MediaQueryList);
+        Object.defineProperty(MediaQueryList.prototype, Symbol.toStringTag, { value: 'MediaQueryList', configurable: true });
+        Object.defineProperty(MediaQueryList.prototype, 'media', { configurable: true, enumerable: true, get: function () { return MQL_PRIVATE.get(this).media; } });
+        Object.defineProperty(MediaQueryList.prototype, 'matches', { configurable: true, enumerable: true, get: function () { return mqlMatches(this); } });
+        var watch = function (mql) {
+            if (liveQueries.has(mql)) return;
+            MQL_PRIVATE.get(mql).last = mqlMatches(mql);
+            liveQueries.add(mql);
+            if (global.__cyberRenderFeature) global.__cyberRenderFeature(8);
+        };
+        Object.defineProperty(MediaQueryList.prototype, 'onchange', { configurable: true, enumerable: true,
+            get: function () { return MQL_PRIVATE.get(this).onchange || null; },
+            set: function (f) {
+                var p = MQL_PRIVATE.get(this);
+                p.onchange = typeof f === 'function' ? f : null;
+                if (p.onchange) watch(this);
+            } });
+        define(MediaQueryList.prototype, 'addEventListener', function (type, fn, opts) {
+            addEventListener.call(this, type, fn, opts);
+            if (String(type) === 'change') watch(this);
+        });
+        define(MediaQueryList.prototype, 'addListener', function (fn) {
+            if (fn) { addEventListener.call(this, 'change', fn); watch(this); }
+        });
+        define(MediaQueryList.prototype, 'removeListener', function (fn) {
+            if (fn) removeEventListener.call(this, 'change', fn);
+        });
+        define(global, 'MediaQueryList', MediaQueryList);
+        define(global, 'matchMedia', function matchMedia(query) {
+            if (arguments.length < 1) throw new TypeError("Failed to execute 'matchMedia' on 'Window': 1 argument required, but only 0 present.");
+            var q = String(query), mql = Object.create(MediaQueryList.prototype);
+            MQL_PRIVATE.set(mql, { query: q, media: evalMedia.call(global, q).media, last: false, onchange: null });
+            return mql;
+        });
+        Object.defineProperty(global, '__cyberMediaCheck', { configurable: true, value: function () {
+            liveQueries.forEach(function (mql) {
+                var p = MQL_PRIVATE.get(mql), now = mqlMatches(mql);
+                if (now === p.last) return;
+                p.last = now;
+                global.__cyberDispatchTrusted(mql, new global.MediaQueryListEvent('change', { media: p.media, matches: now }));
+            });
+        } });
+    }
 
     /* for the C entry points (event_api.c), which forward here */
     Object.defineProperty(global, '__cyberEventTarget', { value: Object.freeze({

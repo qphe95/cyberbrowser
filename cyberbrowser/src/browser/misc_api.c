@@ -3228,14 +3228,14 @@ int resize_observers_tick(JSContextHandle ctx) {
     static unsigned long long last;
     if (seen == g_frame_layouts) return 0;
     unsigned long long now = (unsigned long long)page_clock_now_ms();
-    if (now - last < (g_dom.live >= 5000 ? 1000u : 100u)) return 0;
+    if (now - last < (g_dom.live >= 1500 ? 1000u : 100u)) return 0;
     GCValue reg = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyber_ro_observers");
     if (!JS_IsArray(ctx, reg)) return 0;
     last = now;
     seen = g_frame_layouts;
     uint32_t len = 0;
     JS_ToUint32(ctx, &len, JS_GetPropertyStr(ctx, reg, "length"));
-    bool big = g_dom.live >= 5000;
+    bool big = g_dom.live >= 1500;
     for (uint32_t i = 0; i < len; i++) {
         GCValue observer = JS_GetPropertyUint32(ctx, reg, i);
         /* (a big page: the sizes the last layout has, so that a report, with

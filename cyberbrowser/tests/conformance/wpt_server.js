@@ -281,10 +281,12 @@ const REPORT = `(function () {
   /* (as wptrunner: no results table, which a page's own body.innerHTML would break) */
   if (typeof setup === 'function') setup({ output: false, timeout_multiplier: ${MULT} });
   var start = Date.now();
+  /* (the page as it was opened: it may change its URL) */
+  var opened = (location.pathname + location.search).slice(1);
   var TEST = ['PASS', 'FAIL', 'TIMEOUT', 'NOTRUN', 'PRECONDITION_FAILED'];
   var HARNESS = ['OK', 'ERROR', 'TIMEOUT', 'PRECONDITION_FAILED'];
   add_completion_callback(function (tests, status) {
-    var r = { page: (location.pathname + location.search).slice(1), status: HARNESS[status.status] || 'ERROR',
+    var r = { page: opened, status: HARNESS[status.status] || 'ERROR',
               pass: 0, fail: 0, skip: 0, fails: [], ms: Date.now() - start };
     if (status.status !== 0 && status.message) r.fails.push('harness: ' + String(status.message).slice(0, 300));
     for (var i = 0; i < tests.length; i++) {
@@ -302,6 +304,7 @@ const REPORT = `(function () {
 
 /* {{...}} in .sub. files, for the one host and port there is. */
 const stalledResumes = new Set();
+const dispatcherQueues = new Map();
 function substitute(s, url) {
     const port = url.port, origin = url.origin;
     return s.replace(/\{\{([^}]*)\}\}/g, (all, expr) => {
@@ -436,6 +439,24 @@ const server = http.createServer((req, res) => {
     if (url.pathname === '/common/redirect.py') {
         res.writeHead(+(url.searchParams.get('status') || 302), { location: url.searchParams.get('location') });
         return res.end();
+    }
+    /* (common/dispatcher/dispatcher.py: queues by uuid; POST adds, GET takes) */
+    if (url.pathname === '/common/dispatcher/dispatcher.py') {
+        const uuid = url.searchParams.get('uuid');
+        const cors = { 'access-control-allow-origin': req.headers.origin || '*', 'access-control-allow-credentials': 'true',
+                       'access-control-allow-methods': 'OPTIONS, GET, POST', 'access-control-allow-headers': 'Content-Type',
+                       'cache-control': url.searchParams.has('cacheable') ? 'max-age=31536000' : 'no-cache, no-store, must-revalidate' };
+        if (req.method === 'OPTIONS') { res.writeHead(200, cors); return res.end(); }
+        const queue = dispatcherQueues.get(uuid) || [];
+        dispatcherQueues.set(uuid, queue);
+        if (req.method === 'POST') {
+            let body = '';
+            req.on('data', d => body += d);
+            req.on('end', () => { queue.push(body); res.writeHead(200, cors); res.end('done'); });
+            return;
+        }
+        res.writeHead(200, cors);
+        return res.end(queue.length ? queue.shift() : 'not ready');
     }
     /* (support/stall-resume.py: the start of a video, then the rest once a POST says so) */
     if (url.pathname === '/css/selectors/media/support/stall-resume.py') {

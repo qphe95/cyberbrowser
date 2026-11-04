@@ -37,7 +37,7 @@ static struct {
     int n, cap;
     JSContextHandle *owner, *ctx;   /* the realm that made it, its own (0 until started) */
     GCValue *obj;               /* the Worker object (rooted) */
-    char **url;
+    char **url, **src;          /* src: the script of a blob: URL */
     unsigned char *closed, *shared;
 } W;
 
@@ -56,7 +56,7 @@ static int worker_new(JSContextHandle owner, GCValue obj, const char *url, bool 
     if (W.n == W.cap) {
         int cap = W.cap ? W.cap * 2 : 8;
 #define G(f) W.f = realloc(W.f, (size_t)cap * sizeof(*W.f))
-        G(owner); G(ctx); G(obj); G(url); G(closed); G(shared);
+        G(owner); G(ctx); G(obj); G(url); G(src); G(closed); G(shared);
 #undef G
         W.cap = cap;
     }
@@ -66,6 +66,7 @@ static int worker_new(JSContextHandle owner, GCValue obj, const char *url, bool 
     W.obj[w] = obj;
     gc_add_root(GC_VALUE_GET_HANDLE(obj));
     W.url[w] = strdup(url);
+    W.src[w] = NULL;
     W.closed[w] = 0;
     W.shared[w] = shared;
     return w;
@@ -102,6 +103,10 @@ static GCValue js_worker_start(JSContextHandle ctx, GCValue this_val, int argc, 
     if (!url) return JS_EXCEPTION;
     int w = worker_new(ctx, argv[0], url, argc > 2 && JS_ToBool(ctx, argv[2]));
     JS_FreeCString(ctx, url);
+    if (argc > 3 && JS_IsString(argv[3])) {
+        const char *src = JS_ToCString(ctx, argv[3]);
+        if (src) { W.src[w] = strdup(src); JS_FreeCString(ctx, src); }
+    }
     task_push(WT_START, w, NULL);
     return JS_NewInt32(ctx, w);
 }
@@ -190,7 +195,7 @@ static const char k_worker_setup[] =
     "             toString: function () { return loc.href; } };\n"
     "  Object.defineProperty(g, 'location', { value: wl, configurable: true });\n"
     "  Object.defineProperty(g, 'self', { value: g, writable: true, configurable: true });\n"
-    "  if (!shared) g.postMessage = function postMessage(m) { g.__cyberWorkerOut(m); };\n"
+    "  if (!shared) g.postMessage = function postMessage(m) { g.__cyberWorkerOut(g.__cyberWire(m)); };\n"
     "  else delete g.postMessage;\n"
     "  g.importScripts = function importScripts() {\n"
     "    for (var i = 0; i < arguments.length; i++) g.__cyberImport(new URL(String(arguments[i]), url).href);\n"
@@ -199,14 +204,13 @@ static const char k_worker_setup[] =
     "  var handlers = {};\n"
     "  ['message', 'error', 'messageerror', 'connect'].forEach(function (t) {\n"
     "    Object.defineProperty(g, 'on' + t, { configurable: true, get: function () { return handlers[t] || null; },\n"
-    "      set: function (f) { if (handlers[t]) g.removeEventListener(t, handlers[t]);\n"
-    "        handlers[t] = typeof f === 'function' ? f : null; if (handlers[t]) g.addEventListener(t, handlers[t]); } });\n"
+    "      set: function (f) { handlers[t] = typeof f === 'function' ? f : null; } });\n"
     "  });\n"
     "  var to = g;\n"
     "  if (shared) {\n"
     "    /* (its end of the port: a connect event brings it) */\n"
     "    class Port extends g.EventTarget {\n"
-    "      postMessage(m) { g.__cyberWorkerOut(m); }\n"
+    "      postMessage(m) { g.__cyberWorkerOut(g.__cyberWire(m)); }\n"
     "      start() {}\n"
     "      close() {}\n"
     "    }\n"
@@ -214,7 +218,7 @@ static const char k_worker_setup[] =
     "    to = new Port();\n"
     "    g.__cyberConnect = function () { g.dispatchEvent(new MessageEvent('connect', { source: to, ports: [to] })); };\n"
     "  }\n"
-    "  g.__cyberDeliver = function (data) { to.dispatchEvent(new MessageEvent('message', { data: data })); };\n"
+    "  g.__cyberDeliver = function (data) { to.dispatchEvent(new MessageEvent('message', { data: g.__cyberUnwire(data) })); };\n"
     "})";
 
 /* The DOM interfaces a worker does not have (idl_shape.c's table). */
@@ -248,7 +252,9 @@ static void worker_start(int w) {
         JS_GetException(ctx);
         return;
     }
-    if (!run_script(ctx, W.url[w])) {
+    /* (a blob: URL: its text came with the constructor) */
+    bool ran = W.src[w] ? !JS_IsException(JS_Eval(ctx, W.src[w], strlen(W.src[w]), W.url[w], JS_EVAL_TYPE_GLOBAL)) : run_script(ctx, W.url[w]);
+    if (!ran) {
         /* (an uncaught error: reported in the worker, as a window's would be) */
         GCValue exc = JS_GetException(ctx);
         GCValue report = JS_GetPropertyStr(ctx, g, "reportError");
@@ -276,7 +282,7 @@ static void deliver(JSContextHandle ctx, GCValue fn, GCValue this_val, int argc,
 void worker_api_reset(void) {
     for (int i = 0; i < g_ntasks; i++) free(g_tasks[i].json);
     g_ntasks = 0;
-    for (int w = 0; w < W.n; w++) free(W.url[w]);
+    for (int w = 0; w < W.n; w++) { free(W.url[w]); free(W.src[w]); }
     W.n = 0;
 }
 
@@ -323,28 +329,27 @@ static const char k_worker_class[] =
     "    constructor(url, options) {\n"
     "      if (arguments.length < 1) throw new TypeError(\"Failed to construct 'Worker': 1 argument required.\");\n"
     "      super();\n"
-    "      Object.defineProperty(this, '__w', { value: start(this, new URL(String(url), g.location.href).href) });\n"
+    "      var abs = new URL(String(url), g.location.href).href;\n"
+    "      Object.defineProperty(this, '__w', { value: start(this, abs, false, g.__cyberBlobText(abs)) });\n"
     "    }\n"
-    "    postMessage(m) { post(this.__w, m); }\n"
+    "    postMessage(m) { post(this.__w, g.__cyberWire(m)); }\n"
     "    terminate() { stop(this.__w); }\n"
     "  }\n"
     "  ['message', 'error', 'messageerror'].forEach(function (t) {\n"
     "    Object.defineProperty(Worker.prototype, 'on' + t, { configurable: true, enumerable: true,\n"
     "      get: function () { return (this.__h && this.__h[t]) || null; },\n"
-    "      set: function (f) { var h = this.__h || (this.__h = {}); if (h[t]) this.removeEventListener(t, h[t]);\n"
-    "        h[t] = typeof f === 'function' ? f : null; if (h[t]) this.addEventListener(t, h[t]); } });\n"
+    "      set: function (f) { var h = this.__h || (this.__h = {}); h[t] = typeof f === 'function' ? f : null; } });\n"
     "  });\n"
     "  Object.defineProperty(g, 'Worker', { value: Worker, writable: true, configurable: true });\n"
     "  class MessagePortOf extends g.EventTarget {\n"
-    "    postMessage(m) { post(this.__w, m); }\n"
+    "    postMessage(m) { post(this.__w, g.__cyberWire(m)); }\n"
     "    start() {}\n"
     "    close() { stop(this.__w); }\n"
     "  }\n"
     "  Object.defineProperty(MessagePortOf.prototype, Symbol.toStringTag, { value: 'MessagePort', configurable: true });\n"
     "  Object.defineProperty(MessagePortOf.prototype, 'onmessage', { configurable: true, enumerable: true,\n"
     "    get: function () { return this.__om || null; },\n"
-    "    set: function (f) { if (this.__om) this.removeEventListener('message', this.__om);\n"
-    "      this.__om = typeof f === 'function' ? f : null; if (this.__om) this.addEventListener('message', this.__om); } });\n"
+    "    set: function (f) { this.__om = typeof f === 'function' ? f : null; } });\n"
     "  class SharedWorker extends g.EventTarget {\n"
     "    constructor(url, options) {\n"
     "      if (arguments.length < 1) throw new TypeError(\"Failed to construct 'SharedWorker': 1 argument required.\");\n"
@@ -355,7 +360,7 @@ static const char k_worker_class[] =
     "    }\n"
     "  }\n"
     "  Object.defineProperty(g, 'SharedWorker', { value: SharedWorker, writable: true, configurable: true });\n"
-    "  g.__cyberWorkerDeliver = function (w, data) { w.dispatchEvent(new MessageEvent('message', { data: data })); };\n"
+    "  g.__cyberWorkerDeliver = function (w, data) { w.dispatchEvent(new MessageEvent('message', { data: g.__cyberUnwire(data) })); };\n"
     "})";
 
 void worker_api_install(JSContextHandle ctx, GCValue global) {

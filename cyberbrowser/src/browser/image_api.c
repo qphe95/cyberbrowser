@@ -32,6 +32,7 @@
 
 extern const char *g_cyber_start_url;
 GCValue js_event_target_dispatchEvent(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+void dom_request_relayout(void);
 
 /* Resolved URL an <img> node shows (its <picture>'s source, its srcset
  * candidate, else src). */
@@ -313,6 +314,8 @@ void image_api_notify(JSContextHandle ctx, const char *url)
     int st = image_cache_status(ic, url);
     if (st == 0) return;                    /* still in flight */
     const char *type = st > 0 ? "load" : "error";
+    /* (sizes change: a query after its load event must see them) */
+    dom_request_relayout();
     static int dbg = -1;
     if (dbg < 0) dbg = getenv("CYBER_DEBUG_IMG") ? 1 : 0;
     int nimg = 0, nmatch = 0, nfired = 0;

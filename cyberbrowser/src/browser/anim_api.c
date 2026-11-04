@@ -16,6 +16,7 @@
 #include "browser_api_impl_types.h"
 #include "browser_api_impl_internal.h"
 #include "css_anim.h"
+#include "css_parser.h"
 #include "dom_store.h"
 #include "dom_wrap.h"
 #include "dom_js.h"
@@ -150,6 +151,24 @@ static GCValue js_anim_row(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     return JS_UNDEFINED;
 }
 
+/* __cyberRenderFeature(bit): the rendering tick has this to look after. */
+static GCValue js_render_feature(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    int32_t bit = 0;
+    if (argc > 0 && !JS_ToInt32(ctx, &bit, argv[0])) g_css_render_features |= bit;
+    return JS_UNDEFINED;
+}
+
+/* __cyberColorScheme("light" | "dark" | null) */
+static GCValue js_color_scheme(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    const char *s = argc > 0 && JS_IsString(argv[0]) ? JS_ToCString(ctx, argv[0]) : NULL;
+    if (css_media_set_color_scheme(!s ? NULL : !strcmp(s, "dark") ? "dark" : "light")) dom_request_relayout();
+    return JS_UNDEFINED;
+}
+
 /* __cyberAnimWake(): this realm's animations want turns. */
 static GCValue js_anim_wake(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
 {
@@ -166,6 +185,8 @@ void anim_api_install(JSContextHandle ctx, GCValue global)
     JS_DefinePropertyValueStr(ctx, global, "__cyberAnimStyle", JS_NewCFunction(ctx, js_anim_style, "__cyberAnimStyle", 2), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberAnimWake", JS_NewCFunction(ctx, js_anim_wake, "__cyberAnimWake", 0), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberAnimRow", JS_NewCFunction(ctx, js_anim_row, "__cyberAnimRow", 4), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberRenderFeature", JS_NewCFunction(ctx, js_render_feature, "__cyberRenderFeature", 1), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberColorScheme", JS_NewCFunction(ctx, js_color_scheme, "__cyberColorScheme", 1), JS_PROP_CONFIGURABLE);
 }
 
 static void web_animations_tick(JSContextHandle ctx)

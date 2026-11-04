@@ -2625,6 +2625,14 @@ typedef struct MqFeature {
 } MqFeature;
 
 /* The feature named name (lower case) on a vw x vh screen; false if unknown. */
+static const char *g_mq_color_scheme;
+
+bool css_media_set_color_scheme(const char *scheme) {
+    if (scheme == g_mq_color_scheme) return false;
+    g_mq_color_scheme = scheme;
+    return true;
+}
+
 static bool mq_feature_lookup(const char *name, double vw, double vh, MqFeature *f) {
     static const struct { const char *name, *value; } idents[] = {
         { "prefers-color-scheme", "dark" }, { "prefers-reduced-motion", "no-preference" },
@@ -2650,7 +2658,9 @@ static bool mq_feature_lookup(const char *name, double vw, double vh, MqFeature 
     else if (strcmp(name, "orientation") == 0) { f->type = MQ_IDENT; f->ident = vh >= vw ? "portrait" : "landscape"; }
     else {
         for (size_t i = 0; i < sizeof(idents) / sizeof(idents[0]); i++)
-            if (strcmp(name, idents[i].name) == 0) { f->type = MQ_IDENT; f->ident = idents[i].value; return true; }
+            if (strcmp(name, idents[i].name) == 0) {
+                f->type = MQ_IDENT;
+                f->ident = i == 0 && g_mq_color_scheme ? g_mq_color_scheme : idents[i].value; return true; }
         return false;
     }
     return true;

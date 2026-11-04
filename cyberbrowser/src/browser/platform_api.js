@@ -423,6 +423,128 @@
     Object.defineProperty(File.prototype, 'lastModified', { configurable: true, enumerable: true, get: function () { return this.__lastModified; } });
     Object.defineProperty(File.prototype, Symbol.toStringTag, { value: 'File', configurable: true });
     expose('Blob', Blob);
+
+    /* ---- structured clone (HTML 2.7): a value as JSON text can carry, tagged,
+     * and back in this realm; what crosses to a worker goes this way ---- */
+    function cloneError(v) {
+        return new global.DOMException(String(v) + ' could not be cloned.', 'DataCloneError');
+    }
+    var ERROR_NAMES = ['Error', 'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError', 'TypeError', 'URIError'];
+    var VIEWS = ['Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array',
+                 'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array', 'DataView'];
+    function wire(v, seen) {
+        switch (typeof v) {
+        case 'undefined': return { u: 1 };
+        case 'boolean': case 'string': return v;
+        case 'number':
+            if (v !== v) return { n: 'NaN' };
+            if (v === Infinity) return { n: 'Infinity' };
+            if (v === -Infinity) return { n: '-Infinity' };
+            if (v === 0 && 1 / v < 0) return { n: '-0' };
+            return v;
+        case 'bigint': return { b: String(v) };
+        case 'symbol': case 'function': throw cloneError(typeof v === 'symbol' ? v.toString() : v);
+        }
+        if (v === null) return null;
+        if (seen.has(v)) return { r: seen.get(v) };
+        var id = seen.size, kind = Object.prototype.toString.call(v).slice(8, -1);
+        seen.set(v, id);
+        if (global.DOMException && v instanceof global.DOMException) kind = 'DOMException';
+        if (Array.isArray(v)) {
+            var items = [], own = Object.keys(v);
+            own.forEach(function (k) { items.push([/^\d+$/.test(k) ? +k : k, wire(v[k], seen)]); });
+            return { i: id, a: v.length, p: items };
+        }
+        switch (kind) {
+        case 'Date': return { i: id, d: v.getTime() };
+        case 'RegExp': return { i: id, re: v.source, f: v.flags };
+        case 'Boolean': case 'Number': case 'String': case 'BigInt':
+            return { i: id, w: kind, v: wire(v.valueOf(), new Map()) };
+        case 'ArrayBuffer': return { i: id, ab: Array.from(new Uint8Array(v)) };
+        case 'Map': {
+            var m = [];
+            v.forEach(function (x, k) { m.push([wire(k, seen), wire(x, seen)]); });
+            return { i: id, m: m };
+        }
+        case 'Set': {
+            var e = [];
+            v.forEach(function (x) { e.push(wire(x, seen)); });
+            return { i: id, s: e };
+        }
+        case 'DOMException': return { i: id, x: v.name, msg: v.message };
+        case 'Error': {
+            var name = ERROR_NAMES.indexOf(v.name) >= 0 ? v.name : 'Error';
+            return { i: id, e: name, msg: v.message === undefined ? '' : String(v.message), st: v.stack === undefined ? '' : String(v.stack) };
+        }
+        case 'File': case 'Blob': {
+            var w = { i: id, bl: Array.from(bytesOfBlob(v)), t: v.type };
+            if (kind === 'File') { w.nm = v.name; w.lm = v.lastModified; }
+            return w;
+        }
+        }
+        if (VIEWS.indexOf(kind) >= 0)
+            return { i: id, vw: kind, buf: wire(v.buffer, seen), o: v.byteOffset, l: kind === 'DataView' ? v.byteLength : v.length };
+        /* (what has no serialization: a platform object, a promise, a weak collection) */
+        if (kind !== 'Object' && kind !== 'Arguments') throw cloneError(kind);
+        if (global.Node && v instanceof global.Node) throw cloneError(v);
+        var props = [];
+        Object.keys(v).forEach(function (k) { props.push([k, wire(v[k], seen)]); });
+        return { i: id, o: props };
+    }
+    function unwire(w, made) {
+        if (w === null || typeof w !== 'object') return w;
+        if (w.u) return undefined;
+        if (w.n !== undefined) return w.n === 'NaN' ? NaN : w.n === '-0' ? -0 : w.n === 'Infinity' ? Infinity : -Infinity;
+        if (w.b !== undefined) return BigInt(w.b);
+        if (w.r !== undefined) return made[w.r];
+        var v;
+        if (w.a !== undefined) {
+            v = new Array(w.a);
+            made[w.i] = v;
+            w.p.forEach(function (e) { v[e[0]] = unwire(e[1], made); });
+        } else if (w.o !== undefined && w.vw === undefined) {
+            v = {};
+            made[w.i] = v;
+            w.o.forEach(function (e) { Object.defineProperty(v, e[0], { value: unwire(e[1], made), writable: true, enumerable: true, configurable: true }); });
+        } else if (w.d !== undefined) {
+            v = made[w.i] = new Date(w.d);
+        } else if (w.re !== undefined) {
+            v = made[w.i] = new RegExp(w.re, w.f);
+        } else if (w.w !== undefined) {
+            v = made[w.i] = Object(unwire(w.v, []));
+        } else if (w.ab !== undefined) {
+            v = made[w.i] = new Uint8Array(w.ab).buffer;
+        } else if (w.m !== undefined) {
+            v = made[w.i] = new Map();
+            w.m.forEach(function (e) { v.set(unwire(e[0], made), unwire(e[1], made)); });
+        } else if (w.s !== undefined) {
+            v = made[w.i] = new Set();
+            w.s.forEach(function (e) { v.add(unwire(e, made)); });
+        } else if (w.x !== undefined) {
+            v = made[w.i] = new global.DOMException(w.msg, w.x);
+        } else if (w.e !== undefined) {
+            v = made[w.i] = new global[w.e](w.msg);
+            if (w.st) Object.defineProperty(v, 'stack', { value: w.st, writable: true, configurable: true });
+        } else if (w.bl !== undefined) {
+            var bytes = new Uint8Array(w.bl);
+            v = made[w.i] = w.nm !== undefined ? new global.File([bytes], w.nm, { type: w.t, lastModified: w.lm }) : new Blob([bytes], { type: w.t });
+        } else if (w.vw !== undefined) {
+            var buf = unwire(w.buf, made);
+            v = made[w.i] = new global[w.vw](buf, w.o, w.l);
+        }
+        return v;
+    }
+    Object.defineProperty(global, '__cyberWire', { configurable: true, value: function (v) { return wire(v, new Map()); } });
+    Object.defineProperty(global, '__cyberUnwire', { configurable: true, value: function (w) { return unwire(w, []); } });
+    Object.defineProperty(global, 'structuredClone', { configurable: true, enumerable: true, writable: true, value: function structuredClone(value) {
+        if (arguments.length < 1) throw new TypeError("Failed to execute 'structuredClone': 1 argument required, but only 0 present.");
+        return unwire(wire(value, new Map()), []);
+    } });
+    /* (a blob: URL's script, for a Worker) */
+    Object.defineProperty(global, '__cyberBlobText', { configurable: true, value: function (url) {
+        var reg = global.__blobRegistry, b = reg && reg[url];
+        return b && blobBytes.has(b) ? new global.TextDecoder().decode(blobBytes.get(b)) : null;
+    } });
     expose('File', File);
 
     /* FileReader: a read ends in a task of its own, with the events File API 8 says. */
@@ -720,9 +842,11 @@
             global.scrollBy(r.left, r.top);
         }
     }
-    Object.defineProperty(global, '__cyberRenderTick', { configurable: true, value: function (features, scrollers) {
+    Object.defineProperty(global, '__cyberRenderTick', { configurable: true, value: function (features, scrollers, big) {
         var root = global.document && global.document.documentElement, snappers = [], changed = [];
         if (!root) return;
+        if ((features & 8) && global.__cyberMediaCheck) global.__cyberMediaCheck();
+        if (big && !scrollers) return;
         if (scrollers) {
             for (var s = 0; s < scrollers.length; s++) {
                 var ax = snapAxes(global.getComputedStyle(scrollers[s]));
@@ -750,6 +874,23 @@
         for (var k = 0; k < changed.length; k += 2)
             global.__cyberDispatchTrusted(changed[k], new global.ContentVisibilityAutoStateChangeEvent('contentvisibilityautostatechange', { skipped: changed[k + 1] }));
     } });
+
+    /* (the transition running in a document) */
+    if (global.Document && !('activeViewTransition' in global.Document.prototype))
+        Object.defineProperty(global.Document.prototype, 'activeViewTransition', { configurable: true, enumerable: true, get: function () {
+            return this.__cyberViewTransition || null;
+        } });
+    /* (a window that isn't a popup can't be moved or sized by script) */
+    ['resizeTo', 'resizeBy', 'moveTo', 'moveBy'].forEach(function (n) {
+        if (!(n in global)) Object.defineProperty(global, n, { configurable: true, enumerable: true, writable: true, value: function () {} });
+    });
+
+    /* (an iframe's size is its attributes) */
+    if (global.HTMLIFrameElement) ['width', 'height'].forEach(function (a) {
+        Object.defineProperty(global.HTMLIFrameElement.prototype, a, { configurable: true, enumerable: true,
+            get: function () { var v = this.getAttribute(a); return v === null ? '' : v; },
+            set: function (v) { this.setAttribute(a, String(v)); } });
+    });
 
     /* (HTMLMetaElement reflects its attributes) */
     if (global.HTMLMetaElement) [['name', 'name'], ['content', 'content'], ['httpEquiv', 'http-equiv'], ['media', 'media'], ['scheme', 'scheme']].forEach(function (m) {

@@ -1298,6 +1298,7 @@ bool page_engine_reset(void) {
     anim_api_reset();
     layout_scroll_reset();
     g_css_render_features = 0;
+    css_media_set_color_scheme(NULL);
     g_dom_needs_layout = 0;
     bool ok = init_browser_context();
     if (getenv("CYBER_TAB_CPU"))

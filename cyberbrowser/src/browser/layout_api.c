@@ -1849,7 +1849,8 @@ void layout_scroll_hold(JSContextHandle ctx, bool hold)
 }
 
 static bool g_render_tick_due;
-#define LQ_RENDER_WALK_NODES 5000
+/* (real pages run to thousands of nodes: a replay of YouTube's home page has 3,200) */
+#define LQ_RENDER_WALK_NODES 1500
 
 void layout_scroll_queue(JSContextHandle ctx, uint32_t id)
 {
@@ -1942,13 +1943,16 @@ int layout_render_tick(JSContextHandle ctx)
 {
     int features = g_css_render_features;
     if (!features) return 0;
+    /* (a small page goes by any change: its frame may not come for a while; a
+     * big one's walk waits for the frame) */
     static uint64_t seen;
     static unsigned long long last;
-    if (seen == g_frame_layouts && !g_render_tick_due) return 0;
+    uint64_t version = g_dom.live >= LQ_RENDER_WALK_NODES ? g_frame_layouts : g_frame_layouts + g_dom_relayout_requests;
+    if (seen == version && !g_render_tick_due) return 0;
     unsigned long long now = (unsigned long long)page_clock_now_ms();
     if (now - last < (g_dom.live >= LQ_RENDER_WALK_NODES ? 400u : 16u)) return 0;
     last = now;
-    seen = g_frame_layouts;
+    seen = version;
     g_render_tick_due = false;
     GCValue global = JS_GetGlobalObject(ctx);
     GCValue tick = JS_GetPropertyStr(ctx, global, "__cyberRenderTick");
@@ -1957,9 +1961,9 @@ int layout_render_tick(JSContextHandle ctx)
      * style each frame would cost more than the page's own layout: only the
      * scroll containers of the last layout, for snapping; content-visibility's
      * event and scroll-initial-target go without. */
-    GCValue args[2] = { JS_NewInt32(ctx, features), JS_NULL };
-    if (g_dom.live >= LQ_RENDER_WALK_NODES) {
-        if (!(features & CSS_FEAT_SNAP) || !g_lq_valid) return 0;
+    bool big = g_dom.live >= LQ_RENDER_WALK_NODES;
+    GCValue args[3] = { JS_NewInt32(ctx, features), JS_NULL, JS_NewBool(ctx, big) };
+    if (big && (features & CSS_FEAT_SNAP) && g_lq_valid) {
         GCValue list = JS_NewArray(ctx);
         uint32_t n = 0;
         for (int i = 0; i < g_lq_layout.tree.count; i++) {
@@ -1968,10 +1972,9 @@ int layout_render_tick(JSContextHandle ctx)
             if (hn && hn->type == HTML_NODE_ELEMENT && dom_valid(hn->store_id))
                 JS_SetPropertyUint32(ctx, list, n++, dom_js(ctx, hn->store_id));
         }
-        if (!n) return 0;
-        args[1] = list;
+        if (n) args[1] = list;
     }
-    if (JS_IsException(JS_Call(ctx, tick, JS_UNDEFINED, 2, args))) JS_GetException(ctx);
+    if (JS_IsException(JS_Call(ctx, tick, JS_UNDEFINED, 3, args))) JS_GetException(ctx);
     timer_microtask_checkpoint(ctx);
     return 1;
 }

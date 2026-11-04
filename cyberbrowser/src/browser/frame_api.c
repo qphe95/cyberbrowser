@@ -35,6 +35,7 @@
 #include "browser_api_impl_internal.h"
 #include "dom_js.h"
 #include "dom_store.h"
+#include "layout_api.h"
 #include "dom_wrap.h"
 #include "http_download.h"
 #include "url_utils.h"
@@ -525,14 +526,24 @@ static const char frame_window_js[] =
     "  function ro(name, v) { Object.defineProperty(w, name, { value: v, configurable: true, writable: false }); }"
     "  ro('parent', opener ? w : parent); ro('top', opener ? w : top || parent); ro('frameElement', frameElement);"
     "  if (opener) {"
+    /* (a popup's size is script's to set) */
+    "    var sizeTo = function (x, y) {"
+    "      forced.width = Math.max(1, Math.floor(Number(x)) || 1);"
+    "      forced.height = Math.max(1, Math.floor(Number(y)) || 1);"
+    "      w.setTimeout(function () { w.__cyberFrameResized(false); }, 0);"
+    "    };"
+    "    Object.defineProperty(w, 'resizeTo', { value: function resizeTo(x, y) { sizeTo(x, y); }, configurable: true, writable: true });"
+    "    Object.defineProperty(w, 'resizeBy', { value: function resizeBy(x, y) { sizeTo(w.innerWidth + Number(x), w.innerHeight + Number(y)); }, configurable: true, writable: true });"
     "    Object.defineProperty(w, 'opener', { value: opener, configurable: true, writable: true });"
     "    Object.defineProperty(w, 'close', { value: function close() { w.__cyberFrameClose(); }, configurable: true, writable: true });"
     "  }"
     "  function px(v) { var n = parseFloat(v); return isFinite(n) ? n : NaN; }"
     "  var hidden = !!frameElement && !!frameElement.ownerDocument && frameElement.getClientRects && !frameElement.getClientRects().length;"
+    "  var forced = {};"
     "  function size(dim, attr, dflt) {"
     "    var f = frameElement, n = NaN;"
     "    if (hidden) return 0;"
+    "    if (forced[dim] !== undefined) return forced[dim];"
     "    if (f) { n = px(f.style && f.style[dim]); if (isNaN(n)) n = px(f.getAttribute(attr)); }"
     "    return isNaN(n) ? (opener ? (dim === 'width' ? opener.innerWidth : opener.innerHeight) : dflt) : Math.round(n);"
     "  }"
@@ -547,6 +558,8 @@ static const char frame_window_js[] =
     "    var a = w.innerWidth, b = w.innerHeight;"
     "    if (a === lastW && b === lastH) return;"
     "    lastW = a; lastH = b;"
+    /* (CSS View Transitions: a new size ends the one running) */
+    "    if (w.document && w.document.__cyberViewTransition) w.document.__cyberViewTransition.skipTransition();"
     "    w.dispatchEvent(new w.Event('resize'));"
     "  } });"
     /* (a frame's location navigates it; a fragment alone doesn't) */
@@ -557,6 +570,7 @@ static const char frame_window_js[] =
     "    ['assign', 'replace'].forEach(function (k) {"
     "      Object.defineProperty(loc, k, { value: function (u) { go(u); }, enumerable: true, configurable: true, writable: true });"
     "    });"
+    "    Object.defineProperty(loc, 'reload', { value: function reload() { nav(String(hd.get.call(loc)), true); }, enumerable: true, configurable: true, writable: true });"
     "  }"
     "})";
 
@@ -639,7 +653,27 @@ static char *wurl_percent_decode(const char *s) {
 }
 
 /* Navigate f to f->url: a new realm and document with the page loaded. */
+/* A popup's window of its first about:blank, which script has kept from
+ * window.open: HTML has it stay the window through
+ * the first navigation.  Here the document gets a realm of its own, so the old
+ * window passes on what is asked of it and hears the load. */
+static const char k_window_moved[] =
+    "(function (to) {"
+    "  ['document', 'location', 'scrollX', 'scrollY', 'pageXOffset', 'pageYOffset', 'innerWidth', 'innerHeight',"
+    "   'outerWidth', 'outerHeight', 'scrollTo', 'scrollBy', 'scroll', 'resizeTo', 'resizeBy', 'getComputedStyle',"
+    "   'requestAnimationFrame', 'cancelAnimationFrame', 'postMessage', 'close', 'matchMedia', 'navigation', 'history'].forEach(function (n) {"
+    "    try {"
+    "      Object.defineProperty(window, n, { configurable: true, get: function () {"
+    "        var v = to[n];"
+    "        return typeof v === 'function' ? v.bind(to) : v;"
+    "      } });"
+    "    } catch (e) { /* (one it can't redefine) */ }"
+    "  });"
+    "})";
+
 static void frame_load(Frame *f) {
+    JSContextHandle first_ctx = GC_HANDLE_NULL;
+    GCValue first_win = JS_UNDEFINED;
     char url[2048];
     snprintf(url, sizeof(url), "%s", f->url);
     /* (the document going: its window hears) */
@@ -648,6 +682,12 @@ static void frame_load(Frame *f) {
         /* (pageswap: whether a view transition goes on, same-origin only) */
         char *from = realm_url(f->ctx);
         bool same = same_origin(from, url);
+        if (f->popup && !strncmp(from, "about:blank", 11) && strncmp(url, "about:blank", 11)) {
+            first_ctx = f->ctx;
+            first_win = was;
+            gc_add_root((GCHandle)first_ctx);
+            root_value(first_win, true);
+        }
         free(from);
         GCValue swap = JS_GetPropertyStr(f->ctx, was, "__cyberPageSwap");
         GCValue to = JS_NewString(f->ctx, url), sr = JS_FALSE;
@@ -751,6 +791,14 @@ static void frame_load(Frame *f) {
         "window.dispatchEvent(new Event('load'));";
     GCValue r = JS_Eval(ctx, lifecycle_js, sizeof(lifecycle_js) - 1, "<frame_lifecycle>", JS_EVAL_TYPE_GLOBAL);
     if (JS_IsException(r)) JS_GetException(ctx);
+    if (first_ctx) {
+        GCValue moved = JS_Eval(first_ctx, k_window_moved, sizeof k_window_moved - 1, "<window_moved>", JS_EVAL_TYPE_GLOBAL);
+        GCValue now = JS_GetGlobalObject(ctx);
+        if (JS_IsFunction(first_ctx, moved) && JS_IsException(JS_Call(first_ctx, moved, JS_UNDEFINED, 1, &now))) JS_GetException(first_ctx);
+        frame_fire(first_ctx, first_win, "load");
+        root_value(first_win, false);
+        gc_remove_root((GCHandle)first_ctx);
+    }
     frame_fire(f->parent, dom_js(f->parent, f->iframe), "load");
 }
 
@@ -864,13 +912,17 @@ void frame_api_hold(bool hold) { g_frames_held = hold; }
 /* The frames whose size changed, when anything in the page changed. */
 int frame_api_resize_tick(void) {
     static uint64_t seen;
-    if (seen == g_dom_relayout_requests || !g_frames) return 0;
-    seen = g_dom_relayout_requests;
+    extern uint64_t g_dom_layout_requests;
+    if (seen == g_dom_layout_requests || !g_frames) return 0;
+    seen = g_dom_layout_requests;
     for (Frame *f = g_frames; f; f = f->next) {
         if (f->dead || f->popup || !f->ctx || f->state != FRAME_LOADED) continue;
+        /* (the page's frames lay out only the main document: a frame's style
+         * change is seen here, and a transition it starts with it) */
+        if (f->doc && dom_valid(f->doc) && (g_dom.flags[dom_slot(f->doc)] & DOMF_DIRTY_MASK)) layout_api_update(f->ctx);
         GCValue fn = JS_GetPropertyStr(f->ctx, JS_GetGlobalObject(f->ctx), "__cyberFrameResized");
         /* (asking if it has a box lays out: not on a big page) */
-        GCValue small = JS_NewBool(f->ctx, g_dom.live < 5000);
+        GCValue small = JS_NewBool(f->ctx, g_dom.live < 1500);
         if (JS_IsFunction(f->ctx, fn) && JS_IsException(JS_Call(f->ctx, fn, JS_UNDEFINED, 1, &small))) JS_GetException(f->ctx);
     }
     return 0;
@@ -1055,6 +1107,7 @@ static GCValue js_frame_navigate_to(JSContextHandle ctx, GCValue this_val, int a
     const char *to = abs ? abs : u, *hash = strchr(to, '#');
     size_t n = hash ? (size_t)(hash - to) : strlen(to), bn = strcspn(base, "#");
     bool same = hash && n == bn && !strncmp(to, base, n);
+    if (argc > 1 && JS_ToBool(ctx, argv[1])) same = false;     /* (a reload) */
     if (!same) {
         snprintf(f->url, sizeof(f->url), "%s", to);
         f->state = FRAME_PENDING;
