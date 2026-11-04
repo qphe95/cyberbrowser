@@ -13,6 +13,7 @@
  * are their used values.
  */
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -273,8 +274,23 @@ static char *compute_value(JSContextHandle ctx, ComputedStyle *cs, const CssProp
     env_of(ctx, cs, p, v, &env);
     char *r = css_prop_compute(p, v, &env);
     if (!r) return strdup(v);
+    /* (a list of them, as in gap decorations) */
+    if ((!strcmp(n, "column-rule-width") || !strcmp(n, "row-rule-width")) && (strchr(r, ',') || strchr(r, '('))) {
+        static const struct { const char *kw, *px; } lw[] = { { "thin", "1px" }, { "medium", "3px" }, { "thick", "5px" } };
+        for (size_t k = 0; k < 3; k++) {
+            size_t kl = strlen(lw[k].kw);
+            for (char *q; (q = strstr(r, lw[k].kw)); ) {
+                char *t = malloc(strlen(r) + 8);
+                memcpy(t, r, (size_t)(q - r));
+                strcpy(t + (q - r), lw[k].px);
+                strcat(t, q + kl);
+                free(r);
+                r = t;
+            }
+        }
+    }
     /* line widths: thin, medium, thick */
-    if (strstr(n, "-width") && (strstr(n, "border") || strstr(n, "outline") || strstr(n, "column-rule"))) {
+    if (strstr(n, "-width") && (strstr(n, "border") || strstr(n, "outline") || strstr(n, "rule-width"))) {
         const char *kw = !strcmp(r, "thin") ? "1px" : !strcmp(r, "medium") ? "3px" : !strcmp(r, "thick") ? "5px" : NULL;
         if (kw) { free(r); r = strdup(kw); }
     }
@@ -287,6 +303,239 @@ static bool display_blockified(JSContextHandle ctx, ComputedStyle *cs) {
     if (strcmp(computed_of(ctx, cs, "float"), "none")) return true;
     NodeId p = dom_parent(cs->el);
     return p && dom_kind(p) == DOM_K_DOCUMENT;     /* the root element */
+}
+
+/* ---- a transform list as the matrix it comes to (CSSOM: its resolved value) ---- */
+static void m4_mul(double a[16], const double b[16])
+{
+    double r[16];
+    for (int c = 0; c < 4; c++)
+        for (int w = 0; w < 4; w++) {
+            double v = 0.0;
+            for (int k = 0; k < 4; k++) v += a[k * 4 + w] * b[c * 4 + k];
+            r[c * 4 + w] = v;
+        }
+    memcpy(a, r, sizeof r);
+}
+
+static double tf_len(const char *t, double base)
+{
+    char *e = NULL;
+    double v = strtod(t, &e);
+    if (e && *e == '%') return v * base / 100.0;
+    return v;
+}
+
+static double tf_ang(const char *t)
+{
+    char *e = NULL;
+    double v = strtod(t, &e);
+    if (!e) return v * 3.14159265358979323846 / 180.0;
+    if (!strncmp(e, "rad", 3)) return v;
+    if (!strncmp(e, "grad", 4)) return v * 3.14159265358979323846 / 200.0;
+    if (!strncmp(e, "turn", 4)) return v * 2.0 * 3.14159265358979323846;
+    return v * 3.14159265358979323846 / 180.0;
+}
+
+/* NULL when it can't be read (calc() left in it, say). */
+static char *transform_matrix(const char *list, double w, double h)
+{
+    double m[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    const char *p = list;
+    while (*p) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        const char *open = strchr(p, '(');
+        if (!open) return NULL;
+        char name[24];
+        size_t nl = (size_t)(open - p);
+        if (nl >= sizeof name) return NULL;
+        for (size_t i = 0; i < nl; i++) name[i] = (char)tolower((unsigned char)p[i]);
+        name[nl] = 0;
+        const char *close = strchr(open, ')');
+        if (!close || memchr(open + 1, '(', (size_t)(close - open - 1))) return NULL;
+        char args[16][48];
+        int na = 0;
+        for (const char *a = open + 1; a < close && na < 16; ) {
+            while (a < close && (*a == ' ' || *a == ',')) a++;
+            const char *e = a;
+            while (e < close && *e != ' ' && *e != ',') e++;
+            if (e > a) {
+                if ((size_t)(e - a) >= sizeof args[0]) return NULL;
+                memcpy(args[na], a, (size_t)(e - a));
+                args[na++][e - a] = 0;
+            }
+            a = e;
+        }
+        double f[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+        #define ARG(i) (i < na ? args[i] : "0")
+        if (!strcmp(name, "matrix") && na == 6) {
+            f[0] = atof(args[0]); f[1] = atof(args[1]); f[4] = atof(args[2]); f[5] = atof(args[3]); f[12] = atof(args[4]); f[13] = atof(args[5]);
+        } else if (!strcmp(name, "matrix3d") && na == 16) {
+            for (int i = 0; i < 16; i++) f[i] = atof(args[i]);
+        } else if (!strcmp(name, "translate")) { f[12] = tf_len(ARG(0), w); f[13] = na > 1 ? tf_len(args[1], h) : 0.0; }
+        else if (!strcmp(name, "translatex")) f[12] = tf_len(ARG(0), w);
+        else if (!strcmp(name, "translatey")) f[13] = tf_len(ARG(0), h);
+        else if (!strcmp(name, "translatez")) f[14] = tf_len(ARG(0), 0.0);
+        else if (!strcmp(name, "translate3d")) { f[12] = tf_len(ARG(0), w); f[13] = tf_len(ARG(1), h); f[14] = tf_len(ARG(2), 0.0); }
+        else if (!strcmp(name, "scale")) { f[0] = atof(ARG(0)); f[5] = na > 1 ? atof(args[1]) : f[0]; }
+        else if (!strcmp(name, "scalex")) f[0] = atof(ARG(0));
+        else if (!strcmp(name, "scaley")) f[5] = atof(ARG(0));
+        else if (!strcmp(name, "scalez")) f[10] = atof(ARG(0));
+        else if (!strcmp(name, "scale3d")) { f[0] = atof(ARG(0)); f[5] = atof(ARG(1)); f[10] = atof(ARG(2)); }
+        else if (!strcmp(name, "rotate") || !strcmp(name, "rotatez")) { double a = tf_ang(ARG(0)); f[0] = cos(a); f[1] = sin(a); f[4] = -sin(a); f[5] = cos(a); }
+        else if (!strcmp(name, "rotatex")) { double a = tf_ang(ARG(0)); f[5] = cos(a); f[6] = sin(a); f[9] = -sin(a); f[10] = cos(a); }
+        else if (!strcmp(name, "rotatey")) { double a = tf_ang(ARG(0)); f[0] = cos(a); f[2] = -sin(a); f[8] = sin(a); f[10] = cos(a); }
+        else if (!strcmp(name, "rotate3d") && na == 4) {
+            double x = atof(args[0]), y = atof(args[1]), z = atof(args[2]), a = tf_ang(args[3]), l = sqrt(x * x + y * y + z * z);
+            if (l > 0.0) {
+                x /= l; y /= l; z /= l;
+                double c = cos(a), s = sin(a), t = 1.0 - c;
+                f[0] = t * x * x + c; f[1] = t * x * y + s * z; f[2] = t * x * z - s * y;
+                f[4] = t * x * y - s * z; f[5] = t * y * y + c; f[6] = t * y * z + s * x;
+                f[8] = t * x * z + s * y; f[9] = t * y * z - s * x; f[10] = t * z * z + c;
+            }
+        } else if (!strcmp(name, "skew")) { f[4] = tan(tf_ang(ARG(0))); f[1] = na > 1 ? tan(tf_ang(args[1])) : 0.0; }
+        else if (!strcmp(name, "skewx")) f[4] = tan(tf_ang(ARG(0)));
+        else if (!strcmp(name, "skewy")) f[1] = tan(tf_ang(ARG(0)));
+        else if (!strcmp(name, "perspective")) {
+            if (!(na > 0 && !strcmp(args[0], "none"))) {
+                double d = tf_len(ARG(0), 0.0);
+                f[11] = -1.0 / (d < 1.0 ? 1.0 : d);
+            }
+        } else return NULL;
+        #undef ARG
+        m4_mul(m, f);
+        p = close + 1;
+    }
+    char out[400];
+    bool flat = m[2] == 0 && m[3] == 0 && m[6] == 0 && m[7] == 0 && m[8] == 0 && m[9] == 0 && m[10] == 1 && m[11] == 0 && m[14] == 0 && m[15] == 1;
+    for (int i = 0; i < 16; i++) if (fabs(m[i]) < 1e-9) m[i] = 0.0;
+    if (flat) snprintf(out, sizeof out, "matrix(%.6g, %.6g, %.6g, %.6g, %.6g, %.6g)", m[0], m[1], m[4], m[5], m[12], m[13]);
+    else {
+        size_t n = (size_t)snprintf(out, sizeof out, "matrix3d(");
+        for (int i = 0; i < 16; i++) n += (size_t)snprintf(out + n, sizeof out - n, "%.6g%s", m[i], i < 15 ? ", " : ")");
+    }
+    return strdup(out);
+}
+
+/* What the properties script animates last read as, by element: a transition
+ * starts from it, when the change comes before the element has one. */
+#define BEFORE_N 1024
+static struct { NodeId el; const CssPropDef *p; char *v; } g_before[BEFORE_N];
+
+static char *before_swap(NodeId el, const CssPropDef *p, const char *now)
+{
+    size_t k = (((size_t)el * 2654435761u) ^ ((size_t)p >> 4)) % BEFORE_N;
+    char *old = g_before[k].el == el && g_before[k].p == p ? g_before[k].v : NULL;
+    if (!old) free(g_before[k].v);
+    g_before[k].el = el;
+    g_before[k].p = p;
+    g_before[k].v = strdup(now ? now : "");
+    return old;
+}
+
+static int g_in_hook, g_in_calc;
+
+/* A style pass styled these elements: of what was read of them, what it comes
+ * to now, and a transition from what it was (that is when they start). */
+void computed_style_after_restyle(JSContextHandle ctx)
+{
+    extern int css_layout_take_restyled(NodeId *out, int cap);
+    static NodeId els[256];
+    static uint64_t seen[64];
+    int n = css_layout_take_restyled(els, 256);
+    if (!n || g_in_hook || g_in_calc) return;
+    /* (a whole page restyled: as many as is reasonable, of those with transitions) */
+    static int rot;
+    int budget = n < 0 ? 16 : BEFORE_N;
+    memset(seen, 0, sizeof seen);
+    for (int k = 0; k < n; k++) seen[((uint32_t)els[k] * 2654435761u >> 20) >> 6] |= 1ull << (((uint32_t)els[k] * 2654435761u >> 20) & 63);
+    GCValue hook = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberGenericAnim");
+    g_in_hook++;
+    for (int w = 0; w < BEFORE_N && budget > 0; w++) {
+        int i = (rot + w) % BEFORE_N;
+        NodeId el = g_before[i].el;
+        if (!el || !g_before[i].v) continue;
+        bool hit = n < 0 && dom_valid(el) && layout_query_has_anim_spec(el);
+        if (!hit && n >= 0) {
+            uint32_t h = (uint32_t)el * 2654435761u >> 20;
+            if (!(seen[h >> 6] & (1ull << (h & 63)))) continue;
+            for (int k = 0; k < n && !hit; k++) hit = els[k] == el;
+        }
+        if (!hit || !dom_valid(el)) continue;
+        budget--;
+        if (n < 0) rot = (i + 1) % BEFORE_N;
+        /* (a style of its own: a script's holds no values that skipped the transition) */
+        ComputedStyle *t = computed_style_new(el);
+        refresh(ctx, t);
+        const char *now = t->styled && t->spec ? computed_of(ctx, t, g_before[i].p->name) : NULL;
+        if (now && strcmp(now, g_before[i].v)) {
+            if (JS_IsFunction(ctx, hook) && (anim_has(el, 0) || layout_query_has_anim_spec(el))) {
+                GCValue args[4] = { dom_js(ctx, el), JS_NewString(ctx, g_before[i].p->name), JS_NewString(ctx, now), JS_NewString(ctx, g_before[i].v) };
+                GCValue r = JS_Call(ctx, hook, JS_UNDEFINED, 4, args);
+                if (JS_IsException(r)) JS_GetException(ctx);
+            }
+            free(g_before[i].v);
+            g_before[i].v = strdup(now);
+        }
+        computed_style_free(t);
+    }
+    g_in_hook--;
+}
+
+/* grid-template-*: the used tracks, with the line names written. */
+static void grid_tracks_walk(const char *s, const char *e, const double *tr, int nt, int *at, char *out, size_t cap, size_t *o, bool *sp)
+{
+    #define GT_PUT(txt, len) do { size_t l_ = (len); if (*o + l_ + 2 < cap) { if (*sp) out[(*o)++] = ' '; memcpy(out + *o, (txt), l_); *o += l_; *sp = true; } } while (0)
+    while (s < e) {
+        while (s < e && isspace((unsigned char)*s)) s++;
+        if (s >= e) break;
+        const char *q = s;
+        int d = 0;
+        while (q < e) {
+            if (*q == '(' || *q == '[') d++;
+            else if (*q == ')' || *q == ']') d--;
+            else if (!d && isspace((unsigned char)*q)) break;
+            q++;
+        }
+        if (*s == '[') {
+            GT_PUT(s, (size_t)(q - s));
+        } else if (!strncasecmp(s, "repeat(", 7)) {
+            const char *c = memchr(s, ',', (size_t)(q - s));
+            if (c) {
+                int times = atoi(s + 7);
+                bool aut = !times;
+                for (int k = 0; (aut ? *at < nt : k < times) && k < 2000; k++) {
+                    int was = *at;
+                    grid_tracks_walk(c + 1, q - 1, tr, nt, at, out, cap, o, sp);
+                    if (*at == was) break;
+                }
+            }
+        } else if (*at < nt) {
+            char b[40];
+            snprintf(b, sizeof b, "%.6gpx", tr[(*at)++]);
+            GT_PUT(b, strlen(b));
+        }
+        s = q;
+    }
+    #undef GT_PUT
+}
+
+static char *grid_tracks_resolved(const char *spec, const double *tr, int nt)
+{
+    char out[4096];
+    size_t o = 0;
+    bool sp = false;
+    int at = 0;
+    if (strcasecmp(spec, "none")) grid_tracks_walk(spec, spec + strlen(spec), tr, nt, &at, out, sizeof out, &o, &sp);
+    while (at < nt && o + 48 < sizeof out) {
+        if (sp) out[o++] = ' ';
+        o += (size_t)snprintf(out + o, sizeof out - o, "%.6gpx", tr[at++]);
+        sp = true;
+    }
+    out[o] = 0;
+    return strdup(o ? out : "none");
 }
 
 static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p) {
@@ -334,8 +583,8 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
         if (!strcmp(st, "none") || !strcmp(st, "hidden")) { free(r); r = strdup("0px"); }
     } else if (!strcmp(n, "outline-width")) {
         if (!strcmp(computed_of(ctx, cs, "outline-style"), "none")) { free(r); r = strdup("0px"); }
-    } else if (!strcmp(n, "column-rule-width")) {
-        const char *st = computed_of(ctx, cs, "column-rule-style");
+    } else if (!strcmp(n, "column-rule-width") || !strcmp(n, "row-rule-width")) {
+        const char *st = computed_of(ctx, cs, n[0] == 'c' ? "column-rule-style" : "row-rule-style");
         if (!strcmp(st, "none") || !strcmp(st, "hidden")) { free(r); r = strdup("0px"); }
     } else if (!strcmp(n, "float")) {
         const char *pos = computed_of(ctx, cs, "position");
@@ -366,10 +615,146 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
             else if (!strcmp(n, pd)) { free(r); r = px(cs->used.padding[k]); }
         }
     }
+    /* (a grid's tracks: as they came out) */
+    if (cs->used.rendered && !cs->pseudo && r && (!strcmp(n, "grid-template-columns") || !strcmp(n, "grid-template-rows")) &&
+        !strstr(r, "subgrid")) {
+        const char *dsp = computed_of(ctx, cs, "display");
+        if (!strcmp(dsp, "grid") || !strcmp(dsp, "inline-grid") || strstr(dsp, "grid-lanes")) {
+            static double tracks[2000];
+            /* (its tracks are in its flow's axes) */
+            bool rows_asked = n[14] == 'r';
+            if (cs->used.writing_mode != 0) rows_asked = !rows_asked;
+            int nt = layout_query_grid_tracks(cs->el, rows_asked, tracks, 2000);
+            if (nt >= 0) {
+                char *g = grid_tracks_resolved(r, tracks, nt);
+                free(r);
+                r = g;
+            }
+        }
+    }
+    /* (a background's position along one axis: a length or percentage) */
+    if (r && !strchr(r, '(') && (!strcmp(n, "background-position-x") || !strcmp(n, "background-position-y") ||
+                                 !strcmp(n, "mask-position-x") || !strcmp(n, "mask-position-y")) &&
+        (strstr(r, "left") || strstr(r, "right") || strstr(r, "top") || strstr(r, "bottom") || strstr(r, "center") || strstr(r, "x-") || strstr(r, "y-"))) {
+        char out[512], *o = out;
+        const char *q = r;
+        while (*q && o < out + sizeof out - 48) {
+            const char *e = strchr(q, ',');
+            size_t l = e ? (size_t)(e - q) : strlen(q);
+            char item[96];
+            snprintf(item, sizeof item, "%.*s", (int)l, q);
+            char kw[24] = "", len[48] = "";
+            sscanf(item, " %23s %47s", kw, len);
+            bool end = !strcmp(kw, "right") || !strcmp(kw, "bottom") || !strcmp(kw, "x-end") || !strcmp(kw, "y-end");
+            bool start = !strcmp(kw, "left") || !strcmp(kw, "top") || !strcmp(kw, "x-start") || !strcmp(kw, "y-start");
+            if (!strcmp(kw, "center")) o += sprintf(o, "50%%");
+            else if (start && len[0]) o += sprintf(o, "%s", len);
+            else if (start) o += sprintf(o, "0%%");
+            else if (end && !len[0]) o += sprintf(o, "100%%");
+            else if (end) o += sprintf(o, "calc(100%% - %s)", len);
+            else o += sprintf(o, "%s", kw);
+            q = e ? e + 1 : q + l;
+            if (e) o += sprintf(o, ", ");
+        }
+        *o = 0;
+        free(r);
+        r = strdup(out);
+    }
+    /* (an origin: in pixels, where there is a box) */
+    if (r && cs->used.rendered && !cs->pseudo && (!strcmp(n, "transform-origin") || !strcmp(n, "perspective-origin")) &&
+        (strchr(r, '%') || strstr(r, "left") || strstr(r, "right") || strstr(r, "top") || strstr(r, "bottom") || strstr(r, "center")) && !strchr(r, '(')) {
+        double w = cs->used.content_width + cs->used.padding[1] + cs->used.padding[3] + cs->used.border[1] + cs->used.border[3];
+        double h = cs->used.content_height + cs->used.padding[0] + cs->used.padding[2] + cs->used.border[0] + cs->used.border[2];
+        char a0[48] = "", a1[48] = "", a2[48] = "";
+        int got = sscanf(r, "%47s %47s %47s", a0, a1, a2);
+        double v[2] = { 0.5 * w, 0.5 * h };
+        const char *word[2] = { a0, got > 1 ? a1 : "center" };
+        /* (a vertical keyword first: the other way round) */
+        if (!strcmp(a0, "top") || !strcmp(a0, "bottom") || !strcmp(a1, "left") || !strcmp(a1, "right")) { word[0] = got > 1 ? a1 : "center"; word[1] = a0; }
+        for (int k = 0; k < 2; k++) {
+            const char *t = word[k];
+            double span = k ? h : w;
+            if (!strcmp(t, "center")) v[k] = span / 2.0;
+            else if (!strcmp(t, "left") || !strcmp(t, "top")) v[k] = 0.0;
+            else if (!strcmp(t, "right") || !strcmp(t, "bottom")) v[k] = span;
+            else if (strchr(t, '%')) v[k] = atof(t) * span / 100.0;
+            else v[k] = atof(t);
+        }
+        char out[160];
+        if (got > 2 && atof(a2) != 0.0) snprintf(out, sizeof out, "%.6gpx %.6gpx %s", v[0], v[1], a2);
+        else snprintf(out, sizeof out, "%.6gpx %.6gpx", v[0], v[1]);
+        free(r);
+        r = strdup(out);
+    }
+    /* (keywords of a corner's shape: the superellipse they are) */
+    if (r && !strncmp(n, "corner-", 7) && strstr(n, "-shape")) {
+        static const char *const kw[][2] = { { "round", "superellipse(1)" }, { "scoop", "superellipse(-1)" }, { "bevel", "superellipse(0)" },
+            { "notch", "superellipse(-infinity)" }, { "square", "superellipse(infinity)" }, { "squircle", "superellipse(2)" } };
+        for (size_t k = 0; k < 6; k++) if (!strcmp(r, kw[k][0])) { free(r); r = strdup(kw[k][1]); break; }
+    }
+    /* (a threshold is 0 to 1) */
+    if (r && !strcmp(n, "shape-image-threshold")) {
+        double t = atof(r);
+        if (t < 0.0 || t > 1.0) { free(r); r = strdup(t < 0.0 ? "0" : "1"); }
+    }
+    /* (calc-size(): what it comes to, from what its basis would) */
+    {
+        #define in_calc g_in_calc
+        bool sized = !strcmp(n, "width") || !strcmp(n, "height") || !strcmp(n, "min-width") || !strcmp(n, "min-height") ||
+                     !strcmp(n, "max-width") || !strcmp(n, "max-height");
+        if (sized && !in_calc && !cs->pseudo && s && strstr(s, "calc-size(") && cs->used.rendered) {
+            GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberCalcSize");
+            if (JS_IsFunction(ctx, fn)) {
+                GCValue args[3] = { dom_js(ctx, cs->el), JS_NewString(ctx, n), JS_NewString(ctx, s) };
+                in_calc++;
+                GCValue got = JS_Call(ctx, fn, JS_UNDEFINED, 3, args);
+                in_calc--;
+                if (JS_IsException(got)) JS_GetException(ctx);
+                else if (JS_IsString(got)) {
+                    const char *t = JS_ToCString(ctx, got);
+                    if (t) { free(r); r = strdup(t); }
+                }
+            }
+        }
+        #undef in_calc
+    }
+    /* (a positioned box's insets: what they came to) */
+    if (cs->used.rendered && !cs->pseudo && r) {
+        int side = !strcmp(n, "top") ? 0 : !strcmp(n, "right") ? 1 : !strcmp(n, "bottom") ? 2 : !strcmp(n, "left") ? 3 : -1;
+        if (side >= 0 && (!strcmp(r, "auto") || strchr(r, '%'))) {
+            static const char *const opp[] = { "bottom", "left", "top", "right" };
+            const CssPropDef *od = css_prop_find(opp[side], strlen(opp[side]));
+            const char *os = od ? cs->spec[prop_idx(od)] : NULL;
+            double v = 0.0;
+            if (layout_query_used_inset(cs->el, side, !strcmp(r, "auto"), !os || !strcmp(os, "auto") || !strcmp(os, "initial") || !strcmp(os, "unset"), &v)) {
+                free(r);
+                r = px(v);
+            }
+        }
+    }
+    /* (clip's old form without commas: as the one with) */
+    if (r && !strcmp(n, "clip") && !strncmp(r, "rect(", 5) && !strchr(r, ',')) {
+        char t[160], *o = t;
+        const char *q = r;
+        while (*q && o < t + sizeof t - 2) {
+            if (*q == ' ' && q[-1] != '(' && q[1] != ')') *o++ = ',';
+            *o++ = *q++;
+        }
+        *o = 0;
+        free(r);
+        r = strdup(t);
+    }
     /* a running transition or animation's value (css_anim.h) */
-    int ap = anim_prop_of(n);
+    bool is_transform = !strcmp(n, "transform");
+    bool individual = !strcmp(n, "translate") || !strcmp(n, "rotate") || !strcmp(n, "scale");
+    /* (sizes between keywords or calc-size()s: over their lengths, in script) */
+    bool sized_prop = !strcmp(n, "width") || !strcmp(n, "height") || !strcmp(n, "min-width") || !strcmp(n, "min-height") ||
+                      !strcmp(n, "max-width") || !strcmp(n, "max-height");
+    bool generic_size = sized_prop && !cs->pseudo && ((s && strstr(s, "calc-size(")) ||
+                        !strcmp(computed_of(ctx, cs, "interpolate-size"), "allow-keywords"));
+    int ap = is_transform || individual || generic_size ? -1 : anim_prop_of(n);
     AnimVal av;
-    if (ap >= 0 && anim_value(cs->el, cs->pseudo, ap, (double)page_time_ms(), &av)) {
+    if (ap >= 0 && anim_value(cs->el, cs->pseudo, ap, (double)anim_time_ms(), &av)) {
         char b[96];
         anim_val_css(ap, &av, b, sizeof b);
         /* (translate: its numbers on their own) */
@@ -383,6 +768,41 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
         free(r);
         r = strdup(b);
     }
+    /* (one the engine doesn't animate itself: over what it comes to, in script) */
+    #define in_hook g_in_hook
+    bool generic = ap < 0 && !in_hook && !g_in_calc && !cs->pseudo && strncmp(n, "animation", 9) && strncmp(n, "transition", 10);
+    /* (one the engine animates, with nothing of its own on it: keyframes it can't read) */
+    bool keyframes_only = false;
+    if (!generic && sized_prop && !in_hook && !g_in_calc && !cs->pseudo && anim_has(cs->el, 0) &&
+        !anim_value(cs->el, cs->pseudo, ap, (double)anim_time_ms(), &av)) {
+        generic = true;
+        keyframes_only = true;
+    }
+    char *before = generic && !keyframes_only ? before_swap(cs->el, p, r) : NULL;
+    if (generic && (anim_has(cs->el, 0) || layout_query_has_anim_spec(cs->el))) {
+        GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberGenericAnim");
+        if (JS_IsFunction(ctx, fn)) {
+            GCValue args[5] = { dom_js(ctx, cs->el), JS_NewString(ctx, n), JS_NewString(ctx, r ? r : ""),
+                                before ? JS_NewString(ctx, before) : JS_UNDEFINED, JS_NewBool(ctx, keyframes_only) };
+            in_hook++;
+            GCValue got = JS_Call(ctx, fn, JS_UNDEFINED, 5, args);
+            in_hook--;
+            if (JS_IsException(got)) JS_GetException(ctx);
+            else if (JS_IsString(got)) {
+                const char *t = JS_ToCString(ctx, got);
+                if (t) { free(r); r = strdup(t); }
+            }
+        }
+    }
+    free(before);
+    /* (read from script's own interpolating, it stays a list) */
+    if (is_transform && !in_hook && !g_in_calc && r && strcmp(r, "none")) {
+        double w = cs->used.rendered ? cs->used.content_width + cs->used.padding[1] + cs->used.padding[3] + cs->used.border[1] + cs->used.border[3] : 0.0;
+        double h = cs->used.rendered ? cs->used.content_height + cs->used.padding[0] + cs->used.padding[2] + cs->used.border[0] + cs->used.border[2] : 0.0;
+        char *mx = transform_matrix(r, w, h);
+        if (mx) { free(r); r = mx; }
+    }
+    #undef in_hook
     return r;
 }
 

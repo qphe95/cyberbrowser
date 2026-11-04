@@ -30,6 +30,12 @@ static const char *form_controls_js =
 static const char *cssom_js =
 #include "cssom_js.inc"
 ;
+static const char *geometry_js =
+#include "geometry_js.inc"
+;
+static const char *typed_om_js =
+#include "typed_om_js.inc"
+;
 
 static const char *canvas_api_js =
 #include "canvas_api_js.inc"
@@ -107,6 +113,8 @@ void platform_api_install(JSContextHandle ctx, GCValue global, GCValue window)
     platform_api_run(ctx, dom_events_js, "<dom_events>", global, window);
     platform_api_run(ctx, form_controls_js, "<form_controls>", global, window);
     platform_api_run(ctx, cssom_js, "<cssom>", global, window);
+    platform_api_run(ctx, geometry_js, "<geometry>", global, window);
+    platform_api_run(ctx, typed_om_js, "<typed_om>", global, window);
     anim_api_install(ctx, global);
     platform_api_run(ctx, web_animations_js, "<web_animations>", global, window);
     platform_api_run(ctx, canvas_api_js, "<canvas_api>", global, window);

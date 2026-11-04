@@ -990,6 +990,12 @@ static bool lq_who_affected(void)
 {
     if (g_lq_run_anyway) return true;
     if (!g_lq_ndirty && !g_lq_nanchor) return false;
+    /* (document.body.offsetWidth and the like are how a script flushes style: it
+     * is what a later change transitions from.  Worth the layout where a change
+     * might, on a page of modest size) */
+    extern bool g_css_saw_transition;
+    if (g_lq_ask != LQ_ASK_STYLE && g_css_saw_transition && g_lq_layout.tree.count < 4000 && g_lq_who &&
+        (!strcasecmp(dom_tag_name(g_lq_who), "body") || !strcasecmp(dom_tag_name(g_lq_who), "html"))) return true;
     if (g_lq_scroll_read) return true;
     int qi = g_lq_who ? lq_box_index(g_lq_who) : -1;
     LqAsk ask = g_lq_ask;
@@ -1399,6 +1405,10 @@ static bool lq_ensure(JSContextHandle ctx)
         fprintf(stderr, "[LQ] forced layout %llu took %llu ms\n", (unsigned long long)g_lq_layouts,
                 (unsigned long long)(took / 1000));
     g_lq_running = false;
+    {
+        extern void computed_style_after_restyle(JSContextHandle ctx);
+        computed_style_after_restyle(ctx);
+    }
     return g_lq_valid;
 }
 
@@ -1918,6 +1928,65 @@ bool layout_query_anchor_inset(uint32_t id, int side, double *out)
     const double v[4] = { b->top, b->right, b->bottom, b->left };
     *out = v[side];
     return true;
+}
+
+int layout_query_grid_tracks(uint32_t id, bool rows, double *out, int cap)
+{
+    extern int css_layout_grid_tracks(int idx, bool rows, double *out, int cap);
+    int idx = g_lq_valid && id ? lq_box_index(id) : -1;
+    return idx < 0 ? -1 : css_layout_grid_tracks(idx, rows, out, cap);
+}
+
+bool layout_query_used_inset(uint32_t id, int side, bool side_auto, bool opp_auto, double *out)
+{
+    int idx = g_lq_valid && id ? lq_box_index(id) : -1;
+    if (idx < 0) return false;
+    const LayoutBox *b = &g_lq_layout.boxes[idx];
+    int pos = b->s->position;
+    if (pos == CSS_POSITION_STATIC) return false;
+    bool flow = pos == CSS_POSITION_RELATIVE || pos == CSS_POSITION_STICKY;
+    int cb = -1;
+    for (int p = g_lq_layout.tree.nodes[idx].parent_idx; p >= 0; p = g_lq_layout.tree.nodes[p].parent_idx) {
+        const LayoutBox *a = &g_lq_layout.boxes[p];
+        if (flow) { cb = p; break; }
+        if (a->s->abs_cb || (pos == CSS_POSITION_ABSOLUTE && a->s->position != CSS_POSITION_STATIC)) { cb = p; break; }
+    }
+    double cx = 0.0, cy = 0.0, cw = 0.0, ch = 0.0;
+    if (cb >= 0) {
+        const LayoutBox *a = &g_lq_layout.boxes[cb];
+        cx = a->x + a->s->border_left;
+        cy = a->y + a->s->border_top;
+        cw = a->width - a->s->border_left - a->s->border_right;
+        ch = a->height - a->s->border_top - a->s->border_bottom;
+        if (flow) {
+            cw -= a->padding_left + a->padding_right;
+            ch -= a->padding_top + a->padding_bottom;
+        }
+    } else {
+        const LayoutBox *root = &g_lq_layout.boxes[g_lq_layout.tree.root_idx];
+        cw = root->width;
+        ch = root->height;
+    }
+    const double v0[4] = { b->s->top, b->s->right, b->s->bottom, b->s->left };
+    const double span[4] = { ch, cw, ch, cw };
+    #define USED(k) ((b->s->inset_pct_bits & (1u << (k))) ? (double)b->s->inset_pct[k] * span[k] + v0[k] : v0[k])
+    if (!side_auto) { *out = USED(side); return true; }
+    if (pos == CSS_POSITION_STICKY) return false;
+    if (flow) { *out = opp_auto ? 0.0 : -USED((side + 2) % 4); return true; }
+    #undef USED
+    switch (side) {
+    case 0: *out = b->y - b->margin_top - cy; break;
+    case 1: *out = cx + cw - (b->x + b->width + b->margin_right); break;
+    case 2: *out = cy + ch - (b->y + b->height + b->margin_bottom); break;
+    default: *out = b->x - b->margin_left - cx; break;
+    }
+    return true;
+}
+
+bool layout_query_has_anim_spec(uint32_t id)
+{
+    int idx = g_lq_valid && id ? lq_box_index(id) : -1;
+    return idx >= 0 && g_lq_layout.boxes[idx].s->anim_spec != NULL;
 }
 
 double layout_query_zoom(uint32_t id)

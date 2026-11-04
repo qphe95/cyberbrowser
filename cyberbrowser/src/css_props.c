@@ -804,7 +804,7 @@ static int unit_dim(const char *u, double *scale) {
 static bool is_math_fn(const char *n) {
     static const char *const fns[] = { "calc", "min", "max", "clamp", "round", "mod", "rem", "abs", "sign",
         "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "pow", "sqrt", "hypot", "log", "exp",
-        "-webkit-calc", "calc-size", NULL };
+        "-webkit-calc", "calc-size", "progress", NULL };
     for (int i = 0; fns[i]; i++) if (strcasecmp(n, fns[i]) == 0) return true;
     return false;
 }
@@ -842,6 +842,13 @@ static int calc_value(const Toks *ts, int i, int pct) {
                     if (strcasecmp(f, "round") == 0 && na == 0) { args[na++] = 0; s = j + 1; continue; }
                     return -1;
                 }
+                /* (clamp(): no lower or upper bound) */
+                if (strcasecmp(f, "clamp") == 0 && (na == 0 || na == 2) && ts->t[s].type == T_IDENT && tok_next(ts, s) == j &&
+                    strcasecmp(ts->t[s].str, "none") == 0) {
+                    args[na++] = 0;
+                    s = j + 1;
+                    continue;
+                }
                 /* round()'s optional rounding strategy */
                 if (strcasecmp(f, "round") == 0 && na == 0 && ts->t[s].type == T_IDENT && tok_next(ts, s) == j &&
                     (strcasecmp(ts->t[s].str, "nearest") == 0 || strcasecmp(ts->t[s].str, "up") == 0 ||
@@ -857,6 +864,10 @@ static int calc_value(const Toks *ts, int i, int pct) {
             if (j == t->end) break;
         }
         if (!na) return -1;
+        if (strcasecmp(f, "progress") == 0) {
+            if (na != 3 || !args[0] || (args[0] & ~args[1]) || (args[1] & ~args[2]) || (args[2] & ~args[0])) return -1;
+            return D_NUMBER;
+        }
         if (strcasecmp(f, "sign") == 0) return D_NUMBER;
         if (!strcasecmp(f, "sin") || !strcasecmp(f, "cos") || !strcasecmp(f, "tan")) return (args[0] & (D_NUMBER | D_ANGLE)) ? D_NUMBER : -1;
         if (!strcasecmp(f, "asin") || !strcasecmp(f, "acos") || !strcasecmp(f, "atan") || !strcasecmp(f, "atan2")) return D_ANGLE;
@@ -1144,6 +1155,7 @@ static bool rep_try(Matcher *m, const GNode *g, int count, int pos, int end, Con
 static bool rep_step(Matcher *m, int pos, int end, void *vud) {
     RepUd *r = vud;
     if (pos == r->last && r->count > 1) return false;     /* no progress */
+    if (pos == r->last && r->g->required) return false;   /* (!: not nothing) */
     return rep_try(m, r->g, r->count, pos, end, r->k, r->ud);
 }
 
@@ -1656,6 +1668,7 @@ static bool calc_math_function(const Toks *ts, const Tok *f, CalcSum *out) {
     /* the comma-separated arguments; round()'s first may be a strategy */
     CalcSum args[8];
     int na = 0, strategy = 0;   /* 0 nearest, 1 up, 2 down, 3 to-zero */
+    int clamp_none = 0;
     int s = f->first;
     for (int j = f->first; ; j = j < f->end ? tok_next(ts, j) : j + 1) {
         if (j >= f->end || ts->t[j].type == T_COMMA) {
@@ -1665,6 +1678,13 @@ static bool calc_math_function(const Toks *ts, const Tok *f, CalcSum *out) {
                  tok_ident(&ts->t[s], "to-zero"))) {
                 strategy = tok_ident(&ts->t[s], "up") ? 1 : tok_ident(&ts->t[s], "down") ? 2 :
                            tok_ident(&ts->t[s], "to-zero") ? 3 : 0;
+            } else if (!strcasecmp(name, "clamp") && (na == 0 || na == 2) && tok_next(ts, s) == j && ts->t[s].type == T_IDENT && tok_ident(&ts->t[s], "none")) {
+                /* (the other bound's unit: filled in below) */
+                clamp_none |= na == 0 ? 1 : 2;
+                memset(&args[na], 0, sizeof args[na]);
+                args[na].n = 1;
+                args[na].t[0].v = na == 0 ? -INFINITY : INFINITY;
+                na++;
             } else if (!calc_simplify_sum(ts, s, j, &args[na++])) return false;
             s = j + 1;
             if (j >= f->end) break;
@@ -1674,6 +1694,10 @@ static bool calc_math_function(const Toks *ts, const Tok *f, CalcSum *out) {
     double v[8];
     const char *u[8];
     for (int i = 0; i < na; i++) if (!calc_one(&args[i], &v[i], &u[i])) return false;
+    if (clamp_none && na == 3) {
+        if (clamp_none & 1) u[0] = u[1];
+        if (clamp_none & 2) u[2] = u[1];
+    }
     /* functions over values of one type take arguments of the same unit */
     #define SAME_UNITS() do { for (int i = 1; i < na; i++) if (strcmp(u[i], u[0])) return false; } while (0)
     memset(out, 0, sizeof *out);
@@ -1693,6 +1717,11 @@ static bool calc_math_function(const Toks *ts, const Tok *f, CalcSum *out) {
         if (r > v[2]) r = v[2];
         if (v[0] > v[2]) r = v[0];
         if (isnan(v[0]) || isnan(v[1]) || isnan(v[2])) r = NAN;
+    } else if (!strcasecmp(name, "progress")) {
+        if (na != 3) return false;
+        SAME_UNITS();
+        r = (v[0] - v[1]) / (v[2] - v[1]);
+        unit = "";
     } else if (!strcasecmp(name, "abs")) {
         if (na != 1) return false;
         r = fabs(v[0]);
@@ -2979,7 +3008,7 @@ static char *position_area_canon(const char *value)
     return NULL;
 }
 
-char *css_prop_parse(const CssPropDef *p, const char *value) {
+static char *prop_parse_raw(const CssPropDef *p, const char *value) {
     if (p && value && !strcmp(p->name, "position-area") && strcasecmp(value, "inherit") && strcasecmp(value, "initial") &&
         strcasecmp(value, "unset") && strcasecmp(value, "revert") && strcasecmp(value, "revert-layer"))
         return position_area_canon(value);
@@ -3059,9 +3088,9 @@ char *css_prop_compute(const CssPropDef *p, const char *value, const CssComputeE
  * before it is published, and a racing duplicate is harmless.) */
 int css_prop_longhands(const CssPropDef *p, const char ***names) {
     typedef struct { int n; const char *names[64]; } Longhands;
-    static Longhands *lists[512];
+    static Longhands *lists[NPROPS];
     int pi = (int)(p - g_props);
-    if (!p->longhands || pi < 0 || pi >= 512) { *names = NULL; return 0; }
+    if (!p->longhands || pi < 0 || pi >= NPROPS) { *names = NULL; return 0; }
     Longhands *l = __atomic_load_n(&lists[pi], __ATOMIC_ACQUIRE);
     if (!l) {
         l = calloc(1, sizeof *l);
@@ -3295,7 +3324,7 @@ static ValueKind value_kind(const char *p)
         { "background", VK_GRAMMAR }, { "background-color", VK_COLOR }, { "background-image", VK_GRAMMAR },
         { "border-bottom-color", VK_COLOR }, { "border-color", VK_GRAMMAR }, { "border-left-color", VK_COLOR },
         { "border-right-color", VK_COLOR }, { "border-top-color", VK_COLOR }, { "bottom", VK_LEN1 },
-        { "caret-color", VK_COLOR }, { "color", VK_COLOR }, { "column-rule-color", VK_COLOR },
+        { "caret-color", VK_COLOR }, { "color", VK_COLOR },
         { "font-family", VK_GRAMMAR }, { "font-size", VK_LEN1 }, { "height", VK_LEN1 }, { "left", VK_LEN1 },
         { "letter-spacing", VK_LEN1 }, { "line-height", VK_LEN1 }, { "margin", VK_LEN4 },
         { "margin-bottom", VK_LEN1 }, { "margin-left", VK_LEN1 }, { "margin-right", VK_LEN1 },
@@ -3878,6 +3907,549 @@ static int expand_background(const char *v, char **out, const char **names, int 
     return n;
 }
 
+/* The values of v separated by spaces, up to cap: brackets, parentheses and
+ * strings stay whole. */
+static int gap_words_early(const char *v, char **out, int cap)
+{
+    int n = 0, depth = 0;
+    char q = 0;
+    const char *st = NULL;
+    for (const char *p = v;; p++) {
+        if (q && *p) { if (*p == q) q = 0; continue; }
+        if (*p == '"' || *p == '\'') q = *p;
+        if (*p == '(' || *p == '[') depth++;
+        if (*p == ')' || *p == ']') depth--;
+        bool end = !*p || (!depth && isspace((unsigned char)*p));
+        if (!end && !st) st = p;
+        if (end && st) {
+            if (n < cap) out[n++] = strndup(st, (size_t)(p - st));
+            st = NULL;
+        }
+        if (!*p) break;
+    }
+    return n;
+}
+
+/* ---- grid-template and grid ---- */
+static char *prop_parse_raw(const CssPropDef *p, const char *value);
+static const char *val_of(const char *const *vals, const char **names, int n, const char *name);
+/* s without its empty [] line names, spaces single. */
+static char *grid_clean_tracks(const char *s)
+{
+    Buf b = { 0 };
+    char *w[256];
+    int n = gap_words_early(s, w, 256);
+    for (int i = 0; i < n; i++) {
+        bool empty = w[i][0] == '[';
+        for (const char *q = w[i] + 1; empty && *q; q++) if (*q != ']' && !isspace((unsigned char)*q)) empty = false;
+        if (!empty) {
+            if (b.n) buf_ch(&b, ' ');
+            buf_str(&b, w[i]);
+        }
+        free(w[i]);
+    }
+    buf_ch(&b, 0);
+    return b.s;
+}
+static bool grid_track_ok(const char *v)
+{
+    if (!strcasecmp(v, "none")) return true;
+    const CssPropDef *p = css_prop_find("grid-template-rows", 18);
+    char *t = p ? prop_parse_raw(p, v) : NULL;
+    bool ok = t != NULL;
+    free(t);
+    return ok;
+}
+/* The slash at depth 0 in v, or NULL. */
+static const char *grid_slash(const char *v)
+{
+    int d = 0;
+    char q = 0;
+    for (const char *p = v; *p; p++) {
+        if (q) { if (*p == q) q = 0; continue; }
+        if (*p == '"' || *p == '\'') q = *p;
+        else if (*p == '(' || *p == '[') d++;
+        else if (*p == ')' || *p == ']') d--;
+        else if (*p == '/' && !d) return p;
+    }
+    return NULL;
+}
+/* grid-template's value into rows, columns and areas; false when it isn't one. */
+static bool grid_template_split(const char *v, char **rows, char **cols, char **areas)
+{
+    *rows = *cols = *areas = NULL;
+    if (!strcasecmp(v, "none")) {
+        *rows = strdup("none"); *cols = strdup("none"); *areas = strdup("none");
+        return true;
+    }
+    const char *sl = grid_slash(v);
+    bool strings = false;
+    {
+        char q = 0;
+        for (const char *p = v; *p && !strings && (!sl || p < sl); p++) {
+            if (*p == '"' || *p == '\'') { strings = true; q = *p; }
+        }
+        (void)q;
+    }
+    char *left = sl ? strndup(v, (size_t)(sl - v)) : strdup(v);
+    char *right = sl ? strdup(sl + 1) : NULL;
+    bool ok = true;
+    if (!strings) {
+        if (!sl || grid_slash(right)) ok = false;
+        if (ok) {
+            char *l = grid_clean_tracks(left), *r = grid_clean_tracks(right);
+            ok = l[0] && r[0] && grid_track_ok(l) && grid_track_ok(r);
+            *rows = l; *cols = r;
+            *areas = strdup("none");
+        }
+        free(left); free(right);
+        return ok;
+    }
+    /* [names]? "string" track? [names]?, repeated */
+    Buf rb = { 0 }, ab = { 0 };
+    char *w[256];
+    int n = gap_words_early(left, w, 256);
+    int cols_in_row = -1;
+    for (int i = 0; i < n && ok;) {
+        bool lead = false;
+        if (w[i][0] == '[') {
+            char *cn = grid_clean_tracks(w[i]);
+            if (cn[0]) { if (rb.n) buf_ch(&rb, ' '); buf_str(&rb, cn); lead = true; }
+            free(cn);
+            i++;
+        }
+        (void)lead;
+        if (i >= n || (w[i][0] != '"' && w[i][0] != '\'')) { ok = false; break; }
+        /* (each row of the template as long as the others) */
+        {
+            int cnt = 0;
+            bool in = false;
+            for (const char *q = w[i] + 1; *q && q[1]; q++) {
+                bool sp = isspace((unsigned char)*q);
+                if (!sp && !in) cnt++;
+                in = !sp;
+            }
+            if (cols_in_row >= 0 && cnt != cols_in_row) ok = false;
+            if (!cnt) ok = false;
+            cols_in_row = cnt;
+        }
+        if (ab.n) buf_ch(&ab, ' ');
+        buf_str(&ab, w[i]);
+        i++;
+        if (rb.n) buf_ch(&rb, ' ');
+        if (i < n && w[i][0] != '[' && w[i][0] != '"' && w[i][0] != '\'') {
+            buf_str(&rb, w[i]);
+            i++;
+        } else {
+            buf_str(&rb, "auto");
+        }
+        if (i < n && w[i][0] == '[') {
+            char *cn = grid_clean_tracks(w[i]);
+            if (cn[0]) { buf_ch(&rb, ' '); buf_str(&rb, cn); }
+            free(cn);
+            i++;
+        }
+    }
+    for (int i = 0; i < n; i++) free(w[i]);
+    buf_ch(&rb, 0);
+    buf_ch(&ab, 0);
+    if (ok) ok = grid_track_ok(rb.s) && !strstr(rb.s, "repeat(");
+    char *c = right ? grid_clean_tracks(right) : strdup("none");
+    if (ok && right) ok = c[0] && strcasecmp(c, "none") && grid_track_ok(c) && !strstr(c, "repeat(auto") && !strstr(c, "subgrid");
+    *rows = rb.s; *areas = ab.s; *cols = c;
+    free(left); free(right);
+    return ok;
+}
+static int expand_grid(const char *nm, const char *v, char **out, const char **names, int n)
+{
+    char *rows = NULL, *cols = NULL, *areas = NULL;
+    char *arows = NULL, *acols = NULL, *flow = NULL;
+    bool ok = false;
+    if (!strcmp(nm, "grid") && strstr(v, "auto-flow")) {
+        const char *sl = grid_slash(v);
+        char *left = sl ? strndup(v, (size_t)(sl - v)) : strdup(v);
+        char *right = sl ? strdup(sl + 1) : strdup("");
+        bool in_left = strstr(left, "auto-flow") != NULL;
+        const char *f = in_left ? left : right;
+        char *w[32];
+        int cnt = gap_words_early(f, w, 32);
+        Buf sz = { 0 };
+        bool dense = false, flowed = false;
+        ok = !(in_left && !sl);
+        for (int i = 0; i < cnt; i++) {
+            if (!strcasecmp(w[i], "auto-flow") && !flowed) flowed = true;
+            else if (!strcasecmp(w[i], "dense") && !dense) dense = true;
+            else { if (sz.n) buf_ch(&sz, ' '); buf_str(&sz, w[i]); }
+            free(w[i]);
+        }
+        buf_ch(&sz, 0);
+        const char *other = in_left ? right : left;
+        char *ot = grid_clean_tracks(other);
+        if (ok) ok = ot[0] && grid_track_ok(ot) && !grid_slash(in_left ? right : left) && (!in_left || !strstr(right, "auto-flow"));
+        const CssPropDef *ap = css_prop_find("grid-auto-rows", 14);
+        if (ok && sz.s[0]) { char *t = ap ? prop_parse_raw(ap, sz.s) : NULL; if (!t) ok = false; free(t); }
+        if (ok) {
+            rows = strdup(in_left ? "none" : ot);
+            cols = strdup(in_left ? ot : "none");
+            areas = strdup("none");
+            arows = strdup(in_left && sz.s[0] ? sz.s : "auto");
+            acols = strdup(!in_left && sz.s[0] ? sz.s : "auto");
+            char fb[32];
+            snprintf(fb, sizeof fb, "%s%s", in_left ? "row" : "column", dense ? " dense" : "");
+            flow = strdup(fb);
+        }
+        free(ot); free(sz.s); free(left); free(right);
+    } else {
+        ok = grid_template_split(v, &rows, &cols, &areas);
+        arows = strdup("auto"); acols = strdup("auto"); flow = strdup("row");
+    }
+    if (!ok) {
+        free(rows); free(cols); free(areas); free(arows); free(acols); free(flow);
+        return -1;
+    }
+    struct { const char *k; char *v; } m[] = { { "grid-template-rows", rows }, { "grid-template-columns", cols }, { "grid-template-areas", areas },
+                                               { "grid-auto-rows", arows }, { "grid-auto-columns", acols }, { "grid-auto-flow", flow } };
+    for (size_t k = 0; k < 6; k++) {
+        int i = slot(names, n, m[k].k);
+        if (i >= 0) out[i] = strdup(m[k].v);
+        free(m[k].v);
+    }
+    return n;
+}
+static int serialize_grid(const char *nm, const char *const *vals, const char **names, int n, Buf *b)
+{
+    const char *rows = val_of(vals, names, n, "grid-template-rows"), *cols = val_of(vals, names, n, "grid-template-columns");
+    const char *areas = val_of(vals, names, n, "grid-template-areas");
+    if (!rows || !cols || !areas) return -1;
+    if (!strcmp(nm, "grid")) {
+        const char *ar = val_of(vals, names, n, "grid-auto-rows"), *ac = val_of(vals, names, n, "grid-auto-columns"), *fl = val_of(vals, names, n, "grid-auto-flow");
+        bool plain = ar && ac && fl && !strcmp(ar, "auto") && !strcmp(ac, "auto") && !strcmp(fl, "row");
+        if (!plain) {
+            if (strcmp(areas, "none") || !ar || !ac || !fl) return -1;
+            bool column = !strncmp(fl, "column", 6), dense = strstr(fl, "dense") != NULL;
+            if (column) {
+                if (strcmp(cols, "none") || strcmp(ar, "auto")) return -1;
+                buf_str(b, rows); buf_str(b, " / auto-flow");
+                if (dense) buf_str(b, " dense");
+                if (strcmp(ac, "auto")) { buf_ch(b, ' '); buf_str(b, ac); }
+            } else {
+                if (strcmp(rows, "none") || strcmp(ac, "auto")) return -1;
+                buf_str(b, "auto-flow");
+                if (dense) buf_str(b, " dense");
+                if (strcmp(ar, "auto")) { buf_ch(b, ' '); buf_str(b, ar); }
+                buf_str(b, " / "); buf_str(b, cols);
+            }
+            return 0;
+        }
+    }
+    if (!strcmp(areas, "none")) {
+        if (!strcmp(rows, "none") && !strcmp(cols, "none")) { buf_str(b, "none"); return 0; }
+        buf_str(b, rows); buf_str(b, " / "); buf_str(b, cols);
+        return 0;
+    }
+    /* with areas: each string by its row */
+    if (strstr(rows, "repeat(") || strstr(cols, "repeat(")) return -1;
+    char *as[256], *rs[256];
+    int na = gap_words_early(areas, as, 256), nr = gap_words_early(rows, rs, 256), ri = 0;
+    int rc = 0;
+    for (int i = 0; i < na && !rc; i++) {
+        if (i) buf_ch(b, ' ');
+        if (ri < nr && rs[ri][0] == '[') { buf_str(b, rs[ri++]); buf_ch(b, ' '); }
+        buf_str(b, as[i]);
+        if (ri >= nr || rs[ri][0] == '[') { rc = -1; break; }
+        if (strcmp(rs[ri], "auto")) { buf_ch(b, ' '); buf_str(b, rs[ri]); }
+        ri++;
+        if (ri < nr && rs[ri][0] == '[') { buf_ch(b, ' '); buf_str(b, rs[ri++]); }
+    }
+    if (ri != nr) rc = -1;
+    if (!rc && strcmp(cols, "none")) { buf_str(b, " / "); buf_str(b, cols); }
+    for (int i = 0; i < na; i++) free(as[i]);
+    for (int i = 0; i < nr; i++) free(rs[i]);
+    return rc;
+}
+
+/* ---- gap decorations ---- */
+/* Shorthands giving every longhand the one value. */
+static bool gap_same(const char *nm)
+{
+    static const char *const k[] = { "rule-color", "rule-style", "rule-width", "rule-break", "rule-visibility-items", "column-rule-inset-start",
+        "column-rule-inset-end", "row-rule-inset-start", "row-rule-inset-end", "rule-inset-start", "rule-inset-end" };
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; i++) if (!strcmp(nm, k[i])) return true;
+    return false;
+}
+/* start end pairs, of one or both directions */
+static bool gap_pairs(const char *nm)
+{
+    static const char *const k[] = { "corner-top-shape", "corner-bottom-shape", "corner-left-shape", "corner-right-shape",
+        "corner-block-start-shape", "corner-block-end-shape", "corner-inline-start-shape", "corner-inline-end-shape", "column-rule-inset-cap", "column-rule-inset-junction", "row-rule-inset-cap",
+        "row-rule-inset-junction", "rule-inset-cap", "rule-inset-junction" };
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; i++) if (!strcmp(nm, k[i])) return true;
+    return false;
+}
+static bool gap_insets(const char *nm) { return !strcmp(nm, "column-rule-inset") || !strcmp(nm, "row-rule-inset") || !strcmp(nm, "rule-inset"); }
+static bool gap_rule(const char *nm) { return !strcmp(nm, "column-rule") || !strcmp(nm, "row-rule") || !strcmp(nm, "rule"); }
+
+/* The space-separated values of v, up to cap. */
+static int gap_words(const char *v, char **out, int cap)
+{
+    int n = 0, depth = 0;
+    const char *st = NULL;
+    for (const char *p = v;; p++) {
+        if (*p == '(') depth++;
+        if (*p == ')') depth--;
+        bool end = !*p || (!depth && isspace((unsigned char)*p));
+        if (!end && !st) st = p;
+        if (end && st) {
+            if (n < cap) out[n++] = strndup(st, (size_t)(p - st));
+            st = NULL;
+        }
+        if (!*p) break;
+    }
+    return n;
+}
+
+/* One <gap-rule> into its three channels. */
+static bool gap_rule_parts(const char *v, char *ch[3])
+{
+    Parsed P;
+    if (!parse_type("gap-rule", v, &P)) { parsed_free(&P); return false; }
+    int m[3];
+    members(&P, 0, m, 3);
+    ch[0] = m[0] >= 0 ? hit_text(&P, m[0]) : strdup("medium");
+    ch[1] = m[1] >= 0 ? hit_text(&P, m[1]) : strdup("none");
+    ch[2] = m[2] >= 0 ? hit_text(&P, m[2]) : strdup("currentcolor");
+    parsed_free(&P);
+    return true;
+}
+
+static const char *gap_zero(const char *w) { return !strcmp(w, "0") ? "0px" : w; }
+
+static int expand_gap(const char *nm, const char *v, char **out, const char **names, int n)
+{
+    (void)names;
+    /* (corner-shape: as a box's sides, top left going round) */
+    if (!strcmp(nm, "corner-shape")) {
+        char *w[5] = { NULL, NULL, NULL, NULL, NULL };
+        int c = gap_words(v, w, 5);
+        Parsed Q4;
+        bool ok4 = c >= 1 && c <= 4;
+        for (int i = 0; i < c && i < 4 && ok4; i++) {
+            ok4 = parse_type("corner-shape-value", w[i], &Q4);
+            parsed_free(&Q4);
+        }
+        if (ok4) {
+            const char *a = w[0], *b = c > 1 ? w[1] : a, *d = c > 2 ? w[2] : a, *e = c > 3 ? w[3] : b;
+            out[0] = strdup(a); out[1] = strdup(b); out[2] = strdup(d); out[3] = strdup(e);
+        }
+        for (int i = 0; i < 5; i++) free(w[i]);
+        return ok4 ? n : -1;
+    }
+    const char *ty = gap_rule(nm) ? "gap-rule-list" : gap_insets(nm) ? "gap-insets" : !strncmp(nm, "corner-", 7) ? "corner-shape-pair" : gap_pairs(nm) ? "gap-inset-pair" :
+                     !strcmp(nm, "rule-color") ? "gap-color-list" : !strcmp(nm, "rule-style") ? "gap-style-list" :
+                     !strcmp(nm, "rule-width") ? "gap-width-list" : !strcmp(nm, "rule-break") ? "gap-break" :
+                     !strcmp(nm, "rule-visibility-items") ? "gap-visibility" : "gap-inset";
+    Parsed Q;
+    bool fits = parse_type(ty, v, &Q);
+    parsed_free(&Q);
+    if (!fits) return -1;
+    if (gap_same(nm)) {
+        for (int i = 0; i < n; i++) out[i] = strdup(gap_zero(v));
+        return n;
+    }
+    if (gap_pairs(nm)) {
+        char *w[2] = { NULL, NULL };
+        int c = gap_words(v, w, 2);
+        if (c < 1) return -1;
+        for (int i = 0; i < n; i++) out[i] = strdup(gap_zero(i % 2 && c > 1 ? w[1] : w[0]));
+        free(w[0]); free(w[1]);
+        return n;
+    }
+    if (gap_insets(nm)) {
+        char *left = strdup(v), *right = NULL, *slash = strchr(left, '/');
+        int depth = 0;
+        slash = NULL;
+        for (char *q = left; *q; q++) {
+            if (*q == '(') depth++;
+            if (*q == ')') depth--;
+            if (*q == '/' && !depth) { slash = q; break; }
+        }
+        if (slash) { *slash = 0; right = slash + 1; }
+        char *a[2] = { NULL, NULL }, *b[2] = { NULL, NULL };
+        int ca = gap_words(left, a, 2), cb = right ? gap_words(right, b, 2) : 0;
+        if (ca < 1) { free(left); return -1; }
+        const char *vals4[4] = { a[0], ca > 1 ? a[1] : a[0], cb ? b[0] : a[0], cb ? (cb > 1 ? b[1] : b[0]) : (ca > 1 ? a[1] : a[0]) };
+        for (int i = 0; i < n; i++) out[i] = strdup(gap_zero(vals4[i % 4]));
+        free(a[0]); free(a[1]); free(b[0]); free(b[1]); free(left);
+        return n;
+    }
+    /* column-rule, row-rule, rule: each item's channels; repeat()s stay around them */
+    char **items;
+    int ni = split_commas(v, &items);
+    Buf ch[3] = { { 0 }, { 0 }, { 0 } };
+    bool ok = ni > 0;
+    for (int i = 0; i < ni && ok; i++) {
+        for (int c = 0; c < 3; c++) if (i) buf_str(&ch[c], ", ");
+        const char *it = items[i];
+        if (!strncasecmp(it, "repeat(", 7)) {
+            size_t len = strlen(it);
+            char *inner = strndup(it + 7, len - 8);
+            char **rp;
+            int nr = split_commas(inner, &rp);
+            ok = nr >= 2;
+            for (int c = 0; c < 3 && ok; c++) { buf_str(&ch[c], "repeat("); buf_str(&ch[c], rp[0]); }
+            for (int r = 1; r < nr && ok; r++) {
+                char *pt[3];
+                ok = gap_rule_parts(rp[r], pt);
+                for (int c = 0; c < 3 && ok; c++) { buf_str(&ch[c], ", "); buf_str(&ch[c], pt[c]); free(pt[c]); }
+            }
+            for (int c = 0; c < 3 && ok; c++) buf_ch(&ch[c], ')');
+            free_parts(rp, nr);
+            free(inner);
+        } else {
+            char *pt[3];
+            ok = gap_rule_parts(it, pt);
+            for (int c = 0; c < 3 && ok; c++) { buf_str(&ch[c], pt[c]); free(pt[c]); }
+        }
+    }
+    free_parts(items, ni);
+    if (!ok) { for (int c = 0; c < 3; c++) free(ch[c].s); return -1; }
+    for (int c = 0; c < 3; c++) buf_ch(&ch[c], 0);
+    for (int i = 0; i < n; i++) out[i] = strdup(ch[i % 3].s);
+    for (int c = 0; c < 3; c++) free(ch[c].s);
+    return n;
+}
+
+/* (a repeat()'s inside: its count and items) */
+static bool gap_split_repeat(const char *it, char ***rp, int *nr)
+{
+    if (strncasecmp(it, "repeat(", 7)) return false;
+    char *inner = strndup(it + 7, strlen(it) - 8);
+    *nr = split_commas(inner, rp);
+    free(inner);
+    return true;
+}
+
+static void gap_rule_text(Buf *b, const char *w, const char *s, const char *c)
+{
+    bool sp = false;
+    if (strcmp(w, "medium")) { buf_str(b, w); sp = true; }
+    if (strcmp(s, "none")) { if (sp) buf_ch(b, ' '); buf_str(b, s); sp = true; }
+    if (strcmp(c, "currentcolor")) { if (sp) buf_ch(b, ' '); buf_str(b, c); sp = true; }
+    if (!sp) buf_str(b, "medium");
+}
+
+static int serialize_gap(const char *nm, const char *const *vals, int n, Buf *b)
+{
+    if (!strcmp(nm, "corner-shape")) {
+        const char *x = vals[0], *y = vals[1], *z = vals[2], *t = vals[3];
+        buf_str(b, x);
+        if (strcmp(y, t)) { buf_ch(b, ' '); buf_str(b, y); buf_ch(b, ' '); buf_str(b, z); buf_ch(b, ' '); buf_str(b, t); }
+        else if (strcmp(x, z)) { buf_ch(b, ' '); buf_str(b, y); buf_ch(b, ' '); buf_str(b, z); }
+        else if (strcmp(x, y)) { buf_ch(b, ' '); buf_str(b, y); }
+        return 0;
+    }
+    if (gap_same(nm)) {
+        for (int i = 1; i < n; i++) if (strcmp(vals[i], vals[0])) return -1;
+        buf_str(b, vals[0]);
+        return 0;
+    }
+    if (gap_pairs(nm)) {
+        for (int i = 2; i < n; i++) if (strcmp(vals[i], vals[i - 2])) return -1;
+        buf_str(b, vals[0]);
+        if (strcmp(vals[0], vals[1])) { buf_ch(b, ' '); buf_str(b, vals[1]); }
+        return 0;
+    }
+    if (gap_insets(nm)) {
+        for (int i = 4; i < n; i++) if (strcmp(vals[i], vals[i - 4])) return -1;
+        if (!strcmp(vals[0], vals[1]) && !strcmp(vals[0], vals[2]) && !strcmp(vals[0], vals[3])) { buf_str(b, vals[0]); return 0; }
+        buf_str(b, vals[0]); buf_ch(b, ' '); buf_str(b, vals[1]); buf_str(b, " / ");
+        buf_str(b, vals[2]); buf_ch(b, ' '); buf_str(b, vals[3]);
+        return 0;
+    }
+    for (int i = 3; i < n; i++) if (strcmp(vals[i], vals[i - 3])) return -1;
+    char **col[3];
+    int len[3];
+    for (int c = 0; c < 3; c++) len[c] = split_commas(vals[c], &col[c]);
+    int rc = len[0] == len[1] && len[0] == len[2] ? 0 : -1;
+    size_t mark = b->n;
+    for (int i = 0; i < len[0] && !rc; i++) {
+        if (i) buf_str(b, ", ");
+        char **rp[3];
+        int nr[3];
+        int reps = 0;
+        for (int c = 0; c < 3; c++) if (gap_split_repeat(col[c][i], &rp[c], &nr[c])) reps |= 1 << c;
+        if (reps == 7 && nr[0] == nr[1] && nr[0] == nr[2] && !strcasecmp(rp[0][0], rp[1][0]) && !strcasecmp(rp[0][0], rp[2][0])) {
+            buf_str(b, "repeat("); buf_str(b, rp[0][0]);
+            for (int r = 1; r < nr[0]; r++) { buf_str(b, ", "); gap_rule_text(b, rp[0][r], rp[1][r], rp[2][r]); }
+            buf_ch(b, ')');
+        } else if (!reps) {
+            gap_rule_text(b, col[0][i], col[1][i], col[2][i]);
+        } else {
+            rc = -1;
+        }
+        for (int c = 0; c < 3; c++) if (reps & (1 << c)) free_parts(rp[c], nr[c]);
+    }
+    if (rc) b->n = mark;
+    for (int c = 0; c < 3; c++) free_parts(col[c], len[c]);
+    return rc;
+}
+
+/* mask: its layers into the longhands' lists; it resets mask-border. */
+static int expand_mask(const char *v, char **out, const char **names, int n)
+{
+    Parsed P;
+    if (!parse_type("mask-syntax", v, &P)) { parsed_free(&P); return -1; }
+    int layers[64];
+    int nl = find_all_named(&P, 0, "mask-layer", layers, 64);
+    if (nl <= 0) { parsed_free(&P); return -1; }
+    enum { IMG, POS, SIZE, REP, ORG, CLIP, COMP, MODE, NCOL };
+    char **col[NCOL];
+    for (int k = 0; k < NCOL; k++) col[k] = calloc((size_t)nl, sizeof(char *));
+    for (int l = 0; l < nl; l++) {
+        int m[7];
+        members(&P, layers[l], m, 7);
+        col[IMG][l] = m[0] >= 0 ? hit_text(&P, m[0]) : strdup("none");
+        int pos = m[1] >= 0 ? find_named(&P, m[1], "position") : -1, sz = m[1] >= 0 ? find_named(&P, m[1], "bg-size") : -1;
+        col[POS][l] = pos >= 0 ? hit_text(&P, pos) : strdup("0% 0%");
+        col[SIZE][l] = sz >= 0 ? hit_text(&P, sz) : strdup("auto");
+        col[REP][l] = m[2] >= 0 ? hit_text(&P, m[2]) : strdup("repeat");
+        if (m[3] >= 0 && m[4] >= 0) {
+            /* (no-clip is the clip; of two boxes, the first the origin) */
+            char *a = hit_text(&P, P.m.hits[m[3]].start < P.m.hits[m[4]].start ? m[3] : m[4]);
+            char *b = hit_text(&P, P.m.hits[m[3]].start < P.m.hits[m[4]].start ? m[4] : m[3]);
+            if (!strcmp(a, "no-clip")) { char *t = a; a = b; b = t; }
+            col[ORG][l] = a;
+            col[CLIP][l] = b;
+        } else if (m[3] >= 0 || m[4] >= 0) {
+            char *a = hit_text(&P, m[3] >= 0 ? m[3] : m[4]);
+            col[ORG][l] = strdup(strcmp(a, "no-clip") ? a : "border-box");
+            col[CLIP][l] = a;
+        } else {
+            col[ORG][l] = strdup("border-box");
+            col[CLIP][l] = strdup("border-box");
+        }
+        col[COMP][l] = m[5] >= 0 ? hit_text(&P, m[5]) : strdup("add");
+        col[MODE][l] = m[6] >= 0 ? hit_text(&P, m[6]) : strdup("match-source");
+    }
+    static const char *const lnames[NCOL] = { "mask-image", "mask-position", "mask-size", "mask-repeat",
+                                              "mask-origin", "mask-clip", "mask-composite", "mask-mode" };
+    for (int k = 0; k < NCOL; k++) {
+        int i = slot(names, n, lnames[k]);
+        if (i >= 0) out[i] = join(col[k], nl, ", ");
+        free_parts(col[k], nl);
+    }
+    static const struct { const char *name, *init; } reset[] = {
+        { "mask-border-source", "none" }, { "mask-border-outset", "0" }, { "mask-border-repeat", "stretch" },
+        { "mask-border-slice", "0" }, { "mask-border-width", "auto" },
+    };
+    for (size_t k = 0; k < sizeof reset / sizeof reset[0]; k++) {
+        int i = slot(names, n, reset[k].name);
+        if (i >= 0) out[i] = strdup(reset[k].init);
+    }
+    parsed_free(&P);
+    return n;
+}
+
 static int expand_background_position(const char *v, char **out) {
     char **parts;
     int np = split_commas(v, &parts);
@@ -3929,6 +4501,16 @@ static int expand_layers(const char *v, char **out, const char **names, int n, c
 }
 
 static int expand_font(const char *v, char **out, const char **names, int n) {
+    static const char *const sys[] = { "caption", "icon", "menu", "message-box", "small-caption", "status-bar" };
+    for (size_t k = 0; k < sizeof sys / sizeof sys[0]; k++) {
+        if (strcasecmp(v, sys[k])) continue;
+        for (int i = 0; i < n; i++) {
+            if (!strcmp(names[i], "font-size")) out[i] = strdup("13.3333px");
+            else if (!strcmp(names[i], "font-family")) out[i] = strdup("system-ui");
+            else out[i] = initial_of(names[i]);
+        }
+        return n;
+    }
     Parsed P;
     if (!parse_type("font-syntax", v, &P)) { parsed_free(&P); return -1; }
     int st = find_named(&P, 0, "font-style"), va = find_named(&P, 0, "font-variant-css2"),
@@ -4023,6 +4605,9 @@ static int expand_special(const CssPropDef *p, const char *v, char **out, const 
     if (!strcmp(nm, "grid-row") || !strcmp(nm, "grid-column")) return expand_grid_lines(v, out, 2);
     if (!strcmp(nm, "grid-area")) return expand_grid_lines(v, out, 4);
     if (!strcmp(nm, "background")) return expand_background(v, out, names, n);
+    if (!strcmp(nm, "mask")) return expand_mask(v, out, names, n);
+    if (!strcmp(nm, "grid-template") || !strcmp(nm, "grid")) return expand_grid(nm, v, out, names, n);
+    if (gap_same(nm) || gap_pairs(nm) || gap_insets(nm) || gap_rule(nm) || !strcmp(nm, "corner-shape")) return expand_gap(nm, v, out, names, n);
     if (!strcmp(nm, "background-position")) return expand_background_position(v, out);
     if (!strcmp(nm, "font")) return expand_font(v, out, names, n);
     if (!strcmp(nm, "font-variant")) return expand_font_variant(v, out, names, n);
@@ -4248,6 +4833,50 @@ static int serialize_special(const CssPropDef *p, const char *const *vals, const
         for (int k = 0; k < 8; k++) free_parts(cols[k], len);
         return 0;
     }
+    if (!strcmp(nm, "grid-template") || !strcmp(nm, "grid")) return serialize_grid(nm, vals, names, n, b);
+    if (gap_same(nm) || gap_pairs(nm) || gap_insets(nm) || gap_rule(nm) || !strcmp(nm, "corner-shape")) return serialize_gap(nm, vals, n, b);
+    if (!strcmp(nm, "mask")) {
+        static const char *const lnames[] = { "mask-image", "mask-position", "mask-size", "mask-repeat",
+                                              "mask-origin", "mask-clip", "mask-composite", "mask-mode" };
+        static const char *const resets[] = { "mask-border-source", "mask-border-outset", "mask-border-repeat",
+                                              "mask-border-slice", "mask-border-width" };
+        for (int k = 0; k < 5; k++) {
+            const char *v = val_of(vals, names, n, resets[k]);
+            if (v && !is_initial(resets[k], v)) return -1;
+        }
+        char **cols[8];
+        int len = -1;
+        for (int k = 0; k < 8; k++) {
+            const char *v = val_of(vals, names, n, lnames[k]);
+            int c = split_commas(v ? v : "", &cols[k]);
+            if (len >= 0 && c != len) { for (int j = 0; j <= k; j++) free_parts(cols[j], j == k ? c : len); return -1; }
+            len = c;
+        }
+        for (int l = 0; l < len; l++) {
+            if (l) buf_str(b, ", ");
+            size_t start = b->n;
+            bool sp = false;
+            #define PUT(x) do { if (sp) buf_ch(b, ' '); buf_str(b, x); sp = true; } while (0)
+            if (strcmp(cols[0][l], "none")) PUT(cols[0][l]);
+            bool size = strcmp(cols[2][l], "auto");
+            if (strcmp(cols[1][l], "0% 0%") || size) {
+                PUT(cols[1][l]);
+                if (size) { buf_str(b, " / "); buf_str(b, cols[2][l]); }
+            }
+            if (strcmp(cols[3][l], "repeat")) PUT(cols[3][l]);
+            bool org = strcmp(cols[4][l], "border-box"), clip = strcmp(cols[5][l], "border-box");
+            if (org || clip) {
+                if (org) PUT(cols[4][l]);
+                if (strcmp(cols[4][l], cols[5][l])) PUT(cols[5][l]);
+            }
+            if (strcmp(cols[6][l], "add")) PUT(cols[6][l]);
+            if (strcmp(cols[7][l], "match-source")) PUT(cols[7][l]);
+            if (b->n == start) buf_str(b, "none");
+            #undef PUT
+        }
+        for (int k = 0; k < 8; k++) free_parts(cols[k], len);
+        return 0;
+    }
     if (!strcmp(nm, "font")) {
         /* the reset-only longhands must be initial */
         static const char *const shown[] = { "font-style", "font-variant-caps", "font-weight", "font-stretch",
@@ -4330,4 +4959,102 @@ static int serialize_special(const CssPropDef *p, const char *const *vals, const
         return serialize_layers(vals, names, n, props, 8, b, false);
     }
     return -1;
+}
+
+/* ---- gradients: their canonical form (CSS Images 4: an interpolation method
+ * is left out where it is the default; it follows the size and position) ---- */
+static void gradient_canon_one(const char *arg, const char *end, Buf *b)
+{
+    int depth = 0;
+    const char *comma = NULL;
+    for (const char *q = arg; q < end; q++) {
+        if (*q == '(') depth++;
+        else if (*q == ')') depth--;
+        else if (*q == ',' && !depth) { comma = q; break; }
+    }
+    if (!comma) { buf_add(b, arg, (size_t)(end - arg)); return; }
+    char pre[256];
+    size_t pl = (size_t)(comma - arg);
+    if (pl >= sizeof pre) { buf_add(b, arg, (size_t)(end - arg)); return; }
+    memcpy(pre, arg, pl);
+    pre[pl] = 0;
+    char *w[32];
+    int nw = gap_words(pre, w, 32);
+    int in = -1;
+    for (int i = 0; i < nw; i++) if (!strcasecmp(w[i], "in")) in = i;
+    bool ellipse = nw > 1 && !strcasecmp(w[0], "ellipse") && strcasecmp(w[1], "at") && in != 1;
+    if (in < 0 && !ellipse) {
+        for (int i = 0; i < nw; i++) free(w[i]);
+        buf_add(b, arg, (size_t)(end - arg));
+        return;
+    }
+    bool legacy = true;
+    static const char *const modern[] = { "color(", "lab(", "lch(" };
+    for (int k = 0; k < 3; k++) {
+        const char *hit = strstr(comma, modern[k]);
+        if (hit && hit < end) legacy = false;
+    }
+    Buf rest = { 0 };
+    int mend = in;
+    if (in >= 0) mend = in + 2 < nw && in + 3 < nw && !strcasecmp(w[in + 3], "hue") ? in + 3 : in + 1;
+    for (int i = ellipse ? 1 : 0; i < nw; i++) {
+        if (in >= 0 && i >= in && i <= mend) continue;
+        if (rest.n) buf_ch(&rest, ' ');
+        buf_str(&rest, w[i]);
+    }
+    char method[64] = "";
+    if (in >= 0 && in + 1 < nw) {
+        snprintf(method, sizeof method, "%s", !strcasecmp(w[in + 1], "xyz") ? "xyz-d65" : w[in + 1]);
+        if (mend == in + 3 && strcasecmp(w[in + 2], "shorter")) {
+            size_t ml = strlen(method);
+            snprintf(method + ml, sizeof method - ml, " %s hue", w[in + 2]);
+        }
+        if (legacy ? !strcasecmp(method, "srgb") : !strcasecmp(method, "oklab")) method[0] = 0;
+    }
+    if (rest.n) buf_add(b, rest.s, rest.n);
+    if (method[0]) {
+        if (rest.n) buf_ch(b, ' ');
+        buf_str(b, "in ");
+        buf_str(b, method);
+    }
+    free(rest.s);
+    if (b->n && b->s[b->n - 1] != '(') buf_ch(b, ',');
+    else {
+        /* (nothing is left before the stops) */
+        comma++;
+        while (comma < end && *comma == ' ') comma++;
+        comma--;
+    }
+    buf_add(b, comma + 1, (size_t)(end - comma - 1));
+    for (int i = 0; i < nw; i++) free(w[i]);
+}
+
+char *css_prop_parse(const CssPropDef *p, const char *value)
+{
+    char *v = prop_parse_raw(p, value);
+    if (v && p && (!strcmp(p->name, "opacity") || strstr(p->name, "-opacity")) && strchr(v, '%') && !strchr(v, '(')) {
+        char b[48];
+        snprintf(b, sizeof b, "%.6g", atof(v) / 100.0);
+        free(v);
+        return strdup(b);
+    }
+    if (!v || !strstr(v, "gradient(") || has_substitution(v)) return v;
+    Buf b = { 0 };
+    const char *q = v;
+    for (const char *g; (g = strstr(q, "gradient(")); ) {
+        const char *arg = g + 9, *e = arg;
+        int depth = 1;
+        for (; *e; e++) {
+            if (*e == '(') depth++;
+            else if (*e == ')' && !--depth) break;
+        }
+        buf_add(&b, q, (size_t)(arg - q));
+        gradient_canon_one(arg, e, &b);
+        q = e;
+        if (!*e) break;
+    }
+    buf_str(&b, q);
+    buf_ch(&b, 0);
+    free(v);
+    return b.s;
 }

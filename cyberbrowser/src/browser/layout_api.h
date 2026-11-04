@@ -41,6 +41,8 @@ int layout_query_clip_rects(JSContextHandle ctx, GCValue element, uint32_t stop,
 bool layout_query_valid(void);
 /* The zoom in force on the element's box. */
 double layout_query_zoom(uint32_t id);
+/* Its style names a transition or animation. */
+bool layout_query_has_anim_spec(uint32_t id);
 /* The element is rendered in the query layout's document (and it is that document's). */
 bool layout_query_rendered(uint32_t id);
 /* Its content box there, whole pixels (false without a box). */
@@ -73,6 +75,11 @@ typedef void (*LayoutCascadeFn)(void *ud, const char *prop, const char *value, b
 bool layout_query_cascade(JSContextHandle ctx, GCValue element, LayoutCascadeFn fn, void *ud, LayoutQueryUsed *used);
 /* The used value of its top, right, bottom or left (0 to 3) that anchor() gave. */
 bool layout_query_anchor_inset(uint32_t id, int side, double *out);
+/* A grid container's used track sizes; how many, -1 when it isn't one laid out. */
+int layout_query_grid_tracks(uint32_t id, bool rows, double *out, int cap);
+/* A positioned box's used inset (top, right, bottom, left), for its resolved
+ * value: side_auto, its specified value is auto; opp_auto, the opposite one's. */
+bool layout_query_used_inset(uint32_t id, int side, bool side_auto, bool opp_auto, double *out);
 /* The same of its pseudo-element ps (css_layout_pseudo_decls). */
 bool layout_query_pseudo_cascade(JSContextHandle ctx, GCValue element, int ps, LayoutCascadeFn fn, void *ud);
 /* The computed value of custom property name on the element (malloc'd), or NULL. */

@@ -516,6 +516,8 @@
 "        var list = p.list(false, false);\n"
 "        p.skipWS();\n"
 "        if (p.peek() || !list.length) throw new SyntaxError('bad selector');\n"
+"        /* (view transition pseudo-elements: querySelector's stricter grammar) */\n"
+"        if (/::view-transition/i.test(text)) global.document.createDocumentFragment().querySelector(text);\n"
 "        return serList(list);\n"
 "    }\n"
 "    function selectorValid(text) {\n"

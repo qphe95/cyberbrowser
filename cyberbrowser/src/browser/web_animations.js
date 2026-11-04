@@ -97,23 +97,30 @@
     var LINEAR = parseEasing('linear');
 
     /* ---- interpolating values, from their text ---- */
-    var NUM = /[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?(%|[a-zA-Z]+)?/g;
+    var NUM = /calc\(\s*([-+]?[\d.eE+-]*\d)(%|px)\s*([-+])\s*([\d.eE+-]*\d)(%|px)\s*\)|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?(%|[a-zA-Z]+)?/g;
     function tokens(text) {
         var lits = [], nums = [], at = 0, m;
         NUM.lastIndex = 0;
         while ((m = NUM.exec(text))) {
+            if (m[1] !== undefined) {
+                var c1 = parseFloat(m[1]), c2 = (m[3] === '-' ? -1 : 1) * parseFloat(m[4]);
+                lits.push(text.slice(at, m.index));
+                nums.push({ v: 0, u: 'lp', pct: (m[2] === '%' ? c1 : 0) + (m[5] === '%' ? c2 : 0), px: (m[2] === 'px' ? c1 : 0) + (m[5] === 'px' ? c2 : 0) });
+                at = m.index + m[0].length;
+                continue;
+            }
             /* (inside a name: translate3d, h1, a color's #123) */
             var c = m.index ? text[m.index - 1] : '';
             if (/[a-zA-Z_#-]/.test(c) || (/[-+]/.test(m[0][0]) && /[\w)]/.test(c))) continue;
             lits.push(text.slice(at, m.index));
-            nums.push({ v: parseFloat(m[0]), u: (m[1] || '').toLowerCase() });
+            nums.push({ v: parseFloat(m[0]), u: (m[6] || '').toLowerCase() });
             at = m.index + m[0].length;
         }
         lits.push(text.slice(at));
         return { lits: lits, nums: nums };
     }
     function fmt(v) { return String(Math.round(v * 1e5) / 1e5); }
-    var NONNEG = /^(width|height|min-|max-|padding|border(-[a-z]+)*-(width|radius)|font-size|line-height|flex-grow|flex-shrink|flex-basis|outline-width|column-width|column-gap|row-gap|gap$|perspective$|border-spacing|shape-margin|letter-spacing-none)/;
+    var NONNEG = /^(border-image-(slice|width|outset)|mask-border-(slice|width|outset)|font-stretch|font-width|tab-size|hyphenate-limit-|width|height|min-|max-|padding|border(-[a-z]+)*-(width|radius)|font-size|line-height|flex-grow|flex-shrink|flex-basis|outline-width|column-width|column-gap|row-gap|gap$|perspective$|border-spacing|shape-margin|letter-spacing-none)/;
     var INTEGER = /^(z-index|order|orphans|widows|column-count|flood-none)$/;
     function finish(prop, v) {
         if (prop === 'opacity' || /-opacity$/.test(prop)) v = Math.max(0, Math.min(1, v));
@@ -138,18 +145,34 @@
         var out = ta.lits[0];
         for (var k = 0; k < ta.nums.length; k++) {
             var x = ta.nums[k], y = tb.nums[k], ux = x.u || (x.v === 0 ? y.u : ''), uy = y.u || (y.v === 0 ? x.u : '');
-            if (ux === uy) {
+            /* (lengths and percentages: each part by itself, the percentage first) */
+            if ((ux === 'lp' || uy === 'lp' || (ux === '%' && uy === 'px') || (ux === 'px' && uy === '%')) &&
+                /^(lp|%|px)$/.test(ux) && /^(lp|%|px)$/.test(uy)) {
+                var px0 = x.u === 'lp' ? x.px : ux === 'px' ? x.v : 0, pc0 = x.u === 'lp' ? x.pct : ux === '%' ? x.v : 0;
+                var px1 = y.u === 'lp' ? y.px : uy === 'px' ? y.v : 0, pc1 = y.u === 'lp' ? y.pct : uy === '%' ? y.v : 0;
+                var pxv = how(px0, px1), pcv = how(pc0, pc1);
+                if (!pcv && !pxv) out += '0%';
+                else if (!pcv) out += fmt(finish(prop, pxv)) + 'px';
+                else if (!pxv) out += fmt(finish(prop, pcv)) + '%';
+                else out += 'calc(' + fmt(pcv) + '%' + (pxv < 0 ? ' - ' : ' + ') + fmt(Math.abs(pxv)) + 'px)';
+            } else if (ux === uy) {
                 out += fmt(finish(prop, how(x.v, y.v))) + ux;
             } else if (/^(%|px|em|rem|vw|vh|ch|ex)$/.test(ux) && /^(%|px|em|rem|vw|vh|ch|ex)$/.test(uy)) {
                 /* (px and %: a calc(), the percentage first) */
                 var p = how(x.v, 0), q = how(0, y.v);
                 var first = uy === '%' ? fmt(q) + uy : fmt(p) + ux, second = uy === '%' ? p : q, unit = uy === '%' ? ux : uy;
-                out += 'calc(' + first + (second < 0 ? ' - ' : ' + ') + fmt(Math.abs(second)) + unit + ')';
+                /* (a part that comes to nothing goes, as a calc()'s does in computing it) */
+                if (!second) out += first;
+                else if (!(uy === '%' ? q : p)) out += fmt(second) + unit;
+                else out += 'calc(' + first + (second < 0 ? ' - ' : ' + ') + fmt(Math.abs(second)) + unit + ')';
             } else {
                 return null;
             }
             out += ta.lits[k + 1];
         }
+        out = out.replace(/\b(circle|ellipse)\(-[\d.]+(px|%)/g, function (all, fn, u) { return fn + '(0' + u; })
+                 .replace(/\bellipse\(([^ ]+) -[\d.]+(px|%)/g, function (all, r, u) { return 'ellipse(' + r + ' 0' + u; })
+                 .replace(/\bround -[\d.]+(px|%)/g, function (all, u) { return 'round 0' + u; });
         return tidyColors(out);
     }
     /* (a transform's none: the functions of the other, doing nothing) */
@@ -165,8 +188,661 @@
             }).join(', ') + ')';
         });
     }
+    /* ---- transform lists: composing and interpolating (CSS Transforms 1, 2).
+     * Every function as its primitive; what doesn't pair up, as matrices.
+     * Matrices are column-major, as matrix3d's arguments are. ---- */
+    var tfEl = null;
+    function tfBox() {
+        var w = 0, h = 0;
+        if (tfEl) { try { w = tfEl.offsetWidth || 0; h = tfEl.offsetHeight || 0; } catch (e) { /* (not laid out) */ } }
+        return { w: w, h: h };
+    }
+    var DEG = Math.PI / 180;
+    function tfAng(t) {
+        var v = parseFloat(t), m = /[a-zA-Z]+\s*$/.exec(t), u = m ? m[0].trim().toLowerCase() : 'deg';
+        return u === 'rad' ? v / DEG : u === 'grad' ? v * 0.9 : u === 'turn' ? v * 360 : v;
+    }
+    function tfLen(t) {
+        var out = { px: 0, pct: 0 }, re = /([-+]?\s*(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)(%|[a-zA-Z]*)/g, m, s = String(t);
+        while ((m = re.exec(s))) {
+            var v = parseFloat(m[1].replace(/\s+/g, ''));
+            if (m[2] === '%') out.pct += v; else out.px += v;
+        }
+        return out;
+    }
+    function tfNum(t) { var v = parseFloat(t); return /%\s*$/.test(t) ? v / 100 : v; }
+    function tfArgs(text) {
+        var out = [], depth = 0, cur = '';
+        for (var i = 0; i < text.length; i++) {
+            var c = text[i];
+            if (c === '(') depth++;
+            if (c === ')') depth--;
+            if (!depth && (c === ',' || c === ' ')) { if (cur) out.push(cur); cur = ''; } else cur += c;
+        }
+        if (cur) out.push(cur);
+        return out;
+    }
+    function tfAxis(x, y, z, deg) {
+        var l = Math.sqrt(x * x + y * y + z * z);
+        if (!l) return { k: 'rotate', a: [0, 0, 1, 0] };
+        return { k: 'rotate', a: [x / l, y / l, z / l, deg] };
+    }
+    function tfParse(text) {
+        var out = [], re = /([a-zA-Z][a-zA-Z0-9]*)\s*\(((?:[^()]|\([^()]*\))*)\)/g, m, Z = { px: 0, pct: 0 };
+        while ((m = re.exec(text))) {
+            var n = m[1].toLowerCase(), a = tfArgs(m[2]);
+            switch (n) {
+            case 'translate': out.push({ k: 'translate', a: [tfLen(a[0]), a.length > 1 ? tfLen(a[1]) : Z, Z] }); break;
+            case 'translatex': out.push({ k: 'translate', a: [tfLen(a[0]), Z, Z] }); break;
+            case 'translatey': out.push({ k: 'translate', a: [Z, tfLen(a[0]), Z] }); break;
+            case 'translatez': out.push({ k: 'translate', a: [Z, Z, tfLen(a[0])] }); break;
+            case 'translate3d': out.push({ k: 'translate', a: [tfLen(a[0]), tfLen(a[1]), tfLen(a[2])] }); break;
+            case 'scale': out.push({ k: 'scale', a: [tfNum(a[0]), a.length > 1 ? tfNum(a[1]) : tfNum(a[0]), 1] }); break;
+            case 'scalex': out.push({ k: 'scale', a: [tfNum(a[0]), 1, 1] }); break;
+            case 'scaley': out.push({ k: 'scale', a: [1, tfNum(a[0]), 1] }); break;
+            case 'scalez': out.push({ k: 'scale', a: [1, 1, tfNum(a[0])] }); break;
+            case 'scale3d': out.push({ k: 'scale', a: [tfNum(a[0]), tfNum(a[1]), tfNum(a[2])] }); break;
+            case 'rotate': case 'rotatez': out.push(tfAxis(0, 0, 1, tfAng(a[0]))); break;
+            case 'rotatex': out.push(tfAxis(1, 0, 0, tfAng(a[0]))); break;
+            case 'rotatey': out.push(tfAxis(0, 1, 0, tfAng(a[0]))); break;
+            case 'rotate3d': out.push(tfAxis(parseFloat(a[0]), parseFloat(a[1]), parseFloat(a[2]), tfAng(a[3]))); break;
+            case 'skew': out.push({ k: 'skew', a: [tfAng(a[0]), a.length > 1 ? tfAng(a[1]) : 0] }); break;
+            case 'skewx': out.push({ k: 'skew', a: [tfAng(a[0]), 0] }); break;
+            case 'skewy': out.push({ k: 'skew', a: [0, tfAng(a[0])] }); break;
+            case 'perspective': out.push({ k: 'perspective', a: [a[0] === 'none' ? Infinity : parseFloat(a[0])] }); break;
+            case 'matrix': out.push({ k: 'matrix', m: [+a[0], +a[1], 0, 0, +a[2], +a[3], 0, 0, 0, 0, 1, 0, +a[4], +a[5], 0, 1] }); break;
+            case 'matrix3d': out.push({ k: 'matrix', m: a.map(Number) }); break;
+            default: return null;
+            }
+        }
+        return out;
+    }
+    function tfIdentity(f) {
+        var Z = { px: 0, pct: 0 };
+        switch (f.k) {
+        case 'translate': return { k: 'translate', a: [Z, Z, Z] };
+        case 'scale': return { k: 'scale', a: [1, 1, 1] };
+        case 'rotate': return { k: 'rotate', a: [f.a[0], f.a[1], f.a[2], 0] };
+        case 'skew': return { k: 'skew', a: [0, 0] };
+        case 'perspective': return { k: 'perspective', a: [Infinity] };
+        default: return { k: 'matrix', m: M4_ID.slice() };
+        }
+    }
+    var M4_ID = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    function m4Mul(a, b) {
+        var r = new Array(16);
+        for (var c = 0; c < 4; c++) for (var w = 0; w < 4; w++) {
+            var v = 0;
+            for (var k = 0; k < 4; k++) v += a[k * 4 + w] * b[c * 4 + k];
+            r[c * 4 + w] = v;
+        }
+        return r;
+    }
+    function tfMatrix(f, box) {
+        var m = M4_ID.slice(), a = f.a, r;
+        switch (f.k) {
+        case 'translate':
+            m[12] = a[0].px + a[0].pct * box.w / 100;
+            m[13] = a[1].px + a[1].pct * box.h / 100;
+            m[14] = a[2].px;
+            return m;
+        case 'scale': m[0] = a[0]; m[5] = a[1]; m[10] = a[2]; return m;
+        case 'rotate':
+            r = a[3] * DEG;
+            var c = Math.cos(r), s = Math.sin(r), t = 1 - c, x = a[0], y = a[1], z = a[2];
+            m[0] = t * x * x + c; m[1] = t * x * y + s * z; m[2] = t * x * z - s * y;
+            m[4] = t * x * y - s * z; m[5] = t * y * y + c; m[6] = t * y * z + s * x;
+            m[8] = t * x * z + s * y; m[9] = t * y * z - s * x; m[10] = t * z * z + c;
+            return m;
+        case 'skew': m[4] = Math.tan(a[0] * DEG); m[1] = Math.tan(a[1] * DEG); return m;
+        case 'perspective': if (isFinite(a[0])) m[11] = -1 / Math.max(a[0], 1); return m;
+        default: return f.m;
+        }
+    }
+    function tfListMatrix(list, box) {
+        var m = M4_ID.slice();
+        for (var i = 0; i < list.length; i++) m = m4Mul(m, tfMatrix(list[i], box));
+        return m;
+    }
+    function fine(v) { return String(Math.round(v * 1e8) / 1e8); }
+    function tfText(f, box) {
+        var a = f.a;
+        switch (f.k) {
+        case 'translate':
+            return 'translate3d(' + fine(a[0].px + a[0].pct * box.w / 100) + 'px, ' + fine(a[1].px + a[1].pct * box.h / 100) + 'px, ' + fine(a[2].px) + 'px)';
+        case 'scale': return 'scale3d(' + fine(a[0]) + ', ' + fine(a[1]) + ', ' + fine(a[2]) + ')';
+        case 'rotate': return 'rotate3d(' + fine(a[0]) + ', ' + fine(a[1]) + ', ' + fine(a[2]) + ', ' + fine(a[3]) + 'deg)';
+        case 'skew': return 'skew(' + fine(a[0]) + 'deg, ' + fine(a[1]) + 'deg)';
+        case 'perspective': return isFinite(a[0]) ? 'perspective(' + fine(a[0]) + 'px)' : 'perspective(none)';
+        default: return 'matrix3d(' + f.m.map(fine).join(', ') + ')';
+        }
+    }
+    function is2D(m) {
+        return m[2] === 0 && m[3] === 0 && m[6] === 0 && m[7] === 0 && m[8] === 0 && m[9] === 0 && m[10] === 1 && m[11] === 0 && m[14] === 0 && m[15] === 1;
+    }
+    /* (CSS Transforms 1: decomposing a 2D matrix) */
+    function dec2(m) {
+        var r0x = m[0], r0y = m[1], r1x = m[4], r1y = m[5];
+        var s0 = Math.sqrt(r0x * r0x + r0y * r0y), s1 = Math.sqrt(r1x * r1x + r1y * r1y);
+        if (r0x * r1y - r0y * r1x < 0) { if (r0x < r1y) s0 = -s0; else s1 = -s1; }
+        if (s0) { r0x /= s0; r0y /= s0; }
+        if (s1) { r1x /= s1; r1y /= s1; }
+        var angle = Math.atan2(r0y, r0x), sn = -r0y, cs = r0x, a = r0x, b = r0y, c = r1x, d = r1y;
+        if (angle) {
+            r0x = cs * a + sn * c; r0y = cs * b + sn * d;
+            r1x = -sn * a + cs * c; r1y = -sn * b + cs * d;
+        }
+        return { t: [m[12], m[13]], s: [s0, s1], ang: angle / DEG, r: [r0x, r0y, r1x, r1y] };
+    }
+    function rec2(tx, ty, s0, s1, ang, r) {
+        var rd = ang * DEG, c = Math.cos(rd), s = Math.sin(rd);
+        /* rotation * remainder * scale */
+        var a = c * r[0] - s * r[1], b = s * r[0] + c * r[1], d = c * r[2] - s * r[3], e = s * r[2] + c * r[3];
+        return [a * s0, b * s0, 0, 0, d * s1, e * s1, 0, 0, 0, 0, 1, 0, tx, ty, 0, 1];
+    }
+    function lerp2(A, B, t) {
+        var a = dec2(A), b = dec2(B);
+        if ((a.s[0] < 0 && b.s[1] < 0) || (a.s[1] < 0 && b.s[0] < 0)) {
+            a.s[0] = -a.s[0]; a.s[1] = -a.s[1];
+            a.ang += a.ang < 0 ? 180 : -180;
+        }
+        if (!a.ang) a.ang = 360;
+        if (!b.ang) b.ang = 360;
+        if (Math.abs(a.ang - b.ang) > 180) { if (a.ang > b.ang) a.ang -= 360; else b.ang -= 360; }
+        var l = function (x, y) { return x + (y - x) * t; };
+        return rec2(l(a.t[0], b.t[0]), l(a.t[1], b.t[1]), l(a.s[0], b.s[0]), l(a.s[1], b.s[1]), l(a.ang, b.ang),
+                    [l(a.r[0], b.r[0]), l(a.r[1], b.r[1]), l(a.r[2], b.r[2]), l(a.r[3], b.r[3])]);
+    }
+    function det3(a, b, c, d, e, f, g, h, i) { return a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g); }
+    function m4Det(m) {
+        var d = 0;
+        for (var c = 0; c < 4; c++) {
+            var rows = [];
+            for (var k = 0; k < 4; k++) if (k !== c) rows.push(k);
+            d += (c % 2 ? -1 : 1) * m[c * 4] * det3(m[rows[0] * 4 + 1], m[rows[0] * 4 + 2], m[rows[0] * 4 + 3],
+                                                    m[rows[1] * 4 + 1], m[rows[1] * 4 + 2], m[rows[1] * 4 + 3],
+                                                    m[rows[2] * 4 + 1], m[rows[2] * 4 + 2], m[rows[2] * 4 + 3]);
+        }
+        return d;
+    }
+    function m4Inverse(m) {
+        var d = m4Det(m), out = new Array(16);
+        for (var c = 0; c < 4; c++) for (var r = 0; r < 4; r++) {
+            var cols = [0, 1, 2, 3].filter(function (x) { return x !== c; }), rws = [0, 1, 2, 3].filter(function (x) { return x !== r; });
+            var v = det3(m[cols[0] * 4 + rws[0]], m[cols[0] * 4 + rws[1]], m[cols[0] * 4 + rws[2]],
+                         m[cols[1] * 4 + rws[0]], m[cols[1] * 4 + rws[1]], m[cols[1] * 4 + rws[2]],
+                         m[cols[2] * 4 + rws[0]], m[cols[2] * 4 + rws[1]], m[cols[2] * 4 + rws[2]]);
+            out[r * 4 + c] = ((c + r) % 2 ? -v : v) / d;
+        }
+        return out;
+    }
+    /* (CSS Transforms 2: decomposing a 3D matrix) */
+    function dec3(src) {
+        if (!src[15]) return null;
+        var m = src.map(function (v) { return v / src[15]; }), pm = m.slice();
+        pm[3] = pm[7] = pm[11] = 0; pm[15] = 1;
+        if (Math.abs(m4Det(pm)) < 1e-12) return null;
+        var persp = [0, 0, 0, 1];
+        if (m[3] || m[7] || m[11]) {
+            var inv = m4Inverse(pm), rhs = [m[3], m[7], m[11], m[15]];
+            /* (the inverse's transpose, on the right hand side) */
+            for (var i = 0; i < 4; i++) persp[i] = rhs[0] * inv[i * 4] + rhs[1] * inv[i * 4 + 1] + rhs[2] * inv[i * 4 + 2] + rhs[3] * inv[i * 4 + 3];
+        }
+        var row = [[m[0], m[1], m[2]], [m[4], m[5], m[6]], [m[8], m[9], m[10]]];
+        var len = function (v) { return Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); };
+        var dot = function (a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+        var comb = function (a, b, x, y) { return [a[0] * x + b[0] * y, a[1] * x + b[1] * y, a[2] * x + b[2] * y]; };
+        var scale = [0, 0, 0], skew = [0, 0, 0];
+        scale[0] = len(row[0]);
+        if (scale[0]) row[0] = comb(row[0], row[0], 1 / scale[0], 0);
+        skew[0] = dot(row[0], row[1]);
+        row[1] = comb(row[1], row[0], 1, -skew[0]);
+        scale[1] = len(row[1]);
+        if (scale[1]) { row[1] = comb(row[1], row[1], 1 / scale[1], 0); skew[0] /= scale[1]; }
+        skew[1] = dot(row[0], row[2]);
+        row[2] = comb(row[2], row[0], 1, -skew[1]);
+        skew[2] = dot(row[1], row[2]);
+        row[2] = comb(row[2], row[1], 1, -skew[2]);
+        scale[2] = len(row[2]);
+        if (scale[2]) { row[2] = comb(row[2], row[2], 1 / scale[2], 0); skew[1] /= scale[2]; skew[2] /= scale[2]; }
+        var cross = [row[1][1] * row[2][2] - row[1][2] * row[2][1], row[1][2] * row[2][0] - row[1][0] * row[2][2], row[1][0] * row[2][1] - row[1][1] * row[2][0]];
+        if (dot(row[0], cross) < 0) {
+            for (var k = 0; k < 3; k++) { scale[k] = -scale[k]; row[k] = comb(row[k], row[k], -1, 0); }
+        }
+        var q = [0.5 * Math.sqrt(Math.max(1 + row[0][0] - row[1][1] - row[2][2], 0)),
+                 0.5 * Math.sqrt(Math.max(1 - row[0][0] + row[1][1] - row[2][2], 0)),
+                 0.5 * Math.sqrt(Math.max(1 - row[0][0] - row[1][1] + row[2][2], 0)),
+                 0.5 * Math.sqrt(Math.max(1 + row[0][0] + row[1][1] + row[2][2], 0))];
+        if (row[2][1] > row[1][2]) q[0] = -q[0];
+        if (row[0][2] > row[2][0]) q[1] = -q[1];
+        if (row[1][0] > row[0][1]) q[2] = -q[2];
+        return { t: [m[12], m[13], m[14]], s: scale, k: skew, q: q, p: persp };
+    }
+    function rec3(d) {
+        var m = M4_ID.slice(), i;
+        for (i = 0; i < 4; i++) m[i * 4 + 3] = d.p[i];
+        for (i = 0; i < 3; i++) for (var j = 0; j < 4; j++) m[12 + j] += d.t[i] * m[i * 4 + j];
+        var q = d.q, x = q[0], y = q[1], z = q[2], w = q[3];
+        var rot = M4_ID.slice();
+        rot[0] = 1 - 2 * (y * y + z * z); rot[1] = 2 * (x * y + z * w); rot[2] = 2 * (x * z - y * w);
+        rot[4] = 2 * (x * y - z * w); rot[5] = 1 - 2 * (x * x + z * z); rot[6] = 2 * (y * z + x * w);
+        rot[8] = 2 * (x * z + y * w); rot[9] = 2 * (y * z - x * w); rot[10] = 1 - 2 * (x * x + y * y);
+        m = m4Mul(m, rot);
+        var skew = M4_ID.slice();
+        if (d.k[2]) { skew = M4_ID.slice(); skew[9] = d.k[2]; m = m4Mul(m, skew); }
+        if (d.k[1]) { skew = M4_ID.slice(); skew[8] = d.k[1]; m = m4Mul(m, skew); }
+        if (d.k[0]) { skew = M4_ID.slice(); skew[4] = d.k[0]; m = m4Mul(m, skew); }
+        for (i = 0; i < 3; i++) for (var c = 0; c < 4; c++) m[i * 4 + c] *= d.s[i];
+        return m;
+    }
+    function slerp(a, b, t) {
+        var dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3], sign = 1;
+        if (dot < 0) { dot = -dot; sign = -1; }
+        if (dot >= 1 - 1e-12) return a.slice();
+        var th = Math.acos(dot), w = Math.sin(t * th) / Math.sqrt(1 - dot * dot);
+        var ka = Math.cos(t * th) - dot * w, kb = sign * w;
+        return [0, 1, 2, 3].map(function (i) { return a[i] * ka + b[i] * kb; });
+    }
+    function tfLerpMatrix(A, B, t) {
+        if (is2D(A) && is2D(B)) return lerp2(A, B, t);
+        var a = dec3(A), b = dec3(B);
+        if (!a || !b) return t < 0.5 ? A : B;
+        var l = function (x, y) { return x.map(function (v, i) { return v + (y[i] - v) * t; }); };
+        return rec3({ t: l(a.t, b.t), s: l(a.s, b.s), k: l(a.k, b.k), p: l(a.p, b.p), q: slerp(a.q, b.q, t) });
+    }
+    function tfAccumMatrix(A, B) {
+        var a = dec3(A), b = dec3(B);
+        if (!a || !b) return B;
+        var sum = function (x, y) { return x.map(function (v, i) { return v + y[i]; }); };
+        var x = a.q, y = b.q;
+        var q = [x[3] * y[0] + x[0] * y[3] + x[1] * y[2] - x[2] * y[1],
+                 x[3] * y[1] - x[0] * y[2] + x[1] * y[3] + x[2] * y[0],
+                 x[3] * y[2] + x[0] * y[1] - x[1] * y[0] + x[2] * y[3],
+                 x[3] * y[3] - x[0] * y[0] - x[1] * y[1] - x[2] * y[2]];
+        return rec3({ t: sum(a.t, b.t), k: sum(a.k, b.k), q: q,
+                      s: a.s.map(function (v, i) { return v + b.s[i] - 1; }),
+                      p: [a.p[0] + b.p[0], a.p[1] + b.p[1], a.p[2] + b.p[2], a.p[3] + b.p[3] - 1] });
+    }
+    /* A pair of one primitive, combined by how; null when they don't pair. */
+    function tfSameAxis(a, b) { return !a.a[3] || !b.a[3] || (a.a[0] === b.a[0] && a.a[1] === b.a[1] && a.a[2] === b.a[2]); }
+    function tfPair(a, b, how, box, matrixHow) {
+        if (a.k !== b.k) return null;
+        switch (a.k) {
+        case 'translate':
+            return { k: a.k, a: a.a.map(function (v, i) { return { px: how(v.px, b.a[i].px), pct: how(v.pct, b.a[i].pct) }; }) };
+        case 'skew':
+            return { k: a.k, a: [how(a.a[0], b.a[0]), how(a.a[1], b.a[1])] };
+        case 'rotate':
+            if (tfSameAxis(a, b)) {
+                var ax = a.a[3] ? a : b;
+                return { k: a.k, a: [ax.a[0], ax.a[1], ax.a[2], how(a.a[3], b.a[3])] };
+            }
+            return { k: 'matrix', m: matrixHow(tfMatrix(a, box), tfMatrix(b, box)) };
+        default: return undefined;
+        }
+    }
+    function tfInterpolate(ta, tb, t) {
+        var la = tfParse(ta === 'none' ? '' : ta), lb = tfParse(tb === 'none' ? '' : tb);
+        if (!la || !lb) return null;
+        var box = tfBox(), out = [], n = Math.max(la.length, lb.length);
+        var l = function (x, y) { return x + (y - x) * t; };
+        var ml = function (A, B) { return tfLerpMatrix(A, B, t); };
+        for (var i = 0; i < n; i++) {
+            var a = i < la.length ? la[i] : tfIdentity(lb[i]), b = i < lb.length ? lb[i] : tfIdentity(la[i]);
+            var r = tfPair(a, b, l, box, ml);
+            if (r === undefined) {
+                if (a.k === 'scale') r = { k: a.k, a: [l(a.a[0], b.a[0]), l(a.a[1], b.a[1]), l(a.a[2], b.a[2])] };
+                else if (a.k === 'perspective') {
+                    var ia = isFinite(a.a[0]) ? 1 / Math.max(a.a[0], 1) : 0, ib = isFinite(b.a[0]) ? 1 / Math.max(b.a[0], 1) : 0, iv = l(ia, ib);
+                    r = { k: a.k, a: [iv > 0 ? 1 / iv : Infinity] };
+                } else r = { k: 'matrix', m: ml(a.m, b.m) };
+            }
+            if (!r) {
+                /* (the rest, as matrices) */
+                var ra = la.slice(i), rb = lb.slice(i);
+                out.push('matrix3d(' + ml(tfListMatrix(ra, box), tfListMatrix(rb, box)).map(fine).join(', ') + ')');
+                return out.join(' ');
+            }
+            out.push(tfText(r, box));
+        }
+        return out.join(' ') || 'none';
+    }
+    function tfAccumulate(ta, tb) {
+        var la = tfParse(ta === 'none' ? '' : ta), lb = tfParse(tb === 'none' ? '' : tb);
+        if (!la || !lb) return tb;
+        if (!la.length) return tb;
+        if (!lb.length) return ta;
+        var box = tfBox(), out = [], paired = la.length === lb.length;
+        var sum = function (x, y) { return x + y; };
+        for (var i = 0; paired && i < la.length; i++) {
+            var a = la[i], b = lb[i];
+            var r = tfPair(a, b, sum, box, tfAccumMatrix);
+            if (r === undefined) {
+                if (a.k === 'scale') r = { k: a.k, a: [a.a[0] + b.a[0] - 1, a.a[1] + b.a[1] - 1, a.a[2] + b.a[2] - 1] };
+                else if (a.k === 'perspective') {
+                    var inv = (isFinite(a.a[0]) ? 1 / a.a[0] : 0) + (isFinite(b.a[0]) ? 1 / b.a[0] : 0);
+                    r = { k: a.k, a: [inv > 0 ? 1 / inv : Infinity] };
+                } else r = { k: 'matrix', m: tfAccumMatrix(a.m, b.m) };
+            }
+            if (!r) paired = false; else out.push(tfText(r, box));
+        }
+        if (paired) return out.join(' ');
+        return 'matrix3d(' + tfAccumMatrix(tfListMatrix(la, box), tfListMatrix(lb, box)).map(fine).join(', ') + ')';
+    }
+    /* (for DOMMatrix: a transform list without relative lengths, or null) */
+    Object.defineProperty(global, '__cyberTransformList', { configurable: true, value: function (text) {
+        if (text === 'none') return { m: M4_ID.slice(), is2D: true };
+        if (!global.CSS.supports('transform', text) || /%|em|[0-9](em|rem|ex|ch|vw|vh|vmin|vmax|lh)/.test(text)) return null;
+        var list = tfParse(text);
+        if (!list || !list.length) return null;
+        var m = tfListMatrix(list, { w: 0, h: 0 }), flat = !/3d|translateZ|rotateX|rotateY|scaleZ|perspective/i.test(text);
+        return { m: m, is2D: flat };
+    } });
+    var CORNER_K = { round: 1, squircle: 2, bevel: 0, scoop: -1 };
+    function cornerShape(v) { return v in CORNER_K ? 'superellipse(' + CORNER_K[v] + ')' : v; }
+    /* ---- translate, rotate, scale ---- */
+    function pad3(list, fill) { return [list[0] || fill[0], list[1] || fill[1], list[2] || fill[2]]; }
+    function translateParts(v) { return pad3(v === 'none' ? [] : tfArgs(v), ['0px', '0px', '0px']); }
+    function scaleParts(v) {
+        var a = v === 'none' ? [] : tfArgs(v).map(tfNum);
+        return [a.length ? a[0] : 1, a.length > 1 ? a[1] : a.length ? a[0] : 1, a.length > 2 ? a[2] : 1];
+    }
+    function rotateParts(v) {
+        if (v === 'none') return { x: 0, y: 0, z: 1, deg: 0, text: '' };
+        var a = tfArgs(v), angle = 0, axis = [];
+        a.forEach(function (t) {
+            if (/^(x|y|z)$/i.test(t)) axis = t.toLowerCase() === 'x' ? [1, 0, 0] : t.toLowerCase() === 'y' ? [0, 1, 0] : [0, 0, 1];
+            else if (/[a-zA-Z]\s*$/.test(t)) angle = tfAng(t);
+            else axis.push(parseFloat(t));
+        });
+        if (axis.length !== 3) axis = [0, 0, 1];
+        var l = Math.sqrt(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]) || 1;
+        var text = a.filter(function (t) { return !/[a-zA-Z]\s*$/.test(t) || /^(x|y|z)$/i.test(t); }).join(' ');
+        return { x: axis[0] / l, y: axis[1] / l, z: axis[2] / l, deg: angle, text: text };
+    }
+    function individualInterpolate(prop, a, b, t) {
+        var out, i;
+        if (t === 0 && a === 'none') return a;
+        if (t === 1 && b === 'none') return b;
+        if (prop === 'translate') {
+            var ta = translateParts(a), tb = translateParts(b);
+            out = [];
+            for (i = 0; i < 3; i++) {
+                var c = combine(prop, ta[i], tb[i], function (x, y) { return x + (y - x) * t; });
+                if (c === null) return t < 0.5 ? a : b;
+                out.push(c);
+            }
+            if (t === 0) return a;
+            if (t === 1) return b;
+            var zero = function (s) { return /^-?0(\.0*)?(px)?$/.test(s); };
+            if (zero(out[2])) { out.pop(); if (zero(out[1])) out.pop(); }
+            return out.join(' ');
+        }
+        if (prop === 'scale') {
+            var sa = scaleParts(a), sb = scaleParts(b);
+            out = [0, 1, 2].map(function (k) { return sa[k] + (sb[k] - sa[k]) * t; });
+            if (Math.abs(out[2] - 1) < 1e-9) { out.pop(); if (Math.abs(out[0] - out[1]) < 1e-9) out.pop(); }
+            return out.map(fmt).join(' ');
+        }
+        var ra = rotateParts(a), rb = rotateParts(b);
+        var same = !ra.deg || !rb.deg || (Math.abs(ra.x - rb.x) < 1e-6 && Math.abs(ra.y - rb.y) < 1e-6 && Math.abs(ra.z - rb.z) < 1e-6);
+        if (same) {
+            var ax = ra.deg || a === 'none' && !rb.deg ? ra : rb, deg = ra.deg + (rb.deg - ra.deg) * t;
+            if (!ra.deg && a !== 'none') ax = rb;
+            return (ax.text ? ax.text + ' ' : '') + fmt(deg) + 'deg';
+        }
+        var quat = function (r) {
+            var h = r.deg * DEG / 2, s = Math.sin(h);
+            return [r.x * s, r.y * s, r.z * s, Math.cos(h)];
+        };
+        var q = slerp(quat(ra), quat(rb), t), w = Math.max(-1, Math.min(1, q[3])), an = 2 * Math.acos(w), sn = Math.sin(an / 2);
+        if (Math.abs(sn) < 1e-9) return '0 0 1 0deg';
+        return fine(q[0] / sn) + ' ' + fine(q[1] / sn) + ' ' + fine(q[2] / sn) + ' ' + fmt(an / DEG) + 'deg';
+    }
+    /* ---- lists ---- */
+    function splitTop(text) {
+        var out = [], d = 0, cur = '';
+        for (var i = 0; i < text.length; i++) {
+            var c = text[i];
+            if (c === '(') d++;
+            if (c === ')') d--;
+            if (c === ',' && !d) { out.push(cur.trim()); cur = ''; } else cur += c;
+        }
+        out.push(cur.trim());
+        return out;
+    }
+    function gcd(a, b) { return b ? gcd(b, a % b) : a; }
+    var REPEATABLE = /^(background|mask)-(position(-[xy])?|size)$/;
+    function repeatableInterpolate(prop, a, b, how) {
+        var la = splitTop(a), lb = splitTop(b), n = la.length * lb.length / gcd(la.length, lb.length), out = [];
+        for (var i = 0; i < n; i++) {
+            var v = combine(prop, la[i % la.length], lb[i % lb.length], how);
+            if (v === null) return null;
+            out.push(v);
+        }
+        return out.join(', ');
+    }
+    var CLEAR_SHADOW = 'rgba(0, 0, 0, 0) 0px 0px 0px 0px';
+    function shadowInterpolate(prop, a, b, how) {
+        var la = a === 'none' ? [] : splitTop(a), lb = b === 'none' ? [] : splitTop(b), n = Math.max(la.length, lb.length), out = [];
+        for (var i = 0; i < n; i++) {
+            var x = la[i], y = lb[i];
+            var inset = /\binset\b/;
+            if (x === undefined) x = CLEAR_SHADOW + (inset.test(y) ? ' inset' : '');
+            if (y === undefined) y = CLEAR_SHADOW + (inset.test(x) ? ' inset' : '');
+            /* (text-shadow has no spread) */
+            if (prop === 'text-shadow') { x = x.replace(' 0px 0px 0px 0px', ' 0px 0px 0px'); y = y.replace(' 0px 0px 0px 0px', ' 0px 0px 0px'); }
+            var v = combine(prop, x, y, how);
+            if (v === null) return null;
+            out.push(v);
+        }
+        return out.join(', ') || 'none';
+    }
+    /* filters: function by function, the shorter padded with what does nothing */
+    var FILTER_ZERO = { blur: '0px', grayscale: '0', sepia: '0', invert: '0', 'hue-rotate': '0deg',
+                        brightness: '1', contrast: '1', saturate: '1', opacity: '1', 'drop-shadow': 'rgba(0, 0, 0, 0) 0px 0px 0px' };
+    function filterList(text) {
+        var out = [], re = /([a-zA-Z-]+)\s*\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)/g, m;
+        if (text === 'none') return out;
+        while ((m = re.exec(text))) {
+            var name = m[1].toLowerCase(), arg = m[2].trim();
+            if (name !== 'drop-shadow' && name !== 'hue-rotate' && name !== 'blur' && name !== 'url') {
+                if (!arg) arg = name in FILTER_ZERO ? (FILTER_ZERO[name] === '0' ? '1' : FILTER_ZERO[name]) : arg;
+                else if (/%$/.test(arg)) arg = fmt(parseFloat(arg) / 100);
+            } else if (!arg && (name === 'blur' || name === 'hue-rotate')) {
+                arg = FILTER_ZERO[name];
+            }
+            out.push({ n: name, a: arg });
+        }
+        return out;
+    }
+    function filterInterpolate(prop, a, b, how) {
+        if (/url\(/.test(a) || /url\(/.test(b)) return null;
+        var la = filterList(a), lb = filterList(b), n = Math.max(la.length, lb.length), out = [];
+        for (var i = 0; i < n; i++) {
+            var x = la[i], y = lb[i];
+            if (x && y && x.n !== y.n) return null;
+            var name = (x || y).n;
+            var v = combine(prop, x ? x.a : FILTER_ZERO[name], y ? y.a : FILTER_ZERO[name], how);
+            if (v === null) return null;
+            if (name !== 'hue-rotate' && name !== 'drop-shadow') {
+                var fn = parseFloat(v);
+                if (fn < 0) v = v.replace(/^-?[\d.]+/, '0');
+                else if (fn > 1 && (name === 'sepia' || name === 'grayscale' || name === 'opacity')) v = '1';
+            }
+            out.push(name + '(' + v + ')');
+        }
+        return out.join(' ') || 'none';
+    }
+    /* ---- path(): as absolute commands, number by number ---- */
+    var PATH_ARGS = { M: 2, L: 2, H: 1, V: 1, C: 6, S: 4, Q: 4, T: 2, A: 7, Z: 0 };
+    function pathAbsolute(d) {
+        var re = /([a-zA-Z])|([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)/g, m, toks = [];
+        while ((m = re.exec(d))) toks.push(m[1] ? m[1] : parseFloat(m[2]));
+        var out = [], i = 0, cx = 0, cy = 0, sx = 0, sy = 0;
+        while (i < toks.length) {
+            var c = toks[i++];
+            if (typeof c !== 'string') return null;
+            var up = c.toUpperCase(), rel = c !== up, nargs = PATH_ARGS[up];
+            if (nargs === undefined) return null;
+            if (!nargs) { out.push({ c: 'Z', a: [] }); cx = sx; cy = sy; continue; }
+            var first = true;
+            do {
+                var a = toks.slice(i, i + nargs);
+                if (a.length < nargs || a.some(function (x) { return typeof x !== 'number'; })) return null;
+                i += nargs;
+                var cmd = first ? up : (up === 'M' ? 'L' : up);
+                first = false;
+                if (rel) {
+                    if (cmd === 'H') a[0] += cx;
+                    else if (cmd === 'V') a[0] += cy;
+                    else if (cmd === 'A') { a[5] += cx; a[6] += cy; }
+                    else for (var k = 0; k < a.length; k += 2) { a[k] += cx; a[k + 1] += cy; }
+                }
+                if (cmd === 'H') cx = a[0];
+                else if (cmd === 'V') cy = a[0];
+                else { cx = a[a.length - 2]; cy = a[a.length - 1]; }
+                if (cmd === 'M') { sx = cx; sy = cy; }
+                out.push({ c: cmd, a: a });
+            } while (i < toks.length && typeof toks[i] === 'number');
+        }
+        return out;
+    }
+    var PATH_FN = /^\s*path\(\s*(?:(nonzero|evenodd)\s*,\s*)?["']([^"']*)["']\s*\)\s*$/i;
+    function pathInterpolate(a, b, t) {
+        var ma = PATH_FN.exec(a), mb = PATH_FN.exec(b);
+        if (!ma || !mb) return null;
+        if ((ma[1] || 'nonzero').toLowerCase() !== (mb[1] || 'nonzero').toLowerCase()) return null;
+        var pa = pathAbsolute(ma[2]), pb = pathAbsolute(mb[2]);
+        if (!pa || !pb || pa.length !== pb.length) return null;
+        var parts = [];
+        for (var i = 0; i < pa.length; i++) {
+            if (pa[i].c !== pb[i].c) return null;
+            var nums = pa[i].a.map(function (x, k) {
+                var v = x + (pb[i].a[k] - x) * t;
+                /* (an arc's flags: set where they aren't both clear) */
+                if (pa[i].c === 'A' && (k === 3 || k === 4)) return v !== 0 ? 1 : 0;
+                return fmt(v);
+            });
+            parts.push(pa[i].c + (nums.length ? ' ' + nums.join(' ') : ''));
+        }
+        return 'path(' + (ma[1] ? ma[1].toLowerCase() + ', ' : '') + '"' + parts.join(' ') + '")';
+    }
+    /* ---- inset(), rect() and xywh(): as inset() ---- */
+    function lpParse(t) {
+        var out = { px: 0, pct: 0 };
+        var re = /([-+]?\s*(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)(%|px)?/g, m, s = String(t);
+        while ((m = re.exec(s))) {
+            var v = parseFloat(m[1].replace(/\s+/g, ''));
+            if (m[2] === '%') out.pct += v; else out.px += v;
+        }
+        return out;
+    }
+    function lpText(v) {
+        if (!v.pct) return fmt(v.px) + 'px';
+        if (!v.px) return fmt(v.pct) + '%';
+        return 'calc(' + fmt(v.pct) + '% ' + (v.px < 0 ? '- ' : '+ ') + fmt(Math.abs(v.px)) + 'px)';
+    }
+    function from100(v) { return { px: -v.px, pct: 100 - v.pct }; }
+    function insetParts(text) {
+        var m = /^\s*(inset|rect|xywh)\(((?:[^()]|\([^()]*\))*)\)\s*$/i.exec(text);
+        if (!m) return null;
+        var fn = m[1].toLowerCase(), body = m[2], round = '';
+        var ri = body.search(/\bround\b/);
+        if (ri >= 0) { round = body.slice(ri).trim(); body = body.slice(0, ri); }
+        var a = tfArgs(body.trim());
+        var auto = function (x, dflt) { return /^auto$/i.test(x) ? dflt : lpParse(x); };
+        var box;
+        if (fn === 'inset') {
+            var p = a.map(lpParse);
+            box = [p[0], p.length > 1 ? p[1] : p[0], p.length > 2 ? p[2] : p[0], p.length > 3 ? p[3] : (p.length > 1 ? p[1] : p[0])];
+        } else if (fn === 'rect') {
+            var Z = { px: 0, pct: 0 }, F = { px: 0, pct: 100 };
+            box = [auto(a[0], Z), from100(auto(a[1], F)), from100(auto(a[2], F)), auto(a[3], Z)];
+        } else {
+            var x = lpParse(a[0]), y = lpParse(a[1]), w = lpParse(a[2]), h = lpParse(a[3]);
+            box = [y, { px: -x.px - w.px, pct: 100 - x.pct - w.pct }, { px: -y.px - h.px, pct: 100 - y.pct - h.pct }, x];
+        }
+        return { box: box, round: round };
+    }
+    function insetInterpolate(a, b, t) {
+        var pa = insetParts(a), pb = insetParts(b);
+        if (!pa || !pb) return null;
+        var l = function (x, y) { return { px: x.px + (y.px - x.px) * t, pct: x.pct + (y.pct - x.pct) * t }; };
+        var v = pa.box.map(function (x, i) { return lpText(l(x, pb.box[i])); });
+        var txt = v[3] !== v[1] ? v.join(' ') : v[2] !== v[0] ? v.slice(0, 3).join(' ') : v[1] !== v[0] ? v.slice(0, 2).join(' ') : v[0];
+        var rv = '';
+        if (pa.round || pb.round) {
+            var ra = pa.round || 'round 0px', rb = pb.round || 'round 0px', c = combine('clip-path', ra, rb, function (x, y) { return x + (y - x) * t; });
+            if (c === null) return null;
+            if (!/^round -?0(px|%)?$/.test(c)) rv = ' ' + c;
+        }
+        return 'inset(' + txt + rv + ')';
+    }
+    var SHAPE_PROP = /^(clip-path|shape-outside|offset-path)$/;
+    /* (four numbers that are one, or two, as box values come to) */
+    function boxCollapse(v) {
+        var p = v.split(' ');
+        if (p.length !== 4 || /\//.test(v)) return v;
+        if (p[3] !== p[1]) return v;
+        if (p[2] !== p[0]) return p.slice(0, 3).join(' ');
+        if (p[1] !== p[0]) return p.slice(0, 2).join(' ');
+        return p[0];
+    }
+    /* (a z of nothing, when one has it) */
+    function originParts(v) { var a = tfArgs(v); if (a.length < 3) a.push('0px'); return a.join(' '); }
+    function originTrim(v) { return v.replace(/ -?0(\.0*)?px$/, ''); }
+    function ratioParts(v) {
+        var m = /^(auto\s+)?\s*([\d.eE+-]+)(?:\s*\/\s*([\d.eE+-]+))?(\s+auto)?\s*$/.exec(v);
+        if (!m) return null;
+        return { auto: !!(m[1] || m[4]), w: parseFloat(m[2]), h: m[3] === undefined ? 1 : parseFloat(m[3]) };
+    }
+    /* (rect() without commas, as with) */
+    function clipRect(v) {
+        return /^rect\([^,]*\)$/.test(v) ? v.replace(/\s+(?=[^\s)])/g, ', ') : v;
+    }
     function interpolate(prop, a, b, t) {
         if (a === b) return a;
+        if (prop === 'clip') { a = clipRect(a); b = clipRect(b); }
+        if (prop === 'translate' || prop === 'rotate' || prop === 'scale') return individualInterpolate(prop, a, b, t);
+        var lerpHow = function (x, y) { return x + (y - x) * t; };
+        if (SHAPE_PROP.test(prop)) {
+            var sh = pathInterpolate(a, b, t);
+            if (sh === null) sh = insetInterpolate(a, b, t);
+            if (sh !== null) return sh;
+        }
+        if (/^(border-image|mask-border)-(slice|width|outset)$/.test(prop)) {
+            var bc = combine(prop, a, b, lerpHow);
+            return bc === null ? (t < 0.5 ? a : b) : boxCollapse(bc);
+        }
+        if (prop === 'transform-origin') {
+            var ov = combine(prop, originParts(a), originParts(b), lerpHow);
+            return ov === null ? (t < 0.5 ? a : b) : originTrim(ov);
+        }
+        if (prop === 'aspect-ratio') {
+            var r0 = ratioParts(a), r1 = ratioParts(b);
+            /* (degenerate ratios and auto on one side alone: no interpolating) */
+            if (!r0 || !r1 || r0.auto !== r1.auto || !r0.w || !r0.h || !r1.w || !r1.h) return t < 0.5 ? a : b;
+            var la0 = Math.log(r0.w / r0.h), la1 = Math.log(r1.w / r1.h);
+            return (r0.auto ? 'auto ' : '') + fmt(Math.exp(la0 + (la1 - la0) * t)) + ' / 1';
+        }
+        if (REPEATABLE.test(prop)) {
+            var rv = repeatableInterpolate(prop, a, b, lerpHow);
+            return rv === null ? (t < 0.5 ? a : b) : rv;
+        }
+        if (prop === 'box-shadow' || prop === 'text-shadow') {
+            var sv = shadowInterpolate(prop, a, b, lerpHow);
+            return sv === null ? (t < 0.5 ? a : b) : sv;
+        }
+        if (prop === 'filter' || prop === 'backdrop-filter') {
+            var fv = filterInterpolate(prop, a, b, lerpHow);
+            return fv === null ? (t < 0.5 ? a : b) : fv;
+        }
+        if (/^corner-.*-shape$/.test(prop)) { a = cornerShape(a); b = cornerShape(b); }
+        if (prop === 'transform') {
+            var tv = tfInterpolate(a, b, t);
+            if (tv !== null) return tv;
+        }
         if (/^(transform|filter|backdrop-filter)$/.test(prop)) {
             if (a === 'none' && b !== 'none') a = neutralFunctions(b);
             else if (b === 'none' && a !== 'none') b = neutralFunctions(a);
@@ -174,7 +850,46 @@
         var v = combine(prop, a, b, function (x, y) { return x + (y - x) * t; });
         return v === null ? (t < 0.5 ? a : b) : v;
     }
-    function addValues(prop, under, value) {
+    function addValues(prop, under, value, how) {
+        if (prop === 'clip') { under = clipRect(under); value = clipRect(value); }
+        if (/^(border-image|mask-border)-(slice|width|outset)$/.test(prop)) {
+            var ab = combine(prop, under, value, function (x, y) { return x + y; });
+            return ab === null ? value : boxCollapse(ab);
+        }
+        if (prop === 'transform-origin') {
+            var oa = combine(prop, originParts(under), originParts(value), function (x, y) { return x + y; });
+            return oa === null ? value : originTrim(oa);
+        }
+        if (prop === 'translate' && under !== 'none' && value !== 'none') {
+            var ua = translateParts(under), va = translateParts(value), added = [];
+            for (var ti = 0; ti < 3; ti++) added.push(combine(prop, ua[ti], va[ti], function (x, y) { return x + y; }));
+            if (added.indexOf(null) < 0) return individualInterpolate(prop, added.join(' '), added.join(' ') + ' ', 0.5);
+            return value;
+        }
+        if (prop === 'translate' || prop === 'rotate' || prop === 'scale') {
+            if (under === 'none') return value;
+            if (value === 'none') return under;
+        }
+        if (prop === 'scale') {
+            var ss = scaleParts(under), sv = scaleParts(value);
+            return individualInterpolate(prop, 'none', ss.map(function (x, k) { return fmt(how === 'add' ? x * sv[k] : x + sv[k] - 1); }).join(' '), 0.9999999);
+        }
+        if (prop === 'rotate') {
+            var ru = rotateParts(under), rv = rotateParts(value);
+            if (Math.abs(ru.x - rv.x) < 1e-6 && Math.abs(ru.y - rv.y) < 1e-6 && Math.abs(ru.z - rv.z) < 1e-6) return (rv.text ? rv.text + ' ' : '') + fmt(ru.deg + rv.deg) + 'deg';
+            return value;
+        }
+        if (prop === 'transform' || prop === 'filter' || prop === 'backdrop-filter') {
+            if (prop === 'transform' && how === 'accumulate') return tfAccumulate(under, value);
+            if (how === 'add' || prop === 'transform') {
+                if (under === 'none') return value;
+                return value === 'none' ? under : under + ' ' + value;
+            }
+        }
+        if (how === 'add' && (prop === 'box-shadow' || prop === 'text-shadow')) {
+            if (under === 'none') return value;
+            return value === 'none' ? under : under + ', ' + value;
+        }
         var v = combine(prop, under, value, function (x, y) { return x + y; });
         return v === null ? value : v;
     }
@@ -183,6 +898,8 @@
     var COLORISH = /color|background|border|outline|shadow|fill|stroke|caret|accent/;
     var RELATIVE = /\b(inherit|initial|unset|revert|revert-layer|currentcolor)\b|var\(|calc\(|min\(|max\(|clamp\(|[\d.](em|rem|ex|ch|vw|vh|vmin|vmax|lh|rlh|cap|ic|dvh|dvw|svh|svw|lvh|lvw)\b/i;
     function needsResolving(prop, value) {
+        if (/^(clip-path|shape-outside|offset-path)$/.test(prop) && /\bat\b|closest-|farthest-/.test(value)) return true;
+        if (/^(min-|max-)?(width|height)$/.test(prop) && /calc-size\(|^\s*(auto|min-content|max-content|fit-content|stretch)\s*$/i.test(value)) return true;
         if (RELATIVE.test(value)) return true;
         if (COLORISH.test(prop) && !/^\s*[-+\d.]/.test(value) && value !== 'none') return true;
         return false;
@@ -192,6 +909,178 @@
         setStyle(el, value === null ? null : prop + ': ' + value);
         return global.getComputedStyle(el).getPropertyValue(prop);
     }
+
+    /* ---- CSS animations and transitions of what the engine doesn't animate
+     * itself: values for getComputedStyle, from the rules and the same
+     * interpolation.  (Layout and paint don't see them.) ---- */
+    var keyframesCache = new Map();
+    function keyframesOf(doc, name) {
+        var found = keyframesCache.get(name);
+        if (found) return found;
+        var walk = function (rules) {
+            for (var i = 0; i < rules.length; i++) {
+                var r = rules[i];
+                if (r.keyRules || (r.cssRules && r.name === name && r.type === 7)) found = r.name === name ? r : found;
+                else if (r.cssRules && !r.selectorText) walk(r.cssRules);
+            }
+        };
+        for (var s = 0; s < doc.styleSheets.length; s++) {
+            try { walk(doc.styleSheets[s].cssRules); } catch (e) { /* (cross-origin) */ }
+        }
+        if (!found) return null;
+        var frames = [];
+        for (var k = 0; k < found.cssRules.length; k++) {
+            var fr = found.cssRules[k];
+            String(fr.keyText).split(',').forEach(function (key) {
+                key = key.trim().toLowerCase();
+                frames.push({ at: key === 'from' ? 0 : key === 'to' ? 1 : parseFloat(key) / 100, style: fr.style });
+            });
+        }
+        frames.sort(function (a, b) { return a.at - b.at; });
+        keyframesCache.set(name, frames);
+        return frames;
+    }
+    function computedInContext(el, prop, value, base) {
+        if (!needsResolving(prop, value)) return value;
+        var v = readWith(el, prop, value);
+        setStyle(el, null);
+        applyTarget(el);
+        return v || value;
+    }
+    function cssAnimationsOver(el, prop, base) {
+        var running = global.__cyberAnimRunning(el), v = base;
+        for (var i = 0; i + 1 < running.length; i += 2) {
+            var frames = keyframesOf(el.ownerDocument, running[i]), p = running[i + 1];
+            var comp = listItem(global.getComputedStyle(el).animationComposition || 'replace', i / 2);
+            if (!frames) continue;
+            var pts = [];
+            for (var f = 0; f < frames.length; f++) {
+                var val = frames[f].style.getPropertyValue(prop);
+                if (val) pts.push({ at: frames[f].at, value: val, composite: frames[f].style.animationComposition || comp });
+            }
+            if (!pts.length) continue;
+            if (pts[0].at !== 0) pts.unshift({ at: 0, value: null });
+            if (pts[pts.length - 1].at !== 1) pts.push({ at: 1, value: null });
+            var k = 1;
+            while (k < pts.length - 1 && p >= pts[k].at) k++;
+            var a = pts[k - 1], b = pts[k], span = b.at - a.at, local = span > 0 ? (p - a.at) / span : 1;
+            var under = v;
+            /* (a keyword without allow-keywords: it doesn't interpolate) */
+            if (SIZE_PROP.test(prop) && global.getComputedStyle(el).interpolateSize !== 'allow-keywords') {
+                var kw = function (pt) { return pt.value !== null && SIZE_KEYWORD.test(pt.value); };
+                if (kw(a) !== kw(b) || (kw(a) && kw(b) && a.value !== b.value)) { a = local < 0.5 ? a : b; b = a; local = 0; }
+            }
+            var at = function (pt) {
+                if (pt.value === null) return under;
+                var u = computedInContext(el, prop, pt.value, under);
+                return pt.composite === 'add' || pt.composite === 'accumulate' ? addValues(prop, under, u, pt.composite) : u;
+            };
+            v = interpolate(prop, at(a), at(b), local);
+        }
+        return v;
+    }
+    /* calc-size(basis, expression), on a box: its length. */
+    function firstComma(s) {
+        for (var i = 0, d = 0; i < s.length; i++) {
+            if (s[i] === '(') d++;
+            else if (s[i] === ')') d--;
+            else if (s[i] === ',' && !d) return i;
+        }
+        return -1;
+    }
+    function calcSizePx(el, axis, v) {
+        var m = /^\s*calc-size\(([\s\S]*)\)\s*$/i.exec(v);
+        if (!m) return readWith(el, axis, v);
+        var c = firstComma(m[1]);
+        if (c < 0) return null;
+        var basis = m[1].slice(0, c).trim(), expr = m[1].slice(c + 1).trim();
+        var px = basis.toLowerCase() === 'any' ? '0px' : calcSizePx(el, axis, basis);
+        if (px === null) return null;
+        return readWith(el, axis, 'calc(' + expr.replace(/\bsize\b/g, px) + ')');
+    }
+    var calcMemo = new WeakMap(), calcMemoAt = -1;
+    Object.defineProperty(global, '__cyberCalcSize', { configurable: true, value: function (el, prop, spec) {
+        var axis = /width/.test(prop) ? 'width' : 'height';
+        /* (reading it lays out; a task's pages of them need only once each) */
+        var now = global.__cyberAnimNow();
+        if (now !== calcMemoAt) { calcMemo = new WeakMap(); calcMemoAt = now; }
+        var memo = calcMemo.get(el);
+        if (!memo) calcMemo.set(el, memo = {});
+        var key = axis + '|' + spec + '|' + (el.getAttribute('style') || '');
+        /* (only for a box that is animating: others can change other ways) */
+        var moving = global.__cyberAnimRunning(el).length > 0 || parseFloat(global.getComputedStyle(el).transitionDuration) > 0;
+        if (moving && key in memo) return memo[key];
+        var v = calcSizePx(el, axis, spec);
+        setStyle(el, null);
+        applyTarget(el);
+        memo[key] = v;
+        return v;
+    } });
+    var SIZE_PROP = /^(min-|max-)?(width|height)$/, SIZE_KEYWORD = /^\s*(auto|min-content|max-content|fit-content|stretch|none)\s*$/i;
+    var transitionsOf = new WeakMap();
+    function listItem(text, i) {
+        var parts = String(text).split(/,(?![^(]*\))/).map(function (x) { return x.trim(); });
+        return parts[i % parts.length];
+    }
+    function seconds(t) {
+        var v = parseFloat(t);
+        return /ms\s*$/.test(t) ? v : v * 1000;
+    }
+    function cssTransitionOver(el, prop, base, before) {
+        var cs = global.getComputedStyle(el), names = String(cs.transitionProperty).split(',').map(function (x) { return x.trim(); });
+        var at = names.lastIndexOf(prop);
+        if (at < 0) at = names.lastIndexOf('all');
+        var state = transitionsOf.get(el);
+        if (!state) transitionsOf.set(el, state = new Map());
+        var rec = state.get(prop);
+        if (!rec) { state.set(prop, rec = { last: before === undefined ? base : before, run: null }); }
+        var now = global.__cyberAnimNow();
+        if (base !== rec.last) {
+            var from = rec.last;
+            /* (one running: from where it has got to) */
+            if (rec.run) from = transitionValue(prop, rec.run, now);
+            rec.last = base;
+            rec.run = null;
+            if (at >= 0) {
+                var dur = seconds(listItem(cs.transitionDuration, at)), delay = seconds(listItem(cs.transitionDelay, at));
+                var discrete = listItem(cs.transitionBehavior || 'normal', at) === 'allow-discrete';
+                var id = function (x) { return x; };
+                var can = /^(transform|filter|backdrop-filter|translate|rotate|scale|transform-origin|font-palette)$/.test(prop) ||
+                          (SHAPE_PROP.test(prop) && (pathInterpolate(from, base, 0) !== null || insetInterpolate(from, base, 0) !== null)) ||
+                          (REPEATABLE.test(prop) ? repeatableInterpolate(prop, from, base, id) !== null :
+                           prop === 'box-shadow' || prop === 'text-shadow' ? shadowInterpolate(prop, from, base, id) !== null :
+                           prop === 'aspect-ratio' ? (function () { var p0 = ratioParts(from), p1 = ratioParts(base); return !!(p0 && p1 && p0.auto === p1.auto && p0.w && p0.h && p1.w && p1.h); })() :
+                           combine(prop, from, base, id) !== null);
+                if (prop === 'filter' || prop === 'backdrop-filter') can = filterInterpolate(prop, from, base, id) !== null;
+                if (dur + delay > 0 && (can || discrete)) {
+                    var easing;
+                    try { easing = parseEasing(listItem(cs.transitionTimingFunction, at)); } catch (e) { easing = LINEAR; }
+                    rec.run = { from: from, to: base, start: now, dur: dur, delay: delay, easing: easing };
+                }
+            }
+        }
+        return rec.run ? transitionValue(prop, rec.run, now) : base;
+    }
+    function transitionValue(prop, run, now) {
+        var x = run.dur > 0 ? (now - run.start - run.delay) / run.dur : 1;
+        if (x <= 0) return run.from;
+        if (x >= 1) return run.to;
+        return interpolate(prop, run.from, run.to, run.easing.fn(x));
+    }
+    Object.defineProperty(global, '__cyberGenericAnim', { configurable: true, value: function (el, prop, base, before, keyframesOnly) {
+        tfEl = el;
+        if (keyframesOnly) {
+            /* (only keyframes with calc-size(): the rest the engine has dealt with) */
+            var names = global.__cyberAnimRunning(el), some = false;
+            for (var ni = 0; ni + 1 < names.length && !some; ni += 2) {
+                var fs = keyframesOf(el.ownerDocument, names[ni]);
+                for (var fi = 0; fs && fi < fs.length && !some; fi++) some = (fs[fi].style.getPropertyValue(prop) || '').indexOf('calc-size(') >= 0;
+            }
+            if (!some) return undefined;
+        }
+        var v = keyframesOnly ? base : cssTransitionOver(el, prop, base, before);
+        return cssAnimationsOver(el, prop, v);
+    } });
 
     /* ---- timing (Web Animations 4.5-4.8) ---- */
     function timingOf(input) {
@@ -491,10 +1380,11 @@
             };
             var resolve = function (p) {
                 var u = p.value === null ? under() : resolved(effect, el, prop, p.value);
-                if (p.value !== null && (p.composite === 'add' || p.composite === 'accumulate')) u = addValues(prop, under(), u);
+                if (p.value !== null && (p.composite === 'add' || p.composite === 'accumulate')) u = addValues(prop, under(), u, p.composite);
                 return u;
             };
-            out.set(prop, eased === 0 ? resolve(a) : eased === 1 ? resolve(b) : interpolate(prop, resolve(a), resolve(b), eased));
+            var ends = prop === 'filter' || prop === 'backdrop-filter' || REPEATABLE.test(prop) || prop === 'box-shadow' || prop === 'text-shadow' || SHAPE_PROP.test(prop);
+            out.set(prop, eased === 0 && !ends ? resolve(a) : eased === 1 && !ends ? resolve(b) : interpolate(prop, resolve(a), resolve(b), eased));
         });
     }
     function baseValue(effect, el, prop) {
@@ -522,6 +1412,7 @@
         return !!(e && e._target && !e._pseudo);
     }
     function applyTarget(el) {
+        tfEl = el;
         var list = [];
         animations.forEach(function (a) { if (a._effect && a._effect._target === el && !a._effect._pseudo) list.push(a); });
         list.sort(function (x, y) { return x._seq - y._seq; });

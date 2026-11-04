@@ -656,8 +656,11 @@ static void notify_rejections(void) {
     }
 }
 
+unsigned long long g_anim_task_ms;
+
 void timer_microtask_checkpoint(JSContextHandle ctx) {
     CP_ACC("microtask checkpoint");
+    g_anim_task_ms = 0;
     JSRuntimeHandle rt = JS_GetRuntime(ctx);
     JSContextHandle pctx = GC_HANDLE_NULL;
     for (int guard = 0; guard < 100000 && JS_ExecutePendingJob(rt, &pctx) > 0; guard++) {}
@@ -668,6 +671,7 @@ void timer_microtask_checkpoint(JSContextHandle ctx) {
 }
 
 int timer_process_due(JSContextHandle ctx) {
+    g_anim_task_ms = 0;
     fflush(stderr);   /* logs reach the file at least once a turn (see main) */
     /* Microtasks queued before this turn (by the scripts that just ran)
      * come before any timer. */

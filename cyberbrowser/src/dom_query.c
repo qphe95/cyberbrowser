@@ -66,6 +66,7 @@ typedef struct SelSimple {
 } SelSimple;
 
 typedef struct SelCompound {
+    bool pe;            /* it ends in a pseudo-element: nothing may be combined after it */
     SelSimple *s;
     int n;
     char comb;                  /* combinator to the compound on the left */
@@ -88,6 +89,7 @@ typedef struct SelParser {
     const char *p, *e;
     bool err;
     bool relative;  /* in :has(): each from the anchor */
+    bool no_pe;     /* in :not() and the like: no pseudo-elements */
 } SelParser;
 
 /* Comments separate tokens without being whitespace (a comment between `div`
@@ -261,6 +263,7 @@ static SelList *parse_forgiving(const char *a, size_t n) {
         else if (c == ')' || c == ']') depth--;
         if (c != ',' || depth > 0) continue;
         SelParser sp = { a + b, a + i, false };
+        sp.no_pe = true;
         SelList *one = parse_list(&sp, true);
         if (one->ok && !sp.err && one->n == 1) {
             l->x = realloc(l->x, (size_t)(l->n + 1) * sizeof(SelComplex));
@@ -276,6 +279,7 @@ static SelList *parse_forgiving(const char *a, size_t n) {
 /* Parse one compound; returns false at the end of the complex selector. */
 static bool parse_compound(SelParser *sp, SelCompound *c) {
     bool any = false;
+    int vt = 0;     /* after a view transition pseudo-element: nothing, 2: only :only-child */
     while (sp->p < sp->e && !sp->err) {
         sp_comments(sp);
         if (sp->p >= sp->e) break;
@@ -292,6 +296,9 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
         char ch = *sp->p;
         SelSimple s;
         memset(&s, 0, sizeof s);
+        if (vt && (ch == '*' || ch == '.' || ch == '#' || ch == '[' || ch == ':' || isalpha((unsigned char)ch))) {
+            if (vt != 2 || sp->e - sp->p < 11 || strncasecmp(sp->p, ":only-child", 11)) { sp->err = true; break; }
+        }
         if (ch == '*') {
             sp->p++;
             s.kind = SS_UNIVERSAL;
@@ -385,8 +392,40 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                 if (!name) { sp->err = true; break; }
                 for (char *q = name; *q; q++) *q = (char)tolower((unsigned char)*q);
                 bool known = known_name(name, k_pseudo_elements) || !strncmp(name, "-webkit-", 8);
+                bool vt_fn = !strncmp(name, "view-transition-", 16), vt_root = !strcmp(name, "view-transition");
                 free(name);
-                if (!known) { sp->err = true; break; }
+                if (!known || sp->no_pe) { sp->err = true; break; }
+                bool paren = sp->p < sp->e && *sp->p == '(';
+                if (vt_root && paren) { sp->err = true; break; }
+                if (vt_fn) {
+                    const char *a = sp->p + 1;
+                    while (paren && a < sp->e && isspace((unsigned char)*a)) a++;
+                    if (!paren || a >= sp->e || *a == ')') { sp->err = true; break; }
+                    /* (* or a name, then classes) */
+                    const char *w = a;
+                    bool shape = true;
+                    #define VT_IDENT() do { while (w < sp->e && (isalnum((unsigned char)*w) || *w == '-' || *w == '_' || *w == 92 || (unsigned char)*w >= 0x80)) { if (*w == 92 && w + 1 < sp->e) w++; w++; } } while (0)
+                    if (*w == '*') w++;
+                    else VT_IDENT();
+                    while (shape && w < sp->e && *w == '.') {
+                        const char *st = ++w;
+                        VT_IDENT();
+                        if (w == st) shape = false;
+                    }
+                    #undef VT_IDENT
+                    while (w < sp->e && isspace((unsigned char)*w)) w++;
+                    if (!shape || (w < sp->e && *w != ')')) { sp->err = true; break; }
+                    /* (a <custom-ident>: not these) */
+                    static const char *const no[] = { "default", "initial", "inherit", "unset", "revert", "revert-layer", "none" };
+                    bool bad = false;
+                    for (size_t k = 0; k < sizeof no / sizeof no[0]; k++) {
+                        size_t kl = strlen(no[k]);
+                        if ((size_t)(sp->e - a) > kl && !strncasecmp(a, no[k], kl) && (a[kl] == ')' || a[kl] == '.' || isspace((unsigned char)a[kl]))) bad = true;
+                    }
+                    if (bad) { sp->err = true; break; }
+                }
+                vt = vt_root ? 1 : vt_fn ? 2 : 0;
+                c->pe = true;
                 /* (functional ones: their arguments, to the ')') */
                 if (sp->p < sp->e && *sp->p == '(') {
                     int depth = 0;
@@ -430,6 +469,7 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                     /* (relative selectors: each from an anchor, the element) */
                     if (!args) { sp->err = true; free(name); break; }
                     SelParser sub = { args, args + alen, false, true };
+                    sub.no_pe = true;
                     s.sub = parse_list(&sub, true);
                     if (!s.sub || !s.sub->ok) { sel_free(s.sub); sp->err = true; free(name); break; }
                     s.kind = SS_HAS;
@@ -442,6 +482,7 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                     s.sub = is_not ? NULL : parse_forgiving(args, alen);
                     if (is_not) {
                         SelParser sub = { args, args + alen, false };
+                        sub.no_pe = true;
                         s.sub = parse_list(&sub, true);
                         if (!s.sub || !s.sub->ok) { sel_free(s.sub); sp->err = true; free(name); break; }
                     }
@@ -528,7 +569,7 @@ static SelList *parse_list(SelParser *sp, bool nested) {
                 comb = *sp->p++;
                 sp_ws(sp);
             }
-            SelCompound a = { NULL, 0, 0 };
+            SelCompound a = { .s = NULL, .n = 0 };
             SelSimple as;
             memset(&as, 0, sizeof(as));
             as.kind = SS_ANCHOR;
@@ -537,12 +578,17 @@ static SelList *parse_list(SelParser *sp, bool nested) {
             cx.c[cx.n++] = a;
         }
         for (;;) {
-            SelCompound c = { NULL, 0, comb };
+            SelCompound c = { .s = NULL, .n = 0, .comb = comb };
             if (!parse_compound(sp, &c)) { free(c.s); break; }
+            bool ended = c.pe;
             cx.c = realloc(cx.c, (size_t)(cx.n + 1) * sizeof(SelCompound));
             cx.c[cx.n++] = c;
             bool ws = sp_ws(sp);
             if (sp->p >= sp->e || *sp->p == ',') break;
+            if (ended) {
+                sp->err = true;
+                break;
+            }
             if (*sp->p == '>' || *sp->p == '+' || *sp->p == '~') {
                 comb = *sp->p++;
                 sp_ws(sp);
@@ -594,6 +640,16 @@ static void sel_free(SelList *l) {
 typedef struct { char *text; size_t len; uint32_t hash; SelList *list; uint64_t used; } SelEnt;
 static SelEnt g_sel_cache[SEL_CACHE];
 static uint64_t g_sel_tick;
+
+/* Is it a selector list querySelector takes? */
+bool dom_selector_valid(const char *s)
+{
+    SelParser sp = { s, s + strlen(s), false };
+    SelList *l = parse_list(&sp, false);
+    bool ok = l && l->ok && !sp.err;
+    sel_free(l);
+    return ok;
+}
 
 static SelList *sel_get(const char *s, size_t n) {
     uint32_t h = 2166136261u;

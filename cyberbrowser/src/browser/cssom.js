@@ -515,6 +515,8 @@
         var list = p.list(false, false);
         p.skipWS();
         if (p.peek() || !list.length) throw new SyntaxError('bad selector');
+        /* (view transition pseudo-elements: querySelector's stricter grammar) */
+        if (/::view-transition/i.test(text)) global.document.createDocumentFragment().querySelector(text);
         return serList(list);
     }
     function selectorValid(text) {

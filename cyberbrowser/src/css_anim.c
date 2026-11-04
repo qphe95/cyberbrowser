@@ -112,9 +112,10 @@ static AnimVal val_mix(const AnimVal *x, const AnimVal *y, double t)
 void anim_val_css(int prop, const AnimVal *v, char *buf, size_t cap)
 {
     if (prop == ANIM_COLOR || prop == ANIM_BGCOLOR) {
-        int r = (int)lround(v->x * 255.0f), g = (int)lround(v->y * 255.0f), b = (int)lround(v->z * 255.0f);
+        #define ANIM_C8(c) ((c) < 0.0f ? 0 : (c) > 1.0f ? 255 : (int)lround((c) * 255.0f))
+        int r = ANIM_C8(v->x), g = ANIM_C8(v->y), b = (int)lround((v->z < 0.0f ? 0.0f : v->z > 1.0f ? 1.0f : v->z) * 255.0f);
         if (v->w >= 1.0f) snprintf(buf, cap, "rgb(%d, %d, %d)", r, g, b);
-        else snprintf(buf, cap, "rgba(%d, %d, %d, %.6g)", r, g, b, v->w);
+        else snprintf(buf, cap, "rgba(%d, %d, %d, %.6g)", r, g, b, v->w < 0.0f ? 0.0 : (double)v->w);
         return;
     }
     if (prop == ANIM_FONT_STYLE) {
@@ -461,6 +462,19 @@ static bool anim_progress(int r, double now, double *out)
     return true;
 }
 
+int anim_running(NodeId el, const char **names, double *progress, int cap, double now)
+{
+    int n = 0;
+    FOR_ROWS(r, el) {
+        double p;
+        if (n < cap && A.ps[r] == 0 && A.kind[r] == K_ANIM && anim_progress(r, now, &p)) {
+            names[n] = A.name[r];
+            progress[n++] = p;
+        }
+    }
+    return n;
+}
+
 static bool track_value(int r, double now, AnimVal *out)
 {
     int o = A.owner[r];
@@ -477,8 +491,6 @@ static bool track_value(int r, double now, AnimVal *out)
     while (i + 2 < n && off[i + 1] <= p) i++;
     double span = off[i + 1] - off[i];
     double local = span > 0 ? (p - off[i]) / span : 1;
-    if (local < 0) local = 0;
-    if (local > 1) local = 1;
     *out = val_mix(&v[i], &v[i + 1], local);
     return out->ok;
 }

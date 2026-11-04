@@ -89,6 +89,13 @@ static inline unsigned long long page_time_ms(void) {
 static inline void page_time_advance(unsigned long long ms) {
     JS_time_offset_ms += (int64_t)ms;
 }
+/* The time animations go by: it stands still through a task, as a frame's does
+ * (timer_microtask_checkpoint and the event loop let it move on). */
+extern unsigned long long g_anim_task_ms;
+static inline unsigned long long anim_time_ms(void) {
+    if (!g_anim_task_ms) g_anim_task_ms = page_time_ms();
+    return g_anim_task_ms;
+}
 
 int js_quickjs_network_pending(void);
 int js_quickjs_net_poll(JSContextHandle ctx);

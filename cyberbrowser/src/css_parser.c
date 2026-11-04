@@ -4,6 +4,8 @@
  * A small, self-contained CSS parser for applying styles to the DOM tree.
  */
 
+#include <stdbool.h>
+#include <strings.h>
 #include "css_parser.h"
 #include "css_tokenizer.h"
 #include "dom_js.h"
@@ -29,6 +31,9 @@
 /* ============================================================================
  * String helpers
  * ============================================================================ */
+
+/* A transition has been declared somewhere: see lq_who_affected. */
+bool g_css_saw_transition;
 
 static bool css_is_space(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
@@ -165,6 +170,7 @@ static bool css_declaration_add(CssRule *rule, const char *prop, size_t prop_len
         rule->declarations = new_decls;
         rule->declaration_capacity = new_cap;
     }
+    if (!strncasecmp(p, "transition", 10)) g_css_saw_transition = true;
     rule->declarations[rule->declaration_count].property = p;
     rule->declarations[rule->declaration_count].value = v;
     rule->declarations[rule->declaration_count].important = is_important;
@@ -573,6 +579,7 @@ static void sink_rule(void *ctx, char *prop, char *value, bool important)
         rule->declaration_capacity = nc;
     }
     CssDeclaration *d = &rule->declarations[rule->declaration_count++];
+    if (prop && !strncasecmp(prop, "transition", 10)) g_css_saw_transition = true;
     d->property = prop;
     d->value = value;
     d->important = important;
@@ -771,6 +778,9 @@ static bool css_pseudo_known(const char *n, size_t nl, bool elem)
  * parser takes the rest. */
 static bool css_prelude_invalid(const char *sel)
 {
+    /* (view transition pseudo-elements: the whole selector's grammar) */
+    extern bool dom_selector_valid(const char *s);
+    if (strstr(sel, "::view-transition") && !dom_selector_valid(sel)) return true;
     const char *p = sel;
     char q = 0;
     int br = 0;

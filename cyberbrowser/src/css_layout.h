@@ -200,6 +200,11 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char height_stretch;   /* height: stretch */
     /* writing-mode (0 horizontal-tb, 1 vertical-rl, 2 vertical-lr, 3 sideways-rl, 4 sideways-lr). */
     unsigned char writing_mode, writing_mode_set;
+    unsigned char wm_swapped;       /* now in the axes of a vertical flow being laid out */
+    unsigned char wm_flipped;       /* and of one going right to left */
+    /* line-break: 0 auto, 1 loose, 2 normal, 3 strict, 4 anywhere; word-break:
+     * 0 normal, 1 break-all, 2 keep-all (both inherited). */
+    unsigned char line_break, word_break, line_break_set, word_break_set;
     /* Anchor positioning: anchor-name, position-anchor and position-area as
      * written; insets and sizes that use anchor() or anchor-size() (top, right,
      * bottom, left, width, height); self-alignment anchor-center (1 justify, 2 align). */
@@ -353,6 +358,9 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     CssFlexDirection flex_direction;
     CssFlexWrap flex_wrap;
     CssJustifyContent justify_content;
+    CssJustifyContent align_content;
+    /* not normal or stretch, so nothing stretches to fill: 1 justify-content, 2 align-content */
+    unsigned char content_set;
     CssAlignItems align_items;
 
     double flex_basis;

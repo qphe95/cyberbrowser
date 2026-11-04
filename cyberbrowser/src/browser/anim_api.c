@@ -21,6 +21,7 @@
 #include "dom_wrap.h"
 #include "dom_js.h"
 #include "js_quickjs.h"
+#include "css_props.h"
 #include "layout_api.h"
 
 
@@ -29,7 +30,7 @@
  * moved on). */
 uint64_t g_anim_frame;
 
-static double anim_page_clock(void) { return (double)page_time_ms(); }
+static double anim_page_clock(void) { return (double)anim_time_ms(); }
 
 void anim_api_init(void) { anim_set_clock(anim_page_clock); }
 
@@ -132,7 +133,7 @@ static GCValue js_anim_row(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     double v = 0.0;
     if (argc < 3 || JS_ToInt32(ctx, &op, argv[0]) || JS_ToInt32(ctx, &r, argv[1]) || JS_ToInt32(ctx, &g, argv[2])) return JS_NULL;
     if (argc > 3) JS_ToFloat64(ctx, &v, argv[3]);
-    double now = (double)page_time_ms();
+    double now = (double)anim_time_ms();
     if (op == 0) {
         AnimRowTiming t;
         if (!anim_row_timing(r, (uint32_t)g, now, &t)) return JS_NULL;
@@ -149,6 +150,39 @@ static GCValue js_anim_row(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     dom_request_relayout();
     timer_anim_wake(ctx);
     return JS_UNDEFINED;
+}
+
+/* __cyberCssIsShorthand(name). */
+static GCValue js_css_is_shorthand(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    const char *n = argc > 0 ? JS_ToCString(ctx, argv[0]) : NULL;
+    const CssPropDef *p = n ? css_prop_find(n, strlen(n)) : NULL;
+    return JS_NewBool(ctx, p && p->longhands);
+}
+
+/* __cyberAnimNow(): the time animations go by, in this task. */
+static GCValue js_anim_now(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+    return JS_NewFloat64(ctx, (double)anim_time_ms());
+}
+
+/* __cyberAnimRunning(element): [name, progress, ...] of its CSS animations. */
+static GCValue js_anim_running(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    GCValue out = JS_NewArray(ctx);
+    NodeId el = argc > 0 ? dom_node_of(argv[0]) : DOM_NULL;
+    if (!el) return out;
+    const char *names[32];
+    double p[32];
+    int n = anim_running(el, names, p, 32, (double)anim_time_ms());
+    for (int i = 0; i < n; i++) {
+        JS_SetPropertyUint32(ctx, out, (uint32_t)(2 * i), JS_NewString(ctx, names[i] ? names[i] : ""));
+        JS_SetPropertyUint32(ctx, out, (uint32_t)(2 * i + 1), JS_NewFloat64(ctx, p[i]));
+    }
+    return out;
 }
 
 /* __cyberRenderFeature(bit): the rendering tick has this to look after. */
@@ -184,6 +218,9 @@ void anim_api_install(JSContextHandle ctx, GCValue global)
 {
     JS_DefinePropertyValueStr(ctx, global, "__cyberAnimStyle", JS_NewCFunction(ctx, js_anim_style, "__cyberAnimStyle", 2), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberAnimWake", JS_NewCFunction(ctx, js_anim_wake, "__cyberAnimWake", 0), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberCssIsShorthand", JS_NewCFunction(ctx, js_css_is_shorthand, "__cyberCssIsShorthand", 1), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberAnimNow", JS_NewCFunction(ctx, js_anim_now, "__cyberAnimNow", 0), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberAnimRunning", JS_NewCFunction(ctx, js_anim_running, "__cyberAnimRunning", 1), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberAnimRow", JS_NewCFunction(ctx, js_anim_row, "__cyberAnimRow", 4), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberRenderFeature", JS_NewCFunction(ctx, js_render_feature, "__cyberRenderFeature", 1), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberColorScheme", JS_NewCFunction(ctx, js_color_scheme, "__cyberColorScheme", 1), JS_PROP_CONFIGURABLE);
@@ -222,7 +259,7 @@ int anim_api_tick(JSContextHandle ctx)
         JSContextHandle realm = dom_realm_of_document(docs[i]);
         if (realm && realm != ctx) layout_api_update(realm);
     }
-    double now = (double)page_time_ms();
+    double now = (double)anim_time_ms();
     AnimEvent ev[32];
     bool live = false;
     int fired = 0;
@@ -281,7 +318,7 @@ static GCValue js_anim_commit_styles(JSContextHandle ctx, GCValue this_val, int 
     if (!JS_IsObject(c.style)) return JS_UNDEFINED;
     c.set = JS_GetPropertyStr(ctx, c.style, "setProperty");
     if (!JS_IsFunction(ctx, c.set)) return JS_UNDEFINED;
-    anim_row_values(r, (double)page_time_ms(), commit_one, &c);
+    anim_row_values(r, (double)anim_time_ms(), commit_one, &c);
     return JS_UNDEFINED;
 }
 
