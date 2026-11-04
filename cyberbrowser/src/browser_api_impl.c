@@ -2830,6 +2830,10 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     DEF_FUNC(ctx, css, "supports", js_css_supports, 2);
     {
         extern GCValue js_compute_length(JSContextHandle, GCValue, int, GCValue *);
+        extern GCValue js_computed_unresolved(JSContextHandle, GCValue, int, GCValue *);
+        extern GCValue js_has_anim_spec(JSContextHandle, GCValue, int, GCValue *);
+        JS_DefinePropertyValueStr(ctx, window, "__cyberHasAnimSpec", JS_NewCFunction(ctx, js_has_anim_spec, "__cyberHasAnimSpec", 1), JS_PROP_CONFIGURABLE);
+        JS_DefinePropertyValueStr(ctx, window, "__cyberComputedValue", JS_NewCFunction(ctx, js_computed_unresolved, "__cyberComputedValue", 2), JS_PROP_CONFIGURABLE);
         JS_DefinePropertyValueStr(ctx, window, "__cyberComputeLength", JS_NewCFunction(ctx, js_compute_length, "__cyberComputeLength", 2), JS_PROP_CONFIGURABLE);
     }
     DEF_FUNC(ctx, css, "__syntaxValid", js_css_syntax_valid, 1);

@@ -681,6 +681,202 @@
     var CSSNamespaceRule = subclass('CSSNamespaceRule', CSSRule);
     var CSSFontFaceRule = subclass('CSSFontFaceRule', CSSRule);
     var CSSPageRule = subclass('CSSPageRule', CSSGroupingRule);
+    /* @function (css-mixins) */
+    var CSSFunctionRule = subclass('CSSFunctionRule', CSSGroupingRule);
+    getter(CSSFunctionRule.prototype, 'name', function () { return fnUnescape(this.__name); });
+    function fnUnescape(s) {
+        return s.replace(/\\([0-9a-fA-F]{1,6})\s?|\\(.)/g, function (m, h, c) { return h ? String.fromCodePoint(parseInt(h, 16)) : c; });
+    }
+    /* A type as text: type(...) by what's in it. */
+    function fnTypeText(t) {
+        if (!t) return '*';
+        var m = /^type\(([\s\S]*)\)$/i.exec(t.trim());
+        return m ? m[1].trim() : t.trim();
+    }
+    /* What a function's declarations are: its result and locals, in order. */
+    var CSSFunctionDeclarations = subclass('CSSFunctionDeclarations', CSSRule);
+    getter(CSSFunctionDeclarations.prototype, 'style', function () { return this.__style; });
+    CSSFunctionDeclarations.prototype.__text = function () { return this.__style.cssText; };
+    function CSSFunctionDescriptors() { throw new TypeError('Illegal constructor'); }
+    if (global.__CSSStyleDeclarationProto) {
+        CSSFunctionDescriptors.prototype = Object.create(global.__CSSStyleDeclarationProto);
+        Object.setPrototypeOf(CSSFunctionDescriptors, global.CSSStyleDeclaration || Function.prototype);
+    }
+    Object.defineProperty(CSSFunctionDescriptors.prototype, 'constructor', { value: CSSFunctionDescriptors, writable: true, configurable: true });
+    Object.defineProperty(CSSFunctionDescriptors.prototype, Symbol.toStringTag, { value: 'CSSFunctionDescriptors', configurable: true });
+    Object.defineProperty(global, 'CSSFunctionDescriptors', { value: CSSFunctionDescriptors, writable: true, configurable: true });
+    function fnDescSplit(text) {
+        var out = [], d = 0, cur = '';
+        for (var i = 0; i < text.length; i++) {
+            var c = text[i];
+            if (c === '(' || c === '{' || c === '[') d++;
+            else if (c === ')' || c === '}' || c === ']') d--;
+            if (c === ';' && !d) { out.push(cur); cur = ''; } else cur += c;
+        }
+        out.push(cur);
+        return out;
+    }
+    /* (the order they're first set in; a later one of a name replaces its value) */
+    function fnDescSet(o, text) {
+        var n = o.__n, v = o.__v;
+        fnDescSplit(text).forEach(function (d) {
+            var c = d.indexOf(':');
+            if (c < 0) return;
+            var name = fnUnescape(d.slice(0, c).trim()), val = d.slice(c + 1).trim();
+            if (!val || /!\s*important\s*$/i.test(val)) return;
+            if (name !== 'result' && !/^--./.test(name)) return;
+            var at = n.indexOf(name);
+            if (at < 0) { n.push(name); v.push(val); } else v[at] = val;
+        });
+        fnDescIndex(o);
+    }
+    function fnDescIndex(o) {
+        for (var k = 0; k < o.__n.length; k++) Object.defineProperty(o, k, { value: o.__n[k], enumerable: true, configurable: true });
+        for (var q = o.__n.length; Object.prototype.hasOwnProperty.call(o, q); q++) delete o[q];
+    }
+    function fnDescMake(text, rule) {
+        var o = Object.create(CSSFunctionDescriptors.prototype);
+        Object.defineProperty(o, '__n', { value: [], writable: true });
+        Object.defineProperty(o, '__v', { value: [], writable: true });
+        Object.defineProperty(o, '__rule', { value: rule });
+        fnDescSet(o, text);
+        return o;
+    }
+    (function (P) {
+        function def(name, f) { Object.defineProperty(P, name, { value: f, writable: true, configurable: true, enumerable: true }); }
+        function acc(name, g, s) { Object.defineProperty(P, name, { get: g, set: s, configurable: true, enumerable: true }); }
+        acc('length', function () { return this.__n.length; });
+        def('item', function item(i) { return this.__n[i >>> 0] || ''; });
+        def('getPropertyValue', function getPropertyValue(n) { var at = this.__n.indexOf(String(n)); return at < 0 ? '' : this.__v[at]; });
+        def('getPropertyPriority', function getPropertyPriority() { return ''; });
+        def('setProperty', function setProperty(n, val, pri) { if (!pri) fnDescSet(this, n + ':' + val); });
+        def('removeProperty', function removeProperty(n) {
+            var at = this.__n.indexOf(String(n));
+            if (at < 0) return '';
+            var old = this.__v[at];
+            this.__n.splice(at, 1); this.__v.splice(at, 1);
+            fnDescIndex(this);
+            return old;
+        });
+        acc('cssText', function () {
+            var v = this.__v;
+            return this.__n.map(function (x, k) { return x + ': ' + v[k] + ';'; }).join(' ');
+        }, function (t) { this.__n = []; this.__v = []; fnDescSet(this, String(t)); });
+        acc('result', function () { return this.getPropertyValue('result'); }, function (x) { this.setProperty('result', x); });
+        def(Symbol.iterator, Array.prototype[Symbol.iterator]);
+    })(CSSFunctionDescriptors.prototype);
+    /* A function's body: runs of declarations, and conditions holding more. */
+    function fnBody(block, parent) {
+        var out = [], i = 0, n = block.length, run = '';
+        function flush() {
+            if (!run.trim()) { run = ''; return; }
+            var r = makeRule(CSSFunctionDeclarations, 'function-declarations', { __style: null });
+            r.__style = fnDescMake(run, r);
+            r.__parent = parent;
+            out.push(r);
+            run = '';
+        }
+        while (i < n) {
+            if (block[i] === '@' && !run.replace(/[^;]*;/g, '').trim()) {
+                flush();
+                var o = block.indexOf('{', i);
+                if (o < 0) break;
+                var d = 1, e = o + 1;
+                for (; e < n && d; e++) { if (block[e] === '{') d++; else if (block[e] === '}') d--; }
+                var m = /^@([\w-]+)\s*([\s\S]*)$/.exec(block.slice(i, o).trim());
+                var inner = block.slice(o + 1, e - 1), kid = null;
+                if (m && m[1].toLowerCase() === 'media') kid = makeRule(CSSMediaRule, 'media', { __mediaText: m[2], __media: null, __rules: [] });
+                else if (m && m[1].toLowerCase() === 'supports') kid = makeRule(CSSSupportsRule, 'supports', { __cond: m[2].replace(/\s+/g, ' ').trim(), __rules: [] });
+                if (kid) { kid.__rules = fnBody(inner, kid); out.push(kid); }
+                i = e;
+                continue;
+            }
+            run += block[i++];
+        }
+        flush();
+        return out;
+    }
+    getter(CSSFunctionRule.prototype, 'returnType', function () { return fnTypeText(this.__returns); });
+    define(CSSFunctionRule.prototype, 'getParameters', function () {
+        return this.__params.map(function (x) {
+            var o = { name: fnUnescape(x.name), type: fnTypeText(x.type) };
+            if (x.def !== undefined) o.defaultValue = x.def;
+            return o;
+        });
+    });
+    CSSFunctionRule.prototype.__text = function () {
+        var ps = this.__params.map(function (x) { return x.name + (x.type ? ' ' + x.type : '') + (x.def !== undefined ? ': ' + x.def : ''); }).join(', ');
+        var body = this.__body.replace(/\s+/g, ' ').trim();
+        return '@function ' + this.__name + '(' + ps + ')' + (this.__returns && fnTypeText(this.__returns) !== '*' ? ' returns ' + this.__returns : '') + ' {' + (body ? ' ' + body + ' ' : ' ') + '}';
+    };
+    /* A function's type: one component of a syntax, or type() of any syntax. */
+    function fnTypeValid(t) {
+        t = t.trim();
+        var reg = global.__cyberCssSyntax;
+        var m = /^type\(([\s\S]*)\)$/i.exec(t);
+        if (m) return !reg || m[1].trim() === '*' || reg.__syntaxValid(m[1].trim());
+        return /^(<[a-z-]+>[+#]?|[a-zA-Z_-][\w-]*[+#]?)$/.test(t) && (!reg || reg.__syntaxValid(t));
+    }
+    /* A default has to be of its type, unless it's only known later. */
+    function fnDefaultValid(type, def) {
+        var reg = global.__cyberCssSyntax;
+        if (!type || !reg || /\b(var|env|if|attr)\(|--[\w-]+\(/i.test(def) || /^(initial|inherit|unset|revert|revert-layer|revert-rule)$/i.test(def)) return true;
+        var syn = fnTypeText(type);
+        return syn === '*' || reg.__syntaxParse(syn, def) !== null;
+    }
+    function fnParse(prelude) {
+        var m = /^(--(?:[\w-]|[^\x00-\x7f]|\\[0-9a-fA-F]{1,6}\s?|\\.)+)\(([\s\S]*)$/.exec(prelude.trim());
+        if (!m) return null;
+        var d = 1, i = 0, s = m[2];
+        for (; i < s.length && d; i++) { if (s[i] === '(') d++; else if (s[i] === ')') d--; }
+        if (d) return null;
+        var inside = s.slice(0, i - 1), rest = s.slice(i).trim(), ret = null;
+        if (rest) {
+            var r = /^returns\s+([\s\S]+)$/i.exec(rest);
+            if (!r || !fnTypeValid(r[1])) return null;
+            ret = r[1].trim();
+        }
+        var params = [], depth = 0, cur = '', parts = [];
+        for (var k = 0; k < inside.length; k++) {
+            var c = inside[k];
+            if (c === '(' || c === '{' || c === '[') depth++;
+            else if (c === ')' || c === '}' || c === ']') depth--;
+            if (c === ',' && !depth) { parts.push(cur); cur = ''; } else cur += c;
+        }
+        if (inside.trim() || parts.length) parts.push(cur);
+        for (var q = 0; q < parts.length; q++) {
+            var pm = /^\s*(--(?:[\w-]|[^\x00-\x7f]|\\[0-9a-fA-F]{1,6}\s?|\\.)+)\s*([^:]*?)\s*(?::([\s\S]*))?$/.exec(parts[q]);
+            if (!pm) return null;
+            if (pm[2] && !fnTypeValid(pm[2])) return null;
+            if (pm[3] !== undefined && (/!/.test(pm[3]) || !fnDefaultValid(pm[2], pm[3].trim()))) return null;
+            if (params.some(function (x) { return x.name === pm[1]; })) return null;
+            params.push({ name: pm[1], type: pm[2] || null, def: pm[3] === undefined ? undefined : pm[3].trim() });
+        }
+        return { name: m[1], params: params, returns: ret };
+    }
+    /* @position-try: its name, and the declarations it may have */
+    var CSSPositionTryRule = subclass('CSSPositionTryRule', CSSRule);
+    var TRY_ALLOWED = /^(inset|top|right|bottom|left|margin|width|height|min-|max-|block-size|inline-size|align-self|justify-self|place-self|position-anchor|position-area)/;
+    function tryAllowed(p) { return TRY_ALLOWED.test(String(p).toLowerCase()) && !/^(margin-trim)$/.test(p); }
+    function CSSPositionTryDescriptors() { throw new TypeError('Illegal constructor'); }
+    var DECL_PROTO = global.__CSSStyleDeclarationProto;
+    if (DECL_PROTO) {
+        CSSPositionTryDescriptors.prototype = Object.create(DECL_PROTO, { constructor: { value: CSSPositionTryDescriptors, writable: true, configurable: true } });
+        Object.defineProperty(CSSPositionTryDescriptors.prototype, Symbol.toStringTag, { value: 'CSSPositionTryDescriptors', configurable: true });
+        Object.setPrototypeOf(CSSPositionTryDescriptors, global.CSSStyleDeclaration || Function.prototype);
+        Object.defineProperty(CSSPositionTryDescriptors.prototype, 'setProperty', { writable: true, configurable: true, enumerable: true, value: function setProperty(name, value, priority) {
+            if (!tryAllowed(name) || priority) return;
+            return DECL_PROTO.setProperty.call(this, name, value);
+        } });
+        Object.defineProperty(global, 'CSSPositionTryDescriptors', { value: CSSPositionTryDescriptors, writable: true, configurable: true });
+    }
+    /* A dashed name as written (escapes and all). */
+    getter(CSSPositionTryRule.prototype, 'name', function () { return this.__name; });
+    getter(CSSPositionTryRule.prototype, 'style', function () { return this.__style; });
+    CSSPositionTryRule.prototype.__text = function () {
+        var d = this.__style.cssText;
+        return '@position-try ' + this.__name + ' {' + (d ? ' ' + d + ' ' : ' ') + '}';
+    };
     var CSSKeyframesRule = subclass('CSSKeyframesRule', CSSRule);
     var CSSKeyframeRule = subclass('CSSKeyframeRule', CSSRule);
     var CSSPropertyRule = subclass('CSSPropertyRule', CSSRule);
@@ -1066,6 +1262,26 @@
                 if (p.block === null || p.prelude) return null;
                 r = makeRule(CSSFontFaceRule, 'font-face', { __style: null });
                 r.__style = decls(p.block, r);
+                break;
+            case 'function':
+                if (p.block === null) return null;
+                var fnp = fnParse(p.prelude);
+                if (!fnp) return null;
+                r = makeRule(CSSFunctionRule, 'function', { __name: fnp.name, __params: fnp.params, __returns: fnp.returns, __body: p.block, __rules: [] });
+                r.__rules = fnBody(p.block, r);
+                break;
+            case 'position-try':
+                if (p.block === null || !/^--(?:[\w-]|[^\x00-\x7f]|\\.)+$/.test(p.prelude)) return null;
+                r = makeRule(CSSPositionTryRule, 'position-try', { __name: p.prelude, __style: null });
+                {
+                    /* (only what it may have; nothing !important) */
+                    var kept = p.block.split(';').filter(function (d) {
+                        var c = d.indexOf(':');
+                        return c > 0 && tryAllowed(d.slice(0, c).trim()) && !/!\s*important\s*$/i.test(d);
+                    }).join(';');
+                    r.__style = decls(kept, r);
+                    if (DECL_PROTO) Object.setPrototypeOf(r.__style, CSSPositionTryDescriptors.prototype);
+                }
                 break;
             case 'page':
                 if (p.block === null) return null;

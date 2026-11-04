@@ -81,6 +81,10 @@ bool layout_query_anchor_inset(uint32_t id, int side, double *out);
 int layout_query_grid_tracks(uint32_t id, bool rows, double *out, int cap);
 /* A positioned box's used inset (top, right, bottom, left), for its resolved
  * value: side_auto, its specified value is auto; opp_auto, the opposite one's. */
+void layout_query_flush(JSContextHandle ctx);
+const char *layout_query_anim_spec(uint32_t id);
+int layout_query_anim_elements(uint32_t *out, int cap);
+int layout_query_box_count(void);
 bool layout_query_used_inset(uint32_t id, int side, bool side_auto, bool opp_auto, double *out);
 /* The same of its pseudo-element ps (css_layout_pseudo_decls). */
 bool layout_query_pseudo_cascade(JSContextHandle ctx, GCValue element, int ps, LayoutCascadeFn fn, void *ud);

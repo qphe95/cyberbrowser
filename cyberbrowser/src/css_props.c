@@ -3030,10 +3030,46 @@ static void ser_free(Ser *S) {
  * Parsing values
  * ============================================================================ */
 
+/* A dashed function's call at p, its arguments well formed: none, or each one
+ * something, and a {} one nothing but that. */
+static bool css_dashed_call(const char *p) {
+    if (p[0] != '-' || p[1] != '-') return false;
+    const char *q = p + 2;
+    if (!*q || *q == '(') return false;
+    while (isalnum((unsigned char)*q) || *q == '-' || *q == '_' || (unsigned char)*q >= 0x80) q++;
+    if (*q != '(') return false;
+    q++;
+    int depth = 0, args = 0;
+    bool blank = true, braced = false, after = false;
+    for (;; q++) {
+        char c = *q;
+        if (!c) return false;
+        if (depth == 0 && (c == ',' || c == ')')) {
+            if (blank && (c == ',' || args)) return false;
+            if (c == ')') return true;
+            args++;
+            blank = true; braced = false; after = false;
+            continue;
+        }
+        if (depth == 0 && isspace((unsigned char)c)) continue;
+        if (depth == 0) {
+            if (c == '!' || c == ';' || c == '}' || after) return false;
+            if (c == '{') { if (!blank) return false; braced = true; }
+            blank = false;
+        }
+        if (c == '(' || c == '{' || c == '[') depth++;
+        else if (c == ')' || c == '}' || c == ']') {
+            if (--depth < 0) return false;
+            if (depth == 0 && braced) after = true;
+        }
+    }
+}
+
 static bool has_substitution(const char *v) {
     for (const char *p = v; *p; p++) {
         if ((p == v || !isalnum((unsigned char)p[-1])) &&
-            (strncasecmp(p, "var(", 4) == 0 || strncasecmp(p, "env(", 4) == 0 || strncasecmp(p, "attr(", 5) == 0))
+            (strncasecmp(p, "var(", 4) == 0 || strncasecmp(p, "env(", 4) == 0 || strncasecmp(p, "attr(", 5) == 0 ||
+             strncasecmp(p, "if(", 3) == 0 || css_dashed_call(p)))
             return true;
     }
     return false;
@@ -4737,8 +4773,83 @@ static int expand_font_synthesis(const char *v, char **out, const char **names, 
     return n;
 }
 
+/* One side of an animation-range at *pos in its words: normal, a length, or a
+ * range's name and maybe a length. */
+static char *range_side(char (*w)[128], int nw, int *pos, const char *longhand, const char *dflt_at) {
+    int i = *pos;
+    if (i >= nw) return NULL;
+    bool len0 = isdigit((unsigned char)w[i][0]) || w[i][0] == '.' || w[i][0] == '-' || w[i][0] == '+' || strchr(w[i], '(');
+    char piece[260];
+    if (!len0 && strcasecmp(w[i], "normal") && i + 1 < nw &&
+        (isdigit((unsigned char)w[i + 1][0]) || w[i + 1][0] == '.' || w[i + 1][0] == '-' || w[i + 1][0] == '+' || strchr(w[i + 1], '('))) {
+        /* (the side's own end of the range goes without saying) */
+        if (!strcmp(w[i + 1], dflt_at)) snprintf(piece, sizeof piece, "%s", w[i]);
+        else snprintf(piece, sizeof piece, "%s %s", w[i], w[i + 1]);
+        i += 2;
+    } else {
+        snprintf(piece, sizeof piece, "%s", w[i]);
+        i++;
+    }
+    const CssPropDef *d = css_prop_find(longhand, strlen(longhand));
+    char *ok = d ? css_prop_parse(d, piece) : NULL;
+    *pos = i;
+    return ok;
+}
+
+static int expand_animation_range(const char *v, char **out) {
+    char **parts = NULL;
+    int np = split_commas(v, &parts);
+    if (np <= 0) return -1;
+    Buf s = {0}, e = {0};
+    bool bad = false;
+    for (int k = 0; k < np && !bad; k++) {
+        char w[5][128];
+        int nw = 0;
+        const char *p = parts[k];
+        while (*p && nw < 5) {
+            while (isspace((unsigned char)*p)) p++;
+            if (!*p) break;
+            size_t len = 0;
+            int depth = 0;
+            while (*p && (depth || !isspace((unsigned char)*p))) {
+                if (*p == '(') depth++; else if (*p == ')' && depth) depth--;
+                if (len < 127) w[nw][len++] = *p;
+                p++;
+            }
+            w[nw++][len] = 0;
+        }
+        int at = 0;
+        char *a = range_side(w, nw, &at, "animation-range-start", "0%");
+        char *b = NULL;
+        if (a && at < nw) {
+            b = range_side(w, nw, &at, "animation-range-end", "100%");
+            if (b && !strcmp(b, "100%")) { free(b); b = strdup("normal"); }
+        } else if (a) {
+            /* (only a start: a range's end is its own) */
+            bool named = !(isdigit((unsigned char)a[0]) || a[0] == '.' || a[0] == '-' || a[0] == '+' || strchr(a, '(') == a) && strcasecmp(a, "normal");
+            if (named) { size_t l = strcspn(a, " "); b = strndup(a, l); }
+            else b = strdup("normal");
+        }
+        if (!a || !b || at < nw) bad = true;
+        else {
+            if (k) { buf_str(&s, ", "); buf_str(&e, ", "); }
+            buf_str(&s, a);
+            buf_str(&e, b);
+        }
+        free(a);
+        free(b);
+    }
+    for (int k = 0; k < np; k++) free(parts[k]);
+    free(parts);
+    if (bad) { free(s.s); free(e.s); return -1; }
+    out[0] = s.s;
+    out[1] = e.s;
+    return 0;
+}
+
 static int expand_special(const CssPropDef *p, const char *v, char **out, const char **names, int n) {
     const char *nm = p->name;
+    if (!strcmp(nm, "animation-range")) return expand_animation_range(v, out);
     if (!strcmp(nm, "border")) {
         static const char *const s[] = { "top", "right", "bottom", "left" };
         return expand_border_sides(v, out, names, n, "border-top", s, 4);
@@ -4869,6 +4980,25 @@ static int serialize_layers(const char *const *vals, const char **names, int n, 
 
 static int serialize_special(const CssPropDef *p, const char *const *vals, const char **names, int n, Buf *b) {
     const char *nm = p->name;
+    if (!strcmp(nm, "animation-range")) {
+        char **ps = NULL, **pe = NULL;
+        int ns = split_commas(vals[0], &ps), ne = split_commas(vals[1], &pe);
+        int r = ns == ne ? 0 : -1;
+        for (int k = 0; r == 0 && k < ns; k++) {
+            const char *s = ps[k], *e = pe[k];
+            if (k) buf_str(b, ", ");
+            buf_str(b, s);
+            bool named = !(isdigit((unsigned char)s[0]) || s[0] == '.' || s[0] == '-' || s[0] == '+' || strchr(s, '(') == s) && strcasecmp(s, "normal");
+            size_t l = strcspn(s, " ");
+            bool same = named ? strlen(e) == l && !strncmp(s, e, l) : !strcmp(e, "normal");
+            if (!same) { buf_ch(b, ' '); buf_str(b, e); }
+        }
+        for (int k = 0; k < ns; k++) free(ps[k]);
+        for (int k = 0; k < ne; k++) free(pe[k]);
+        free(ps);
+        free(pe);
+        return r;
+    }
     if (!strcmp(nm, "border") || !strcmp(nm, "border-block") || !strcmp(nm, "border-inline")) {
         /* every side the same, and border-image initial */
         const char *w = NULL, *s = NULL, *c = NULL;

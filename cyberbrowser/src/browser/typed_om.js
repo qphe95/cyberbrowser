@@ -1009,11 +1009,17 @@
         out.push(cur.trim());
         return out;
     }
+    var LOGICAL_PAIR = /^(margin|padding|inset)-(block|inline)$/;
     function reify(prop, text) {
         text = String(text).trim();
         if (/\bvar\(/i.test(text) || prop.slice(0, 2) === '--') return parseUnparsed(text);
         if (/^(initial|inherit|unset|revert|revert-layer)$/i.test(text)) return new CSSKeywordValue(text.toLowerCase());
-        if (global.__cyberCssIsShorthand && global.__cyberCssIsShorthand(prop)) return generic(text, prop);
+        if (prop === 'vertical-align' && !/^(baseline|[-+]?[\d.]|calc\()/.test(text)) return generic(text, prop);
+        if (global.__cyberCssIsShorthand && global.__cyberCssIsShorthand(prop)) {
+            /* (a logical pair of one value reads as that value, and a border's keyword) */
+            var lone = !/\s/.test(text.replace(/\([^)]*\)/g, ''));
+            if (!(lone && (LOGICAL_PAIR.test(prop) || (/^border-(block|inline)(-width|-style)?$/.test(prop) && /^[a-z-]+$/i.test(text))))) return generic(text, prop);
+        }
         /* (colors: not keywords of their own, but for these) */
         if (/(^|-)color$/.test(prop) && !/^(currentcolor|transparent)$/i.test(text)) return generic(text, prop);
         if (/^-?[a-zA-Z_][\w-]*$/.test(text) && !/^(?:e|pi|infinity)$/i.test(text)) return new CSSKeywordValue(text);
@@ -1067,6 +1073,9 @@
             if (!knownProp(p)) throw new TypeError('Unknown property: ' + property);
             var t = mapOf(this).read(p);
             if (!t) return null;
+            /* (a number set is that number, as it was put) */
+            var held = mapOf(this).held;
+            if (held && held[p] && held[p].text === t) return held[p].value;
             return (LIST_VALUED.test(p) ? splitCommas(t) : [t]).map(function (x) { return reify(p, x); })[0];
         }
         getAll(property) {
@@ -1108,9 +1117,22 @@
             if (vals.length > 1 && !LIST_VALUED.test(p)) throw new TypeError(p + ' is not list-valued');
             /* (a var() in a list: only alone) */
             if (vals.length > 1 && vals.some(function (v) { return /\bvar\(/i.test(String(v)); })) throw new TypeError('var() in a list of values');
-            var text = vals.map(function (v) { return valueText(p, v); }).join(', ');
+            var text = vals.map(function (v) { return valueText(p, v); }).join(', '), wrapped = false;
+            /* (a number out of range isn't invalid: it's clamped when computed) */
+            if (vals.length === 1 && vals[0] instanceof CSSUnitValue && vals[0].value < 0 && p.slice(0, 2) !== '--' &&
+                !global.CSS.supports(p, text) && global.CSS.supports(p, 'calc(' + text + ')')) { text = 'calc(' + text + ')'; wrapped = true; }
+            /* (0 goes for a length in text; as a number it's not one) */
+            if (vals.length === 1 && vals[0] instanceof CSSUnitValue && vals[0].unit === 'number' && vals[0].value === 0 &&
+                p.slice(0, 2) !== '--' && !global.CSS.supports(p, '1')) throw new TypeError(p + ' does not take a number');
             if (p.slice(0, 2) !== '--' && !global.CSS.supports(p, text)) throw new TypeError('Invalid value for ' + p + ': ' + text);
+            /* (a shorthand's value is more than a number; a logical pair's is one) */
+            if (vals[0] instanceof CSSNumericValue && global.__cyberCssIsShorthand && global.__cyberCssIsShorthand(p) && !LOGICAL_PAIR.test(p))
+                throw new TypeError(p + ' does not take a number');
             m.write(p, text);
+            if (m.held) {
+                if (vals.length === 1 && vals[0] instanceof CSSNumericValue && !wrapped) m.held[p] = { text: m.read(p), value: vals[0] };
+                else delete m.held[p];
+            }
         }
         append(property) {
             var p = propName(property), m = mapOf(this);
@@ -1138,6 +1160,7 @@
     function declMap(style) {
         var map = new StylePropertyMap(ILLEGAL);
         MAP.set(map, {
+            held: {},
             read: function (p) { return style.getPropertyValue(p); },
             write: function (p, t) { if (t === null) style.removeProperty(p); else style.setProperty(p, t); },
             names: function () {
@@ -1155,7 +1178,15 @@
         var map = new StylePropertyMapReadOnly(ILLEGAL);
         var cs = function () { return global.getComputedStyle(el, pseudo); };
         MAP.set(map, {
-            read: function (p) { return cs().getPropertyValue(p); },
+            read: function (p) {
+                var v = cs().getPropertyValue(p);
+                /* (percentages of these are computed values; used sizes are not) */
+                if (!pseudo && /(^|-)(margin|padding|inset|top|right|bottom|left|width|height|size)(-|$)/.test(p) && global.__cyberComputedValue) {
+                    var raw = global.__cyberComputedValue(el, p);
+                    if (raw && (raw.indexOf('%') >= 0 || raw === 'auto')) return raw;
+                }
+                return v;
+            },
             write: function () { throw new TypeError('read only'); },
             names: function () {
                 var s = cs(), out = [];

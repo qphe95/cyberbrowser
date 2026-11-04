@@ -14,6 +14,7 @@
  * Freed rows go on a free list (through next) and are taken again.
  */
 #include "css_anim.h"
+#include "dom_store.h"
 #include "css_parser.h"
 
 #include <math.h>
@@ -495,6 +496,15 @@ static bool track_value(int r, double now, AnimVal *out)
     return out->ok;
 }
 
+/* The parent's transition of a property that is going where this box's value is. */
+static int inherited_run(NodeId el, int ps, int p, const AnimVal *v)
+{
+    NodeId up = ps ? el : dom_parent(el);
+    if (!up) return -1;
+    int r = row_find(up, 0, K_TRANS, p, NULL);
+    return r >= 0 && val_same(&A.b[r], v) ? r : -1;
+}
+
 bool anim_value(NodeId el, int ps, int prop, double now, AnimVal *out)
 {
     bool got = false;
@@ -506,6 +516,12 @@ bool anim_value(NodeId el, int ps, int prop, double now, AnimVal *out)
     /* (transitions over animations: the cascade's transition origin) */
     FOR_ROWS(r, el)
         if (A.ps[r] == ps && A.prop[r] == prop && A.kind[r] == K_TRANS) { *out = trans_value(r, now); return true; }
+    /* (what it inherits is moving) */
+    if (!got) {
+        int b = row_find(el, ps, K_BASE, prop, NULL);
+        int up = b >= 0 ? inherited_run(el, ps, prop, &A.a[b]) : -1;
+        if (up >= 0) { *out = trans_value(up, now); return true; }
+    }
     return got;
 }
 
@@ -644,6 +660,8 @@ void anim_box(NodeId el, int ps, const char *spec, const AnimVal base[ANIM_NPROP
             if (t >= 0) { note_cancel(t, ANIM_EV_TCANCEL, now); row_free(t); }
             A.a[b] = base[p];
             if (dur <= 0 || !from.ok || !base[p].ok || val_same(&from, &base[p])) continue;
+            /* (what comes down from a parent that is transitioning it doesn't start one) */
+            if (inherited_run(el, ps, p, &base[p]) >= 0) continue;
             t = row_new(el, ps, K_TRANS, p);
             if (t < 0) continue;
             A.a[t] = from;

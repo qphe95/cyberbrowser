@@ -434,7 +434,7 @@ static char *transform_matrix(const char *list, double w, double h)
 
 /* What the properties script animates last read as, by element: a transition
  * starts from it, when the change comes before the element has one. */
-#define BEFORE_N 1024
+#define BEFORE_N 8192
 static struct { NodeId el; const CssPropDef *p; char *v, *spec; } g_before[BEFORE_N];
 
 /* (and what it was declared as: sizes interpolate by that) */
@@ -502,26 +502,50 @@ void computed_style_reset(void)
     }
 }
 
+static bool g_frame_pass;
+void computed_style_after_restyle(JSContextHandle ctx);
+
 /* A style pass styled these elements: of what was read of them, what it comes
  * to now, and a transition from what it was (that is when they start). */
+/* A frame's own style pass: only of what the engine doesn't run itself, and the
+ * list stays for the forced layout that sees to the rest. */
+void computed_style_after_frame(JSContextHandle ctx)
+{
+    extern unsigned g_anim_restyled_gen;
+    extern uint64_t g_anim_restyled_stamp;
+    static unsigned seen_gen;
+    if (seen_gen == g_anim_restyled_gen) return;
+    /* (the document has moved on: reading it would lay out at this point) */
+    if (dom_change_stamp() != g_anim_restyled_stamp) return;
+    seen_gen = g_anim_restyled_gen;
+    g_frame_pass = true;
+    computed_style_after_restyle(ctx);
+    g_frame_pass = false;
+}
+
 void computed_style_after_restyle(JSContextHandle ctx)
 {
     extern int css_layout_take_restyled(NodeId *out, int cap);
-    static NodeId els[256];
+    extern int css_layout_peek_restyled(NodeId *out, int cap);
+    static NodeId els[1024];
     static uint64_t seen[64];
-    int n = css_layout_take_restyled(els, 256);
+    int n = g_frame_pass ? css_layout_peek_restyled(els, 1024) : css_layout_take_restyled(els, 1024);
     if (!n || g_in_hook || g_in_calc) return;
     /* (a whole page restyled: as many as is reasonable, of those with transitions) */
     static int rot;
-    int budget = n < 0 ? 16 : BEFORE_N;
+    int budget = n < 0 ? 48 : BEFORE_N;
     memset(seen, 0, sizeof seen);
     for (int k = 0; k < n; k++) seen[((uint32_t)els[k] * 2654435761u >> 20) >> 6] |= 1ull << (((uint32_t)els[k] * 2654435761u >> 20) & 63);
     GCValue hook = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberGenericAnim");
     g_in_hook++;
+    /* (parents first: what comes down from a parent's transition starts none of its own) */
+    static struct { int i, depth; } todo[BEFORE_N];
+    int nt = 0;
     for (int w = 0; w < BEFORE_N && budget > 0; w++) {
         int i = (rot + w) % BEFORE_N;
         NodeId el = g_before[i].el;
         if (!el || !g_before[i].v) continue;
+        if (g_frame_pass && anim_prop_of(g_before[i].p->name) >= 0) continue;
         bool hit = n < 0 && dom_valid(el) && layout_query_has_anim_spec(el);
         if (!hit && n >= 0) {
             uint32_t h = (uint32_t)el * 2654435761u >> 20;
@@ -531,9 +555,26 @@ void computed_style_after_restyle(JSContextHandle ctx)
         if (!hit || !dom_valid(el)) continue;
         budget--;
         if (n < 0) rot = (i + 1) % BEFORE_N;
+        int depth = 0;
+        for (NodeId a = dom_parent(el); a && depth < 4096; a = dom_parent(a)) depth++;
+        int at = nt++;
+        /* (an element's together: they share a style) */
+        while (at > 0 && (todo[at - 1].depth > depth || (todo[at - 1].depth == depth && g_before[todo[at - 1].i].el > el))) { todo[at] = todo[at - 1]; at--; }
+        todo[at].i = i;
+        todo[at].depth = depth;
+    }
+    ComputedStyle *t = NULL;
+    NodeId t_el = 0;
+    for (int w = 0; w < nt; w++) {
+        int i = todo[w].i;
+        NodeId el = g_before[i].el;
         /* (a style of its own: a script's holds no values that skipped the transition) */
-        ComputedStyle *t = computed_style_new(el);
-        refresh(ctx, t);
+        if (t_el != el) {
+            if (t) computed_style_free(t);
+            t = computed_style_new(el);
+            t_el = el;
+            refresh(ctx, t);
+        }
         const char *now = t->styled && t->spec ? computed_of(ctx, t, g_before[i].p->name) : NULL;
         if (now && strcmp(now, g_before[i].v)) {
             if (JS_IsFunction(ctx, hook) && (anim_has(el, 0) || layout_query_has_anim_spec(el))) {
@@ -548,6 +589,57 @@ void computed_style_after_restyle(JSContextHandle ctx)
             g_before[i].v = strdup(now);
             free(g_before[i].spec);
             g_before[i].spec = t->spec[prop_idx(g_before[i].p)] ? strdup(t->spec[prop_idx(g_before[i].p)]) : NULL;
+        }
+    }
+    if (t) computed_style_free(t);
+    /* (what a transition names the engine doesn't run: from now on, what it
+     * comes to is kept, for the next change to start from) */
+    /* (a whole page restyled: those of them with a transition) */
+    /* (on a page of modest size: a style each isn't for free) */
+    int nreg = layout_query_box_count() > 600 ? 0 : n < 0 ? layout_query_anim_elements(els, 1024) : n;
+    for (int k = 0, left = 64; k < nreg && left > 0; k++) {
+        NodeId el = els[k];
+        if (!dom_valid(el) || dom_kind(el) != DOM_K_ELEMENT) continue;
+        const char *aspec = layout_query_anim_spec(el);
+        if (!aspec) continue;
+        /* (once for an element's list of them) */
+        static struct { NodeId el; const char *spec; } looked[2048];
+        size_t lk = ((size_t)el * 2654435761u) % 2048;
+        if (looked[lk].el == el && looked[lk].spec == aspec) continue;
+        looked[lk].el = el;
+        looked[lk].spec = aspec;
+        left--;
+        t = computed_style_new(el);
+        refresh(ctx, t);
+        const char *names = t->styled && t->spec ? computed_of(ctx, t, "transition-property") : NULL;
+        char word[64];
+        /* (all: of what script runs, those that tend to be given) */
+        static const char all_names[] = "min-width min-height max-width max-height line-height text-indent vertical-align "
+            "outline-offset outline-width outline-color background-position-x background-position-y background-size "
+            "border-top-left-radius border-top-right-radius border-bottom-left-radius border-bottom-right-radius "
+            "border-top-color border-right-color border-bottom-color border-left-color column-gap row-gap column-width "
+            "column-count column-rule-width column-rule-color column-height box-shadow text-shadow text-decoration-color "
+            "text-decoration-inset object-view-box font-size-adjust font-stretch z-index flex-basis flex-grow flex-shrink order";
+        if (names && !strcmp(names, "all")) names = all_names;
+        for (const char *q = names; q && *q; ) {
+            while (*q == ' ' || *q == ',') q++;
+            size_t l = strcspn(q, " ,");
+            if (!l) break;
+            if (l < sizeof word) {
+                memcpy(word, q, l);
+                word[l] = 0;
+                const CssPropDef *p = css_prop_find(word, l);
+                if (p && !p->longhands && anim_prop_of(word) < 0) {
+                    size_t h = (((size_t)el * 2654435761u) ^ ((size_t)p >> 4)) % BEFORE_N;
+                    if (!(g_before[h].el == el && g_before[h].p == p)) {
+                        const char *cur = computed_of(ctx, t, word);
+                        char *old_spec = NULL;
+                        free(before_swap(el, p, cur, t->spec[prop_idx(p)], &old_spec));
+                        free(old_spec);
+                    }
+                }
+            }
+            q += l;
         }
         computed_style_free(t);
     }
@@ -798,6 +890,37 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
         }
         #undef in_calc
     }
+    /* (position-area: logical words short when there are two; beside span-all
+     * a word of either axis says which) */
+    if (r && !strcmp(n, "position-area") && strchr(r, ' ')) {
+        char a[40] = "", b[40] = "", o[90];
+        if (sscanf(r, "%39s %39s", a, b) == 2) {
+            bool all0 = !strcmp(a, "span-all"), all1 = !strcmp(b, "span-all");
+            if (all0 || all1) {
+                /* (start: block first, inline after) */
+                char *w = all0 ? b : a;
+                const char *axis = all0 ? "inline-" : "block-";
+                char *st = strstr(w, "start"), *en = strstr(w, "end");
+                char *at = st ? st : en;
+                if (at) {
+                    size_t pre = (size_t)(at - w);
+                    snprintf(o, sizeof o, "%.*s%s%s", (int)pre, w, axis, at);
+                    free(r);
+                    r = strdup(o);
+                }
+            } else {
+                for (int k = 0; k < 2; k++) {
+                    char *w = k ? b : a;
+                    char *c;
+                    if ((c = strstr(w, "block-")) || (c = strstr(w, "inline-"))) memmove(c, strchr(c, '-') + 1, strlen(strchr(c, '-') + 1) + 1);
+                }
+                if (!strcmp(a, b)) snprintf(o, sizeof o, "%s", a);
+                else snprintf(o, sizeof o, "%s %s", a, b);
+                free(r);
+                r = strdup(o);
+            }
+        }
+    }
     /* (a positioned box's insets: what they came to) */
     if (cs->used.rendered && !cs->pseudo && r) {
         int side = !strcmp(n, "top") ? 0 : !strcmp(n, "right") ? 1 : !strcmp(n, "bottom") ? 2 : !strcmp(n, "left") ? 3 : -1;
@@ -806,6 +929,7 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
             const CssPropDef *od = css_prop_find(opp[side], strlen(opp[side]));
             const char *os = od ? cs->spec[prop_idx(od)] : NULL;
             double v = 0.0;
+            layout_query_flush(ctx);
             if (layout_query_used_inset(cs->el, side, !strcmp(r, "auto"), !os || !strcmp(os, "auto") || !strcmp(os, "initial") || !strcmp(os, "unset"), &v)) {
                 free(r);
                 r = px(v);
@@ -919,6 +1043,35 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
 }
 
 /* A length as computed on an element, without touching its style or laying out. */
+/* __cyberHasAnimSpec(el): as of the last layout, it declares a transition or animation. */
+GCValue js_has_anim_spec(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)ctx; (void)this_val;
+    NodeId id = argc > 0 && JS_IsObject(argv[0]) ? dom_node_of(argv[0]) : DOM_NULL;
+    return JS_NewBool(ctx, id && layout_query_has_anim_spec(id));
+}
+
+/* __cyberComputedValue(el, prop): a value as computed, before any layout has
+ * its say (percentages stay percentages). */
+GCValue js_computed_unresolved(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    NodeId id = argc > 1 && JS_IsObject(argv[0]) ? dom_node_of(argv[0]) : DOM_NULL;
+    if (!id || dom_kind(id) != DOM_K_ELEMENT) return JS_NULL;
+    const char *prop = JS_ToCString(ctx, argv[1]);
+    if (!prop) return JS_EXCEPTION;
+    ComputedStyle *cs = computed_style_new(id);
+    GCValue out = JS_NULL;
+    if (cs) {
+        refresh(ctx, cs);
+        cs->used.rendered = false;
+        char *v = computed_style_value(ctx, cs, prop, strlen(prop));
+        if (v) { out = JS_NewString(ctx, v); free(v); }
+        computed_style_free(cs);
+    }
+    return out;
+}
+
 GCValue js_compute_length(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
     NodeId id = argc > 1 ? dom_node_of(argv[0]) : 0;

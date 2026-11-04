@@ -1971,6 +1971,12 @@ int layout_query_grid_tracks(uint32_t id, bool rows, double *out, int cap)
     return idx < 0 ? -1 : css_layout_grid_tracks(idx, rows, out, cap);
 }
 
+/* (a change of offsets alone waits for what asks where the box is: this does) */
+void layout_query_flush(JSContextHandle ctx)
+{
+    lq_ensure(ctx);
+}
+
 bool layout_query_used_inset(uint32_t id, int side, bool side_auto, bool opp_auto, double *out)
 {
     int idx = g_lq_valid && id ? lq_box_index(id) : -1;
@@ -2015,6 +2021,24 @@ bool layout_query_used_inset(uint32_t id, int side, bool side_auto, bool opp_aut
     default: *out = b->x - b->margin_left - cx; break;
     }
     return true;
+}
+
+int layout_query_box_count(void) { return g_lq_valid ? g_lq_layout.tree.count : 0; }
+
+/* The elements with a transition or animation declared, up to cap. */
+int layout_query_anim_elements(uint32_t *out, int cap)
+{
+    int n = 0;
+    if (!g_lq_valid || !g_lq_layout.ids) return 0;
+    for (int i = 0; i < g_lq_layout.base_count && n < cap; i++)
+        if (g_lq_layout.boxes[i].s->anim_spec && g_lq_layout.ids[i]) out[n++] = g_lq_layout.ids[i];
+    return n;
+}
+
+const char *layout_query_anim_spec(uint32_t id)
+{
+    int idx = g_lq_valid && id ? lq_box_index(id) : -1;
+    return idx >= 0 ? g_lq_layout.boxes[idx].s->anim_spec : NULL;
 }
 
 bool layout_query_has_anim_spec(uint32_t id)

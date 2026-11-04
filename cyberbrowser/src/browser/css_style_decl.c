@@ -37,6 +37,9 @@ typedef struct StyleDecl {
     char *name;                 /* custom property name (--x) */
     char *value;
     bool important;
+    /* (a shorthand given with var(): its longhands wait, and this is its text) */
+    char *sh;
+    const CssPropDef *sh_of;
 } StyleDecl;
 
 typedef struct StyleBlock {
@@ -63,7 +66,7 @@ static StyleBlock *block_of(JSContextHandle ctx, GCValue obj) {
 }
 
 static void block_clear(StyleBlock *b) {
-    for (int i = 0; i < b->n; i++) { free(b->d[i].name); free(b->d[i].value); }
+    for (int i = 0; i < b->n; i++) { free(b->d[i].name); free(b->d[i].value); free(b->d[i].sh); }
     b->n = 0;
 }
 
@@ -107,6 +110,9 @@ static void put_decl(StyleBlock *b, const CssPropDef *p, const char *custom, con
         free(d->value);
         d->value = strdup(value);
         d->important = important;
+        free(d->sh);
+        d->sh = NULL;
+        d->sh_of = NULL;
         return;
     }
     if (b->n == b->cap) {
@@ -121,6 +127,8 @@ static void put_decl(StyleBlock *b, const CssPropDef *p, const char *custom, con
     d->name = custom ? strdup(custom) : NULL;
     d->value = strdup(value);
     d->important = important;
+    d->sh = NULL;
+    d->sh_of = NULL;
 }
 
 static bool remove_decl(StyleBlock *b, const CssPropDef *p, const char *custom) {
@@ -129,6 +137,7 @@ static bool remove_decl(StyleBlock *b, const CssPropDef *p, const char *custom) 
     int i = (int)(d - b->d);
     free(d->name);
     free(d->value);
+    free(d->sh);
     memmove(&b->d[i], &b->d[i + 1], (size_t)(b->n - i - 1) * sizeof(StyleDecl));
     b->n--;
     return true;
@@ -145,6 +154,7 @@ static char *shorthand_value(StyleBlock *b, const CssPropDef *p, bool *important
     int n = css_prop_longhands(p, &names);
     const char *vals[64];
     int imp = -1;
+    const char *waiting = NULL;
     for (int i = 0; i < n && i < 64; i++) {
         const CssPropDef *lp = css_prop_find(names[i], strlen(names[i]));
         StyleDecl *d = lp ? find_decl(b, lp, NULL) : NULL;
@@ -152,8 +162,11 @@ static char *shorthand_value(StyleBlock *b, const CssPropDef *p, bool *important
         if (imp >= 0 && imp != d->important) return NULL;
         imp = d->important;
         vals[i] = d->value;
+        if (i == 0 && d->sh_of == p) waiting = d->sh;
+        else if (waiting && (d->sh_of != p || strcmp(waiting, d->sh))) waiting = NULL;
     }
     if (important) *important = imp == 1;
+    if (waiting) return strdup(waiting);
     return css_prop_shorthand_serialize(p, vals);
 }
 
@@ -205,6 +218,7 @@ static char *block_text(StyleBlock *b) {
             }
         }
         done[i] = true;
+        if (!value[0] && d->prop) continue;     /* (waiting for what's no longer here) */
         if (len) APPEND(" ");
         APPEND(name);
         APPEND(": ");
@@ -290,7 +304,20 @@ static bool block_set(StyleBlock *b, const char *prop, size_t plen, const char *
         css_prop_longhands(p, &names);
         for (int i = 0; i < n; i++) {
             const CssPropDef *lp = css_prop_find(names[i], strlen(names[i]));
-            if (lp) put_decl(b, lp, NULL, vals[i], important);
+            if (lp) {
+                put_decl(b, lp, NULL, vals[i], important);
+                if (!vals[i][0]) {
+                    StyleDecl *ld = find_decl(b, lp, NULL);
+                    if (ld) {
+                        const char *t = value;
+                        while (*t && isspace((unsigned char)*t)) t++;
+                        size_t tl = strlen(t);
+                        while (tl && isspace((unsigned char)t[tl - 1])) tl--;
+                        ld->sh = strndup(t, tl);
+                        ld->sh_of = p;
+                    }
+                }
+            }
             free(vals[i]);
         }
         free(vals);

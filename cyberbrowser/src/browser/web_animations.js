@@ -944,6 +944,12 @@
         return /infinity/i.test(m[1]) ? (m[1][0] === '-' ? -Infinity : Infinity) : parseFloat(m[1]);
     }
     function interpolate(prop, a, b, t) {
+        /* (always the pair, as the reference reads) */
+        if (prop === 'border-spacing') {
+            var two = function (v) { var p = String(v).trim().split(/\s+/); return p.length === 1 ? p[0] + ' ' + p[0] : v; };
+            a = two(a);
+            b = two(b);
+        }
         if (a === b) return a;
         if (/color|shadow|background|border|outline|fill|stroke|caret|accent/.test(prop) && tfEl) {
             var pairs = wideColorPairs(a, b);
@@ -1254,18 +1260,35 @@
         var state = transitionsOf.get(el);
         if (!state) transitionsOf.set(el, state = new Map());
         var rec = state.get(prop);
+        var fresh = !rec;
         if (!rec) { state.set(prop, rec = { last: before === undefined ? base : before, lastSpec: specBefore, run: null }); }
         var now = global.__cyberAnimNow();
         var fromSpec = rec.lastSpec;
         if (base === rec.last) rec.lastSpec = specNow;
+        /* (what comes down from a parent that is transitioning it doesn't start one) */
+        var pe = el.parentElement, up = null, prec = null;
+        /* (a parent with transitions of its own, only: reading one lays out and runs its transitions) */
+        if (pe && global.__cyberHasAnimSpec(pe) && (base !== rec.last || fresh || transitionsOf.get(pe))) {
+            var heldEl = tfEl, pcs = global.getComputedStyle(pe);
+            if ((base !== rec.last || fresh) && pcs.transitionDuration !== '0s') pcs.getPropertyValue(prop);
+            var pst = transitionsOf.get(pe);
+            prec = pst && pst.get(prop);
+            /* (it may have got what the parent's at, or where it's going) */
+            if (prec && prec.run && !transitionDone(prec.run, now) &&
+                (prec.run.to === base || transitionValue(prop, prec.run, now) === base || pcs.getPropertyValue(prop) === base)) up = prec.run;
+            tfEl = heldEl;
+        }
         if (base !== rec.last) {
             var from = rec.last;
             /* (one running: from where it has got to) */
-            if (rec.run) from = transitionValue(prop, rec.run, now);
+            if (rec.run) {
+                from = transitionValue(prop, rec.run, now);
+                transitionCancel(el, prop, rec.run, now);
+            }
             rec.last = base;
             rec.lastSpec = specNow;
             rec.run = null;
-            if (at >= 0) {
+            if (at >= 0 && !up) {
                 var dur = seconds(listItem(cs.transitionDuration, at)), delay = seconds(listItem(cs.transitionDelay, at));
                 var discrete = listItem(cs.transitionBehavior || 'normal', at) === 'allow-discrete';
                 var id = function (x) { return x; };
@@ -1284,10 +1307,88 @@
                     var easing;
                     try { easing = parseEasing(listItem(cs.transitionTimingFunction, at)); } catch (e) { easing = LINEAR; }
                     rec.run = { from: can ? sizeResolved(el, prop, from) : from, to: can ? sizeResolved(el, prop, base) : base, start: now, dur: dur, delay: delay, easing: easing, flip: !can };
+                    /* (one the engine runs too has its events and its animation there) */
+                    if (ENGINE_RUNS.test(prop) && !wideColorPairs(from, base) && !(SIZE_PROP.test(prop) && /calc-size\(|^\s*(auto|none|min-content|max-content|fit-content|stretch)\s*$/i.test(String(specNow) + ' ' === ' ' ? '' : String(specNow)))) rec.run.quiet = true;
+                    else transitionEvents(el, prop, rec.run);
                 }
             }
         }
+        if (up && !rec.run) return prec.run.to === base ? transitionValue(prop, up, now) : base;
         return rec.run ? transitionValue(prop, rec.run, now) : base;
+    }
+    var ENGINE_RUNS = /^(left|top|right|bottom|opacity|transform|width|height|color|background-color|(padding|margin)-(top|right|bottom|left)|border-(top|right|bottom|left)-width|font-size|letter-spacing|word-spacing|font-weight)$/;
+    function transitionDone(run, now) { return now - run.start - run.delay >= run.dur; }
+    function transitionFire(el, type, prop, secs) {
+        if (el.isConnected) el.dispatchEvent(new global.TransitionEvent(type, { bubbles: true, propertyName: prop, elapsedTime: secs, pseudoElement: '' }));
+    }
+    function transitionCancel(el, prop, run, now) {
+        if (run.over || run.quiet) return;
+        run.over = true;
+        if (run.endTimer) global.clearTimeout(run.endTimer);
+        var t = Math.max(0, now - run.start - Math.max(run.delay, 0)) / 1000;
+        global.setTimeout(function () { transitionFire(el, 'transitioncancel', prop, t); }, 0);
+    }
+    /* (the engine's events for one of those it runs itself; these from timers) */
+    function transitionEvents(el, prop, run) {
+        var d = run.delay, wait = Math.max(d, 0), late = Math.max(-d, 0) / 1000;
+        global.setTimeout(function () {
+            if (run.over) return;
+            transitionFire(el, 'transitionrun', prop, late);
+            if (wait === 0) transitionFire(el, 'transitionstart', prop, late);
+        }, 0);
+        if (wait > 0) global.setTimeout(function () { if (!run.over) transitionFire(el, 'transitionstart', prop, late); }, wait);
+        transitionArm(el, prop, run, global.__cyberAnimNow());
+    }
+    function transitionArm(el, prop, run, now) {
+        if (run.endTimer) global.clearTimeout(run.endTimer);
+        run.endTimer = global.setTimeout(function () {
+            if (run.over) return;
+            run.over = true;
+            transitionFire(el, 'transitionend', prop, run.dur / 1000);
+            if (run.done) run.done();
+        }, Math.max(run.start + run.delay + run.dur - now, 0));
+    }
+    /* What getAnimations() has for one of them. */
+    function transitionAnimation(el, prop, run) {
+        if (run.anim) return run.anim;
+        var a = Object.create(CSSTransition.prototype);
+        var own = function (name, get, set) { Object.defineProperty(a, name, { configurable: true, enumerable: true, get: get, set: set }); };
+        var total = function () { return run.delay + run.dur; };
+        var val = function (name, v) { Object.defineProperty(a, name, { configurable: true, enumerable: true, writable: true, value: v }); };
+        val('id', '');
+        val('transitionProperty', prop);
+        val('onfinish', null);
+        val('oncancel', null);
+        val('onremove', null);
+        val('finished', new Promise(function (ok) { run.done = function () { ok(a); }; }));
+        own('currentTime', function () { return run.over ? total() : global.__cyberAnimNow() - run.start; }, function (t) {
+            var now = global.__cyberAnimNow();
+            run.start = now - Number(t);
+            if (!run.over) transitionArm(el, prop, run, now);
+        });
+        own('startTime', function () { return run.start; }, function (t) {
+            run.start = Number(t);
+            if (!run.over) transitionArm(el, prop, run, global.__cyberAnimNow());
+        });
+        own('playState', function () { return run.over ? 'finished' : 'running'; });
+        own('pending', function () { return false; });
+        own('playbackRate', function () { return 1; }, function () {});
+        own('timeline', function () { return defaultTimeline; });
+        own('replaceState', function () { return 'active'; });
+        var timing = function () { return { delay: run.delay, endDelay: 0, fill: 'backwards', iterationStart: 0, iterations: 1, duration: run.dur, direction: 'normal', easing: 'ease' }; };
+        val('effect', { target: el, pseudoElement: null, getTiming: timing, getKeyframes: function () { return []; },
+                        getComputedTiming: function () {
+                            var t = timing(), c = a.currentTime;
+                            t.endTime = total(); t.activeDuration = run.dur; t.localTime = c;
+                            t.progress = run.dur > 0 ? Math.max(0, Math.min(1, (c - run.delay) / run.dur)) : 1;
+                            t.currentIteration = 0;
+                            return t;
+                        } });
+        val('cancel', function () { if (!run.over) transitionCancel(el, prop, run, global.__cyberAnimNow()); });
+        val('finish', function () { a.currentTime = total(); });
+        ['pause', 'play', 'reverse', 'persist', 'commitStyles', 'updatePlaybackRate', 'addEventListener', 'removeEventListener'].forEach(function (n) { val(n, function () {}); });
+        run.anim = a;
+        return a;
     }
     function transitionValue(prop, run, now) {
         var x = run.dur > 0 ? (now - run.start - run.delay) / run.dur : 1;
@@ -2215,7 +2316,10 @@
     }
     var rowsOf = ELP.getAnimations;
     function nativeGetOf(el) {
-        return Array.from(rowsOf.call(el)).map(function (rec) { return wrapRow(rec, el); });
+        var got = Array.from(rowsOf.call(el)).map(function (rec) { return wrapRow(rec, el); });
+        var st = transitionsOf.get(el);
+        if (st) st.forEach(function (rec, prop) { if (rec.run && !rec.run.over && !rec.run.quiet) got.push(transitionAnimation(el, prop, rec.run)); });
+        return got;
     }
     var nativeGet = rowsOf ? { call: nativeGetOf_ } : null;
     function nativeGetOf_(el) { return nativeGetOf(el); }

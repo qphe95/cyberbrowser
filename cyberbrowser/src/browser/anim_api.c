@@ -248,6 +248,11 @@ static void web_animations_tick(JSContextHandle ctx)
  * frame: the layout samples it again, and another turn comes. */
 int anim_api_tick(JSContextHandle ctx)
 {
+    /* (a frame's style pass: what it starts in script, with what a transition names) */
+    {
+        extern void computed_style_after_frame(JSContextHandle ctx);
+        computed_style_after_frame(ctx);
+    }
     if (g_web_realm_n) web_animations_tick(ctx);
     if (!anim_any()) return 0;
     /* (the other documents with transitions see their style changes: the
