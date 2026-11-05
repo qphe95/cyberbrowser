@@ -131,6 +131,9 @@ char *css_syntax_parse(const char *syntax, const char *value);
 bool css_syntax_component(const char *syntax, const char *value, char *type, size_t cap, char *mult);
 bool css_value_depends_on_context(const char *v);
 bool css_calc_number(const char *v, double *out);
+/* clip-path's or shape-outside's value in its computed form; NULL if it already is. */
+char *css_shape_computed(const char *n, const char *v);
+extern __thread bool g_css_shape_path_normal;   /* (and path() data as absolute commands) */
 
 #ifdef __cplusplus
 }

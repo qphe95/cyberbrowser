@@ -976,6 +976,18 @@ static CssLen calc_parse_primary(CalcParser *p)
 
     /* Nested calc( and bare parentheses. */
     if (p->len - p->pos > 5 && strncasecmp(p->s + p->pos, "calc(", 5) == 0) p->pos += 4;
+    {
+        /* (the numbers with names) */
+        static const struct { const char *n; double v; } names[] = { { "-infinity", -INFINITY }, { "infinity", INFINITY }, { "nan", NAN } };
+        for (size_t k = 0; k < 3; k++) {
+            size_t l = strlen(names[k].n);
+            if (p->len - p->pos >= l && !strncasecmp(p->s + p->pos, names[k].n, l) && !isalnum((unsigned char)p->s[p->pos + l]) && p->s[p->pos + l] != '-' && p->s[p->pos + l] != '(') {
+                p->pos += l;
+                CssLen named = { names[k].v, 0.0 };
+                return named;
+            }
+        }
+    }
     if (isalpha((unsigned char)p->s[p->pos])) return calc_parse_function(p);
     if (p->s[p->pos] == '(') {
         p->pos++;
@@ -1036,8 +1048,9 @@ static CssLen calc_parse_term(CalcParser *p)
             CssLen l = rhs.pct == 0.0 ? lhs : rhs;
             lhs.px = l.px * k;
             lhs.pct = l.pct * k;
-        } else if (rhs.px != 0.0) {
-            lhs.px /= rhs.px;
+        } else {
+            /* (by nothing: no end to it, or not a number) */
+            lhs.px = lhs.px == 0.0 && lhs.pct != 0.0 ? 0.0 : lhs.px / rhs.px;
             lhs.pct /= rhs.px;
         }
     }
@@ -1064,6 +1077,19 @@ static CssLen calc_parse_expr(CalcParser *p)
 
 /* A length value (number+unit, percentage or calc()) as px + pct.  Unitless
  * numbers and unknown units are px. */
+/* What calc() came to, as layout can use it: NaN nothing, no end the most there is. */
+static CssLen calc_sane(CssLen v)
+{
+    const double most = 33554400.0;
+    if (isnan(v.px) || isnan(v.pct) || (isinf(v.px) && isinf(v.pct) && (v.px > 0) != (v.pct > 0))) {
+        v.px = v.pct = 0.0;
+        return v;
+    }
+    if (isinf(v.px)) { v.px = v.px > 0 ? most : -most; v.pct = 0.0; }
+    if (isinf(v.pct)) { v.px = v.pct > 0 ? most : -most; v.pct = 0.0; }
+    return v;
+}
+
 static CssLen css_parse_len(const char *value, double font_size)
 {
     CssLen out = { 0.0, 0.0 };
@@ -1074,14 +1100,14 @@ static CssLen css_parse_len(const char *value, double font_size)
         p.s = value + 5;
         p.len = strlen(p.s);
         p.font_size = font_size;
-        return calc_parse_expr(&p);
+        return calc_sane(calc_parse_expr(&p));
     }
     if (isalpha((unsigned char)*value) && strchr(value, '(')) {
         CalcParser p = {0};
         p.s = value;
         p.len = strlen(p.s);
         p.font_size = font_size;
-        return calc_parse_function(&p);
+        return calc_sane(calc_parse_function(&p));
     }
     char *end = NULL;
     double num = strtod(value, &end);
@@ -15796,6 +15822,41 @@ static bool ifc_bidi_controls_only(const char *t, uint32_t n)
     return true;
 }
 
+/* (css-text 4: East Asian wide, fullwidth or halfwidth, Hangul apart) */
+static bool seg_wide(uint32_t c)
+{
+    if (c >= 0x1100 && c <= 0x11FF) return false;
+    if (c >= 0xA960 && c <= 0xA97F) return false;
+    if (c >= 0xAC00 && c <= 0xD7FF) return false;
+    if (c >= 0xFFA0 && c <= 0xFFDC) return false;
+    return (c >= 0x2E80 && c <= 0x303E) || (c >= 0x3041 && c <= 0x4DBF) || (c >= 0x4E00 && c <= 0xA4CF) ||
+           (c >= 0xF900 && c <= 0xFAFF) || (c >= 0xFE30 && c <= 0xFE6F) || (c >= 0xFF00 && c <= 0xFFEE) ||
+           (c >= 0x20000 && c <= 0x3FFFD);
+}
+
+static uint32_t seg_decode(const char *p)
+{
+    const unsigned char *u = (const unsigned char *)p;
+    if (u[0] < 0x80) return u[0];
+    if (u[0] < 0xE0) return (uint32_t)(u[0] & 0x1F) << 6 | (u[1] & 0x3F);
+    if (u[0] < 0xF0) return (uint32_t)(u[0] & 0x0F) << 12 | (uint32_t)(u[1] & 0x3F) << 6 | (u[2] & 0x3F);
+    return (uint32_t)(u[0] & 0x07) << 18 | (uint32_t)(u[1] & 0x3F) << 12 | (uint32_t)(u[2] & 0x3F) << 6 | (u[3] & 0x3F);
+}
+
+/* The run of white space at q, after o[0..k): holds a break that transforms to nothing? */
+static bool seg_break_gone(const char *o, size_t k, const char *q)
+{
+    bool nl = false;
+    const char *r = q;
+    for (; *r == ' ' || *r == '\n' || *r == '\t' || *r == '\r' || *r == '\f'; r++) if (*r == '\n') nl = true;
+    if (!nl || !*r) return false;
+    size_t s = k - 1;
+    while (s > 0 && ((unsigned char)o[s] & 0xC0) == 0x80) s--;
+    uint32_t before = seg_decode(o + s), after = seg_decode(r);
+    if (before == 0x200B || after == 0x200B) return true;
+    return seg_wide(before) && seg_wide(after);
+}
+
 /* Whether a text box's text makes no line box: white space only, none of
  * it kept (pre and pre-wrap keep spaces; pre, pre-wrap and pre-line keep
  * segment breaks). */
@@ -24037,6 +24098,11 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
                     o[k++] = '\n';
                     in_space = true;
                 } else if (ch == ' ' || ch == '\n' || ch == '\t' || ch == '\r' || ch == '\f') {
+                    /* (a segment break between wide characters, or at a zero width space, is none) */
+                    if (!in_space && (unsigned char)q[1] != 0 && k > 0 && seg_break_gone(o, k, q)) {
+                        while (q[1] == ' ' || q[1] == '\n' || q[1] == '\t' || q[1] == '\r' || q[1] == '\f') q++;
+                        continue;
+                    }
                     if (!in_space) o[k++] = ' ';
                     in_space = true;
                 } else {

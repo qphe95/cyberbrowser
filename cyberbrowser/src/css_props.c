@@ -1963,6 +1963,20 @@ static bool calc_serialize(const Toks *ts, int i, Buf *b) {
         buf_str(b, s.t[0].unit);
         return true;
     }
+    /* (computed, what has no end comes to the largest there is, or with another, to nothing) */
+    if (g_env) {
+        bool up = false, down = false, nan = false;
+        for (int k = 0; k < s.n; k++) {
+            if (isnan(s.t[k].v)) nan = true;
+            else if (isinf(s.t[k].v)) { if (s.t[k].v > 0) up = true; else down = true; }
+        }
+        if (nan || (up && down)) { buf_str(b, "0px"); return true; }
+        if (up || down) {
+            fmt_number(b, up ? 3.4028234663852886e38 : -3.4028234663852886e38);
+            for (int k = 0; k < s.n; k++) if (!isfinite(s.t[k].v)) { buf_str(b, s.t[k].unit); break; }
+            return true;
+        }
+    }
     buf_str(b, "calc(");
     for (int k = 0; k < s.n; k++) {
         double v = s.t[k].v;
@@ -3749,6 +3763,7 @@ static const char *color_raw_of(const char *value) {
     return value;
 }
 
+char *css_shape_computed(const char *n, const char *v);
 char *css_prop_compute(const CssPropDef *p, const char *value, const CssComputeEnv *env) {
     if (!p || !value || !env || p->longhands) return NULL;
     char *v = trim_dup(color_raw_of(value));
@@ -3771,12 +3786,17 @@ char *css_prop_compute(const CssPropDef *p, const char *value, const CssComputeE
         toks_free(&ts);
     }
     free(v);
+    if (out && strchr(out, '(') && (!strcmp(p->name, "clip-path") || !strcmp(p->name, "shape-outside"))) {
+        char *sc = css_shape_computed(p->name, out);
+        if (sc) { free(out); out = sc; }
+    }
     return out;
 }
 
 /* ============================================================================
  * Shorthands
  * ============================================================================ */
+
 
 /* (Built on first use; layout threads call this too, so a list is complete
  * before it is published, and a racing duplicate is harmless.) */
@@ -6496,6 +6516,373 @@ static char *canon_box_round(const char *v)
     return b.s;
 }
 
+static __thread bool g_shape_computed;   /* (a shape being put in its computed form) */
+__thread bool g_css_shape_path_normal;
+
+/* A computed length-percentage as percent and px: "1%", "2px", "calc(1% + 2px)". */
+static bool lin_parse(const char *t, double *pct, double *px, bool *has_pct)
+{
+    *pct = *px = 0.0;
+    *has_pct = false;
+    const char *p = t;
+    bool in_calc = !strncasecmp(p, "calc(", 5);
+    if (in_calc) p += 5;
+    double sign = 1.0;
+    for (;;) {
+        while (isspace((unsigned char)*p)) p++;
+        char *e = NULL;
+        double v = strtod(p, &e);
+        if (e == p) return false;
+        if (*e == '%') { *pct += sign * v; *has_pct = true; e++; }
+        else if (!strncasecmp(e, "px", 2)) { *px += sign * v; e += 2; }
+        else if (v == 0.0 && (!*e || *e == ')' || isspace((unsigned char)*e))) { }
+        else return false;
+        p = e;
+        while (isspace((unsigned char)*p)) p++;
+        if (*p == '+') sign = 1.0;
+        else if (*p == '-') sign = -1.0;
+        else break;
+        p++;
+    }
+    if (in_calc && *p == ')') p++;
+    return *p == 0;
+}
+
+static void lin_text(Buf *b, double pct, double px, bool has_pct)
+{
+    if (fabs(pct) < 1e-9) pct = 0.0;
+    if (fabs(px) < 1e-9) px = 0.0;
+    if (!has_pct) { fmt_number(b, px); buf_str(b, "px"); return; }
+    if (px == 0.0) { fmt_number(b, pct); buf_ch(b, '%'); return; }
+    buf_str(b, "calc(");
+    fmt_number(b, pct);
+    buf_str(b, px < 0 ? "% - " : "% + ");
+    fmt_number(b, fabs(px));
+    buf_str(b, "px)");
+}
+
+/* A value in its simplest computed form, into w. */
+static void lin_simplify(char *w, size_t cap)
+{
+    double pct, px;
+    bool hp;
+    if (!lin_parse(w, &pct, &px, &hp)) return;
+    Buf b = { 0 };
+    lin_text(&b, pct, px, hp);
+    buf_ch(&b, 0);
+    snprintf(w, cap, "%s", b.s);
+    free(b.s);
+}
+
+/* Computed xywh() or rect() as the inset() they come to; NULL if not worked out. */
+static char *shape_box_inset(int fn, const char *inner)
+{
+    char w[4][160];
+    if (canon_words(inner, w, 4) != 4) return NULL;
+    double p[4], x[4];
+    bool hp[4];
+    for (int i = 0; i < 4; i++) {
+        if (fn == 6 && !strcasecmp(w[i], "auto")) {
+            /* (an edge at its own side) */
+            p[i] = i == 1 || i == 2 ? 100.0 : 0.0;
+            x[i] = 0.0;
+            hp[i] = true;
+        } else if (!lin_parse(w[i], &p[i], &x[i], &hp[i])) return NULL;
+    }
+    double tp = fn == 5 ? p[1] : p[0], tx = fn == 5 ? x[1] : x[0];
+    double lp = fn == 5 ? p[0] : p[3], lx = fn == 5 ? x[0] : x[3];
+    double rp = fn == 5 ? 100.0 - (p[0] + p[2]) : 100.0 - p[1], rx = fn == 5 ? -(x[0] + x[2]) : -x[1];
+    double bp = fn == 5 ? 100.0 - (p[1] + p[3]) : 100.0 - p[2], bx = fn == 5 ? -(x[1] + x[3]) : -x[2];
+    Buf b = { 0 };
+    lin_text(&b, tp, tx, fn == 5 ? hp[1] : hp[0]);
+    buf_ch(&b, ' ');
+    lin_text(&b, rp, rx, true);
+    buf_ch(&b, ' ');
+    lin_text(&b, bp, bx, true);
+    buf_ch(&b, ' ');
+    lin_text(&b, lp, lx, fn == 5 ? hp[0] : hp[3]);
+    return buf_take(&b);
+}
+
+/* Path data with every command absolute and the numbers spaced, in quotes. */
+static bool path_normal(const char *d, Buf *out)
+{
+    double cx = 0, cy = 0, sx = 0, sy = 0;
+    const char *p = d;
+    char cmd = 0;
+    bool any = false;
+    for (;;) {
+        while (*p && (isspace((unsigned char)*p) || *p == ',')) p++;
+        if (!*p) break;
+        if (isalpha((unsigned char)*p)) cmd = *p++;
+        else if (!cmd) return false;
+        else if (cmd == 'M') cmd = 'L';
+        else if (cmd == 'm') cmd = 'l';
+        bool rel = cmd >= 'a';
+        char up = (char)toupper((unsigned char)cmd);
+        static const char *const names = "MLHVCSQTAZ";
+        static const int counts[] = { 2, 2, 1, 1, 6, 4, 4, 2, 7, 0 };
+        const char *f = strchr(names, up);
+        if (!f) return false;
+        int cnt = counts[f - names];
+        double a[7];
+        for (int i = 0; i < cnt; i++) {
+            while (*p && (isspace((unsigned char)*p) || *p == ',')) p++;
+            char *e = NULL;
+            if (up == 'A' && (i == 3 || i == 4)) {
+                if (*p != '0' && *p != '1') return false;
+                a[i] = *p == '1';
+                p++;
+                continue;
+            }
+            a[i] = strtod(p, &e);
+            if (e == p) return false;
+            p = e;
+        }
+        if (any) buf_ch(out, ' ');
+        any = true;
+        buf_ch(out, up);
+        if (up == 'Z') { cx = sx; cy = sy; cmd = 0; continue; }
+        for (int i = 0; i < cnt; i++) {
+            double v = a[i];
+            if (rel) {
+                if (up == 'H') v += cx;
+                else if (up == 'V') v += cy;
+                else if (up == 'A') { if (i == 5) v += cx; else if (i == 6) v += cy; }
+                else v += i % 2 ? cy : cx;
+            }
+            a[i] = v;
+            buf_ch(out, ' ');
+            fmt_number(out, v);
+        }
+        if (up == 'H') cx = a[0];
+        else if (up == 'V') cy = a[0];
+        else { cx = a[cnt - 2]; cy = a[cnt - 1]; }
+        if (up == 'M') { sx = cx; sy = cy; }
+    }
+    return any;
+}
+
+/* A position in a shape: both axes, x first; the computed form in percentages. */
+static void shape_position(const char *text, Buf *b)
+{
+    char w[4][160];
+    int n = canon_words(text, w, 4);
+    bool computed = g_shape_computed != NULL;
+    if (n == 1) {
+        if (!strcasecmp(w[0], "top") || !strcasecmp(w[0], "bottom")) { snprintf(w[1], 160, "%s", w[0]); snprintf(w[0], 160, "center"); }
+        else snprintf(w[1], 160, "center");
+        n = 2;
+    } else if (n == 2) {
+        bool first_y = !strcasecmp(w[0], "top") || !strcasecmp(w[0], "bottom");
+        bool second_x = !strcasecmp(w[1], "left") || !strcasecmp(w[1], "right");
+        if (first_y || second_x) { char t[160]; memcpy(t, w[0], 160); memcpy(w[0], w[1], 160); memcpy(w[1], t, 160); }
+    }
+    /* (from the sides, when it's worked out: from the top left) */
+    if (computed && n == 4) {
+        bool first_y = !strcasecmp(w[0], "top") || !strcasecmp(w[0], "bottom");
+        const char *ex = first_y ? w[2] : w[0], *vx = first_y ? w[3] : w[1];
+        const char *ey = first_y ? w[0] : w[2], *vy = first_y ? w[1] : w[3];
+        double p1, x1, p2, x2;
+        bool h1, h2;
+        if (lin_parse(vx, &p1, &x1, &h1) && lin_parse(vy, &p2, &x2, &h2)) {
+            if (!strcasecmp(ex, "right")) { p1 = 100.0 - p1; x1 = -x1; h1 = true; }
+            if (!strcasecmp(ey, "bottom")) { p2 = 100.0 - p2; x2 = -x2; h2 = true; }
+            lin_text(b, p1, x1, h1);
+            buf_ch(b, ' ');
+            lin_text(b, p2, x2, h2);
+            return;
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        const char *o = w[i];
+        if (computed && n == 2) {
+            if (!strcasecmp(o, "left") || !strcasecmp(o, "top")) o = "0%";
+            else if (!strcasecmp(o, "right") || !strcasecmp(o, "bottom")) o = "100%";
+            else if (!strcasecmp(o, "center")) o = "50%";
+            else lin_simplify(w[i], sizeof w[i]);
+        }
+        if (i) buf_ch(b, ' ');
+        buf_str(b, o);
+    }
+}
+
+/* clip-path and shape-outside: the shape first, what's implied gone, each function short. */
+static char *canon_basic_shape(const char *n, const char *v)
+{
+    const char *open = strchr(v, '(');
+    if (!open) return NULL;
+    const char *head = open;
+    while (head > v && (isalnum((unsigned char)head[-1]) || head[-1] == '-')) head--;
+    size_t fl = (size_t)(open - head);
+    static const char *const fns[] = { "circle", "ellipse", "polygon", "path", "inset", "xywh", "rect" };
+    int fn = -1;
+    for (int i = 0; i < 7; i++) if (strlen(fns[i]) == fl && !strncasecmp(head, fns[i], fl)) fn = i;
+    if (fn < 0) return NULL;
+    int d = 0;
+    const char *close = open;
+    char q = 0;
+    for (; *close; close++) {
+        if (q) { if (*close == q) q = 0; continue; }
+        if (*close == '"' || *close == '\'') q = *close;
+        else if (*close == '(') d++;
+        else if (*close == ')' && --d == 0) break;
+    }
+    if (!*close) return NULL;
+    /* (a box on either side) */
+    char box[32] = "";
+    size_t pl = (size_t)(head - v);
+    while (pl > 0 && isspace((unsigned char)v[pl - 1])) pl--;
+    const char *after = close + 1;
+    while (isspace((unsigned char)*after)) after++;
+    if (pl && *after) return NULL;
+    if (pl >= sizeof box || strlen(after) >= sizeof box) return NULL;
+    if (pl) { memcpy(box, v, pl); box[pl] = 0; }
+    else snprintf(box, sizeof box, "%s", after);
+    size_t bl = strlen(box);
+    while (bl > 0 && isspace((unsigned char)box[bl - 1])) box[--bl] = 0;
+    char *inner = strndup(open + 1, (size_t)(close - open - 1));
+    /* (computed, these two are insets) */
+    if ((fn == 5 || fn == 6) && g_shape_computed) {
+        char *rd0 = strstr(inner, " round ");
+        char *box0 = rd0 ? strndup(inner, (size_t)(rd0 - inner)) : strdup(inner);
+        char *ins = shape_box_inset(fn, box0);
+        free(box0);
+        if (ins) {
+            Buf ni = { 0 };
+            buf_str(&ni, ins);
+            if (rd0) buf_str(&ni, rd0);
+            free(ins);
+            free(inner);
+            inner = buf_take(&ni);
+            fn = 4;
+        }
+    }
+    Buf b = { 0 };
+    buf_str(&b, fns[fn]);
+    buf_ch(&b, '(');
+    if (fn == 0 || fn == 1) {
+        /* (radii up to "at"; the closest side is what's meant without) */
+        char *at = NULL;
+        d = 0;
+        for (char *c = inner; *c; c++) {
+            if (*c == '(') d++;
+            else if (*c == ')') d--;
+            else if (!d && !strncasecmp(c, "at", 2) && (c == inner || isspace((unsigned char)c[-1])) && isspace((unsigned char)c[2])) { at = c; break; }
+        }
+        if (at) *at = 0;
+        char w[3][160];
+        int nr = canon_words(inner, w, 3);
+        bool sp = false;
+        /* (computed, a radius is never below nothing) */
+        if (g_shape_computed) for (int i = 0; i < nr; i++) if (w[i][0] == '-' && strtod(w[i], NULL) < 0) snprintf(w[i], 160, "0px");
+        if (fn == 0) {
+            if (nr == 1 && strcasecmp(w[0], "closest-side")) { buf_str(&b, w[0]); sp = true; }
+        } else if (nr == 2 && (strcasecmp(w[0], "closest-side") || strcasecmp(w[1], "closest-side"))) {
+            buf_str(&b, w[0]); buf_ch(&b, ' '); buf_str(&b, w[1]);
+            sp = true;
+        }
+        if (at) {
+            if (sp) buf_ch(&b, ' ');
+            buf_str(&b, "at ");
+            shape_position(at + 2, &b);
+        }
+    } else if (fn == 2 || fn == 3) {
+        /* (the fill rule that's implied, and no rounding, unsaid) */
+        d = 0;
+        const char *comma = NULL;
+        q = 0;
+        for (const char *c = inner; *c && !comma; c++) {
+            if (q) { if (*c == q) q = 0; continue; }
+            if (*c == '"' || *c == '\'') q = *c;
+            else if (*c == '(') d++;
+            else if (*c == ')') d--;
+            else if (*c == ',' && !d) comma = c;
+        }
+        const char *rest = inner;
+        if (comma) {
+            char *first = strndup(inner, (size_t)(comma - inner));
+            char w[4][160];
+            int nf = canon_words(first, w, 4);
+            free(first);
+            bool rule = nf >= 1 && (!strcasecmp(w[0], "nonzero") || !strcasecmp(w[0], "evenodd"));
+            int ri = rule ? 1 : 0;
+            bool round = nf == ri + 2 && !strcasecmp(w[ri], "round");
+            if (rule || round) {
+                rest = comma + 1;
+                while (isspace((unsigned char)*rest)) rest++;
+                bool zero = round && strtod(w[ri + 1], NULL) == 0.0 && !strchr(w[ri + 1], '(');
+                bool even = rule && !strcasecmp(w[0], "evenodd");
+                if (even) buf_str(&b, "evenodd");
+                if (round && !zero) { if (even) buf_ch(&b, ' '); buf_str(&b, "round "); buf_str(&b, w[ri + 1]); }
+                if (even || (round && !zero)) buf_str(&b, ", ");
+            }
+        }
+        /* (computed, path data as absolute commands) */
+        Buf pn = { 0 };
+        size_t rl = strlen(rest);
+        if (fn == 3 && g_shape_computed && g_css_shape_path_normal && rl >= 2 && (rest[0] == '"' || rest[0] == '\'')) {
+            char *data = strndup(rest + 1, rl - 2);
+            bool ok = path_normal(data, &pn);
+            free(data);
+            if (ok) { buf_ch(&b, '"'); buf_add(&b, pn.s, pn.n); buf_ch(&b, '"'); rest = ""; }
+            free(pn.s);
+        }
+        buf_str(&b, rest);
+    } else {
+        /* (inset, xywh, rect: no rounding unsaid; inset's sides as short as they go) */
+        char *rd = strstr(inner, " round ");
+        char *rt = NULL;
+        if (rd) { *rd = 0; rt = rd + 7; }
+        if (fn == 4) {
+            char w[4][160];
+            int ns = canon_words(inner, w, 4);
+            if (ns < 1) { free(inner); free(b.s); return NULL; }
+            if (ns == 3) { snprintf(w[3], 160, "%s", w[1]); ns = 4; }
+            if (ns == 2) { snprintf(w[2], 160, "%s", w[0]); snprintf(w[3], 160, "%s", w[1]); ns = 4; }
+            if (ns == 1) { for (int i = 1; i < 4; i++) snprintf(w[i], 160, "%s", w[0]); ns = 4; }
+            if (g_shape_computed) for (int i = 0; i < 4; i++) lin_simplify(w[i], sizeof w[i]);
+            int keep = 4;
+            if (!strcmp(w[3], w[1])) keep = 3;
+            if (keep == 3 && !strcmp(w[2], w[0])) keep = 2;
+            if (keep == 2 && !strcmp(w[1], w[0])) keep = 1;
+            for (int i = 0; i < keep; i++) { if (i) buf_ch(&b, ' '); buf_str(&b, w[i]); }
+        } else {
+            buf_str(&b, inner);
+        }
+        if (rt) {
+            while (isspace((unsigned char)*rt)) rt++;
+            bool zero = !strchr(rt, ' ') && !strchr(rt, '(') && strtod(rt, NULL) == 0.0;
+            if (!zero && g_shape_computed) {
+                /* (each radius as simple as it goes) */
+                char rw[9][160];
+                int nw = canon_words(rt, rw, 9);
+                buf_str(&b, " round");
+                for (int i = 0; i < nw; i++) {
+                    if (strcmp(rw[i], "/")) lin_simplify(rw[i], sizeof rw[i]);
+                    buf_ch(&b, ' ');
+                    buf_str(&b, rw[i]);
+                }
+            } else if (!zero) { buf_str(&b, " round "); buf_str(&b, rt); }
+        }
+    }
+    buf_ch(&b, ')');
+    bool implied = (!strcmp(n, "clip-path") && !strcasecmp(box, "border-box")) || (!strcmp(n, "shape-outside") && !strcasecmp(box, "margin-box"));
+    if (box[0] && !implied) { buf_ch(&b, ' '); buf_str(&b, box); }
+    free(inner);
+    buf_ch(&b, 0);
+    if (!strcmp(b.s, v)) { free(b.s); return NULL; }
+    return b.s;
+}
+
+char *css_shape_computed(const char *n, const char *v)
+{
+    g_shape_computed = true;
+    char *r = canon_basic_shape(n, v);
+    g_shape_computed = false;
+    return r;
+}
+
 /* position-try-fallbacks: "" if invalid. */
 static char *canon_try_fallbacks(const char *v)
 {
@@ -7041,6 +7428,14 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
     if (!strcmp(n, "position-try-fallbacks")) return canon_try_fallbacks(v);
     if ((!strcmp(n, "grid-template-columns") || !strcmp(n, "grid-template-rows")) && grid_tracks_bad(v)) return strdup("");
     if (strstr(v, "random(")) return canon_random(n, v);
+    if (!strcmp(n, "clip-path") || !strcmp(n, "shape-outside")) {
+        char *bs = canon_basic_shape(n, v);
+        if (bs) {
+            char *rb = strstr(bs, " round ") ? canon_box_round(bs) : NULL;
+            if (rb) { free(bs); return rb; }
+            return bs;
+        }
+    }
     if ((!strcmp(n, "clip-path") || !strcmp(n, "shape-outside") || !strcmp(n, "offset-path")) && strstr(v, " round ")) return canon_box_round(v);
     return NULL;
 }

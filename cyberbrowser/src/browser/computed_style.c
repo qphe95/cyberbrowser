@@ -620,6 +620,8 @@ static double tf_ang(const char *t)
 {
     char *e = NULL;
     double v = strtod(t, &e);
+    /* (an angle with no end is none) */
+    if (!isfinite(v) || fabs(v) >= 1e30) return 0.0;
     if (!e) return v * 3.14159265358979323846 / 180.0;
     if (!strncmp(e, "rad", 3)) return v;
     if (!strncmp(e, "grad", 4)) return v * 3.14159265358979323846 / 200.0;
@@ -1514,6 +1516,14 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
         if (mx) { free(r); r = mx; }
     }
     #undef in_hook
+    /* (a shape in its computed form, an animated one too) */
+    if (r && strchr(r, '(') && (!strcmp(n, "clip-path") || !strcmp(n, "shape-outside"))) {
+        /* (animations work from the commands as written) */
+        g_css_shape_path_normal = !g_in_hook;
+        char *sc = css_shape_computed(n, r);
+        g_css_shape_path_normal = false;
+        if (sc) { free(r); r = sc; }
+    }
     return r;
 }
 
