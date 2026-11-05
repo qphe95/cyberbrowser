@@ -139,7 +139,7 @@ static const CssTypeDef g_types[] = {
                      "rect( [ <length-percentage> | auto ]{4} [ round <'border-radius'> ]? )" },
     { "shape-radius", "<length-percentage [0,inf]> | closest-side | farthest-side | closest-corner | farthest-corner" },
     { "param-fn", "param( <dashed-ident> , <any-value>* )" },
-    { "text-spacing-value", "normal | none | auto | [ space-all | space-first | trim-start | trim-both | trim-all ] || [ no-autospace | ideograph-alpha || ideograph-numeric || punctuation || insert || replace ]" },
+    { "text-spacing-value", "none | auto | [ normal | space-all | space-first | trim-start | trim-both | trim-all ] || [ normal | no-autospace | ideograph-alpha || ideograph-numeric || punctuation || insert || replace ]" },
     { "shape-command", "move <command-end-point> | line <command-end-point> | close | "
                        "hline [ to [ <length-percentage> | left | center | right | x-start | x-end ] | by <length-percentage> ] | "
                        "vline [ to [ <length-percentage> | top | center | bottom | y-start | y-end ] | by <length-percentage> ] | "
@@ -752,10 +752,10 @@ static CssPropDef g_props[] = {
     L("overflow-x", "visible | hidden | clip | scroll | auto | overlay", "visible", 0),
     L("overflow-y", "visible | hidden | clip | scroll | auto | overlay", "visible", 0),
     S("overscroll-behavior", "<'overscroll-behavior-x'>{1,2}", "overscroll-behavior-x overscroll-behavior-y", CSS_SH_PAIR),
-    L("overscroll-behavior-block", "contain | none | auto", "auto", 0),
-    L("overscroll-behavior-inline", "contain | none | auto", "auto", 0),
-    L("overscroll-behavior-x", "contain | none | auto", "auto", 0),
-    L("overscroll-behavior-y", "contain | none | auto", "auto", 0),
+    L("overscroll-behavior-block", "contain | none | auto | chain", "auto", 0),
+    L("overscroll-behavior-inline", "contain | none | auto | chain", "auto", 0),
+    L("overscroll-behavior-x", "contain | none | auto | chain", "auto", 0),
+    L("overscroll-behavior-y", "contain | none | auto | chain", "auto", 0),
     S("padding", "<'padding-top'>{1,4}", "padding-top padding-right padding-bottom padding-left", CSS_SH_BOX),
     S("padding-block", "<'padding-block-start'>{1,2}", "padding-block-start padding-block-end", CSS_SH_PAIR),
     L("padding-block-end", "<length-percentage [0,inf]>", "0px", 0),

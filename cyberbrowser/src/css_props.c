@@ -3709,6 +3709,40 @@ static bool env_calls_ok(const char *v) {
     }
     return true;
 }
+/* Each var( name [, fallback] ): the name one thing, a custom property's name,
+ * a var() that gives one, or a {} block of one. */
+static bool var_calls_ok(const char *v) {
+    for (const char *p = v; (p = strcasestr_simple(p, "var(")); p += 4) {
+        if (p > v && (isalnum((unsigned char)p[-1]) || p[-1] == '-' || p[-1] == '_')) continue;
+        const char *a = p + 4, *e = a;
+        int d = 0;
+        for (; *e; e++) {
+            if (*e == '(' || *e == '{' || *e == '[') d++;
+            else if (*e == ')' || *e == '}' || *e == ']') { if (!d) break; d--; }
+            else if (*e == ',' && !d) break;
+        }
+        const char *s = a, *t = e;
+        while (s < t && isspace((unsigned char)*s)) s++;
+        while (t > s && isspace((unsigned char)t[-1])) t--;
+        if (s >= t) return false;
+        /* (a {} block in it: the whole of it, with something in it) */
+        bool block = false;
+        int dd = 0;
+        for (const char *q = s; q < t; q++) {
+            if (*q == '(') dd++;
+            else if (*q == ')') dd--;
+            else if (*q == '{' && dd == 0) block = true;
+        }
+        if (!block) continue;
+        if (*s != '{' || t[-1] != '}') return false;
+        const char *bs = s + 1, *be = t - 1;
+        while (bs < be && isspace((unsigned char)*bs)) bs++;
+        if (bs >= be) return false;
+        const char *k = t;
+        if (k < t) return false;
+    }
+    return true;
+}
 /* Each --name( ... ) call's arguments: a named one with a value, a {} one
  * with something in it and no !important, no bad url. */
 static bool dashed_calls_ok(const char *v) {
@@ -3885,7 +3919,7 @@ static char *prop_parse_raw(const CssPropDef *p, const char *value) {
         return v;
     }
     if (has_substitution(v)) {
-        if (!ident_calls_ok(v) || !env_calls_ok(v) || !dashed_calls_ok(v)) { free(v); return NULL; }
+        if (!ident_calls_ok(v) || !env_calls_ok(v) || !dashed_calls_ok(v) || !var_calls_ok(v)) { free(v); return NULL; }
         return v;
     }
     if (p->shorthand != CSS_SH_NONE) {
@@ -3995,7 +4029,7 @@ char *css_prop_compute(const CssPropDef *p, const char *value, const CssComputeE
         if (ok) { buf_ch(&sb, 0); free(out); out = sb.s; } else free(sb.s);
     }
     if (out && (!strcmp(p->name, "contain") || !strcmp(p->name, "text-fit") ||
-                (strstr(p->name, "timing-function") && strstr(out, "linear(")))) {
+                strstr(p->name, "timing-function"))) {
         g_canon_computed = true;
         char *cc = css_prop_canon(p, out);
         g_canon_computed = false;
@@ -5000,15 +5034,20 @@ static int expand_background(const char *v, char **out, const char **names, int 
         rep[l] = m[2] >= 0 ? hit_text(&P, m[2]) : strdup("repeat");
         att[l] = m[3] >= 0 ? hit_text(&P, m[3]) : strdup("scroll");
         if (m[4] >= 0 && m[5] >= 0) {
-            /* the first box given is the origin, the second the clip */
-            int a = P.m.hits[m[4]].start < P.m.hits[m[5]].start ? m[4] : m[5], b = a == m[4] ? m[5] : m[4];
+            /* the first box given is the origin, the second the clip (a clip
+             * that isn't a box, the clip wherever it is) */
+            char *t5 = hit_text(&P, m[5]);
+            bool box5 = !strcmp(t5, "border-box") || !strcmp(t5, "padding-box") || !strcmp(t5, "content-box");
+            free(t5);
+            int a = !box5 ? m[4] : P.m.hits[m[4]].start < P.m.hits[m[5]].start ? m[4] : m[5], b = a == m[4] ? m[5] : m[4];
             org[l] = hit_text(&P, a);
             clip[l] = hit_text(&P, b);
         } else if (m[4] >= 0 || m[5] >= 0) {
             char *one = hit_text(&P, m[4] >= 0 ? m[4] : m[5]);
             /* (a clip that isn't a box: border-area, text: the clip alone) */
             if (!strcmp(one, "border-box") || !strcmp(one, "padding-box") || !strcmp(one, "content-box")) { org[l] = one; clip[l] = strdup(one); }
-            else { org[l] = strdup("padding-box"); clip[l] = one; }
+            /* (border-area: the origin the border box) */
+            else { org[l] = strdup(strstr(one, "border-area") ? "border-box" : "padding-box"); clip[l] = one; }
         } else {
             org[l] = strdup("padding-box");
             clip[l] = strdup("border-box");
@@ -6503,14 +6542,21 @@ static int serialize_special(const CssPropDef *p, const char *const *vals, const
             bool pos = strcmp(cols[1][l], "0%") || strcmp(cols[2][l], "0%"), size = strcmp(cols[3][l], "auto");
             if (pos || size) {
                 if (sp) buf_ch(b, ' ');
-                buf_str(b, cols[1][l]); buf_ch(b, ' '); buf_str(b, cols[2][l]);
+                /* (an edge and its offset with a lone other: the lone one from its own start edge) */
+                bool x2 = strchr(cols[1][l], ' ') != NULL, y2 = strchr(cols[2][l], ' ') != NULL;
+                if (y2 && !x2) buf_str(b, "left ");
+                buf_str(b, cols[1][l]); buf_ch(b, ' ');
+                if (x2 && !y2) buf_str(b, "top ");
+                buf_str(b, cols[2][l]);
                 if (size) { buf_str(b, " / "); buf_str(b, cols[3][l]); }
                 sp = true;
             }
             if (strcmp(cols[4][l], "repeat")) PUT(cols[4][l]);
             if (strcmp(cols[5][l], "scroll")) PUT(cols[5][l]);
             bool org = strcmp(cols[6][l], "padding-box"), clip = strcmp(cols[7][l], "border-box");
-            if (org || clip) {
+            /* (border-area's own origin, the border box, goes without saying) */
+            if (strstr(cols[7][l], "border-area") && !strcmp(cols[6][l], "border-box")) PUT(cols[7][l]);
+            else if (org || clip) {
                 PUT(cols[6][l]);
                 if (strcmp(cols[6][l], cols[7][l])) PUT(cols[7][l]);
             }
@@ -8299,6 +8345,47 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
         snprintf(b, sizeof b, "digits %d", (int)d);
         return strdup(b);
     }
+    if (!strcmp(n, "transform-origin") && !g_canon_computed) {
+        /* (one value: the other axis's center said too) */
+        char w[2][160];
+        if (canon_words(v, w, 2) == 1) {
+            Buf s = { 0 };
+            if (!strcasecmp(w[0], "top") || !strcasecmp(w[0], "bottom")) { buf_str(&s, "center "); buf_str(&s, w[0]); }
+            else { buf_str(&s, w[0]); buf_str(&s, " center"); }
+            return buf_take(&s);
+        }
+        return NULL;
+    }
+    if (!strcmp(n, "text-spacing")) {
+        /* (its trim, then its autospace, each unsaid when normal; space-all and no-autospace: none) */
+        char w[8][160];
+        int nw = canon_words(v, w, 8);
+        if (nw < 1 || (nw == 1 && (!strcasecmp(w[0], "none") || !strcasecmp(w[0], "auto")))) return NULL;
+        static const char *const trims[] = { "space-all", "space-first", "trim-start", "trim-both", "trim-all" };
+        const char *trim = NULL;
+        Buf as = { 0 };
+        int normals = 0;
+        for (int i = 0; i < nw; i++) {
+            bool t = false;
+            for (int k = 0; k < 5 && !t; k++) t = !strcasecmp(w[i], trims[k]);
+            if (t) trim = w[i];
+            else if (!strcasecmp(w[i], "normal")) normals++;
+            else { if (as.n) buf_ch(&as, ' '); buf_str(&as, w[i]); }
+        }
+        Buf s = { 0 };
+        bool no_auto = as.n && !strcmp(as.s, "no-autospace");
+        if (trim && !strcasecmp(trim, "space-all") && no_auto) buf_str(&s, "none");
+        else {
+            if (trim) buf_str(&s, trim);
+            if (as.n) { if (s.n) buf_ch(&s, ' '); buf_add(&s, as.s, as.n); }
+            if (!s.n) buf_str(&s, "normal");
+        }
+        (void)normals;
+        free(as.s);
+        char *r = buf_take(&s);
+        if (!strcmp(r, v)) { free(r); return NULL; }
+        return r;
+    }
     if (!strcmp(n, "size")) {
         /* (a square once, a portrait page size by its name, names in lower case) */
         char w[2][160];
@@ -8353,6 +8440,61 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
     if (!strcmp(n, "font-palette") && !strncasecmp(v, "palette-mix(", 12)) return canon_palette_mix(v);
     if ((!strcmp(n, "animation-timing-function") || !strcmp(n, "transition-timing-function")) && strstr(v, "linear("))
         return canon_linear(v, g_canon_computed);
+    if ((!strcmp(n, "animation-timing-function") || !strcmp(n, "transition-timing-function")) && g_canon_computed &&
+        (strstr(v, "step") || strstr(v, "cubic-bezier("))) {
+        /* (computed: the step keywords as the steps they are, end unsaid, a curve's x within 0 to 1) */
+        Buf b = { 0 };
+        bool changed = false;
+        for (const char *p = v; *p; ) {
+            bool at_word = p == v || !(isalnum((unsigned char)p[-1]) || p[-1] == '-');
+            if (at_word && !strncmp(p, "step-start", 10) && !(isalnum((unsigned char)p[10]) || p[10] == '-')) { buf_str(&b, "steps(1, start)"); p += 10; changed = true; continue; }
+            if (at_word && !strncmp(p, "step-end", 8) && !(isalnum((unsigned char)p[8]) || p[8] == '-')) { buf_str(&b, "steps(1)"); p += 8; changed = true; continue; }
+            if (at_word && !strncmp(p, "steps(", 6)) {
+                const char *e = strchr(p, ')');
+                if (e) {
+                    char in[64];
+                    size_t l = (size_t)(e - p - 6) < sizeof in - 1 ? (size_t)(e - p - 6) : sizeof in - 1;
+                    memcpy(in, p + 6, l); in[l] = 0;
+                    char *c = strchr(in, ',');
+                    const char *pos = "end";
+                    if (c) { *c = 0; pos = c + 1; while (isspace((unsigned char)*pos)) pos++; }
+                    char *t = in; while (isspace((unsigned char)*t)) t++;
+                    char *ne = NULL;
+                    double cnt = strtod(t, &ne);
+                    if (ne != t) {
+                        /* (a whole number of steps, at least one; two with no jump) */
+                        long nst = (long)floor(cnt + 0.5);
+                        long lo = !strcmp(pos, "jump-none") ? 2 : 1;
+                        if (nst < lo) nst = lo;
+                        char nb[96];
+                        if (!strcmp(pos, "end") || !strcmp(pos, "jump-end")) snprintf(nb, sizeof nb, "steps(%ld)", nst);
+                        else snprintf(nb, sizeof nb, "steps(%ld, %s)", nst, pos);
+                        buf_str(&b, nb);
+                        p = e + 1; changed = true; continue;
+                    }
+                }
+            }
+            if (at_word && !strncmp(p, "cubic-bezier(", 13)) {
+                const char *e = strchr(p, ')');
+                double x[4];
+                if (e && sscanf(p + 13, "%lf , %lf , %lf , %lf", &x[0], &x[1], &x[2], &x[3]) == 4) {
+                    bool clamp = x[0] < 0 || x[0] > 1 || x[2] < 0 || x[2] > 1;
+                    if (clamp) {
+                        x[0] = x[0] < 0 ? 0 : x[0] > 1 ? 1 : x[0];
+                        x[2] = x[2] < 0 ? 0 : x[2] > 1 ? 1 : x[2];
+                        buf_str(&b, "cubic-bezier(");
+                        for (int k = 0; k < 4; k++) { if (k) buf_str(&b, ", "); fmt_number(&b, x[k]); }
+                        buf_ch(&b, ')');
+                        p = e + 1; changed = true; continue;
+                    }
+                }
+            }
+            buf_ch(&b, *p++);
+        }
+        buf_ch(&b, 0);
+        if (!changed) { free(b.s); return NULL; }
+        return b.s;
+    }
     if (strstr(v, "image-set(")) return canon_image_set(v);
     if (!strcmp(n, "position-try-fallbacks")) return canon_try_fallbacks(v);
     if ((!strcmp(n, "grid-template-columns") || !strcmp(n, "grid-template-rows")) && strstr(v, "[") && strncasecmp(v, "subgrid", 7)) {
