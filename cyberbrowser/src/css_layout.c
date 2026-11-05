@@ -788,8 +788,10 @@ static double css_unit_factor(const char *unit, double parent_value, double font
     if (strcasecmp(unit, "vh") == 0) return g_unit_vh / 100.0;
     if (strcasecmp(unit, "vmin") == 0) return (g_unit_vw < g_unit_vh ? g_unit_vw : g_unit_vh) / 100.0;
     if (strcasecmp(unit, "vmax") == 0) return (g_unit_vw > g_unit_vh ? g_unit_vw : g_unit_vh) / 100.0;
-    if (strcasecmp(unit, "em") == 0) return font_size;
-    if (strcasecmp(unit, "rem") == 0) return g_unit_rem;
+    if (strcasecmp(unit, "em") == 0 || strcasecmp(unit, "ic") == 0) return font_size;
+    if (strcasecmp(unit, "cap") == 0) return font_size * 0.7;
+    if (strcasecmp(unit, "rem") == 0 || strcasecmp(unit, "ric") == 0) return g_unit_rem;
+    if (strcasecmp(unit, "rcap") == 0) return g_unit_rem * 0.7;
     if (strcasecmp(unit, "pt") == 0) return 96.0 / 72.0;
     if (strcasecmp(unit, "pc") == 0) return 16.0;
     if (strcasecmp(unit, "in") == 0) return 96.0;
@@ -830,11 +832,13 @@ static double calc_cmp_value(CssLen v) { return v.px + v.pct * calc_pct_hint(); 
 
 /* min() / max() / clamp() / round() / mod() / rem() / abs() (CSS Values 4).
  * Unknown functions evaluate to 0, like other unsupported expressions. */
+static __thread int t_calc_trig;     /* (inside sin() and the like: angles, in radians) */
+
 static CssLen calc_parse_function(CalcParser *p)
 {
     CssLen zero = { 0.0, 0.0 };
     size_t ns = p->pos;
-    while (p->pos < p->len && (isalpha((unsigned char)p->s[p->pos]) || p->s[p->pos] == '-')) p->pos++;
+    while (p->pos < p->len && (isalnum((unsigned char)p->s[p->pos]) || p->s[p->pos] == '-')) p->pos++;
     size_t nl = p->pos - ns;
     char name[8] = {0};
     if (nl >= sizeof(name) || p->pos >= p->len || p->s[p->pos] != '(') return zero;
@@ -859,6 +863,8 @@ static CssLen calc_parse_function(CalcParser *p)
         }
     }
 
+    bool trig = !strcmp(name, "sin") || !strcmp(name, "cos") || !strcmp(name, "tan");
+    if (trig) t_calc_trig++;
     CssLen args[8];
     int n = 0;
     for (;;) {
@@ -869,7 +875,32 @@ static CssLen calc_parse_function(CalcParser *p)
         break;
     }
     if (p->pos < p->len && p->s[p->pos] == ')') p->pos++;
+    if (trig) t_calc_trig--;
     if (n == 0) return zero;
+
+    {
+        /* (the rest of the math functions: numbers, or lengths of one kind) */
+        double a0 = calc_cmp_value(args[0]), a1 = n > 1 ? calc_cmp_value(args[1]) : 0.0, m;
+        bool is_math = true;
+        if (!strcmp(name, "sin")) m = sin(a0);
+        else if (!strcmp(name, "cos")) m = cos(a0);
+        else if (!strcmp(name, "tan")) m = tan(a0);
+        else if (!strcmp(name, "asin")) m = asin(a0);
+        else if (!strcmp(name, "acos")) m = acos(a0);
+        else if (!strcmp(name, "atan")) m = atan(a0);
+        else if (!strcmp(name, "atan2")) m = atan2(a0, a1);
+        else if (!strcmp(name, "pow")) m = pow(a0, a1);
+        else if (!strcmp(name, "sqrt")) m = sqrt(a0);
+        else if (!strcmp(name, "exp")) m = exp(a0);
+        else if (!strcmp(name, "log")) m = n > 1 ? log(a0) / log(a1) : log(a0);
+        else if (!strcmp(name, "sign")) m = a0 > 0.0 ? 1.0 : a0 < 0.0 ? -1.0 : 0.0;
+        else if (!strcmp(name, "hypot")) {
+            double h = 0.0;
+            for (int i = 0; i < n; i++) { double a = calc_cmp_value(args[i]); h += a * a; }
+            m = sqrt(h);
+        } else { is_math = false; m = 0.0; }
+        if (is_math) { CssLen out = { m, 0.0 }; return out; }
+    }
 
     if (strcmp(name, "min") == 0 || strcmp(name, "max") == 0) {
         bool want_min = name[1] == 'i';
@@ -950,6 +981,11 @@ static CssLen calc_parse_primary(CalcParser *p)
         }
         bool known;
         double f = css_unit_factor(unit, 0.0, p->font_size, &known);
+        if (t_calc_trig) {
+            if (!strcmp(unit, "deg")) f = M_PI / 180.0;
+            else if (!strcmp(unit, "grad")) f = M_PI / 200.0;
+            else if (!strcmp(unit, "turn")) f = M_PI * 2.0;
+        }
         /* px or unknown unit: treat number as px */
         CssLen v = { num * f, 0.0 };
         return v;
@@ -4012,6 +4048,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
          * font-size, not to the containing-block width.  Record the ratio and
          * resolve it in a serial preorder pass after the (parallel) apply. */
         } else if (css_value_is_percent(value)) {
+            box->s->font_size_add = 0.0;
             box->s->font_size_ratio = css_parse_percent_ratio(value);
             box->s->font_size = 16.0 * box->s->font_size_ratio; /* provisional */
             box->s->font_size_set = 1;
@@ -4020,6 +4057,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             while (*p && isspace((unsigned char)*p)) p++;
             char *end = NULL;
             double num = strtod(p, &end);
+            box->s->font_size_add = 0.0;
             if (end != p && strcasecmp(end, "em") == 0) {
                 box->s->font_size_ratio = num;
                 box->s->font_size = 16.0 * num; /* provisional */
@@ -4030,6 +4068,13 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                 box->s->font_size_ratio = num * unit_font_ratio((end[0] | 32) == 'c');
                 t_unit_box = self;
                 box->s->font_size = 16.0 * box->s->font_size_ratio; /* provisional */
+            } else if (strchr(value, '(')) {
+                /* (of the parent's size, once known: how it goes with em, and with nothing) */
+                CssLen l1 = css_parse_len(value, 1.0), l2 = css_parse_len(value, 2.0);
+                double per = l2.px - l1.px;
+                box->s->font_size_ratio = per + l1.pct > 0.0 ? per + l1.pct : 0.0;
+                box->s->font_size_add = box->s->font_size_ratio > 0.0 ? l1.px - per : 0.0;
+                box->s->font_size = box->s->font_size_ratio > 0.0 ? 16.0 * box->s->font_size_ratio + box->s->font_size_add : l1.px - per;
             } else {
                 box->s->font_size_ratio = 0.0;
                 box->s->font_size = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
@@ -6610,6 +6655,33 @@ static void layout_sheet_add_url(LayoutStyleSheetList *list, const UrlSheet *u)
  * whose media list matches, fetched relative to base (enc: the importing
  * sheet's encoding, for an imported sheet that names none), queued with its
  * own imports before it; all before the importing sheet's rules. */
+/* (an import into a layer: its text inside one) */
+static __thread char t_import_layer[256];
+static __thread bool t_import_layered;
+
+static void layout_sheet_add_layered(LayoutStyleSheetList *list, const char *text, size_t len)
+{
+    size_t cap = len + sizeof t_import_layer + 32;
+    char *w = malloc(cap);
+    if (!w) return;
+    int n = snprintf(w, cap, "@layer %s {\n", t_import_layer);
+    memcpy(w + n, text, len);
+    memcpy(w + n + len, "\n}\n", 3);
+    layout_sheet_list_add_text(list, w, (size_t)n + len + 3, NULL);
+    free(w);
+}
+
+static void layout_sheet_add_import(LayoutStyleSheetList *list, const UrlSheet *u)
+{
+    if (t_import_layered) layout_sheet_add_layered(list, u->text, u->len);
+    else layout_sheet_add_url(list, u);
+}
+
+static int hex_val(char c)
+{
+    return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+}
+
 static void layout_sheet_imports(LayoutStyleSheetList *list, const char *text, size_t len, const char *base,
                                  const char *enc, int depth)
 {
@@ -6643,7 +6715,7 @@ static void layout_sheet_imports(LayoutStyleSheetList *list, const char *text, s
         }
         p += charset ? 8 : 7;
         while (p < end && isspace((unsigned char)*p)) p++;
-        char href[1024];
+        char href[8192];
         href[0] = 0;
         if (!charset) {
             const char *a = NULL, *b = NULL;
@@ -6688,21 +6760,102 @@ static void layout_sheet_imports(LayoutStyleSheetList *list, const char *text, s
         if (charset || !href[0]) continue;
         while (ms < me && isspace((unsigned char)*ms)) ms++;
         while (me > ms && isspace((unsigned char)me[-1])) me--;
+        /* layer or layer(x), then supports(...), then the media list */
+        bool held_lay = t_import_layered;
+        char held_name[sizeof t_import_layer];
+        memcpy(held_name, t_import_layer, sizeof held_name);
+        #define IMPORT_RESTORE() do { t_import_layered = held_lay; memcpy(t_import_layer, held_name, sizeof held_name); } while (0)
+        if (me - ms >= 5 && !strncasecmp(ms, "layer", 5) && (ms + 5 == me || isspace((unsigned char)ms[5]) || ms[5] == '(')) {
+            const char *ln = NULL;
+            size_t ll = 0;
+            ms += 5;
+            if (ms < me && *ms == '(') {
+                ln = ++ms;
+                while (ms < me && *ms != ')') ms++;
+                ll = (size_t)(ms - ln);
+                if (ms < me) ms++;
+            }
+            char nm[128];
+            nm[0] = 0;
+            if (ln && ll < sizeof nm) { memcpy(nm, ln, ll); nm[ll] = 0; }
+            if (t_import_layered && nm[0]) {
+                size_t have = strlen(t_import_layer);
+                snprintf(t_import_layer + have, sizeof t_import_layer - have, ".%s", nm);
+            } else if (nm[0]) {
+                snprintf(t_import_layer, sizeof t_import_layer, "%s", nm);
+            } else if (!t_import_layered) {
+                t_import_layer[0] = 0;  /* (with no name: its own, as "@layer {") */
+            }
+            t_import_layered = true;
+            while (ms < me && isspace((unsigned char)*ms)) ms++;
+        }
+        if (me - ms >= 9 && !strncasecmp(ms, "supports(", 9)) {
+            const char *cs = ms + 9, *q = cs;
+            int dep = 1;
+            for (; q < me; q++) {
+                if (*q == '(') dep++;
+                else if (*q == ')' && --dep == 0) break;
+            }
+            size_t cl = (size_t)(q - cs);
+            char *cn = malloc(cl + 3);
+            bool yes = false;
+            if (cn) {
+                memcpy(cn, cs, cl);
+                cn[cl] = 0;
+                yes = css_supports_condition(cn);
+                if (!yes) {
+                    cn[0] = '(';
+                    memcpy(cn + 1, cs, cl);
+                    cn[cl + 1] = ')';
+                    cn[cl + 2] = 0;
+                    yes = css_supports_condition(cn);
+                }
+                free(cn);
+            }
+            if (!yes) { IMPORT_RESTORE(); continue; }
+            ms = q < me ? q + 1 : me;
+            while (ms < me && isspace((unsigned char)*ms)) ms++;
+        }
         if (me > ms) {
             char media[512];
             size_t ml = (size_t)(me - ms) < sizeof(media) - 1 ? (size_t)(me - ms) : sizeof(media) - 1;
             memcpy(media, ms, ml);
             media[ml] = 0;
-            if (!css_media_query_matches(media, g_unit_vw, g_unit_vh)) continue;
+            if (!css_media_query_matches(media, g_unit_vw, g_unit_vh)) { IMPORT_RESTORE(); continue; }
+        }
+        if (!strncasecmp(href, "data:", 5)) {
+            /* (written in place: nothing to fetch) */
+            const char *comma = strchr(href, ',');
+            const char *b64 = strstr(href, ";base64");
+            if (comma && !(b64 && b64 < comma)) {
+                char *dt = malloc(strlen(comma) + 1);
+                size_t dn = 0;
+                for (const char *c = comma + 1; dt && *c; c++) {
+                    int h1, h2;
+                    if (*c == '%' && (h1 = hex_val(c[1])) >= 0 && (h2 = hex_val(c[2])) >= 0) { dt[dn++] = (char)(h1 * 16 + h2); c += 2; }
+                    else dt[dn++] = *c;
+                }
+                if (dt && dn) {
+                    dt[dn] = 0;
+                    layout_sheet_imports(list, dt, dn, base, enc, depth + 1);
+                    if (t_import_layered) layout_sheet_add_layered(list, dt, dn);
+                    else layout_sheet_list_add_text(list, dt, dn, NULL);
+                }
+                free(dt);
+            }
+            IMPORT_RESTORE();
+            continue;
         }
         char *url = layout_resolve_url(base, href);
-        if (!url) continue;
+        if (!url) { IMPORT_RESTORE(); continue; }
         const UrlSheet *u = url_sheet_get_ex(url, enc);
         if (u) {
             layout_sheet_imports(list, u->text, u->len, url, u->enc, depth + 1);
-            layout_sheet_add_url(list, u);
+            layout_sheet_add_import(list, u);
         }
         free(url);
+        IMPORT_RESTORE();
+        #undef IMPORT_RESTORE
     }
 }
 
@@ -10793,7 +10946,8 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
         if (phase == 0) {
             if (box->s->font_size_ratio > 0.0) {
                 double base = parent ? parent->s->font_size : 16.0;
-                box->s->font_size = (base > 0.0 ? base : 16.0) * box->s->font_size_ratio;
+                box->s->font_size = (base > 0.0 ? base : 16.0) * box->s->font_size_ratio + box->s->font_size_add;
+                if (box->s->font_size <= 0.0) box->s->font_size = 0.01;
             } else if (!box->s->font_size_set && parent) {
                 box->s->font_size = parent->s->font_size;
             }
@@ -10873,7 +11027,8 @@ static void style_finish_box_em(bool em_defer, LayoutBox *box, const LayoutBox *
     if (box->s->font_size_ratio > 0.0) {
         double base = parent ? parent->s->font_size : 16.0;
         if (base <= 0.0) base = 16.0;
-        box->s->font_size = base * box->s->font_size_ratio;
+        box->s->font_size = base * box->s->font_size_ratio + box->s->font_size_add;
+        if (box->s->font_size <= 0.0) box->s->font_size = 0.01;
     }
     if (!parent && box->s->font_size > 0.0) g_unit_rem = box->s->font_size;   /* root: rem base */
     if (!box->s->fill_set && parent) {

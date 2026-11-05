@@ -478,6 +478,7 @@ typedef struct { CssNestItem *v; int n, cap; bool on; } CssNestList;
 static __thread CssNestList t_nest;
 /* (inside a nested at-rule: the selector its declarations and rules are of) */
 static __thread const char *t_nest_parent;
+static char *scope_apply(const char *sel, const char *a, const char *b, bool prefix);
 
 static void css_nest_push(size_t start, size_t brace, int decls)
 {
@@ -701,6 +702,10 @@ void css_declarations_free(CssDeclaration *decls, int count) {
  * Stylesheet parser
  * ============================================================================ */
 
+/* (inside @layer: where the rules go) */
+static __thread char *t_layer_path;
+static __thread char *t_scope_a, *t_scope_b;
+
 static CssRule* css_stylesheet_add_rule(CssStylesheet *sheet) {
     if (sheet->rule_count >= sheet->rule_capacity) {
         int new_cap = sheet->rule_capacity ? sheet->rule_capacity * 2 : 16;
@@ -711,7 +716,41 @@ static CssRule* css_stylesheet_add_rule(CssStylesheet *sheet) {
     }
     CssRule *rule = &sheet->rules[sheet->rule_count++];
     memset(rule, 0, sizeof(*rule));
+    if (t_layer_path) rule->layer_name = strdup(t_layer_path);
+    rule->scoped = t_scope_a != NULL;
     return rule;
+}
+
+/* The next of @layer's names at *p: "a.b" (false: not one). */
+static bool layer_name_next(const char **p, char *out, size_t cap)
+{
+    const char *q = *p;
+    size_t n = 0;
+    for (;;) {
+        const char *st = q;
+        if (*q == '-' && q[1] == '-') q += 2;
+        else if (*q == '-') q++;
+        if (!(isalpha((unsigned char)*q) || *q == '_' || (unsigned char)*q >= 0x80 || (*q == '-' && q > st))) return false;
+        while (isalnum((unsigned char)*q) || *q == '_' || *q == '-' || (unsigned char)*q >= 0x80) q++;
+        if ((size_t)(q - st) + n + 2 > cap) return false;
+        memcpy(out + n, st, (size_t)(q - st));
+        n += (size_t)(q - st);
+        if (*q != '.') break;
+        out[n++] = '.';
+        q++;
+    }
+    out[n] = 0;
+    *p = q;
+    return true;
+}
+
+/* The path of a name under the layer it's in (malloc'd). */
+static char *layer_join(const char *name)
+{
+    size_t n = (t_layer_path ? strlen(t_layer_path) + 1 : 0) + strlen(name) + 1;
+    char *o = (char *)malloc(n);
+    if (o) snprintf(o, n, "%s%s%s", t_layer_path ? t_layer_path : "", t_layer_path ? "." : "", name);
+    return o;
 }
 
 /* Removes comments from a selector in place.  A comment separates tokens, so
@@ -1400,10 +1439,63 @@ static size_t css_at_rule(const char *s, size_t len, size_t pos, bool nested, Cs
      * does not count; of the statements only @namespace does) */
     bool is_namespace = nl == 9 && !strncasecmp(name, "namespace", 9);
     if (counts) *counts = css_at_known(name, nl) && !is_charset && !is_import && (block ? true : is_namespace);
+    bool is_layer = nl == 5 && !strncasecmp(name, "layer", 5);
+    char *layer_here = NULL;
+    if (is_layer) {
+        /* @layer a, b; or @layer [a]? { }: the order is by what's named first */
+        char *c = css_strndup_trim(s + pre, pre_end - pre);
+        if (c && strstr(c, "/*")) css_strip_comments(c);
+        const char *p = c ? c : "";
+        char names[16][128];
+        int nn = 0;
+        bool bad = false;
+        while (css_is_space(*p)) p++;
+        while (*p && !bad) {
+            if (nn >= 16 || !layer_name_next(&p, names[nn], sizeof names[0])) { bad = true; break; }
+            nn++;
+            while (css_is_space(*p)) p++;
+            if (*p == ',') {
+                p++;
+                while (css_is_space(*p)) p++;
+                if (!*p) bad = true;
+            } else if (*p) bad = true;
+        }
+        free(c);
+        if (block ? nn > 1 : nn == 0) bad = true;
+        if (bad) {
+            if (!block) return end;
+            CssTz tz;
+            css_tz_init(&tz, s, len, end);
+            end = css_tokens_skip_block(&tz);
+            css_tz_free(&tz);
+            return end;
+        }
+        if (block) {
+            if (nn) layer_here = layer_join(names[0]);
+            else {
+                /* (with no name: one of its own) */
+                static int anon;
+                char an[32];
+                snprintf(an, sizeof an, "\x01%d", __atomic_add_fetch(&anon, 1, __ATOMIC_RELAXED));
+                layer_here = layer_join(an);
+            }
+        }
+        if (sheet) {
+            char *held = t_layer_path;
+            for (int k = 0; k < nn || (block && k == 0); k++) {
+                char *pa = block ? strdup(layer_here) : layer_join(names[k]);
+                t_layer_path = pa;
+                css_stylesheet_add_rule(sheet);
+                t_layer_path = held;
+                free(pa);
+            }
+        }
+    }
     if (!block) return end;
     if (sheet && ((nl == 9 && !strncasecmp(name, "keyframes", 9)) || (nl == 17 && !strncasecmp(name, "-webkit-keyframes", 17))))
         return css_keyframes_rule(s, len, pre, pre_end, end, sheet);
     if (kind == AT_SKIP || !sheet) {
+        free(layer_here);
         size_t e;
         if (css_block_skip_fast(s, len, end, &e)) return e;
         CssTz tz;
@@ -1411,6 +1503,54 @@ static size_t css_at_rule(const char *s, size_t len, size_t pos, bool nested, Cs
         end = css_tokens_skip_block(&tz);
         css_tz_free(&tz);
         return end;
+    }
+    bool is_scope = nl == 5 && !strncasecmp(name, "scope", 5);
+    char *sc_a = NULL, *sc_b = NULL;
+    if (is_scope) {
+        /* [(start)]? [to (end)]? */
+        char *c = css_strndup_trim(s + pre, pre_end - pre);
+        if (c && strstr(c, "/*")) css_strip_comments(c);
+        const char *p = c ? c : "";
+        char *parts[2] = { NULL, NULL };
+        bool bad = false;
+        for (int k = 0; k < 2 && !bad; k++) {
+            while (css_is_space(*p)) p++;
+            if (!*p) break;
+            if (!strncasecmp(p, "to", 2) && (css_is_space(p[2]) || p[2] == '(')) {
+                if (parts[1]) { bad = true; break; }
+                p += 2;
+                while (css_is_space(*p)) p++;
+                k = 1;
+            } else if (k == 1) { bad = true; break; }
+            if (*p != '(') { bad = true; break; }
+            int depth = 0;
+            const char *q = p;
+            for (; *q; q++) {
+                if (*q == '(') depth++;
+                else if (*q == ')' && --depth == 0) break;
+            }
+            if (!*q) { bad = true; break; }
+            parts[k] = css_strndup_trim(p + 1, (size_t)(q - p - 1));
+            if (!parts[k] || !parts[k][0] || css_prelude_invalid(parts[k])) bad = true;
+            p = q + 1;
+        }
+        while (!bad && css_is_space(*p)) p++;
+        if (*p) bad = true;
+        free(c);
+        if (bad) {
+            free(parts[0]); free(parts[1]);
+            CssTz tz;
+            css_tz_init(&tz, s, len, end);
+            end = css_tokens_skip_block(&tz);
+            css_tz_free(&tz);
+            return end;
+        }
+        /* (with no start: the owner's parent) */
+        const char *start = parts[0] ? parts[0] : ":has(> style, > link)";
+        const char *oa = t_nest_parent ? t_nest_parent : t_scope_a, *ob = t_nest_parent ? NULL : t_scope_b;
+        sc_a = oa ? scope_apply(start, oa, ob, !t_nest_parent) : strdup(start);
+        if (parts[1]) sc_b = scope_apply(parts[1], sc_a, NULL, false);
+        free(parts[0]); free(parts[1]);
     }
     char *eff = NULL;
     if (kind == AT_MEDIA) {
@@ -1447,7 +1587,15 @@ static size_t css_at_rule(const char *s, size_t len, size_t pos, bool nested, Cs
             free(c);
         }
     }
+    char *held_sa = t_scope_a, *held_sb = t_scope_b;
+    const char *held_np = t_nest_parent;
+    if (is_scope) { t_scope_a = sc_a; t_scope_b = sc_b; t_nest_parent = NULL; }
+    char *held_layer = t_layer_path;
+    if (layer_here) t_layer_path = layer_here;
     end = css_rule_list(s, len, end, len, true, sheet, eff ? eff : "");
+    t_layer_path = held_layer;
+    free(layer_here);
+    if (is_scope) { t_scope_a = held_sa; t_scope_b = held_sb; t_nest_parent = held_np; free(sc_a); free(sc_b); }
     t_cq_cond = held_cq;
     free(cq_here);
     free(eff);
@@ -1494,6 +1642,10 @@ static size_t css_rule_item(const char *s, size_t len, size_t pos, bool nested, 
         css_skip_rule_block(s, len, &pos);
         return pos;
     }
+    if (t_scope_a) {
+        char *sw = scope_apply(sel, t_scope_a, t_scope_b, true);
+        if (sw) { free(sel); sel = sw; }
+    }
     rule->selector_text = sel;
     rule->media_query = cond && cond[0] ? strdup(cond) : NULL; rule->container_query = t_cq_cond ? strdup(t_cq_cond) : NULL;
     css_parse_rule_block(s, len, &pos, rule, sheet, cond);
@@ -1515,6 +1667,78 @@ static void sel_append(char **buf, size_t *n, size_t *cap, const char *t, size_t
     memcpy(*buf + *n, t, l);
     *n += l;
     (*buf)[*n] = 0;
+}
+
+/* sel in a scope: :scope and & as the root; without them under it; not past the limit. */
+static char *scope_apply(const char *sel, const char *a, const char *b, bool prefix)
+{
+    size_t n = 0, cap = strlen(sel) + 64;
+    char *out = (char *)malloc(cap);
+    if (!out) return NULL;
+    out[0] = 0;
+    const char *p = sel;
+    while (*p) {
+        const char *q = p, *pe = NULL;
+        int depth = 0;
+        char quote = 0;
+        bool ref = false;
+        for (; *q; q++) {
+            if (*q == '\\' && q[1]) { q++; continue; }
+            if (quote) { if (*q == quote) quote = 0; continue; }
+            if (*q == '"' || *q == '\'') quote = *q;
+            else if (*q == '(' || *q == '[') depth++;
+            else if ((*q == ')' || *q == ']') && depth > 0) depth--;
+            else if (*q == '&') ref = true;
+            else if (*q == ':' && !strncasecmp(q, ":scope", 6) && !isalnum((unsigned char)q[6]) && q[6] != '-') ref = true;
+            else if (*q == ':' && q[1] == ':' && !depth && !pe) pe = q;
+            else if (*q == ',' && depth == 0) break;
+        }
+        const char *x = p, *y = q;
+        while (x < y && css_is_space(*x)) x++;
+        while (y > x && css_is_space(y[-1])) y--;
+        if (!pe || pe > y) pe = y;
+        if (n) sel_append(&out, &n, &cap, ", ", 2);
+        if (!ref && prefix) {
+            sel_append(&out, &n, &cap, ":where(", 7);
+            sel_append(&out, &n, &cap, a, strlen(a));
+            sel_append(&out, &n, &cap, ") ", 2);
+        }
+        quote = 0;
+        for (const char *c = x; c < pe; c++) {
+            if (*c == '\\' && c + 1 < pe) { sel_append(&out, &n, &cap, c, 2); c++; continue; }
+            if (quote) { if (*c == quote) quote = 0; sel_append(&out, &n, &cap, c, 1); continue; }
+            if (*c == '"' || *c == '\'') { quote = *c; sel_append(&out, &n, &cap, c, 1); continue; }
+            if (*c == '&') {
+                sel_append(&out, &n, &cap, ":is(", 4);
+                sel_append(&out, &n, &cap, a, strlen(a));
+                sel_append(&out, &n, &cap, ")", 1);
+                continue;
+            }
+            if (*c == ':' && !strncasecmp(c, ":scope", 6) && !isalnum((unsigned char)c[6]) && c[6] != '-') {
+                /* (of a pseudo-class's weight: the root's own is not counted) */
+                sel_append(&out, &n, &cap, ":is(:where(", 11);
+                sel_append(&out, &n, &cap, a, strlen(a));
+                sel_append(&out, &n, &cap, "), .__cb_s)", 11);
+                c += 5;
+                continue;
+            }
+            sel_append(&out, &n, &cap, c, 1);
+        }
+        if (b) {
+            sel_append(&out, &n, &cap, ":not(:where(", 12);
+            sel_append(&out, &n, &cap, a, strlen(a));
+            sel_append(&out, &n, &cap, ") :where(", 9);
+            sel_append(&out, &n, &cap, b, strlen(b));
+            sel_append(&out, &n, &cap, "), :where(", 10);
+            sel_append(&out, &n, &cap, a, strlen(a));
+            sel_append(&out, &n, &cap, ") :where(", 9);
+            sel_append(&out, &n, &cap, b, strlen(b));
+            sel_append(&out, &n, &cap, ") *)", 4);
+        }
+        if (pe < y) sel_append(&out, &n, &cap, pe, (size_t)(y - pe));
+        p = *q ? q + 1 : q;
+    }
+    return out;
 }
 
 /* A compound that "&" can be written out as, as it is, before what follows. */
@@ -1737,6 +1961,7 @@ void css_stylesheet_free(CssStylesheet *sheet) {
     for (int i = 0; i < sheet->rule_count; i++) {
         CssRule *rule = &sheet->rules[i];
         free(rule->selector_text);
+        free(rule->layer_name);
         free(rule->media_query);
         free(rule->container_query);
         css_declarations_free(rule->declarations, rule->declaration_count);

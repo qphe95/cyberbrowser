@@ -408,6 +408,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * because the parallel pass cannot safely read the parent's computed
      * font-size. */
     double font_size_ratio;
+    double font_size_add;   /* (px, with the ratio: calc(1em + 2px)) */
 
     /* Outer display is inline but the box is laid out as an atomic inline
      * (inline-flex / inline-grid / inline-table; inline-block uses

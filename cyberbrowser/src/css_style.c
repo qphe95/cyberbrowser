@@ -588,7 +588,67 @@ typedef struct CRule {
     int sheet, index;
     int32_t aspect;         /* list index, -1 = none */
     bool ua;                /* from the user agent's sheet */
+    int layer_bias;         /* how far below no layer at all its layer is */
 } CRule;
+
+/* Cascade layers, as first named across the sheets: a layer's sublayers below
+ * its own rules, all below rules in none. */
+static int layer_visit(const int *parent, int n, int at, int *rank, int r)
+{
+    for (int i = 0; i < n; i++) if (parent[i] == at) r = layer_visit(parent, n, i, rank, r);
+    if (at >= 0) rank[at] = ++r;
+    return r;
+}
+
+static int layer_rule_cmp(const void *a, const void *b)
+{
+    const CRule *x = *(const CRule *const *)a, *y = *(const CRule *const *)b;
+    if (x->sheet != y->sheet) return x->sheet < y->sheet ? -1 : 1;
+    return x->index < y->index ? -1 : x->index > y->index;
+}
+
+static void style_layer_order(CRule *rules, int nrules)
+{
+    int nl = 0;
+    for (int g = 0; g < nrules; g++) {
+        rules[g].layer_bias = 0;
+        if (rules[g].rule && rules[g].rule->layer_name) nl++;
+    }
+    if (!nl) return;
+    const CRule **v = malloc((size_t)nl * sizeof *v);
+    nl = 0;
+    for (int g = 0; g < nrules; g++)
+        if (rules[g].rule && rules[g].rule->layer_name) v[nl++] = &rules[g];
+    qsort(v, (size_t)nl, sizeof *v, layer_rule_cmp);
+    enum { MAX_LAYERS = 60 };
+    const char *path[MAX_LAYERS];
+    size_t plen[MAX_LAYERS];
+    int parent[MAX_LAYERS], rank[MAX_LAYERS], n = 0;
+    for (int i = 0; i < nl; i++) {
+        const char *nm = v[i]->rule->layer_name;
+        int at = -1;
+        for (const char *e = nm;; e++) {
+            if (*e && *e != '.') continue;
+            size_t l = (size_t)(e - nm);
+            int f = -1;
+            for (int k = 0; k < n; k++) if (plen[k] == l && !memcmp(path[k], nm, l)) { f = k; break; }
+            if (f < 0 && n < MAX_LAYERS) {
+                f = n++;
+                path[f] = nm; plen[f] = l; parent[f] = at;
+            }
+            at = f;
+            if (!*e) break;
+        }
+    }
+    layer_visit(parent, n, -1, rank, 0);
+    for (int i = 0; i < nl; i++) {
+        const char *nm = v[i]->rule->layer_name;
+        size_t l = strlen(nm);
+        for (int k = 0; k < n; k++)
+            if (plen[k] == l && !memcmp(path[k], nm, l)) { ((CRule *)v[i])->layer_bias = n + 1 - rank[k]; break; }
+    }
+    free(v);
+}
 
 typedef struct CAfter {
     int32_t rule;
@@ -896,9 +956,53 @@ static _Thread_local HasMemo *t_has_memo;
 
 static bool has_scan(const CssStyleSet *S, const CssStyleDoc *D, const CComp *c, int n);
 
+/* A relative selector being scanned: where its first compound must stand. */
+static __thread const CComp *t_ha_parts;
+static __thread int t_ha_node, t_ha_comb;
+static bool chain_match(const CssStyleSet *S, const CssStyleDoc *D, const CChain *ch, int node);
+
+/* (more than one compound after the relative combinator: "+ div .test") */
+static bool has_list_deep(const CssStyleSet *S, int32_t li)
+{
+    if (li < 0) return false;
+    const CList *l = &S->lists[li];
+    for (uint32_t i = 0; i < l->n; i++)
+        if (S->chains[S->atoms[l->first + i]].n > 1) return true;
+    return false;
+}
+
+/* More than one compound: the last anywhere it can reach, the first in its place. */
+static bool has_deep(const CssStyleSet *S, const CssStyleDoc *D, const CComp *c, int n)
+{
+    int lo = n + 1, hi = D->sub_end[n];
+    if (c->has_comb == '+' || c->has_comb == '~') {
+        if (D->parent[n] < 0) return false;
+        lo = D->sub_end[n];
+        hi = D->sub_end[D->parent[n]];
+    }
+    const CComp *sp = t_ha_parts;
+    int sn = t_ha_node, sc = t_ha_comb;
+    bool hit = false;
+    const CList *l = &S->lists[c->has];
+    for (uint32_t i = 0; i < l->n && !hit; i++) {
+        const CChain *ch = &S->chains[S->atoms[l->first + i]];
+        for (int j = lo; j < hi && !hit; j++) {
+            if (!D->is_elem[j]) continue;
+            t_ha_parts = S->comps + ch->first;
+            t_ha_node = n;
+            t_ha_comb = c->has_comb;
+            hit = chain_match(S, D, ch, j);
+        }
+    }
+    t_ha_parts = sp;
+    t_ha_node = sn;
+    t_ha_comb = sc;
+    return hit;
+}
+
 static bool has_match(const CssStyleSet *S, const CssStyleDoc *D, const CComp *c, int n)
 {
-    if (c->has_comb == '+') return D->next_elem[n] >= 0 && list_match(S, D, c->has, D->next_elem[n]);
+    if (c->has_comb == '+' && !has_list_deep(S, c->has)) return D->next_elem[n] >= 0 && list_match(S, D, c->has, D->next_elem[n]);
     HasMemo *m = t_has_memo;
     if (!m) {
         m = t_has_memo = (HasMemo *)calloc(1, sizeof(HasMemo));
@@ -923,6 +1027,7 @@ static bool has_match(const CssStyleSet *S, const CssStyleDoc *D, const CComp *c
 
 static bool has_scan(const CssStyleSet *S, const CssStyleDoc *D, const CComp *c, int n)
 {
+    if (has_list_deep(S, c->has)) return has_deep(S, D, c, n);
     switch (c->has_comb) {
     case '+':
         return D->next_elem[n] >= 0 && list_match(S, D, c->has, D->next_elem[n]);
@@ -1004,12 +1109,23 @@ static bool comp_match(const CssStyleSet *S, const CssStyleDoc *D, const CComp *
 
 /* Right-to-left with backtracking over descendant / general-sibling
  * combinators.  `budget` bounds pathological selector/DOM combinations. */
+static bool ha_anchored(const CssStyleDoc *D, int cur)
+{
+    int n = t_ha_node;
+    switch (t_ha_comb) {
+    case '+': return D->next_elem[n] == cur;
+    case '~': return cur > n && D->parent[cur] == D->parent[n];
+    case '>': return D->parent[cur] == n;
+    default: return cur > n && cur < D->sub_end[n];
+    }
+}
+
 static bool chain_match_from(const CssStyleSet *S, const CssStyleDoc *D, const CComp *parts,
                              int i, int cur, int *budget)
 {
     if (cur < 0 || --*budget < 0) return false;
     if (!comp_match(S, D, &parts[i], cur)) return false;
-    if (i == 0) return true;
+    if (i == 0) return parts != t_ha_parts || ha_anchored(D, cur);
     switch (parts[i].comb) {
     case CSS_COMB_CHILD:
         return chain_match_from(S, D, parts, i - 1, D->parent[cur], budget);
@@ -1379,6 +1495,7 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
     }
     free(rchains.v);
     S->nrules = g;
+    style_layer_order(S->rules, g);
     /* The builder's vectors grew by doubling: keep only what they hold. */
     VEC_FIT(b.comps);
     VEC_FIT(b.chains);
@@ -1695,7 +1812,9 @@ int css_style_match(const CssStyleSet *S, const CssStyleDoc *D, int dom,
             /* (the user agent's sheet below every author rule whatever its
              * specificity: origin before specificity in the cascade) */
             a.specificity = t->rule_spec[g] - (cr->ua ? (1 << 28) : 0);
-            a.order = (int)((uint32_t)cr->sheet * 1000000u + (uint32_t)cr->index * 1000u + (uint32_t)d);
+            /* (layers ahead of specificity; the earlier win when important) */
+            if (cr->layer_bias) a.specificity += (rule->declarations[d].important ? cr->layer_bias : -cr->layer_bias) * (1 << 22);
+            a.order = (int)((uint32_t)cr->sheet * 1000000u + (uint32_t)cr->index * 1000u + (uint32_t)d + (rule->scoped ? 1u << 30 : 0u));
             a.important = rule->declarations[d].important;
             a.rule = g;
             VEC_PUSH(t->applied, a);

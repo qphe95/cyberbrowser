@@ -366,13 +366,14 @@ static double font_px(JSContextHandle ctx, ComputedStyle *cs) {
 
 static void env_of(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p, const char *v, CssComputeEnv *env) {
     memset(env, 0, sizeof *env);
-    bool is_fs = !strcmp(p->name, "font-size"), is_color = !strcmp(p->name, "color");
+    /* (the font's own properties: of the parent's font) */
+    bool is_fs = !strncmp(p->name, "font", 4), is_color = !strcmp(p->name, "color");
     ComputedStyle *par = (is_fs || is_color) ? parent_of(ctx, cs) : NULL;
     env->font_size = is_fs ? (par ? font_px(ctx, par) : 16) : font_px(ctx, cs);
     env->root_font_size = cs->root_font_size;
     /* (ch and ex: of the font it has) */
-    if (!is_fs && strncmp(p->name, "font", 4) && v && (strstr(v, "ch") || strstr(v, "ex"))) {
-        const char *fam = computed_of(ctx, cs, "font-family");
+    if (v && (strstr(v, "ch") || strstr(v, "ex")) && (!is_fs || strchr(v, '('))) {
+        const char *fam = computed_of(ctx, is_fs && par ? par : cs, "font-family");
         TextShaper *f = fam && fam[0] ? font_registry_slot(font_registry_resolve(fam, 400, false)) : NULL;
         if (f) {
             env->ch_ratio = text_shaper_zero_advance(f);
@@ -421,6 +422,12 @@ static char *compute_value(JSContextHandle ctx, ComputedStyle *cs, const CssProp
             int pw = par ? atoi(computed_of(ctx, par, "font-weight")) : 400;
             if (!strcmp(v, "bolder")) w = pw < 350 ? 400 : pw < 550 ? 700 : pw < 900 ? 900 : pw;
             else w = pw < 100 ? pw : pw < 550 ? 100 : pw < 750 ? 400 : 700;
+        } else if (strchr(v, '(')) {
+            CssComputeEnv we;
+            env_of(ctx, cs, p, v, &we);
+            char *wr = css_prop_compute(p, v, &we);
+            if (wr) return wr;
+            w = 400;
         } else w = weight_num(v);
         char tmp[16];
         snprintf(tmp, sizeof tmp, "%d", w);
@@ -434,6 +441,19 @@ static char *compute_value(JSContextHandle ctx, ComputedStyle *cs, const CssProp
     env_of(ctx, cs, p, v, &env);
     char *r = css_prop_compute(p, v, &env);
     if (!r) return strdup(v);
+    if (!strcmp(n, "overflow-clip-margin") && strchr(r, '-')) {
+        /* (the box first; padding-box is where it starts anyway; no margin needn't be said) */
+        char a[64] = "", c[64] = "";
+        sscanf(r, "%63s %63s", a, c);
+        const char *box = !strcmp(a, "content-box") || !strcmp(a, "border-box") || !strcmp(a, "padding-box") ? a : c;
+        const char *len = box == a ? c : a;
+        char t[140];
+        bool none = !len[0] || !strcmp(len, "0px");
+        bool pb = !strcmp(box, "padding-box") || !box[0];
+        snprintf(t, sizeof t, "%s%s%s", pb ? "" : box, !pb && !none ? " " : "", none ? (pb ? "0px" : "") : len);
+        free(r);
+        return strdup(t);
+    }
     /* (a list of them, as in gap decorations) */
     if ((!strcmp(n, "column-rule-width") || !strcmp(n, "row-rule-width")) && (strchr(r, ',') || strchr(r, '('))) {
         static const struct { const char *kw, *px; } lw[] = { { "thin", "1px" }, { "medium", "3px" }, { "thick", "5px" } };
@@ -1380,13 +1400,25 @@ static char *registered_item(JSContextHandle ctx, ComputedStyle *cs, const char 
     const char *as = !strcmp(type, "length") ? "width" : !strcmp(type, "length-percentage") ? "width"
                    : !strcmp(type, "color") ? "background-color" : !strcmp(type, "transform-function") ? "transform"
                    : !strcmp(type, "transform-list") ? "transform" : !strcmp(type, "time") ? "transition-duration"
-                   : !strcmp(type, "angle") ? "rotate" : NULL;
+                   : !strcmp(type, "angle") ? "rotate"
+                   : !strcmp(type, "percentage") && strchr(v, '(') ? "width" : NULL;
     if (!strcmp(type, "integer") || !strcmp(type, "number")) {
         const char *b = v;
         while (*b && isspace((unsigned char)*b)) b++;
         if (strncasecmp(b, "calc(", 5)) return strdup(v);
         double d;
-        if (!css_calc_number(v, &d)) return strdup(v);
+        if (!css_calc_number(v, &d)) {
+            /* (with units in its math: under this element's) */
+            const CssPropDef *fg = css_prop_find("flex-grow", 9);
+            CssComputeEnv ne;
+            if (fg) env_of(ctx, cs, fg, v, &ne);
+            char *nr = fg ? css_prop_compute(fg, v, &ne) : NULL;
+            char *ne2 = NULL;
+            d = nr ? strtod(nr, &ne2) : 0;
+            bool got = nr && ne2 != nr && !*ne2;
+            free(nr);
+            if (!got) return strdup(v);
+        }
         char tmp[64];
         if (!strcmp(type, "integer")) snprintf(tmp, sizeof tmp, "%lld", (long long)floor(d + 0.5));
         else snprintf(tmp, sizeof tmp, "%.6g", d);

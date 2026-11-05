@@ -127,7 +127,7 @@
         if (/^(column|row)-rule-width$/.test(prop)) return v <= 0 ? 0 : v < 1 ? 1 : Math.floor(v + 0.02);
         /* (no size at all is the size it was) */
         if (prop === 'zoom') return v <= 0 ? 1 : v;
-        if (prop === 'opacity' || /-opacity$/.test(prop)) v = Math.max(0, Math.min(1, v));
+        if (prop === 'opacity' || /-opacity$/.test(prop) || prop === 'shape-image-threshold') v = Math.max(0, Math.min(1, v));
         else if (INTEGER.test(prop)) v = Math.round(v);
         else if (NONNEG.test(prop) && v < 0) v = 0;
         return v;
@@ -542,8 +542,9 @@
     }
     /* (for DOMMatrix: a transform list without relative lengths, or null) */
     Object.defineProperty(global, '__cyberTransformList', { configurable: true, value: function (text) {
+        text = String(text).trim();
         if (text === 'none') return { m: M4_ID.slice(), is2D: true };
-        if (!global.CSS.supports('transform', text) || /%|em|[0-9](em|rem|ex|ch|vw|vh|vmin|vmax|lh)/.test(text)) return null;
+        if (!global.CSS.supports('transform', text) || /%|[0-9.](?:[a-z]*em|ex|ch|ic|cap|r?lh|[dsl]?v[whib]|[dsl]?vmin|[dsl]?vmax|c[qQ][a-zA-Z]+)\b/.test(text)) return null;
         var list = tfParse(text);
         if (!list || !list.length) return null;
         var m = tfListMatrix(list, { w: 0, h: 0 }), flat = !/3d|translateZ|rotateX|rotateY|scaleZ|perspective/i.test(text);
@@ -665,6 +666,11 @@
             } else if (!arg && (name === 'blur' || name === 'hue-rotate')) {
                 arg = FILTER_ZERO[name];
             }
+            /* (a shadow with no blur: of none, to go against one with) */
+            if (name === 'drop-shadow') {
+                var lens = arg.match(/-?[\d.]+(?:e[-+]?\d+)?px/g);
+                if (lens && lens.length === 2) arg = arg.replace(lens[1], lens[1] + ' 0px');
+            }
             out.push({ n: name, a: arg });
         }
         return out;
@@ -681,7 +687,7 @@
             if (name !== 'hue-rotate' && name !== 'drop-shadow') {
                 var fn = parseFloat(v);
                 if (fn < 0) v = v.replace(/^-?[\d.]+/, '0');
-                else if (fn > 1 && (name === 'sepia' || name === 'grayscale' || name === 'opacity')) v = '1';
+                else if (fn > 1 && (name === 'sepia' || name === 'grayscale' || name === 'opacity' || name === 'invert')) v = '1';
             }
             out.push(name + '(' + v + ')');
         }
@@ -805,7 +811,7 @@
             return fa[1].toLowerCase() + '(' + xa.map(function (x, i) { return lpMixText(lpMix(lpParse(x), lpParse(xb[i]), t)); }).join(' ') + rr + ')';
         }
         var v = pa.box.map(function (x, i) { return lpText(l(x, pb.box[i])); });
-        var txt = v[3] !== v[1] ? v.join(' ') : v[2] !== v[0] ? v.slice(0, 3).join(' ') : v[1] !== v[0] ? v.slice(0, 2).join(' ') : v[0];
+        var txt = v[1] === v[0] && v[2] === v[0] && v[3] === v[0] ? v[0] : v.join(' ');
         var rv = '';
         if (pa.round || pb.round) {
             var ra = pa.round || 'round 0px', rb = pb.round || 'round 0px', c = combine('clip-path', ra, rb, function (x, y) { return x + (y - x) * t; });
@@ -1200,6 +1206,28 @@
         return { flag: !!kw, deg: deg + (kw === 'reverse' ? 180 : 0) };
     }
     function interpolate(prop, a, b, t) {
+        /* (normal is none at all, but at its own end) */
+        if (prop === 'letter-spacing' || prop === 'word-spacing') {
+            if (a === 'normal' && t === 0) return a;
+            if (b === 'normal' && t === 1) return b;
+            if (a === 'normal' && b === 'normal') return a;
+            if (a === 'normal') a = '0px';
+            if (b === 'normal') b = '0px';
+        }
+        /* (each of its numbers, whole; auto doesn't go between) */
+        if (prop === 'hyphenate-limit-chars') {
+            var hp = String(a).trim().split(/\s+/), hq = String(b).trim().split(/\s+/), hr = [];
+            for (var hi = 0; hi < 3; hi++) {
+                var hx = hp[hi] === undefined ? 'auto' : hp[hi], hy = hq[hi] === undefined ? 'auto' : hq[hi];
+                if (hx === 'auto' || hy === 'auto') {
+                    if (hx !== hy) return t < 0.5 ? a : b;
+                    hr.push('auto');
+                } else hr.push(String(Math.round(parseFloat(hx) + (parseFloat(hy) - parseFloat(hx)) * t)));
+            }
+            while (hr.length > 2 && hr[hr.length - 1] === 'auto') hr.pop();
+            if (hr.length === 2 && hr[1] === 'auto' && hr[0] === 'auto') return 'auto';
+            return hr.join(' ');
+        }
         /* (visible all the way, but for the very end of hidden) */
         if (prop === 'visibility') {
             if (a === b) return a;
@@ -1409,7 +1437,7 @@
             under = boxFour(under);
             value = boxFour(value);
             var ab = combine(prop, under, value, function (x, y) { return x + y; });
-            return ab === null ? value : boxCollapse(ab);
+            return boxCollapse(ab === null ? value : ab);
         }
         /* (a corner's two radii, the same: one) */
         if (/^border-.*-radius$/.test(prop)) {
@@ -2626,9 +2654,12 @@
     CSSTransition.prototype = Object.create(Animation.prototype, { constructor: { value: CSSTransition, writable: true, configurable: true } });
     /* What's left once its row has gone. */
     function settleRow(a) {
-        if (a._gone || rowTiming(a)) return;
+        if (a._gone) return;
+        var v = rowTiming(a);
+        if (v) { if (v[6]) hide(a, '_ended', true); return; }
         a._gone = true;
-        if (a._state !== 'idle') a._state = 'finished';
+        /* (gone before it ended: cancelled, by a change of style) */
+        a._state = a._ended ? 'finished' : 'idle';
     }
     [CSSAnimation.prototype, CSSTransition.prototype].forEach(function (P) {
         setAccessors(P, {

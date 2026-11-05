@@ -4367,6 +4367,132 @@ static int expand_grid(const char *nm, const char *v, char **out, const char **n
     }
     return n;
 }
+/* grid-lanes: its words in any order; a string, the direction, the rest the tracks. */
+static int expand_grid_lanes(const char *v, char **out)
+{
+    size_t vl = strlen(v);
+    char *tracks = calloc(vl + 2, 1);
+    const char *str = NULL;
+    size_t strl = 0;
+    bool row = false, col = false, normal = false, fr = false, tr = false, bad = false;
+    const char *p = v;
+    while (*p) {
+        while (isspace((unsigned char)*p)) p++;
+        if (!*p) break;
+        const char *s = p;
+        int d = 0;
+        char q = 0;
+        for (; *p; p++) {
+            if (q) { if (*p == q) q = 0; continue; }
+            if (*p == '"' || *p == '\'') q = *p;
+            else if (*p == '(' || *p == '[') d++;
+            else if (*p == ')' || *p == ']') d--;
+            else if (isspace((unsigned char)*p) && !d) break;
+        }
+        size_t l = (size_t)(p - s);
+        #define IS(w) (l == strlen(w) && !strncasecmp(s, w, l))
+        if (*s == '"' || *s == '\'') { if (str) bad = true; str = s; strl = l; }
+        else if (IS("row")) { if (row) bad = true; row = true; }
+        else if (IS("column")) { if (col) bad = true; col = true; }
+        else if (IS("normal")) { if (normal) bad = true; normal = true; }
+        else if (IS("fill-reverse")) { if (fr) bad = true; fr = true; }
+        else if (IS("track-reverse")) { if (tr) bad = true; tr = true; }
+        else {
+            if (tracks[0]) strcat(tracks, " ");
+            strncat(tracks, s, l);
+        }
+        #undef IS
+    }
+    if ((row && col) || (normal && (row || col || fr || tr))) bad = true;
+    const CssPropDef *tp = css_prop_find("grid-template-columns", 21), *ap = css_prop_find("grid-template-areas", 19);
+    char *tv = NULL, *av = NULL;
+    if (!bad && tracks[0]) {
+        tv = tp ? prop_parse_raw(tp, tracks) : NULL;
+        if (!tv) bad = true;
+    }
+    if (!bad && str) {
+        char *t = strndup(str, strl);
+        av = ap ? prop_parse_raw(ap, t) : NULL;
+        free(t);
+        if (!av) bad = true;
+    }
+    if (bad || (!tracks[0] && !str && !row && !col && !normal && !fr && !tr)) {
+        free(tracks); free(tv); free(av);
+        return -1;
+    }
+    /* (going in rows: its names one to a row) */
+    if (row && av && strcmp(av, "none")) {
+        Buf nb = {0};
+        bool in = false;
+        for (const char *a = av; *a; a++) {
+            if (*a == '"') continue;
+            if (isspace((unsigned char)*a)) { if (in) buf_str(&nb, "\" "); in = false; continue; }
+            if (!in) { if (nb.n && nb.s[nb.n - 1] != ' ') buf_str(&nb, " "); buf_str(&nb, "\""); in = true; }
+            char one[2] = { *a, 0 };
+            buf_str(&nb, one);
+        }
+        if (in) buf_str(&nb, "\"");
+        free(av);
+        av = nb.s ? strndup(nb.s, nb.n) : strdup("none");
+        free(nb.s);
+    }
+    char dir[48];
+    snprintf(dir, sizeof dir, "%s%s%s", normal ? "normal" : row ? "row" : "column", fr ? " fill-reverse" : "", tr ? " track-reverse" : "");
+    set_out(out, 0, row && tv ? tv : "none");
+    set_out(out, 1, !row && tv ? tv : "none");
+    set_out(out, 2, av ? av : "none");
+    set_out(out, 3, dir);
+    free(tracks); free(tv); free(av);
+    return 0;
+}
+
+static int serialize_grid_lanes(const char *const *vals, const char **names, int n, Buf *b)
+{
+    const char *rows = val_of(vals, names, n, "grid-template-rows"), *cols = val_of(vals, names, n, "grid-template-columns");
+    const char *areas = val_of(vals, names, n, "grid-template-areas"), *dir = val_of(vals, names, n, "grid-lanes-direction");
+    if (!rows || !cols || !areas || !dir) return -1;
+    bool row = !strncmp(dir, "row", 3);
+    const char *tracks = row ? rows : cols;
+    bool any = false;
+    if (strcmp(areas, "none")) {
+        /* (one string: the rows' names, in rows, run together) */
+        int strs = 0, words = 0;
+        bool in = false;
+        for (const char *a = areas; *a; a++) if (*a == '"') { strs++; in = !in; }
+        strs /= 2;
+        in = false;
+        for (const char *a = areas; *a; a++) {
+            bool w = *a != '"' && !isspace((unsigned char)*a);
+            if (w && !in) words++;
+            in = w;
+        }
+        if (row ? strs != words : strs != 1) return -1;
+        buf_str(b, "\"");
+        bool first = true;
+        in = false;
+        for (const char *a = areas; *a; a++) {
+            bool w = *a != '"' && !isspace((unsigned char)*a);
+            if (w) {
+                if (!in && !first) buf_str(b, " ");
+                char one[2] = { *a, 0 };
+                buf_str(b, one);
+                first = false;
+            }
+            in = w;
+        }
+        buf_str(b, "\"");
+        any = true;
+    }
+    if (strcmp(tracks, "none")) {
+        if (any) buf_str(b, " ");
+        buf_str(b, tracks);
+        any = true;
+    }
+    if (any) buf_str(b, " ");
+    buf_str(b, dir);
+    return 0;
+}
+
 static int serialize_grid(const char *nm, const char *const *vals, const char **names, int n, Buf *b)
 {
     const char *rows = val_of(vals, names, n, "grid-template-rows"), *cols = val_of(vals, names, n, "grid-template-columns");
@@ -5048,6 +5174,7 @@ static int expand_special(const CssPropDef *p, const char *v, char **out, const 
     if (!strcmp(nm, "background")) return expand_background(v, out, names, n);
     if (!strcmp(nm, "mask")) return expand_mask(v, out, names, n);
     if (!strcmp(nm, "grid-template") || !strcmp(nm, "grid")) return expand_grid(nm, v, out, names, n);
+    if (!strcmp(nm, "grid-lanes")) return expand_grid_lanes(v, out);
     if (gap_same(nm) || gap_pairs(nm) || gap_insets(nm) || gap_rule(nm) || !strcmp(nm, "corner-shape")) return expand_gap(nm, v, out, names, n);
     if (!strcmp(nm, "background-position")) return expand_background_position(v, out);
     if (!strcmp(nm, "font")) return expand_font(v, out, names, n);
@@ -5324,6 +5451,7 @@ static int serialize_special(const CssPropDef *p, const char *const *vals, const
         return 0;
     }
     if (!strcmp(nm, "grid-template") || !strcmp(nm, "grid")) return serialize_grid(nm, vals, names, n, b);
+    if (!strcmp(nm, "grid-lanes")) return serialize_grid_lanes(vals, names, n, b);
     if (gap_same(nm) || gap_pairs(nm) || gap_insets(nm) || gap_rule(nm) || !strcmp(nm, "corner-shape")) return serialize_gap(nm, vals, n, b);
     if (!strcmp(nm, "mask")) {
         static const char *const lnames[] = { "mask-image", "mask-position", "mask-size", "mask-repeat",

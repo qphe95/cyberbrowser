@@ -55,6 +55,8 @@ typedef struct CssCompiledSelector CssCompiledSelector;
 typedef struct CssRule {
     char *selector_text;
     char *media_query;   /* enclosing @media condition, e.g. "(min-width:792px)" */
+    bool scoped;         /* under @scope: ahead of the rest, on equal specificity */
+    char *layer_name;    /* its cascade layer: "a.b" (NULL: none); with no selector, only says it exists */
     char *container_query;  /* enclosing @container preludes, joined by \x01; held to the element */
     int specificity;
     CssDeclaration *declarations;

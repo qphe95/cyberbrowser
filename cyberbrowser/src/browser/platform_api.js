@@ -1390,10 +1390,12 @@
         var name = m[0], by = m[1];
         if (ELP) Object.defineProperty(ELP, name, { configurable: true, enumerable: true, writable: true, value: function () {
             scrollApply(this, scrollArgs(name, 'Element', arguments), by);
+            return Promise.resolve({ interrupted: false });
         } });
         Object.defineProperty(global, name, { configurable: true, enumerable: true, writable: true, value: function () {
             var o = scrollArgs(name, 'Window', arguments), el = scrollViewportElement();
             if (el) scrollApply(el, o, by);
+            return Promise.resolve({ interrupted: false });
         } });
     });
     [['scrollX', 'scrollLeft'], ['pageXOffset', 'scrollLeft'], ['scrollY', 'scrollTop'], ['pageYOffset', 'scrollTop']].forEach(function (m) {
@@ -1454,6 +1456,7 @@
                 block = 'end';
             }
             scrollIntoViewOf(this, block, inline);
+            return Promise.resolve({ interrupted: false });
         } });
         Object.defineProperty(ELP, 'scrollIntoViewIfNeeded', { configurable: true, enumerable: true, writable: true, value: function () {
             scrollIntoViewOf(this, 'nearest', 'nearest');
