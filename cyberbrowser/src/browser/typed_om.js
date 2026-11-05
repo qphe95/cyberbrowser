@@ -1078,12 +1078,14 @@
         if (global.__cyberCssIsShorthand && global.__cyberCssIsShorthand(prop)) {
             /* (a logical pair of one value reads as that value, and a border's keyword) */
             var lone = !/\s/.test(text.replace(/\([^)]*\)/g, ''));
-            if (!(lone && (LOGICAL_PAIR.test(prop) || (/^border-(block|inline)(-width|-style)?$/.test(prop) && /^[a-z-]+$/i.test(text))))) return generic(text, prop);
+            /* (one keyword alone is a keyword, whatever it sets) */
+            var oneWord = /^(none|auto|normal|hidden|solid|dotted|dashed|double|groove|ridge|inset|outset|thin|medium|thick|currentcolor|transparent)$/i.test(text);
+            if (!(lone && (LOGICAL_PAIR.test(prop) || (oneWord && /^border(-[a-z]+)*$/.test(prop))))) return generic(text, prop);
         }
         /* (colors: not keywords of their own, but for these) */
         if (/(^|-)color$/.test(prop) && !/^(currentcolor|auto)$/i.test(text)) return generic(text, prop);
         /* (what has no typed form yet) */
-        if (UNTYPED.test(prop)) return generic(text, prop);
+        if (UNTYPED.test(prop) && !(/^[a-z][a-z-]*$/i.test(text) && !/^(font-family|transition-property)$/.test(prop))) return generic(text, prop);
         /* (a size or an amount out of range is kept as it was written) */
         if (/^calc\(\s*[-+]?[\d.]+(?:e[-+]?\d+)?(?:%|[a-z]+)?\s*\)$/i.test(text)) {
             var lone = null;

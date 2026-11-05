@@ -1102,6 +1102,23 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
     } else if (!strcmp(n, "column-rule-width") || !strcmp(n, "row-rule-width")) {
         const char *st = computed_of(ctx, cs, n[0] == 'c' ? "column-rule-style" : "row-rule-style");
         if (!strcmp(st, "none") || !strcmp(st, "hidden")) { free(r); r = strdup("0px"); }
+    }
+    /* (a line's width, and outline-offset's size, in whole device pixels: one at least) */
+    if ((strstr(n, "-width") && (!strncmp(n, "border-", 7) || !strncmp(n, "outline", 7) || !strcmp(n, "column-rule-width") || !strcmp(n, "row-rule-width")) &&
+         !strstr(n, "image")) || !strcmp(n, "outline-offset")) {
+        char *e = NULL;
+        double v = r ? strtod(r, &e) : 0.0;
+        if (r && e != r && !strcmp(e, "px") && v != 0.0 && !anim_has(cs->el, 0)) {
+            double m = fabs(v), snapped = m < 1.0 ? 1.0 : floor(m);
+            if (snapped != m) {
+                char b[48];
+                snprintf(b, sizeof b, "%gpx", v < 0 ? -snapped : snapped);
+                free(r);
+                r = strdup(b);
+            }
+        }
+    }
+    if (0) {
     } else if (!strcmp(n, "float")) {
         const char *pos = computed_of(ctx, cs, "position");
         if (!strcmp(pos, "absolute") || !strcmp(pos, "fixed")) { free(r); r = strdup("none"); }

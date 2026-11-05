@@ -23605,6 +23605,11 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
     else box->x = static_x + ml;
     if (area_x >= 0 && !has_left && !has_right)
         box->x = area_x == 0 ? cb_x + ml : area_x == 2 ? cb_x + cb_w - mr - box->width : cb_x + (cb_w - box->width) / 2.0;
+    /* (in its area with both insets: still toward the anchor, not by the flow's direction) */
+    else if (area_x >= 0 && has_left && has_right && j_mode < 0 && !(box->s->margin_auto & 0xA)) {
+        double lo = cb_x + box->left + ml, hi = cb_x + cb_w - box->right - mr - box->width;
+        box->x = area_x == 0 ? lo : area_x == 2 ? hi : (lo + hi) / 2.0;
+    }
     if (has_center_x) box->x = anchor_cx - box->width / 2.0;
     else if (has_left && has_right && j_mode >= 0 && !(box->s->margin_auto & 0xA)) {
         box->x = abs_align_place(cb_x, cb_w, box->left, box->right, ml, mr, box->width, j_mode, j_kw, cbb, true, cross);
@@ -23656,6 +23661,10 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
         layout_move_box(ctx, idx, box->x, anchor_cy - box->height / 2.0);
     } else if (area_y >= 0 && !has_top && !has_bottom) {
         double y = area_y == 0 ? cb_y + mt : area_y == 2 ? cb_y + cb_h - mb - box->height : cb_y + (cb_h - box->height) / 2.0;
+        if (y != box->y) layout_move_box(ctx, idx, box->x, y);
+    } else if (area_y >= 0 && has_top && has_bottom && !(box->s->margin_auto & 5)) {
+        double lo = cb_y + box->top + mt, hi = cb_y + cb_h - box->bottom - mb - box->height;
+        double y = area_y == 0 ? lo : area_y == 2 ? hi : (lo + hi) / 2.0;
         if (y != box->y) layout_move_box(ctx, idx, box->x, y);
     } else if (!has_top) {
         double y = box->y;
