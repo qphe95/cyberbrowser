@@ -4475,12 +4475,29 @@ DEF_DOM_RECT_GETTER(x, x)
 DEF_DOM_RECT_GETTER(y, y)
 DEF_DOM_RECT_GETTER(width, width)
 DEF_DOM_RECT_GETTER(height, height)
-DEF_DOM_RECT_GETTER(top, top)
-DEF_DOM_RECT_GETTER(right, right)
-DEF_DOM_RECT_GETTER(bottom, bottom)
-DEF_DOM_RECT_GETTER(left, left)
-
 #undef DEF_DOM_RECT_GETTER
+
+/* The edges from x, y, width and height as they are now: the lesser and the
+ * greater of each pair (a negative size goes the other way); NaN stays NaN. */
+static double rect_min(double a, double b) { return isnan(a) || isnan(b) ? NAN : a < b ? a : b; }
+static double rect_max(double a, double b) { return isnan(a) || isnan(b) ? NAN : a > b ? a : b; }
+#define DEF_DOM_RECT_EDGE(name, expr) \
+static GCValue js_dom_rect_get_##name(JSContextHandle ctx, GCValue this_val) { \
+    DOMRectDataHandle rect = JS_GetOpaqueHandle(this_val, js_dom_rect_class_id); \
+    if (SAFE_IS_NULL(rect)) { \
+        rect = JS_GetOpaqueHandle(this_val, js_dom_rect_read_only_class_id); \
+        if (SAFE_IS_NULL(rect)) return JS_ThrowTypeError(ctx, "Invalid DOMRect"); \
+    } \
+    double x = SAFE_GET_OR(rect, DOMRectDataHandle, x, 0.0), y = SAFE_GET_OR(rect, DOMRectDataHandle, y, 0.0); \
+    double w = SAFE_GET_OR(rect, DOMRectDataHandle, width, 0.0), h = SAFE_GET_OR(rect, DOMRectDataHandle, height, 0.0); \
+    (void)x; (void)y; (void)w; (void)h; \
+    return JS_NewFloat64(ctx, expr); \
+}
+DEF_DOM_RECT_EDGE(top, rect_min(y, y + h))
+DEF_DOM_RECT_EDGE(right, rect_max(x, x + w))
+DEF_DOM_RECT_EDGE(bottom, rect_max(y, y + h))
+DEF_DOM_RECT_EDGE(left, rect_min(x, x + w))
+#undef DEF_DOM_RECT_EDGE
 
 #define DEF_DOM_RECT_SETTER(name, field) \
 static GCValue js_dom_rect_set_##name(JSContextHandle ctx, GCValue this_val, GCValue val) { \

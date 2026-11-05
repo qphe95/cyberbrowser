@@ -666,6 +666,9 @@ static CssPropDef g_props[] = {
     L("lighting-color", "<color>", "white", 0),
     L("line-break", "auto | loose | normal | strict | anywhere", "auto", 1),
     L("line-clamp", "none | [ <integer [1,inf]> || auto || no-ellipsis || ellipsis || <string> ] -webkit-legacy?", "none", 0),
+    /* (the legacy line-clamp idiom's two) */
+    L("-webkit-line-clamp", "none | <integer [1,inf]>", "none", 0),
+    L("-webkit-box-orient", "horizontal | vertical | inline-axis | block-axis", "horizontal", 0),
     L("line-height", "normal | <number [0,inf]> | <length-percentage [0,inf]>", "normal", 1),
     SI("list-style", "<'list-style-position'> || <'list-style-image'> || <'list-style-type'>",
        "list-style-position list-style-image list-style-type", CSS_SH_SPECIAL),

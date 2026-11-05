@@ -899,7 +899,14 @@ static int calc_value(const Toks *ts, int i, int pct) {
         if (strcasecmp(f, "sign") == 0) return D_NUMBER;
         if (strcasecmp(f, "random") == 0 && (na < 2 || na > 3)) return -1;
         if (!strcasecmp(f, "sin") || !strcasecmp(f, "cos") || !strcasecmp(f, "tan")) return (args[0] & (D_NUMBER | D_ANGLE)) ? D_NUMBER : -1;
-        if (!strcasecmp(f, "asin") || !strcasecmp(f, "acos") || !strcasecmp(f, "atan") || !strcasecmp(f, "atan2")) return D_ANGLE;
+        /* (one number for these three; two of one type for atan2) */
+        if (!strcasecmp(f, "asin") || !strcasecmp(f, "acos") || !strcasecmp(f, "atan")) return na == 1 && args[0] == D_NUMBER ? D_ANGLE : -1;
+        if (!strcasecmp(f, "atan2")) {
+            if (na != 2) return -1;
+            int x = args[0] & ~D_PERCENT, y = args[1] & ~D_PERCENT;
+            if (x && y && x != y) return -1;
+            return D_ANGLE;
+        }
         /* (numbers only, and as many as each takes) */
         if (!strcasecmp(f, "pow") || !strcasecmp(f, "sqrt") || !strcasecmp(f, "log") || !strcasecmp(f, "exp")) {
             int want_lo = !strcasecmp(f, "pow") ? 2 : 1, want_hi = !strcasecmp(f, "pow") || !strcasecmp(f, "log") ? 2 : 1;
@@ -3942,6 +3949,7 @@ static const char *color_raw_of(const char *value) {
 }
 
 static char *css_prop_canon(const CssPropDef *p, const char *v);
+static int canon_words(const char *v, char (*w)[160], int max);
 static __thread bool g_canon_computed;
 static char *gradient_computed(const char *v);
 char *css_gradient_computed(const char *v) { return gradient_computed(v); }
@@ -3968,6 +3976,24 @@ char *css_prop_compute(const CssPropDef *p, const char *value, const CssComputeE
         toks_free(&ts);
     }
     free(v);
+    /* (scale's percentages, computed: the numbers they are) */
+    if (out && !strcmp(p->name, "scale") && strchr(out, '%')) {
+        char w[3][160];
+        int nw = canon_words(out, w, 3);
+        Buf sb = { 0 };
+        bool ok = nw > 0;
+        for (int i = 0; i < nw && ok; i++) {
+            const char *t = w[i];
+            if (!strncasecmp(t, "calc(", 5)) t += 5;
+            char *e = NULL;
+            double d = strtod(t, &e);
+            if (e == t) { ok = false; break; }
+            if (*e == '%') d /= 100;
+            if (i) buf_ch(&sb, ' ');
+            fmt_number(&sb, d);
+        }
+        if (ok) { buf_ch(&sb, 0); free(out); out = sb.s; } else free(sb.s);
+    }
     if (out && (!strcmp(p->name, "contain") || !strcmp(p->name, "text-fit") ||
                 (strstr(p->name, "timing-function") && strstr(out, "linear(")))) {
         g_canon_computed = true;
@@ -8256,6 +8282,22 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
         buf_ch(&s, 0);
         if (!changed || !strcmp(s.s, v)) { free(s.s); return NULL; }
         return s.s;
+    }
+    if (!strcmp(n, "text-combine-upright") && strcasestr_simple(v, "calc(")) {
+        /* (digits calc(...): an integer's math, coming to 2, 3 or 4) */
+        const char *c = strcasestr_simple(v, "calc(");
+        for (const char *k = c + 5; *k; k++) if (*k == '.' || *k == 'e' || *k == 'E' || *k == '/') return strdup("");
+        CalcSum s;
+        double d;
+        const char *u;
+        Toks ts = { 0 };
+        if (!tokenize(c, strlen(c), &ts) || ts.n < 1) { toks_free(&ts); return strdup(""); }
+        bool ok = calc_simplify_value(&ts, 0, &s) && calc_one(&s, &d, &u) && !*u && d >= 2 && d <= 4 && d == floor(d);
+        toks_free(&ts);
+        if (!ok) return strdup("");
+        char b[32];
+        snprintf(b, sizeof b, "digits %d", (int)d);
+        return strdup(b);
     }
     if (!strcmp(n, "size")) {
         /* (a square once, a portrait page size by its name, names in lower case) */

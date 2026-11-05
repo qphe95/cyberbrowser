@@ -2110,6 +2110,18 @@
             if (this !== undefined && this !== null && this !== global) throw new TypeError('Illegal invocation');
             if (arguments.length < 1) throw new TypeError("Failed to execute 'matchMedia' on 'Window': 1 argument required, but only 0 present.");
             var q = String(query), mql = Object.create(MediaQueryList.prototype);
+            /* (the end of the input closes what's open) */
+            var open = 0;
+            for (var qi = 0; qi < q.length; qi++) { if (q[qi] === '(') open++; else if (q[qi] === ')' && open) open--; }
+            while (open-- > 0) q += ')';
+            /* (a resolution worked out in calc(): in dppx) */
+            q = q.replace(/calc\(([\d.\s+\-*\/]*(?:x|dppx)[\d.\s+\-*\/xdp]*)\)/gi, function (all, e) {
+                var t = e.replace(/(\d*\.?\d+)\s*(?:dppx|x)\b/gi, '$1');
+                if (!/^[\d.\s+\-*\/()]+$/.test(t)) return all;
+                var v;
+                try { v = Function('return (' + t + ')')(); } catch (er) { return all; }
+                return typeof v === 'number' && isFinite(v) ? 'calc(' + v + 'dppx)' : all;
+            });
             MQL_PRIVATE.set(mql, { query: q, media: global.__cyberMediaText ? global.__cyberMediaText(q) : evalMedia.call(global, q).media, last: false, onchange: null });
             return mql;
         });

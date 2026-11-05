@@ -1197,6 +1197,28 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
         for (size_t k = 0; k < sizeof map / sizeof map[0]; k++)
             if (!strcmp(r, map[k][0])) { free(r); r = strdup(map[k][1]); break; }
     }
+    if (r && !strcmp(n, "display")) {
+        /* (math outside MathML: flow) */
+        if (strstr(r, "math") && dom_valid(cs->el) && g_dom.ns[dom_slot(cs->el)] != DOM_NS_MATHML) {
+            const char *to = strstr(r, "block") ? "block" : "inline";
+            free(r);
+            r = strdup(to);
+        }
+        /* (the prefixed flex names: flex's) */
+        else if (!strcmp(r, "-webkit-flex")) { free(r); r = strdup("flex"); }
+        else if (!strcmp(r, "-webkit-inline-flex")) { free(r); r = strdup("inline-flex"); }
+        /* (a vertical box clamped to lines: a block of its own) */
+        else if (!strcmp(r, "-webkit-box") || !strcmp(r, "-webkit-inline-box")) {
+            const char *orient = computed_of(ctx, cs, "-webkit-box-orient"), *clamp = computed_of(ctx, cs, "-webkit-line-clamp");
+            const char *lc = computed_of(ctx, cs, "line-clamp"), *cont = computed_of(ctx, cs, "continue");
+            bool clamped = (clamp && *clamp && strcmp(clamp, "none")) || (lc && *lc && strcmp(lc, "none")) || (cont && !strcmp(cont, "discard"));
+            if (orient && !strcmp(orient, "vertical") && clamped) {
+                bool inl = !strcmp(r, "-webkit-inline-box");
+                free(r);
+                r = strdup(inl ? "inline-block" : "flow-root");
+            }
+        }
+    }
     /* resolved values: a rendered box's used sizes, margins and paddings */
     if (cs->used.rendered) {
         static const char *const sides[] = { "top", "right", "bottom", "left" };
@@ -1857,6 +1879,15 @@ char *computed_style_value(JSContextHandle ctx, ComputedStyle *cs, const char *p
         for (int i = 0; i < n; i++) {
             const char *v = computed_of(ctx, cs, names[i]);
             vals[i] = v ? strdup(v) : NULL;
+        }
+        /* (a text decoration's color that is the color: as it was, currentcolor) */
+        if (!strcmp(p->name, "text-decoration")) {
+            const char *col = computed_of(ctx, cs, "color");
+            for (int i = 0; i < n; i++)
+                if (!strcmp(names[i], "text-decoration-color") && vals[i] && col && !strcmp(vals[i], col)) {
+                    free((char *)vals[i]);
+                    vals[i] = strdup("currentcolor");
+                }
         }
         char *s = css_prop_shorthand_serialize(p, vals);
         for (int i = 0; i < n; i++) free((char *)vals[i]);

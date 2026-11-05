@@ -704,6 +704,16 @@ static void build_attrs(void) {
     int cap = 0;
     for (int i = 0; i < css_prop_count(); i++) {
         const CssPropDef *p = css_prop_at(i);
+        /* (a -webkit- one of its own: webkitX and WebkitX, as its aliases have) */
+        if (!strncmp(p->name, "-webkit-", 8)) {
+            char *wc = css_prop_camel(p->name + 1);
+            add_attr(&cap, wc, p);
+            char *up = strdup(wc);
+            up[0] = (char)toupper((unsigned char)up[0]);
+            add_attr(&cap, up, p);
+            add_attr(&cap, p->name, p);
+            continue;
+        }
         char *camel = css_prop_camel(p->name);
         add_attr(&cap, camel, p);                   /* (kept: the entries point at the names) */
         if (strchr(p->name, '-')) add_attr(&cap, p->name, p);
