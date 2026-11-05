@@ -691,6 +691,136 @@
             Object.defineProperty(global, d[0], { value: C, writable: true, enumerable: false, configurable: true });
         });
     }
+    /* (for idl_shape.c: an interface nothing behind it yet, its members all there) */
+    Object.defineProperty(global, '__cyberStubInterface', { configurable: true, value: function (name, parent, ro, rw, ops) {
+        var had = !!global[name];
+        if (!had) plainInterfaces([[name, parent, [], [], ops]]);
+        var C = global[name];
+        if (typeof C !== 'function') return;
+        var proto = C.prototype;
+        var dash = function (a) { return a.replace(/[A-Z]/g, function (m) { return '-' + m.toLowerCase(); }); };
+        /* (a style declaration's: what it holds; the rest, nothing yet) */
+        var isDecl = global.CSSStyleDeclaration && proto instanceof global.CSSStyleDeclaration, held = new WeakMap();
+        ro.concat(rw).forEach(function (a, i) {
+            if (Object.getOwnPropertyDescriptor(proto, a)) return;
+            var get = { get: function () {
+                if (!(this instanceof C)) throw new TypeError('Illegal invocation');
+                if (isDecl) return this.getPropertyValue(a.indexOf('-') >= 0 ? a : dash(a));
+                var kept = held.get(this);
+                return kept ? kept[a] : undefined;
+            } };
+            var g = Object.getOwnPropertyDescriptor(get, 'get').value, s;
+            if (i >= ro.length) {
+                var set = { set: function (v) {
+                    if (!(this instanceof C)) throw new TypeError('Illegal invocation');
+                    if (isDecl) { this.setProperty(a.indexOf('-') >= 0 ? a : dash(a), v); return; }
+                    /* (what's put in, kept for reading back) */
+                    var kept = held.get(this);
+                    if (!kept) held.set(this, kept = {});
+                    kept[a] = v;
+                } };
+                s = Object.getOwnPropertyDescriptor(set, 'set').value;
+            }
+            Object.defineProperty(proto, a, { get: g, set: s, enumerable: true, configurable: true });
+        });
+    } });
+    /* (for idl_shape.c: a script-made accessor checks its this, as a native one does) */
+    var fnText = Function.prototype.toString;
+    Object.defineProperty(global, '__cyberBrandAccessors', { configurable: true, value: function (C) {
+        var proto = C.prototype;
+        Object.getOwnPropertyNames(proto).forEach(function (k) {
+            var d = Object.getOwnPropertyDescriptor(proto, k);
+            if (!d.get || fnText.call(d.get).indexOf('[native code]') >= 0) return;
+            var g = d.get, s = d.set;
+            var get = function () { if (!(this instanceof C)) throw new TypeError('Illegal invocation'); return g.call(this); };
+            var set = s && function (v) { if (!(this instanceof C)) throw new TypeError('Illegal invocation'); return s.call(this, v); };
+            Object.defineProperty(proto, k, { get: get, set: set, enumerable: d.enumerable, configurable: true });
+        });
+    } });
+    /* (a screen, what the media features' device says) */
+    function liveInterface(name, parent, ro) {
+        var C = { f: function () { throw new TypeError('Illegal constructor'); } }.f;
+        Object.defineProperty(C, 'name', { value: name, configurable: true });
+        Object.defineProperty(C, 'length', { value: 0, configurable: true });
+        var pc = parent && global[parent];
+        if (pc) Object.setPrototypeOf(C, pc);
+        var proto = Object.create(pc ? pc.prototype : Object.prototype);
+        Object.defineProperty(C, 'prototype', { value: proto, writable: false, enumerable: false, configurable: false });
+        Object.defineProperty(proto, 'constructor', { value: C, writable: true, enumerable: false, configurable: true });
+        Object.defineProperty(proto, Symbol.toStringTag, { value: name, configurable: true });
+        Object.keys(ro).forEach(function (k) {
+            var read = ro[k];
+            Object.defineProperty(proto, k, { get: function () { if (!(this instanceof C)) throw new TypeError('Illegal invocation'); return read.call(this); }, enumerable: true, configurable: true });
+        });
+        Object.defineProperty(global, name, { value: C, writable: true, enumerable: false, configurable: true });
+        return C;
+    }
+    if (global.document && !global.Screen) {
+        var ScreenC = liveInterface('Screen', null, {
+            availWidth: function () { return 1920; }, availHeight: function () { return 1040; }, width: function () { return 1920; },
+            height: function () { return 1080; }, colorDepth: function () { return 24; }, pixelDepth: function () { return 24; }
+        });
+        var theScreen = Object.create(ScreenC.prototype);
+        Object.defineProperty(global, 'screen', { get: function screen() { return theScreen; }, set: function (v) { Object.defineProperty(global, 'screen', { value: v, writable: true, configurable: true, enumerable: true }); }, enumerable: true, configurable: true });
+        var VV = liveInterface('VisualViewport', 'EventTarget', {
+            offsetLeft: function () { return 0; }, offsetTop: function () { return 0; },
+            pageLeft: function () { return global.scrollX || 0; }, pageTop: function () { return global.scrollY || 0; },
+            width: function () { return global.innerWidth; }, height: function () { return global.innerHeight; }, scale: function () { return 1; }
+        });
+        ['onresize', 'onscroll', 'onscrollend'].forEach(function (k) {
+            var held = new WeakMap();
+            Object.defineProperty(VV.prototype, k, { enumerable: true, configurable: true,
+                get: function () { if (!(this instanceof VV)) throw new TypeError('Illegal invocation'); return held.get(this) || null; },
+                set: function (f) {
+                    if (!(this instanceof VV)) throw new TypeError('Illegal invocation');
+                    var was = held.get(this);
+                    if (was) this.removeEventListener(k.slice(2), was);
+                    if (typeof f === 'function') { held.set(this, f); this.addEventListener(k.slice(2), f); } else held.delete(this);
+                } });
+        });
+        var theViewport = null;
+        Object.defineProperty(global, 'visualViewport', { enumerable: true, configurable: true, get: function visualViewport() {
+            if (!theViewport) {
+                theViewport = new EventTarget();
+                Object.setPrototypeOf(theViewport, VV.prototype);
+            }
+            return theViewport;
+        }, set: function (v) { Object.defineProperty(global, 'visualViewport', { value: v, writable: true, configurable: true, enumerable: true }); } });
+        var CaretP = liveInterface('CaretPosition', null, {
+            offsetNode: function () { return this.__node; }, offset: function () { return this.__offset; }
+        });
+        Object.defineProperty(CaretP.prototype, 'getClientRect', { writable: true, enumerable: true, configurable: true, value: function getClientRect() {
+            if (!(this instanceof CaretP)) throw new TypeError('Illegal invocation');
+            var r = global.document.createRange();
+            r.setStart(this.__node, this.__offset);
+            r.collapse(true);
+            return r.getBoundingClientRect();
+        } });
+        var DocP = global.Document && global.Document.prototype;
+        if (DocP && !DocP.caretPositionFromPoint) Object.defineProperty(DocP, 'caretPositionFromPoint', { writable: true, enumerable: true, configurable: true,
+            value: function caretPositionFromPoint(x, y) {
+                if (arguments.length < 2) throw new TypeError('caretPositionFromPoint: 2 arguments required');
+                if (x < 0 || y < 0 || x > global.innerWidth || y > global.innerHeight) return null;
+                var el = this.elementFromPoint(x, y);
+                if (!el) return null;
+                var p = Object.create(CaretP.prototype), n = el.firstChild && el.firstChild.nodeType === 3 ? el.firstChild : el;
+                Object.defineProperty(p, '__node', { value: n });
+                Object.defineProperty(p, '__offset', { value: 0 });
+                return p;
+            } });
+        var ElP = global.Element && global.Element.prototype;
+        if (ElP && !('currentCSSZoom' in ElP)) Object.defineProperty(ElP, 'currentCSSZoom', { enumerable: true, configurable: true,
+            get: function () {
+                if (!(this instanceof Element)) throw new TypeError('Illegal invocation');
+                var z = 1;
+                for (var e = this; e; e = e.parentElement) {
+                    var v = parseFloat(global.getComputedStyle(e).zoom);
+                    if (v > 0) z *= v;
+                }
+                return z;
+            } });
+    }
+
     /* (filter-effects: its elements; a window's only) */
     if (global.document) plainInterfaces([["SVGFilterElement","SVGElement",["filterUnits","primitiveUnits","x","y","width","height"],[],[]],["SVGFEBlendElement","SVGElement",["in1","in2","mode","x","y","width","height","result"],[["SVG_FEBLEND_MODE_UNKNOWN",0],["SVG_FEBLEND_MODE_NORMAL",1],["SVG_FEBLEND_MODE_MULTIPLY",2],["SVG_FEBLEND_MODE_SCREEN",3],["SVG_FEBLEND_MODE_DARKEN",4],["SVG_FEBLEND_MODE_LIGHTEN",5],["SVG_FEBLEND_MODE_OVERLAY",6],["SVG_FEBLEND_MODE_COLOR_DODGE",7],["SVG_FEBLEND_MODE_COLOR_BURN",8],["SVG_FEBLEND_MODE_HARD_LIGHT",9],["SVG_FEBLEND_MODE_SOFT_LIGHT",10],["SVG_FEBLEND_MODE_DIFFERENCE",11],["SVG_FEBLEND_MODE_EXCLUSION",12],["SVG_FEBLEND_MODE_HUE",13],["SVG_FEBLEND_MODE_SATURATION",14],["SVG_FEBLEND_MODE_COLOR",15],["SVG_FEBLEND_MODE_LUMINOSITY",16]],[]],["SVGFEColorMatrixElement","SVGElement",["in1","type","values","x","y","width","height","result"],[["SVG_FECOLORMATRIX_TYPE_UNKNOWN",0],["SVG_FECOLORMATRIX_TYPE_MATRIX",1],["SVG_FECOLORMATRIX_TYPE_SATURATE",2],["SVG_FECOLORMATRIX_TYPE_HUEROTATE",3],["SVG_FECOLORMATRIX_TYPE_LUMINANCETOALPHA",4]],[]],["SVGFEComponentTransferElement","SVGElement",["in1","x","y","width","height","result"],[],[]],["SVGComponentTransferFunctionElement","SVGElement",["type","tableValues","slope","intercept","amplitude","exponent","offset"],[["SVG_FECOMPONENTTRANSFER_TYPE_UNKNOWN",0],["SVG_FECOMPONENTTRANSFER_TYPE_IDENTITY",1],["SVG_FECOMPONENTTRANSFER_TYPE_TABLE",2],["SVG_FECOMPONENTTRANSFER_TYPE_DISCRETE",3],["SVG_FECOMPONENTTRANSFER_TYPE_LINEAR",4],["SVG_FECOMPONENTTRANSFER_TYPE_GAMMA",5]],[]],["SVGFEFuncRElement","SVGComponentTransferFunctionElement",[],[],[]],["SVGFEFuncGElement","SVGComponentTransferFunctionElement",[],[],[]],["SVGFEFuncBElement","SVGComponentTransferFunctionElement",[],[],[]],["SVGFEFuncAElement","SVGComponentTransferFunctionElement",[],[],[]],["SVGFECompositeElement","SVGElement",["in1","in2","operator","k1","k2","k3","k4","x","y","width","height","result"],[["SVG_FECOMPOSITE_OPERATOR_UNKNOWN",0],["SVG_FECOMPOSITE_OPERATOR_OVER",1],["SVG_FECOMPOSITE_OPERATOR_IN",2],["SVG_FECOMPOSITE_OPERATOR_OUT",3],["SVG_FECOMPOSITE_OPERATOR_ATOP",4],["SVG_FECOMPOSITE_OPERATOR_XOR",5],["SVG_FECOMPOSITE_OPERATOR_ARITHMETIC",6]],[]],["SVGFEConvolveMatrixElement","SVGElement",["in1","orderX","orderY","kernelMatrix","divisor","bias","targetX","targetY","edgeMode","kernelUnitLengthX","kernelUnitLengthY","preserveAlpha","x","y","width","height","result"],[["SVG_EDGEMODE_UNKNOWN",0],["SVG_EDGEMODE_DUPLICATE",1],["SVG_EDGEMODE_WRAP",2],["SVG_EDGEMODE_NONE",3]],[]],["SVGFEDiffuseLightingElement","SVGElement",["in1","surfaceScale","diffuseConstant","kernelUnitLengthX","kernelUnitLengthY","x","y","width","height","result"],[],[]],["SVGFEDistantLightElement","SVGElement",["azimuth","elevation"],[],[]],["SVGFEPointLightElement","SVGElement",["x","y","z"],[],[]],["SVGFESpotLightElement","SVGElement",["x","y","z","pointsAtX","pointsAtY","pointsAtZ","specularExponent","limitingConeAngle"],[],[]],["SVGFEDisplacementMapElement","SVGElement",["in1","in2","scale","xChannelSelector","yChannelSelector","x","y","width","height","result"],[["SVG_CHANNEL_UNKNOWN",0],["SVG_CHANNEL_R",1],["SVG_CHANNEL_G",2],["SVG_CHANNEL_B",3],["SVG_CHANNEL_A",4]],[]],["SVGFEDropShadowElement","SVGElement",["in1","dx","dy","stdDeviationX","stdDeviationY","x","y","width","height","result"],[],[["setStdDeviation",2]]],["SVGFEFloodElement","SVGElement",["x","y","width","height","result"],[],[]],["SVGFEGaussianBlurElement","SVGElement",["in1","stdDeviationX","stdDeviationY","edgeMode","x","y","width","height","result"],[["SVG_EDGEMODE_UNKNOWN",0],["SVG_EDGEMODE_DUPLICATE",1],["SVG_EDGEMODE_WRAP",2],["SVG_EDGEMODE_NONE",3]],[["setStdDeviation",2]]],["SVGFEImageElement","SVGElement",["preserveAspectRatio","crossOrigin","x","y","width","height","result","href"],[],[]],["SVGFEMergeElement","SVGElement",["x","y","width","height","result"],[],[]],["SVGFEMergeNodeElement","SVGElement",["in1"],[],[]],["SVGFEMorphologyElement","SVGElement",["in1","operator","radiusX","radiusY","x","y","width","height","result"],[["SVG_MORPHOLOGY_OPERATOR_UNKNOWN",0],["SVG_MORPHOLOGY_OPERATOR_ERODE",1],["SVG_MORPHOLOGY_OPERATOR_DILATE",2]],[]],["SVGFEOffsetElement","SVGElement",["in1","dx","dy","x","y","width","height","result"],[],[]],["SVGFESpecularLightingElement","SVGElement",["in1","surfaceScale","specularConstant","specularExponent","kernelUnitLengthX","kernelUnitLengthY","x","y","width","height","result"],[],[]],["SVGFETileElement","SVGElement",["in1","x","y","width","height","result"],[],[]],["SVGFETurbulenceElement","SVGElement",["baseFrequencyX","baseFrequencyY","numOctaves","seed","stitchTiles","type","x","y","width","height","result"],[["SVG_TURBULENCE_TYPE_UNKNOWN",0],["SVG_TURBULENCE_TYPE_FRACTALNOISE",1],["SVG_TURBULENCE_TYPE_TURBULENCE",2],["SVG_STITCHTYPE_UNKNOWN",0],["SVG_STITCHTYPE_STITCH",1],["SVG_STITCHTYPE_NOSTITCH",2]],[]]]);
 

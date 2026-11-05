@@ -214,8 +214,65 @@ GCValue idl_window_only_names(JSContextHandle ctx) {
     return a;
 }
 
+/* Interfaces nothing implements yet, and nothing relies on: there, with their members. */
+static const char *const k_idl_stubs[] = {
+    "CSSFontFaceDescriptors", "CSSPositionTryDescriptors", "CSSPageDescriptors", "CSSStyleProperties", "CSSMarginRule",
+    "CSSFontFeatureValuesMap", "FontFaceVariationAxis", "FontFaceVariations", "FontFacePalette", "FontFacePalettes",
+    "FontFaceFeatures", "CSSSupportsConditionRule", "SVGMaskElement", "SVGClipPathElement", "DOMRectList",
+    "ViewTransitionTypeSet", "CSSColor", "CSSParserRule", "CSSParserAtRule", "CSSParserQualifiedRule", "CSSParserDeclaration",
+    "CSSParserValue", "CSSParserBlock", "CSSParserFunction", "FontFace", "FontFaceSet", "FontFaceSetLoadEvent",
+    "CSSFontFeatureValuesRule", "CSSGroupingRule",
+};
+
+static const IdlIface *iface_named(const char *name) {
+    for (int i = 0; i < NIFACE; i++)
+        if (!strcmp(k_idl_ifaces[i].name, name)) return &k_idl_ifaces[i];
+    return NULL;
+}
+
+static void stub_interface(JSContextHandle ctx, GCValue global, const IdlIface *f) {
+    if (f->parent) {
+        const IdlIface *up = iface_named(f->parent);
+        if (up) stub_interface(ctx, global, up);
+    }
+    GCValue fn = JS_GetPropertyStr(ctx, global, "__cyberStubInterface");
+    if (!JS_IsFunction(ctx, fn)) return;
+    GCValue ro = JS_NewArray(ctx), rw = JS_NewArray(ctx), ops = JS_NewArray(ctx);
+    uint32_t nro = 0, nrw = 0, nop = 0;
+    for (int k = 0; k < f->count; k++) {
+        const IdlMember *m = &k_idl_members[f->first + k];
+        if (m->kind == IDL_RO_ATTR) JS_SetPropertyUint32(ctx, ro, nro++, JS_NewString(ctx, m->name));
+        else if (m->kind == IDL_ATTR) JS_SetPropertyUint32(ctx, rw, nrw++, JS_NewString(ctx, m->name));
+        else if (m->kind == IDL_OP) {
+            GCValue op = JS_NewArray(ctx);
+            JS_SetPropertyUint32(ctx, op, 0, JS_NewString(ctx, m->name));
+            JS_SetPropertyUint32(ctx, op, 1, JS_NewInt32(ctx, m->required));
+            JS_SetPropertyUint32(ctx, ops, nop++, op);
+        }
+    }
+    GCValue args[5] = { JS_NewString(ctx, f->name), f->parent ? JS_NewString(ctx, f->parent) : JS_NULL, ro, rw, ops };
+    GCValue r = JS_Call(ctx, fn, JS_UNDEFINED, 5, args);
+    if (JS_IsException(r)) JS_GetException(ctx);
+}
+
 void idl_shape_apply(JSContextHandle ctx, GCValue global) {
     JS_SetBrandCheck(brand_check);
+    for (size_t s = 0; s < sizeof k_idl_stubs / sizeof k_idl_stubs[0]; s++) {
+        const IdlIface *f = iface_named(k_idl_stubs[s]);
+        if (f) stub_interface(ctx, global, f);
+    }
+    /* (the interfaces made in script: their accessors check this) */
+    {
+        GCValue brand_js = JS_GetPropertyStr(ctx, global, "__cyberBrandAccessors");
+        for (int i = 0; i < NIFACE && JS_IsFunction(ctx, brand_js); i++) {
+            const char *nm = k_idl_ifaces[i].name;
+            if (strncmp(nm, "CSS", 3) && strncmp(nm, "FontFace", 8) && strcmp(nm, "StyleSheet") && strcmp(nm, "StylePropertyMapReadOnly") && strcmp(nm, "StylePropertyMap")) continue;
+            GCValue c = JS_GetPropertyStr(ctx, global, nm);
+            if (!JS_IsFunction(ctx, c)) continue;
+            GCValue r = JS_Call(ctx, brand_js, JS_UNDEFINED, 1, &c);
+            if (JS_IsException(r)) JS_GetException(ctx);
+        }
+    }
     GCValue win = JS_GetPropertyStr(ctx, global, "window");
     bool win_other = JS_IsObject(win) && !JS_StrictEq(ctx, win, global);
     Checked *seen = NULL;

@@ -2973,9 +2973,13 @@ static bool mq_feature_lookup(const char *name, double vw, double vh, MqFeature 
     memset(f, 0, sizeof(*f));
     f->name = name;
     double ratio = vh > 0 ? vw / vh : 0;
-    if (strcmp(name, "width") == 0 || strcmp(name, "device-width") == 0) { f->type = MQ_LEN; f->num = vw; }
-    else if (strcmp(name, "height") == 0 || strcmp(name, "device-height") == 0) { f->type = MQ_LEN; f->num = vh; }
-    else if (strcmp(name, "aspect-ratio") == 0 || strcmp(name, "device-aspect-ratio") == 0) { f->type = MQ_RATIO; f->num = ratio; }
+    /* (the device: what window.screen says) */
+    if (strcmp(name, "device-width") == 0) { f->type = MQ_LEN; f->num = 1920; }
+    else if (strcmp(name, "device-height") == 0) { f->type = MQ_LEN; f->num = 1080; }
+    else if (strcmp(name, "device-aspect-ratio") == 0) { f->type = MQ_RATIO; f->num = 1920.0 / 1080.0; }
+    else if (strcmp(name, "width") == 0) { f->type = MQ_LEN; f->num = vw; }
+    else if (strcmp(name, "height") == 0) { f->type = MQ_LEN; f->num = vh; }
+    else if (strcmp(name, "aspect-ratio") == 0) { f->type = MQ_RATIO; f->num = ratio; }
     else if (strcmp(name, "resolution") == 0) { f->type = MQ_RES; f->num = 1.0; }
     else if (strcmp(name, "device-pixel-ratio") == 0) { f->type = MQ_NUM; f->num = 1.0; }
     else if (strcmp(name, "color") == 0) { f->type = MQ_NUM; f->num = 8.0; }

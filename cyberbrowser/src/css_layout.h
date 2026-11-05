@@ -364,6 +364,12 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char content_set;
     /* (calc-size() on a keyword: the expression over what the keyword comes to) */
     const char *csz_w, *csz_h;
+    /* (content keywords: min-width's and max-width's, 1 min 2 max 3 fit; on height the
+     * content is what it comes to) */
+    unsigned char mm_kw_w[2], h_kw, mm_kw_h;
+    /* (contain: size and inline-size: 1 inline, 2 block; and the sizes it then has) */
+    unsigned char contain_size;
+    float cis_w, cis_h;     /* contain-intrinsic-width and -height, px; 0 none */
     CssAlignItems align_items;
 
     double flex_basis;

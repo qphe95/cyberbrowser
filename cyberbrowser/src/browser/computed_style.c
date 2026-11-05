@@ -258,6 +258,19 @@ static const char *computed_of(JSContextHandle ctx, ComputedStyle *cs, const cha
         /* (flex-start and flex-end compute to flow-start and flow-end) */
         char *fx = cs->comp[i] && (name[0] == 'a' || name[0] == 'j') && (!strncmp(name, "align-", 6) || !strncmp(name, "justify-", 8)) ? strstr(cs->comp[i], "flex-") : NULL;
         if (fx && (!strcmp(fx, "flex-start") || !strcmp(fx, "flex-end"))) { fx[1] = 'l'; fx[2] = 'o'; fx[3] = 'w'; }
+        /* (a track's lengths don't go below nothing) */
+        if (cs->comp[i] && name[0] == 'g' && (!strcmp(name, "grid-auto-rows") || !strcmp(name, "grid-auto-columns") ||
+                                              !strcmp(name, "grid-template-rows") || !strcmp(name, "grid-template-columns"))) {
+            char *c = cs->comp[i];
+            for (char *m = strchr(c, '-'); m; m = strchr(m + 1, '-')) {
+                if (!(m == c || m[-1] == ' ' || m[-1] == '(') || !(isdigit((unsigned char)m[1]) || m[1] == '.')) continue;
+                char *e = NULL;
+                strtod(m, &e);
+                if (strncmp(e, "px", 2)) continue;
+                *m = '0';
+                memmove(m + 1, e, strlen(e) + 1);
+            }
+        }
         /* (gaps don't go below nothing, however they're worked out) */
         if (cs->comp[i] && cs->comp[i][0] == '-' && (!strcmp(name, "row-gap") || !strcmp(name, "column-gap")) && !strchr(cs->comp[i], '%')) {
             free(cs->comp[i]);
@@ -290,6 +303,18 @@ static const char *computed_of(JSContextHandle ctx, ComputedStyle *cs, const cha
                 memmove(cs->comp[i], cs->comp[i] + 5, pl);
                 cs->comp[i][pl] = 0;
             }
+        }
+        /* (zoom: a number; none at all is normal) */
+        if (cs->comp[i] && name[0] == 'z' && !strcmp(name, "zoom")) {
+            char *e = NULL;
+            double z = strtod(cs->comp[i], &e);
+            if (e == cs->comp[i]) z = 1.0;
+            else if (*e == '%') z /= 100.0;
+            if (z <= 0.0) z = 1.0;
+            char zb[32];
+            snprintf(zb, sizeof zb, "%.6g", z);
+            free(cs->comp[i]);
+            cs->comp[i] = strdup(zb);
         }
         /* (the size a font of no size is kept at) */
         if (cs->comp[i] && name[0] == 'f' && !strcmp(name, "font-size") && !strcmp(cs->comp[i], "0.01px")) {
@@ -580,6 +605,8 @@ static bool size_spec_special(const char *s)
 {
     if (!s) return true;
     if (strstr(s, "calc-size(")) return true;
+    /* (a percentage: what it comes to is the layout's) */
+    if (strchr(s, '%')) return true;
     static const char *const kw[] = { "auto", "none", "min-content", "max-content", "fit-content", "stretch", "initial", "unset", "inherit", "revert", "revert-layer" };
     for (size_t i = 0; i < sizeof(kw) / sizeof(kw[0]); i++) if (!strcasecmp(s, kw[i])) return true;
     return false;
@@ -911,8 +938,9 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
         }
     }
     /* (a grid's tracks: as they came out) */
+    /* (none stays none, implicit tracks or not) */
     if (cs->used.rendered && !cs->pseudo && r && (!strcmp(n, "grid-template-columns") || !strcmp(n, "grid-template-rows")) &&
-        !strstr(r, "subgrid")) {
+        !strstr(r, "subgrid") && s && strcmp(s, "none")) {
         const char *dsp = computed_of(ctx, cs, "display");
         if (!strcmp(dsp, "grid") || !strcmp(dsp, "inline-grid") || strstr(dsp, "grid-lanes")) {
             static double tracks[2000];

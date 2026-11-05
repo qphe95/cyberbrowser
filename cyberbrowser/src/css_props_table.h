@@ -876,7 +876,7 @@ static CssPropDef g_props[] = {
     L("x", "<length-percentage>", "0px", 0),
     L("y", "<length-percentage>", "0px", 0),
     L("z-index", "auto | <integer>", "auto", 0),
-    L("zoom", "normal | reset | <number [0,inf]> | <percentage [0,inf]>", "1", 1),
+    L("zoom", "normal | reset | <number [0,inf]> | <percentage [0,inf]>", "1", 0),
 };
 
 #undef L

@@ -125,6 +125,8 @@
     function finish(prop, v) {
         /* (a gap rule's width snaps as a border's does) */
         if (/^(column|row)-rule-width$/.test(prop)) return v <= 0 ? 0 : v < 1 ? 1 : Math.floor(v + 0.02);
+        /* (no size at all is the size it was) */
+        if (prop === 'zoom') return v <= 0 ? 1 : v;
         if (prop === 'opacity' || /-opacity$/.test(prop)) v = Math.max(0, Math.min(1, v));
         else if (INTEGER.test(prop)) v = Math.round(v);
         else if (NONNEG.test(prop) && v < 0) v = 0;
@@ -1016,6 +1018,9 @@
     }
     /* (four numbers that are one, or two, as box values come to) */
     function boxCollapse(v) {
+        /* (fill, after the numbers) */
+        var fill = /\s+fill$/.test(v);
+        if (fill) return boxCollapse(v.replace(/\s+fill$/, '')) + ' fill';
         var p = v.split(' ');
         if (p.length !== 4 || /\//.test(v)) return v;
         if (p[3] !== p[1]) return v;
@@ -1181,7 +1186,7 @@
         return m ? [+m[1], +m[2], +m[3], m[4] === undefined ? 1 : +m[4]] : null;
     }
     /* offset-rotate: whether it follows the path, and the angle over that. */
-    var IMAGE_PROP = /^background-image$/;
+    var IMAGE_PROP = /^(background-image|list-style-image)$/;
     function offsetRotateParts(v) {
         var m = /^(?:(auto|reverse)\s*)?([^\s]*?)(?:\s*(auto|reverse))?$/i.exec(String(v).trim());
         if (!m) return null;
@@ -1195,6 +1200,8 @@
         return { flag: !!kw, deg: deg + (kw === 'reverse' ? 180 : 0) };
     }
     function interpolate(prop, a, b, t) {
+        /* (counters don't go between) */
+        if (/^counter-/.test(prop)) return t < 0.5 ? a : b;
         if (prop === 'border-shape') {
             var bs = borderShapeInterpolate(a, b, t);
             return bs === null ? (t < 0.5 ? a : b) : bs;
@@ -1397,6 +1404,13 @@
             var ab = combine(prop, under, value, function (x, y) { return x + y; });
             return ab === null ? value : boxCollapse(ab);
         }
+        /* (a corner's two radii, the same: one) */
+        if (/^border-.*-radius$/.test(prop)) {
+            var rr = combine(prop, under, value, function (x, y) { return x + y; });
+            if (rr === null) return value;
+            var rp = rr.split(' ');
+            return rp.length === 2 && rp[0] === rp[1] ? rp[0] : rr;
+        }
         if (prop === 'transform-origin') {
             var oa = combine(prop, originParts(under), originParts(value), function (x, y) { return x + y; });
             return oa === null ? value : originTrim(oa);
@@ -1456,6 +1470,12 @@
     }
     /* The computed value of prop with this declaration in force on el. */
     function readWith(el, prop, value) {
+        /* (calc-size(): its length, worked out from its basis here) */
+        if (value && /calc-size\(/i.test(value) && SIZE_PROP.test(prop)) {
+            var sized = calcSizePx(el, /width/.test(prop) ? 'width' : 'height', value);
+            setStyle(el, prop + ': ' + value);
+            if (sized !== null) return sized;
+        }
         setStyle(el, value === null ? null : prop + ': ' + value);
         return global.getComputedStyle(el).getPropertyValue(prop);
     }
@@ -1497,6 +1517,13 @@
         applyTarget(el);
         return v || value;
     }
+    /* (a physical size's logical name, on this box) */
+    function sizeLogical(el, prop) {
+        var m = /^(min-|max-|)(width|height)$/.exec(prop);
+        if (!m) return null;
+        var vert = !/^horizontal/.test(global.getComputedStyle(el).writingMode || 'horizontal-tb');
+        return m[1] + ((m[2] === 'width') !== vert ? 'inline-size' : 'block-size');
+    }
     function cssAnimationsOver(el, prop, base, specBase) {
         var running = global.__cyberAnimRunning(el), v = base;
         for (var i = 0; i + 1 < running.length; i += 2) {
@@ -1504,8 +1531,9 @@
             var comp = listItem(global.getComputedStyle(el).animationComposition || 'replace', i / 2);
             if (!frames) continue;
             var pts = [];
+            var alias = sizeLogical(el, prop);
             for (var f = 0; f < frames.length; f++) {
-                var val = frames[f].style.getPropertyValue(prop);
+                var val = frames[f].style.getPropertyValue(prop) || (alias && frames[f].style.getPropertyValue(alias));
                 if (val) pts.push({ at: frames[f].at, value: val, composite: frames[f].style.animationComposition || comp });
             }
             if (!pts.length) continue;
@@ -1569,11 +1597,11 @@
         var moving = global.__cyberAnimRunning(el).length > 0 || parseFloat(global.getComputedStyle(el).transitionDuration) > 0;
         if (moving && key in memo) return memo[key];
         var v = calcSizePx(el, axis, spec);
-        /* (while the effects are being sampled, they put it back) */
+        /* (while the effects are being sampled, what was being read stays) */
         if (!applying) {
             setStyle(el, null);
             applyTarget(el);
-        }
+        } else setStyle(el, prop + ': ' + spec);
         memo[key] = v;
         return v;
     } });
@@ -1630,10 +1658,10 @@
     }
     /* (the last that covers it: by its name, by a shorthand's, or all) */
     var longhandsMemo = new Map();
-    function transitionItem(names, prop) {
+    function transitionItem(names, prop, alias) {
         for (var i = names.length - 1; i >= 0; i--) {
             var nm = names[i];
-            if (nm === prop) return i;
+            if (nm === prop || nm === alias) return i;
             if (nm === 'none' || nm === 'all') continue;
             var ls = longhandsMemo.get(nm);
             if (ls === undefined) longhandsMemo.set(nm, ls = global.__cyberCssLonghands(nm));
@@ -1643,7 +1671,7 @@
     }
     function cssTransitionOver(el, prop, base, before, specNow, specBefore) {
         var cs = global.getComputedStyle(el), names = String(cs.transitionProperty).split(',').map(function (x) { return x.trim(); });
-        var at = transitionItem(names, prop);
+        var at = transitionItem(names, prop, sizeLogical(el, prop));
         var state = transitionsOf.get(el);
         if (!state) transitionsOf.set(el, state = new Map());
         var rec = state.get(prop);
@@ -2126,7 +2154,13 @@
                 if (p.value !== null && (p.composite === 'add' || p.composite === 'accumulate')) u = addValues(prop, under(), u, p.composite);
                 return u;
             };
-            var ends = (prop === 'transform' && a.value !== b.value) || prop === 'translate' || prop === 'rotate' || prop === 'scale' || prop === 'offset-rotate' || prop === 'border-shape' || prop === 'filter' || prop === 'backdrop-filter' || REPEATABLE.test(prop) || prop === 'box-shadow' || prop === 'text-shadow' || SHAPE_PROP.test(prop);
+            var ends = (prop === 'transform' && a.value !== b.value) || prop === 'translate' || prop === 'rotate' || prop === 'scale' || prop === 'offset-rotate' || prop === 'border-shape' || /^(border-image|mask-border)-(slice|width|outset)$/.test(prop) || prop === 'filter' || prop === 'backdrop-filter' || REPEATABLE.test(prop) || prop === 'box-shadow' || prop === 'text-shadow' || SHAPE_PROP.test(prop);
+            /* (an inset that's auto doesn't go between) */
+            var autoish = function (v) { return v !== null && /^\s*(auto|initial|unset|revert|revert-layer)\s*$/i.test(v); };
+            if (/^(top|right|bottom|left)$/.test(prop) && (autoish(a.value) || autoish(b.value))) {
+                out.set(prop, eased < 0.5 ? resolve(a) : resolve(b));
+                return;
+            }
             /* (sizes that don't interpolate: the nearer keyframe) */
             if (SIZE_PROP.test(prop) && !sizesInterpolate(el, prop, a.value === null ? under() : a.value,
                                                            b.value === null ? under() : b.value)) {
