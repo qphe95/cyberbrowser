@@ -1647,6 +1647,8 @@ bool layout_query_element_box(JSContextHandle ctx, GCValue element, LayoutQueryB
     out->border_bottom = b->s->border_bottom;
     out->border_left = b->s->border_left;
     out->inline_level = b->s->display == CSS_DISPLAY_INLINE;
+    double tm[6];
+    if (css_layout_box_map(&g_lq_layout, idx, -1, tm)) css_layout_map_bounds(tm, &out->x, &out->y, &out->width, &out->height);
     double dx, dy;
     lq_client_shift(dom_node_of(element), idx, &dx, &dy);
     out->x -= dx;
@@ -1658,6 +1660,9 @@ int layout_query_client_rects(JSContextHandle ctx, GCValue element, double (*out
 {
     int idx = lq_query(ctx, element);
     int n = idx < 0 ? 0 : css_layout_client_rects(&g_lq_layout, idx, out, max);
+    double tm[6];
+    if (n && css_layout_box_map(&g_lq_layout, idx, -1, tm))
+        for (int i = 0; i < n; i++) css_layout_map_bounds(tm, &out[i][0], &out[i][1], &out[i][2], &out[i][3]);
     if (n && g_dom_scrolls.n) {
         double dx, dy;
         lq_client_shift(dom_node_of(element), idx, &dx, &dy);
@@ -1840,6 +1845,35 @@ LQ_GETTER(js_client_width, M_CLIENT_W)
 LQ_GETTER(js_client_height, M_CLIENT_H)
 LQ_GETTER(js_client_top, M_CLIENT_T)
 LQ_GETTER(js_client_left, M_CLIENT_L)
+/* __cyberBoxMap(el): [a,b,c,d,e,f, x,y,w,h]: its border box as laid out, and what takes
+ * that to the viewport; null without a box. */
+static GCValue js_box_map(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    if (argc < 1) return JS_NULL;
+    int idx = lq_query(ctx, argv[0]);
+    if (idx < 0) return JS_NULL;
+    const LayoutBox *b = &g_lq_layout.boxes[idx];
+    double m[6], dx, dy;
+    css_layout_box_map(&g_lq_layout, idx, -1, m);
+    lq_client_shift(dom_node_of(argv[0]), idx, &dx, &dy);
+    m[4] -= dx;
+    m[5] -= dy;
+    double v[10] = { m[0], m[1], m[2], m[3], m[4], m[5], b->x, b->y, b->width, b->height };
+    GCValue a = JS_NewArray(ctx);
+    for (int i = 0; i < 10; i++) JS_SetPropertyUint32(ctx, a, (uint32_t)i, JS_NewFloat64(ctx, v[i]));
+    return a;
+}
+
+/* (a smooth scroll under way: scrollend waits for its end) */
+void layout_scroll_hold(JSContextHandle ctx, bool hold);
+static GCValue js_scroll_hold(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    layout_scroll_hold(ctx, argc > 0 && JS_ToBool(ctx, argv[0]) > 0);
+    return JS_UNDEFINED;
+}
+
 LQ_GETTER(js_scroll_width, M_SCROLL_W)
 LQ_GETTER(js_scroll_height, M_SCROLL_H)
 
@@ -1986,6 +2020,13 @@ bool layout_query_anchor_inset(uint32_t id, int side, double *out)
     const double v[4] = { b->top, b->right, b->bottom, b->left };
     *out = v[side];
     return true;
+}
+
+int layout_query_grid_lead(uint32_t id, bool rows)
+{
+    extern int css_layout_grid_lead(int idx, bool rows);
+    int idx = g_lq_valid && id ? lq_box_index(id) : -1;
+    return idx < 0 ? 0 : css_layout_grid_lead(idx, rows);
 }
 
 int layout_query_grid_tracks(uint32_t id, bool rows, double *out, int cap)
@@ -2532,6 +2573,11 @@ void layout_api_install(JSContextHandle ctx, GCValue element_proto)
                               JS_NewCFunction(ctx, js_scroll_marker_targets, "__cyberScrollMarkerTargets", 1), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberRenderElements",
                               JS_NewCFunction(ctx, js_render_elements, "__cyberRenderElements", 1), JS_PROP_CONFIGURABLE);
+    {
+        GCValue glob = JS_GetGlobalObject(ctx);
+        JS_SetPropertyStr(ctx, glob, "__cyberBoxMap", JS_NewCFunction(ctx, js_box_map, "__cyberBoxMap", 1));
+        JS_SetPropertyStr(ctx, glob, "__cyberScrollHold", JS_NewCFunction(ctx, js_scroll_hold, "__cyberScrollHold", 1));
+    }
     define_accessor(ctx, element_proto, "offsetWidth", js_offset_width, NULL);
     define_accessor(ctx, element_proto, "offsetHeight", js_offset_height, NULL);
     define_accessor(ctx, element_proto, "offsetTop", js_offset_top, NULL);

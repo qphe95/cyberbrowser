@@ -78,6 +78,7 @@ bool layout_query_cascade(JSContextHandle ctx, GCValue element, LayoutCascadeFn 
 /* The used value of its top, right, bottom or left (0 to 3) that anchor() gave. */
 bool layout_query_anchor_inset(uint32_t id, int side, double *out);
 /* A grid container's used track sizes; how many, -1 when it isn't one laid out. */
+int layout_query_grid_lead(uint32_t id, bool rows);
 int layout_query_grid_tracks(uint32_t id, bool rows, double *out, int cap);
 /* A positioned box's used inset (top, right, bottom, left), for its resolved
  * value: side_auto, its specified value is auto; opp_auto, the opposite one's. */

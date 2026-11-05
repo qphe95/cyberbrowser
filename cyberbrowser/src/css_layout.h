@@ -449,6 +449,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     double translate_x, translate_y;
     double translate_xpct, translate_ypct;
     unsigned char has_translate;
+    /* (more than a translation: as written; the box itself stays where it's laid out) */
+    const char *tf_text, *tf_origin, *tf_rotate, *tf_scale;
     /* width: min-content (1) / max-content (2) / fit-content (3). */
     unsigned char width_keyword;
     /* Percentage insets (top, right, bottom, left): bit set => the
@@ -874,6 +876,11 @@ extern volatile int g_layout_zoom_any;
 void css_layout_box_max(const LayoutContext *ctx, int idx, double *x, double *y);
 bool css_layout_box_offset(const LayoutContext *ctx, int idx, float *x, float *y);
 void css_layout_box_scrolled(const LayoutContext *ctx, int idx, double *dx, double *dy, bool *fixed);
+/* What idx's transforms and its ancestors' (up to, not with, stop) make of points
+ * in laid-out coordinates: an affine m[6] (a b c d e f); false when they make nothing of them. */
+bool css_layout_box_map(const LayoutContext *ctx, int idx, int stop, double m[6]);
+/* A rect's bounds under m. */
+void css_layout_map_bounds(const double m[6], double *x, double *y, double *w, double *h);
 
 /* Box idx's values as the transitions store's before-change style. */
 void css_layout_anim_seed(const LayoutContext *ctx, int idx, uint32_t el);

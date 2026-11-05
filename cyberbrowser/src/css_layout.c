@@ -2013,11 +2013,13 @@ static double css_border_width_value(const char *v, double pw, double vw, double
 
 /* transform: keep the translation (translate/translateX/translateY/
  * translate3d/matrix); other functions are ignored. */
+static const char *layout_intern(const char *s, size_t n);
 static void css_parse_transform(LayoutBox *box, const char *v, double pw, double vw)
 {
     box->s->translate_x = box->s->translate_y = 0.0;
     box->s->translate_xpct = box->s->translate_ypct = 0.0;
     box->s->has_translate = 0;
+    box->s->tf_text = NULL;
     const char *p = v;
     while (p && *p) {
         while (*p && (isspace((unsigned char)*p) || *p == ',')) p++;
@@ -2058,6 +2060,7 @@ static void css_parse_transform(LayoutBox *box, const char *v, double pw, double
             box->s->translate_x += strtod(parts[4], NULL);
             box->s->translate_y += strtod(parts[5], NULL);
         }
+        if (!(nl >= 9 && !strncasecmp(name, "translate", 9))) box->s->tf_text = layout_intern(v, strlen(v));
         #undef TR_ADD
     }
     box->s->has_translate = (box->s->translate_x != 0.0 || box->s->translate_y != 0.0 ||
@@ -3218,6 +3221,14 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             if (!strcasecmp(value, k[i].n)) { box->s->writing_mode = k[i].v; box->s->writing_mode_set = 1; }
         return;
     }
+    if ((prop[0] == 't' && !strcasecmp(prop, "transform-origin")) || (prop[0] == 'r' && !strcasecmp(prop, "rotate")) ||
+        (prop[0] == 's' && !strcasecmp(prop, "scale"))) {
+        const char *t = !strcasecmp(value, "none") ? NULL : layout_intern(value, strlen(value));
+        if (prop[0] == 't') box->s->tf_origin = t;
+        else if (prop[0] == 'r') box->s->tf_rotate = t;
+        else box->s->tf_scale = t;
+        return;
+    }
     /* (translate: as the transform's translation) */
     if (prop[0] == 't' && !strcasecmp(prop, "translate")) {
         if (!strcasecmp(value, "none")) {
@@ -3234,7 +3245,9 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         }
         if (split) snprintf(tv, sizeof tv, "translate(%.*s, %s)", (int)(split - value), value, split + 1);
         else snprintf(tv, sizeof tv, "translate(%s)", value);
+        const char *held_tf = box->s->tf_text;
         css_parse_transform(box, tv, parent_width, viewport_width);
+        box->s->tf_text = held_tf;
         return;
     }
     if (prop[0] == 's' && !strcasecmp(prop, "shape-outside")) {
@@ -13647,6 +13660,35 @@ static void layout_img_constrain(const LayoutBox *box, double *cw, double *ch)
 static double layout_intrinsic_width(LayoutContext *ctx, int idx, bool want_max);
 
 static inline bool layout_is_in_flow(const LayoutBox *box);
+static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_max);
+
+/* min-width and max-width by content: what that is, in the box's own sizing. */
+static void layout_mm_kw_widths(LayoutBox *box, double parent_content_width)
+{
+    if (!(box->s->mm_kw_w[0] || box->s->mm_kw_w[1]) || !g_layout_ctx ||
+        box < g_layout_ctx->boxes || box >= g_layout_ctx->boxes + g_layout_ctx->tree.count) return;
+    int bx = (int)(box - g_layout_ctx->boxes);
+    /* (its content's, whatever its own width and its own limits say) */
+    unsigned char held_set = box->s->width_set;
+    double held_min = box->min_width, held_max = box->max_width;
+    box->s->width_set = 0;
+    box->min_width = 0.0;
+    box->max_width = -1.0;
+    double mx = layout_intrinsic_compute(g_layout_ctx, bx, true), mn = layout_intrinsic_compute(g_layout_ctx, bx, false);
+    box->s->width_set = held_set;
+    box->min_width = held_min;
+    box->max_width = held_max;
+    double avail = parent_content_width - box->margin_left - box->margin_right;
+    double hb = box->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX ? 0.0 : layout_horizontal_border_padding(box);
+    for (int w = 0; w < 2; w++) {
+        int ck = box->s->mm_kw_w[w];
+        if (!ck) continue;
+        double v = ck == 1 ? mn : ck == 2 ? mx : (mx < avail ? mx : (mn > avail ? mn : avail));
+        if (w) box->max_width = v - hb;
+        else box->min_width = v - hb;
+    }
+}
+
 static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
                                       double parent_content_width,
                                       double parent_content_height)
@@ -13659,21 +13701,7 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
     /* Percentage margins/paddings first: the width below depends on them. */
     layout_resolve_side_pcts(box, parent_content_width);
     layout_resolve_minmax_pcts(box, parent_content_width, parent_content_height);
-    /* (min-width and max-width by content: what that is, in the box's own sizing) */
-    if ((box->s->mm_kw_w[0] || box->s->mm_kw_w[1]) && g_layout_ctx &&
-        box >= g_layout_ctx->boxes && box < g_layout_ctx->boxes + g_layout_ctx->tree.count) {
-        int bx = (int)(box - g_layout_ctx->boxes);
-        double mx = layout_intrinsic_width(g_layout_ctx, bx, true), mn = layout_intrinsic_width(g_layout_ctx, bx, false);
-        double avail = parent_content_width - box->margin_left - box->margin_right;
-        double hb = box->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX ? 0.0 : layout_horizontal_border_padding(box);
-        for (int w = 0; w < 2; w++) {
-            int ck = box->s->mm_kw_w[w];
-            if (!ck) continue;
-            double v = ck == 1 ? mn : ck == 2 ? mx : (mx < avail ? mx : (mn > avail ? mn : avail));
-            if (w) box->max_width = v - hb;
-            else box->min_width = v - hb;
-        }
-    }
+    layout_mm_kw_widths(box, parent_content_width);
 
     /* ---------- width ---------- */
     bool width_auto = true;
@@ -15747,8 +15775,23 @@ static void ifc_collect(LayoutContext *ctx, int p, int c0, int stop, IfcItems *I
                  * control or embedded content its used size, else 80 x 20) */
                 if (layout_is_svg_box(n)) {
                     layout_svg_size(ctx, c, n, &cb->width, &cb->height);
-                    cb->width += layout_horizontal_border_padding(cb);
-                    cb->height += layout_vertical_border_padding(cb);
+                    double bw = layout_horizontal_border_padding(cb), bh = layout_vertical_border_padding(cb);
+                    double ratio = cb->width > 0.0 && cb->height > 0.0 ? cb->width / cb->height : 0.0;
+                    cb->width += bw;
+                    cb->height += bh;
+                    /* (its limits, the other way through its ratio when that's free) */
+                    layout_resolve_minmax_pcts(cb, avail_width, 0.0);
+                    layout_mm_kw_widths(cb, avail_width);
+                    bool bbx = cb->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX;
+                    double was_w = cb->width, was_h = cb->height;
+                    if (cb->max_width >= 0.0 && cb->width > cb->max_width + (bbx ? 0.0 : bw)) cb->width = cb->max_width + (bbx ? 0.0 : bw);
+                    if (cb->min_width > 0.0 && cb->width < cb->min_width + (bbx ? 0.0 : bw)) cb->width = cb->min_width + (bbx ? 0.0 : bw);
+                    if (cb->max_height >= 0.0 && cb->height > cb->max_height + (bbx ? 0.0 : bh)) cb->height = cb->max_height + (bbx ? 0.0 : bh);
+                    if (cb->min_height > 0.0 && cb->height < cb->min_height + (bbx ? 0.0 : bh)) cb->height = cb->min_height + (bbx ? 0.0 : bh);
+                    if (ratio > 0.0) {
+                        if (cb->width != was_w && !cb->s->height_set && cb->height == was_h) cb->height = (cb->width - bw) / ratio + bh;
+                        else if (cb->height != was_h && !cb->s->width_set && cb->width == was_w) cb->width = (cb->height - bh) * ratio + bw;
+                    }
                 } else if (!strcasecmp(n->tag_name, "meter") || !strcasecmp(n->tag_name, "progress")) {
                     /* (a browser's default: 80 or 160 by 16) */
                     if (cb->width <= 0.0) cb->width = n->tag_name[0] == 'm' || n->tag_name[0] == 'M' ? 80.0 : 160.0;
@@ -18435,6 +18478,9 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
         }
         it->base = basis;
 
+        /* (by content, or what's there: known before anything's flexed) */
+        layout_mm_kw_widths(child, ct->content_width);
+        layout_minmax_stretch(child, ct->content_width, layout_height_auto(ct) ? 0.0 : ct->content_height);
         if (is_row) {
             it->min_main = child->min_width > 0.0 ? layout_flex_main_total(child, child->min_width, true) : -1.0;
             it->max_main = child->max_width > 0.0 ? layout_flex_main_total(child, child->max_width, true) : 0.0;
@@ -18698,6 +18744,23 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
         } else {
             child->height = it->target;
             it->cross = child->width;
+        }
+        /* (an image not stretched: its other size through its ratio, from what it flexed to) */
+        if (!it->cross_def && it->align != CSS_ALIGN_STRETCH) {
+            HtmlNode *idom = layout_node_dom(ctx, ctx->tree.nodes[it->idx].dom_node_idx);
+            double nw, nh, own;
+            unsigned dims;
+            if (idom && layout_is_img(idom) && layout_img_natural(ctx, idom, &nw, &nh, &dims, &own) && nw > 0.0 && nh > 0.0) {
+                double r = own > 0.0 ? own : nw / nh;
+                double bw = layout_horizontal_border_padding(child), bh = layout_vertical_border_padding(child);
+                if (is_row) {
+                    child->height = flex_clamp((it->target - bw) / r + bh, it->min_cross, it->max_cross);
+                    it->cross = child->height;
+                } else {
+                    child->width = flex_clamp((it->target - bh) * r + bw, it->min_cross, it->max_cross);
+                    it->cross = child->width;
+                }
+            }
         }
         layout_update_content_sizes(child);
     }
@@ -19149,10 +19212,14 @@ static int grid_named_line(const GridDefs *D, bool rows, const char *nm, size_t 
 
 /* One placement property: *line (0-based) when definite, else *span
  * (>= 1) from "span N"; both unset for auto. */
+/* (lines before the first: only placing items takes them, as implicit tracks) */
+#define GRID_LINE_NONE (-1000000)
+static __thread bool t_gl_before;
+
 static void grid_line_value(const GridDefs *D, bool rows, const char *v, bool end, int explicit_lines,
                             int *line, int *span)
 {
-    *line = -1;
+    *line = t_gl_before ? GRID_LINE_NONE : -1;
     *span = 0;
     if (!v) return;
     while (isspace((unsigned char)*v)) v++;
@@ -19166,7 +19233,7 @@ static void grid_line_value(const GridDefs *D, bool rows, const char *v, bool en
     if (e != v) {
         if (n > 0) *line = (int)n - 1;
         else if (n < 0) *line = explicit_lines + (int)n;
-        if (*line < 0) *line = 0;
+        if (*line < 0 && !t_gl_before) *line = 0;
         return;
     }
     size_t len = 0;
@@ -19180,19 +19247,22 @@ static bool grid_resolve_axis(const GridDefs *D, bool rows, const char *sv, cons
                               int *start, int *span)
 {
     int sl, ss, el, es;
+    t_gl_before = true;
     grid_line_value(D, rows, sv, false, explicit_tracks + 1, &sl, &ss);
     grid_line_value(D, rows, ev, true, explicit_tracks + 1, &el, &es);
-    if (sl >= 0 && el >= 0) {
+    t_gl_before = false;
+    bool has_s = sl != GRID_LINE_NONE, has_e = el != GRID_LINE_NONE;
+    if (has_s && has_e) {
         if (el < sl) { int t = sl; sl = el; el = t; }
         *start = sl;
         *span = el > sl ? el - sl : 1;
         return true;
     }
-    if (sl >= 0) { *start = sl; *span = es > 0 ? es : 1; return true; }
-    if (el >= 0) {
+    if (has_s) { *start = sl; *span = es > 0 ? es : 1; return true; }
+    if (has_e) {
         int sp = ss > 0 ? ss : 1;
-        *start = el - sp < 0 ? 0 : el - sp;
-        *span = el - *start > 0 ? el - *start : 1;
+        *start = el - sp;
+        *span = sp;
         return true;
     }
     *span = ss > 0 ? ss : (es > 0 ? es : 1);
@@ -19395,6 +19465,9 @@ static void grid_size_tracks(GridSize *t, int n, double avail, double gap, const
                     t[i].base += extra / nint;
                     if (t[i].growth < t[i].base) t[i].growth = t[i].base;
                 }
+        /* (what the limits come to now that the bases have grown) */
+        sum_g = gap * (e - s - 1);
+        for (int i = s; i < e; i++) sum_g += t[i].growth;
         extra = cmax - sum_g;
         if (extra > 0.0 && nmax > 0)
             for (int i = s; i < e; i++)
@@ -19475,12 +19548,18 @@ static void grid_size_tracks(GridSize *t, int n, double avail, double gap, const
 }
 
 /* Track definitions for n tracks: the explicit list, then the auto list. */
-static void grid_init_sizes(GridSize *t, int n, const GridTrackList *L, const GridTrackList *A, double avail)
+static void grid_init_sizes(GridSize *t, int n, int lead, const GridTrackList *L, const GridTrackList *A, double avail)
 {
     for (int i = 0; i < n; i++) {
         GridTrackDef d;
-        if (i < L->n) d = L->t[i];
-        else if (A->n > 0) d = A->t[(i - L->n) % A->n];
+        int at = i - lead;
+        /* (before the explicit ones, the auto list runs backward from its end) */
+        if (at < 0) {
+            if (A->n > 0) d = A->t[(A->n - ((-at) % A->n)) % A->n];
+            else { memset(&d, 0, sizeof(d)); d.kmin = d.kmax = GT_AUTO; }
+        }
+        else if (at < L->n) d = L->t[at];
+        else if (A->n > 0) d = A->t[(at - L->n) % A->n];
         else { memset(&d, 0, sizeof(d)); d.kmin = d.kmax = GT_AUTO; }
         /* Percentages of an indefinite size behave as auto. */
         if (d.kmin == GT_LEN && d.min_pct != 0.0 && avail < 0.0) d.kmin = GT_AUTO;
@@ -19503,6 +19582,7 @@ typedef struct {
     GridItem *items;
     int nitems;
     int ncols, nrows;
+    int lead_c, lead_r;                /* implicit tracks before the explicit ones */
     GridSize *cols, *rows;
 } GridState;
 
@@ -19561,6 +19641,19 @@ static bool grid_setup(LayoutContext *ctx, int idx, double cw, double ch, GridSt
         if (it->rs > GRID_MAX_TRACKS) it->rs = GRID_MAX_TRACKS;
         if (it->cs > GRID_MAX_TRACKS) it->cs = GRID_MAX_TRACKS;
     }
+    /* (lines before the first make tracks there: the rest move along) */
+    for (int i = 0; i < n; i++) {
+        if (rdef[i] && -G->items[i].r > G->lead_r) G->lead_r = -G->items[i].r;
+        if (cdef[i] && -G->items[i].c > G->lead_c) G->lead_c = -G->items[i].c;
+    }
+    if (G->lead_r > 1000) G->lead_r = 1000;
+    if (G->lead_c > 1000) G->lead_c = 1000;
+    if (G->lead_r || G->lead_c) for (int i = 0; i < n; i++) {
+        if (rdef[i]) { G->items[i].r += G->lead_r; if (G->items[i].r < 0) G->items[i].r = 0; }
+        if (cdef[i]) { G->items[i].c += G->lead_c; if (G->items[i].c < 0) G->items[i].c = 0; }
+    }
+    ecols += G->lead_c;
+    erows += G->lead_r;
     bool column_flow = ct->s->grid_flow & 1;
     int minor = 0;
     int major = grid_place_items(G->items, n, rdef, cdef, column_flow, (ct->s->grid_flow & 2) != 0,
@@ -19581,15 +19674,16 @@ static bool grid_setup(LayoutContext *ctx, int idx, double cw, double ch, GridSt
     GridTrackList *ac = (GridTrackList *)malloc(sizeof(GridTrackList));
     if (!ac) return false;
     grid_parse_tracks(ct->s->grid_auto_cols, fs, cw, 0.0, ac);
-    grid_init_sizes(G->cols, G->ncols, &D->cols, ac, cw);
+    grid_init_sizes(G->cols, G->ncols, G->lead_c, &D->cols, ac, cw);
     grid_parse_tracks(ct->s->grid_auto_rows, fs, ch, 0.0, ac);
-    grid_init_sizes(G->rows, G->nrows, &D->rows, ac, ch);
+    grid_init_sizes(G->rows, G->nrows, G->lead_r, &D->rows, ac, ch);
     free(ac);
     /* auto-fit: repeated tracks no item occupies collapse. */
     for (int axis = 0; axis < 2; axis++) {
         const GridTrackList *L = axis ? &D->rows : &D->cols;
         GridSize *t = axis ? G->rows : G->cols;
-        for (int k = L->fit_start; k < L->fit_start + L->fit_count; k++) {
+        int lk = axis ? G->lead_r : G->lead_c;
+        for (int k = L->fit_start + lk; k < L->fit_start + L->fit_count + lk; k++) {
             bool used = false;
             for (int i = 0; i < n && !used; i++) {
                 int s = axis ? G->items[i].r : G->items[i].c, sp = axis ? G->items[i].rs : G->items[i].cs;
@@ -19642,13 +19736,13 @@ static double layout_grid_intrinsic(LayoutContext *ctx, int idx, bool want_max)
 
 /* ---- a laid out grid's lines, for the boxes positioned against it: each track's
  * start and end from the content edge; flat, one run's (css_layout_run clears it) ---- */
-typedef struct { int idx, ncols, nrows, at; } GridLinesRec;
+typedef struct { int idx, ncols, nrows, at, lead_c, lead_r; } GridLinesRec;
 static GridLinesRec *g_gl_rec;
 static double *g_gl_val;
 static int g_gl_nrec, g_gl_caprec, g_gl_nval, g_gl_capval;
 static pthread_mutex_t g_gl_mu = PTHREAD_MUTEX_INITIALIZER;
 
-static void grid_lines_record(int idx, int ncols, int nrows, const double *cpos, const double *rpos,
+static void grid_lines_record(int idx, int ncols, int nrows, int lead_c, int lead_r, const double *cpos, const double *rpos,
                               const GridSize *cols, const GridSize *rows)
 {
     int need = 2 * (ncols + nrows);
@@ -19661,7 +19755,7 @@ static void grid_lines_record(int idx, int ncols, int nrows, const double *cpos,
         g_gl_capval = (g_gl_nval + need) * 2;
         g_gl_val = (double *)realloc(g_gl_val, (size_t)g_gl_capval * sizeof(double));
     }
-    GridLinesRec r = { idx, ncols, nrows, g_gl_nval };
+    GridLinesRec r = { idx, ncols, nrows, g_gl_nval, lead_c, lead_r };
     g_gl_rec[g_gl_nrec++] = r;
     double *v = g_gl_val + g_gl_nval;
     for (int i = 0; i < ncols; i++) { v[2 * i] = cpos[i]; v[2 * i + 1] = cpos[i] + (cols[i].collapsed ? 0.0 : cols[i].base); }
@@ -19669,6 +19763,13 @@ static void grid_lines_record(int idx, int ncols, int nrows, const double *cpos,
     for (int i = 0; i < nrows; i++) { v[2 * i] = rpos[i]; v[2 * i + 1] = rpos[i] + (rows[i].collapsed ? 0.0 : rows[i].base); }
     g_gl_nval += need;
     pthread_mutex_unlock(&g_gl_mu);
+}
+
+int css_layout_grid_lead(int idx, bool rows)
+{
+    for (int i = g_gl_nrec - 1; i >= 0; i--)
+        if (g_gl_rec[i].idx == idx) return rows ? g_gl_rec[i].lead_r : g_gl_rec[i].lead_c;
+    return 0;
 }
 
 int css_layout_grid_tracks(int idx, bool rows, double *out, int cap)
@@ -19712,6 +19813,9 @@ static void grid_area_as_cb(const LayoutBox *grid, int idx, const LayoutStyle *s
         int sl, ss, el, es;
         grid_line_value(D, rows, sv, false, rows ? er : ec, &sl, &ss);
         grid_line_value(D, rows, ev, true, rows ? er : ec, &el, &es);
+        /* (the first explicit line is past the implicit tracks before it) */
+        if (sl >= 0) sl += rows ? r->lead_r : r->lead_c;
+        if (el >= 0) el += rows ? r->lead_r : r->lead_c;
         if (sl >= 0 && el < 0 && es > 0) el = sl + es;
         if (el >= 0 && sl < 0 && ss > 0) sl = el - ss < 0 ? 0 : el - ss;
         if (sl >= 0 && el >= 0 && el < sl) { int t = sl; sl = el; el = t; }
@@ -19889,7 +19993,7 @@ static void layout_grid_container(LayoutContext *ctx, int idx)
 
     grid_size_tracks(G.rows, G.nrows, chh, gap_r, G.items, G.nitems, true, 0, !(ct->s->content_set & 2));
     grid_track_positions(G.rows, G.nrows, gap_r, chh, grid_content_align(ct->s->align_content, ct->s->ac_kw, false), rpos);
-    grid_lines_record(idx, G.ncols, G.nrows, cpos, rpos, G.cols, G.rows);
+    grid_lines_record(idx, G.ncols, G.nrows, G.lead_c, G.lead_r, cpos, rpos, G.cols, G.rows);
 
     /* Block-axis alignment; stretched items whose contents depend on their
      * height are laid out again. */
@@ -23038,6 +23142,22 @@ static void layout_position_absolute_box(LayoutContext *ctx, int idx)
             if (box->height < bph) box->height = bph;
             layout_update_content_sizes(box);
         }
+        /* (a size given, under a min or max of stretch: laid out against the wrong room till now) */
+        bool bbs = box->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX;
+        if ((box->s->minmax_stretch & 3) && box->s->width_set && !box->s->width_percent && !box->s->width_keyword) {
+            double v = box->s->css_width;
+            if (box->max_width >= 0.0 && v > box->max_width) v = box->max_width;
+            if (v < box->min_width) v = box->min_width;
+            box->width = bbs ? (v > bpw ? v : bpw) : v + bpw;
+            layout_update_content_sizes(box);
+        }
+        if ((box->s->minmax_stretch & 12) && box->s->height_set && !box->height_pct_unresolved && !box->s->height_stretch) {
+            double v = box->s->css_height;
+            if (box->max_height >= 0.0 && v > box->max_height) v = box->max_height;
+            if (v < box->min_height) v = box->min_height;
+            box->height = bbs ? (v > bph ? v : bph) : v + bph;
+            layout_update_content_sizes(box);
+        }
     }
 
     /* ---- horizontal (§10.3.7) ---- */
@@ -24041,28 +24161,245 @@ static void client_rects_walk(const LayoutContext *ctx, int p, double (*r)[4], i
     }
 }
 
-static void extent_walk(const LayoutContext *ctx, int idx, double *right, double *bottom)
+/* ---- Transforms beyond a translation ---- */
+static inline bool tf_has(const LayoutStyle *s) { return s->tf_text || s->tf_rotate || s->tf_scale; }
+
+/* r = a b */
+static void tf_mul(double r[6], const double a[6], const double b[6])
+{
+    double o[6] = {
+        a[0] * b[0] + a[2] * b[1], a[1] * b[0] + a[3] * b[1],
+        a[0] * b[2] + a[2] * b[3], a[1] * b[2] + a[3] * b[3],
+        a[0] * b[4] + a[2] * b[5] + a[4], a[1] * b[4] + a[3] * b[5] + a[5],
+    };
+    memcpy(r, o, sizeof o);
+}
+
+static double tf_angle(const char *t)
+{
+    char *e = NULL;
+    double v = strtod(t, &e);
+    if (e == t) return 0.0;
+    if (!strncasecmp(e, "deg", 3)) return v * M_PI / 180.0;
+    if (!strncasecmp(e, "grad", 4)) return v * M_PI / 200.0;
+    if (!strncasecmp(e, "turn", 4)) return v * M_PI * 2.0;
+    return v;
+}
+
+static double tf_num(const char *t)
+{
+    char *e = NULL;
+    double v = strtod(t, &e);
+    if (e != t && *e == '%') v /= 100.0;
+    return v;
+}
+
+/* m by each function of the list. */
+static void tf_apply_list(double m[6], const char *v, double w, double h, double fs)
+{
+    const char *p = v;
+    while (p && *p) {
+        while (*p && (isspace((unsigned char)*p) || *p == ',')) p++;
+        const char *name = p;
+        while (*p && *p != '(' && !isspace((unsigned char)*p)) p++;
+        size_t nl = (size_t)(p - name);
+        if (*p != '(') break;
+        p++;
+        const char *args = p;
+        int depth = 1;
+        while (*p && depth > 0) { if (*p == '(') depth++; else if (*p == ')') depth--; if (depth) p++; }
+        size_t al = (size_t)(p - args);
+        if (*p == ')') p++;
+        char buf[512];
+        if (al >= sizeof buf) continue;
+        memcpy(buf, args, al);
+        buf[al] = 0;
+        char *a[16];
+        int n = 0, d = 0;
+        char *st = buf;
+        for (char *q = buf;; q++) {
+            if (*q == '(') d++;
+            else if (*q == ')') d--;
+            if (!*q || (!d && *q == ',')) {
+                bool end = !*q;
+                *q = 0;
+                while (*st && isspace((unsigned char)*st)) st++;
+                if (n < 16) a[n++] = st;
+                st = q + 1;
+                if (end) break;
+            }
+        }
+        char nm[16];
+        if (nl >= sizeof nm) continue;
+        for (size_t i = 0; i < nl; i++) nm[i] = (char)tolower((unsigned char)name[i]);
+        nm[nl] = 0;
+        double f[6] = { 1, 0, 0, 1, 0, 0 };
+        #define LEN(i, base) css_parse_length(a[i], base, 0.0, fs)
+        if (!strcmp(nm, "translate") || !strcmp(nm, "translate3d")) { f[4] = LEN(0, w); if (n > 1) f[5] = LEN(1, h); }
+        else if (!strcmp(nm, "translatex")) f[4] = LEN(0, w);
+        else if (!strcmp(nm, "translatey")) f[5] = LEN(0, h);
+        else if (!strcmp(nm, "rotate") || !strcmp(nm, "rotatez")) { double r = tf_angle(a[0]); f[0] = f[3] = cos(r); f[1] = sin(r); f[2] = -f[1]; }
+        else if (!strcmp(nm, "rotatex")) f[3] = cos(tf_angle(a[0]));
+        else if (!strcmp(nm, "rotatey")) f[0] = cos(tf_angle(a[0]));
+        else if (!strcmp(nm, "rotate3d") && n == 4) {
+            double x = strtod(a[0], NULL), y = strtod(a[1], NULL), z = strtod(a[2], NULL), l = sqrt(x * x + y * y + z * z);
+            if (l > 0.0) {
+                x /= l; y /= l; z /= l;
+                double r = tf_angle(a[3]), c = cos(r), s = sin(r), t = 1.0 - c;
+                f[0] = c + x * x * t; f[1] = z * s + x * y * t;
+                f[2] = x * y * t - z * s; f[3] = c + y * y * t;
+            }
+        }
+        else if (!strcmp(nm, "scale") || !strcmp(nm, "scale3d")) { f[0] = tf_num(a[0]); f[3] = n > 1 ? tf_num(a[1]) : f[0]; }
+        else if (!strcmp(nm, "scalex")) f[0] = tf_num(a[0]);
+        else if (!strcmp(nm, "scaley")) f[3] = tf_num(a[0]);
+        else if (!strcmp(nm, "skew")) { f[2] = tan(tf_angle(a[0])); if (n > 1) f[1] = tan(tf_angle(a[1])); }
+        else if (!strcmp(nm, "skewx")) f[2] = tan(tf_angle(a[0]));
+        else if (!strcmp(nm, "skewy")) f[1] = tan(tf_angle(a[0]));
+        else if (!strcmp(nm, "matrix") && n == 6) for (int i = 0; i < 6; i++) f[i] = strtod(a[i], NULL);
+        else if (!strcmp(nm, "matrix3d") && n == 16) {
+            static const int k[6] = { 0, 1, 4, 5, 12, 13 };
+            for (int i = 0; i < 6; i++) f[i] = strtod(a[k[i]], NULL);
+        }
+        #undef LEN
+        tf_mul(m, m, f);
+    }
+}
+
+/* Where transform-origin is, from the border box's corner. */
+static void tf_origin_of(const LayoutBox *b, double *ox, double *oy)
+{
+    *ox = b->width / 2.0;
+    *oy = b->height / 2.0;
+    const char *t = b->s->tf_origin;
+    if (!t) return;
+    char w0[64] = "", w1[64] = "";
+    sscanf(t, "%63s %63s", w0, w1);
+    bool x_set = false, y_set = false;
+    const char *w[2] = { w0, w1 };
+    for (int i = 0; i < 2 && w[i][0]; i++) {
+        const char *c = w[i];
+        double fs = b->s->font_size;
+        if (!strcasecmp(c, "left")) { *ox = 0.0; x_set = true; }
+        else if (!strcasecmp(c, "right")) { *ox = b->width; x_set = true; }
+        else if (!strcasecmp(c, "top")) { *oy = 0.0; y_set = true; }
+        else if (!strcasecmp(c, "bottom")) { *oy = b->height; y_set = true; }
+        else if (!strcasecmp(c, "center")) { if (i == 1 && !x_set) x_set = true; else if (i == 1 || y_set) x_set = true; else y_set = y_set; }
+        else if (i == 0 || (y_set && !x_set)) { *ox = css_parse_length(c, b->width, 0.0, fs); x_set = true; }
+        else { *oy = css_parse_length(c, b->height, 0.0, fs); y_set = true; }
+    }
+}
+
+bool css_layout_box_map(const LayoutContext *ctx, int idx, int stop, double m[6])
+{
+    bool any = false;
+    double r[6] = { 1, 0, 0, 1, 0, 0 };
+    for (int i = idx; i >= 0 && i != stop; i = ctx->tree.nodes[i].parent_idx) {
+        const LayoutBox *b = &ctx->boxes[i];
+        const LayoutStyle *s = b->s;
+        if (!tf_has(s)) continue;
+        any = true;
+        double tx = s->translate_x + s->translate_xpct * b->width, ty = s->translate_y + s->translate_ypct * b->height;
+        double ox, oy;
+        tf_origin_of(b, &ox, &oy);
+        /* (the box as it would be with no transform; its origin; all of it about that) */
+        double o_x = b->x - tx + ox, o_y = b->y - ty + oy;
+        double a[6] = { 1, 0, 0, 1, o_x, o_y };
+        if (!s->tf_text) { a[4] += tx; a[5] += ty; }
+        if (s->tf_rotate) {
+            /* (an angle, or an axis and one: only about z here) */
+            char w0[64] = "", w1[64] = "", w2[64] = "", w3[64] = "";
+            int nw = sscanf(s->tf_rotate, "%63s %63s %63s %63s", w0, w1, w2, w3);
+            double ang = tf_angle(nw == 2 ? w1 : nw == 4 ? w3 : w0), c = cos(ang), sn = sin(ang);
+            double f[6] = { c, sn, -sn, c, 0, 0 };
+            if (nw == 2 && !strcasecmp(w0, "x")) { f[0] = 1; f[1] = f[2] = 0; f[3] = c; }
+            else if (nw == 2 && !strcasecmp(w0, "y")) { f[0] = c; f[1] = f[2] = 0; f[3] = 1; }
+            tf_mul(a, a, f);
+        }
+        if (s->tf_scale) {
+            char w0[64] = "", w1[64] = "";
+            int nw = sscanf(s->tf_scale, "%63s %63s", w0, w1);
+            double f[6] = { tf_num(w0), 0, 0, nw > 1 ? tf_num(w1) : tf_num(w0), 0, 0 };
+            tf_mul(a, a, f);
+        }
+        if (s->tf_text) tf_apply_list(a, s->tf_text, b->width, b->height, s->font_size);
+        double back[6] = { 1, 0, 0, 1, -o_x - tx, -o_y - ty };
+        tf_mul(a, a, back);
+        tf_mul(r, a, r);
+    }
+    memcpy(m, r, sizeof r);
+    return any;
+}
+
+void css_layout_map_bounds(const double m[6], double *x, double *y, double *w, double *h)
+{
+    double xs[2] = { *x, *x + *w }, ys[2] = { *y, *y + *h };
+    double lx = INFINITY, ly = INFINITY, hx = -INFINITY, hy = -INFINITY;
+    for (int i = 0; i < 2; i++) for (int j = 0; j < 2; j++) {
+        double px = m[0] * xs[i] + m[2] * ys[j] + m[4], py = m[1] * xs[i] + m[3] * ys[j] + m[5];
+        if (px < lx) lx = px;
+        if (px > hx) hx = px;
+        if (py < ly) ly = py;
+        if (py > hy) hy = py;
+    }
+    *x = lx; *y = ly; *w = hx - lx; *h = hy - ly;
+}
+
+/* (a box as its transforms have it, to the scroller; only when there are any on the way) */
+static void extent_box(const LayoutContext *ctx, int c, int stop, bool under, double *x, double *y, double *w, double *h)
+{
+    const LayoutBox *cb = &ctx->boxes[c];
+    *x = cb->x; *y = cb->y; *w = cb->width; *h = cb->height;
+    if (!under) return;
+    double m[6];
+    if (css_layout_box_map(ctx, c, stop, m)) css_layout_map_bounds(m, x, y, w, h);
+}
+
+static void extent_walk(const LayoutContext *ctx, int idx, int stop, bool under, double *right, double *bottom)
 {
     const LayoutNodeRef *nodes = ctx->tree.nodes;
     for (int c = nodes[idx].first_child_idx; c >= 0; c = nodes[c].next_sibling_idx) {
         const LayoutBox *cb = &ctx->boxes[c];
         if (cb->s->display == CSS_DISPLAY_NONE) continue;
-        if (cb->x + cb->width > *right) *right = cb->x + cb->width;
-        if (cb->y + cb->height > *bottom) *bottom = cb->y + cb->height;
-        extent_walk(ctx, c, right, bottom);
+        bool u = under || tf_has(cb->s);
+        double x, y, w, h;
+        extent_box(ctx, c, stop, u, &x, &y, &w, &h);
+        if (x + w > *right) *right = x + w;
+        if (y + h > *bottom) *bottom = y + h;
+        extent_walk(ctx, c, stop, u, right, bottom);
+    }
+}
+
+/* (how far relative position and translation moved a box from its place in the flow) */
+static void extent_shift(const LayoutBox *cb, double *rx, double *ry)
+{
+    *rx = *ry = 0.0;
+    const LayoutStyle *s = cb->s;
+    if (s->position == CSS_POSITION_RELATIVE) {
+        if (s->positioned_sides & LAYOUT_SIDE_LEFT) *rx = cb->left;
+        else if (s->positioned_sides & LAYOUT_SIDE_RIGHT) *rx = -cb->right;
+        if (s->positioned_sides & LAYOUT_SIDE_TOP) *ry = cb->top;
+        else if (s->positioned_sides & LAYOUT_SIDE_BOTTOM) *ry = -cb->bottom;
+    }
+    if (s->has_translate) {
+        *rx += s->translate_x + s->translate_xpct * cb->width;
+        *ry += s->translate_y + s->translate_ypct * cb->height;
     }
 }
 
 /* The mirror of css_layout_extent: how far left and up the content goes. */
-static void extent_walk_start(const LayoutContext *ctx, int idx, double *left, double *top)
+static void extent_walk_start(const LayoutContext *ctx, int idx, int stop, bool under, double *left, double *top)
 {
     const LayoutNodeRef *nodes = ctx->tree.nodes;
     for (int c = nodes[idx].first_child_idx; c >= 0; c = nodes[c].next_sibling_idx) {
         const LayoutBox *cb = &ctx->boxes[c];
         if (cb->s->display == CSS_DISPLAY_NONE) continue;
-        if (cb->x < *left) *left = cb->x;
-        if (cb->y < *top) *top = cb->y;
-        extent_walk_start(ctx, c, left, top);
+        bool u = under || tf_has(cb->s);
+        double x, y, w, h;
+        extent_box(ctx, c, stop, u, &x, &y, &w, &h);
+        if (x < *left) *left = x;
+        if (y < *top) *top = y;
+        extent_walk_start(ctx, c, stop, u, left, top);
     }
 }
 
@@ -24074,12 +24411,14 @@ void css_layout_extent_start(const LayoutContext *ctx, int idx, double *left, do
     for (int c = flows ? nodes[idx].first_child_idx : -1; c >= 0; c = nodes[c].next_sibling_idx) {
         const LayoutBox *cb = &ctx->boxes[c];
         if (cb->s->display == CSS_DISPLAY_NONE || cb->s->display == CSS_DISPLAY_INLINE) continue;
-        if (cb->s->position == CSS_POSITION_ABSOLUTE || cb->s->position == CSS_POSITION_FIXED) continue;
-        double l = cb->x - cb->margin_left - b->s->padding_left, t = cb->y - cb->margin_top - b->s->padding_top;
+        if (cb->s->position == CSS_POSITION_ABSOLUTE || cb->s->position == CSS_POSITION_FIXED || tf_has(cb->s)) continue;
+        double rx, ry;
+        extent_shift(cb, &rx, &ry);
+        double l = cb->x - rx - cb->margin_left - b->s->padding_left, t = cb->y - ry - cb->margin_top - b->s->padding_top;
         if (l < *left) *left = l;
         if (t < *top) *top = t;
     }
-    extent_walk_start(ctx, idx, left, top);
+    extent_walk_start(ctx, idx, idx, false, left, top);
 }
 
 void css_layout_extent(const LayoutContext *ctx, int idx, double *right, double *bottom)
@@ -24095,13 +24434,15 @@ void css_layout_extent(const LayoutContext *ctx, int idx, double *right, double 
     for (int c = flows ? nodes[idx].first_child_idx : -1; c >= 0; c = nodes[c].next_sibling_idx) {
         const LayoutBox *cb = &ctx->boxes[c];
         if (cb->s->display == CSS_DISPLAY_NONE || cb->s->display == CSS_DISPLAY_INLINE) continue;
-        if (cb->s->position == CSS_POSITION_ABSOLUTE || cb->s->position == CSS_POSITION_FIXED) continue;
+        if (cb->s->position == CSS_POSITION_ABSOLUTE || cb->s->position == CSS_POSITION_FIXED || tf_has(cb->s)) continue;
         /* (white space between a flex or grid container's items is no item) */
         bool laid = b->s->display == CSS_DISPLAY_FLEX || b->s->display == CSS_DISPLAY_GRID;
         if (laid && cb->width <= 0.0 && cb->height <= 0.0) continue;
         double mb = cb->margin_bottom;
-        double r = cb->x + cb->width + cb->margin_right + b->s->padding_right;
-        double end = cb->y + cb->height;
+        double rx, ry;
+        extent_shift(cb, &rx, &ry);
+        double r = cb->x - rx + cb->width + cb->margin_right + b->s->padding_right;
+        double end = cb->y - ry + cb->height;
         /* (a self-collapsing block: its margin with the one before it) */
         if (cb->height <= 0.0 && was_end > 0.0) { end = was_end; if (was_margin > mb) mb = was_margin; }
         double e = end + mb + b->s->padding_bottom;
@@ -24110,7 +24451,7 @@ void css_layout_extent(const LayoutContext *ctx, int idx, double *right, double 
         if (r > *right) *right = r;
         if (e > *bottom) *bottom = e;
     }
-    extent_walk(ctx, idx, right, bottom);
+    extent_walk(ctx, idx, idx, false, right, bottom);
 }
 
 bool css_layout_box_scrolls(const LayoutContext *ctx, int idx)

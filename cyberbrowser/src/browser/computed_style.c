@@ -828,6 +828,30 @@ void computed_style_after_restyle(JSContextHandle ctx)
     g_in_hook--;
 }
 
+/* How many tracks [s, e) of a track list says outright (no auto repeat in it). */
+static int grid_tracks_said(const char *s, const char *e)
+{
+    int n = 0;
+    while (s < e) {
+        while (s < e && isspace((unsigned char)*s)) s++;
+        if (s >= e) break;
+        const char *q = s;
+        int d = 0;
+        while (q < e) {
+            if (*q == '(' || *q == '[') d++;
+            else if (*q == ')' || *q == ']') d--;
+            else if (!d && isspace((unsigned char)*q)) break;
+            q++;
+        }
+        if (!strncasecmp(s, "repeat(", 7)) {
+            const char *c = memchr(s, ',', (size_t)(q - s));
+            if (c) n += atoi(s + 7) * grid_tracks_said(c + 1, q - 1);
+        } else if (*s != '[') n++;
+        s = q;
+    }
+    return n;
+}
+
 /* grid-template-*: the used tracks, with the line names written. */
 static void grid_tracks_walk(const char *s, const char *e, const double *tr, int nt, int *at, char *out, size_t cap, size_t *o, bool *sp)
 {
@@ -853,7 +877,9 @@ static void grid_tracks_walk(const char *s, const char *e, const double *tr, int
             if (c) {
                 int times = atoi(s + 7);
                 bool aut = !times;
-                for (int k = 0; (aut ? *at < nt : k < times) && k < 2000; k++) {
+                /* (an auto repeat leaves the tracks after it for what says them) */
+                int after = aut ? grid_tracks_said(q, e) : 0;
+                for (int k = 0; (aut ? *at + after < nt : k < times) && k < 2000; k++) {
                     int was = *at;
                     grid_tracks_walk(c + 1, q - 1, tr, nt, at, out, cap, o, sp);
                     if (*at == was) break;
@@ -869,12 +895,21 @@ static void grid_tracks_walk(const char *s, const char *e, const double *tr, int
     #undef GT_PUT
 }
 
-static char *grid_tracks_resolved(const char *spec, const double *tr, int nt)
+static char *grid_tracks_resolved(const char *spec, const double *tr, int nt, int lead)
 {
     char out[4096];
     size_t o = 0;
     bool sp = false;
     int at = 0;
+    /* (implicit tracks before the explicit ones) */
+    while (at < lead && at < nt && o + 48 < sizeof out) {
+        if (sp) out[o++] = ' ';
+        o += (size_t)snprintf(out + o, sizeof out - o, "%.6gpx", tr[at++]);
+        sp = true;
+    }
+    tr += at;
+    nt -= at;
+    at = 0;
     if (strcasecmp(spec, "none")) grid_tracks_walk(spec, spec + strlen(spec), tr, nt, &at, out, sizeof out, &o, &sp);
     while (at < nt && o + 48 < sizeof out) {
         if (sp) out[o++] = ' ';
@@ -882,6 +917,8 @@ static char *grid_tracks_resolved(const char *spec, const double *tr, int nt)
         sp = true;
     }
     out[o] = 0;
+    /* (names side by side are one list) */
+    for (char *q; (q = strstr(out, "] [")); ) memmove(q, q + 2, strlen(q + 2) + 1), *q = ' ';
     return strdup(o ? out : "none");
 }
 
@@ -975,7 +1012,7 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
             if (cs->used.writing_mode != 0) rows_asked = !rows_asked;
             int nt = layout_query_grid_tracks(cs->el, rows_asked, tracks, 2000);
             if (nt >= 0) {
-                char *g = grid_tracks_resolved(r, tracks, nt);
+                char *g = grid_tracks_resolved(r, tracks, nt, layout_query_grid_lead(cs->el, rows_asked));
                 free(r);
                 r = g;
             }

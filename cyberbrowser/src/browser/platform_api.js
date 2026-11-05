@@ -1376,12 +1376,85 @@
         if (a.behavior !== undefined) scrollEnum(name, owner, a.behavior, ['auto', 'instant', 'smooth']);
         if (a.left !== undefined) o.left = scrollNumber(a.left);
         if (a.top !== undefined) o.top = scrollNumber(a.top);
+        o.behavior = a.behavior;
         return o;
     }
-    function scrollApply(el, o, by) {
-        if (o.left !== undefined) el.scrollLeft = by ? el.scrollLeft + o.left : o.left;
-        if (o.top !== undefined) el.scrollTop = by ? el.scrollTop + o.top : o.top;
+    /* ---- Scrolling, at once or smoothly: what's running, per element ---- */
+    var SCROLL_MS = 250;
+    var scrollRuns = new Map();
+    var rawTop = ELP && Object.getOwnPropertyDescriptor(ELP, 'scrollTop');
+    var rawLeft = ELP && Object.getOwnPropertyDescriptor(ELP, 'scrollLeft');
+    function scrollInterrupt(el) {
+        var run = scrollRuns.get(el);
+        if (!run) return;
+        scrollRuns.delete(el);
+        if (!scrollRuns.size) global.__cyberScrollHold(false);
+        run.resolve({ interrupted: true });
     }
+    /* (where it can go: some flows run to the negative side) */
+    function scrollClamp(el, cs, left, top) {
+        var vert = cs.writingMode !== 'horizontal-tb', rtl = cs.direction === 'rtl';
+        var mx = Math.max(0, el.scrollWidth - el.clientWidth), my = Math.max(0, el.scrollHeight - el.clientHeight);
+        var negL = vert ? /-rl$/.test(cs.writingMode) : rtl, negT = vert && rtl;
+        /* (a control's text says nothing here: what's written clamps it) */
+        return [mx ? Math.max(negL ? -mx : 0, Math.min(negL ? 0 : mx, left)) : left, my ? Math.max(negT ? -my : 0, Math.min(negT ? 0 : my, top)) : top];
+    }
+    function scrollSmoothly(el, behavior) {
+        if (behavior === 'instant') return false;
+        if (behavior === 'smooth') return !!el.isConnected;
+        return !!el.isConnected && global.getComputedStyle(el).scrollBehavior === 'smooth';
+    }
+    function scrollGo(el, left, top, behavior) {
+        if (!scrollSmoothly(el, behavior)) {
+            scrollInterrupt(el);
+            if (left !== undefined) rawLeft.set.call(el, left);
+            if (top !== undefined) rawTop.set.call(el, top);
+            return Promise.resolve({ interrupted: false });
+        }
+        var l0 = rawLeft.get.call(el), t0 = rawTop.get.call(el), was = scrollRuns.get(el);
+        var to = scrollClamp(el, global.getComputedStyle(el), left === undefined ? (was ? was.l1 : l0) : left, top === undefined ? (was ? was.t1 : t0) : top);
+        var l1 = to[0], t1 = to[1];
+        /* (going where it's going already: nothing changes) */
+        if (was && was.l1 === l1 && was.t1 === t1) return was.promise;
+        scrollInterrupt(el);
+        if (l0 === l1 && t0 === t1) return Promise.resolve({ interrupted: false });
+        var made = new Promise(function (resolve) {
+            var run = { resolve: resolve, l1: l1, t1: t1 }, start = null;
+            scrollRuns.set(el, run);
+            global.__cyberScrollHold(true);
+            var tick = function (now) {
+                if (scrollRuns.get(el) !== run) return;
+                if (start === null) start = now;
+                var p = (now - start) / SCROLL_MS;
+                if (p >= 1) {
+                    scrollRuns.delete(el);
+                    rawLeft.set.call(el, l1);
+                    rawTop.set.call(el, t1);
+                    if (!scrollRuns.size) global.__cyberScrollHold(false);
+                    resolve({ interrupted: false });
+                    return;
+                }
+                var e = p * p * (3 - 2 * p);
+                rawLeft.set.call(el, l0 + (l1 - l0) * e);
+                rawTop.set.call(el, t0 + (t1 - t0) * e);
+                global.requestAnimationFrame(tick);
+            };
+            global.requestAnimationFrame(tick);
+        });
+        scrollRuns.get(el).promise = made;
+        return made;
+    }
+    function scrollApply(el, o, by) {
+        var l = o.left === undefined ? undefined : by ? rawLeft.get.call(el) + o.left : o.left;
+        var t = o.top === undefined ? undefined : by ? rawTop.get.call(el) + o.top : o.top;
+        return scrollGo(el, l, t, o.behavior);
+    }
+    if (rawTop && rawLeft) [['scrollTop', rawTop], ['scrollLeft', rawLeft]].forEach(function (d) {
+        var top = d[0] === 'scrollTop', raw = d[1];
+        Object.defineProperty(ELP, d[0], { configurable: true, enumerable: raw.enumerable, get: raw.get, set: function (v) {
+            scrollGo(this, top ? undefined : +v, top ? +v : undefined);
+        } });
+    });
     function scrollViewportElement() {
         var d = global.document;
         return d && d.scrollingElement;
@@ -1389,13 +1462,11 @@
     [['scroll', false], ['scrollTo', false], ['scrollBy', true]].forEach(function (m) {
         var name = m[0], by = m[1];
         if (ELP) Object.defineProperty(ELP, name, { configurable: true, enumerable: true, writable: true, value: function () {
-            scrollApply(this, scrollArgs(name, 'Element', arguments), by);
-            return Promise.resolve({ interrupted: false });
+            return scrollApply(this, scrollArgs(name, 'Element', arguments), by);
         } });
         Object.defineProperty(global, name, { configurable: true, enumerable: true, writable: true, value: function () {
             var o = scrollArgs(name, 'Window', arguments), el = scrollViewportElement();
-            if (el) scrollApply(el, o, by);
-            return Promise.resolve({ interrupted: false });
+            return el ? scrollApply(el, o, by) : Promise.resolve({ interrupted: false });
         } });
     });
     [['scrollX', 'scrollLeft'], ['pageXOffset', 'scrollLeft'], ['scrollY', 'scrollTop'], ['pageYOffset', 'scrollTop']].forEach(function (m) {
@@ -1413,12 +1484,21 @@
         return 0;
     }
     /* (inner: where in el, a frame, what is scrolled to is) */
+    var scrollWith, scrollLast;
     function scrollIntoViewOf(el, block, inline, inner) {
         var d = el.ownerDocument, root = d.documentElement;
+        /* (what smooth scrolls begun here will still take off it) */
+        var pendX = 0, pendY = 0;
+        var pend = function (a) {
+            var run = scrollRuns.get(a);
+            if (!run) return;
+            pendX += run.l1 - rawLeft.get.call(a);
+            pendY += run.t1 - rawTop.get.call(a);
+        };
         var rectOf = function () {
             var r = el.getBoundingClientRect();
-            if (!inner) return r;
-            var left = r.left + el.clientLeft + inner.left, top = r.top + el.clientTop + inner.top;
+            if (!inner) return pendX || pendY ? { left: r.left - pendX, top: r.top - pendY, right: r.right - pendX, bottom: r.bottom - pendY } : r;
+            var left = r.left + el.clientLeft + inner.left - pendX, top = r.top + el.clientTop + inner.top - pendY;
             return { left: left, top: top, right: left + inner.right - inner.left, bottom: top + inner.bottom - inner.top };
         };
         /* (a skipped box a descendant is scrolled to shows it, whatever it does then) */
@@ -1432,14 +1512,16 @@
             if (!isScrollBox(global.getComputedStyle(a))) continue;
             var r = rectOf(), b = a.getBoundingClientRect();
             var l = b.left + a.clientLeft, t = b.top + a.clientTop;
-            a.scrollLeft += scrollAlign(inline, r.left, r.right, l, l + a.clientWidth);
-            a.scrollTop += scrollAlign(block, r.top, r.bottom, t, t + a.clientHeight);
+            scrollLast = scrollGo(a, rawLeft.get.call(a) + scrollAlign(inline, r.left, r.right, l, l + a.clientWidth),
+                                  rawTop.get.call(a) + scrollAlign(block, r.top, r.bottom, t, t + a.clientHeight), scrollWith);
+            pend(a);
         }
         var se = d.scrollingElement;
         if (!se) return;
         var v = rectOf();
-        se.scrollLeft += scrollAlign(inline, v.left, v.right, 0, global.innerWidth);
-        se.scrollTop += scrollAlign(block, v.top, v.bottom, 0, global.innerHeight);
+        scrollLast = scrollGo(se, rawLeft.get.call(se) + scrollAlign(inline, v.left, v.right, 0, global.innerWidth),
+                              rawTop.get.call(se) + scrollAlign(block, v.top, v.bottom, 0, global.innerHeight), scrollWith);
+        pend(se);
         /* (the parent's too, if this window may reach it) */
         var fe = global.frameElement, view = fe && fe.ownerDocument && fe.ownerDocument.defaultView;
         if (view && view.__cyberScrollIntoView) view.__cyberScrollIntoView(fe, block, inline, rectOf());
@@ -1447,6 +1529,8 @@
     Object.defineProperty(global, '__cyberScrollIntoView', { configurable: true, value: scrollIntoViewOf });
     if (ELP) {
         Object.defineProperty(ELP, 'scrollIntoView', { configurable: true, enumerable: true, writable: true, value: function () {
+            scrollWith = typeof arguments[0] === 'object' && arguments[0] ? arguments[0].behavior : undefined;
+            scrollLast = null;
             var arg = arguments[0], block = 'start', inline = 'nearest', LOGICAL = ['start', 'center', 'end', 'nearest'];
             if (typeof arg === 'object' && arg !== null || typeof arg === 'function') {
                 if (arg.behavior !== undefined) scrollEnum('scrollIntoView', 'Element', arg.behavior, ['auto', 'instant', 'smooth']);
@@ -1456,8 +1540,83 @@
                 block = 'end';
             }
             scrollIntoViewOf(this, block, inline);
-            return Promise.resolve({ interrupted: false });
+            scrollWith = undefined;
+            return scrollLast || Promise.resolve({ interrupted: false });
         } });
+        /* ---- GeometryUtils (CSSOM View): a box's corners, through the transforms ---- */
+        var geoPx = function (v) { return parseFloat(v) || 0; };
+        /* (a node as [matrix to the viewport, its box's rect there before that]) */
+        var geoBox = function (node, box, fname) {
+            box = box === undefined ? 'border' : String(box);
+            if (['margin', 'border', 'padding', 'content'].indexOf(box) < 0)
+                throw new TypeError("Failed to execute '" + fname + "': invalid box");
+            if (node === document || (node && node.nodeType === 9)) {
+                var sx = global.scrollX || 0, sy = global.scrollY || 0;
+                return { m: [1, 0, 0, 1, 0, 0], x: -sx, y: -sy, w: global.innerWidth, h: global.innerHeight };
+            }
+            if (node && node.nodeType === 3) {
+                var rg = document.createRange();
+                rg.selectNodeContents(node);
+                var tr = rg.getBoundingClientRect();
+                return { m: [1, 0, 0, 1, 0, 0], x: tr.left, y: tr.top, w: tr.width, h: tr.height };
+            }
+            if (!node || node.nodeType !== 1) throw new TypeError("Failed to execute '" + fname + "': not a geometry node");
+            var v = node.isConnected ? global.__cyberBoxMap(node) : null;
+            if (!v) throw new DOMException('The node has no box.', 'InvalidStateError');
+            var cs = global.getComputedStyle(node);
+            var off = function (side) {
+                if (box === 'margin') return -geoPx(cs['margin' + side]);
+                if (box === 'border') return 0;
+                var bw = geoPx(cs['border' + side + 'Width']);
+                return box === 'padding' ? bw : bw + geoPx(cs['padding' + side]);
+            };
+            var l = off('Left'), t = off('Top'), r = off('Right'), bt = off('Bottom');
+            return { m: v.slice(0, 6), x: v[6] + l, y: v[7] + t, w: v[8] - l - r, h: v[9] - t - bt };
+        };
+        var geoTo = function (m, p) { return { x: m[0] * p.x + m[2] * p.y + m[4], y: m[1] * p.x + m[3] * p.y + m[5] }; };
+        var geoFrom = function (m, p) {
+            var det = m[0] * m[3] - m[1] * m[2], dx = p.x - m[4], dy = p.y - m[5];
+            return { x: (m[3] * dx - m[2] * dy) / det, y: (m[0] * dy - m[1] * dx) / det };
+        };
+        /* (from a point in one's box to one in another's) */
+        var geoPoint = function (from, to, p) {
+            var v = geoTo(from.m, { x: p.x + from.x, y: p.y + from.y }), o = geoFrom(to.m, v);
+            return { x: o.x - to.x, y: o.y - to.y };
+        };
+        var geoQuads = function getBoxQuads() {
+            var o = arguments[0] || {}, b = geoBox(this, o.box, 'getBoxQuads');
+            var to = o.relativeTo !== undefined ? geoBox(o.relativeTo, 'border', 'getBoxQuads') : { m: [1, 0, 0, 1, 0, 0], x: 0, y: 0 };
+            var c = [[0, 0], [b.w, 0], [b.w, b.h], [0, b.h]].map(function (k) { return geoPoint(b, to, { x: k[0], y: k[1] }); });
+            return [new global.DOMQuad(c[0], c[1], c[2], c[3])];
+        };
+        var geoArgs = function (self, name, a, min) {
+            if (a.length < min) throw new TypeError("Failed to execute '" + name + "': 2 arguments required");
+            var o = a[2] || {};
+            return { from: geoBox(a[1], o.fromBox, name), to: geoBox(self, o.toBox, name) };
+        };
+        var geoMethods = {
+            getBoxQuads: geoQuads,
+            convertQuadFromNode: function convertQuadFromNode(quad, from) {
+                var g = geoArgs(this, 'convertQuadFromNode', arguments, 2), q = Object(quad);
+                var c = ['p1', 'p2', 'p3', 'p4'].map(function (k) { var p = q[k] || {}; return geoPoint(g.from, g.to, { x: +p.x || 0, y: +p.y || 0 }); });
+                return new global.DOMQuad(c[0], c[1], c[2], c[3]);
+            },
+            convertRectFromNode: function convertRectFromNode(rect, from) {
+                var g = geoArgs(this, 'convertRectFromNode', arguments, 2), r = Object(rect), x = +r.x || 0, y = +r.y || 0, w = +r.width || 0, h = +r.height || 0;
+                var c = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]].map(function (k) { return geoPoint(g.from, g.to, { x: k[0], y: k[1] }); });
+                return new global.DOMQuad(c[0], c[1], c[2], c[3]);
+            },
+            convertPointFromNode: function convertPointFromNode(point, from) {
+                var g = geoArgs(this, 'convertPointFromNode', arguments, 2), p = Object(point);
+                var o = geoPoint(g.from, g.to, { x: +p.x || 0, y: +p.y || 0 });
+                return new global.DOMPoint(o.x, o.y, +p.z || 0, p.w === undefined ? 1 : +p.w);
+            },
+        };
+        Object.keys(geoMethods).forEach(function (k) {
+            [ELP, DOCP, global.Text && global.Text.prototype].forEach(function (P) {
+                if (P) Object.defineProperty(P, k, { configurable: true, enumerable: true, writable: true, value: geoMethods[k] });
+            });
+        });
         Object.defineProperty(ELP, 'scrollIntoViewIfNeeded', { configurable: true, enumerable: true, writable: true, value: function () {
             scrollIntoViewOf(this, 'nearest', 'nearest');
         } });
