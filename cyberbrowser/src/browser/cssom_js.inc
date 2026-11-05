@@ -824,6 +824,8 @@
 "    function ffvBlock(block, maps) {\n"
 "        var i = 0, n = block.length;\n"
 "        while (i < n) {\n"
+"            while (i < n && /\\s/.test(block[i])) i++;\n"
+"            if (i >= n) break;\n"
 "            if (block[i] !== '@') {\n"
 "                var semi = block.indexOf(';', i);\n"
 "                var brace = block.indexOf('{', i);\n"

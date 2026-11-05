@@ -737,6 +737,46 @@
             Object.defineProperty(proto, k, { get: get, set: set, enumerable: d.enumerable, configurable: true });
         });
     } });
+    /* (FontFace: its descriptors, checked as @font-face checks them) */
+    if (global.FontFace && global.FontFace.prototype) {
+        var ffWeight = function (w) { return w === 'normal' || w === 'bold' || (/^[+-]?[\d.]+(e[-+]?\d+)?$/i.test(w) && +w >= 1 && +w <= 1000); };
+        var ffStretch = function (w) {
+            if (/^(normal|ultra-condensed|extra-condensed|condensed|semi-condensed|semi-expanded|expanded|extra-expanded|ultra-expanded)$/.test(w)) return true;
+            return /^[+-]?[\d.]+%$/.test(w) && parseFloat(w) >= 0;
+        };
+        var ffAngle = function (w) { return /^[+-]?[\d.]+deg$/.test(w) && Math.abs(parseFloat(w)) <= 90; };
+        var ffWords = function (v) { return String(v).trim().split(/\s+(?![^(]*\))/); };
+        var ffCalc = function (v) {
+            /* (a sum of percentages: worked out, in calc()) */
+            var m = /^calc\(\s*([-+]?[\d.]+)%\s*([-+])\s*([\d.]+)%\s*\)$/.exec(v);
+            return m ? 'calc(' + (parseFloat(m[1]) + (m[2] === '-' ? -1 : 1) * parseFloat(m[3])) + '%)' : v;
+        };
+        var ffDescs = {
+            weight: function (v) { var w = ffWords(v); return w.length <= 2 && w.every(ffWeight) && (w.length < 2 || !/[a-z]/.test(v)) ? v.trim() : null; },
+            stretch: function (v) {
+                var t = ffCalc(String(v).trim());
+                if (/^calc\(/.test(t)) return /^calc\([-+]?[\d.]+%\)$/.test(t) ? t : null;
+                var w = ffWords(t);
+                return w.length <= 2 && w.every(ffStretch) && (w.length < 2 || /^[\d.]+% [\d.]+%$/.test(t)) ? t : null;
+            },
+            style: function (v) {
+                var t = String(v).trim(), w = ffWords(t);
+                if (t === 'normal' || t === 'italic' || t === 'oblique') return t;
+                return w[0] === 'oblique' && w.length <= 3 && w.length > 1 && w.slice(1).every(ffAngle) ? t : null;
+            },
+        };
+        Object.keys(ffDescs).forEach(function (k) {
+            var check = ffDescs[k], held = new WeakMap();
+            Object.defineProperty(global.FontFace.prototype, k, { enumerable: true, configurable: true,
+                get: function () { if (!(this instanceof global.FontFace)) throw new TypeError('Illegal invocation'); var v = held.get(this); return v === undefined ? 'normal' : v; },
+                set: function (v) {
+                    if (!(this instanceof global.FontFace)) throw new TypeError('Illegal invocation');
+                    var ok = check(String(v));
+                    if (ok === null) throw new global.DOMException("'" + v + "' is not a valid value for " + k, 'SyntaxError');
+                    held.set(this, ok);
+                } });
+        });
+    }
     /* (a screen, what the media features' device says) */
     function liveInterface(name, parent, ro) {
         var C = { f: function () { throw new TypeError('Illegal constructor'); } }.f;

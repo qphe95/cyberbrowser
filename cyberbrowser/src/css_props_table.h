@@ -569,7 +569,7 @@ static CssPropDef g_props[] = {
     L("font-size-adjust", "none | [ ex-height | cap-height | ch-width | ic-width | ic-height ]? [ from-font | <number [0,inf]> ]", "none", 1),
     L("font-stretch", "normal | <percentage [0,inf]> | ultra-condensed | extra-condensed | condensed | semi-condensed | "
                       "semi-expanded | expanded | extra-expanded | ultra-expanded", "normal", 1),
-    L("font-style", "normal | italic | left | right | oblique <angle>?", "normal", 1),
+    L("font-style", "normal | italic | left | right | oblique <angle [-90deg,90deg]>?", "normal", 1),
     S("font-synthesis", "none | [ weight || style || small-caps || position ]",
       "font-synthesis-weight font-synthesis-style font-synthesis-small-caps font-synthesis-position", CSS_SH_SPECIAL),
     L("font-synthesis-position", "auto | none", "auto", 1),

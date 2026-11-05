@@ -1200,6 +1200,13 @@
         return { flag: !!kw, deg: deg + (kw === 'reverse' ? 180 : 0) };
     }
     function interpolate(prop, a, b, t) {
+        /* (visible all the way, but for the very end of hidden) */
+        if (prop === 'visibility') {
+            if (a === b) return a;
+            if (a !== 'visible' && b !== 'visible') return t < 0.5 ? a : b;
+            var vp = a === 'visible' ? 1 - t : t;
+            return vp > 0 ? 'visible' : (a === 'visible' ? b : a);
+        }
         /* (counters don't go between) */
         if (/^counter-/.test(prop)) return t < 0.5 ? a : b;
         if (prop === 'border-shape') {
@@ -1533,7 +1540,12 @@
             var pts = [];
             var alias = sizeLogical(el, prop);
             for (var f = 0; f < frames.length; f++) {
-                var val = frames[f].style.getPropertyValue(prop) || (alias && frames[f].style.getPropertyValue(alias));
+                var val = frames[f].style.getPropertyValue(prop);
+                /* (by a logical name: a keyword or calc-size(); a plain length is the engine's) */
+                if (!val && alias) {
+                    var byLogical = frames[f].style.getPropertyValue(alias);
+                    if (byLogical && !/^s*[-+d.]/.test(byLogical)) val = byLogical;
+                }
                 if (val) pts.push({ at: frames[f].at, value: val, composite: frames[f].style.animationComposition || comp });
             }
             if (!pts.length) continue;
@@ -1722,13 +1734,15 @@
                 if (IMAGE_PROP.test(prop)) can = true;
                 if (prop === 'border-shape') can = borderShapeInterpolate(from, base, 0) !== null;
                 if (prop === 'font-style') can = true;
+                if (prop === 'visibility') can = true;
+                if (/(^|-)color$/.test(prop) && rgbaOf(from) && rgbaOf(base)) can = true;
                 if (prop === 'filter' || prop === 'backdrop-filter') can = filterInterpolate(prop, from, base, id) !== null;
                 if (dur + delay > 0 && (can || discrete)) {
                     var easing;
                     try { easing = parseEasing(listItem(cs.transitionTimingFunction, at)); } catch (e) { easing = LINEAR; }
                     rec.run = { from: can ? sizeResolved(el, prop, from) : from, to: can ? sizeResolved(el, prop, base) : base, start: now, dur: dur, delay: delay, easing: easing, flip: !can };
                     /* (one the engine runs too has its events and its animation there) */
-                    if (ENGINE_RUNS.test(prop) && !wideColorPairs(from, base) && !(SIZE_PROP.test(prop) && /calc-size\(|^\s*(auto|none|min-content|max-content|fit-content|stretch)\s*$/i.test(String(specNow) + ' ' === ' ' ? '' : String(specNow)))) rec.run.quiet = true;
+                    if (ENGINE_RUNS.test(prop) && !/%/.test(String(specNow) + String(fromSpec)) && !wideColorPairs(from, base) && !(SIZE_PROP.test(prop) && /calc-size\(|^\s*(auto|none|min-content|max-content|fit-content|stretch)\s*$/i.test(String(specNow) + ' ' === ' ' ? '' : String(specNow)))) rec.run.quiet = true;
                     else transitionEvents(el, prop, rec.run);
                 }
             }
@@ -2727,6 +2741,12 @@
                 if (!a._finished.settled) resolveWith(a, '_finished', a);
             } else if (state === 'idle') {
                 awaitingEnd.delete(a);
+                /* (cancelled: what waited for its end hears so) */
+                if (!a._finished.settled) {
+                    a._finished.settled = true;
+                    a._finished.reject(new global.DOMException('The animation was canceled', 'AbortError'));
+                    a._finished = deferred();
+                }
             }
         });
         running.forEach(function (a) { settlePending(a); });
@@ -2763,6 +2783,8 @@
     }
     var rowsOf = ELP.getAnimations;
     function nativeGetOf(el) {
+        /* (style is up to date first: that's what starts them) */
+        if (el.isConnected) global.getComputedStyle(el).getPropertyValue('opacity');
         var got = Array.from(rowsOf.call(el)).map(function (rec) { return wrapRow(rec, el); });
         var st = transitionsOf.get(el);
         if (st) st.forEach(function (rec, prop) { if (rec.run && !rec.run.over && !rec.run.quiet) got.push(transitionAnimation(el, prop, rec.run)); });

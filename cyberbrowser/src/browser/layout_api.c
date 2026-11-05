@@ -2012,6 +2012,11 @@ bool layout_query_used_inset(uint32_t id, int side, bool side_auto, bool opp_aut
     int cb = -1;
     for (int p = g_lq_layout.tree.nodes[idx].parent_idx; p >= 0; p = g_lq_layout.tree.nodes[p].parent_idx) {
         const LayoutBox *a = &g_lq_layout.boxes[p];
+        /* (sticky: against what scrolls it) */
+        if (pos == CSS_POSITION_STICKY) {
+            if (a->s->overflow != 0) { cb = p; break; }
+            continue;
+        }
         if (flow) { cb = p; break; }
         if (a->s->abs_cb || (pos == CSS_POSITION_ABSOLUTE && a->s->position != CSS_POSITION_STATIC)) { cb = p; break; }
     }

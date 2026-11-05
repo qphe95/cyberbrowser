@@ -510,6 +510,7 @@
     }
     variadic(CSSMathInvert, 'invert', function () { return typeInvert(this.__arg.__type()); });
 
+    var REGISTERED = Object.create(null);
     /* CSS.registerProperty (css-properties-values-api 3.) */
     if (global.CSS && global.CSS.__register) {
         var hidden = {};
@@ -539,6 +540,7 @@
                 if (hidden.__dependsOnContext(initial)) throw err("'" + initial + "' is not computationally independent");
                 initial = parsed;
             } else if (/var\(/.test(initial)) throw err('An initial value cannot use var()');
+            REGISTERED[name] = syntax;
             if (!hidden.__register(name, syntax, inherits, initial))
                 throw new global.DOMException("'" + name + "' is already registered", 'InvalidModificationError');
         } });
@@ -1011,6 +1013,32 @@
     }
     var LOGICAL_PAIR = /^(margin|padding|inset)-(block|inline)$/;
     var UNTYPED = /^(border-(bottom|top)-(left|right)-radius|border-image-(outset|repeat|slice|width)|counter-(increment|reset|set)|font-family|grid-(column|row)-(start|end)|scroll-snap-align|transition-property|will-change)$/;
+    /* What a registered property's computed value comes to, by its syntax. */
+    function reifyRegistered(text, syntax) {
+        text = String(text).trim();
+        if (/^url\(/i.test(text)) {
+            var iv = new CSSImageValue(ILLEGAL);
+            Object.defineProperty(iv, '__text', { value: text });
+            return iv;
+        }
+        if (/transform-(list|function)/.test(syntax)) {
+            var tv;
+            try { tv = parseTransform(text); } catch (e) { tv = null; }
+            if (tv) return tv;
+        }
+        if (/^-?[a-zA-Z_][\w-]*$/.test(text)) return new CSSKeywordValue(text);
+        if (/^[-+]?[\d.]|^(?:calc|min|max|clamp)\(/i.test(text)) {
+            var n = null;
+            try { n = parseNumeric(text); } catch (e) { n = null; }
+            if (n) return n;
+        }
+        return generic(text, '--x');
+    }
+    function registeredList(p, t) {
+        var syntax = REGISTERED[p];
+        var parts = /#\s*$/.test(syntax) ? splitCommas(t) : /\+\s*$/.test(syntax) ? String(t).trim().split(/\s+(?![^(]*\))/) : [t];
+        return parts.map(function (x) { return reifyRegistered(x, syntax); });
+    }
     function reify(prop, text) {
         text = String(text).trim();
         if (/\bvar\(/i.test(text) || prop.slice(0, 2) === '--') return parseUnparsed(text);
@@ -1082,6 +1110,7 @@
             if (!knownProp(p)) throw new TypeError('Unknown property: ' + property);
             var t = mapOf(this).read(p);
             if (!t) return null;
+            if (mapOf(this).computed && REGISTERED[p] && REGISTERED[p] !== '*') return registeredList(p, t)[0];
             /* (a number set is that number, as it was put) */
             var held = mapOf(this).held;
             if (held && held[p] && held[p].text === t) return held[p].value;
@@ -1092,6 +1121,7 @@
             if (!knownProp(p)) throw new TypeError('Unknown property: ' + property);
             var t = mapOf(this).read(p);
             if (!t) return [];
+            if (mapOf(this).computed && REGISTERED[p] && REGISTERED[p] !== '*') return registeredList(p, t);
             return (LIST_VALUED.test(p) ? splitCommas(t) : [t]).map(function (x) { return reify(p, x); });
         }
         has(property) {
@@ -1113,6 +1143,8 @@
         if (typeof v === 'string') return v;
         if (!(v instanceof CSSStyleValue)) throw new TypeError('A CSSStyleValue or string is required');
         if (v.__prop && v.__prop !== p) throw new TypeError('The value is for ' + v.__prop);
+        /* (a custom property takes tokens, not typed values) */
+        if (p.slice(0, 2) === '--' && !(v instanceof CSSUnparsedValue)) throw new TypeError('A custom property takes a string or CSSUnparsedValue');
         return v.toString();
     }
     class StylePropertyMap extends StylePropertyMapReadOnly {
@@ -1175,7 +1207,7 @@
             write: function (p, t) { if (t === null) style.removeProperty(p); else style.setProperty(p, t); },
             names: function () {
                 var out = [];
-                for (var i = 0; i < style.length; i++) out.push(style[i]);
+                for (var i = 0; i < style.length; i++) { var nm0 = style[i] || style.item(i); if (nm0) out.push(nm0); }
                 return out.sort(function (a, b) {
                     var ca = a.slice(0, 2) === '--', cb = b.slice(0, 2) === '--';
                     return ca !== cb ? (ca ? 1 : -1) : a < b ? -1 : a > b ? 1 : 0;
@@ -1188,6 +1220,7 @@
         var map = new StylePropertyMapReadOnly(ILLEGAL);
         var cs = function () { return global.getComputedStyle(el, pseudo); };
         MAP.set(map, {
+            computed: true,
             read: function (p) {
                 var v = cs().getPropertyValue(p);
                 /* (percentages of these are computed values; used sizes are not) */
@@ -1203,7 +1236,9 @@
             write: function () { throw new TypeError('read only'); },
             names: function () {
                 var s = cs(), out = [];
-                for (var i = 0; i < s.length; i++) out.push(s[i]);
+                for (var i = 0; i < s.length; i++) { var nm = s[i] || s.item(i); if (nm) out.push(nm); }
+                /* (registered ones have a value whether set or not) */
+                Object.keys(REGISTERED).forEach(function (k) { if (out.indexOf(k) < 0 && s.getPropertyValue(k)) out.push(k); });
                 return out.sort();
             },
         });

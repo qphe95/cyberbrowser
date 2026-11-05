@@ -625,6 +625,12 @@ static bool before_color_wide(NodeId el, const CssPropDef *p)
 }
 
 /* Whether what el's size was last read as was such a size. */
+static bool before_pct(NodeId el, const CssPropDef *p)
+{
+    size_t k = (((size_t)el * 2654435761u) ^ ((size_t)p >> 4)) % BEFORE_N;
+    return g_before[k].el == el && g_before[k].p == p && g_before[k].spec && strchr(g_before[k].spec, '%');
+}
+
 static bool before_size_special(NodeId el, const CssPropDef *p)
 {
     size_t k = (((size_t)el * 2654435761u) ^ ((size_t)p >> 4)) % BEFORE_N;
@@ -1205,10 +1211,13 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
     /* (colors that interpolate in oklab: over what script works out) */
     bool color_prop = !strcmp(n, "color") || !strcmp(n, "background-color");
     bool wide_color = color_prop && !cs->pseudo && ((s && color_spec_wide(s)) || before_color_wide(cs->el, p));
+    /* (a margin, padding or inset by percentage: the store has no length for it) */
+    bool box_prop = !strncmp(n, "margin-", 7) || !strncmp(n, "padding-", 8) || !strcmp(n, "top") || !strcmp(n, "right") || !strcmp(n, "bottom") || !strcmp(n, "left");
+    bool box_pct = box_prop && !cs->pseudo && ((s && strchr(s, '%')) || before_pct(cs->el, p));
     bool generic_size = sized_prop && !cs->pseudo && (has_calc_size || (s && (size_spec_special(s) || before_size_special(cs->el, p))) ||
                         !strcmp(computed_of(ctx, cs, "interpolate-size"), "allow-keywords"));
     /* (script working out what a declaration comes to: the declaration alone) */
-    int ap = is_transform || individual || generic_size || wide_color || (sized_prop && (g_in_calc || g_in_hook)) ? -1 : anim_prop_of(n);
+    int ap = is_transform || individual || generic_size || box_pct || wide_color || (sized_prop && (g_in_calc || g_in_hook)) ? -1 : anim_prop_of(n);
     AnimVal av;
     /* (what composition builds on is the value under the animation; the script works it out) */
     extern bool g_css_saw_composition;
@@ -1263,10 +1272,10 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
     }
 
     char *before_spec = NULL;
-    char *now_spec = (sized_prop || color_prop) && s ? strdup(s) : NULL;
+    char *now_spec = (sized_prop || color_prop || box_prop) && s ? strdup(s) : NULL;
     char *before = generic && !keyframes_only ? before_swap(cs->el, p, r, now_spec, &before_spec) : NULL;
     /* (a size read now may be what a later change transitions from) */
-    if (!generic && (sized_prop || color_prop) && !in_hook && !g_in_calc && !cs->pseudo) {
+    if (!generic && (sized_prop || color_prop || box_prop) && !in_hook && !g_in_calc && !cs->pseudo) {
         char *old_spec = NULL;
         free(before_swap(cs->el, p, r, now_spec, &old_spec));
         free(old_spec);

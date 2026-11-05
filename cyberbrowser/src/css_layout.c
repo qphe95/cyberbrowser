@@ -20438,8 +20438,8 @@ static void layout_anim_read(const LayoutStyle *s, AnimVal v[ANIM_NPROP])
     /* (italic flips over at the middle; the others are angles, normal's 0) */
     bool italic = s->font_italic && !s->font_is_oblique;
     v[ANIM_FONT_STYLE] = (AnimVal){ s->font_is_oblique ? s->font_oblique_deg : 0.0f, italic ? 1.0f : 0.0f, 1 };
-    v[ANIM_LETTER_SPACING] = (AnimVal){ s->letter_spacing_set ? s->letter_spacing : 0.0f, 0, 1 };
-    v[ANIM_WORD_SPACING] = (AnimVal){ s->word_spacing_set ? s->word_spacing : 0.0f, 0, 1 };
+    v[ANIM_LETTER_SPACING] = (AnimVal){ s->letter_spacing, 0, 1 };
+    v[ANIM_WORD_SPACING] = (AnimVal){ s->word_spacing, 0, 1 };
 }
 
 void css_layout_anim_seed(const LayoutContext *ctx, int idx, uint32_t el)
@@ -22560,42 +22560,95 @@ static bool anchor_eval(const AnchorQuery *q, const char *raw, int side, double 
 
 /* position-area: for each axis the range of the three tracks (start of the
  * containing block to the anchor, the anchor, the anchor to its end). */
-static void position_area_parse(const char *v, int x[2], int y[2])
+static bool pa_x_rev(int wm, bool rtl) { return wm == 0 ? rtl : (wm == 1 || wm == 3); }
+static bool pa_y_rev(int wm, bool rtl) { return wm == 0 ? false : (wm == 4 ? !rtl : rtl); }
+
+static void position_area_parse(const char *v, int x[2], int y[2], int cwm, bool crtl, int swm, bool srtl)
 {
     x[0] = y[0] = 0;
     x[1] = y[1] = 2;
-    char a[2][32] = { "", "" };
-    int n = sscanf(v, "%31s %31s", a[0], a[1]);
-    bool xset = false, yset = false;
-    int amb[2][2], namb = 0;
-    for (int i = 0; i < n; i++) {
-        const char *w = a[i];
-        bool span = !strncasecmp(w, "span-", 5);
-        const char *c = span ? w + 5 : w;
-        if (!strncasecmp(c, "self-", 5)) c += 5;
-        int lo, hi;
-        bool isx = false, isy = false, high = false, mid = false, all = false;
+    char a[2][40] = { "", "" };
+    int n = sscanf(v, "%39s %39s", a[0], a[1]);
+    /* each word: its axis (0 x, 1 y, 2 the flow's: block first, then inline, 3 the other), its tracks */
+    int axis[2] = { 3, 3 }, lo[2] = { 0, 0 }, hi[2] = { 2, 2 };
+    bool own[2] = { false, false };
+    for (int i = 0; i < n && i < 2; i++) {
+        const char *c = a[i];
+        bool span = !strncasecmp(c, "span-", 5);
+        if (span) c += 5;
+        bool self = !strncasecmp(c, "self-", 5);
+        if (self) c += 5;
+        own[i] = self;
+        int wm = self ? swm : cwm;
+        bool rtl = self ? srtl : crtl, high = false, known = true;
+        int ax = 3;
+        bool mid = false, all = false;
+        bool vert = wm != 0;
         if (!strcasecmp(c, "all")) all = true;
         else if (!strcasecmp(c, "center")) mid = true;
-        else if (!strcasecmp(c, "left") || !strcasecmp(c, "x-start") || !strcasecmp(c, "inline-start")) isx = true;
-        else if (!strcasecmp(c, "right") || !strcasecmp(c, "x-end") || !strcasecmp(c, "inline-end")) { isx = true; high = true; }
-        else if (!strcasecmp(c, "top") || !strcasecmp(c, "y-start") || !strcasecmp(c, "block-start")) isy = true;
-        else if (!strcasecmp(c, "bottom") || !strcasecmp(c, "y-end") || !strcasecmp(c, "block-end")) { isy = true; high = true; }
-        else if (!strcasecmp(c, "end")) high = true;
-        else if (strcasecmp(c, "start")) continue;
-        if (all) { lo = 0; hi = 2; }
-        else if (mid) { lo = hi = 1; }
-        else if (span) { lo = high ? 1 : 0; hi = high ? 2 : 1; }
-        else { lo = hi = high ? 2 : 0; }
-        if (isx) { x[0] = lo; x[1] = hi; xset = true; }
-        else if (isy) { y[0] = lo; y[1] = hi; yset = true; }
-        else { amb[namb][0] = lo; amb[namb][1] = hi; namb++; }
+        else if (!strcasecmp(c, "left")) { ax = 0; }
+        else if (!strcasecmp(c, "right")) { ax = 0; high = true; }
+        else if (!strcasecmp(c, "top")) { ax = 1; }
+        else if (!strcasecmp(c, "bottom")) { ax = 1; high = true; }
+        else if (!strcasecmp(c, "x-start")) { ax = 0; high = pa_x_rev(wm, rtl); }
+        else if (!strcasecmp(c, "x-end")) { ax = 0; high = !pa_x_rev(wm, rtl); }
+        else if (!strcasecmp(c, "y-start")) { ax = 1; high = pa_y_rev(wm, rtl); }
+        else if (!strcasecmp(c, "y-end")) { ax = 1; high = !pa_y_rev(wm, rtl); }
+        else if (!strcasecmp(c, "block-start")) { ax = vert ? 0 : 1; high = vert ? pa_x_rev(wm, rtl) : false; }
+        else if (!strcasecmp(c, "block-end")) { ax = vert ? 0 : 1; high = vert ? !pa_x_rev(wm, rtl) : true; }
+        else if (!strcasecmp(c, "inline-start")) { ax = vert ? 1 : 0; high = vert ? pa_y_rev(wm, rtl) : rtl; }
+        else if (!strcasecmp(c, "inline-end")) { ax = vert ? 1 : 0; high = vert ? !pa_y_rev(wm, rtl) : !rtl; }
+        else if (!strcasecmp(c, "start")) ax = 2;
+        else if (!strcasecmp(c, "end")) { ax = 2; high = true; }
+        else known = false;
+        if (!known) continue;
+        axis[i] = ax;
+        if (all) { lo[i] = 0; hi[i] = 2; }
+        else if (mid) { lo[i] = hi[i] = 1; }
+        else if (ax == 2) {
+            /* (start and end: which is which, once the axis is known) */
+            lo[i] = high ? 1 : 0;
+            hi[i] = span ? 1 : 0;
+        } else if (span) { lo[i] = high ? 1 : 0; hi[i] = high ? 2 : 1; }
+        else { lo[i] = hi[i] = high ? 2 : 0; }
     }
-    /* (a word of no one axis: for the axis left; alone, for both) */
-    if (n == 1 && namb == 1) { x[0] = y[0] = amb[0][0]; x[1] = y[1] = amb[0][1]; return; }
-    for (int i = 0; i < namb; i++) {
-        if (!yset) { y[0] = amb[i][0]; y[1] = amb[i][1]; yset = true; }
-        else if (!xset) { x[0] = amb[i][0]; x[1] = amb[i][1]; xset = true; }
+    /* (the flow's words: block then inline; one alone: both; the others by what's left) */
+    for (int i = 0; i < n && i < 2; i++) {
+        if (axis[i] != 2) continue;
+        int wm = own[i] ? swm : cwm;
+        bool rtl = own[i] ? srtl : crtl, vert = wm != 0;
+        int other = i ? axis[0] : (n > 1 ? axis[1] : -1);
+        int want;
+        if (other == 0) want = 1;
+        else if (other == 1) want = 0;
+        else want = i == 0 ? (vert ? 0 : 1) : (vert ? 1 : 0);
+        axis[i] = want;
+        bool rev = want == 0 ? pa_x_rev(wm, rtl) : pa_y_rev(wm, rtl);
+        bool high = (lo[i] == 1) != rev, span = hi[i] == 1;
+        if (span) { lo[i] = high ? 1 : 0; hi[i] = high ? 2 : 1; }
+        else { lo[i] = hi[i] = high ? 2 : 0; }
+        /* (one word alone: the other axis the same way) */
+        if (n == 1) {
+            bool rev2 = want == 0 ? pa_y_rev(wm, rtl) : pa_x_rev(wm, rtl);
+            bool high2 = (high != rev) != rev2;
+            int l2 = span ? (high2 ? 1 : 0) : (high2 ? 2 : 0), h2 = span ? (high2 ? 2 : 1) : (high2 ? 2 : 0);
+            if (want == 0) { y[0] = l2; y[1] = h2; }
+            else { x[0] = l2; x[1] = h2; }
+        }
+    }
+    for (int i = 0; i < n && i < 2; i++) {
+        if (axis[i] == 0) { x[0] = lo[i]; x[1] = hi[i]; }
+        else if (axis[i] == 1) { y[0] = lo[i]; y[1] = hi[i]; }
+    }
+    /* (center and all: the axis the other word leaves; alone, both) */
+    for (int i = 0; i < n && i < 2; i++) {
+        if (axis[i] != 3) continue;
+        int other = n > 1 ? axis[!i] : 3;
+        if (other == 0) { y[0] = lo[i]; y[1] = hi[i]; }
+        else if (other == 1) { x[0] = lo[i]; x[1] = hi[i]; }
+        else if (n == 1) { x[0] = y[0] = lo[i]; x[1] = y[1] = hi[i]; }
+        else if (i == 0) { y[0] = lo[i]; y[1] = hi[i]; }
+        else { x[0] = lo[i]; x[1] = hi[i]; }
     }
 }
 
@@ -22728,7 +22781,10 @@ static void layout_position_absolute_box(LayoutContext *ctx, int idx)
             double r[4];
             layout_anchor_rect(ctx, an, anc, cb_x, cb_y, r);
             int x[2], y[2];
-            position_area_parse(as->position_area, x, y);
+            {
+                const LayoutBox *wb = cbb ? cbb : layout_box(ctx, ctx->tree.root_idx);
+                position_area_parse(as->position_area, x, y, wb->s->writing_mode, wb->s->direction == 1, as->writing_mode, as->direction == 1);
+            }
             double ex[4] = { 0.0, r[0], r[0] + r[2], cb_w }, ey[4] = { 0.0, r[1], r[1] + r[3], cb_h };
             for (int k = 1; k < 3; k++) {
                 ex[k] = ex[k] < 0.0 ? 0.0 : ex[k] > cb_w ? cb_w : ex[k];
@@ -22742,6 +22798,19 @@ static void layout_position_absolute_box(LayoutContext *ctx, int idx)
             cb_h = ey[y[1] + 1] - ey[y[0]];
             if (cb_w < 0.0) cb_w = 0.0;
             if (cb_h < 0.0) cb_h = 0.0;
+            /* (a self-alignment of its own: in the area, its auto insets nothing) */
+            int xe = cross ? a_self : j_self, ye = cross ? j_self : a_self;
+            unsigned char xk = cross ? as->as_kw : as->js_kw, yk = cross ? as->js_kw : as->as_kw;
+            if (xe || (xk & 0x3f)) {
+                if (!has_left) { box->left = 0.0; has_left = true; }
+                if (!has_right) { box->right = 0.0; has_right = true; }
+                area_x = -1;
+            }
+            if (ye || (yk & 0x3f)) {
+                if (!has_top) { box->top = 0.0; has_top = true; }
+                if (!has_bottom) { box->bottom = 0.0; has_bottom = true; }
+                area_y = -1;
+            }
         }
         AnchorQuery q = { ctx, idx, anc, cb_x, cb_y, cb_w, cb_h };
         double *fields[4] = { &box->top, &box->right, &box->bottom, &box->left };
