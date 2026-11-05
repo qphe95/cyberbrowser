@@ -941,26 +941,105 @@
         }
         return out.join(', ');
     }
+    /* A @font-face src list's parts that parse: each a url with its format and tech, or a local name. */
+    var SRC_FORMATS = /^(collection|embedded-opentype|opentype|svg|truetype|woff|woff2)$/i;
+    var SRC_TECHS = /^(features-opentype|features-aat|features-graphite|color-colrv0|color-colrv1|color-svg|color-sbix|color-cbdt|variations|palettes|incremental)$/i;
+    var WIDE_NAME = /^(default|inherit|initial|revert|revert-layer|unset)$/i;
+    function fontSrcParts(text) {
+        var s = String(text).replace(/\/\*[\s\S]*?\*\//g, ' '), out = [], d = 0, q = '', cur = '', parts = [];
+        for (var i = 0; i < s.length; i++) {
+            var c = s[i];
+            if (q) { if (c === q) q = ''; }
+            else if (c === '"' || c === "'") q = c;
+            else if (c === '(') d++;
+            else if (c === ')') d--;
+            if (c === ',' && !d && !q) { parts.push(cur); cur = ''; } else cur += c;
+        }
+        parts.push(cur);
+        parts.forEach(function (p) {
+            p = p.trim();
+            var lm = /^local\(\s*("[^"]*"|'[^']*'|[^()"']*?)\s*\)$/i.exec(p);
+            if (lm) {
+                var nm = lm[1];
+                if (!nm) return;
+                if (nm[0] !== '"' && nm[0] !== "'") {
+                    var ids = nm.split(/\s+/);
+                    if (!ids.every(function (x) { return /^-?[a-zA-Z_][\w-]*$/.test(x); })) return;
+                    if (ids.length === 1 && WIDE_NAME.test(ids[0])) return;
+                }
+                out.push({ text: p, local: true });
+                return;
+            }
+            var um = /^url\(\s*("[^"]*"|'[^']*'|[^\s"'()]*)\s*\)\s*/i.exec(p);
+            if (!um) return;
+            var rest = p.slice(um[0].length), fmt = null;
+            var fm = /^format\(\s*("[^"]*"|'[^']*'|[-\w]+)\s*\)\s*/i.exec(rest);
+            if (fm) {
+                fmt = fm[1].replace(/^["']|["']$/g, '');
+                if (fm[1][0] !== '"' && fm[1][0] !== "'" && !SRC_FORMATS.test(fm[1])) return;
+                rest = rest.slice(fm[0].length);
+            }
+            var tm = /^tech\(([^()]*)\)\s*/i.exec(rest);
+            if (tm) {
+                if (!tm[1].split(',').every(function (x) { return SRC_TECHS.test(x.trim()); })) return;
+                p = p.replace(tm[0].trim(), tm[0].trim().toLowerCase());
+                rest = rest.slice(tm[0].length);
+            }
+            if (rest) return;
+            out.push({ text: p, format: fmt });
+        });
+        return out;
+    }
+    Object.defineProperty(global, '__cyberFontSrcParts', { value: fontSrcParts, configurable: true, writable: true, enumerable: false });
+    /* (what isn't a property: its own check, and it's kept here) */
+    var FACE_DESC = {
+        'src': function (v) { var p = fontSrcParts(v); return p.length ? p.map(function (x) { return x.text; }).join(', ') : null; },
+        'ascent-override': facePct, 'descent-override': facePct, 'line-gap-override': facePct,
+        'size-adjust': function (v) { v = String(v).trim().toLowerCase(); return /^\+?[\d.]+(e[-+]?\d+)?%$/.test(v) ? v.replace(/^\+/, '') : null; }
+    };
+    function facePct(v) {
+        v = String(v).trim().toLowerCase();
+        if (v === 'normal') return v;
+        return /^\+?[\d.]+(e[-+]?\d+)?%$/.test(v) ? v.replace(/^\+/, '') : null;
+    }
     /* A @font-face rule's style, with its unicode-range. */
     function fontFaceStyle(style, block) {
-        var range = null;
+        var range = null, desc = {};
         var m = /(?:^|;)\s*unicode-range\s*:\s*([^;]*)/i.exec(block);
         if (m) range = urangeCanon(m[1]);
+        Object.keys(FACE_DESC).forEach(function (k) {
+            var re = new RegExp('(?:^|;)\\s*' + k + '\\s*:\\s*((?:[^;"\'()]|"[^"]*"|\'[^\']*\'|\\([^)]*\\))*)', 'gi'), dm;
+            while ((dm = re.exec(block))) {
+                var ok = FACE_DESC[k](dm[1]);
+                if (ok !== null) desc[k] = ok;
+            }
+        });
         var set = style.setProperty, get = style.getPropertyValue, remove = style.removeProperty;
-        var is = function (n) { return String(n).trim().toLowerCase() === 'unicode-range'; };
+        var low = function (n) { return String(n).trim().toLowerCase(); };
+        var is = function (n) { return low(n) === 'unicode-range'; };
         Object.defineProperty(style, 'setProperty', { configurable: true, writable: true, value: function setProperty(n, v, pri) {
+            if (low(n) in FACE_DESC) {
+                var dv = FACE_DESC[low(n)](v);
+                if (dv !== null) desc[low(n)] = dv;
+                return;
+            }
             if (!is(n)) return set.call(this, n, v, pri);
             var c = urangeCanon(v);
             if (c !== null) range = c;
         } });
         Object.defineProperty(style, 'getPropertyValue', { configurable: true, writable: true, value: function getPropertyValue(n) {
+            if (low(n) in FACE_DESC) return desc[low(n)] || '';
             return is(n) ? (range === null ? '' : range) : get.call(this, n);
         } });
         Object.defineProperty(style, 'removeProperty', { configurable: true, writable: true, value: function removeProperty(n) {
+            if (low(n) in FACE_DESC) { var dw = desc[low(n)] || ''; delete desc[low(n)]; return dw; }
             if (!is(n)) return remove.call(this, n);
             var was = range === null ? '' : range;
             range = null;
             return was;
+        } });
+        Object.defineProperty(style, '__faceText', { configurable: true, value: function () {
+            return Object.keys(desc).map(function (k) { return k + ': ' + desc[k] + ';'; }).join(' ');
         } });
         return style;
     }
@@ -1352,7 +1431,7 @@
         return '@namespace ' + (this.__prefix ? serIdent(this.__prefix) + ' ' : '') + 'url(' + serString(this.__uri) + ');';
     };
     getter(CSSFontFaceRule.prototype, 'style', function () { return this.__style; });
-    CSSFontFaceRule.prototype.__text = function () { var d = declText(this.__style); return '@font-face {' + (d ? ' ' + d + ' ' : ' ') + '}'; };
+    CSSFontFaceRule.prototype.__text = function () { var d = declText(this.__style), fx = this.__style.__faceText ? this.__style.__faceText() : ''; if (fx) d = d ? d + ' ' + fx : fx; return '@font-face {' + (d ? ' ' + d + ' ' : ' ') + '}'; };
     getter(CSSPageRule.prototype, 'selectorText', function () { return this.__selector; }, function (v) { this.__selector = String(v).trim(); touched(this); });
     getter(CSSPageRule.prototype, 'style', function () { return this.__style; });
     CSSPageRule.prototype.__text = function () {

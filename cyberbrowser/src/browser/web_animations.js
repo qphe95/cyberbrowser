@@ -874,7 +874,7 @@
             var nums = pa[i].a.map(function (x, k) {
                 var v = x + (pb[i].a[k] - x) * t;
                 /* (an arc's flags: set where they aren't both clear) */
-                if (pa[i].c === 'A' && (k === 3 || k === 4)) return v !== 0 ? 1 : 0;
+                if (pa[i].c === 'A' && (k === 3 || k === 4)) return v > 0 ? 1 : 0;
                 return fmt(v);
             });
             parts.push(pa[i].c + (nums.length ? ' ' + nums.join(' ') : ''));
@@ -1424,6 +1424,57 @@
     var DISCRETE = /^(overflow-clip-margin|mask-border-source|border-image-source|list-style-image)$/;
     function interpolate(prop, a, b, t) {
         if (DISCRETE.test(prop)) return t < 0.5 ? a : b;
+        /* (the box it would have anyway isn't said) */
+        if (prop === 'clip-path' || prop === 'offset-path') {
+            a = String(a).replace(/\s+border-box\s*$/, '');
+            b = String(b).replace(/\s+border-box\s*$/, '');
+        }
+        /* (a corner's two radii, each by itself) */
+        if (/^border-.*-radius$/.test(prop) && prop !== 'border-radius') {
+            var rw = posWords(a), rz = posWords(b);
+            if (rw.length !== rz.length && rw.length && rz.length) {
+                var rx = combine(prop, rw[0], rz[0], function (x, y) { return Math.max(0, x + (y - x) * t); });
+                var ry = combine(prop, rw[1] || rw[0], rz[1] || rz[0], function (x, y) { return Math.max(0, x + (y - x) * t); });
+                if (rx === null || ry === null) return t < 0.5 ? a : b;
+                return rx === ry ? rx : rx + ' ' + ry;
+            }
+        }
+        /* (how much of each limit) */
+        if (prop === 'dynamic-range-limit') {
+            var drl = function (v) {
+                var o = { standard: 0, constrained: 0, 'no-limit': 0 }, m, re = /(standard|constrained|no-limit)\s*([\d.]+%)?/g, s = String(v), any = 0;
+                while ((m = re.exec(s))) { o[m[1]] += m[2] ? parseFloat(m[2]) : 100; any++; }
+                return any ? o : null;
+            };
+            var da = drl(a), db = drl(b);
+            if (!da || !db) return t < 0.5 ? a : b;
+            var parts = [];
+            ['standard', 'constrained', 'no-limit'].forEach(function (k) {
+                var w = da[k] + (db[k] - da[k]) * t;
+                if (w > 0) parts.push({ k: k, w: w });
+            });
+            if (!parts.length) return a;
+            if (parts.length === 1) return parts[0].k;
+            return 'dynamic-range-limit-mix(' + parts.map(function (p) { return p.k + ' ' + fmt(p.w) + '%'; }).join(', ') + ')';
+        }
+        /* (auto goes between lengths as what it's used as; each side by itself) */
+        if (prop === 'text-decoration-inset') {
+            var insets = function (v) {
+                var w = posWords(v === 'auto' ? '0px' : v);
+                return [w[0], w.length > 1 ? w[1] : w[0]];
+            };
+            if (a === 'auto' && b === 'auto') return a;
+            var ia = insets(a), ib = insets(b);
+            var ix = combine(prop, ia[0], ib[0], function (x, y) { return x + (y - x) * t; });
+            var iy = combine(prop, ia[1], ib[1], function (x, y) { return x + (y - x) * t; });
+            if (ix === null || iy === null) return t < 0.5 ? a : b;
+            return ix === iy ? ix : ix + ' ' + iy;
+        }
+        /* (a metric that's the default isn't said) */
+        if (prop === 'font-size-adjust') {
+            a = String(a).replace(/^ex-height\s+/, '');
+            b = String(b).replace(/^ex-height\s+/, '');
+        }
         /* (the baseline is where a length starts from) */
         if (prop === 'vertical-align') {
             if (a === 'baseline' && b !== 'baseline' && /[\d)]/.test(b)) a = '0px';
@@ -1646,7 +1697,8 @@
             if (r === null) return value;
             out.push(r);
         }
-        return filterTidy(out.join(' '));
+        /* (not in range yet: that comes after going between) */
+        return out.join(' ');
     }
     /* (amounts in their ranges) */
     function filterTidy(s) {
@@ -1658,6 +1710,19 @@
         });
     }
     function addValues(prop, under, value, how) {
+        /* (axis by axis; what's only on one side stays) */
+        if (prop === 'font-variation-settings') {
+            var fva = function (v) {
+                var o = {}, m, re = /["']([^"']{4})["']\s+(-?[\d.]+(?:e[-+]?\d+)?)/g;
+                while ((m = re.exec(String(v)))) o[m[1]] = +m[2];
+                return o;
+            };
+            var fu = fva(under), fv = fva(value);
+            if (!Object.keys(fv).length) return value;
+            Object.keys(fv).forEach(function (k) { fu[k] = (fu[k] || 0) + fv[k]; });
+            var fk = Object.keys(fu).sort();
+            return fk.length ? fk.map(function (k) { return '"' + k + '" ' + fmt(fu[k]); }).join(', ') : 'normal';
+        }
         if (POS_PROP.test(prop)) { under = posNormal(under, prop); value = posNormal(value, prop); }
         /* (the lists repeated to the same length, each item added) */
         if (REPEATABLE.test(prop)) {
@@ -1670,8 +1735,10 @@
             return ts === null ? value : ts;
         }
         if (prop === 'font-size-adjust') {
+            under = String(under).replace(/^ex-height\s+/, '');
+            value = String(value).replace(/^ex-height\s+/, '');
             var sa = combine(prop, under, value, function (x, y) { return x + y; });
-            if (sa !== null) return sa.replace(/^ex-height\s+/, '');
+            if (sa !== null) return sa;
         }
         if ((prop === 'filter' || prop === 'backdrop-filter') && how === 'accumulate') return filterAccumulate(prop, under, value);
         if (/^(border-image|mask-border)-(slice|width|outset)$/.test(prop)) {
@@ -1727,12 +1794,13 @@
 
     /* ---- what a keyframe's value comes to on an element ---- */
     var COLORISH = /color|background|border|outline|shadow|fill|stroke|caret|accent/;
-    var RELATIVE = /\b(inherit|initial|unset|revert|revert-layer|currentcolor)\b|var\(|calc\(|min\(|max\(|clamp\(|[\d.](em|rem|ex|ch|vw|vh|vmin|vmax|lh|rlh|cap|ic|dvh|dvw|svh|svw|lvh|lvw)\b/i;
+    var RELATIVE = /\b(inherit|initial|unset|revert|revert-layer|currentcolor)\b|var\(|calc\(|min\(|max\(|clamp\(|[\d.](em|rem|ex|ch|vw|vh|vmin|vmax|lh|rlh|cap|ic|dvh|dvw|svh|svw|lvh|lvw|q|mm|cm|in|pt|pc)\b/i;
     function needsResolving(prop, value) {
         if (/^\s*(unset|initial|inherit|revert|revert-layer)\s*$/i.test(value)) return true;
         /* (what weighs by name, or sizes by name) */
         if (prop === 'font-weight' && /[a-z]/i.test(value)) return true;
         if (prop === 'font-size' && /^\s*[a-z-]+\s*$/i.test(value)) return true;
+        if (prop === 'line-height' && /%/.test(value)) return true;
         /* (what a keyword or a left-out color comes to, in the computed form) */
         if (/^(box-shadow|text-shadow|font-stretch|font-width|corner-.*-shape)$/.test(prop) && value !== 'none') return true;
         if (/^(clip-path|shape-outside|offset-path)$/.test(prop) && /\bat\b|closest-|farthest-|shape\(/.test(value)) return true;
@@ -1755,8 +1823,13 @@
         setStyle(el, value === null ? null : prop + ': ' + value);
         /* (a size comes from the box: with this one) */
         if (prop === 'font-size') void el.offsetHeight;
-        /* (no inset at all doesn't go between, whatever it's used as) */
+        /* (no inset at all doesn't go between, whatever it's used as; a percentage
+         * is a computed value, what it comes to isn't) */
         if (/^(left|right|top|bottom)$/.test(prop) && global.__cyberComputedValue(el, prop) === 'auto') return 'auto';
+        if (/^(left|right|top|bottom)$/.test(prop)) {
+            var rawPct = global.__cyberComputedValue(el, prop);
+            if (rawPct && rawPct.indexOf('%') >= 0 && rawPct.indexOf('calc-size') < 0) return rawPct;
+        }
         return global.getComputedStyle(el).getPropertyValue(prop);
     }
 
@@ -2006,7 +2079,7 @@
                 if (prop === 'offset-rotate') { var rf = offsetRotateParts(from), rt = offsetRotateParts(base); can = !!(rf && rt && rf.flag === rt.flag); }
                 if (IMAGE_PROP.test(prop)) can = true;
                 if (prop === 'border-shape') can = borderShapeInterpolate(from, base, 0) !== null;
-                if (prop === 'font-style') can = true;
+                if (prop === 'font-style' || prop === 'dynamic-range-limit') can = true;
                 if (prop === 'visibility') can = true;
                 if (/(^|-)color$/.test(prop) && rgbaOf(from) && rgbaOf(base)) can = true;
                 if (prop === 'filter' || prop === 'backdrop-filter') can = filterInterpolate(prop, from, base, id) !== null;
@@ -2023,6 +2096,8 @@
         if (up && !rec.run) return prec.run.to === base ? transitionValue(prop, up, now) : base;
         return rec.run ? transitionValue(prop, rec.run, now) : base;
     }
+    /* (these don't animate at all) */
+    var NOT_ANIMATABLE = /^(interpolate-size)$/;
     var ENGINE_RUNS = /^(left|top|right|bottom|opacity|transform|width|height|color|background-color|(padding|margin)-(top|right|bottom|left)|border-(top|right|bottom|left)-width|font-size|letter-spacing|word-spacing|font-weight)$/;
     function transitionDone(run, now) { return now - run.start - run.delay >= run.dur; }
     function transitionFire(el, type, prop, secs) {
@@ -2116,8 +2191,12 @@
             }
             if (!some) return undefined;
         }
+        if (NOT_ANIMATABLE.test(prop)) return base;
         var v = keyframesOnly ? base : cssTransitionOver(el, prop, base, before, specNow, specBefore);
         v = cssAnimationsOver(el, prop, v, specNow);
+        /* (a border of no style has no width, however it's animated) */
+        if (/^(border-(top|right|bottom|left)|outline|column-rule|row-rule)-width$/.test(prop) && typeof v === 'string' && v !== '0px' &&
+            /^(none|hidden)$/.test(global.getComputedStyle(el).getPropertyValue(prop.replace('width', 'style')))) v = '0px';
         /* (a size part percentage: the length it comes to on this box) */
         if (SIZE_PROP.test(prop) && typeof v === 'string' && v !== base && v.indexOf('%') >= 0 && /^(width|height)$/.test(prop)) {
             var got = readWith(el, prop, v);
@@ -2418,6 +2497,7 @@
         var frames = effect._frames, props = {};
         frames.forEach(function (f) { Object.keys(frameLonghands(f)).forEach(function (p) { props[p] = true; }); });
         Object.keys(props).forEach(function (prop) {
+            if (NOT_ANIMATABLE.test(prop)) return;
             var list = frames.filter(function (f) { return prop in f.long; });
             var first = list[0], last = list[list.length - 1];
             /* (the missing ends: the underlying value) */

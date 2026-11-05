@@ -784,8 +784,22 @@ static double css_unit_factor(const char *unit, double parent_value, double font
         if (!strcasecmp(unit, "cqmin")) return (cw < ch ? cw : ch) / 100.0;
         if (!strcasecmp(unit, "cqmax")) return (cw > ch ? cw : ch) / 100.0;
     }
-    if (strcasecmp(unit, "vw") == 0) return g_unit_vw / 100.0;
-    if (strcasecmp(unit, "vh") == 0) return g_unit_vh / 100.0;
+    /* (small, large, dynamic: all the one viewport here) */
+    {
+        const char *vu = unit;
+        if ((vu[0] == 's' || vu[0] == 'l' || vu[0] == 'd' || vu[0] == 'S' || vu[0] == 'L' || vu[0] == 'D') && (vu[1] == 'v' || vu[1] == 'V')) vu++;
+        if (vu[0] == 'v' || vu[0] == 'V') {
+            /* (inline and block: by the writing mode of the flow being laid out) */
+            extern __thread bool t_wm_across_ext;
+            if (!strcasecmp(vu, "vw")) return g_unit_vw / 100.0;
+            if (!strcasecmp(vu, "vh")) return g_unit_vh / 100.0;
+            if (!strcasecmp(vu, "vi")) return (t_wm_across_ext ? g_unit_vh : g_unit_vw) / 100.0;
+            if (!strcasecmp(vu, "vb")) return (t_wm_across_ext ? g_unit_vw : g_unit_vh) / 100.0;
+            if (!strcasecmp(vu, "vmin")) return (g_unit_vw < g_unit_vh ? g_unit_vw : g_unit_vh) / 100.0;
+            if (!strcasecmp(vu, "vmax")) return (g_unit_vw > g_unit_vh ? g_unit_vw : g_unit_vh) / 100.0;
+        }
+    }
+    if (strcasecmp(unit, "q") == 0) return 96.0 / 101.6;
     if (strcasecmp(unit, "vmin") == 0) return (g_unit_vw < g_unit_vh ? g_unit_vw : g_unit_vh) / 100.0;
     if (strcasecmp(unit, "vmax") == 0) return (g_unit_vw > g_unit_vh ? g_unit_vw : g_unit_vh) / 100.0;
     if (strcasecmp(unit, "em") == 0 || strcasecmp(unit, "ic") == 0) return font_size;
@@ -4548,9 +4562,27 @@ static void css_custom_prop_declare(FrameArena *a, CssCustomProps *m, const CssC
                                     const char *prop, const char *value)
 {
     int r = css_reg_count() ? css_reg_find(prop) : -1;
-    if (r < 0) { css_custom_props_put(a, m, prop, value); return; }
     const char *v = value;
     while (*v && isspace((unsigned char)*v)) v++;
+    if (r < 0) {
+        /* (the wide keywords aren't values: no value at all, or the parent's) */
+        size_t vl = strlen(v);
+        while (vl && isspace((unsigned char)v[vl - 1])) vl--;
+        bool initial = vl == 7 && !strncasecmp(v, "initial", 7);
+        bool inherit = (vl == 7 && !strncasecmp(v, "inherit", 7)) || (vl == 5 && !strncasecmp(v, "unset", 5)) ||
+                       (vl == 6 && !strncasecmp(v, "revert", 6)) || (vl == 12 && !strncasecmp(v, "revert-layer", 12));
+        if (initial || inherit) {
+            const char *up = inherit && parent ? css_custom_props_get(parent, prop) : NULL;
+            if (up) css_custom_props_put(a, m, prop, up);
+            else {
+                int i = cp_find(m, prop);
+                if (i >= 0) m->props[i].value = NULL;
+            }
+            return;
+        }
+        css_custom_props_put(a, m, prop, value);
+        return;
+    }
     const char *init = css_reg_initial(r);
     const char *up = parent ? css_custom_props_get(parent, prop) : NULL;
     const char *fallback = css_reg_inherits(r) && up ? up : init;
@@ -10119,7 +10151,8 @@ static const PseudoRec *style_pseudo_rec(StylePass *P, StyleThread *T, const Css
             if (!strncasecmp(v, "none", 4) || !strncasecmp(v, "normal", 6)) content = NULL;
         }
         if (button && any && !content) content = "";
-        if (!content) continue;
+        /* (no box without content, but its style is still there to read) */
+        if (!content && !cnt) continue;
         if (!rec) {
             rec = (PseudoRec *)frame_arena_alloc(&T->arena, sizeof(PseudoRec));
             if (!rec) break;
@@ -10865,10 +10898,13 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
                 const char *init = css_reg_initial(r);
                 if (init || css_custom_props_get(m, css_reg_name(r))) css_custom_props_put(ma, m, css_reg_name(r), init ? init : "");
             }
+            /* (what's important comes after all that isn't) */
+            for (int pass = 0; pass < 2; pass++) {
             for (int d = 0; d < count; d++) {
                 const char *prop = applied[d].decl->property;
                 const char *val = applied[d].decl->value;
                 if (!(prop && prop[0] == '-' && prop[1] == '-')) continue;
+                if ((int)applied[d].decl->important != pass) continue;
                 if (css_var_is_self_reference(prop, val)) continue; /* invalid: unset */
                 char *resolved = css_var_resolve(val, m);
                 css_custom_prop_declare(ma, m, pv, prop, resolved ? resolved : val);
@@ -10878,11 +10914,13 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
                 for (int i = 0; i < inl[b].count; i++) {
                     const char *prop = inl[b].decls[i].property;
                     if (!(prop && prop[0] == '-' && prop[1] == '-')) continue;
+                    if ((int)inl[b].decls[i].important != pass) continue;
                     if (css_var_is_self_reference(prop, inl[b].decls[i].value)) continue;
                     char *resolved = css_var_resolve(inl[b].decls[i].value, m);
                     css_custom_prop_declare(ma, m, pv, prop, resolved ? resolved : inl[b].decls[i].value);
                     free(resolved);
                 }
+            }
             }
             ctx->custom_props[idx] = m;
         }
@@ -18598,7 +18636,8 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
         }
         if (basis < 0.0 && main_def_item && !child->s->fb_kw) basis = is_row ? child->width : child->height;
         /* (a size by flex-basis, in a column: its content still floors it) */
-        if (basis >= 0.0 && !is_row && !main_def_item && child->s->overflow == 0 && !(child->s->min_size_set & 2) &&
+        bool mh_kw = (child->s->mm_kw_h & 1) != 0;
+        if (basis >= 0.0 && !is_row && !main_def_item && ((child->s->overflow == 0 && !(child->s->min_size_set & 2)) || mh_kw) &&
             child->min_height <= 0.0) {
             child->x = content_x + it->cm_s;
             child->y = content_y + it->mm_s;
@@ -18665,7 +18704,7 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
                 double bh = layout_vertical_border_padding(child);
                 it->base = csz_eval(child->s->fb_csz, child->height - bh, ct->content_height, ctx->viewport_width, child->s->font_size) + bh;
             }
-            if (child->s->overflow == 0 && !(child->s->min_size_set & 2) && child->min_height <= 0.0) {
+            if (((child->s->overflow == 0 && !(child->s->min_size_set & 2)) || (child->s->mm_kw_h & 1)) && child->min_height <= 0.0) {
                 double mc = child->height;
                 if (it->max_main > 0.0 && mc > it->max_main) mc = it->max_main;
                 it->min_main = mc;

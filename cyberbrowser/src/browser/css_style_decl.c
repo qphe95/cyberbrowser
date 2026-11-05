@@ -388,8 +388,20 @@ static void block_set_text(StyleBlock *b, const char *text) {
     CssDeclaration *decls = css_parse_inline_style(text ? text : "", &count);
     for (int i = 0; decls && i < count; i++) {
         if (!decls[i].property || !decls[i].value) continue;
+        /* (what's important stands against what comes later without it) */
+        if (!decls[i].important) {
+            const char *pn = decls[i].property;
+            const CssPropDef *lp = css_prop_is_custom(pn, strlen(pn)) ? NULL : lookup(pn, strlen(pn));
+            StyleDecl *had = lp ? (lp->longhands ? NULL : find_decl(b, lp, NULL)) : css_prop_is_custom(pn, strlen(pn)) ? find_decl(b, NULL, pn) : NULL;
+            if (had && had->important) continue;
+        }
         block_set(b, decls[i].property, strlen(decls[i].property), decls[i].value,
                   decls[i].important ? "important" : "");
+        /* (written with nothing but space, it's a value of one space) */
+        if (css_prop_is_custom(decls[i].property, strlen(decls[i].property)) && !decls[i].value[strspn(decls[i].value, " \t\r\n\f")]) {
+            StyleDecl *sp = find_decl(b, NULL, decls[i].property);
+            if (sp) { free(sp->value); sp->value = strdup(" "); }
+        }
     }
     if (decls) css_declarations_free(decls, count);
 }

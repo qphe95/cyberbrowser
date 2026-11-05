@@ -594,6 +594,22 @@ static void m4_mul(double a[16], const double b[16])
 
 static double tf_len(const char *t, double base)
 {
+    /* (a sum, as calc() computes to: each part of it) */
+    if (!strncmp(t, "calc(", 5)) {
+        double sum = 0.0, sign = 1.0;
+        for (const char *q = t + 5; *q && *q != ')'; ) {
+            if (*q == ' ') { q++; continue; }
+            if ((*q == '-' || *q == '+') && q[1] == ' ') { sign = *q == '-' ? -1.0 : 1.0; q += 2; continue; }
+            char *e = NULL;
+            double v = strtod(q, &e);
+            if (e == q) break;
+            sum += sign * (*e == '%' ? v * base / 100.0 : v);
+            sign = 1.0;
+            q = e;
+            while (*q && *q != ' ' && *q != ')') q++;
+        }
+        return sum;
+    }
     char *e = NULL;
     double v = strtod(t, &e);
     if (e && *e == '%') return v * base / 100.0;
@@ -626,14 +642,18 @@ static char *transform_matrix(const char *list, double w, double h)
         if (nl >= sizeof name) return NULL;
         for (size_t i = 0; i < nl; i++) name[i] = (char)tolower((unsigned char)p[i]);
         name[nl] = 0;
-        const char *close = strchr(open, ')');
-        if (!close || memchr(open + 1, '(', (size_t)(close - open - 1))) return NULL;
-        char args[16][48];
+        const char *close = open + 1;
+        for (int d = 0; *close && (d > 0 || *close != ')'); close++) d += *close == '(' ? 1 : *close == ')' ? -1 : 0;
+        if (!*close) return NULL;
+        /* (inside only the translations take sums of lengths and percentages) */
+        const char *nest = memchr(open + 1, '(', (size_t)(close - open - 1));
+        if (nest && (strncmp(name, "translate", 9) || strncmp(nest - 4, "calc", 4))) return NULL;
+        char args[16][96];
         int na = 0;
         for (const char *a = open + 1; a < close && na < 16; ) {
             while (a < close && (*a == ' ' || *a == ',')) a++;
             const char *e = a;
-            while (e < close && *e != ' ' && *e != ',') e++;
+            for (int d = 0; e < close && (d > 0 || (*e != ' ' && *e != ',')); e++) d += *e == '(' ? 1 : *e == ')' ? -1 : 0;
             if (e > a) {
                 if ((size_t)(e - a) >= sizeof args[0]) return NULL;
                 memcpy(args[na], a, (size_t)(e - a));
@@ -696,7 +716,7 @@ static char *transform_matrix(const char *list, double w, double h)
 /* What the properties script animates last read as, by element: a transition
  * starts from it, when the change comes before the element has one. */
 #define BEFORE_N 8192
-static struct { NodeId el; const CssPropDef *p; char *v, *spec; } g_before[BEFORE_N];
+static struct { NodeId el; const CssPropDef *p; char *v, *spec; bool held; } g_before[BEFORE_N];
 
 /* (and what it was declared as: sizes interpolate by that) */
 static char *before_swap(NodeId el, const CssPropDef *p, const char *now, const char *spec, char **old_spec)
@@ -707,11 +727,25 @@ static char *before_swap(NodeId el, const CssPropDef *p, const char *now, const 
     if (!old) free(g_before[k].v);
     if (old_spec && same) *old_spec = g_before[k].spec;
     else free(g_before[k].spec);
+    if (!same) g_before[k].held = false;
     g_before[k].el = el;
     g_before[k].p = p;
     g_before[k].v = strdup(now ? now : "");
     g_before[k].spec = spec ? strdup(spec) : NULL;
     return old;
+}
+
+/* (script is running this one: it stays with script until that's over, whatever
+ * the last read saw) */
+static bool before_held(NodeId el, const CssPropDef *p)
+{
+    size_t k = (((size_t)el * 2654435761u) ^ ((size_t)p >> 4)) % BEFORE_N;
+    return g_before[k].el == el && g_before[k].p == p && g_before[k].held;
+}
+static void before_hold(NodeId el, const CssPropDef *p, bool on)
+{
+    size_t k = (((size_t)el * 2654435761u) ^ ((size_t)p >> 4)) % BEFORE_N;
+    if (g_before[k].el == el && g_before[k].p == p) g_before[k].held = on;
 }
 
 /* A size that takes more than a number to interpolate. */
@@ -742,7 +776,8 @@ static bool before_color_wide(NodeId el, const CssPropDef *p)
 static bool before_pct(NodeId el, const CssPropDef *p)
 {
     size_t k = (((size_t)el * 2654435761u) ^ ((size_t)p >> 4)) % BEFORE_N;
-    return g_before[k].el == el && g_before[k].p == p && g_before[k].spec && strchr(g_before[k].spec, '%');
+    return g_before[k].el == el && g_before[k].p == p && g_before[k].spec &&
+           (strchr(g_before[k].spec, '%') || !strcasecmp(g_before[k].spec, "auto"));
 }
 
 static bool before_size_special(NodeId el, const CssPropDef *p)
@@ -1364,8 +1399,8 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
     bool wide_color = color_prop && !cs->pseudo && ((s && color_spec_wide(s)) || before_color_wide(cs->el, p));
     /* (a margin, padding or inset by percentage: the store has no length for it) */
     bool box_prop = !strncmp(n, "margin-", 7) || !strncmp(n, "padding-", 8) || !strcmp(n, "top") || !strcmp(n, "right") || !strcmp(n, "bottom") || !strcmp(n, "left");
-    bool box_pct = box_prop && !cs->pseudo && ((s && strchr(s, '%')) || before_pct(cs->el, p));
-    bool generic_size = sized_prop && !cs->pseudo && (has_calc_size || (s && (size_spec_special(s) || before_size_special(cs->el, p))) ||
+    bool box_pct = box_prop && !cs->pseudo && ((s && (strchr(s, '%') || !strcasecmp(s, "auto"))) || before_pct(cs->el, p) || before_held(cs->el, p));
+    bool generic_size = sized_prop && !cs->pseudo && (has_calc_size || before_held(cs->el, p) || (s && (size_spec_special(s) || before_size_special(cs->el, p))) ||
                         !strcmp(computed_of(ctx, cs, "interpolate-size"), "allow-keywords"));
     /* (script working out what a declaration comes to: the declaration alone) */
     int ap = is_transform || individual || generic_size || box_pct || wide_color || (sized_prop && (g_in_calc || g_in_hook)) ? -1 : anim_prop_of(n);
@@ -1444,7 +1479,11 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
             if (JS_IsException(got)) JS_GetException(ctx);
             else if (JS_IsString(got)) {
                 const char *t = JS_ToCString(ctx, got);
-                if (t) { free(r); r = strdup(t); }
+                if (t) {
+                    if (!keyframes_only && (sized_prop || box_prop)) before_hold(cs->el, p, !r || strcmp(r, t));
+                    free(r);
+                    r = strdup(t);
+                }
             }
         }
     }

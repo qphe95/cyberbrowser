@@ -831,7 +831,13 @@
         var ffOrig = global.FontFace, ffCtor = function FontFace(family, source) {
             if (!new.target) throw new TypeError("Failed to construct 'FontFace': Please use the 'new' operator");
             if (arguments.length < 2) throw new TypeError("Failed to construct 'FontFace': 2 arguments required");
+            /* (a list with nothing in it to load: load() says so) */
+            var srcBad = false;
+            if (typeof source === 'string' && global.__cyberFontSrcParts) {
+                srcBad = !global.__cyberFontSrcParts(source).some(function (p) { return p.local || p.format === null || /^(collection|opentype|truetype|woff|woff2)(-variations)?$/i.test(p.format); });
+            }
             var f = Reflect.construct(ffOrig, arguments, new.target === ffCtor ? ffOrig : new.target), init = arguments[2];
+            if (srcBad) ffOf(f).badSrc = true;
             if (init && typeof init === 'object') Object.keys(ffMore).forEach(function (k) {
                 if (init[k] === undefined) return;
                 var ok = ffMore[k][1](init[k]);
@@ -839,6 +845,11 @@
             });
             return f;
         };
+        var ffLoad = ffOrig.prototype.load;
+        if (ffLoad) Object.defineProperty(ffOrig.prototype, 'load', { configurable: true, enumerable: true, writable: true, value: function load() {
+            if (ffOf(this).badSrc) return Promise.reject(new global.DOMException('The source provided could not be parsed as a value list.', 'SyntaxError'));
+            return ffLoad.call(this);
+        } });
         Object.defineProperty(ffCtor, 'length', { configurable: true, value: 2 });
         Object.defineProperty(ffCtor, 'prototype', { value: ffOrig.prototype, writable: false });
         Object.defineProperty(ffOrig.prototype, 'constructor', { configurable: true, writable: true, value: ffCtor });

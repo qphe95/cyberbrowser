@@ -3056,6 +3056,7 @@ static void css_media_skip_ws(const char **sp) {
 
 static double css_media_expr(const char **sp);
 
+static __thread double t_mq_vw, t_mq_vh;     /* (the viewport a query is asked of) */
 static double css_media_number(const char **sp) {
     css_media_skip_ws(sp);
     char *end = NULL;
@@ -3071,6 +3072,19 @@ static double css_media_number(const char **sp) {
         if (strncasecmp(*sp, units[i].u, n) == 0 && !isalpha((unsigned char)(*sp)[n])) {
             *sp += n;
             return v * units[i].px;
+        }
+    }
+    /* (of the viewport; small, large and dynamic are the one here) */
+    {
+        const char *u = *sp;
+        if ((*u == 's' || *u == 'l' || *u == 'd' || *u == 'S' || *u == 'L' || *u == 'D') && (u[1] == 'v' || u[1] == 'V')) u++;
+        static const char *const vu[] = { "vw", "vi", "vh", "vb", "vmin", "vmax" };
+        for (int i = 0; i < 6; i++) {
+            size_t n = strlen(vu[i]);
+            if (strncasecmp(u, vu[i], n) || isalpha((unsigned char)u[n])) continue;
+            *sp = u + n;
+            double b = i < 2 ? t_mq_vw : i < 4 ? t_mq_vh : i == 4 ? (t_mq_vw < t_mq_vh ? t_mq_vw : t_mq_vh) : (t_mq_vw > t_mq_vh ? t_mq_vw : t_mq_vh);
+            return v * b / 100.0;
         }
     }
     return v;
@@ -3204,6 +3218,8 @@ bool css_media_set_color_scheme(const char *scheme) {
 }
 
 static bool mq_feature_lookup(const char *name, double vw, double vh, MqFeature *f) {
+    t_mq_vw = vw;
+    t_mq_vh = vh;
     static const struct { const char *name, *value; } idents[] = {
         { "prefers-color-scheme", "dark" }, { "prefers-reduced-motion", "no-preference" },
         { "prefers-contrast", "no-preference" }, { "prefers-reduced-transparency", "no-preference" },

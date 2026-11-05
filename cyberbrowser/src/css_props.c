@@ -1501,12 +1501,14 @@ static bool calc_unit_canon(const char *u, double *scale, char *out, size_t cap)
 /* Set while computing a value (css_prop_compute): relative lengths resolve. */
 static __thread const CssComputeEnv *g_env;
 
+static bool math_ser_top(const Toks *ts, int i, Buf *b);
 static void ser_tok(Ser *S, int i, Buf *b, const int *kids, int nk) {
     const Tok *t = &S->ts->t[i];
     switch (t->type) {
     case T_IDENT: ser_ident(b, t->str); break;
     case T_FUNC: {
         if (is_math_fn(t->str) && calc_serialize(S->ts, i, b)) break;
+        if (!g_env && is_math_fn(t->str) && math_ser_top(S->ts, i, b)) break;
         if (!strcasecmp(t->str, "anchor") || !strcasecmp(t->str, "anchor-size")) {
             const Toks *ts = S->ts;
             buf_str(b, !strcasecmp(t->str, "anchor") ? "anchor(" : "anchor-size(");
@@ -1975,6 +1977,373 @@ static bool calc_serialize(const Toks *ts, int i, Buf *b) {
         buf_str(b, s.t[k].unit);
     }
     buf_ch(b, ')');
+    return true;
+}
+
+/* ---- math that can't be worked out yet, in its canonical form: sums sorted and
+ * flat, the numeric factor first, what a function comes to without a calc() round it ---- */
+typedef struct { char *text; int kind; double num; bool neg, product; char unit[12]; } MathTerm;   /* (kind: 0 number, 1 percent, 2 dimension, 3 other) */
+typedef struct { MathTerm t[32]; int n; bool bad; } MathSum;
+
+static void math_sum_tokens(const Toks *ts, int b, int e, MathSum *out, bool neg);
+static char *math_sum_text(MathSum *s, bool wrap);
+
+static void math_sum_free(MathSum *s) { for (int i = 0; i < s->n; i++) free(s->t[i].text); s->n = 0; }
+
+/* A plain value's text, without its sign. */
+static char *math_num_text(double v, const char *unit)
+{
+    Buf b = { 0 };
+    v = fabs(v);
+    if (isnan(v) || isinf(v)) {
+        buf_str(&b, isnan(v) ? "NaN" : "infinity");
+        if (unit && unit[0]) { buf_str(&b, " * 1"); buf_str(&b, unit); }
+    } else {
+        fmt_number(&b, v);
+        if (unit) buf_str(&b, unit);
+    }
+    return buf_take(&b);
+}
+
+static bool math_is_plain_fn(const char *f)
+{
+    static const char *const fns[] = { "calc", "-webkit-calc", "min", "max", "clamp", "round", "mod", "rem", "abs", "sign",
+        "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "pow", "sqrt", "hypot", "log", "exp", NULL };
+    for (int i = 0; fns[i]; i++) if (!strcasecmp(f, fns[i])) return true;
+    return false;
+}
+
+/* The text of a function's call, with its arguments in canonical form. */
+static char *math_fn_text(const Toks *ts, int i)
+{
+    const Tok *t = &ts->t[i];
+    char name[24];
+    snprintf(name, sizeof name, "%s", t->str);
+    for (char *p = name; *p; p++) *p = (char)tolower((unsigned char)*p);
+    /* (the arguments) */
+    int starts[8], ends[8], na = 0, s = t->first;
+    for (int j = t->first; j <= t->end && na < 8; j = j < t->end ? tok_next(ts, j) : j + 1) {
+        if (j == t->end || ts->t[j].type == T_COMMA) {
+            starts[na] = s;
+            ends[na++] = j;
+            s = j + 1;
+            if (j == t->end) break;
+        }
+    }
+    /* (one argument, or a clamp with a bound of none: what it comes to) */
+    bool drop_first = false, drop_last = false;
+    if (!strcmp(name, "clamp") && na == 3) {
+        drop_first = ends[0] == starts[0] + 1 && tok_ident(&ts->t[starts[0]], "none");
+        drop_last = ends[2] == starts[2] + 1 && tok_ident(&ts->t[starts[2]], "none");
+        if (drop_first && drop_last) { starts[0] = starts[1]; ends[0] = ends[1]; na = 1; snprintf(name, sizeof name, "calc"); }
+        else if (drop_last) { na = 2; snprintf(name, sizeof name, "max"); }
+        else if (drop_first) { starts[0] = starts[1]; ends[0] = ends[1]; starts[1] = starts[2]; ends[1] = ends[2]; na = 2; snprintf(name, sizeof name, "min"); }
+    }
+    if (na == 1 && (!strcmp(name, "min") || !strcmp(name, "max") || !strcmp(name, "calc") || !strcmp(name, "-webkit-calc"))) {
+        MathSum m = { .n = 0 };
+        math_sum_tokens(ts, starts[0], ends[0], &m, false);
+        if (m.bad) { math_sum_free(&m); return NULL; }
+        if (m.n == 1 && m.t[0].kind == 3 && !m.t[0].neg && !m.t[0].product &&
+            (!strncmp(m.t[0].text, "min(", 4) || !strncmp(m.t[0].text, "max(", 4) || !strncmp(m.t[0].text, "clamp(", 6) || !strncmp(m.t[0].text, "calc(", 5))) {
+            char *one = m.t[0].text;
+            m.t[0].text = NULL;
+            math_sum_free(&m);
+            return one;
+        }
+        char *in = math_sum_text(&m, false);
+        math_sum_free(&m);
+        Buf b = { 0 };
+        buf_str(&b, "calc(");
+        buf_str(&b, in);
+        buf_ch(&b, ')');
+        free(in);
+        return buf_take(&b);
+    }
+    Buf b = { 0 };
+    buf_str(&b, name);
+    buf_ch(&b, '(');
+    for (int a = 0; a < na; a++) {
+        if (a) buf_str(&b, ", ");
+        MathSum m = { .n = 0 };
+        math_sum_tokens(ts, starts[a], ends[a], &m, false);
+        if (m.bad) { math_sum_free(&m); free(b.s); return NULL; }
+        char *in = math_sum_text(&m, false);
+        math_sum_free(&m);
+        buf_str(&b, in);
+        free(in);
+    }
+    buf_ch(&b, ')');
+    return buf_take(&b);
+}
+
+static void math_sum_tokens(const Toks *ts, int b, int e, MathSum *out, bool neg)
+{
+    bool minus = neg;
+    int s = b;
+    for (int i = b; i <= e; i = i < e ? tok_next(ts, i) : i + 1) {
+        bool op = i < e && i > s && ts->t[i].type == T_DELIM && (ts->t[i].delim == '+' || ts->t[i].delim == '-');
+        if (i != e && !op) continue;
+        /* (divided by more than a number: in the order it's written) */
+        bool verbatim = false;
+        for (int j = s; j < i; j = tok_next(ts, j)) {
+            if (ts->t[j].type != T_DELIM || ts->t[j].delim != '/') continue;
+            int d = tok_next(ts, j);
+            if (d < i && ts->t[d].type != T_NUMBER) verbatim = true;
+        }
+        if (verbatim) {
+            Buf vb = { 0 };
+            for (int j = s; j < i; j = tok_next(ts, j)) {
+                const Tok *x = &ts->t[j];
+                if (x->type == T_DELIM) { buf_ch(&vb, ' '); buf_ch(&vb, x->delim); buf_ch(&vb, ' '); continue; }
+                if (x->type == T_NUMBER) fmt_number(&vb, x->num);
+                else if (x->type == T_PERCENT || x->type == T_DIM) {
+                    fmt_number(&vb, x->num);
+                    if (x->type == T_PERCENT) buf_ch(&vb, '%'); else buf_str(&vb, x->str);
+                } else if (x->type == T_IDENT) buf_str(&vb, x->str);
+                else if (x->type == T_FUNC && math_is_plain_fn(x->str)) {
+                    char *tx = math_fn_text(ts, j);
+                    if (!tx) { out->bad = true; break; }
+                    buf_str(&vb, tx);
+                    free(tx);
+                } else if (x->type == T_PAREN) {
+                    MathSum in = { .n = 0 };
+                    math_sum_tokens(ts, x->first, x->end, &in, false);
+                    char *tx = in.bad ? NULL : math_sum_text(&in, true);
+                    math_sum_free(&in);
+                    if (!tx) { out->bad = true; break; }
+                    buf_str(&vb, tx);
+                    free(tx);
+                } else {
+                    Ser plain = { ts, NULL, 0, NULL, NULL };
+                    ser_tok(&plain, j, &vb, NULL, 0);
+                }
+            }
+            if (!out->bad && out->n < 32) {
+                MathTerm *m = &out->t[out->n++];
+                memset(m, 0, sizeof *m);
+                m->kind = 3;
+                m->product = true;
+                m->neg = minus;
+                m->text = buf_take(&vb);
+            } else free(vb.s);
+            if (out->bad || i == e) break;
+            minus = neg != (ts->t[i].delim == '-');
+            s = i + 1;
+            continue;
+        }
+        /* (the product from s to i) */
+        double k = 1.0, kdiv = 1.0;
+        bool f_is_sum = false;
+        bool any_num = false, divided = false, after_nums = false;
+        const char *unit = NULL;
+        int nf = 0, only = -1;
+        Buf f = { 0 }, after = { 0 };
+        bool wanted_paren_sum = false;
+        for (int j = s; j < i; j = tok_next(ts, j)) {
+            const Tok *x = &ts->t[j];
+            if (x->type == T_DELIM && x->delim == '*') continue;
+            if (x->type == T_DELIM && x->delim == '/') {
+                int d = tok_next(ts, j);
+                if (d >= i) { out->bad = true; break; }
+                const Tok *dv = &ts->t[d];
+                if (dv->type == T_NUMBER) { kdiv *= dv->num; after_nums = true; j = d; continue; }
+                buf_str(&after, " / ");
+                {
+                    char *tx = NULL;
+                    if (dv->type == T_FUNC && math_is_plain_fn(dv->str)) tx = math_fn_text(ts, d);
+                    else if (dv->type == T_DIM || dv->type == T_PERCENT) {
+                        Buf q = { 0 };
+                        fmt_number(&q, dv->num);
+                        if (dv->type == T_PERCENT) buf_ch(&q, '%'); else buf_str(&q, dv->str);
+                        tx = buf_take(&q);
+                    } else if (dv->type == T_IDENT) tx = strdup(dv->str);
+                    if (!tx) { out->bad = true; break; }
+                    buf_str(&after, tx);
+                    free(tx);
+                }
+                divided = true;
+                j = d;
+                continue;
+            }
+            if (x->type == T_NUMBER) { k *= x->num; any_num = true; continue; }
+            if (x->type == T_IDENT) {
+                double cv = 0.0;
+                bool isc = true;
+                if (!strcasecmp(x->str, "e")) cv = M_E;
+                else if (!strcasecmp(x->str, "pi")) cv = M_PI;
+                else if (!strcasecmp(x->str, "infinity")) cv = INFINITY;
+                else if (!strcasecmp(x->str, "-infinity")) cv = -INFINITY;
+                else if (!strcasecmp(x->str, "nan")) cv = NAN;
+                else isc = false;
+                if (isc) { k *= cv; any_num = true; continue; }
+            }
+            if ((x->type == T_PERCENT || x->type == T_DIM) && !unit) {
+                k *= x->num;
+                unit = x->type == T_PERCENT ? "%" : x->str;
+                continue;
+            }
+            if (nf) buf_str(&f, " * ");
+            nf++;
+            if (x->type == T_PERCENT || x->type == T_DIM) {
+                fmt_number(&f, x->num);
+                if (x->type == T_PERCENT) buf_ch(&f, '%'); else buf_str(&f, x->str);
+            } else if (x->type == T_IDENT) {
+                for (const char *p = x->str; *p; p++) buf_ch(&f, (char)tolower((unsigned char)*p));
+            } else if (x->type == T_PAREN || (x->type == T_FUNC && (!strcasecmp(x->str, "calc") || !strcasecmp(x->str, "-webkit-calc")))) {
+                MathSum in = { .n = 0 };
+                math_sum_tokens(ts, x->first, x->end, &in, false);
+                if (in.bad) { math_sum_free(&in); out->bad = true; break; }
+                if (in.n > 1) f_is_sum = true;
+                /* (a bracket that is all of the term goes into this sum) */
+                if (tok_next(ts, s) == i && j == s) {
+                    for (int q = 0; q < in.n && out->n < 32; q++) {
+                        out->t[out->n] = in.t[q];
+                        if (minus) { out->t[out->n].neg = !out->t[out->n].neg; out->t[out->n].num = -out->t[out->n].num; }
+                        out->n++;
+                    }
+                    wanted_paren_sum = true;
+                    break;
+                }
+                char *tx = math_sum_text(&in, in.n > 1);
+                math_sum_free(&in);
+                buf_str(&f, tx);
+                free(tx);
+            } else if (x->type == T_FUNC) {
+                char *tx = math_is_plain_fn(x->str) ? math_fn_text(ts, j) : NULL;
+                /* (what came to a calc() of its own, inside another: not twice) */
+                if (tx && !strncmp(tx, "calc(", 5)) {
+                    size_t tl = strlen(tx);
+                    tx[tl - 1] = 0;
+                    if (strstr(tx + 5, " + ") || strstr(tx + 5, " - ")) { buf_ch(&f, '('); buf_str(&f, tx + 5); buf_ch(&f, ')'); }
+                    else buf_str(&f, tx + 5);
+                    free(tx);
+                }
+                else if (tx) { buf_str(&f, tx); free(tx); }
+                else {
+                    Ser plain = { ts, NULL, 0, NULL, NULL };
+                    ser_tok(&plain, j, &f, NULL, 0);
+                }
+            } else { out->bad = true; break; }
+            only = j;
+        }
+        (void)only;
+        if (!out->bad && !wanted_paren_sum && out->n < 32) {
+            MathTerm *m = &out->t[out->n++];
+            memset(m, 0, sizeof *m);
+            Buf tb = { 0 };
+            bool lone_factor = nf == 0;
+            if (lone_factor) {
+                /* (all numeric) */
+                k /= kdiv;
+                m->kind = unit ? (!strcmp(unit, "%") ? 1 : 2) : 0;
+                m->num = minus ? -k : k;
+                if (unit) snprintf(m->unit, sizeof m->unit, "%s", unit);
+                { char *nt = math_num_text(k, unit); buf_str(&tb, nt); free(nt); }
+                m->neg = minus != (k < 0);
+                m->text = NULL;
+                if (after.n) {
+                    /* (with a divisor it stays as it's written) */
+                    buf_str(&tb, after.s);
+                    m->kind = 3;
+                    m->product = true;
+                }
+                m->text = buf_take(&tb);
+            } else {
+                m->kind = 3;
+                /* (a number divides the factor too, but for a whole sum) */
+                if (after_nums && !f_is_sum) { k /= kdiv; any_num = true; after_nums = false; }
+                bool hascoef = any_num || unit;
+                if (after_nums) {
+                    /* (a divisor stays where it's written) */
+                    Buf tail = { 0 };
+                    buf_str(&tail, " / ");
+                    fmt_number(&tail, kdiv);
+                    if (after.s) buf_str(&tail, after.s);
+                    free(after.s);
+                    after = tail;
+                }
+                if (hascoef) {
+                    m->neg = minus != (k < 0);
+                    fmt_number(&tb, fabs(k));
+                    if (unit) buf_str(&tb, unit);
+                    buf_str(&tb, " * ");
+                    m->product = true;
+                } else {
+                    m->neg = minus;
+                    if (nf > 1) m->product = true;
+                }
+                buf_str(&tb, f.s ? f.s : "");
+                if (after.n) { buf_str(&tb, after.s); m->product = true; }
+                m->text = buf_take(&tb);
+            }
+        }
+        (void)divided;
+        free(f.s);
+        free(after.s);
+        if (out->bad || i == e) break;
+        minus = neg != (ts->t[i].delim == '-');
+        s = i + 1;
+    }
+}
+
+static int math_term_cmp(const void *a, const void *b)
+{
+    const MathTerm *x = (const MathTerm *)a, *y = (const MathTerm *)b;
+    return x->kind - y->kind;
+}
+
+/* The terms of a sum as text, sorted (stable by insertion), brackets round products. */
+static char *math_sum_text(MathSum *s, bool wrap)
+{
+    /* (like terms of a number or a dimension together) */
+    for (int i = 0; i < s->n; i++) {
+        if (s->t[i].kind == 3 || !s->t[i].text) continue;
+        for (int j = i + 1; j < s->n; j++) {
+            if (s->t[j].kind != s->t[i].kind || strcasecmp(s->t[j].unit, s->t[i].unit)) continue;
+            s->t[i].num += s->t[j].num;
+            free(s->t[j].text);
+            memmove(&s->t[j], &s->t[j + 1], (size_t)(s->n - j - 1) * sizeof(MathTerm));
+            s->n--;
+            j--;
+            free(s->t[i].text);
+            s->t[i].text = math_num_text(s->t[i].num, s->t[i].unit);
+            s->t[i].neg = s->t[i].num < 0;
+        }
+    }
+    for (int i = 1; i < s->n; i++) {
+        MathTerm t = s->t[i];
+        int j = i;
+        while (j > 0 && math_term_cmp(&s->t[j - 1], &t) > 0) { s->t[j] = s->t[j - 1]; j--; }
+        s->t[j] = t;
+    }
+    Buf b = { 0 };
+    if (wrap) buf_ch(&b, '(');
+    for (int i = 0; i < s->n; i++) {
+        const MathTerm *t = &s->t[i];
+        bool neg = t->neg;
+        bool paren = s->n > 1 && t->product;
+        if (i) buf_str(&b, neg ? " - " : " + ");
+        else if (neg && t->kind == 3 && !t->product) buf_str(&b, "-1 * ");
+        else if (neg && !paren) buf_ch(&b, '-');
+        if (paren) buf_ch(&b, '(');
+        if (!i && neg && paren) buf_ch(&b, '-');
+        buf_str(&b, t->text ? t->text : "");
+        if (paren) buf_ch(&b, ')');
+    }
+    if (wrap) buf_ch(&b, ')');
+    char *out = buf_take(&b);
+    return out ? out : strdup("");
+}
+
+/* Math function token i, canonical: false to leave it as written. */
+static bool math_ser_top(const Toks *ts, int i, Buf *b)
+{
+    const Tok *t = &ts->t[i];
+    if (t->type != T_FUNC || !t->str || !math_is_plain_fn(t->str)) return false;
+    char *s = math_fn_text(ts, i);
+    if (!s) return false;
+    buf_str(b, s);
+    free(s);
     return true;
 }
 
@@ -2831,6 +3200,12 @@ static void color_spec(Buf *b, const Toks *ts, int i) {
         return;
     }
     if (t->type != T_FUNC && r != 1) { ser_tok(&plain, i, b, NULL, 0); return; }
+    if (t->type == T_FUNC && !strcasecmp(t->str, "contrast-color") && t->first < t->end) {
+        buf_str(b, "contrast-color(");
+        color_spec(b, ts, t->first);
+        buf_ch(b, ')');
+        return;
+    }
     if (r == 1 && !c.derived && (c.legacy || !has_math_arg(ts, t))) { color_serialize(b, &c); return; }
     if (t->type != T_FUNC) { ser_tok(&plain, i, b, NULL, 0); return; }
     if (!strcasecmp(t->str, "color-mix")) { color_mix_spec(b, ts, t); return; }
@@ -2852,6 +3227,55 @@ static void color_spec(Buf *b, const Toks *ts, int i) {
     snprintf(name, sizeof name, "%s", t->str);
     for (char *p = name; *p; p++) *p = (char)tolower((unsigned char)*p);
     if (!strcmp(name, "rgba") || !strcmp(name, "hsla")) name[3] = '\0';
+    /* (with math in it, and no color it's from: its other channels as numbers) */
+    bool relative = t->first < t->end && tok_ident(&ts->t[t->first], "from");
+    int kind = !strcmp(name, "rgb") ? 1 : !strcmp(name, "hsl") || !strcmp(name, "hwb") ? 2 : !strcmp(name, "lab") ? 3 : !strcmp(name, "lch") ? 4 :
+               !strcmp(name, "oklab") ? 5 : !strcmp(name, "oklch") ? 6 : !strcmp(name, "color") ? 7 : 0;
+    if (!relative && kind) {
+        buf_str(b, name);
+        buf_ch(b, '(');
+        int ch = 0;
+        bool alpha = false, first = true;
+        for (int j = t->first; j < t->end; j = tok_next(ts, j)) {
+            const Tok *a = &ts->t[j];
+            if (a->type == T_COMMA) { if (ch == 3) alpha = true; continue; }
+            if (a->type == T_DELIM && a->delim == '/') { alpha = true; continue; }
+            if (!first) buf_str(b, alpha ? " / " : " ");
+            first = false;
+            if (kind == 7 && ch == 0 && a->type == T_IDENT && !tok_ident(a, "none") && !alpha) {
+                if (tok_ident(a, "xyz")) buf_str(b, "xyz-d65");
+                else for (const char *q = a->str; *q; q++) buf_ch(b, (char)tolower((unsigned char)*q));
+                kind = 8;
+                continue;
+            }
+            if (a->type == T_FUNC && math_ser_top(ts, j, b)) { if (!alpha) ch++; continue; }
+            if (a->type == T_IDENT) { for (const char *q = a->str; *q; q++) buf_ch(b, (char)tolower((unsigned char)*q)); if (!alpha) ch++; continue; }
+            if (a->type != T_NUMBER && a->type != T_PERCENT && a->type != T_DIM) { ser_tok(&plain, j, b, NULL, 0); if (!alpha) ch++; continue; }
+            double v = a->num;
+            bool pct = a->type == T_PERCENT;
+            if (alpha) { if (pct) v /= 100.0; v = v < 0 ? 0 : v > 1 ? 1 : v; }
+            else if (a->type == T_DIM) {
+                /* (an angle: in degrees) */
+                double sc = 1.0;
+                unit_dim(a->str, &sc);
+                v = v * sc;
+            }
+            else switch (kind) {
+            case 1: if (pct) v *= 2.55; v = v < 0 ? 0 : v > 255 ? 255 : v; break;
+            case 2: if (ch > 0) v = v < 0 ? 0 : v > 100 ? 100 : v; break;
+            case 3: if (ch == 0) v = v < 0 ? 0 : v > 100 ? 100 : v; else if (pct) v *= 1.25; break;
+            case 4: if (ch == 0) v = v < 0 ? 0 : v > 100 ? 100 : v; else if (ch == 1) { if (pct) v *= 1.5; if (v < 0) v = 0; } break;
+            case 5: if (ch == 0) { if (pct) v /= 100.0; v = v < 0 ? 0 : v > 1 ? 1 : v; } else if (pct) v *= 0.004; break;
+            case 6: if (ch == 0) { if (pct) v /= 100.0; v = v < 0 ? 0 : v > 1 ? 1 : v; } else if (ch == 1) { if (pct) v *= 0.004; if (v < 0) v = 0; } break;
+            case 8: if (pct) v /= 100.0; break;
+            default: break;
+            }
+            fmt_number(b, v);
+            ch++;
+        }
+        buf_ch(b, ')');
+        return;
+    }
     buf_str(b, name);
     buf_ch(b, '(');
     bool space = false, from = false;
@@ -2864,6 +3288,7 @@ static void color_spec(Buf *b, const Toks *ts, int i) {
         if (from || !strcmp(name, "light-dark")) { color_spec(b, ts, j); from = false; continue; }
         if (tok_ident(a, "from")) from = true;
         if (tok_ident(a, "xyz")) { buf_str(b, "xyz-d65"); continue; }
+        if (a->type == T_FUNC && math_ser_top(ts, j, b)) continue;
         ser_tok(&plain, j, b, NULL, 0);
     }
     buf_ch(b, ')');
@@ -3040,7 +3465,7 @@ static void ser_hit(Ser *S, int h, Buf *out) {
         const Tok *t = &S->ts->t[H->start];
         Color c;
         if (g_env && color_eval(S->ts, H->start, &c, 0) == 1) { color_serialize(out, &c); return; }
-        if (!g_env && t->type != T_IDENT && color_tok_valid(S->ts, H->start)) { color_spec(out, S->ts, H->start); return; }
+        if (!g_env && t->type != T_IDENT && (color_tok_valid(S->ts, H->start) || (t->type == T_FUNC && has_math_arg(S->ts, t)))) { color_spec(out, S->ts, H->start); return; }
         if (t->type == T_IDENT) {
             for (const char *p = t->str; *p; p++) buf_ch(out, (char)tolower((unsigned char)*p));
             return;
@@ -6447,6 +6872,90 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
         if (nw == 4 && (w[0][0] == 'y' || !strcasecmp(w[0], "top") || !strcasecmp(w[0], "bottom"))) {
             snprintf(b, sizeof b, "%s %s %s %s", w[2], w[3], w[0], w[1]);
             return strdup(b);
+        }
+        return NULL;
+    }
+    if (!strcmp(n, "font-size-adjust") && !strncasecmp(v, "ex-height ", 10)) return strdup(v + 10);
+    /* (functions by their proper names; a scale's percentages as numbers) */
+    if (!strcmp(n, "transform") && strcmp(v, "none")) {
+        static const struct { const char *low, *name; } fx[] = {
+            { "translatex(", "translateX(" }, { "translatey(", "translateY(" }, { "translatez(", "translateZ(" },
+            { "scalex(", "scaleX(" }, { "scaley(", "scaleY(" }, { "scalez(", "scaleZ(" },
+            { "rotatex(", "rotateX(" }, { "rotatey(", "rotateY(" }, { "rotatez(", "rotateZ(" },
+            { "skewx(", "skewX(" }, { "skewy(", "skewY(" }, };
+        Buf s = { 0 };
+        bool changed = false;
+        for (const char *q = v; *q; ) {
+            bool hit = false;
+            for (size_t k = 0; k < sizeof fx / sizeof fx[0] && !hit; k++) {
+                size_t l = strlen(fx[k].low);
+                if (strncasecmp(q, fx[k].low, l)) continue;
+                if (strncmp(q, fx[k].name, l)) changed = true;
+                buf_str(&s, fx[k].name);
+                q += l;
+                hit = true;
+            }
+            if (hit) continue;
+            /* (in a scale: a percentage is a hundredth) */
+            if (!strncasecmp(q, "scale", 5)) {
+                const char *open = strchr(q, '('), *close = open ? strchr(open, ')') : NULL;
+                if (open && close && open - q <= 7 && memchr(open, '%', (size_t)(close - open)) && !memchr(open + 1, '(', (size_t)(close - open - 1))) {
+                    for (const char *c = q; c <= open; c++) buf_ch(&s, *c);
+                    for (const char *c = open + 1; c < close; ) {
+                        char *e = NULL;
+                        double x = strtod(c, &e);
+                        if (e != c && *e == '%') { fmt_number(&s, x / 100.0); c = e + 1; changed = true; }
+                        else if (e != c) { for (; c < e; c++) buf_ch(&s, *c); }
+                        else buf_ch(&s, *c++);
+                    }
+                    q = close;
+                    continue;
+                }
+            }
+            buf_ch(&s, *q++);
+        }
+        if (changed) return buf_take(&s);
+        free(s.s);
+        return NULL;
+    }
+    /* (a percentage is a number here; what's the same on each axis is said once) */
+    if (!strcmp(n, "scale") && strchr(v, '%')) {
+        char w[3][160];
+        int nw = canon_words(v, w, 3);
+        Buf s = { 0 };
+        double vals[3] = { 1, 1, 1 };
+        bool plain = true;
+        for (int i = 0; i < nw; i++) {
+            char *e = NULL;
+            vals[i] = strtod(w[i], &e);
+            if (e == w[i] || (*e && *e != '%')) plain = false;
+            if (*e == '%') vals[i] /= 100.0;
+        }
+        if (nw == 1) vals[1] = vals[0];
+        if (!plain) { free(s.s); return NULL; }
+        int show = vals[2] != 1 ? 3 : vals[0] != vals[1] ? 2 : 1;
+        for (int i = 0; i < show; i++) { if (i) buf_ch(&s, ' '); fmt_number(&s, vals[i]); }
+        return buf_take(&s);
+    }
+    /* (an axis that's an axis, by its name; a negative one is the angle turned round) */
+    if (!strcmp(n, "rotate")) {
+        char w[4][160];
+        if (canon_words(v, w, 4) == 4) {
+            char *e0, *e1, *e2;
+            double x = strtod(w[0], &e0), y = strtod(w[1], &e1), z = strtod(w[2], &e2);
+            if (!*e0 && !*e1 && !*e2 && ((x != 0) + (y != 0) + (z != 0)) == 1) {
+                double m = x + y + z;
+                char *ae = NULL;
+                double ang = strtod(w[3], &ae);
+                if (ae != w[3] && !strchr(w[3], '(')) {
+                    Buf s = { 0 };
+                    if (x != 0) buf_str(&s, "x ");
+                    else if (y != 0) buf_str(&s, "y ");
+                    fmt_number(&s, m < 0 ? -ang : ang);
+                    buf_str(&s, ae);
+                    return buf_take(&s);
+                }
+            }
         }
         return NULL;
     }

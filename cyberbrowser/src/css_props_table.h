@@ -42,7 +42,7 @@ static const CssTypeDef g_types[] = {
     { "image-fn", "image( [ ltr | rtl ]? [ <url> | <string> ] , <color> ) | image( [ ltr | rtl ]? [ <url> | <string> | <color> ] )" },
     { "image-set", "image-set( <image-set-option># ) | -webkit-image-set( <image-set-option># )" },
     { "image-set-option", "[ <image> | <string> ] [ <resolution> || type( <string> ) ]?" },
-    { "cross-fade", "cross-fade( <cf-image># )" },
+    { "cross-fade", "cross-fade( <cf-image># ) | cross-fade( <image> , <image> , <number [0,1]> )" },
     { "cf-image", "[ <image> | <color> ] && <percentage [0,100]>?" },
     { "gradient", "<linear-gradient> | <radial-gradient> | <conic-gradient> | <legacy-gradient>" },
     { "linear-gradient", "linear-gradient( <linear-gradient-syntax> ) | repeating-linear-gradient( <linear-gradient-syntax> )" },
