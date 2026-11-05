@@ -38,7 +38,7 @@ static const CssTypeDef g_types[] = {
     { "hue-interpolation-method", "[ shorter | longer | increasing | decreasing ] hue" },
 
     /* images */
-    { "image", "<url> | <gradient> | <image-set> | <cross-fade> | light-dark( <image> , <image> ) | <image-fn>" },
+    { "image", "<url> | <gradient> | <image-set> | <cross-fade> | light-dark( [ <image> | none ] , [ <image> | none ] ) | <image-fn>" },
     { "image-fn", "image( [ ltr | rtl ]? [ <url> | <string> ] , <color> ) | image( [ ltr | rtl ]? [ <url> | <string> | <color> ] )" },
     { "image-set", "image-set( <image-set-option># ) | -webkit-image-set( <image-set-option># )" },
     { "image-set-option", "[ <image> | <string> ] [ <resolution> || type( <string> ) ]?" },
@@ -554,7 +554,8 @@ static CssPropDef g_props[] = {
     S("flex-flow", "<'flex-direction'> || <'flex-wrap'>", "flex-direction flex-wrap", CSS_SH_GRAMMAR),
     L("flex-grow", "<number [0,inf]>", "0", 0),
     L("flex-shrink", "<number [0,inf]>", "1", 0),
-    L("flex-wrap", "nowrap | wrap | wrap-reverse", "nowrap", 0),
+    L("flex-wrap", "nowrap | [ wrap | wrap-reverse ] || balance", "nowrap", 0),
+    L("flex-line-count", "<integer [1,inf]>", "1", 0),
     L("float", "left | right | inline-start | inline-end | none", "none", 0),
     L("flood-color", "<color>", "black", 0),
     L("flood-opacity", "<alpha-value>", "1", 0),
@@ -574,20 +575,20 @@ static CssPropDef g_props[] = {
     L("font-stretch", "normal | <percentage [0,inf]> | ultra-condensed | extra-condensed | condensed | semi-condensed | "
                       "semi-expanded | expanded | extra-expanded | ultra-expanded", "normal", 1),
     L("font-style", "normal | italic | left | right | oblique <angle [-90deg,90deg]>?", "normal", 1),
-    S("font-synthesis", "none | [ weight || style || small-caps || position ]",
+    S("font-synthesis", "none | [ weight || [ style | oblique-only ] || small-caps || position ]",
       "font-synthesis-weight font-synthesis-style font-synthesis-small-caps font-synthesis-position", CSS_SH_SPECIAL),
     L("font-synthesis-position", "auto | none", "auto", 1),
     L("font-synthesis-small-caps", "auto | none", "auto", 1),
-    L("font-synthesis-style", "auto | none", "auto", 1),
+    L("font-synthesis-style", "auto | none | oblique-only", "auto", 1),
     L("font-synthesis-weight", "auto | none", "auto", 1),
     SI("font-variant", "normal | none | [ <common-lig-values> || <discretionary-lig-values> || <historical-lig-values> || "
-                       "<contextual-alt-values> || historical-forms || [ small-caps | all-small-caps | petite-caps | "
+                       "<contextual-alt-values> || stylistic( <custom-ident> ) || historical-forms || styleset( <custom-ident># ) || character-variant( <custom-ident># ) || swash( <custom-ident> ) || ornaments( <custom-ident> ) || annotation( <custom-ident> ) || [ small-caps | all-small-caps | petite-caps | "
                        "all-petite-caps | unicase | titling-caps ] || [ sub | super ] || <numeric-figure-values> || "
                        "<numeric-spacing-values> || <numeric-fraction-values> || ordinal || slashed-zero || "
                        "<east-asian-variant-values> || <east-asian-width-values> || ruby || [ text | emoji | unicode ] ]",
        "font-variant-ligatures font-variant-alternates font-variant-caps font-variant-numeric font-variant-east-asian "
        "font-variant-position font-variant-emoji", CSS_SH_SPECIAL),
-    L("font-variant-alternates", "normal | historical-forms", "normal", 1),
+    L("font-variant-alternates", "normal | [ stylistic( <custom-ident> ) || historical-forms || styleset( <custom-ident># ) || character-variant( <custom-ident># ) || swash( <custom-ident> ) || ornaments( <custom-ident> ) || annotation( <custom-ident> ) ]", "normal", 1),
     L("font-variant-caps", "normal | small-caps | all-small-caps | petite-caps | all-petite-caps | unicase | titling-caps", "normal", 1),
     L("font-variant-east-asian", "normal | [ <east-asian-variant-values> || <east-asian-width-values> || ruby ]", "normal", 1),
     L("font-variant-emoji", "normal | text | emoji | unicode", "normal", 1),
@@ -731,7 +732,7 @@ static CssPropDef g_props[] = {
     L("opacity", "<alpha-value>", "1", 0),
     L("order", "<integer>", "0", 0),
     L("orphans", "<integer [1,inf]>", "2", 1),
-    S("outline", "<'outline-color'> || <'outline-style'> || <'outline-width'>", "outline-color outline-style outline-width", CSS_SH_GRAMMAR),
+    S("outline", "<'outline-width'> || <'outline-style'> || <'outline-color'>", "outline-width outline-style outline-color", CSS_SH_GRAMMAR),
     L("outline-color", "auto | <color>", "currentcolor", 0),
     L("outline-offset", "<length>", "0px", 0),
     L("outline-style", "auto | none | dotted | dashed | solid | double | groove | ridge | inset | outset", "none", 0),

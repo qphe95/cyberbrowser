@@ -112,7 +112,16 @@ enum {
     DOM_ST_TARGET_CURRENT = 1 << 15, /* its ::scroll-marker is its group's active one */
     DOM_ST_PAUSED = 1 << 16, DOM_ST_ENABLED = 1 << 17, DOM_ST_DISABLED = 1 << 18, DOM_ST_READ_WRITE = 1 << 19,
     DOM_ST_READ_ONLY = 1 << 20, DOM_ST_REQUIRED = 1 << 21, DOM_ST_OPTIONAL = 1 << 22,
+    DOM_ST_VALID = 1 << 23, DOM_ST_INVALID = 1 << 24,   /* (as dom_validity_refresh last found them) */
+    DOM_ST_PLACEHOLDER_SHOWN = 1 << 25, DOM_ST_DEFAULT = 1 << 26, DOM_ST_IN_RANGE = 1 << 27, DOM_ST_OUT_OF_RANGE = 1 << 28,
+    DOM_ST_MODAL = 1 << 29, DOM_ST_POPOVER_OPEN = 1 << 30,   /* (g_dom_top: what the page's script showed) */
 };
+
+/* Per slot: a dialog shown modally (1), a popover showing (2).  Cleared when a
+ * slot is given out again. */
+extern uint8_t *g_dom_top;
+extern uint32_t g_dom_top_cap;
+void dom_top_state_set(uint32_t slot, uint8_t bits, bool on);
 
 typedef struct DomStore {
     uint32_t cap;           /* slots allocated (slot 0 is never used) */

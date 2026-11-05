@@ -379,7 +379,7 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                     s.ci = fc == 'i';
                     sp_ws(sp);
                 } else {
-                    s.ci = legacy;
+                    s.ci = legacy ? 3 : 0;
                 }
             }
             /* (and the end of the input the brackets: CSS Syntax 5.4.8) */
@@ -509,8 +509,14 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                 else if (strcmp(name, "link") == 0 || strcmp(name, "any-link") == 0 || strcmp(name, "-webkit-any-link") == 0)
                     s.kind = SS_LINK;
                 else if (strcmp(name, "visited") == 0) s.kind = SS_NEVER;      /* (no history here) */
+                /* (states nothing here enters: no user edits tracked, no fullscreen, no top layer) */
+                else if (!strcmp(name, "user-valid") || !strcmp(name, "user-invalid") || !strcmp(name, "fullscreen") ||
+                         !strcmp(name, "picture-in-picture") || !strcmp(name, "volume-locked") || !strcmp(name, "xr-overlay") ||
+                         !strcmp(name, "local-link") || !strcmp(name, "blank") || !strcmp(name, "first") ||
+                         !strcmp(name, "left") || !strcmp(name, "right")) s.kind = SS_NEVER;
                 else if ((s.a = (int)css_state_bit(name, strlen(name))) != 0 && strcmp(name, "disabled") && strcmp(name, "enabled") &&
-                         strcmp(name, "target")) s.kind = SS_STATE;
+                         strcmp(name, "target") && strcmp(name, "valid") && strcmp(name, "invalid") &&
+                         strcmp(name, "placeholder-shown") && strcmp(name, "default") && strcmp(name, "in-range") && strcmp(name, "out-of-range")) s.kind = SS_STATE;
                 else if (strcmp(name, "target") == 0) s.kind = SS_TARGET;
                 else if (strcmp(name, "heading") == 0) {
                     s.kind = SS_HEADING;
@@ -740,22 +746,33 @@ static bool attr_ok(uint32_t s, const SelSimple *ss) {
             const char *want = colon ? css_atom_str(ss->atom) : NULL;
             if (!want || strcmp(colon + 1, want) != 0) continue;
         } else if (exact && written && strcmp(dom_attr_qualified_name(&l->a[i]), written) != 0) continue;
+        /* (an HTML element's: the selector's name, lower-cased, as the attribute's was written) */
+        else if (!exact && l->a[i].qname) {
+            const char *qn = dom_attr_qualified_name(&l->a[i]);
+            bool upper = false;
+            for (const char *c = qn; *c && !upper; c++) upper = *c >= 'A' && *c <= 'Z';
+            if (upper) continue;
+        }
+        /* (no namespace asked for: an attribute in none) */
+        if (!ss->any_ns && l->a[i].ns) continue;
         const char *v = l->a[i].value.s ? l->a[i].value.s : "";
         size_t vn = l->a[i].value.len, n = ss->vlen;
-        bool ci = ss->ci;
+        /* (the legacy case-insensitive ones: an HTML element's, in no namespace) */
+        bool ci = ss->ci == 3 ? !exact && !l->a[i].ns : ss->ci;
+        bool m = false;
         switch (ss->op) {
-        case AO_EXISTS: return true;
-        case AO_EQ: return vn == n && cmp_n(v, ss->val, n, ci);
-        case AO_WORD: return word_in(v, vn, ss->val, n, ci);
-        case AO_DASH: return (vn == n && cmp_n(v, ss->val, n, ci)) || (vn > n && cmp_n(v, ss->val, n, ci) && v[n] == '-');
-        case AO_PREFIX: return n && vn >= n && cmp_n(v, ss->val, n, ci);
-        case AO_SUFFIX: return n && vn >= n && cmp_n(v + vn - n, ss->val, n, ci);
+        case AO_EXISTS: m = true; break;
+        case AO_EQ: m = vn == n && cmp_n(v, ss->val, n, ci); break;
+        case AO_WORD: m = word_in(v, vn, ss->val, n, ci); break;
+        case AO_DASH: m = (vn == n && cmp_n(v, ss->val, n, ci)) || (vn > n && cmp_n(v, ss->val, n, ci) && v[n] == '-'); break;
+        case AO_PREFIX: m = n && vn >= n && cmp_n(v, ss->val, n, ci); break;
+        case AO_SUFFIX: m = n && vn >= n && cmp_n(v + vn - n, ss->val, n, ci); break;
         case AO_SUBSTR:
-            if (!n) return false;
-            for (size_t k = 0; k + n <= vn; k++) if (cmp_n(v + k, ss->val, n, ci)) return true;
-            return false;
+            for (size_t k = 0; n && k + n <= vn && !m; k++) m = cmp_n(v + k, ss->val, n, ci);
+            break;
         }
-        return false;
+        /* (any namespace's: the next one may) */
+        if (m || !ss->any_ns) return m;
     }
     return false;
 }
@@ -790,6 +807,7 @@ void dom_query_set_target(const char *frag, size_t n) {
 }
 
 int (*g_dom_query_validity)(NodeId el);
+int (*g_dom_query_formstate)(NodeId el);   /* (bits: 1 placeholder shown, 2 default, 4 in range, 8 out of range) */
 
 /* Whether s is a form control :enabled and :disabled apply to. */
 static bool form_control(uint32_t s) {
@@ -822,11 +840,63 @@ static bool control_disabled(uint32_t s) {
     return false;
 }
 
+/* Each form control's, form's and fieldset's validity, as :valid and :invalid
+ * match it in style (they can't ask script while styling); what changed is
+ * restyled. Only when some style asks (g_css_saw_validity). */
+static uint8_t *g_validity;
+static uint32_t g_validity_cap;
+bool g_css_saw_validity;
+void dom_validity_refresh(void)
+{
+    if (!g_css_saw_validity || !g_dom_query_validity) return;
+    atoms_init();
+    if (g_validity_cap < g_dom.count) {
+        uint8_t *nv = (uint8_t *)realloc(g_validity, g_dom.count);
+        if (!nv) return;
+        memset(nv + g_validity_cap, 0, g_dom.count - g_validity_cap);
+        g_validity = nv;
+        g_validity_cap = g_dom.count;
+    }
+    for (uint32_t s = 1; s < g_dom.count; s++) {
+        if (g_dom.kind[s] != DOM_K_ELEMENT || g_dom.ns[s] != DOM_NS_HTML) continue;
+        uint8_t v = 0;
+        static CssAtom t_form;
+        if (!t_form) { css_atom_reserve(1); t_form = css_atom_intern("form", 4); }
+        if (g_dom.tag[s] == t_form || g_dom.tag[s] == g_t_form[6]) {
+            v = 1;
+            for (uint32_t x = g_dom.first[s]; x && v == 1; x = dom_next_in_subtree(x, s))
+                if (g_dom.kind[x] == DOM_K_ELEMENT && form_control(x) && g_dom_query_validity(dom_id_of(x)) == 2) v = 2;
+        } else if (form_control(s)) {
+            v = (uint8_t)g_dom_query_validity(dom_id_of(s));
+            extern int (*g_dom_query_formstate)(NodeId el);
+            /* (and what else its value says: placeholder shown, default, in or out of range) */
+            if (g_dom_query_formstate) v |= (uint8_t)(g_dom_query_formstate(dom_id_of(s)) << 2);
+        } else continue;
+        if (v != g_validity[s]) {
+            g_validity[s] = v;
+            dom_mark_dirty(dom_id_of(s), DOMF_DIRTY_ATTR);
+        }
+    }
+}
+
 uint32_t dom_element_state(NodeId el)
 {
     if (!dom_valid(el)) return 0;
     atoms_init();
     uint32_t s = dom_slot(el), st = g_dom.state[s], n;
+    if (s < g_dom_top_cap && g_dom_top[s]) {
+        if (g_dom_top[s] & 1) st |= DOM_ST_MODAL;
+        if (g_dom_top[s] & 2) st |= DOM_ST_POPOVER_OPEN;
+    }
+    if (g_validity && s < g_validity_cap && g_validity[s]) {
+        uint8_t v = g_validity[s];
+        if ((v & 3) == 1) st |= DOM_ST_VALID;
+        else if ((v & 3) == 2) st |= DOM_ST_INVALID;
+        if (v & 4) st |= DOM_ST_PLACEHOLDER_SHOWN;
+        if (v & 8) st |= DOM_ST_DEFAULT;
+        if (v & 16) st |= DOM_ST_IN_RANGE;
+        if (v & 32) st |= DOM_ST_OUT_OF_RANGE;
+    }
     if (g_dom.kind[s] != DOM_K_ELEMENT || g_dom.ns[s] != DOM_NS_HTML) return st;
     /* (each element, each time it is read for style: by atom, not by name) */
     static CssAtom a_ce, t_video, t_audio;

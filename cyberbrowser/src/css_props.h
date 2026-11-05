@@ -133,6 +133,8 @@ bool css_value_depends_on_context(const char *v);
 bool css_calc_number(const char *v, double *out);
 /* clip-path's or shape-outside's value in its computed form; NULL if it already is. */
 char *css_shape_computed(const char *n, const char *v);
+/* An image list's radial and conic gradients in their computed form; NULL if already. */
+char *css_gradient_computed(const char *v);
 extern __thread bool g_css_shape_path_normal;   /* (and path() data as absolute commands) */
 
 #ifdef __cplusplus

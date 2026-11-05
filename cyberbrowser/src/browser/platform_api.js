@@ -476,6 +476,24 @@
             var name = ERROR_NAMES.indexOf(v.name) >= 0 ? v.name : 'Error';
             return { i: id, e: name, msg: v.message === undefined ? '' : String(v.message), st: v.stack === undefined ? '' : String(v.stack) };
         }
+        case 'DOMPoint': case 'DOMPointReadOnly': case 'DOMRect': case 'DOMRectReadOnly':
+        case 'DOMQuad': case 'DOMMatrix': case 'DOMMatrixReadOnly': {
+            /* (by the interface's own getters: an instance's may be anything) */
+            var own = function (o, k) {
+                for (var p = Object.getPrototypeOf(o); p; p = Object.getPrototypeOf(p)) {
+                    var d = Object.getOwnPropertyDescriptor(p, k);
+                    if (d && d.get) return d.get.call(o);
+                }
+                return o[k];
+            };
+            var pt = function (o) { return [own(o, 'x'), own(o, 'y'), own(o, 'z'), own(o, 'w')]; };
+            if (/Point/.test(kind)) return { i: id, g: kind, gv: pt(v) };
+            if (/Rect/.test(kind)) return { i: id, g: kind, gv: [own(v, 'x'), own(v, 'y'), own(v, 'width'), own(v, 'height')] };
+            if (kind === 'DOMQuad') return { i: id, g: kind, gv: [pt(own(v, 'p1')), pt(own(v, 'p2')), pt(own(v, 'p3')), pt(own(v, 'p4'))] };
+            var two = own(v, 'is2D');
+            var names = two ? ['a', 'b', 'c', 'd', 'e', 'f'] : ['m11', 'm12', 'm13', 'm14', 'm21', 'm22', 'm23', 'm24', 'm31', 'm32', 'm33', 'm34', 'm41', 'm42', 'm43', 'm44'];
+            return { i: id, g: kind, gv: names.map(function (k) { return own(v, k); }) };
+        }
         case 'File': case 'Blob': {
             var w = { i: id, bl: Array.from(bytesOfBlob(v)), t: v.type };
             if (kind === 'File') { w.nm = v.name; w.lm = v.lastModified; }
@@ -525,6 +543,14 @@
         } else if (w.e !== undefined) {
             v = made[w.i] = new global[w.e](w.msg);
             if (w.st) Object.defineProperty(v, 'stack', { value: w.st, writable: true, configurable: true });
+        } else if (w.g !== undefined) {
+            var C = global[w.g], gv = w.gv;
+            if (/Point/.test(w.g)) v = new C(gv[0], gv[1], gv[2], gv[3]);
+            else if (/Rect/.test(w.g)) v = new C(gv[0], gv[1], gv[2], gv[3]);
+            else if (w.g === "DOMQuad") v = new C(new global.DOMPoint(gv[0][0], gv[0][1], gv[0][2], gv[0][3]), new global.DOMPoint(gv[1][0], gv[1][1], gv[1][2], gv[1][3]),
+                                                        new global.DOMPoint(gv[2][0], gv[2][1], gv[2][2], gv[2][3]), new global.DOMPoint(gv[3][0], gv[3][1], gv[3][2], gv[3][3]));
+            else v = new C(gv);
+            made[w.i] = v;
         } else if (w.bl !== undefined) {
             var bytes = new Uint8Array(w.bl);
             v = made[w.i] = w.nm !== undefined ? new global.File([bytes], w.nm, { type: w.t, lastModified: w.lm }) : new Blob([bytes], { type: w.t });
@@ -1883,6 +1909,180 @@
     Object.defineProperty(global, '__cyberHighlights', { configurable: true, value: theRegistry });
     if (global.CSS) Object.defineProperty(global.CSS, 'highlights', { configurable: true, enumerable: true, get: function () { return theRegistry; } });
 
+    /* ---- dialogs and popovers: shown, hidden, modal (as far as style and events go) ---- */
+    (function () {
+        var ST_MODAL = 1 << 29, ST_POPOVER = 1 << 30;
+        var elState = global.__cyberElState;
+        if (typeof elState !== 'function') return;
+        function method(P, name, fn, len) {
+            Object.defineProperty(fn, 'name', { configurable: true, value: name });
+            Object.defineProperty(P, name, { configurable: true, enumerable: true, writable: true, value: fn });
+        }
+        function invalidState(msg) { return new global.DOMException(msg, 'InvalidStateError'); }
+        function toggleEvent(el, type, oldState, newState, cancelable) {
+            var C = global.ToggleEvent || global.Event;
+            return el.dispatchEvent(new C(type, { cancelable: !!cancelable, oldState: oldState, newState: newState }));
+        }
+        /* (a toggle event, in a task: one pending per element, its first old state kept) */
+        var pendingToggle = new WeakMap();
+        function queueToggle(el, oldState, newState) {
+            var p = pendingToggle.get(el);
+            if (p) { p.newState = newState; return; }
+            p = { oldState: oldState, newState: newState };
+            pendingToggle.set(el, p);
+            global.setTimeout(function () {
+                pendingToggle.delete(el);
+                if (p.oldState !== p.newState) toggleEvent(el, 'toggle', p.oldState, p.newState, false);
+            }, 0);
+        }
+
+        var D = global.HTMLDialogElement, DP = D && D.prototype;
+        if (DP && typeof DP.showModal !== 'function') {
+            var RV = new WeakMap();
+            var isDialog = function (el) { return el instanceof D; };
+            Object.defineProperty(DP, 'open', { configurable: true, enumerable: true,
+                get: function () { if (!isDialog(this)) throw new TypeError('Illegal invocation'); return this.hasAttribute('open'); },
+                set: function (v) { if (!isDialog(this)) throw new TypeError('Illegal invocation'); if (v) this.setAttribute('open', ''); else this.removeAttribute('open'); } });
+            Object.defineProperty(DP, 'returnValue', { configurable: true, enumerable: true,
+                get: function () { if (!isDialog(this)) throw new TypeError('Illegal invocation'); return RV.has(this) ? RV.get(this) : ''; },
+                set: function (v) { if (!isDialog(this)) throw new TypeError('Illegal invocation'); RV.set(this, String(v)); } });
+            method(DP, 'show', function () {
+                if (!isDialog(this)) throw new TypeError('Illegal invocation');
+                if (this.hasAttribute('open')) {
+                    if (elState(this, ST_MODAL)) throw invalidState('The dialog is already open as a modal dialog.');
+                    return;
+                }
+                if (!toggleEvent(this, 'beforetoggle', 'closed', 'open', true) || this.hasAttribute('open')) return;
+                this.setAttribute('open', '');
+                queueToggle(this, 'closed', 'open');
+            });
+            method(DP, 'showModal', function () {
+                if (!isDialog(this)) throw new TypeError('Illegal invocation');
+                if (this.hasAttribute('open')) {
+                    if (elState(this, ST_MODAL)) return;
+                    throw invalidState('The dialog is already open as a non-modal dialog.');
+                }
+                if (!this.isConnected) throw invalidState('The dialog is not connected.');
+                if (elState(this, ST_POPOVER)) throw invalidState('The dialog is already open as a popover.');
+                if (!toggleEvent(this, 'beforetoggle', 'closed', 'open', true) || this.hasAttribute('open')) return;
+                this.setAttribute('open', '');
+                elState(this, ST_MODAL, true);
+                queueToggle(this, 'closed', 'open');
+                /* (its focus: the autofocus one, or the dialog itself) */
+                var f = this.querySelector('[autofocus]') || this;
+                try { if (typeof f.focus === 'function') f.focus(); } catch (e) { /* (not focusable) */ }
+            });
+            var closeDialog = function (el, rv) {
+                if (!el.hasAttribute('open')) return;
+                toggleEvent(el, 'beforetoggle', 'open', 'closed', false);
+                if (!el.hasAttribute('open')) return;
+                el.removeAttribute('open');
+                elState(el, ST_MODAL, false);
+                if (rv !== undefined && rv !== null) RV.set(el, String(rv));
+                queueToggle(el, 'open', 'closed');
+                global.setTimeout(function () { el.dispatchEvent(new global.Event('close')); }, 0);
+            };
+            method(DP, 'close', function (rv) {
+                if (!isDialog(this)) throw new TypeError('Illegal invocation');
+                closeDialog(this, rv);
+            });
+            method(DP, 'requestClose', function (rv) {
+                if (!isDialog(this)) throw new TypeError('Illegal invocation');
+                if (!this.hasAttribute('open')) return;
+                if (!this.dispatchEvent(new global.Event('cancel', { cancelable: true }))) return;
+                closeDialog(this, rv);
+            });
+        }
+
+        /* popovers: the popover attribute's element, shown and hidden */
+        var HP = global.HTMLElement && global.HTMLElement.prototype;
+        if (!HP || typeof HP.showPopover === 'function') return;
+        function popoverKind(el) {
+            var v = el.getAttribute('popover');
+            if (v === null) return null;
+            v = v.toLowerCase();
+            return v === 'manual' ? 'manual' : v === 'hint' ? 'hint' : 'auto';
+        }
+        var isHTML = function (el) { return el instanceof global.HTMLElement; };
+        function showing(el) { return !!elState(el, ST_POPOVER); }
+        function check(el, open) {
+            if (popoverKind(el) === null) throw new global.DOMException('Not a popover.', 'NotSupportedError');
+            if (!el.isConnected) throw invalidState('The popover is not connected.');
+            if (el.localName === 'dialog' && el.hasAttribute('open') && !showing(el)) throw invalidState('The dialog is already open.');
+        }
+        function hide(el, events) {
+            if (!showing(el)) return;
+            if (events) toggleEvent(el, 'beforetoggle', 'open', 'closed', false);
+            if (!showing(el)) return;
+            elState(el, ST_POPOVER, false);
+            if (events) queueToggle(el, 'open', 'closed');
+        }
+        /* (the auto ones showing, oldest first) */
+        var autoStack = [];
+        function show(el) {
+            if (showing(el)) return;
+            check(el);
+            if (!toggleEvent(el, 'beforetoggle', 'closed', 'open', true) || showing(el)) return;
+            if (popoverKind(el) === 'auto') {
+                /* (the others shown with it close, but for its ancestors) */
+                for (var i = autoStack.length - 1; i >= 0; i--) {
+                    var o = autoStack[i];
+                    if (o === el || !showing(o) || o.contains(el)) continue;
+                    autoStack.splice(i, 1);
+                    hide(o, true);
+                }
+                autoStack.push(el);
+            }
+            elState(el, ST_POPOVER, true);
+            queueToggle(el, 'closed', 'open');
+        }
+        method(HP, 'showPopover', function (options) {
+            if (!isHTML(this)) throw new TypeError('Illegal invocation');
+            show(this);
+        });
+        method(HP, 'hidePopover', function () {
+            if (!isHTML(this)) throw new TypeError('Illegal invocation');
+            if (!showing(this)) return;
+            check(this);
+            var k = autoStack.indexOf(this);
+            if (k >= 0) autoStack.splice(k, 1);
+            hide(this, true);
+        });
+        method(HP, 'togglePopover', function (force) {
+            if (!isHTML(this)) throw new TypeError('Illegal invocation');
+            var want = typeof force === 'boolean' ? force : force && typeof force === 'object' && typeof force.force === 'boolean' ? force.force : !showing(this);
+            if (want) show(this); else if (showing(this)) this.hidePopover();
+            else check(this);
+            return showing(this);
+        });
+        Object.defineProperty(HP, 'popover', { configurable: true, enumerable: true,
+            get: function () { if (!isHTML(this)) throw new TypeError('Illegal invocation'); return popoverKind(this); },
+            set: function (v) {
+                if (!isHTML(this)) throw new TypeError('Illegal invocation');
+                if (v === null) this.removeAttribute('popover'); else this.setAttribute('popover', String(v));
+            } });
+        /* (a popover that stops being one: hidden) */
+        var setA = global.Element.prototype.removeAttribute;
+        if (global.MutationObserver) {
+            var mo = new global.MutationObserver(function (recs) {
+                recs.forEach(function (r) {
+                    var el = r.target;
+                    if (r.attributeName === 'popover' && showing(el) && popoverKind(el) !== r.oldValue) hide(el, false);
+                    if (r.attributeName === 'open' && el.localName === 'dialog' && !el.hasAttribute('open')) elState(el, ST_MODAL, false);
+                });
+            });
+            var watching = new WeakSet();
+            global.__cyberWatchPopover = function (doc) {
+                if (!doc || watching.has(doc)) return;
+                watching.add(doc);
+                mo.observe(doc, { attributes: true, attributeFilter: ['popover', 'open'], attributeOldValue: true, subtree: true });
+            };
+        }
+        var origShow = show;
+        show = function (el) { if (global.__cyberWatchPopover) global.__cyberWatchPopover(el.ownerDocument); origShow(el); };
+        (void setA);
+    })();
+
     /* ---- Window's sizes and offsets: read through getters that know their object ---- */
     ['innerWidth', 'innerHeight', 'outerWidth', 'outerHeight', 'screenX', 'screenY', 'screenLeft', 'screenTop', 'devicePixelRatio',
      'scrollX', 'scrollY', 'pageXOffset', 'pageYOffset', 'screen', 'visualViewport'].forEach(function (k) {
@@ -1892,12 +2092,16 @@
         var get = d.get ? function () { if (!mine.call(this)) throw new TypeError('Illegal invocation'); return d.get.call(global); }
                         : function () { if (!mine.call(this)) throw new TypeError('Illegal invocation'); return val; };
         if (!d.get) val = d.value;
-        Object.defineProperty(global, k, { configurable: true, enumerable: true, get: get,
-            set: d.get ? d.set : function (v) { val = v; } });
+        var set = d.get ? d.set : function (v) { if (!mine.call(this)) throw new TypeError('Illegal invocation'); val = v; };
+        /* (named as an attribute's accessors are) */
+        Object.defineProperty(get, 'name', { configurable: true, value: 'get ' + k });
+        if (set && !d.get) Object.defineProperty(set, 'name', { configurable: true, value: 'set ' + k });
+        Object.defineProperty(global, k, { configurable: true, enumerable: true, get: get, set: set });
     });
     ['moveTo', 'moveBy', 'resizeTo', 'resizeBy'].forEach(function (n) {
         var was = global[n];
         var f = function (a, b) {
+            if (this !== undefined && this !== null && this !== global) throw new TypeError('Illegal invocation');
             if (arguments.length < 2) throw new TypeError("Failed to execute '" + n + "' on 'Window': 2 arguments required");
             if (typeof was === 'function') return was.call(this, a, b);
         };
@@ -2397,4 +2601,148 @@
     expose('PerformanceEntry', PerformanceEntry);
     expose('PerformanceMark', PerformanceMark);
     expose('PerformanceMeasure', PerformanceMeasure);
+
+    /* ---- the accessibility tree's role and name of an element (HTML-AAM, accname 1.2) ---- */
+    var ARIA_ROLES = ('alert alertdialog application article banner blockquote button caption cell checkbox code columnheader ' +
+        'combobox complementary contentinfo definition deletion dialog directory document emphasis feed figure form generic grid ' +
+        'gridcell group heading img insertion link list listbox listitem log main mark marquee math menu menubar menuitem ' +
+        'menuitemcheckbox menuitemradio meter navigation none note option paragraph presentation progressbar radio radiogroup ' +
+        'region row rowgroup rowheader scrollbar search searchbox separator slider spinbutton status strong subscript ' +
+        'superscript switch tab table tablist tabpanel term textbox time timer toolbar tooltip tree treegrid treeitem').split(' ');
+    function axHidden(el) {
+        for (var n = el; n && n.nodeType === 1; n = n.parentElement) {
+            if (n.hasAttribute('hidden') || n.getAttribute('aria-hidden') === 'true') return true;
+            var cs = global.getComputedStyle ? global.getComputedStyle(n) : null;
+            if (cs && (cs.display === 'none' || (n === el && cs.visibility === 'hidden'))) return true;
+        }
+        return false;
+    }
+    function axTableRole(el) {
+        for (var t = el.parentElement; t; t = t.parentElement) {
+            if (t.localName === 'table' || /^(grid|treegrid|table)$/.test(t.getAttribute('role') || '')) return axRole(t);
+        }
+        return '';
+    }
+    function axSectioning(el) {
+        for (var p = el.parentElement; p; p = p.parentElement)
+            if (/^(article|aside|main|nav|section)$/.test(p.localName)) return true;
+        return false;
+    }
+    function axRole(el) {
+        var explicit = (el.getAttribute('role') || '').trim().toLowerCase().split(/\s+/);
+        for (var i = 0; i < explicit.length; i++) if (ARIA_ROLES.indexOf(explicit[i]) >= 0) return explicit[i];
+        var tag = el.localName, type = (el.getAttribute('type') || '').toLowerCase();
+        if (el.namespaceURI === 'http://www.w3.org/2000/svg') {
+            if (tag === 'svg') return 'graphics-document';
+            if (tag === 'g') return axName(el) ? 'group' : 'generic';
+            return '';
+        }
+        switch (tag) {
+        case 'a': case 'area': return el.hasAttribute('href') ? 'link' : 'generic';
+        case 'button': return 'button';
+        case 'h1': case 'h2': case 'h3': case 'h4': case 'h5': case 'h6': return 'heading';
+        case 'nav': return 'navigation';
+        case 'main': return 'main';
+        case 'header': return axSectioning(el) ? 'generic' : 'banner';
+        case 'footer': return axSectioning(el) ? 'generic' : 'contentinfo';
+        case 'aside': return 'complementary';
+        case 'section': return axName(el) ? 'region' : 'generic';
+        case 'form': return 'form';
+        case 'search': return 'search';
+        case 'article': return 'article';
+        case 'ul': case 'ol': case 'menu': return 'list';
+        case 'li': return 'listitem';
+        case 'table': return 'table';
+        case 'caption': return 'caption';
+        case 'thead': case 'tbody': case 'tfoot': return 'rowgroup';
+        case 'tr': return 'row';
+        case 'td': return /^(grid|treegrid)$/.test(axTableRole(el)) ? 'gridcell' : 'cell';
+        case 'th': return el.getAttribute('scope') === 'row' ? 'rowheader' : 'columnheader';
+        case 'dialog': return 'dialog';
+        case 'fieldset': case 'details': case 'optgroup': return 'group';
+        case 'figure': return 'figure';
+        case 'img': return el.getAttribute('alt') === '' ? 'presentation' : 'img';
+        case 'hr': return 'separator';
+        case 'p': return 'paragraph';
+        case 'progress': return 'progressbar';
+        case 'meter': return 'meter';
+        case 'output': return 'status';
+        case 'option': return 'option';
+        case 'select': return el.multiple || el.size > 1 ? 'listbox' : 'combobox';
+        case 'textarea': return 'textbox';
+        case 'dl': return 'list';
+        case 'dt': return 'term';
+        case 'dd': return 'definition';
+        case 'blockquote': return 'blockquote';
+        case 'input':
+            if (/^(button|submit|reset|image)$/.test(type)) return 'button';
+            if (type === 'checkbox') return 'checkbox';
+            if (type === 'radio') return 'radio';
+            if (type === 'range') return 'slider';
+            if (type === 'number') return 'spinbutton';
+            if (type === 'search') return el.hasAttribute('list') ? 'combobox' : 'searchbox';
+            if (type === 'hidden') return '';
+            return el.hasAttribute('list') ? 'combobox' : 'textbox';
+        case 'div': case 'span': return 'generic';
+        }
+        return '';
+    }
+    var NAME_FROM_CONTENT = /^(button|cell|checkbox|columnheader|gridcell|heading|link|menuitem|menuitemcheckbox|menuitemradio|option|radio|row|rowheader|switch|tab|tooltip|treeitem|caption|term|listitem)$/;
+    function axText(node, referenced) {
+        var out = '';
+        for (var c = node.firstChild; c; c = c.nextSibling) {
+            if (c.nodeType === 3) out += c.data;
+            else if (c.nodeType === 1) {
+                if (!referenced && axHidden(c)) continue;
+                if (c.localName === 'title' && c.namespaceURI === 'http://www.w3.org/2000/svg') continue;
+                var sub = c.getAttribute('aria-label') || axText(c, referenced);
+                var cs = global.getComputedStyle ? global.getComputedStyle(c) : null;
+                var block = cs && /^(block|flex|grid|list-item|table)/.test(cs.display);
+                out += block ? ' ' + sub + ' ' : sub;
+            }
+        }
+        return out;
+    }
+    function axClean(t) { return String(t || '').replace(/\s+/g, ' ').trim(); }
+    function axName(el) {
+        var doc = el.ownerDocument;
+        var by = (el.getAttribute('aria-labelledby') || '').trim();
+        if (by) {
+            var parts = by.split(/\s+/).map(function (id) {
+                var r = doc.getElementById(id);
+                return r ? axClean(r.getAttribute('aria-label') || axText(r, true)) : '';
+            }).filter(Boolean);
+            if (parts.length) return parts.join(' ');
+        }
+        var al = axClean(el.getAttribute('aria-label'));
+        if (al) return al;
+        var tag = el.localName;
+        if (/^(input|button|textarea|select|meter|progress|output)$/.test(tag)) {
+            var labels = el.labels ? Array.prototype.slice.call(el.labels) : [];
+            var lt = axClean(labels.map(function (l) { return axText(l, false); }).join(' '));
+            if (lt) return lt;
+            if (tag === 'input' && /^(button|submit|reset)$/.test((el.type || '').toLowerCase())) return axClean(el.value);
+        }
+        if (tag === 'img' || (tag === 'input' && el.type === 'image')) { var alt = el.getAttribute('alt'); if (alt) return axClean(alt); }
+        if (el.namespaceURI === 'http://www.w3.org/2000/svg') {
+            for (var c = el.firstElementChild; c; c = c.nextElementSibling) if (c.localName === 'title') return axClean(c.textContent);
+        }
+        if (tag === 'table') { var cap = el.querySelector('caption'); if (cap) return axClean(axText(cap, false)); }
+        if (tag === 'fieldset') { var lg = el.querySelector('legend'); if (lg) return axClean(axText(lg, false)); }
+        if (tag === 'figure') { var fc = el.querySelector('figcaption'); if (fc) return axClean(axText(fc, false)); }
+        var role = axRoleOnly(el);
+        if (NAME_FROM_CONTENT.test(role)) { var tc = axClean(axText(el, false)); if (tc) return tc; }
+        return axClean(el.getAttribute('title'));
+    }
+    var axDepth = 0;
+    function axRoleOnly(el) {
+        /* (a role that asks for the name asks again: once is enough) */
+        if (axDepth > 2) return '';
+        axDepth++;
+        try { return axRole(el); } finally { axDepth--; }
+    }
+    Object.defineProperty(global, '__cyberAccessibility', { configurable: true, value: Object.freeze({
+        role: function (el) { return el && el.nodeType === 1 ? axRoleOnly(el) : ''; },
+        label: function (el) { return el && el.nodeType === 1 ? axName(el) : ''; },
+    }) });
 })

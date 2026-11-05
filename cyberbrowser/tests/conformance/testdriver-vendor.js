@@ -9,6 +9,16 @@
     const frame = w => new Promise(r => w.requestAnimationFrame(() => r()));
     const pause = ms => new Promise(r => setTimeout(r, ms));
 
+    /* (the accessibility tree's role and name, from the engine) */
+    internal.get_computed_role = async function (element) {
+        const w = element.ownerDocument.defaultView || window;
+        return w.__cyberAccessibility.role(element);
+    };
+    internal.get_computed_label = async function (element) {
+        const w = element.ownerDocument.defaultView || window;
+        return w.__cyberAccessibility.label(element);
+    };
+
     internal.click = async function (element, coords) {
         const w = element.ownerDocument.defaultView || window;
         const input = w.__cyberInput;

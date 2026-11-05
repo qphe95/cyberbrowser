@@ -651,6 +651,17 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
                     }
                 }
             }
+            /* (the highlights: by their names) */
+            if (q && !ps && p[1] == ':' && gcs_pseudo_known(q, true) &&
+                (!strcasecmp(q, "selection") || !strcasecmp(q, "target-text") || !strcasecmp(q, "search-text") ||
+                 !strcasecmp(q, "spelling-error") || !strcasecmp(q, "grammar-error") || !strncasecmp(q, "highlight(", 10))) {
+                char hn[96];
+                size_t k = 0;
+                for (const char *c = q; *c && k + 1 < sizeof hn; c++) if (!isspace((unsigned char)*c)) hn[k++] = (char)tolower((unsigned char)*c);
+                hn[k] = 0;
+                if (!strncmp(hn, "highlight(", 10) && hn[k - 1] != ')' && k + 1 < sizeof hn) { hn[k++] = ')'; hn[k] = 0; }
+                ps = layout_highlight_code(hn);
+            }
             /* (with colons, what isn't a pseudo-element has no style at all) */
             if (q && !ps && !gcs_pseudo_known(q, p[1] == ':')) {
                 JS_FreeCString(ctx, p);
@@ -661,6 +672,8 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
     }
     const char *key = ps == 1 ? "__cyber_cs_before" : ps == 2 ? "__cyber_cs_after" : ps == 3 ? "__cyber_cs_letter" : ps == 4 ? "__cyber_cs_line" : ps == 5 ? "__cyber_cs_list_marker" : ps == 6 ? "__cyber_cs_marker"
                     : ps == 8 ? "__cyber_cs_marker_group" : "__cyber_cs";
+    char hkey[32];
+    if (ps >= 20) { snprintf(hkey, sizeof hkey, "__cyber_cs_hl%d", ps); key = hkey; }
     GCValue cached = JS_GetPropertyStr(ctx, element, key);
     if (css_style_decl_is(ctx, cached)) return cached;
     GCValue cs = ps ? css_style_decl_new_computed_pseudo(ctx, id, ps) : css_style_decl_new_computed(ctx, id);

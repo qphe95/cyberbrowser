@@ -1042,7 +1042,7 @@
         out.push(cur.trim());
         return out;
     }
-    var LOGICAL_PAIR = /^(margin|padding|inset)-(block|inline)$/;
+    var LOGICAL_PAIR = /^(margin|padding|inset)-(block|inline)$|^border-(block|inline)-width$/;
     var UNTYPED = /^(border-(bottom|top)-(left|right)-radius|border-image-(outset|repeat|slice|width)|counter-(increment|reset|set)|font-family|grid-(column|row)-(start|end)|scroll-snap-align|transition-property|will-change)$/;
     /* What a registered property's computed value comes to, by its syntax. */
     function reifyRegistered(text, syntax) {
@@ -1070,11 +1070,13 @@
         var parts = /#\s*$/.test(syntax) ? splitCommas(t) : /\+\s*$/.test(syntax) ? String(t).trim().split(/\s+(?![^(]*\))/) : [t];
         return parts.map(function (x) { return reifyRegistered(x, syntax); });
     }
-    function reify(prop, text) {
+    function reify(prop, text, mode) {
         text = String(text).trim();
         if (/\bvar\(/i.test(text) || prop.slice(0, 2) === '--') return parseUnparsed(text);
         if (/^(initial|inherit|unset|revert|revert-layer)$/i.test(text)) return new CSSKeywordValue(text.toLowerCase());
         if (prop === 'vertical-align' && !/^(baseline|[-+]?[\d.]|calc\()/.test(text)) return generic(text, prop);
+        /* (lists, as gap decorations are: no typed form, but as specified) */
+        if (mode && /^(column|row)-rule-(width|style)$/.test(prop)) return generic(text, prop);
         if (global.__cyberCssIsShorthand && global.__cyberCssIsShorthand(prop)) {
             /* (a logical pair of one value reads as that value, and a border's keyword) */
             var lone = !/\s/.test(text.replace(/\([^)]*\)/g, ''));
@@ -1084,14 +1086,14 @@
         }
         /* (colors: not keywords of their own, but for these) */
         if (/(^|-)color$/.test(prop) && !/^(currentcolor|auto)$/i.test(text)) return generic(text, prop);
-        /* (what has no typed form yet) */
-        if (UNTYPED.test(prop) && !(/^[a-z][a-z-]*$/i.test(text) && !/^(font-family|transition-property)$/.test(prop))) return generic(text, prop);
         /* (a size or an amount out of range is kept as it was written) */
         if (/^calc\(\s*[-+]?[\d.]+(?:e[-+]?\d+)?(?:%|[a-z]+)?\s*\)$/i.test(text)) {
             var lone = null;
             try { lone = parseNumeric(text.slice(5, -1).trim()); } catch (e) { lone = null; }
             if (lone) return new CSSMathSum(lone);
         }
+        /* (what has no typed form yet) */
+        if (UNTYPED.test(prop) && !(/^[a-z][a-z-]*$/i.test(text) && !/^(font-family|transition-property)$/.test(prop))) return generic(text, prop);
         if (/^-{0,2}[a-zA-Z_][\w-]*$/.test(text) && !/^(?:e|pi|infinity)$/i.test(text)) return new CSSKeywordValue(text);
         if ((prop === 'transform') && text !== 'none') {
             var tv;
@@ -1117,7 +1119,7 @@
         }
         if (prop.slice(0, 2) !== '--' && !global.CSS.supports(prop, text)) throw new TypeError('Invalid value for ' + prop + ': ' + text);
         var parts = LIST_VALUED.test(prop) ? splitCommas(text) : [text];
-        var vals = parts.map(function (t) { return reify(prop, t); });
+        var vals = parts.map(function (t) { return reify(prop, t, 'parse'); });
         return all ? vals : vals[0];
     }
     var LIST_VALUED = /^(transition|animation|background|mask|box-shadow|text-shadow|will-change|font-family|grid-template-areas)(-|$)/;
@@ -1147,7 +1149,8 @@
             /* (a number set is that number, as it was put) */
             var held = mapOf(this).held;
             if (held && held[p] && held[p].text === t) return held[p].value;
-            return (LIST_VALUED.test(p) ? splitCommas(t) : [t]).map(function (x) { return reify(p, x); })[0];
+            var mode = mapOf(this).computed ? 'computed' : '';
+            return (LIST_VALUED.test(p) ? splitCommas(t) : [t]).map(function (x) { return reify(p, x, mode); })[0];
         }
         getAll(property) {
             var p = propName(property);
@@ -1155,7 +1158,8 @@
             var t = mapOf(this).read(p);
             if (!t) return [];
             if (mapOf(this).computed && REGISTERED[p] && REGISTERED[p] !== '*') return registeredList(p, t);
-            return (LIST_VALUED.test(p) ? splitCommas(t) : [t]).map(function (x) { return reify(p, x); });
+            var mode = mapOf(this).computed ? 'computed' : '';
+            return (LIST_VALUED.test(p) ? splitCommas(t) : [t]).map(function (x) { return reify(p, x, mode); });
         }
         has(property) {
             var p = propName(property);
@@ -1254,8 +1258,31 @@
         var cs = function () { return global.getComputedStyle(el, pseudo); };
         MAP.set(map, {
             computed: true,
-            read: function (p) {
+            read: function read(p) {
+                /* (a logical pair: its two sides, as one if they're the same) */
+                var pair = /^(margin|padding|inset|border)-(block|inline)(-width|-style|-color)?$/.exec(p);
+                if (pair) {
+                    var a = read(pair[1] + '-' + pair[2] + '-start' + (pair[3] || '')), b = read(pair[1] + '-' + pair[2] + '-end' + (pair[3] || ''));
+                    if (a === b || pair[1] !== 'border' || pair[3]) return a === b ? a : a + ' ' + b;
+                }
+                /* (a border side of nothing but initial values: none) */
+                if (/^border-(top|right|bottom|left|block-start|block-end|inline-start|inline-end)$/.test(p)) {
+                    var bw = read(p + '-width'), bs = read(p + '-style'), bc = read(p + '-color');
+                    if (bw === '3px' && bs === 'none' && bc === 'currentcolor') return 'none';
+                }
                 var v = cs().getPropertyValue(p);
+                /* (always a pair, computed) */
+                if (p === 'border-image-repeat' && /^[a-z]+$/.test(v)) return v + ' ' + v;
+                /* (a width a keyword names: the keyword) */
+                if (p === 'font-stretch' || p === 'font-width') {
+                    var FW = { '50%': 'ultra-condensed', '62.5%': 'extra-condensed', '75%': 'condensed', '87.5%': 'semi-condensed', '100%': 'normal',
+                               '112.5%': 'semi-expanded', '125%': 'expanded', '150%': 'extra-expanded', '200%': 'ultra-expanded' };
+                    if (FW[v]) return FW[v];
+                }
+                /* (the step keywords, as the steps they are) */
+                if (/-timing-function$/.test(p)) v = v.replace(/\bstep-start\b/g, 'steps(1, start)').replace(/\bstep-end\b/g, 'steps(1)');
+                /* (a dash's length: in pixels) */
+                if (p === 'stroke-dasharray') v = v.replace(/(^|[\s,])([-+]?[\d.]+(?:e[-+]?\d+)?)(?=$|[\s,])/gi, '$1$2px');
                 /* (going between functions: still those functions) */
                 if (p === 'transform' && !pseudo && global.__cyberAnimTransform) {
                     var fv = global.__cyberAnimTransform(el);
@@ -1265,6 +1292,11 @@
                 if (!pseudo && /(^|-)(margin|padding|inset|top|right|bottom|left|width|height|size)(-|$)/.test(p) && global.__cyberComputedValue) {
                     var raw = global.__cyberComputedValue(el, p);
                     if (raw && (raw.indexOf('%') >= 0 || raw === 'auto')) v = raw;
+                }
+                /* (a line's width whatever its style; currentcolor as itself) */
+                if (!pseudo && p !== 'color' && /^(border-.*-width|outline-width|column-rule-width|.*-color)$/.test(p) && global.__cyberComputedValue) {
+                    var tv = global.__cyberComputedValue(el, p, true);
+                    if (tv) v = tv;
                 }
                 /* (below what it can be: as low as it can be) */
                 var neg = /^(?:calc\()?-[\d.]+(?:e[-+]?\d+)?(%|[a-z]*)\)?$/i.exec(v);

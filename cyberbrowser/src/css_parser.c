@@ -617,6 +617,20 @@ static const char *flow_side(bool block, bool end, int wm, bool rtl)
 
 bool css_logical_physical(const char *prop, int wm, bool rtl, char *out, size_t cap)
 {
+    /* (a corner: its block side, then its inline side) */
+    if (!strncmp(prop, "border-", 7) && (!strncmp(prop + 7, "start-", 6) || !strncmp(prop + 7, "end-", 4))) {
+        const char *a = prop + 7;
+        bool bend = !strncmp(a, "end-", 4);
+        a += bend ? 4 : 6;
+        bool iend = !strncmp(a, "end-", 4);
+        if (!iend && strncmp(a, "start-", 6)) return false;
+        a += iend ? 4 : 6;
+        if (strcmp(a, "radius")) return false;
+        const char *bs = flow_side(true, bend, wm, rtl), *is = flow_side(false, iend, wm, rtl);
+        bool b_vert = !strcmp(bs, "top") || !strcmp(bs, "bottom");
+        snprintf(out, cap, "border-%s-%s-radius", b_vert ? bs : is, b_vert ? is : bs);
+        return true;
+    }
     if (!strstr(prop, "block") && !strstr(prop, "inline")) return false;
     bool vertical = wm != 0;
     static const struct { const char *name, *h, *v; } sizes[] = {
@@ -800,7 +814,7 @@ static bool css_pseudo_known(const char *n, size_t nl, bool elem)
     static const char *const classes[] = {
         "active", "any-link", "autofill", "blank", "buffering", "checked", "closed", "current", "default",
         "defined", "dir", "disabled", "empty", "enabled", "first", "first-child", "first-of-type", "focus",
-        "focus-visible", "focus-within", "fullscreen", "future", "has", "host", "host-context", "hover",
+        "focus-visible", "focus-within", "fullscreen", "future", "has", "heading", "host", "host-context", "hover",
         "in-range", "indeterminate", "invalid", "is", "lang", "last-child", "last-of-type", "left", "link",
         "local-link", "matches", "modal", "muted", "not", "nth-child", "nth-last-child", "nth-last-of-type",
         "nth-of-type", "only-child", "only-of-type", "open", "optional", "out-of-range", "past", "paused",
@@ -827,6 +841,10 @@ static bool css_pseudo_known(const char *n, size_t nl, bool elem)
  * selector (a comma at either end, or two together), or one starting with
  * what no compound starts with (a digit: "1badselector").  The selector
  * parser takes the rest. */
+static bool css_prelude_invalid(const char *sel);
+/* (for @supports selector(): the grammar style rules are held to) */
+bool css_selector_text_invalid(const char *sel) { return css_prelude_invalid(sel); }
+
 static bool css_prelude_invalid(const char *sel)
 {
     /* (view transition pseudo-elements: the whole selector's grammar) */
@@ -2108,7 +2126,14 @@ uint32_t css_state_bit(const char *name, size_t nl)
         { "buffering", DOM_ST_BUFFERING }, { "stalled", DOM_ST_STALLED }, { "enabled", DOM_ST_ENABLED },
         { "disabled", DOM_ST_DISABLED }, { "read-write", DOM_ST_READ_WRITE }, { "read-only", DOM_ST_READ_ONLY },
         { "required", DOM_ST_REQUIRED }, { "optional", DOM_ST_OPTIONAL },
+        { "modal", DOM_ST_MODAL }, { "popover-open", DOM_ST_POPOVER_OPEN },
+        { "valid", DOM_ST_VALID }, { "invalid", DOM_ST_INVALID },
+        { "placeholder-shown", DOM_ST_PLACEHOLDER_SHOWN }, { "default", DOM_ST_DEFAULT },
+        { "in-range", DOM_ST_IN_RANGE }, { "out-of-range", DOM_ST_OUT_OF_RANGE },
     };
+    extern bool g_css_saw_validity;
+    for (size_t i = sizeof k / sizeof k[0] - 6; i < sizeof k / sizeof k[0]; i++)
+        if (strlen(k[i].n) == nl && !strncasecmp(k[i].n, name, nl)) g_css_saw_validity = true;
     for (size_t i = 0; i < sizeof k / sizeof k[0]; i++)
         if (strlen(k[i].n) == nl && !strncasecmp(k[i].n, name, nl)) return k[i].bit;
     return 0;
@@ -2145,7 +2170,7 @@ static void css_apply_pseudo(CssSimpleSelector *out,
         return;
     }
     if (css_pseudo_name_is(name, nl, "empty")) { out->requires_empty = true; return; }
-    if (css_pseudo_name_is(name, nl, "link")) { out->requires_link = true; return; }
+    if (css_pseudo_name_is(name, nl, "link") || css_pseudo_name_is(name, nl, "any-link")) { out->requires_link = true; return; }
     uint32_t state_bit = css_state_bit(name, nl);
     if (state_bit) {
         out->state_mask |= state_bit;
@@ -2158,7 +2183,14 @@ static void css_apply_pseudo(CssSimpleSelector *out,
         css_pseudo_name_is(name, nl, "autofill") ||
         css_pseudo_name_is(name, nl, "current") ||
         css_pseudo_name_is(name, nl, "past") ||
-        css_pseudo_name_is(name, nl, "future")) {
+        css_pseudo_name_is(name, nl, "future") ||
+        css_pseudo_name_is(name, nl, "local-link") || css_pseudo_name_is(name, nl, "open") ||
+        css_pseudo_name_is(name, nl, "closed") || css_pseudo_name_is(name, nl, "fullscreen") ||
+        css_pseudo_name_is(name, nl, "picture-in-picture") || css_pseudo_name_is(name, nl, "volume-locked") ||
+        css_pseudo_name_is(name, nl, "xr-overlay") || css_pseudo_name_is(name, nl, "user-valid") ||
+        css_pseudo_name_is(name, nl, "user-invalid") || css_pseudo_name_is(name, nl, "first") ||
+        css_pseudo_name_is(name, nl, "left") || css_pseudo_name_is(name, nl, "right") ||
+        css_pseudo_name_is(name, nl, "blank")) {
         out->never_match = true;
         return;
     }

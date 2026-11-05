@@ -929,6 +929,7 @@ void css_layout_tree_stats(uint64_t *kept, uint64_t *built);
  * the element's custom properties (not reported).  Uses the style set of ctx's last layout; false when it is gone
  * or idx is not an element. */
 typedef void (*CssCascadeFn)(void *ud, const char *prop, const char *value, bool important);
+bool css_layout_highlight_cascade(LayoutContext *ctx, int dom, const char *pseudo, CssCascadeFn fn, void *ud);
 bool css_layout_element_cascade(LayoutContext *ctx, int idx, CssCascadeFn fn, void *ud);
 /* The computed value of custom property name (--x) on box idx's element
  * from ctx's last layout, or NULL. */

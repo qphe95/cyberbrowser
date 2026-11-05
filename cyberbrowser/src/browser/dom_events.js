@@ -911,6 +911,18 @@
             }
             return;
         }
+        /* (a button that shows, hides or toggles a popover) */
+        if ((el.localName === 'button' || (isInput && /^(button|submit|reset|image)$/.test(type))) && el.hasAttribute('popovertarget') &&
+            !disabledControl(el) && !((type === 'submit' || type === 'image' || (el.localName === 'button' && buttonType(el) === 'submit')) && formOf(el))) {
+            var pt = el.ownerDocument.getElementById(el.getAttribute('popovertarget'));
+            if (pt && pt.hasAttribute('popover') && typeof pt.togglePopover === 'function') {
+                var act = String(el.getAttribute('popovertargetaction') || 'toggle').toLowerCase();
+                try {
+                    if (act === 'show') pt.showPopover(); else if (act === 'hide') pt.hidePopover(); else pt.togglePopover();
+                } catch (e) { /* (not shown: as if not asked) */ }
+            }
+            return;
+        }
         if ((isInput && (type === 'submit' || type === 'image')) || (el.localName === 'button' && buttonType(el) === 'submit')) {
             var form = disabledControl(el) ? null : formOf(el);
             if (form && form.isConnected) requestSubmit(form, el);
@@ -944,6 +956,9 @@
         followHyperlink(el, view);
     }
     function requestSubmit(form, submitter) {
+        /* (interactive validation: an invalid form isn't sent, unless told not to check) */
+        if (!form.hasAttribute('novalidate') && !(submitter && submitter.hasAttribute && submitter.hasAttribute('formnovalidate')) &&
+            typeof form.checkValidity === 'function' && !form.checkValidity()) return;
         var ok = form.dispatchEvent(new global.SubmitEvent('submit', { bubbles: true, cancelable: true,
                                                                        submitter: submitter || null }));
         if (ok && typeof form.__cyberSubmit === 'function') form.__cyberSubmit(submitter);
@@ -2076,13 +2091,18 @@
             if (String(type) === 'change') watch(this);
         });
         define(MediaQueryList.prototype, 'addListener', function (fn) {
+            if (!MQL_PRIVATE.has(this)) throw new TypeError('Illegal invocation');
+            if (arguments.length < 1) throw new TypeError("Failed to execute 'addListener' on 'MediaQueryList': 1 argument required");
             if (fn) { addEventListener.call(this, 'change', fn); watch(this); }
         });
         define(MediaQueryList.prototype, 'removeListener', function (fn) {
+            if (!MQL_PRIVATE.has(this)) throw new TypeError('Illegal invocation');
+            if (arguments.length < 1) throw new TypeError("Failed to execute 'removeListener' on 'MediaQueryList': 1 argument required");
             if (fn) removeEventListener.call(this, 'change', fn);
         });
         define(global, 'MediaQueryList', MediaQueryList);
         define(global, 'matchMedia', function matchMedia(query) {
+            if (this !== undefined && this !== null && this !== global) throw new TypeError('Illegal invocation');
             if (arguments.length < 1) throw new TypeError("Failed to execute 'matchMedia' on 'Window': 1 argument required, but only 0 present.");
             var q = String(query), mql = Object.create(MediaQueryList.prototype);
             MQL_PRIVATE.set(mql, { query: q, media: global.__cyberMediaText ? global.__cyberMediaText(q) : evalMedia.call(global, q).media, last: false, onchange: null });

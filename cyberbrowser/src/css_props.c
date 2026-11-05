@@ -3589,10 +3589,31 @@ static bool has_substitution(const char *v) {
     for (const char *p = v; *p; p++) {
         if ((p == v || !isalnum((unsigned char)p[-1])) &&
             (strncasecmp(p, "var(", 4) == 0 || strncasecmp(p, "env(", 4) == 0 || strncasecmp(p, "attr(", 5) == 0 ||
-             strncasecmp(p, "if(", 3) == 0 || css_dashed_call(p)))
+             strncasecmp(p, "if(", 3) == 0 || strncasecmp(p, "ident(", 6) == 0 || css_dashed_call(p)))
             return true;
     }
     return false;
+}
+
+/* Each ident( ... ) in v with something in it, no comma and no {} block at
+ * its top level (what's in it is only checked once substituted). */
+static const char *strcasestr_simple(const char *h, const char *n);
+static bool ident_calls_ok(const char *v) {
+    for (const char *p = v; (p = strcasestr_simple(p, "ident(")); p += 6) {
+        if (p > v && (isalnum((unsigned char)p[-1]) || p[-1] == '-' || p[-1] == '_')) continue;
+        const char *a = p + 6;
+        int d = 1;
+        bool any = false;
+        for (; *a && d; a++) {
+            if (*a == '"' || *a == '\'') { char q = *a; for (a++; *a && *a != q; a++) if (*a == '\\' && a[1]) a++; if (!*a) break; any = true; continue; }
+            if (*a == '(') d++;
+            else if (*a == ')') { if (--d == 0) break; }
+            else if (d == 1 && (*a == ',' || *a == '{' || *a == '}')) return false;
+            if (!isspace((unsigned char)*a)) any = true;
+        }
+        if (!any) return false;
+    }
+    return true;
 }
 
 static char *trim_dup(const char *v) {
@@ -3702,7 +3723,10 @@ static char *prop_parse_raw(const CssPropDef *p, const char *value) {
         for (char *q = v; *q; q++) *q = (char)tolower((unsigned char)*q);
         return v;
     }
-    if (has_substitution(v)) return v;
+    if (has_substitution(v)) {
+        if (!ident_calls_ok(v)) { free(v); return NULL; }
+        return v;
+    }
     if (p->shorthand != CSS_SH_NONE) {
         /* checked by expanding it; serialized back from the longhands */
         char **vals = NULL;
@@ -3763,6 +3787,10 @@ static const char *color_raw_of(const char *value) {
     return value;
 }
 
+static char *css_prop_canon(const CssPropDef *p, const char *v);
+static __thread bool g_canon_computed;
+static char *gradient_computed(const char *v);
+char *css_gradient_computed(const char *v) { return gradient_computed(v); }
 char *css_shape_computed(const char *n, const char *v);
 char *css_prop_compute(const CssPropDef *p, const char *value, const CssComputeEnv *env) {
     if (!p || !value || !env || p->longhands) return NULL;
@@ -3786,7 +3814,18 @@ char *css_prop_compute(const CssPropDef *p, const char *value, const CssComputeE
         toks_free(&ts);
     }
     free(v);
-    if (out && strchr(out, '(') && (!strcmp(p->name, "clip-path") || !strcmp(p->name, "shape-outside"))) {
+    if (out && (!strcmp(p->name, "contain") || !strcmp(p->name, "text-fit"))) {
+        g_canon_computed = true;
+        char *cc = css_prop_canon(p, out);
+        g_canon_computed = false;
+        if (cc && cc[0]) { free(out); out = cc; } else free(cc);
+    }
+    if (out && strstr(out, "gradient(") && (!strcmp(p->name, "background-image") || !strcmp(p->name, "mask-image") ||
+                                             !strcmp(p->name, "list-style-image") || !strcmp(p->name, "border-image-source"))) {
+        char *gc = gradient_computed(out);
+        if (gc) { free(out); out = gc; }
+    }
+    if (out && strchr(out, '(') && (!strcmp(p->name, "clip-path") || !strcmp(p->name, "shape-outside") || (!strcmp(p->name, "offset-path") && !strstr(out, "ray(")))) {
         char *sc = css_shape_computed(p->name, out);
         if (sc) { free(out); out = sc; }
     }
@@ -3825,6 +3864,8 @@ int css_prop_longhands(const CssPropDef *p, const char ***names) {
     *names = l->names;
     return l->n;
 }
+
+static int canon_words(const char *v, char (*w)[160], int max);
 
 static int lh_index(const char **names, int n, const char *name) {
     for (int i = 0; i < n; i++) if (strcmp(names[i], name) == 0) return i;
@@ -3981,6 +4022,38 @@ char *css_prop_shorthand_serialize(const CssPropDef *p, const char *const *vals)
         if (strcmp(vals[0], vals[1])) { buf_ch(&b, ' '); buf_str(&b, vals[1]); }
     } else if (p->shorthand == CSS_SH_SPECIAL) {
         if (serialize_special(p, vals, names, n, &b) < 0) { free(b.s); return NULL; }
+    } else if (!strcmp(p->name, "border-image") && n == 5) {
+        /* source slice [/ width [/ outset]] repeat: what isn't initial; a slash
+         * for each part after the slice that's said (an empty width between) */
+        const char *src = NULL, *sl = NULL, *wd = NULL, *os = NULL, *rp = NULL;
+        for (int i = 0; i < n; i++) {
+            const char *nmi = names[i];
+            if (!strcmp(nmi, "border-image-source")) src = vals[i];
+            else if (!strcmp(nmi, "border-image-slice")) sl = vals[i];
+            else if (!strcmp(nmi, "border-image-width")) wd = vals[i];
+            else if (!strcmp(nmi, "border-image-outset")) os = vals[i];
+            else if (!strcmp(nmi, "border-image-repeat")) rp = vals[i];
+        }
+        if (!src || !sl || !wd || !os || !rp) { free(b.s); return NULL; }
+        bool has_w = strcmp(wd, "1") != 0, has_o = strcmp(os, "0") != 0;
+        if (strcmp(src, "none")) buf_str(&b, src);
+        if (strcmp(sl, "100%") || has_w || has_o) {
+            if (b.n) buf_ch(&b, ' ');
+            /* (the slice's four sides, as few as say them) */
+            char w[5][160];
+            int nw = canon_words(sl, w, 5);
+            bool fill = nw > 0 && !strcmp(w[nw - 1], "fill");
+            int ns = fill ? nw - 1 : nw;
+            if (ns == 4) {
+                if (!strcmp(w[1], w[3])) { ns = 3; if (!strcmp(w[0], w[2])) { ns = 2; if (!strcmp(w[0], w[1])) ns = 1; } }
+                for (int i = 0; i < ns; i++) { if (i) buf_ch(&b, ' '); buf_str(&b, w[i]); }
+                if (fill) buf_str(&b, " fill");
+            } else buf_str(&b, sl);
+        }
+        if (has_w || has_o) { buf_str(&b, " /"); if (has_w) { buf_ch(&b, ' '); buf_str(&b, wd); } }
+        if (has_o) { buf_str(&b, " / "); buf_str(&b, os); }
+        if (strcmp(rp, "stretch")) { if (b.n) buf_ch(&b, ' '); buf_str(&b, rp); }
+        if (!b.n) buf_str(&b, "none");
     } else {
         /* the longhands that are not initial, in order (or the first) */
         for (int i = 0; i < n; i++) {
@@ -3989,7 +4062,8 @@ char *css_prop_shorthand_serialize(const CssPropDef *p, const char *const *vals)
             if (b.n) buf_ch(&b, ' ');
             buf_str(&b, vals[i]);
         }
-        if (!b.n) buf_str(&b, vals[0]);
+        /* (a border side with nothing but initial values: none) */
+        if (!b.n) buf_str(&b, n == 3 && !strncmp(p->name, "border-", 7) && strstr(names[1], "-style") ? vals[1] : vals[0]);
     }
     char *s = buf_take(&b);
     /* it must give back the same longhands */
@@ -4196,13 +4270,143 @@ bool css_value_invalid(const char *prop, const char *value)
     return !ok;
 }
 
+static __thread const char *t_sup_from;
+static const char *strcasestr_simple(const char *h, const char *n)
+{
+    size_t l = strlen(n);
+    for (; *h; h++) if (!strncasecmp(h, n, l)) return h;
+    return NULL;
+}
+
+/* selector() in @supports: one complex selector, and nothing forgiven inside :is(),
+ * :where(), :has() or an :nth-child()'s "of". */
+static bool sup_selector_branches(const char *s, size_t n, bool relative);
+static bool sup_selector_one(const char *s, size_t n, bool relative)
+{
+    extern bool dom_selector_valid(const char *s);
+    char *t = strndup(s, n);
+    if (!t) return false;
+    char *x = t;
+    while (isspace((unsigned char)*x)) x++;
+    size_t l = strlen(x);
+    while (l && isspace((unsigned char)x[l - 1])) x[--l] = 0;
+    if (!*x) { free(t); return false; }
+    if (relative && (*x == '>' || *x == '+' || *x == '~')) { x++; while (isspace((unsigned char)*x)) x++; }
+    /* (a column combinator, or a vendor pseudo-element nobody knows) */
+    bool ok = !strstr(x, " | ") && !strstr(x, "||");
+    for (const char *w = strstr(x, "::-webkit-"); ok && w; w = strstr(w + 1, "::-webkit-")) {
+        static const char *const known[] = { "scrollbar", "resizer", "search-cancel-button", "inner-spin-button", "outer-spin-button",
+            "input-placeholder", "file-upload-button", "slider-thumb", "slider-runnable-track", "details-marker", "progress-bar",
+            "progress-value", "progress-inner-element", "meter-bar", "meter-optimum-value", "meter-suboptimum-value",
+            "meter-even-less-good-value", "color-swatch", "color-swatch-wrapper", "calendar-picker-indicator", "datetime-edit" };
+        const char *nm = w + 10;
+        bool hit = false;
+        for (size_t k = 0; k < sizeof known / sizeof known[0] && !hit; k++) hit = !strncasecmp(nm, known[k], strlen(known[k]));
+        if (!hit) ok = false;
+    }
+    extern bool css_selector_text_invalid(const char *sel);
+    (void)dom_selector_valid;
+    if (ok) ok = !css_selector_text_invalid(x);
+    /* (what the lists inside say, each strictly) */
+    for (const char *p = x; ok && (p = strchr(p, ':')); p++) {
+        static const struct { const char *n; int kind; } fns[] = {
+            { ":is(", 0 }, { ":where(", 0 }, { ":matches(", 0 }, { ":-webkit-any(", 0 }, { ":not(", 0 }, { ":has(", 1 },
+            { ":nth-child(", 2 }, { ":nth-last-child(", 2 } };
+        for (size_t k = 0; k < sizeof fns / sizeof fns[0]; k++) {
+            size_t fl = strlen(fns[k].n);
+            if (strncasecmp(p, fns[k].n, fl) || (p > x && p[-1] == ':')) continue;
+            const char *a = p + fl, *e = a;
+            int d = 1;
+            for (; *e && d; e++) { if (*e == '(') d++; else if (*e == ')') d--; }
+            if (d) { ok = false; break; }
+            size_t an = (size_t)(e - 1 - a);
+            if (fns[k].kind == 2) {
+                const char *of = NULL;
+                for (const char *c = a; c + 3 < a + an && !of; c++)
+                    if (isspace((unsigned char)c[0]) && !strncasecmp(c + 1, "of", 2) && isspace((unsigned char)c[3])) of = c;
+                const char *ie = of ? of : a + an;
+                /* (An+B and nothing else) */
+                for (const char *c = a; c < ie && ok; c++) {
+                    if (isalpha((unsigned char)*c) && !strchr("nN", *c) && strncasecmp(c, "odd", 3) && strncasecmp(c, "even", 4)) ok = false;
+                    if (!strncasecmp(c, "odd", 3)) c += 2;
+                    else if (!strncasecmp(c, "even", 4)) c += 3;
+                }
+                if (ok) {
+                    /* (two numbers in a row: "2n 4") */
+                    bool num_end = false, gap = false;
+                    for (const char *c = a; c < ie && ok; c++) {
+                        if (isspace((unsigned char)*c)) { if (num_end) gap = true; continue; }
+                        if (isdigit((unsigned char)*c) && gap) ok = false;
+                        num_end = isdigit((unsigned char)*c) || *c == 'n' || *c == 'N';
+                        if (*c == '+' || *c == '-') num_end = false;
+                        gap = false;
+                    }
+                }
+                if (ok && of) ok = sup_selector_branches(of + 4, (size_t)(a + an - of - 4), false);
+            } else ok = sup_selector_branches(a, an, fns[k].kind == 1);
+            break;
+        }
+    }
+    free(t);
+    return ok;
+}
+
+static bool sup_selector_branches(const char *s, size_t n, bool relative)
+{
+    size_t st = 0;
+    int d = 0;
+    for (size_t i = 0; i <= n; i++) {
+        if (i < n && (s[i] == '(' || s[i] == '[')) d++;
+        else if (i < n && (s[i] == ')' || s[i] == ']')) d--;
+        if (i == n || (s[i] == ',' && !d)) {
+            if (!sup_selector_one(s + st, i - st, relative)) return false;
+            st = i + 1;
+        }
+    }
+    return true;
+}
+
+static bool sup_selector(const char *s)
+{
+    int d = 0;
+    for (const char *c = s; *c; c++) {
+        if (*c == '(' || *c == '[') d++;
+        else if (*c == ')' || *c == ']') d--;
+        else if (*c == ',' && !d) return false;
+    }
+    return sup_selector_one(s, strlen(s), false);
+}
+
 /* condition: not <in-parens> | <in-parens> [and <in-parens>]* | <in-parens> [or <in-parens>]* */
 static int sup_cond(const Toks *ts, int b, int e, const char *src);
 
 static int sup_in_parens(const Toks *ts, int i, const char *src) {
     const Tok *t = &ts->t[i];
     if (t->type == T_FUNC) {
-        if (strcasecmp(t->str, "selector") == 0) return 1;     /* (the matcher's selectors are not checked here) */
+        if (strcasecmp(t->str, "selector") == 0) {
+            /* (its text as written: the next selector( in the condition, in the order they're asked) */
+            const char *at = src ? strcasestr_simple(t_sup_from ? t_sup_from : src, "selector(") : NULL;
+            if (!at) return 0;
+            const char *a = at + 9, *e = a;
+            int d = 1;
+            for (; *e && d; e++) { if (*e == '(') d++; else if (*e == ')') d--; }
+            t_sup_from = e;
+            char *txt = strndup(a, (size_t)(e - a - (d ? 0 : 1)));
+            bool ok = txt && sup_selector(txt);
+            free(txt);
+            return ok;
+        }
+        if (strcasecmp(t->str, "at-rule") == 0) {
+            /* (one at-keyword the engine knows) */
+            int k = t->first;
+            if (k >= t->end || ts->t[k].type != T_AT || tok_next(ts, k) != t->end) return 0;
+            static const char *const known[] = { "media", "supports", "import", "namespace", "font-face", "keyframes", "page",
+                "counter-style", "layer", "container", "property", "scope", "starting-style", "font-feature-values",
+                "font-palette-values", "position-try", "view-transition", "swash", "annotation", "ornaments", "stylistic",
+                "styleset", "character-variant", "historical-forms", "-webkit-keyframes" };
+            for (size_t q = 0; q < sizeof known / sizeof known[0]; q++) if (!strcasecmp(ts->t[k].str, known[q])) return 1;
+            return 0;
+        }
         return 0;   /* font-tech(), font-format(), unknown functions */
     }
     if (t->type != T_PAREN) return 0;
@@ -4255,6 +4459,7 @@ static int sup_cond(const Toks *ts, int b, int e, const char *src) {
 bool css_supports_condition(const char *cond) {
     Toks ts;
     if (!cond || !tokenize(cond, strlen(cond), &ts)) return false;
+    t_sup_from = NULL;
     int r = sup_cond(&ts, 0, ts.n, cond);
     toks_free(&ts);
     return r > 0;
@@ -5564,6 +5769,21 @@ static int expand_font_variant(const char *v, char **out, const char **names, in
     static const char *const lh[] = { "font-variant-ligatures", "font-variant-alternates", "font-variant-caps",
         "font-variant-numeric", "font-variant-east-asian", "font-variant-position", "font-variant-emoji" };
     Buf acc[7] = { { 0 } };
+    /* (the alternates' functions, as written: to font-variant-alternates) */
+    for (const char *p = v; *p; p++) {
+        static const char *const fns[] = { "stylistic(", "styleset(", "character-variant(", "swash(", "ornaments(", "annotation(" };
+        if (p > v && !isspace((unsigned char)p[-1])) continue;
+        for (int k = 0; k < 6; k++) {
+            size_t fl = strlen(fns[k]);
+            if (strncasecmp(p, fns[k], fl)) continue;
+            const char *e = strchr(p + fl, ')');
+            if (!e) break;
+            if (acc[1].n) buf_ch(&acc[1], ' ');
+            buf_add(&acc[1], p, (size_t)(e + 1 - p));
+            p = e;
+            break;
+        }
+    }
     for (int i = 0; i < P.ts.n; i = tok_next(&P.ts, i)) {
         const Tok *t = &P.ts.t[i];
         if (t->type != T_IDENT) continue;
@@ -5596,12 +5816,15 @@ static int expand_font_synthesis(const char *v, char **out, const char **names, 
     if (!parse_prop("font-synthesis", v, &P)) { parsed_free(&P); return -1; }
     static const char *const kw[] = { "weight", "style", "small-caps", "position" };
     for (int k = 0; k < 4; k++) {
-        bool on = false;
-        for (int i = 0; i < P.ts.n; i++) if (tok_ident(&P.ts.t[i], kw[k])) on = true;
+        bool on = false, oblique = false;
+        for (int i = 0; i < P.ts.n; i++) {
+            if (tok_ident(&P.ts.t[i], kw[k])) on = true;
+            if (k == 1 && tok_ident(&P.ts.t[i], "oblique-only")) oblique = true;
+        }
         char name[64];
         snprintf(name, sizeof name, "font-synthesis-%s", kw[k]);
         int i = slot(names, n, name);
-        if (i >= 0) out[i] = strdup(on ? "auto" : "none");
+        if (i >= 0) out[i] = strdup(oblique ? "oblique-only" : on ? "auto" : "none");
     }
     parsed_free(&P);
     return n;
@@ -6205,6 +6428,7 @@ static int serialize_special(const CssPropDef *p, const char *const *vals, const
             snprintf(name, sizeof name, "font-synthesis-%s", kw[k]);
             const char *v = val_of(vals, names, n, name);
             if (v && !strcmp(v, "auto")) { if (sp) buf_ch(b, ' '); buf_str(b, kw[k]); sp = true; }
+            else if (v && k == 1 && !strcmp(v, "oblique-only")) { if (sp) buf_ch(b, ' '); buf_str(b, "oblique-only"); sp = true; }
         }
         if (!sp) buf_str(b, "none");
         return 0;
@@ -6360,7 +6584,8 @@ static char *canon_display(const char *v)
     if (!strcasecmp(o, "block")) return strdup(inner);
     if (!strcasecmp(o, "inline")) {
         if (!strcasecmp(inner, "flow-root")) return strdup("inline-block");
-        snprintf(b, sizeof b, "inline-%s", inner);
+        /* (the newer ones have no one-word form) */
+        snprintf(b, sizeof b, strcasecmp(inner, "grid-lanes") ? "inline-%s" : "inline %s", inner);
         return strdup(b);
     }
     snprintf(b, sizeof b, "%s %s", o, inner);
@@ -6867,11 +7092,87 @@ static char *canon_basic_shape(const char *n, const char *v)
         }
     }
     buf_ch(&b, ')');
-    bool implied = (!strcmp(n, "clip-path") && !strcasecmp(box, "border-box")) || (!strcmp(n, "shape-outside") && !strcasecmp(box, "margin-box"));
+    bool implied = ((!strcmp(n, "clip-path") || !strcmp(n, "offset-path")) && !strcasecmp(box, "border-box")) || (!strcmp(n, "shape-outside") && !strcasecmp(box, "margin-box"));
     if (box[0] && !implied) { buf_ch(&b, ' '); buf_str(&b, box); }
     free(inner);
     buf_ch(&b, 0);
     if (!strcmp(b.s, v)) { free(b.s); return NULL; }
+    return b.s;
+}
+
+/* Computed radial and conic gradients: what goes without saying, unsaid (an
+ * ellipse to the farthest corner, at the centre, from 0deg); a radius below
+ * nothing, none. */
+static char *gradient_computed(const char *v)
+{
+    if (!strstr(v, "radial-gradient(") && !strstr(v, "conic-gradient(")) return NULL;
+    Buf b = { 0 };
+    bool changed = false;
+    for (const char *p = v; *p; ) {
+        const char *fn = NULL;
+        bool radial = false;
+        if (!strncmp(p, "radial-gradient(", 16) || !strncmp(p, "repeating-radial-gradient(", 26)) { fn = strchr(p, '('); radial = true; }
+        else if (!strncmp(p, "conic-gradient(", 15) || !strncmp(p, "repeating-conic-gradient(", 25)) fn = strchr(p, '(');
+        if (!fn || (p > v && (isalnum((unsigned char)p[-1]) || p[-1] == '-'))) { buf_ch(&b, *p++); continue; }
+        /* (its first argument, if it isn't a color stop) */
+        const char *a = fn + 1, *c = a;
+        int d = 0;
+        for (; *c && !(d == 0 && (*c == ',' || *c == ')')); c++) { if (*c == '(') d++; else if (*c == ')') d--; }
+        char *first = strndup(a, (size_t)(c - a));
+        char w[12][160];
+        int nw = canon_words(first, w, 12);
+        bool config = nw > 0 && (!strcmp(w[0], "at") || !strcmp(w[0], "from") || !strcmp(w[0], "in") || !strcmp(w[0], "circle") ||
+                                 !strcmp(w[0], "ellipse") || !strncmp(w[0], "closest", 7) || !strncmp(w[0], "farthest", 8) ||
+                                 isdigit((unsigned char)w[0][0]) || w[0][0] == '-' || !strncmp(w[0], "calc(", 5));
+        if (!config || *c != ',') { free(first); buf_add(&b, p, (size_t)(a - p)); p = a; continue; }
+        Buf o = { 0 };
+        int i = 0;
+        bool ellipse_kw = false, sized = false;
+        int nsize = 0;
+        for (; i < nw && strcmp(w[i], "at") && strcmp(w[i], "in") && strcmp(w[i], "from"); i++) {
+            if (!strcmp(w[i], "ellipse")) { ellipse_kw = true; continue; }
+            if (!strcmp(w[i], "farthest-corner")) continue;
+            if (!strcmp(w[i], "circle")) { if (o.n) buf_ch(&o, ' '); buf_str(&o, "circle"); continue; }
+            sized = true;
+            nsize++;
+            if (o.n) buf_ch(&o, ' ');
+            /* (a radius is never below nothing) */
+            if (w[i][0] == '-' && strtod(w[i], NULL) < 0) buf_str(&o, "0px"); else buf_str(&o, w[i]);
+        }
+        (void)ellipse_kw; (void)sized; (void)nsize;
+        for (; i < nw; ) {
+            if (!strcmp(w[i], "from") && i + 1 < nw) {
+                double ang = strtod(w[i + 1], NULL);
+                if (!(ang == 0.0 && (!strcmp(w[i + 1], "0deg") || !strcmp(w[i + 1], "0rad") || !strcmp(w[i + 1], "0turn") || !strcmp(w[i + 1], "0grad")))) {
+                    if (o.n) buf_ch(&o, ' ');
+                    buf_str(&o, "from ");
+                    buf_str(&o, w[i + 1]);
+                }
+                i += 2;
+            } else if (!strcmp(w[i], "at") && i + 2 < nw + 1) {
+                bool center = i + 2 < nw && !strcmp(w[i + 1], "50%") && !strcmp(w[i + 2], "50%");
+                int j = i + 1;
+                Buf pos = { 0 };
+                for (; j < nw && strcmp(w[j], "in") && strcmp(w[j], "from"); j++) { if (pos.n) buf_ch(&pos, ' '); buf_str(&pos, w[j]); }
+                if (!center && pos.n) { if (o.n) buf_ch(&o, ' '); buf_str(&o, "at "); buf_add(&o, pos.s, pos.n); }
+                free(pos.s);
+                i = j;
+            } else {
+                if (o.n) buf_ch(&o, ' ');
+                buf_str(&o, w[i]);
+                i++;
+            }
+        }
+        free(first);
+        (void)radial;
+        buf_add(&b, p, (size_t)(a - p));
+        if (o.n) { buf_add(&b, o.s, o.n); buf_ch(&b, ','); p = c + 1; }
+        else { p = c + 1; while (*p == ' ') p++; }
+        free(o.s);
+        changed = true;
+    }
+    buf_ch(&b, 0);
+    if (!changed || !strcmp(b.s, v)) { free(b.s); return NULL; }
     return b.s;
 }
 
@@ -7329,50 +7630,66 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
         return NULL;
     }
     if (!strcmp(n, "font-size-adjust") && !strncasecmp(v, "ex-height ", 10)) return strdup(v + 10);
-    /* (functions by their proper names; a scale's percentages as numbers) */
+    /* (each function by its name in lower case, its arguments ", " apart; a scale's
+     * percentages as numbers, an angle of 0 in degrees) */
     if (!strcmp(n, "transform") && strcmp(v, "none")) {
-        static const struct { const char *low, *name; } fx[] = {
-            { "translatex(", "translateX(" }, { "translatey(", "translateY(" }, { "translatez(", "translateZ(" },
-            { "scalex(", "scaleX(" }, { "scaley(", "scaleY(" }, { "scalez(", "scaleZ(" },
-            { "rotatex(", "rotateX(" }, { "rotatey(", "rotateY(" }, { "rotatez(", "rotateZ(" },
-            { "skewx(", "skewX(" }, { "skewy(", "skewY(" }, };
         Buf s = { 0 };
-        bool changed = false;
-        for (const char *q = v; *q; ) {
-            bool hit = false;
-            for (size_t k = 0; k < sizeof fx / sizeof fx[0] && !hit; k++) {
-                size_t l = strlen(fx[k].low);
-                if (strncasecmp(q, fx[k].low, l)) continue;
-                if (strncmp(q, fx[k].name, l)) changed = true;
-                buf_str(&s, fx[k].name);
-                q += l;
-                hit = true;
+        const char *q = v;
+        bool first = true;
+        while (*q) {
+            while (isspace((unsigned char)*q)) q++;
+            if (!*q) break;
+            const char *open = strchr(q, '(');
+            if (!open) { free(s.s); return NULL; }
+            int d = 0;
+            const char *close = open;
+            for (; *close; close++) {
+                if (*close == '(') d++;
+                else if (*close == ')' && --d == 0) break;
             }
-            if (hit) continue;
-            /* (in a scale: a percentage is a hundredth) */
-            if (!strncasecmp(q, "scale", 5)) {
-                const char *open = strchr(q, '('), *close = open ? strchr(open, ')') : NULL;
-                if (open && close && open - q <= 7 && memchr(open, '%', (size_t)(close - open)) && !memchr(open + 1, '(', (size_t)(close - open - 1))) {
-                    for (const char *c = q; c <= open; c++) buf_ch(&s, *c);
-                    for (const char *c = open + 1; c < close; ) {
-                        char *e = NULL;
-                        double x = strtod(c, &e);
-                        if (e != c && *e == '%') { fmt_number(&s, x / 100.0); c = e + 1; changed = true; }
-                        else if (e != c) { for (; c < e; c++) buf_ch(&s, *c); }
-                        else buf_ch(&s, *c++);
-                    }
-                    q = close;
-                    continue;
+            if (!*close) { free(s.s); return NULL; }
+            char name[32];
+            size_t nl = (size_t)(open - q);
+            if (nl >= sizeof name) { free(s.s); return NULL; }
+            for (size_t i = 0; i < nl; i++) name[i] = (char)tolower((unsigned char)q[i]);
+            name[nl] = 0;
+            /* (translations keep their axis letter as the specification writes it) */
+            if (!strncmp(name, "translate", 9) && (name[9] == 'x' || name[9] == 'y' || name[9] == 'z') && !name[10]) name[9] = (char)toupper((unsigned char)name[9]);
+            bool scale = !strncmp(name, "scale", 5);
+            bool angles = !strncmp(name, "rotate", 6) || !strncmp(name, "skew", 4);
+            if (!first) buf_ch(&s, ' ');
+            first = false;
+            buf_str(&s, name);
+            buf_ch(&s, '(');
+            /* (its arguments, at the top level) */
+            int argn = 0;
+            const char *arg = open + 1;
+            for (const char *c = open + 1; c <= close; c++) {
+                if (*c == '(') d++;
+                else if (*c == ')' && c != close) d--;
+                if ((*c == ',' && d == 0) || c == close) {
+                    const char *x = arg, *y = c;
+                    while (x < y && isspace((unsigned char)*x)) x++;
+                    while (y > x && isspace((unsigned char)y[-1])) y--;
+                    if (argn++) buf_str(&s, ", ");
+                    char *e = NULL;
+                    double num = strtod(x, &e);
+                    bool is_angle = angles && (strcmp(name, "rotate3d") || argn == 4);
+                    if (scale && e != x && e + 1 == y && *e == '%') fmt_number(&s, num / 100.0);
+                    else if (is_angle && e != x && e == y && num == 0.0) buf_str(&s, "0deg");
+                    else buf_add(&s, x, (size_t)(y - x));
+                    arg = c + 1;
                 }
             }
-            buf_ch(&s, *q++);
+            buf_ch(&s, ')');
+            q = close + 1;
         }
-        if (changed) return buf_take(&s);
-        free(s.s);
-        return NULL;
+        buf_ch(&s, 0);
+        if (!strcmp(s.s, v)) { free(s.s); return NULL; }
+        return s.s;
     }
     /* (a percentage is a number here; what's the same on each axis is said once) */
-    if (!strcmp(n, "scale") && strchr(v, '%')) {
+    if (!strcmp(n, "scale") && strcmp(v, "none")) {
         char w[3][160];
         int nw = canon_words(v, w, 3);
         Buf s = { 0 };
@@ -7388,12 +7705,44 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
         if (!plain) { free(s.s); return NULL; }
         int show = vals[2] != 1 ? 3 : vals[0] != vals[1] ? 2 : 1;
         for (int i = 0; i < show; i++) { if (i) buf_ch(&s, ' '); fmt_number(&s, vals[i]); }
+        buf_ch(&s, 0);
+        if (!strcmp(s.s, v)) { free(s.s); return NULL; }
+        return s.s;
+    }
+    /* (a translation's trailing zeros go unsaid) */
+    if (!strcmp(n, "translate") && strcmp(v, "none")) {
+        char w[3][160];
+        int nw = canon_words(v, w, 3);
+        if (nw < 2) return NULL;
+        bool zero[3];
+        for (int i = 0; i < nw; i++) {
+            char *e = NULL;
+            double x = strtod(w[i], &e);
+            zero[i] = e != w[i] && x == 0.0 && (!*e || !strcasecmp(e, "px"));
+        }
+        int keep = nw;
+        if (keep == 3 && zero[2]) keep = 2;
+        if (keep == 2 && zero[1]) keep = 1;
+        if (keep == nw) return NULL;
+        Buf s = { 0 };
+        for (int i = 0; i < keep; i++) { if (i) buf_ch(&s, ' '); buf_str(&s, w[i]); }
         return buf_take(&s);
     }
     /* (an axis that's an axis, by its name; a negative one is the angle turned round) */
     if (!strcmp(n, "rotate")) {
         char w[4][160];
-        if (canon_words(v, w, 4) == 4) {
+        int rw = canon_words(v, w, 4);
+        if (rw == 2) {
+            /* (an axis keyword: first; the z axis goes without saying) */
+            int ax = !strcasecmp(w[0], "x") || !strcasecmp(w[0], "y") || !strcasecmp(w[0], "z") ? 0 : !strcasecmp(w[1], "x") || !strcasecmp(w[1], "y") || !strcasecmp(w[1], "z") ? 1 : -1;
+            if (ax >= 0) {
+                char o[330];
+                if (!strcasecmp(w[ax], "z")) snprintf(o, sizeof o, "%s", w[!ax]);
+                else snprintf(o, sizeof o, "%c %s", tolower((unsigned char)w[ax][0]), w[!ax]);
+                return strcmp(o, v) ? strdup(o) : NULL;
+            }
+        }
+        if (rw == 4) {
             char *e0, *e1, *e2;
             double x = strtod(w[0], &e0), y = strtod(w[1], &e1), z = strtod(w[2], &e2);
             if (!*e0 && !*e1 && !*e2 && ((x != 0) + (y != 0) + (z != 0)) == 1) {
@@ -7452,7 +7801,7 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
     if (!strcmp(n, "font-language-override") || !strcmp(n, "font-variation-settings") || !strcmp(n, "font-feature-settings")) {
         /* (a tag: four printable characters) */
         bool lang = n[5] == 'l';
-        if (strchr(v, '\\')) return NULL;
+        if (strchr(v, '\\')) return strchr(v, '"') && !lang ? strdup("") : NULL;
         for (const char *q = v; *q; q++) {
             if (*q != '"' && *q != '\'') continue;
             const char *e = strchr(q + 1, *q);
@@ -7461,6 +7810,59 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
             if (lang ? (tl < 1 || tl > 4) : tl != 4) return strdup("");
             for (const char *c = q + 1; c < e; c++) if ((unsigned char)*c < 0x20 || (unsigned char)*c > 0x7e) return strdup("");
             q = e;
+        }
+        /* (a language's trailing spaces say nothing) */
+        if (lang && v[0] == '"') {
+            size_t l = strlen(v);
+            if (l >= 3 && v[l - 1] == '"' && v[l - 2] == ' ') {
+                char *o = strdup(v);
+                size_t k = l - 1;
+                while (k > 1 && o[k - 1] == ' ') k--;
+                o[k] = '"';
+                o[k + 1] = 0;
+                return o;
+            }
+        }
+        /* (each tag once, its last value where it first stood; 1 and on unsaid, off as 0) */
+        if (n[5] == 'f' && strcmp(v, "normal")) {
+            char **parts = NULL;
+            int np = split_commas(v, &parts);
+            if (np < 1) return NULL;
+            char tag[32][16], val[32][32];
+            int nt = 0;
+            for (int i = 0; i < np && nt < 32; i++) {
+                char w[2][160];
+                int nw = canon_words(parts[i], w, 2);
+                if (nw < 1) continue;
+                const char *vv = nw > 1 ? w[1] : "1";
+                if (!strcasecmp(vv, "on")) vv = "1";
+                else if (!strcasecmp(vv, "off")) vv = "0";
+                int at = -1;
+                for (int j = 0; j < nt; j++) if (!strcmp(tag[j], w[0])) at = j;
+                if (at < 0) { at = nt++; snprintf(tag[at], sizeof tag[at], "%s", w[0]); }
+                snprintf(val[at], sizeof val[at], "%s", vv);
+            }
+            for (int i = 0; i < np; i++) free(parts[i]);
+            free(parts);
+            Buf s = { 0 };
+            for (int j = 0; j < nt; j++) {
+                if (j) buf_str(&s, ", ");
+                buf_str(&s, tag[j]);
+                if (strcmp(val[j], "1")) { buf_ch(&s, ' '); buf_str(&s, val[j]); }
+            }
+            buf_ch(&s, 0);
+            if (!strcmp(s.s, v)) { free(s.s); return NULL; }
+            return s.s;
+        }
+        return NULL;
+    }
+    if (!strcmp(n, "font-style")) {
+        /* (an oblique of no angle is no oblique) */
+        char w[2][160];
+        if (canon_words(v, w, 2) == 2 && !strcasecmp(w[0], "oblique")) {
+            char *e = NULL;
+            double a = strtod(w[1], &e);
+            if (e != w[1] && a == 0.0 && (!*e || !strcasecmp(e, "deg") || !strcasecmp(e, "rad") || !strcasecmp(e, "grad") || !strcasecmp(e, "turn"))) return strdup("normal");
         }
         return NULL;
     }
@@ -7474,6 +7876,142 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
         return NULL;
     }
     if (!strcmp(n, "white-space")) return canon_white_space(v);
+    if (!strcmp(n, "will-change")) {
+        /* (a CSS-wide keyword is no feature to watch) */
+        char w[16][160];
+        int nw = canon_words(v, w, 16);
+        for (int i = 0; i < nw; i++) {
+            char *c = w[i];
+            size_t l = strlen(c);
+            if (l && c[l - 1] == ',') c[l - 1] = 0;
+            if (!strcasecmp(c, "revert-rule") || !strcasecmp(c, "revert-layer") || !strcasecmp(c, "revert") ||
+                !strcasecmp(c, "initial") || !strcasecmp(c, "inherit") || !strcasecmp(c, "unset")) { if (nw > 1) return strdup(""); }
+        }
+        return NULL;
+    }
+    if (!strcmp(n, "contain") && g_canon_computed) {
+        /* (computed: the four that make content, and size with them, strict) */
+        char w[6][160];
+        int nw = canon_words(v, w, 6);
+        bool size = false, layout = false, style = false, paint = false, other = false;
+        for (int i = 0; i < nw; i++) {
+            if (!strcasecmp(w[i], "size")) size = true;
+            else if (!strcasecmp(w[i], "layout")) layout = true;
+            else if (!strcasecmp(w[i], "style")) style = true;
+            else if (!strcasecmp(w[i], "paint")) paint = true;
+            else other = true;
+        }
+        if (!other && layout && style && paint) return strdup(size ? "strict" : "content");
+        return NULL;
+    }
+    if (!strcmp(n, "hyphenate-limit-chars") && false) {
+        /* (trailing autos go without saying) */
+        char w[3][160];
+        int nw = canon_words(v, w, 3), keep = nw;
+        while (keep > 1 && !strcasecmp(w[keep - 1], "auto")) keep--;
+        if (keep == nw) return NULL;
+        Buf s = { 0 };
+        for (int i = 0; i < keep; i++) { if (i) buf_ch(&s, ' '); buf_str(&s, w[i]); }
+        return buf_take(&s);
+    }
+    if (!strcmp(n, "text-fit") && g_canon_computed) {
+        char w[3][160];
+        int nw = canon_words(v, w, 3);
+        if (nw == 2 && !strcasecmp(w[1], "consistent")) return strdup(w[0]);
+        return NULL;
+    }
+    if (!strcmp(n, "content") && strcasestr_simple(v, "counter")) {
+        /* (counter() and counters(): a predefined style's name lower-cased, decimal unsaid) */
+        static const char *pre[] = { "decimal", "disc", "circle", "square", "none", "lower-roman", "upper-roman", "lower-alpha",
+                                      "upper-alpha", "lower-latin", "upper-latin", "lower-greek", "decimal-leading-zero",
+                                      "disclosure-open", "disclosure-closed", "armenian", "georgian", NULL };
+        Buf s = { 0 };
+        bool changed = false;
+        for (const char *p = v; *p; ) {
+            bool two = !strncasecmp(p, "counters(", 9), one = !two && !strncasecmp(p, "counter(", 8);
+            if (!(one || two) || (p > v && (isalnum((unsigned char)p[-1]) || p[-1] == '-'))) { buf_ch(&s, *p++); continue; }
+            const char *a = strchr(p, '('), *e = a + 1;
+            int d = 1;
+            bool q = false;
+            char qc = 0;
+            for (; *e; e++) {
+                if (q) { if (*e == '\\' && e[1]) e++; else if (*e == qc) q = false; continue; }
+                if (*e == '"' || *e == '\'') { q = true; qc = *e; }
+                else if (*e == '(') d++;
+                else if (*e == ')' && --d == 0) break;
+            }
+            if (!*e) { buf_ch(&s, *p++); continue; }
+            /* (its last argument: after the last top-level comma) */
+            const char *lc = NULL;
+            d = 0; q = false;
+            for (const char *k = a + 1; k < e; k++) {
+                if (q) { if (*k == '\\' && k[1]) k++; else if (*k == qc) q = false; continue; }
+                if (*k == '"' || *k == '\'') { q = true; qc = *k; }
+                else if (*k == '(') d++;
+                else if (*k == ')') d--;
+                else if (*k == ',' && d == 0) lc = k;
+            }
+            int commas = 0;
+            d = 0; q = false;
+            for (const char *k = a + 1; k < e; k++) {
+                if (q) { if (*k == '\\' && k[1]) k++; else if (*k == qc) q = false; continue; }
+                if (*k == '"' || *k == '\'') { q = true; qc = *k; }
+                else if (*k == '(') d++; else if (*k == ')') d--;
+                else if (*k == ',' && d == 0) commas++;
+            }
+            bool styled = lc && commas == (two ? 2 : 1);
+            if (!styled) { buf_add(&s, p, (size_t)(e + 1 - p)); p = e + 1; continue; }
+            const char *st = lc + 1, *se = e;
+            while (st < se && isspace((unsigned char)*st)) st++;
+            while (se > st && isspace((unsigned char)se[-1])) se--;
+            int k = 0;
+            for (; pre[k]; k++) if ((size_t)(se - st) == strlen(pre[k]) && !strncasecmp(st, pre[k], strlen(pre[k]))) break;
+            if (!pre[k]) { buf_add(&s, p, (size_t)(e + 1 - p)); p = e + 1; continue; }
+            const char *ae = lc;
+            while (ae > a + 1 && isspace((unsigned char)ae[-1])) ae--;
+            buf_add(&s, p, (size_t)(ae - p));
+            if (strcmp(pre[k], "decimal")) { buf_str(&s, ", "); buf_str(&s, pre[k]); }
+            buf_ch(&s, ')');
+            changed = changed || strcmp(pre[k], "decimal") || true;
+            p = e + 1;
+        }
+        buf_ch(&s, 0);
+        if (!changed || !strcmp(s.s, v)) { free(s.s); return NULL; }
+        return s.s;
+    }
+    if (!strcmp(n, "flex-wrap")) {
+        /* (balance wraps: wrap goes without saying, wrap-reverse first) */
+        char w[2][160];
+        int nw = canon_words(v, w, 2);
+        if (nw != 2) return NULL;
+        int bi = !strcasecmp(w[0], "balance") ? 0 : 1, oi = 1 - bi;
+        if (!strcasecmp(w[oi], "wrap")) return strdup("balance");
+        if (bi == 0) { Buf s = { 0 }; buf_str(&s, w[oi]); buf_str(&s, " balance"); return buf_take(&s); }
+        return NULL;
+    }
+    if (!strcmp(n, "overflow-clip-margin")) {
+        char w[2][160];
+        if (canon_words(v, w, 2) == 2 && strtod(w[1], NULL) == 0.0 && isdigit((unsigned char)w[1][0])) return strdup(w[0]);
+        return NULL;
+    }
+    if (!strcmp(n, "counter-reset") || !strcmp(n, "counter-set")) {
+        /* (a name without a number: 0) */
+        char w[16][160];
+        int nw = canon_words(v, w, 16);
+        if (nw < 1 || (nw == 1 && !strcasecmp(w[0], "none"))) return NULL;
+        Buf s = { 0 };
+        bool changed = false;
+        for (int i = 0; i < nw; i++) {
+            if (i) buf_ch(&s, ' ');
+            buf_str(&s, w[i]);
+            bool name = !isdigit((unsigned char)w[i][0]) && w[i][0] != '-' && w[i][0] != '+' && strncasecmp(w[i], "calc(", 5) && strncasecmp(w[i], "reversed(", 9);
+            bool next_num = i + 1 < nw && (isdigit((unsigned char)w[i + 1][0]) || w[i + 1][0] == '-' || w[i + 1][0] == '+' || !strncasecmp(w[i + 1], "calc(", 5));
+            if (name && !next_num && !strcmp(n, "counter-reset")) { buf_str(&s, " 0"); changed = true; }
+        }
+        if (changed) return buf_take(&s);
+        free(s.s);
+        return NULL;
+    }
     if (!strcmp(n, "text-box-edge")) return canon_box_edge(v);
     if (!strcmp(n, "offset-rotate")) return canon_offset_rotate(v);
     if (!strcmp(n, "offset-path") && !strncmp(v, "ray(", 4)) return canon_ray(v);
@@ -7508,7 +8046,7 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
     }
     if ((!strcmp(n, "grid-template-columns") || !strcmp(n, "grid-template-rows")) && grid_tracks_bad(v)) return strdup("");
     if (strstr(v, "random(")) return canon_random(n, v);
-    if (!strcmp(n, "clip-path") || !strcmp(n, "shape-outside")) {
+    if (!strcmp(n, "clip-path") || !strcmp(n, "shape-outside") || (!strcmp(n, "offset-path") && !strstr(v, "ray("))) {
         char *bs = canon_basic_shape(n, v);
         if (bs) {
             char *rb = strstr(bs, " round ") ? canon_box_round(bs) : NULL;

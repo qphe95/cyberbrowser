@@ -237,6 +237,23 @@ void dom_store_reserve(uint32_t extra) {
     store_grow(g_dom.count + extra + 1);
 }
 
+uint8_t *g_dom_top;
+uint32_t g_dom_top_cap;
+
+void dom_top_state_set(uint32_t slot, uint8_t bits, bool on) {
+    if (slot >= g_dom_top_cap) {
+        if (!on) return;
+        uint32_t nc = g_dom_top_cap ? g_dom_top_cap : 1024;
+        while (nc <= slot) nc *= 2;
+        uint8_t *nt = (uint8_t *)realloc(g_dom_top, nc);
+        if (!nt) return;
+        memset(nt + g_dom_top_cap, 0, nc - g_dom_top_cap);
+        g_dom_top = nt;
+        g_dom_top_cap = nc;
+    }
+    g_dom_top[slot] = on ? (uint8_t)(g_dom_top[slot] | bits) : (uint8_t)(g_dom_top[slot] & ~bits);
+}
+
 uint32_t dom_alloc_slot(int kind, NodeId owner) {
     if (!g_dom.cap) dom_store_init();
     uint32_t s = g_dom.free_head;
@@ -249,6 +266,7 @@ uint32_t dom_alloc_slot(int kind, NodeId owner) {
     g_dom.kind[s] = (uint8_t)kind;
     g_dom.flags[s] = 0;
     g_dom.state[s] = 0;
+    if (s < g_dom_top_cap) g_dom_top[s] = 0;
     g_dom.tag[s] = CSS_ATOM_NONE;
     g_dom.parent[s] = g_dom.first[s] = g_dom.last[s] = g_dom.next[s] = g_dom.prev[s] = 0;
     g_dom.host[s] = g_dom.shadow[s] = g_dom.content[s] = 0;

@@ -1498,9 +1498,15 @@ bool layout_query_font_size(JSContextHandle ctx, GCValue element, double *px)
 static bool lq_style_ready(JSContextHandle ctx, NodeId id)
 {
     if (!id) return false;
+    extern void dom_validity_refresh(void);
+    extern bool g_css_saw_validity;
+    bool saw = g_css_saw_validity;
+    dom_validity_refresh();
     g_lq_who = id;
     g_lq_ask = LQ_ASK_STYLE;
     bool ok = lq_ensure(ctx);
+    /* (style that first asked about validity while being parsed: again, with it) */
+    if (ok && !saw && g_css_saw_validity) { dom_validity_refresh(); g_dom_relayout_requests++; ok = lq_ensure(ctx); }
     g_lq_ask = LQ_ASK_POS;
     g_lq_who = 0;
     return ok;
@@ -1515,10 +1521,25 @@ static int lq_styled_holder(NodeId id)
     return h;
 }
 
+/* Highlight pseudo-elements by name, as codes 20 and up. */
+static char *g_hl_names[64];
+static int g_hl_n;
+int layout_highlight_code(const char *name)
+{
+    for (int i = 0; i < g_hl_n; i++) if (!strcmp(g_hl_names[i], name)) return 20 + i;
+    if (g_hl_n >= 64) return 0;
+    g_hl_names[g_hl_n] = strdup(name);
+    return 20 + g_hl_n++;
+}
+
 bool layout_query_pseudo_cascade(JSContextHandle ctx, GCValue element, int ps, LayoutCascadeFn fn, void *ud)
 {
     NodeId id = dom_node_of(element);
     if (!lq_style_ready(ctx, id)) return false;
+    if (ps >= 20 && ps - 20 < g_hl_n) {
+        int dom = g_lq_doc ? html_mirror_index_of(g_lq_doc, id) : -1;
+        return css_layout_highlight_cascade(&g_lq_layout, dom, g_hl_names[ps - 20], fn, ud);
+    }
     int idx = lq_box_index(id);
     if (idx < 0) return true;
     for (int pass = 0; pass < 2; pass++) {

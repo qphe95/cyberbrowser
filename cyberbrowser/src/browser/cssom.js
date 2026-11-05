@@ -660,21 +660,33 @@
         return m;
     }
     getter(MediaList.prototype, 'mediaText', function () { return this.__items.join(', '); },
-        function (v) { this.__items = splitMedia(v == null ? '' : String(v)); if (this.__onChange) this.__onChange(); });
+        function (v) {
+            if (!this || !this.__items) throw new TypeError('Illegal invocation');
+            this.__items = splitMedia(v == null ? '' : String(v)); if (this.__onChange) this.__onChange();
+        });
     getter(MediaList.prototype, 'length', function () { return this.__items.length; });
-    define(MediaList.prototype, 'item', function (i) { i = i >>> 0; return i < this.__items.length ? this.__items[i] : null; });
+    define(MediaList.prototype, 'item', function (i) {
+        if (arguments.length < 1) throw new TypeError("Failed to execute 'item' on 'MediaList': 1 argument required");
+        i = i >>> 0; return i < this.__items.length ? this.__items[i] : null; });
     define(MediaList.prototype, 'appendMedium', function (m) {
+        if (arguments.length < 1) throw new TypeError("Failed to execute 'appendMedium' on 'MediaList': 1 argument required");
         m = normalizeMedia(String(m));
         if (m && this.__items.indexOf(m) < 0) { this.__items.push(m); if (this.__onChange) this.__onChange(); }
     });
     define(MediaList.prototype, 'deleteMedium', function (m) {
+        if (arguments.length < 1) throw new TypeError("Failed to execute 'deleteMedium' on 'MediaList': 1 argument required");
         m = normalizeMedia(String(m));
         var k = this.__items.indexOf(m);
         if (k < 0) throw domException("Failed to execute 'deleteMedium': the medium is not in the list.", 'NotFoundError');
         this.__items.splice(k, 1);
         if (this.__onChange) this.__onChange();
     });
-    define(MediaList.prototype, 'toString', function () { return this.mediaText; });
+    define(MediaList.prototype, 'toString', function () {
+        if (!this || !this.__items) throw new TypeError('Illegal invocation');
+        return this.mediaText;
+    });
+    /* (a stringifier is enumerable) */
+    Object.defineProperty(MediaList.prototype, 'toString', { enumerable: true });
     Object.defineProperty(MediaList.prototype, Symbol.toStringTag, { value: 'MediaList', configurable: true });
     MediaList.prototype[Symbol.iterator] = Array.prototype[Symbol.iterator];
     /* (a declaration block is a list of its property names) */
@@ -714,8 +726,9 @@
         expose(name, C);
         return C;
     }
-    var CSSStyleRule = subclass('CSSStyleRule', CSSRule);
     var CSSGroupingRule = subclass('CSSGroupingRule', CSSRule);
+    /* (a style rule groups the rules nested in it) */
+    var CSSStyleRule = subclass('CSSStyleRule', CSSGroupingRule);
     var CSSConditionRule = subclass('CSSConditionRule', CSSGroupingRule);
     var CSSMediaRule = subclass('CSSMediaRule', CSSConditionRule);
     var CSSSupportsRule = subclass('CSSSupportsRule', CSSConditionRule);
@@ -1429,6 +1442,7 @@
         return k;
     });
     define(CSSStyleRule.prototype, 'deleteRule', function (index) {
+        if (arguments.length < 1) throw new TypeError("Failed to execute 'deleteRule' on 'CSSStyleRule': 1 argument required");
         index = index >>> 0;
         var rules = this.__rules || [];
         if (index >= rules.length) throw domException("Failed to execute 'deleteRule': index out of range.", 'IndexSizeError');
@@ -1446,6 +1460,7 @@
         return k;
     });
     define(CSSGroupingRule.prototype, 'deleteRule', function (index) {
+        if (arguments.length < 1) throw new TypeError("Failed to execute 'deleteRule' on 'CSSGroupingRule': 1 argument required");
         index = index >>> 0;
         if (index >= this.__rules.length) throw domException("Failed to execute 'deleteRule': index out of range.", 'IndexSizeError');
         this.__rules.splice(index, 1);
@@ -1456,7 +1471,7 @@
     getter(CSSMediaRule.prototype, 'media', function () {
         var self = this;
         return this.__media || (this.__media = newMediaList(this.__mediaText, function () { self.__mediaText = self.__media.mediaText; touched(self); }));
-    });
+    }, function (v) { this.media.mediaText = v; });
     CSSMediaRule.prototype.__condition = function () { return this.__media ? this.__media.mediaText : splitMedia(this.__mediaText).join(', '); };
     CSSMediaRule.prototype.__text = function () { return blockText('@media ' + this.__condition(), this.__rules); };
     CSSSupportsRule.prototype.__condition = function () { return this.__cond; };
@@ -1479,7 +1494,8 @@
         return blockText(p, this.__rules);
     };
     getter(CSSImportRule.prototype, 'href', function () { return this.__href; });
-    getter(CSSImportRule.prototype, 'media', function () { return this.__media || (this.__media = newMediaList(this.__mediaText)); });
+    getter(CSSImportRule.prototype, 'media', function () { return this.__media || (this.__media = newMediaList(this.__mediaText)); },
+        function (v) { this.media.mediaText = v; });
     getter(CSSImportRule.prototype, 'styleSheet', function () { return null; });
     getter(CSSImportRule.prototype, 'layerName', function () { return this.__layer === undefined ? null : this.__layer; });
     getter(CSSImportRule.prototype, 'supportsText', function () { return this.__supports || null; });
@@ -1499,7 +1515,7 @@
     getter(CSSFontFaceRule.prototype, 'style', function () { return this.__style; });
     CSSFontFaceRule.prototype.__text = function () { var d = declText(this.__style), fx = this.__style.__faceText ? this.__style.__faceText() : ''; if (fx) d = d ? d + ' ' + fx : fx; return '@font-face {' + (d ? ' ' + d + ' ' : ' ') + '}'; };
     getter(CSSPageRule.prototype, 'selectorText', function () { return this.__selector; }, function (v) { this.__selector = String(v).trim(); touched(this); });
-    getter(CSSPageRule.prototype, 'style', function () { return this.__style; });
+    getter(CSSPageRule.prototype, 'style', function () { return this.__style; }, function (v) { this.__style.cssText = v; });
     CSSPageRule.prototype.__text = function () {
         var d = declText(this.__style);
         return '@page' + (this.__selector ? ' ' + this.__selector : '') + ' {' + (d ? ' ' + d + ' ' : ' ') + '}';
@@ -1982,8 +1998,17 @@
                 var rest = im[6] || '', layer, supports;
                 var lm = /^layer(?:\(([^)]*)\))?\s*/i.exec(rest);
                 if (lm) { layer = lm[1] ? lm[1].trim() : ''; rest = rest.slice(lm[0].length); }
-                var spm = /^supports\(([^)]*(?:\([^)]*\)[^)]*)*)\)\s*/i.exec(rest);
-                if (spm) { supports = spm[1].trim(); rest = rest.slice(spm[0].length); }
+                /* (supports(...): to its own closing parenthesis, however deep) */
+                if (/^supports\(/i.test(rest)) {
+                    var sd = 0, se = -1;
+                    for (var si = 8; si < rest.length; si++) {
+                        var sc = rest[si];
+                        if (sc === '"' || sc === "'") { var sq = rest.indexOf(sc, si + 1); if (sq < 0) break; si = sq; continue; }
+                        if (sc === '(') sd++;
+                        else if (sc === ')' && --sd === 0) { se = si; break; }
+                    }
+                    if (se > 0) { supports = rest.slice(9, se).trim(); rest = rest.slice(se + 1).replace(/^\s+/, ''); }
+                }
                 r = makeRule(CSSImportRule, 'import', { __href: href, __mediaText: rest.trim(), __media: null, __layer: layer, __supports: supports });
                 break;
             case 'namespace':
@@ -2142,7 +2167,9 @@
     /* after a change to arr: its list, if any, follows */
     function changedList(owner) { if (owner && owner.__ruleList) syncList(owner.__ruleList); }
     getter(CSSRuleList.prototype, 'length', function () { return this.__arr.length; });
-    define(CSSRuleList.prototype, 'item', function (i) { i = i >>> 0; var a = this.__arr; return i < a.length ? a[i] : null; });
+    define(CSSRuleList.prototype, 'item', function (i) {
+        if (arguments.length < 1) throw new TypeError("Failed to execute 'item' on 'CSSRuleList': 1 argument required");
+        i = i >>> 0; var a = this.__arr; return i < a.length ? a[i] : null; });
     Object.defineProperty(CSSRuleList.prototype, Symbol.toStringTag, { value: 'CSSRuleList', configurable: true });
     CSSRuleList.prototype[Symbol.iterator] = function* () { var a = this.__arr; for (var i = 0; i < a.length; i++) yield a[i]; };
     expose('CSSRuleList', CSSRuleList);
@@ -2195,7 +2222,7 @@
     getter(StyleSheet.prototype, 'media', function () {
         var st = this[SHEET], self = this;
         return st.media || (st.media = newMediaList(st.mediaText, function () { self.__changed(); }));
-    });
+    }, function (v) { this.media.mediaText = v; });
     getter(StyleSheet.prototype, 'disabled', function () { return this[SHEET].disabled; },
         function (v) { this[SHEET].disabled = !!v; this.__changed(); });
     define(CSSStyleSheet.prototype, '__changed', function () {
@@ -2241,6 +2268,7 @@
     });
     define(CSSStyleSheet.prototype, 'removeRule', function (index) { this.deleteRule(index === undefined ? 0 : index); });
     define(CSSStyleSheet.prototype, 'replaceSync', function (text) {
+        if (arguments.length < 1) throw new TypeError("Failed to execute 'replaceSync' on 'CSSStyleSheet': 1 argument required");
         if (!this[SHEET].constructed) throw domException("Failed to execute 'replaceSync': Can't call replaceSync on non-constructed CSSStyleSheets.", 'NotAllowedError');
         var rules = parseRules(String(text), 'top', this).filter(function (r) { return r.__kind !== 'import'; });
         for (var k = 0; k < rules.length; k++) rules[k].__sheet = this;
@@ -2294,7 +2322,10 @@
         var C = global[n];
         var P = C && C.prototype;
         if (!P) return;
-        Object.defineProperty(P, 'sheet', { get: function () { return elementSheet(this); }, configurable: true, enumerable: true });
+        Object.defineProperty(P, 'sheet', { get: function sheet() {
+            if (!P.isPrototypeOf(this)) throw new TypeError('Illegal invocation');
+            return elementSheet(this);
+        }, configurable: true, enumerable: true });
         /* (disabled: its sheet's) */
         Object.defineProperty(P, 'disabled', {
             get: function () { var s = elementSheet(this); return s ? s.disabled : false; },
@@ -2318,16 +2349,30 @@
         for (var k = 0; k < els.length; k++) { var s = elementSheet(els[k]); if (s) arr.push(s); }
         var l = Object.create(StyleSheetList.prototype);
         for (var j = 0; j < arr.length; j++) Object.defineProperty(l, j, { value: arr[j], enumerable: true });
-        Object.defineProperty(l, 'length', { value: arr.length });
+        Object.defineProperty(l, '__n', { value: arr.length });
         return l;
     }
-    define(StyleSheetList.prototype, 'item', function (i) { i = i >>> 0; return i < this.length ? this[i] : null; });
+    function isSheetList(l) { return l && typeof l === 'object' && Object.prototype.hasOwnProperty.call(l, '__n'); }
+    getter(StyleSheetList.prototype, 'length', function () {
+        if (!isSheetList(this)) throw new TypeError('Illegal invocation');
+        return this.__n;
+    });
+    define(StyleSheetList.prototype, 'item', function (i) {
+        if (!isSheetList(this)) throw new TypeError('Illegal invocation');
+        if (arguments.length < 1) throw new TypeError("Failed to execute 'item' on 'StyleSheetList': 1 argument required");
+        i = i >>> 0; return i < this.__n ? this[i] : null;
+    });
     StyleSheetList.prototype[Symbol.iterator] = Array.prototype[Symbol.iterator];
     Object.defineProperty(StyleSheetList.prototype, Symbol.toStringTag, { value: 'StyleSheetList', configurable: true });
     expose('StyleSheetList', StyleSheetList);
+    /* (a namespace object isn't enumerable) */
+    if (Object.getOwnPropertyDescriptor(global, 'CSS')) Object.defineProperty(global, 'CSS', { enumerable: false });
     var DP = global.Document && global.Document.prototype;
     var docTarget = DP || (global.document && Object.getPrototypeOf(global.document));
-    if (docTarget) Object.defineProperty(docTarget, 'styleSheets', { get: function () { return sheetList(this); }, configurable: true });
+    if (docTarget) Object.defineProperty(docTarget, 'styleSheets', { get: function styleSheets() {
+        if (!this || this.nodeType !== 9) throw new TypeError('Illegal invocation');
+        return sheetList(this);
+    }, configurable: true, enumerable: true });
     if (global.document && Object.prototype.hasOwnProperty.call(global.document, 'styleSheets')) {
         try { delete global.document.styleSheets; } catch (e) { /* (kept) */ }
     }

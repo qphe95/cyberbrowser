@@ -239,12 +239,21 @@ static char *block_text(StyleBlock *b) {
         char *sh_value = NULL;
         bool important = d->important;
         if (d->prop) {
-            /* the first shorthand (in the table) that has this longhand and
-             * whose longhands are all here */
+            /* the first shorthand (in preferred order: more longhands first,
+             * then the table's) that has this longhand and whose longhands
+             * are all here */
             const CssPropDef *const *shs;
             int nsh = css_prop_shorthands_of(d->prop, &shs);
-            for (int k = 0; k < nsh && !sh_value; k++) {
-                const CssPropDef *s = shs[k];
+            const CssPropDef *ord[32];
+            int nord = 0, cnt[32];
+            for (int k = 0; k < nsh && nord < 32; k++) {
+                const char **nm_;
+                int c = css_prop_longhands(shs[k], &nm_), at = nord;
+                while (at > 0 && cnt[at - 1] < c) { ord[at] = ord[at - 1]; cnt[at] = cnt[at - 1]; at--; }
+                ord[at] = shs[k]; cnt[at] = c; nord++;
+            }
+            for (int k = 0; k < nord && !sh_value; k++) {
+                const CssPropDef *s = ord[k];
                 /* (a corner's or a side's radii: never what the whole list is written as) */
                 size_t snl = strlen(s->name);
                 if ((snl > 7 && !strcmp(s->name + snl - 7, "-radius") && strcmp(s->name, "border-radius")) ||

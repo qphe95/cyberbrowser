@@ -741,6 +741,8 @@ static bool frame_images_in_same_frame(void) {
 uint64_t g_frame_layouts;
 
 void page_frame_build(PageFrame *f, HtmlDocument *doc, ImageCache *images, int width, int height) {
+    extern void dom_validity_refresh(void);
+    dom_validity_refresh();
     /* The same document again (the layout mirror, updated in place): the
      * layout keeps its tree, restyles what changed and reuses the subtrees
      * that did not (css_layout_run); only the display list starts over. */

@@ -1767,6 +1767,8 @@ static CssFlexWrap css_parse_flex_wrap(const char *value) {
     if (!value) return CSS_FLEX_WRAP_NOWRAP;
     if (strcasecmp(value, "wrap") == 0) return CSS_FLEX_WRAP_WRAP;
     if (strcasecmp(value, "wrap-reverse") == 0) return CSS_FLEX_WRAP_WRAP_REVERSE;
+    /* (balance: it wraps, as wrap or wrap-reverse would) */
+    if (strstr(value, "balance")) return strstr(value, "wrap-reverse") ? CSS_FLEX_WRAP_WRAP_REVERSE : CSS_FLEX_WRAP_WRAP;
     return CSS_FLEX_WRAP_NOWRAP;
 }
 
@@ -5435,7 +5437,7 @@ static char *css_fn_subst(const char *value, const CssCustomProps *props, int de
 static LayoutContext *g_layout_ctx;
 static int subst_style_query(const char *a, const char *b, const CssCustomProps *props, int depth);
 /* ---- @container: the containers as the last layout left them, by DOM node ---- */
-typedef struct CqBox { int dom; double w, h, fs; unsigned char type, wm; const char *name; } CqBox;
+typedef struct CqBox { int dom; double w, h, fs; unsigned char type, wm, unsized; const char *name; } CqBox;   /* (unsized: inline or a table's: no size to ask of) */
 static const LayoutContext *g_cq_ctx;   /* (what's being styled) */
 static CqBox *g_cq_box;
 static unsigned g_cq_gen;
@@ -5472,6 +5474,7 @@ static bool cq_table_update(LayoutContext *ctx)
         t[k].fs = b->s->font_size;
         t[k].type = b->s->container_type;
         t[k].wm = b->s->writing_mode;
+        t[k].unsized = b->s->display == CSS_DISPLAY_INLINE || b->s->table_role > 0;
         t[k].name = b->s->container_name;
         k++;
     }
@@ -5579,6 +5582,8 @@ static int cq_size_query(const LayoutContext *ctx, int dom, const char *cname, s
     char *colon = strchr(q, ':');
     char *ops = strpbrk(q, "<>=");
     const CqBox *b = cq_find(ctx, dom, cname, cl, 1);
+    /* (a container that can't be sized: what's asked of it is unknown) */
+    if (b && b->unsized) return -1;
     double v, x;
     bool ratio, orient;
     if (colon && !ops) {
@@ -5966,10 +5971,68 @@ static char *css_var_resolve(const char *value, const CssCustomProps *props)
     return css_var_resolve_rest(value, props);
 }
 
+/* ident( <ident-arg>+ ): the identifier its strings, integers and identifiers
+ * make, written as one (a leading digit escaped).  NULL when there is none to
+ * replace; t_var_failed when one isn't an identifier's makings. */
+static char *ident_subst(const char *v)
+{
+    if (!v) return NULL;
+    size_t cap = strlen(v) * 2 + 16, o = 0;
+    char *out = (char *)malloc(cap);
+    if (!out) return NULL;
+    bool any = false;
+    for (const char *p = v; *p; ) {
+        if (strncasecmp(p, "ident(", 6) || (p > v && (isalnum((unsigned char)p[-1]) || p[-1] == '-' || p[-1] == '_'))) { out[o++] = *p++; continue; }
+        const char *a = p + 6;
+        char id[512];
+        size_t il = 0;
+        bool ok = true;
+        while (*a && *a != ')') {
+            while (isspace((unsigned char)*a)) a++;
+            if (*a == ')' || !*a) break;
+            if (*a == '"' || *a == '\'') {
+                char q = *a++;
+                while (*a && *a != q) { if (*a == '\\' && a[1]) a++; if (il < sizeof id - 1) id[il++] = *a; a++; }
+                if (*a) a++;
+            } else if (isdigit((unsigned char)*a) || ((*a == '-' || *a == '+') && isdigit((unsigned char)a[1]))) {
+                const char *s = a;
+                if (*a == '-' || *a == '+') a++;
+                while (isdigit((unsigned char)*a)) a++;
+                if (*a && !isspace((unsigned char)*a) && *a != ')') { ok = false; break; }   /* (5px, 1.5: not integers) */
+                for (const char *k = s; k < a; k++) if (*k != '+' && il < sizeof id - 1) id[il++] = *k;
+            } else if (isalpha((unsigned char)*a) || *a == '-' || *a == '_' || (unsigned char)*a >= 0x80) {
+                const char *s = a;
+                while (*a && (isalnum((unsigned char)*a) || *a == '-' || *a == '_' || (unsigned char)*a >= 0x80)) a++;
+                if (*a == '(') { ok = false; break; }     /* (a function: not an ident-arg) */
+                for (const char *k = s; k < a; k++) if (il < sizeof id - 1) id[il++] = *k;
+            } else { ok = false; break; }
+        }
+        if (!ok || *a != ')' || !il) { t_var_failed = true; free(out); return NULL; }
+        id[il] = 0;
+        if (o + il + 8 >= cap) { cap = (o + il + 8) * 2; char *t = realloc(out, cap); if (!t) { free(out); return NULL; } out = t; }
+        /* (a leading digit, or a dash and a digit: escaped) */
+        size_t k0 = 0;
+        if (isdigit((unsigned char)id[0])) { o += (size_t)snprintf(out + o, cap - o, "\\%x ", (unsigned char)id[0]); k0 = 1; }
+        else if (id[0] == '-' && isdigit((unsigned char)id[1])) { out[o++] = '-'; o += (size_t)snprintf(out + o, cap - o, "\\%x ", (unsigned char)id[1]); k0 = 2; }
+        memcpy(out + o, id + k0, il - k0);
+        o += il - k0;
+        p = a + 1;
+        any = true;
+        if (o + strlen(p) + 8 >= cap) { cap = (o + strlen(p) + 8) * 2; char *t = realloc(out, cap); if (!t) { free(out); return NULL; } out = t; }
+    }
+    out[o] = 0;
+    if (!any) { free(out); return NULL; }
+    return out;
+}
+
 static char *css_var_resolve_rest(const char *value, const CssCustomProps *props)
 {
     char *r = css_var_subst(value, props);
     const char *v = r ? r : value;
+    if (v && strchr(v, '(') && (strstr(v, "ident(") || strstr(v, "IDENT("))) {
+        char *t = ident_subst(v);
+        if (t) { free(r); r = t; v = r; }
+    }
     if (v && strchr(v, '(') && (strstr(v, "sibling-") || strstr(v, "random("))) {
         char *t = tree_fn_subst(v);
         if (t) { free(r); r = t; v = r; }
@@ -7243,6 +7306,13 @@ static void layout_collect_constructed_stylesheets(LayoutContext *ctx,
  * order (the UA sheet is always first in the sheet list). */
 static const char *g_ua_stylesheet_css =
     "head, meta, title, link, style, script, base, template, noscript { display: none; }\n"
+    /* (HTML's dialogs and popovers: closed ones not rendered; open ones over the page, centred) */
+    "dialog:not([open]) { display: none; }\n"
+    "dialog { position: absolute; inset-inline-start: 0; inset-inline-end: 0; width: fit-content; height: fit-content; margin: auto; border: solid; padding: 1em; background-color: Canvas; color: CanvasText; }\n"
+    "dialog:modal { position: fixed; overflow: auto; inset-block: 0; max-width: calc(100% - 6px - 2em); max-height: calc(100% - 6px - 2em); }\n"
+    "[popover]:not(:popover-open):not(dialog[open]) { display: none; }\n"
+    "[popover] { position: fixed; inset: 0; width: fit-content; height: fit-content; margin: auto; border: solid; padding: 0.25em; overflow: auto; color: CanvasText; background-color: Canvas; }\n"
+    "dialog:popover-open { display: block; }\n"
     "html { font-family: serif; }\n"
     "body { margin: 8px; }\n"
     "p { margin: 1em 0; }\n"
@@ -7255,6 +7325,27 @@ static const char *g_ua_stylesheet_css =
     "b { font-weight: bold; }\n"
     "strong { font-weight: bold; }\n"
     "th { font-weight: bold; }\n"
+    /* (HTML's rendering of a table's border, frame and rules) */
+    "table, td, th { border-color: gray; }\n"
+    "thead, tbody, tfoot, tr { border-color: inherit; }\n"
+    "table:is([rules=none i], [rules=groups i], [rules=rows i], [rules=cols i], [rules=all i], [frame=void i], [frame=above i], [frame=below i], [frame=hsides i], [frame=lhs i], [frame=rhs i], [frame=vsides i], [frame=box i], [frame=border i]), table:is([rules=none i], [rules=groups i], [rules=rows i], [rules=cols i], [rules=all i], [frame=void i], [frame=above i], [frame=below i], [frame=hsides i], [frame=lhs i], [frame=rhs i], [frame=vsides i], [frame=box i], [frame=border i]) > tr > :is(td, th), table:is([rules=none i], [rules=groups i], [rules=rows i], [rules=cols i], [rules=all i], [frame=void i], [frame=above i], [frame=below i], [frame=hsides i], [frame=lhs i], [frame=rhs i], [frame=vsides i], [frame=box i], [frame=border i]) > :is(thead, tbody, tfoot) > tr > :is(td, th) { border-color: black; }\n"
+    "table:is([rules=none i], [rules=groups i], [rules=rows i], [rules=cols i], [rules=all i]) { border-style: hidden; border-collapse: collapse; }\n"
+    "table[frame] { border-width: 1px; }\n"
+    "table[frame=void i] { border-style: hidden; }\n"
+    "table[frame=above i] { border-style: outset hidden hidden hidden; }\n"
+    "table[frame=below i] { border-style: hidden hidden outset hidden; }\n"
+    "table[frame=hsides i] { border-style: outset hidden outset hidden; }\n"
+    "table[frame=lhs i] { border-style: hidden hidden hidden outset; }\n"
+    "table[frame=rhs i] { border-style: hidden outset hidden hidden; }\n"
+    "table[frame=vsides i] { border-style: hidden outset; }\n"
+    "table:is([frame=box i], [frame=border i]) { border-style: outset; }\n"
+    "table[border] > tr > :is(td, th), table[border] > :is(thead, tbody, tfoot) > tr > :is(td, th) { border-width: 1px; border-style: inset; }\n"
+    "table[rules=none i] > tr > :is(td, th), table[rules=none i] > :is(thead, tbody, tfoot) > tr > :is(td, th), table[rules=groups i] > tr > :is(td, th), table[rules=groups i] > :is(thead, tbody, tfoot) > tr > :is(td, th), table[rules=rows i] > tr > :is(td, th), table[rules=rows i] > :is(thead, tbody, tfoot) > tr > :is(td, th) { border-width: 1px; border-style: none; }\n"
+    "table[rules=cols i] > tr > :is(td, th), table[rules=cols i] > :is(thead, tbody, tfoot) > tr > :is(td, th) { border-width: 1px; border-block-style: none; border-inline-style: solid; }\n"
+    "table[rules=all i] > tr > :is(td, th), table[rules=all i] > :is(thead, tbody, tfoot) > tr > :is(td, th) { border-width: 1px; border-style: solid; }\n"
+    "table[rules=groups i] > colgroup { border-inline-width: 1px; border-inline-style: solid; }\n"
+    "table[rules=groups i] > :is(thead, tbody, tfoot) { border-block-width: 1px; border-block-style: solid; }\n"
+    "table[rules=rows i] > tr, table[rules=rows i] > :is(thead, tbody, tfoot) > tr { border-block-width: 1px; border-block-style: solid; }\n"
     "i { font-style: italic; }\n"
     "em { font-style: italic; }\n"
     "cite { font-style: italic; }\n"
@@ -24303,6 +24394,100 @@ bool css_layout_element_cascade(LayoutContext *ctx, int idx, CssCascadeFn fn, vo
     return cascade_at(ctx, ctx->tree.nodes[idx].dom_node_idx, ctx->custom_props ? ctx->custom_props[idx] : NULL, fn, ud);
 }
 
+/* A highlight pseudo-element's declarations (::selection, ::highlight(name), ...)
+ * on the element at dom: each ancestor's from the root down, so the nearest
+ * says last; in each, by importance, specificity and order. Matched against
+ * the selectors' text: only getComputedStyle asks. */
+static const char *strcasestr_lite(const char *h, const char *n)
+{
+    size_t l = strlen(n);
+    for (; *h; h++) if (!strncasecmp(h, n, l)) return h;
+    return NULL;
+}
+
+bool css_layout_highlight_cascade(LayoutContext *ctx, int dom, const char *pseudo, CssCascadeFn fn, void *ud)
+{
+    extern bool css_selector_matches_one(const char *selector, HtmlDocument *doc, HtmlNode *node);
+    if (!ctx || !ctx->doc || dom < 0 || !pseudo) return false;
+    const CssStyleSet *set = styleset_cached(ctx->style_gen, ctx->viewport_width, ctx->viewport_height);
+    if (!set) return false;
+    int chain[64], nc = 0;
+    for (int d = dom; d >= 0 && nc < 64; d = po_array_parent(&ctx->doc->array, d)) {
+        HtmlNode *hn = (HtmlNode *)po_array_payload(&ctx->doc->array, d);
+        if (hn && hn->type == HTML_NODE_ELEMENT) chain[nc++] = d;
+    }
+    char want[96];
+    snprintf(want, sizeof want, "::%s", pseudo);
+    size_t wl = strlen(want);
+    int nr = css_styleset_rule_count(set);
+    typedef struct { int g, spec; } Hit;
+    Hit *hits = (Hit *)malloc(sizeof(Hit) * (size_t)(nr + 1));
+    if (!hits) return false;
+    for (int c = nc - 1; c >= 0; c--) {
+        HtmlNode *node = (HtmlNode *)po_array_payload(&ctx->doc->array, chain[c]);
+        int nh = 0;
+        for (int g = 0; g < nr; g++) {
+            const CssRule *rule = css_styleset_rule(set, g);
+            const char *sel = rule ? rule->selector_text : NULL;
+            if (!sel || !rule->declaration_count || !strcasestr_lite(sel, want)) continue;
+            int best = -1;
+            /* (each branch ending in it: what's before it must match) */
+            for (const char *b = sel; *b; ) {
+                const char *e = b;
+                for (int dp = 0; *e && (dp > 0 || *e != ','); e++) dp += *e == '(' ? 1 : *e == ')' && dp > 0 ? -1 : 0;
+                const char *x = b, *y = e;
+                while (x < y && isspace((unsigned char)*x)) x++;
+                while (y > x && isspace((unsigned char)y[-1])) y--;
+                if ((size_t)(y - x) >= wl && !strncasecmp(y - wl, want, wl)) {
+                    char base[512];
+                    size_t bl = (size_t)(y - x) - wl;
+                    if (bl < sizeof base - 2) {
+                        memcpy(base, x, bl);
+                        base[bl] = 0;
+                        if (!bl || isspace((unsigned char)base[bl - 1]) || base[bl - 1] == '>') { base[bl] = '*'; base[bl + 1] = 0; }
+                        if (css_selector_matches_one(base, ctx->doc, node)) {
+                            int sp = css_specificity_from_selector_text(base) + 1;
+                            if (sp > best) best = sp;
+                        }
+                    }
+                }
+                b = *e ? e + 1 : e;
+            }
+            if (best >= 0) { hits[nh].g = g; hits[nh].spec = best; nh++; }
+        }
+        /* (by specificity, then order: insertion sort, few) */
+        for (int i = 1; i < nh; i++) {
+            Hit h = hits[i];
+            int j = i;
+            while (j > 0 && (hits[j - 1].spec > h.spec ||
+                             (hits[j - 1].spec == h.spec && css_styleset_rule_order(set, hits[j - 1].g) > css_styleset_rule_order(set, h.g)))) {
+                hits[j] = hits[j - 1];
+                j--;
+            }
+            hits[j] = h;
+        }
+        for (int pass = 0; pass < 2; pass++)
+            for (int i = 0; i < nh; i++) {
+                const CssRule *rule = css_styleset_rule(set, hits[i].g);
+                for (int d = 0; d < rule->declaration_count; d++) {
+                    const CssDeclaration *dl = &rule->declarations[d];
+                    if (!dl->property || !dl->value || dl->important != (pass == 1)) continue;
+                    /* (only what a highlight paints: colors, decorations, shadows, strokes) */
+                    const char *pn = dl->property;
+                    bool ok = !strncmp(pn, "--", 2) || !strcmp(pn, "color") || !strcmp(pn, "background-color") ||
+                              !strncmp(pn, "text-decoration", 15) || !strcmp(pn, "text-shadow") ||
+                              !strcmp(pn, "text-underline-offset") || !strcmp(pn, "text-emphasis-color") ||
+                              !strncmp(pn, "-webkit-text-", 13) || !strncmp(pn, "stroke", 6) || !strncmp(pn, "fill", 4) ||
+                              !strcmp(pn, "caret-color") || !strcmp(pn, "background");
+                    if (!ok) continue;
+                    fn(ud, dl->property, dl->value, dl->important);
+                }
+            }
+    }
+    free(hits);
+    return true;
+}
+
 bool css_layout_dom_cascade(LayoutContext *ctx, int dom, int holder, CssCascadeFn fn, void *ud)
 {
     if (!ctx || !ctx->doc || dom < 0) return false;
@@ -24351,10 +24536,23 @@ static bool cascade_at(LayoutContext *ctx, int dom, const CssCustomProps *props,
     }
     t_subst_node = node;
     t_subst_parent = NULL;
+    /* (a table's border and cellspacing attributes: after the user agent's rules, before the author's) */
+    char hint_w[32] = "", hint_sp[32] = "";
+    if (node->tag_name && !strcasecmp(node->tag_name, "table")) {
+        if (!hint_dimension(layout_node_attribute(node, "border"), hint_w, sizeof hint_w) || !strcmp(hint_w, "0px")) hint_w[0] = 0;
+        if (!hint_dimension(layout_node_attribute(node, "cellspacing"), hint_sp, sizeof hint_sp)) hint_sp[0] = 0;
+    }
+    bool hinted = !hint_w[0] && !hint_sp[0];
     /* normal sheet declarations, inline, !important sheet, !important inline */
     for (int pass = 0; pass < 2; pass++) {
         bool imp = pass == 1;
-        for (int d = 0; d < count; d++) {
+        for (int d = 0; d <= count; d++) {
+            if (!imp && !hinted && (d == count || applied[d].specificity >= 0)) {
+                hinted = true;
+                if (hint_w[0]) { fn(ud, "border-width", hint_w, false); fn(ud, "border-style", "outset", false); }
+                if (hint_sp[0]) fn(ud, "border-spacing", hint_sp, false);
+            }
+            if (d == count) break;
             const CssDeclaration *dl = applied[d].decl;
             if (applied[d].important != imp || !dl->property || !dl->value || (dl->property[0] == '-' && dl->property[1] == '-')) continue;
             char *r = strchr(dl->value, '(') ? css_var_resolve(dl->value, props) : NULL;

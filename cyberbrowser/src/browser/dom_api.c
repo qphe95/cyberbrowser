@@ -4233,7 +4233,22 @@ void dom_referrer_apply(JSContextHandle ctx, char *url, size_t cap) {
     }
 }
 
+/* What a control's value says beyond validity, for style (dom_validity_refresh). */
+static int control_formstate(NodeId n) {
+    extern JSContextHandle g_js_context;
+    JSContextHandle ctx = g_js_context;
+    GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberFormState");
+    GCValue el = dom_js(ctx, n);
+    if (!JS_IsFunction(ctx, fn) || !JS_IsObject(el)) return 0;
+    GCValue r = JS_Call(ctx, fn, JS_UNDEFINED, 1, &el);
+    int32_t v = 0;
+    if (JS_IsNumber(r)) JS_ToInt32(ctx, &v, r);
+    return v;
+}
+
 void attr_api_install(JSContextHandle ctx, GCValue global) {
+    extern int (*g_dom_query_formstate)(NodeId el);
+    g_dom_query_formstate = control_formstate;
     g_dom_query_validity = control_validity;
     g_dom_query_value = control_value;
     GCValue node = JS_GetPropertyStr(ctx, global, "Node");

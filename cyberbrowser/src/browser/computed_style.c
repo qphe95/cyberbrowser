@@ -571,6 +571,9 @@ static char *compute_value(JSContextHandle ctx, ComputedStyle *cs, const CssProp
     return r;
 }
 
+/* (computing for Typed OM: js_computed_unresolved) */
+static bool g_cs_typed;
+
 static bool display_blockified(JSContextHandle ctx, ComputedStyle *cs) {
     const char *pos = computed_of(ctx, cs, "position");
     if (!strcmp(pos, "absolute") || !strcmp(pos, "fixed")) return true;
@@ -1149,18 +1152,20 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
         }
         r = compute_value(ctx, cs, p, !strcmp(s, "initial") ? p->initial : swapped ? swapped : s);
         free(swapped);
+        /* (Typed OM's computed value: currentcolor stays itself) */
+        if (g_cs_typed && r && !strcasecmp(s, "currentcolor") && strcmp(n, "color")) { free(r); r = strdup("currentcolor"); }
     }
-    /* the properties whose computed value depends on another one */
+    /* the properties whose computed value depends on another one (not Typed OM's) */
     if (strstr(n, "-width") && !strncmp(n, "border-", 7) && !strstr(n, "image")) {
         char style[64];
         snprintf(style, sizeof style, "%.*sstyle", (int)(strlen(n) - 5), n);
-        const char *st = computed_of(ctx, cs, style);
+        const char *st = g_cs_typed ? "" : computed_of(ctx, cs, style);
         if (!strcmp(st, "none") || !strcmp(st, "hidden")) { free(r); r = strdup("0px"); }
     } else if (!strcmp(n, "outline-width")) {
-        if (!strcmp(computed_of(ctx, cs, "outline-style"), "none")) { free(r); r = strdup("0px"); }
+        if (!g_cs_typed && !strcmp(computed_of(ctx, cs, "outline-style"), "none")) { free(r); r = strdup("0px"); }
     } else if (!strcmp(n, "column-rule-width") || !strcmp(n, "row-rule-width")) {
         const char *st = computed_of(ctx, cs, n[0] == 'c' ? "column-rule-style" : "row-rule-style");
-        if (!strcmp(st, "none") || !strcmp(st, "hidden")) { free(r); r = strdup("0px"); }
+        if (!g_cs_typed && (!strcmp(st, "none") || !strcmp(st, "hidden"))) { free(r); r = strdup("0px"); }
     }
     /* (a line's width, and outline-offset's size, in whole device pixels: one at least) */
     if ((strstr(n, "-width") && (!strncmp(n, "border-", 7) || !strncmp(n, "outline", 7) || !strcmp(n, "column-rule-width") || !strcmp(n, "row-rule-width")) &&
@@ -1593,8 +1598,46 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
         if (mx) { free(r); r = mx; }
     }
     #undef in_hook
+    /* (light-dark() of images: the one the used color scheme picks) */
+    if (r && strstr(r, "light-dark(") && (!strcmp(n, "background-image") || !strcmp(n, "list-style-image") ||
+                                          !strcmp(n, "border-image-source") || !strcmp(n, "mask-image") || !strcmp(n, "content"))) {
+        const char *scheme = computed_of(ctx, cs, "color-scheme");
+        bool dark = scheme && strstr(scheme, "dark") && !strstr(scheme, "light");
+        for (int round = 0; round < 4 && strstr(r, "light-dark("); round++) do {
+            static const char clear[] = "image(rgba(0, 0, 0, 0))";
+            size_t cap = strlen(r) * 2 + sizeof clear, o = 0;
+            char *out = (char *)malloc(cap);
+            if (!out) break;
+            for (const char *p = r; *p; ) {
+                if (strncmp(p, "light-dark(", 11) || (p > r && (isalnum((unsigned char)p[-1]) || p[-1] == '-'))) { out[o++] = *p++; continue; }
+                const char *a = p + 11, *comma = NULL, *e = a;
+                int d = 1;
+                for (; *e && d; e++) {
+                    if (*e == '(') d++;
+                    else if (*e == ')') { if (--d == 0) break; }
+                    else if (*e == ',' && d == 1 && !comma) comma = e;
+                }
+                if (!comma || !*e) { out[o++] = *p++; continue; }
+                const char *x = dark ? comma + 1 : a, *y = dark ? e : comma;
+                while (x < y && isspace((unsigned char)*x)) x++;
+                while (y > x && isspace((unsigned char)y[-1])) y--;
+                /* (none, picked: an image of nothing) */
+                if (y - x == 4 && !strncmp(x, "none", 4)) { memcpy(out + o, clear, sizeof clear - 1); o += sizeof clear - 1; }
+                else { memcpy(out + o, x, (size_t)(y - x)); o += (size_t)(y - x); }
+                p = e + 1;
+            }
+            out[o] = 0;
+            free(r);
+            r = out;
+        } while (0);
+    }
+    /* (gradients: what goes without saying, unsaid) */
+    if (r && strstr(r, "gradient(") && (!strcmp(n, "background-image") || !strcmp(n, "list-style-image") || !strcmp(n, "border-image-source"))) {
+        char *gc = css_gradient_computed(r);
+        if (gc) { free(r); r = gc; }
+    }
     /* (a shape in its computed form, an animated one too) */
-    if (r && strchr(r, '(') && (!strcmp(n, "clip-path") || !strcmp(n, "shape-outside"))) {
+    if (r && strchr(r, '(') && (!strcmp(n, "clip-path") || !strcmp(n, "shape-outside") || (!strcmp(n, "offset-path") && !strstr(r, "ray(")))) {
         /* (animations work from the commands as written) */
         g_css_shape_path_normal = !g_in_hook;
         char *sc = css_shape_computed(n, r);
@@ -1627,7 +1670,10 @@ GCValue js_computed_unresolved(JSContextHandle ctx, GCValue this_val, int argc, 
     if (cs) {
         refresh(ctx, cs);
         cs->used.rendered = false;
+        /* (a third argument: Typed OM's computed value, not the resolved one) */
+        g_cs_typed = argc > 2 && JS_ToBool(ctx, argv[2]);
         char *v = computed_style_value(ctx, cs, prop, strlen(prop));
+        g_cs_typed = false;
         if (v) { out = JS_NewString(ctx, v); free(v); }
         computed_style_free(cs);
     }

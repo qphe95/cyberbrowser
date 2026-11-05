@@ -629,6 +629,20 @@
     [IP, TP, SP, BP, FSP].forEach(function (P) {
         if (!P) return;
         accessor(P, 'validity', function () { return validityOf(this); });
+        if (!global.__cyberFormState) Object.defineProperty(global, '__cyberFormState', { configurable: true, value: function (el) {
+            /* (1 placeholder shown, 2 default, 4 in range, 8 out of range) */
+            var tag = el.localName, type = tag === 'input' ? String(el.type || 'text').toLowerCase() : '', bits = 0;
+            var texty = tag === 'textarea' || (tag === 'input' && /^(text|search|url|tel|email|password|number)$/.test(type));
+            if (texty && el.hasAttribute('placeholder') && el.value === '') bits |= 1;
+            if ((type === 'checkbox' || type === 'radio') && el.hasAttribute('checked')) bits |= 2;
+            if (tag === 'option' && el.hasAttribute('selected')) bits |= 2;
+            if (tag === 'input' && /^(number|range|date|month|week|time|datetime-local)$/.test(type) &&
+                (el.hasAttribute('min') || el.hasAttribute('max')) && !el.disabled && !el.readOnly) {
+                var vy = validityOf(el);
+                bits |= vy && (vy.rangeUnderflow || vy.rangeOverflow) ? 8 : 4;
+            }
+            return bits;
+        } });
         accessor(P, 'validationMessage', function () {
             return isValid(this) ? '' : state(this).customValidity || 'Invalid value.';
         });

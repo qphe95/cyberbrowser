@@ -73,6 +73,8 @@ typedef struct {
     bool rtl;
 } LayoutQueryUsed;
 typedef void (*LayoutCascadeFn)(void *ud, const char *prop, const char *value, bool important);
+/* A highlight pseudo-element's name (selection, highlight(x), ...) as a pseudo code (20 and up). */
+int layout_highlight_code(const char *name);
 /* (LayoutQueryUsed: known before the cascade is walked) */
 bool layout_query_cascade(JSContextHandle ctx, GCValue element, LayoutCascadeFn fn, void *ud, LayoutQueryUsed *used);
 /* The used value of its top, right, bottom or left (0 to 3) that anchor() gave. */

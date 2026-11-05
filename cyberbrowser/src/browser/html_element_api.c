@@ -400,6 +400,21 @@ static GCValue js_el_state(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     int32_t mask = 0;
     if (!el || argc < 2 || JS_ToInt32(ctx, &mask, argv[1])) return JS_FALSE;
     uint32_t s = dom_slot(el);
+    /* (a dialog shown modally, a popover showing: kept apart) */
+    if ((uint32_t)mask == DOM_ST_MODAL || (uint32_t)mask == DOM_ST_POPOVER_OPEN) {
+        uint8_t bit = (uint32_t)mask == DOM_ST_MODAL ? 1 : 2;
+        bool was = s < g_dom_top_cap && (g_dom_top[s] & bit);
+        if (argc > 2 && !JS_IsUndefined(argv[2])) {
+            bool on = JS_ToBool(ctx, argv[2]);
+            if (on != was) {
+                dom_top_state_set(s, bit, on);
+                dom_mark_dirty(el, DOMF_DIRTY_ATTR);
+                dom_request_layout();
+            }
+            return JS_NewBool(ctx, on);
+        }
+        return JS_NewBool(ctx, was);
+    }
     if (argc > 2 && !JS_IsUndefined(argv[2])) {
         uint16_t was = g_dom.state[s];
         uint16_t now = JS_ToBool(ctx, argv[2]) ? (uint16_t)(was | mask) : (uint16_t)(was & ~mask);
