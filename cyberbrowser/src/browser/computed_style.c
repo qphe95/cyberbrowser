@@ -193,7 +193,7 @@ static void refresh(JSContextHandle ctx, ComputedStyle *cs) {
         }
         if (cs->styled) layout_query_pseudo_cascade(ctx, el, cs->pseudo, collect, cs);
     } else {
-        cs->styled = JS_IsObject(el) && dom_kind(cs->el) == DOM_K_ELEMENT &&
+        cs->styled = JS_IsObject(el) && dom_kind(cs->el) == DOM_K_ELEMENT && dom_is_connected(cs->el) &&
                      layout_query_cascade(ctx, el, collect, cs, &cs->used);
     }
     CST("queried %d", cs->styled);
@@ -1675,7 +1675,19 @@ char *computed_style_value(JSContextHandle ctx, ComputedStyle *cs, const char *p
         free(name);
         if (reg >= 0) {
             char *c = registered_computed(ctx, cs, reg, r);
-            if (c) { free(r); return c; }
+            if (c) { free(r); r = c; }
+        }
+        /* (under an animation from @keyframes) */
+        if (anim_has(cs->el, 0) && !g_in_hook) {
+            GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberCustomCssAnim");
+            if (JS_IsFunction(ctx, fn)) {
+                g_in_hook = true;
+                GCValue a[3] = { el, JS_NewStringLen(ctx, prop, len), JS_NewString(ctx, r) };
+                GCValue got = JS_Call(ctx, fn, JS_UNDEFINED, 3, a);
+                g_in_hook = false;
+                const char *t = JS_IsString(got) ? JS_ToCString(ctx, got) : NULL;
+                if (t) { free(r); r = strdup(t); }
+            }
         }
         return r;
     }
@@ -1712,13 +1724,14 @@ static void longhands_init(void) {
 }
 
 int computed_style_length(ComputedStyle *cs) {
-    (void)cs;
+    /* (nothing to compute outside the document) */
+    if (!cs->pseudo && !dom_is_connected(cs->el)) return 0;
     longhands_init();
     return g_nlonghands;
 }
 
 const char *computed_style_item(ComputedStyle *cs, int i) {
-    (void)cs;
+    if (!cs->pseudo && !dom_is_connected(cs->el)) return NULL;
     longhands_init();
     return i >= 0 && i < g_nlonghands ? g_longhands[i]->name : NULL;
 }

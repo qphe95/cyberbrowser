@@ -1776,6 +1776,46 @@ static void for_candidates(const CssStyleSet *S, const CssStyleDoc *D, const Buc
 #undef VISIT_SLOT
 }
 
+/* revert and revert-layer: what an author (or its layer) said before them is gone, the
+ * user agent's stands. A longhand under an earlier shorthand stays as it was: it
+ * acts as unset. */
+static void cascade_reverts(const CssStyleSet *S, CssStyleScratch *t)
+{
+    bool any = false;
+    for (size_t k = 0; k < t->applied.n && !any; k++) {
+        const char *v = t->applied.v[k].decl->value;
+        any = v && (v[0] | 32) == 'r' && !strncasecmp(v, "revert", 6);
+    }
+    if (!any) return;
+    for (size_t k = t->applied.n; k-- > 0;) {
+        CssAppliedDecl *a = &t->applied.v[k];
+        if (!a->decl) continue;
+        const char *v = a->decl->value;
+        if (!v || (v[0] | 32) != 'r') continue;
+        bool layer = !strcasecmp(v, "revert-layer");
+        if (!layer && strcasecmp(v, "revert")) continue;
+        const CRule *ar = &S->rules[a->rule];
+        if (ar->ua) continue;
+        const char *prop = a->decl->property;
+        size_t pl = strlen(prop);
+        bool all = !strcmp(prop, "all"), under = false;
+        for (size_t j = 0; j < k; j++) {
+            CssAppliedDecl *b = &t->applied.v[j];
+            if (!b->decl) continue;
+            const CRule *br = &S->rules[b->rule];
+            if (br->ua || (layer && br->layer_bias != ar->layer_bias)) continue;
+            const char *bp = b->decl->property;
+            size_t bl = strlen(bp);
+            if (all || (bl == pl && !strcmp(bp, prop)) || (bl > pl && !strncmp(bp, prop, pl) && bp[pl] == '-')) b->decl = NULL;
+            else if (pl > bl && !strncmp(prop, bp, bl) && prop[bl] == '-') under = true;
+        }
+        if (!under) a->decl = NULL;
+    }
+    size_t n = 0;
+    for (size_t k = 0; k < t->applied.n; k++) if (t->applied.v[k].decl) t->applied.v[n++] = t->applied.v[k];
+    t->applied.n = n;
+}
+
 static void on_rule_hit(CssStyleScratch *t, const CChain *ch, int32_t ci)
 {
     (void)ci;
@@ -1832,6 +1872,7 @@ int css_style_match(const CssStyleSet *S, const CssStyleDoc *D, int dom,
     }
     if (t->applied.n > 1)
         qsort(t->applied.v, t->applied.n, sizeof(CssAppliedDecl), css_applied_decl_compare);
+    cascade_reverts(S, t);
     *out = t->applied.v;
     return (int)t->applied.n;
 }

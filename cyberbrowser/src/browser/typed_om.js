@@ -510,6 +510,37 @@
     }
     variadic(CSSMathInvert, 'invert', function () { return typeInvert(this.__arg.__type()); });
 
+    /* Whether text is a value for any custom property: no wide keyword, nothing out of
+     * place at the top, what opens closes. */
+    function universalValue(text) {
+        var t = text.trim();
+        if (/^(initial|inherit|unset|revert|revert-layer)$/i.test(t)) return false;
+        var open = [];
+        for (var i = 0; i < t.length; i++) {
+            var c = t[i];
+            if (c === '\\') { i++; continue; }
+            if (c === '"' || c === "'") {
+                var j = i + 1;
+                while (j < t.length && t[j] !== c && t[j] !== '\n') j += t[j] === '\\' ? 2 : 1;
+                /* (a quote that ends the text closes itself) */
+                if (j >= t.length && i === t.length - 1 && t === text) return true;
+                if (j >= t.length || t[j] !== c) return false;
+                i = j;
+            } else if (c === '(' || c === '[' || c === '{') {
+                /* (an unquoted url is one token, with no space or quote inside) */
+                if (c === '(' && /url$/i.test(t.slice(Math.max(0, i - 3), i))) {
+                    var e = t.indexOf(')', i);
+                    var inside = (e < 0 ? t.slice(i + 1) : t.slice(i + 1, e)).trim();
+                    if (!/^["']/.test(inside) && /[\s"'(]/.test(inside)) return false;
+                    if (!/^["']/.test(inside)) { if (e < 0) return true; i = e; continue; }
+                }
+                open.push(c === '(' ? ')' : c === '[' ? ']' : '}');
+            } else if (c === ')' || c === ']' || c === '}') {
+                if (open.pop() !== c) return false;
+            } else if (!open.length && (c === ';' || c === '!')) return false;
+        }
+        return true;
+    }
     var REGISTERED = Object.create(null);
     /* CSS.registerProperty (css-properties-values-api 3.) */
     if (global.CSS && global.CSS.__register) {
@@ -539,7 +570,7 @@
                 if (parsed === null) throw err("'" + initial + "' is not a value of '" + syntax + "'");
                 if (hidden.__dependsOnContext(initial)) throw err("'" + initial + "' is not computationally independent");
                 initial = parsed;
-            } else if (/var\(/.test(initial)) throw err('An initial value cannot use var()');
+            } else if (/var\(/.test(initial) || !universalValue(initial)) throw err("'" + initial + "' is not a value of '*'");
             REGISTERED[name] = syntax;
             if (!hidden.__register(name, syntax, inherits, initial))
                 throw new global.DOMException("'" + name + "' is already registered", 'InvalidModificationError');

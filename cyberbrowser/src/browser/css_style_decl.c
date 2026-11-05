@@ -88,10 +88,48 @@ static void css_style_decl_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *ma
     if (h != GC_HANDLE_NULL) mark_func(rt, h);
 }
 
+/* style[i]: the property names in order (tagged integer atoms only, so that
+ * style.width doesn't look at its own name). */
+#define STYLE_ATOM_INT (1u << 31)
+static int style_decl_count(StyleBlock *b) { return b->cs ? computed_style_length(b->cs) : b->n; }
+
+static int css_style_decl_get_own(JSContextHandle ctx, JSPropertyDescriptor *desc, GCValue obj, JSAtom prop) {
+    if (!(prop & STYLE_ATOM_INT)) return 0;
+    uint32_t i = prop & ~STYLE_ATOM_INT;
+    StyleBlock *b = block_of(ctx, obj);
+    if (!b || i >= (uint32_t)style_decl_count(b)) return 0;
+    if (desc) {
+        const char *nm = b->cs ? computed_style_item(b->cs, (int)i) : b->d[i].prop ? b->d[i].prop->name : b->d[i].name;
+        desc->flags = JS_PROP_ENUMERABLE | JS_PROP_CONFIGURABLE;
+        desc->value = JS_NewString(ctx, nm ? nm : "");
+        desc->getter = JS_UNDEFINED;
+        desc->setter = JS_UNDEFINED;
+    }
+    return 1;
+}
+
+static int css_style_decl_get_names(JSContextHandle ctx, JSPropertyEnum **ptab, uint32_t *plen, GCValue obj) {
+    StyleBlock *b = block_of(ctx, obj);
+    int count = b ? style_decl_count(b) : 0;
+    GCHandle h = gc_allocz(sizeof(JSPropertyEnum) * (size_t)(count + 1), JS_GC_OBJ_TYPE_DATA);
+    JSPropertyEnum *tab = h != GC_HANDLE_NULL ? (JSPropertyEnum *)gc_deref(h) : NULL;
+    if (!tab) return -1;
+    for (int i = 0; i < count; i++) tab[i].atom = JS_NewAtomUInt32(ctx, (uint32_t)i);
+    *ptab = tab;
+    *plen = (uint32_t)count;
+    return 0;
+}
+
+static JSClassExoticMethods css_style_decl_exotic = {
+    .get_own_property = css_style_decl_get_own,
+    .get_own_property_names = css_style_decl_get_names,
+};
+
 JSClassDef js_css_style_decl_class_def = {
     .class_name = "CSSStyleDeclaration",
     .finalizer = css_style_decl_finalizer,
     .gc_mark = css_style_decl_mark,
+    .exotic = &css_style_decl_exotic,
 };
 
 /* ---- the block ---- */

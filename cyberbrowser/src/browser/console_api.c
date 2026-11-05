@@ -583,6 +583,33 @@ static GCValue js_computed_style_get_used_height(JSContextHandle ctx, GCValue th
 
 static GCValue js_get_computed_style_legacy(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 
+/* Whether q, after its colons, names a pseudo-element getComputedStyle takes. */
+static bool gcs_pseudo_known(const char *q, bool two)
+{
+    if (!two) return false;
+    if (!strncasecmp(q, "-webkit-", 8)) return true;
+    static const char *const plain[] = { "backdrop", "placeholder", "file-selector-button", "selection", "target-text", "search-text",
+        "spelling-error", "grammar-error", "view-transition", "details-content", "column", "checkmark", "picker-icon" };
+    for (size_t i = 0; i < sizeof plain / sizeof plain[0]; i++) if (!strcasecmp(q, plain[i])) return true;
+    static const char *const fns[] = { "highlight(", "view-transition-group(", "view-transition-image-pair(", "view-transition-old(",
+        "view-transition-new(", "picker(", "scroll-button(" };
+    for (size_t i = 0; i < sizeof fns / sizeof fns[0]; i++) {
+        size_t l = strlen(fns[i]);
+        if (strncasecmp(q, fns[i], l)) continue;
+        const char *a = q + l;
+        while (*a == ' ' || *a == '\t') a++;
+        if (i == 6 && *a == '*') return true;
+        /* (a name, and the end closes what's open) */
+        if (!isalpha((unsigned char)*a) && *a != '_' && *a != '-' && *a != '\\' && (unsigned char)*a < 0x80) return false;
+        if (i == 5 && strncasecmp(a, "select", 6)) return false;
+        while (*a && *a != ')' && *a != ' ' && *a != '\t') a++;
+        while (*a == ' ' || *a == '\t') a++;
+        if (*a == ')') a++;
+        return !*a;
+    }
+    return false;
+}
+
 /* getComputedStyle(element): a live, read-only CSSStyleDeclaration of the
  * element's resolved values (computed_style.c), one per element. */
 GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
@@ -623,6 +650,11 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
                         }
                     }
                 }
+            }
+            /* (with colons, what isn't a pseudo-element has no style at all) */
+            if (q && !ps && !gcs_pseudo_known(q, p[1] == ':')) {
+                JS_FreeCString(ctx, p);
+                return css_style_decl_new(ctx, DOM_NULL, NULL);
             }
             JS_FreeCString(ctx, p);
         }

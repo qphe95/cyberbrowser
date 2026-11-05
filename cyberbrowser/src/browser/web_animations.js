@@ -1884,6 +1884,61 @@
         var vert = !/^horizontal/.test(global.getComputedStyle(el).writingMode || 'horizontal-tb');
         return m[1] + ((m[2] === 'width') !== vert ? 'inline-size' : 'block-size');
     }
+    /* A CSS animation's keyframes as script sees them: frames of one offset, easing and
+     * composite as one; what the ends leave out, as computed on the element. */
+    function cssKeyframes(el, name) {
+        if (!el) return [];
+        var frames = keyframesOf(el.ownerDocument, name);
+        if (!frames) return [];
+        var cs = global.getComputedStyle(el), dflt = listItem(cs.animationTimingFunction || 'ease', 0);
+        var out = [], all = Object.create(null), custom = {};
+        var subst = function (v, f) {
+            for (var n = 0; n < 8 && /var\(/.test(v); n++) {
+                v = v.replace(/var\(\s*(--[^,)\s]+)\s*(?:,([^()]*))?\)/g, function (m, p, fb) {
+                    var own = f.style.getPropertyValue(p);
+                    return own || cs.getPropertyValue(p) || fb || '';
+                });
+            }
+            return v.trim();
+        };
+        frames.forEach(function (f) {
+            var easing = f.style.getPropertyValue('animation-timing-function');
+            /* (var() in a keyframe's easing isn't taken) */
+            easing = easing && !/var\(/.test(easing) ? easing : dflt;
+            var composite = f.style.getPropertyValue('animation-composition') || 'auto';
+            var slot = null;
+            for (var i = 0; i < out.length; i++) if (out[i].offset === f.at && out[i].easing === easing && out[i].composite === composite) slot = out[i];
+            for (var k = 0; k < f.style.length; k++) {
+                var p = f.style.item(k);
+                if (p.indexOf('--') === 0 || NOT_ANIMATABLE.test(p)) continue;
+                if (!slot) { slot = { offset: f.at, easing: easing, composite: composite, props: {} }; out.push(slot); }
+                slot.props[p] = subst(f.style.getPropertyValue(p), f);
+                all[p] = true;
+            }
+        });
+        if (!out.length) return [];
+        [0, 1].forEach(function (end) {
+            var missing = Object.keys(all).filter(function (p) {
+                return !out.some(function (s) { return s.offset === end && p in s.props; });
+            });
+            if (!missing.length) return;
+            var slot = null;
+            for (var i = 0; i < out.length; i++) if (out[i].offset === end && out[i].easing === dflt) slot = out[i];
+            if (!slot) { slot = { offset: end, easing: dflt, composite: 'replace', props: {} }; out.push(slot); }
+            missing.forEach(function (p) { slot.props[p] = cs.getPropertyValue(p); });
+        });
+        var order = out.map(function (s, i) { return { s: s, i: i }; });
+        order.sort(function (a, b) { return a.s.offset - b.s.offset || a.i - b.i; });
+        return order.map(function (e) {
+            var o = { offset: e.s.offset, computedOffset: e.s.offset, easing: e.s.easing, composite: e.s.composite };
+            Object.keys(e.s.props).forEach(function (p) { o[idlName(p)] = e.s.props[p]; });
+            return o;
+        });
+    }
+    /* (a custom property under @keyframes, read by script) */
+    Object.defineProperty(global, '__cyberCustomCssAnim', { configurable: true, value: function (el, prop, base) {
+        return cssAnimationsOver(el, prop, base, base);
+    } });
     function cssAnimationsOver(el, prop, base, specBase) {
         var running = global.__cyberAnimRunning(el), v = base;
         for (var i = 0; i + 1 < running.length; i += 2) {
@@ -2104,7 +2159,7 @@
         return rec.run ? transitionValue(prop, rec.run, now) : base;
     }
     /* (these don't animate at all) */
-    var NOT_ANIMATABLE = /^(interpolate-size)$/;
+    var NOT_ANIMATABLE = /^(interpolate-size|transition(-[a-z-]+)?|animation(-[a-z-]+)?)$/;
     var ENGINE_RUNS = /^(left|top|right|bottom|opacity|transform|width|height|color|background-color|(padding|margin)-(top|right|bottom|left)|border-(top|right|bottom|left)-width|font-size|letter-spacing|word-spacing|font-weight)$/;
     function transitionDone(run, now) { return now - run.start - run.delay >= run.dur; }
     function transitionFire(el, type, prop, secs) {
@@ -2452,6 +2507,7 @@
     KeyframeEffect.prototype = Object.create(AnimationEffect.prototype, { constructor: { value: KeyframeEffect, writable: true, configurable: true } });
     setMethods(KeyframeEffect.prototype, {
         getKeyframes: function () {
+            if (this._anim && this._anim.animationName !== undefined && !this._frames.length) return cssKeyframes(this._target, this._anim.animationName);
             var comp = this._composite;
             return this._frames.map(function (f) {
                 var o = { offset: f.offset, computedOffset: f.computed, easing: f.easing.text, composite: f.composite };

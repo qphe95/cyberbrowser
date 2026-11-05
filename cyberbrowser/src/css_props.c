@@ -7879,22 +7879,67 @@ static bool syntax_is_universal(const char *syntax) {
     return !*syntax;
 }
 
+/* A syntax string with its escapes written out (malloc'd). */
+static char *syntax_unescape(const char *s)
+{
+    Buf b = { 0 };
+    for (; *s; s++) {
+        if (*s != '\\' || !s[1]) { buf_ch(&b, *s); continue; }
+        s++;
+        if (!isxdigit((unsigned char)*s)) { buf_ch(&b, *s); continue; }
+        unsigned c = 0;
+        int n = 0;
+        while (n < 6 && isxdigit((unsigned char)*s)) { c = c * 16 + (unsigned)(isdigit((unsigned char)*s) ? *s - '0' : (tolower((unsigned char)*s) - 'a' + 10)); s++; n++; }
+        if (!isspace((unsigned char)*s)) s--;
+        if (c < 0x80) buf_ch(&b, (char)c);
+        else if (c < 0x800) { buf_ch(&b, (char)(0xC0 | c >> 6)); buf_ch(&b, (char)(0x80 | (c & 63))); }
+        else if (c < 0x10000) { buf_ch(&b, (char)(0xE0 | c >> 12)); buf_ch(&b, (char)(0x80 | ((c >> 6) & 63))); buf_ch(&b, (char)(0x80 | (c & 63))); }
+        else { buf_ch(&b, (char)(0xF0 | c >> 18)); buf_ch(&b, (char)(0x80 | ((c >> 12) & 63))); buf_ch(&b, (char)(0x80 | ((c >> 6) & 63))); buf_ch(&b, (char)(0x80 | (c & 63))); }
+    }
+    return buf_take(&b);
+}
+
+/* Whether the keywords of a value are written as the syntax has them, and its resolutions aren't below nothing. */
+static bool syntax_exact(const char *syntax, const Toks *ts)
+{
+    for (int i = 0; i < ts->n; i++) {
+        const Tok *t = &ts->t[i];
+        if (t->type == T_DIM && t->num < 0 && strstr(syntax, "<resolution>") &&
+            (!strcasecmp(t->str, "dpi") || !strcasecmp(t->str, "dpcm") || !strcasecmp(t->str, "dppx") || !strcasecmp(t->str, "x"))) return false;
+        if (t->type != T_IDENT) continue;
+        size_t l = strlen(t->str);
+        bool some = false, same = false;
+        for (const char *p = syntax; *p; p++) {
+            if (strncasecmp(p, t->str, l)) continue;
+            bool whole = (p == syntax || isspace((unsigned char)p[-1]) || p[-1] == '|') && (!p[l] || isspace((unsigned char)p[l]) || p[l] == '|' || p[l] == '#' || p[l] == '+');
+            if (!whole) continue;
+            some = true;
+            if (!strncmp(p, t->str, l)) same = true;
+        }
+        if (some && !same) return false;
+    }
+    return true;
+}
+
 /* The value matched against a syntax string, serialized (malloc'd), or NULL. */
 char *css_syntax_parse(const char *syntax, const char *value) {
     if (syntax_is_universal(syntax)) return trim_dup(value);
     char *v = trim_dup(value);
+    char *plain = strchr(syntax, '\\') ? syntax_unescape(syntax) : NULL;
+    if (plain) syntax = plain;
     GNode *g = v[0] ? syntax_grammar(syntax) : NULL;
     Toks ts;
-    if (!g || !tokenize(v, strlen(v), &ts)) { free(v); return NULL; }
+    if (!g || !tokenize(v, strlen(v), &ts)) { free(v); free(plain); return NULL; }
     Matcher m;
     memset(&m, 0, sizeof m);
     m.ts = &ts;
     m.cur = -1;
     bool ok = ts.n > 0;
     for (int i = 0; ok && i < ts.n; i++) if (ts.t[i].type == T_BAD || ts.t[i].type == T_SEMI) ok = false;
-    ok = ok && match_node(&m, g, 0, ts.n, at_end, NULL);
+    ok = ok && match_node(&m, g, 0, ts.n, at_end, NULL) && syntax_exact(syntax, &ts);
     free(m.hits);
     toks_free(&ts);
+    free(plain);
     if (ok) return v;
     free(v);
     return NULL;
@@ -8009,6 +8054,12 @@ bool css_syntax_valid(const char *syntax) {
         "length-percentage", "number", "percentage", "resolution", "string", "time", "url",
         "transform-function", "transform-list" };
     if (syntax_is_universal(syntax)) return true;
+    if (strchr(syntax, 92)) {
+        char *plain = syntax_unescape(syntax);
+        bool ok = !strchr(plain, 92) && css_syntax_valid(plain);
+        free(plain);
+        return ok;
+    }
     const char *s = syntax;
     if (!*s) return false;
     for (;;) {
