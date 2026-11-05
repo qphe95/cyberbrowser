@@ -20568,12 +20568,17 @@ static void layout_animate(LayoutContext *ctx, const CssStyleSet *set)
         bool rows = any && anim_has(el, ps);
         /* (a style left as it was, with nothing running: as it was) */
         if (!rows && (!box->s->anim_spec || (i < base && ctx->style_left && ctx->style_left[i]))) continue;
+        /* (under display: none nothing runs: what ran is cancelled, nothing starts) */
+        bool unrendered = box->s->display == CSS_DISPLAY_NONE;
+        for (int up = ctx->tree.nodes[i].parent_idx; up >= 0 && !unrendered; up = ctx->tree.nodes[up].parent_idx)
+            unrendered = ctx->boxes[up].s->display == CSS_DISPLAY_NONE;
+        if (unrendered && !rows) continue;
         AnimVal was[ANIM_NPROP], cur[ANIM_NPROP];
         bool set_p[ANIM_NPROP];
         layout_anim_read(box->s, was);
         u.box = box;
         anim_flow_set(box->s->writing_mode, box->s->direction == 1);
-        const char *spec = box->s->display == CSS_DISPLAY_NONE ? NULL : box->s->anim_spec;
+        const char *spec = unrendered ? NULL : box->s->anim_spec;
         anim_box(el, ps, spec, was, !ctx->cache_readonly, now, layout_anim_keyframes, layout_anim_frame, &u, cur, set_p);
         bool wrote = false;
         for (int p = 0; p < ANIM_NPROP; p++)

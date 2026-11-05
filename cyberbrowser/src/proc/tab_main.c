@@ -18,6 +18,7 @@
  * UI's input: resizes, scrolls and clicks.  A click on a link asks the UI to
  * navigate; every navigation gets a new tab process (the engine holds one
  * page per process). */
+#include "cyber_sampler.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1090,6 +1091,8 @@ int main(int argc, char **argv) {
     memory_report("at start");
 
     send_state(TAB_LOADING);
+    /* (CYBER_SAMPLE: this load's main thread; needs CYBER_NO_SANDBOX to write it) */
+    cyber_sampler_start();
     /* No platform_init: it only starts Winsock, which the sandbox refuses. */
     if (!page_engine_init(NULL)) {
         send_state(TAB_LOAD_FAILED);
@@ -1155,6 +1158,7 @@ load:
     unsigned frames;
     double frames_wall, frames_cpu;
     page_frame_stats(&frames, &frames_wall, &frames_cpu);
+    cyber_sampler_stop();
     fprintf(stderr, "[tab %u] load event at %llu ms (cpu: main thread %.0f ms, process %.0f ms; "
             "%u frames built, %.0f ms, %.0f ms cpu)\n",
             g_tab, loaded_at - g_start_tick, cpu_t, cpu_p, frames, frames_wall, frames_cpu);
