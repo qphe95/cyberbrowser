@@ -91,16 +91,46 @@ static void set_spec(ComputedStyle *cs, const CssPropDef *p, const char *v) {
     }
     int i = prop_idx(p);
     free(cs->spec[i]);
+    /* (the sum it is) */
+    if (strstr(v, "calc-mix(")) {
+        extern char *css_calc_mix_expand(const char *value);
+        char *sum = css_calc_mix_expand(v);
+        if (sum) {
+            cs->spec[i] = sum;
+            return;
+        }
+    }
     cs->spec[i] = strdup(v);
 }
 
 /* One cascaded declaration (in cascade order: the last one wins). */
+static bool marker_allows(const char *prop) {
+    static const char *const pre[] = { "font", "animation", "transition", "text-emphasis", "color", "content", "cursor", "direction", "hyphens", "letter-spacing",
+                                       "line-break", "line-height", "overflow-wrap", "quotes", "tab-size", "text-combine-upright", "text-decoration-skip-ink",
+                                       "text-shadow", "text-transform", "unicode-bidi", "white-space", "word-break", "word-spacing", "text-wrap" };
+    for (size_t k = 0; k < sizeof pre / sizeof pre[0]; k++)
+        if (!strncmp(prop, pre[k], strlen(pre[k]))) return true;
+    return false;
+}
+
+static bool first_line_allows(const char *prop) {
+    static const char *const pre[] = { "background", "color", "font", "letter-spacing", "word-spacing", "opacity", "text-", "line-height",
+                                       "vertical-align", "ruby-", "-webkit-text", "white-space" };
+    for (size_t k = 0; k < sizeof pre / sizeof pre[0]; k++)
+        if (!strncmp(prop, pre[k], strlen(pre[k]))) return true;
+    return false;
+}
+
 static void collect(void *ud, const char *prop, const char *value, bool important) {
     CST("decl %s: %s", prop, value);
     (void)important;
     ComputedStyle *cs = ud;
     size_t pl = strlen(prop);
     if (css_prop_is_custom(prop, pl)) return;      /* (read from the layout when asked for) */
+    /* (what a first line or first letter can have) */
+    if (cs->pseudo == 4 && !first_line_allows(prop)) return;
+    if (cs->pseudo == 5 && !marker_allows(prop)) return;
+    if (cs->pseudo == 3 && (!strcmp(prop, "position") || !strncmp(prop, "transition", 10) || !strcmp(prop, "transform") || !strcmp(prop, "word-break"))) return;
     const CssPropDef *p = css_prop_find(prop, pl);
     if (!p) return;
     /* var() that did not resolve: invalid at computed-value time (unset) */
@@ -147,6 +177,11 @@ static void refresh(JSContextHandle ctx, ComputedStyle *cs) {
     if (cs->pseudo) {
         memset(&cs->used, 0, sizeof cs->used);
         cs->styled = JS_IsObject(el) && dom_kind(cs->el) == DOM_K_ELEMENT;
+        /* (a marker's own defaults) */
+        if (cs->styled && cs->pseudo == 5) {
+            static const char *const md[][2] = { { "unicode-bidi", "isolate" }, { "font-variant-numeric", "tabular-nums" }, { "text-transform", "none" }, { "text-indent", "0px" } };
+            for (size_t k = 0; k < sizeof md / sizeof md[0]; k++) set_spec(cs, css_prop_find(md[k][0], strlen(md[k][0])), md[k][1]);
+        }
         if (cs->styled) layout_query_pseudo_cascade(ctx, el, cs->pseudo, collect, cs);
     } else {
         cs->styled = JS_IsObject(el) && dom_kind(cs->el) == DOM_K_ELEMENT &&
@@ -179,11 +214,97 @@ static ComputedStyle *parent_of(JSContextHandle ctx, ComputedStyle *cs) {
 extern double css_length_value(const char *value, double base, double viewport, double font_size);
 static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p);
 
+/* One percentage of a random(): a number, maybe times another. */
+static bool random_pct(const char *a, const char *b, double *out) {
+    char *t = strndup(a, (size_t)(b - a)), *e = NULL;
+    double x = strtod(t, &e), y = 1.0;
+    while (*e == ' ') e++;
+    if (*e == '*') { char *e2 = NULL; y = strtod(e + 1, &e2); e = e2; while (*e == ' ') e++; }
+    bool ok = *e == '%' && e[1 + strspn(e + 1, " ")] == 0;
+    free(t);
+    *out = x * y;
+    return ok;
+}
+
+/* random(a%, b%) as it computes: random(fixed where-it-fell, a%, b%). */
+static char *random_fixed(const char *spec, const char *now) {
+    const char *r = strstr(spec, "random(");
+    if (r != spec) return NULL;
+    size_t sl = strlen(spec);
+    if (spec[sl - 1] != ')') return NULL;
+    const char *a = r + 7, *e = spec + sl - 1;
+    const char *c1 = memchr(a, ',', (size_t)(e - a));
+    if (!c1) return NULL;
+    const char *first = a;
+    while (*first == ' ') first++;
+    if (isalpha((unsigned char)*first) || *first == '-') { a = c1 + 1; c1 = memchr(a, ',', (size_t)(e - a)); if (!c1) return NULL; }
+    if (memchr(c1 + 1, ',', (size_t)(e - c1 - 1))) return NULL;
+    double lo, hi;
+    if (!random_pct(a, c1, &lo) || !random_pct(c1 + 1, e, &hi)) return NULL;
+    double v = strtod(now, NULL), f = hi > lo ? (v - lo) / (hi - lo) : 0.0;
+    if (f < 0.0) f = 0.0;
+    if (f > 0.999999) f = 0.999999;
+    char out[128];
+    snprintf(out, sizeof out, "random(fixed %.6g, %.6g%%, %.6g%%)", f, lo, hi);
+    return strdup(out);
+}
+
 static const char *computed_of(JSContextHandle ctx, ComputedStyle *cs, const char *name) {
     const CssPropDef *p = css_prop_find(name, strlen(name));
     if (!p) return "";
     int i = prop_idx(p);
-    if (!cs->comp[i]) cs->comp[i] = compute(ctx, cs, p);
+    if (!cs->comp[i]) {
+        cs->comp[i] = compute(ctx, cs, p);
+        /* (flex-start and flex-end compute to flow-start and flow-end) */
+        char *fx = cs->comp[i] && (name[0] == 'a' || name[0] == 'j') && (!strncmp(name, "align-", 6) || !strncmp(name, "justify-", 8)) ? strstr(cs->comp[i], "flex-") : NULL;
+        if (fx && (!strcmp(fx, "flex-start") || !strcmp(fx, "flex-end"))) { fx[1] = 'l'; fx[2] = 'o'; fx[3] = 'w'; }
+        /* (gaps don't go below nothing, however they're worked out) */
+        if (cs->comp[i] && cs->comp[i][0] == '-' && (!strcmp(name, "row-gap") || !strcmp(name, "column-gap")) && !strchr(cs->comp[i], '%')) {
+            free(cs->comp[i]);
+            cs->comp[i] = strdup("0px");
+        }
+        /* (a percentage left as it is: its random() stays, with where it fell) */
+        if (cs->comp[i] && cs->spec && cs->spec[i] && strstr(cs->spec[i], "random(") && strchr(cs->comp[i], '%') && !strstr(cs->comp[i], "random(")) {
+            char *fx2 = random_fixed(cs->spec[i], cs->comp[i]);
+            if (fx2) { free(cs->comp[i]); cs->comp[i] = fx2; }
+        }
+        /* (the same shape and box twice: once; each's default box goes without saying) */
+        if (cs->comp[i] && name[0] == 'b' && !strcmp(name, "border-shape")) {
+            char *v = cs->comp[i];
+            size_t cl = strlen(v);
+            if (strstr(v, "-box") && cl % 2 && v[cl / 2] == ' ' && !strncmp(v, v + cl / 2 + 1, cl / 2)) v[cl / 2] = 0;
+            else {
+                char *bb = strstr(v, ") border-box ");
+                if (bb) memmove(bb + 1, bb + 12, strlen(bb + 12) + 1);
+                cl = strlen(v);
+                if (cl > 13 && !strcmp(v + cl - 13, ") padding-box")) v[cl - 12] = 0;
+            }
+            for (char *hb; (hb = strstr(v, " half-border-box")) != NULL; ) memmove(hb, hb + 16, strlen(hb + 16) + 1);
+        }
+        /* (a percentage in calc() and nothing else: the percentage) */
+        if (cs->comp[i] && !strncmp(cs->comp[i], "calc(", 5)) {
+            char *pe = NULL;
+            strtod(cs->comp[i] + 5, &pe);
+            if (pe != cs->comp[i] + 5 && pe[0] == '%' && pe[1] == ')' && !pe[2]) {
+                size_t pl = (size_t)(pe + 1 - (cs->comp[i] + 5));
+                memmove(cs->comp[i], cs->comp[i] + 5, pl);
+                cs->comp[i][pl] = 0;
+            }
+        }
+        /* (the size a font of no size is kept at) */
+        if (cs->comp[i] && name[0] == 'f' && !strcmp(name, "font-size") && !strcmp(cs->comp[i], "0.01px")) {
+            free(cs->comp[i]);
+            cs->comp[i] = strdup("0px");
+        }
+        /* (legacy: the parent's, if that's legacy with a direction) */
+        if (cs->comp[i] && name[0] == 'j' && !strcmp(cs->comp[i], "legacy") && !strcmp(name, "justify-items")) {
+            ComputedStyle *t = parent_of(ctx, cs);
+            const char *pv = t && t->styled && t->spec ? computed_of(ctx, t, name) : NULL;
+            char *got = pv && !strncmp(pv, "legacy ", 7) ? strdup(pv) : NULL;
+            free(cs->comp[i]);
+            cs->comp[i] = got ? got : strdup("normal");
+        }
+    }
     return cs->comp[i] ? cs->comp[i] : "";
 }
 
@@ -630,12 +751,19 @@ void computed_style_after_restyle(JSContextHandle ctx)
                 memcpy(word, q, l);
                 word[l] = 0;
                 const CssPropDef *p = css_prop_find(word, l);
-                if (p && !p->longhands && anim_prop_of(word) < 0) {
-                    size_t h = (((size_t)el * 2654435761u) ^ ((size_t)p >> 4)) % BEFORE_N;
-                    if (!(g_before[h].el == el && g_before[h].p == p)) {
-                        const char *cur = computed_of(ctx, t, word);
+                /* (a shorthand names its longhands) */
+                const char **lnames = NULL;
+                const char *one = word;
+                int ln = p && p->longhands ? css_prop_longhands(p, &lnames) : 1;
+                for (int li = 0; p && li < ln; li++) {
+                    const char *wn = p->longhands ? lnames[li] : one;
+                    const CssPropDef *lp = p->longhands ? css_prop_find(wn, strlen(wn)) : p;
+                    if (!lp || lp->longhands || anim_prop_of(wn) >= 0) continue;
+                    size_t h = (((size_t)el * 2654435761u) ^ ((size_t)lp >> 4)) % BEFORE_N;
+                    if (!(g_before[h].el == el && g_before[h].p == lp)) {
+                        const char *cur = computed_of(ctx, t, wn);
                         char *old_spec = NULL;
-                        free(before_swap(el, p, cur, t->spec[prop_idx(p)], &old_spec));
+                        free(before_swap(el, lp, cur, t->spec[prop_idx(lp)], &old_spec));
                         free(old_spec);
                     }
                 }
@@ -704,6 +832,7 @@ static char *grid_tracks_resolved(const char *spec, const double *tr, int nt)
     return strdup(o ? out : "none");
 }
 
+static int g_comp_base;
 static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p) {
     CST("compute %s", p->name);
     if (!cs->styled) return strdup("");
@@ -876,14 +1005,17 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
         #define in_calc g_in_calc
         bool sized = !strcmp(n, "width") || !strcmp(n, "height") || !strcmp(n, "min-width") || !strcmp(n, "min-height") ||
                      !strcmp(n, "max-width") || !strcmp(n, "max-height");
-        if (sized && !in_calc && !cs->pseudo && s && strstr(s, "calc-size(") && cs->used.rendered) {
+        /* (read in the middle of another's: its basis has none, so it doesn't go round) */
+        if (sized && in_calc < 4 && !cs->pseudo && s && strstr(s, "calc-size(") && cs->used.rendered) {
             GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberCalcSize");
             if (JS_IsFunction(ctx, fn)) {
                 GCValue args[3] = { dom_js(ctx, cs->el), JS_NewString(ctx, n), JS_NewString(ctx, s) };
                 in_calc++;
                 GCValue got = JS_Call(ctx, fn, JS_UNDEFINED, 3, args);
                 in_calc--;
-                /* (reading it there took the snapshot again: the strings are new) */
+                /* (reading it there took the snapshot again, with what it tried in force:
+                 * once more, now that's gone) */
+                refresh(ctx, cs);
                 s = cs->spec ? cs->spec[i] : NULL;
                 if (JS_IsException(got)) JS_GetException(ctx);
                 else if (JS_IsString(got)) {
@@ -1050,7 +1182,34 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
     /* (script working out what a declaration comes to: the declaration alone) */
     int ap = is_transform || individual || generic_size || wide_color || (sized_prop && (g_in_calc || g_in_hook)) ? -1 : anim_prop_of(n);
     AnimVal av;
-    if (ap >= 0 && anim_value(cs->el, cs->pseudo, ap, (double)anim_time_ms(), &av)) {
+    /* (what composition builds on is the value under the animation; the script works it out) */
+    extern bool g_css_saw_composition;
+    bool comp_path = g_css_saw_composition && !g_comp_base && ap >= 0 && !g_in_hook && !g_in_calc && !cs->pseudo && anim_has(cs->el, 0) && strncmp(n, "animation", 9);
+    bool comp_used = false;
+    if (comp_path) {
+        bool held = cs->used.rendered;
+        cs->used.rendered = false;
+        g_comp_base++;
+        char *under = compute(ctx, cs, p);
+        g_comp_base--;
+        /* (a font size is read from the box) */
+        if (!strcmp(n, "font-size") && s && strstr(s, "px") && !strchr(s, '(')) { free(under); under = strdup(s); }
+        cs->used.rendered = held;
+        GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberGenericAnim");
+        if (under && JS_IsFunction(ctx, fn)) {
+            GCValue args[7] = { dom_js(ctx, cs->el), JS_NewString(ctx, n), JS_NewString(ctx, under), JS_UNDEFINED, JS_TRUE, s ? JS_NewString(ctx, s) : JS_NULL, JS_NULL };
+            g_in_hook++;
+            GCValue got = JS_Call(ctx, fn, JS_UNDEFINED, 7, args);
+            g_in_hook--;
+            if (JS_IsException(got)) JS_GetException(ctx);
+            else if (JS_IsString(got)) {
+                const char *t = JS_ToCString(ctx, got);
+                if (t) { free(r); r = strdup(t); comp_used = true; }
+            }
+        }
+        free(under);
+    }
+    if (!g_comp_base && !comp_used && ap >= 0 && anim_value(cs->el, cs->pseudo, ap, (double)anim_time_ms(), &av)) {
         char b[96];
         anim_val_css(ap, &av, b, sizeof b);
         /* (translate: its numbers on their own) */
@@ -1066,7 +1225,7 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
     }
     /* (one the engine doesn't animate itself: over what it comes to, in script) */
     #define in_hook g_in_hook
-    bool generic = ap < 0 && !in_hook && !g_in_calc && !cs->pseudo && strncmp(n, "animation", 9) && strncmp(n, "transition", 10);
+    bool generic = ap < 0 && !in_hook && !g_comp_base && !g_in_calc && !cs->pseudo && strncmp(n, "animation", 9) && strncmp(n, "transition", 10);
     /* (one the engine animates, with nothing of its own on it: keyframes it can't read) */
     bool keyframes_only = false;
     if (!generic && sized_prop && !in_hook && !g_in_calc && !cs->pseudo && anim_has(cs->el, 0) &&
@@ -1074,6 +1233,7 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
         generic = true;
         keyframes_only = true;
     }
+
     char *before_spec = NULL;
     char *now_spec = (sized_prop || color_prop) && s ? strdup(s) : NULL;
     char *before = generic && !keyframes_only ? before_swap(cs->el, p, r, now_spec, &before_spec) : NULL;
@@ -1278,8 +1438,13 @@ char *computed_style_value(JSContextHandle ctx, ComputedStyle *cs, const char *p
         const char **names;
         int n = css_prop_longhands(p, &names);
         const char **vals = calloc((size_t)(n ? n : 1), sizeof(char *));
-        for (int i = 0; i < n; i++) vals[i] = computed_of(ctx, cs, names[i]);
+        /* (a copy: reading the next may style again, under an animation) */
+        for (int i = 0; i < n; i++) {
+            const char *v = computed_of(ctx, cs, names[i]);
+            vals[i] = v ? strdup(v) : NULL;
+        }
         char *s = css_prop_shorthand_serialize(p, vals);
+        for (int i = 0; i < n; i++) free((char *)vals[i]);
         free(vals);
         return s ? s : strdup("");
     }

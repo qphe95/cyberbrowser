@@ -362,6 +362,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     CssJustifyContent align_content;
     /* not normal or stretch, so nothing stretches to fill: 1 justify-content, 2 align-content */
     unsigned char content_set;
+    /* (calc-size() on a keyword: the expression over what the keyword comes to) */
+    const char *csz_w, *csz_h;
     CssAlignItems align_items;
 
     double flex_basis;
@@ -433,6 +435,9 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * styled side without an explicit width is `medium` (3px). */
     unsigned char border_styled;
     unsigned char border_width_set;
+    /* container-type (0 normal, 1 inline-size, 2 size) and container-name */
+    unsigned char container_type;
+    const char *container_name;
     /* transform: translation part only (px plus fraction of own size). */
     double translate_x, translate_y;
     double translate_xpct, translate_ypct;

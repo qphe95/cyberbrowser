@@ -168,6 +168,43 @@ static GCValue js_anim_now(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     return JS_NewFloat64(ctx, (double)anim_time_ms());
 }
 
+/* __cyberCssLonghands(name): the longhands of a shorthand, or null. */
+static GCValue js_css_longhands(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    const char *n = argc > 0 ? JS_ToCString(ctx, argv[0]) : NULL;
+    const CssPropDef *p = n ? css_prop_find(n, strlen(n)) : NULL;
+    if (!p || !p->longhands) return JS_NULL;
+    const char **names;
+    int c = css_prop_longhands(p, &names);
+    GCValue arr = JS_NewArray(ctx);
+    for (int i = 0; i < c; i++) JS_SetPropertyUint32(ctx, arr, (uint32_t)i, JS_NewString(ctx, names[i]));
+    return arr;
+}
+
+/* __cyberCssExpand(name, value): { longhand: value }, or null. */
+static GCValue js_css_expand(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    const char *n = argc > 1 ? JS_ToCString(ctx, argv[0]) : NULL;
+    const char *v = argc > 1 ? JS_ToCString(ctx, argv[1]) : NULL;
+    const CssPropDef *p = n ? css_prop_find(n, strlen(n)) : NULL;
+    if (!p || !p->longhands || !v || strstr(v, "var(")) return JS_NULL;
+    const char **names;
+    char **vals = NULL;
+    int c = css_prop_longhands(p, &names);
+    if (css_prop_expand(p, v, &vals) != c) return JS_NULL;
+    GCValue o = JS_NewObject(ctx);
+    bool ok = true;
+    for (int i = 0; i < c; i++) {
+        if (!vals[i][0]) ok = false;
+        else JS_SetPropertyStr(ctx, o, names[i], JS_NewString(ctx, vals[i]));
+        free(vals[i]);
+    }
+    free(vals);
+    return ok ? o : JS_NULL;
+}
+
 /* __cyberAnimRunning(element): [name, progress, ...] of its CSS animations. */
 static GCValue js_anim_running(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
 {
@@ -219,6 +256,8 @@ void anim_api_install(JSContextHandle ctx, GCValue global)
     JS_DefinePropertyValueStr(ctx, global, "__cyberAnimStyle", JS_NewCFunction(ctx, js_anim_style, "__cyberAnimStyle", 2), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberAnimWake", JS_NewCFunction(ctx, js_anim_wake, "__cyberAnimWake", 0), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberCssIsShorthand", JS_NewCFunction(ctx, js_css_is_shorthand, "__cyberCssIsShorthand", 1), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberCssLonghands", JS_NewCFunction(ctx, js_css_longhands, "__cyberCssLonghands", 1), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberCssExpand", JS_NewCFunction(ctx, js_css_expand, "__cyberCssExpand", 2), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberAnimNow", JS_NewCFunction(ctx, js_anim_now, "__cyberAnimNow", 0), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberAnimRunning", JS_NewCFunction(ctx, js_anim_running, "__cyberAnimRunning", 1), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberAnimRow", JS_NewCFunction(ctx, js_anim_row, "__cyberAnimRow", 4), JS_PROP_CONFIGURABLE);

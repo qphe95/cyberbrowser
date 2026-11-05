@@ -182,12 +182,40 @@
     var PSEUDO_CLASS_FNS = 'dir has host host-context is lang not nth-child nth-last-child nth-last-of-type nth-of-type state where heading active-view-transition-type'.split(' ');
     var PSEUDO_ELEMENTS = ('after backdrop before cue file-selector-button first-letter first-line grammar-error marker ' +
         'placeholder selection spelling-error target-text view-transition details-content checkmark picker-icon ' +
-        'scroll-marker scroll-marker-group column scroll-button -webkit-scrollbar -webkit-scrollbar-thumb ' +
+        'scroll-marker scroll-marker-group column search-text -webkit-scrollbar -webkit-scrollbar-thumb ' +
         '-webkit-scrollbar-track -webkit-scrollbar-button -webkit-scrollbar-corner -webkit-scrollbar-track-piece ' +
         '-webkit-resizer -webkit-input-placeholder -webkit-file-upload-button -webkit-inner-spin-button ' +
         '-webkit-outer-spin-button -webkit-search-cancel-button -webkit-details-marker').split(' ');
     var PSEUDO_ELEMENT_FNS = 'part slotted highlight cue view-transition-group view-transition-image-pair view-transition-old view-transition-new picker scroll-button'.split(' ');
     var LEGACY_PSEUDO_ELEMENTS = ['before', 'after', 'first-line', 'first-letter'];
+
+    /* What may follow a pseudo-element in a compound. */
+    var HIGHLIGHTS = /^(selection|target-text|spelling-error|grammar-error|highlight|search-text)$/;
+    var NOT_AFTER_PART = /^(first|left|right|empty|root|scope|host|first-child|last-child|only-child|first-of-type|last-of-type|only-of-type|nth-child|nth-last-child|nth-of-type|nth-last-of-type|host-context|has)$/;
+    function pseudoChainOk(a, b) {
+        if (a === 'part') return !HIGHLIGHTS.test(b) ? b !== 'part' && b !== 'slotted' : true;
+        if (a === 'slotted') return /^(before|after|marker|placeholder|file-selector-button)$/.test(b);
+        if (a === 'before' || a === 'after') return b === 'marker';
+        if (a === 'column') return b === 'scroll-marker';
+        return /^-webkit-/.test(a) || /^-webkit-/.test(b);
+    }
+    function checkCompound(c, last) {
+        var pe = null;
+        for (var i = 0; i < c.items.length; i++) {
+            var it = c.items[i];
+            if (it.k === 'pelem' || it.k === 'pelemfn') {
+                if (pe && !pseudoChainOk(pe, it.v)) throw new SyntaxError('pseudo-element here');
+                pe = it.v;
+            } else if (pe) {
+                if (it.k !== 'pclass' && it.k !== 'pclassfn') throw new SyntaxError('after a pseudo-element');
+                if (HIGHLIGHTS.test(pe) && !(pe === 'search-text' && (it.v === 'current' || it.v === 'not'))) throw new SyntaxError('after a highlight');
+                if (it.v === 'state' && pe !== 'part') throw new SyntaxError(':state() after a pseudo-element');
+                if (pe === 'part' && NOT_AFTER_PART.test(it.v)) throw new SyntaxError('after ::part()');
+                if (pe === 'slotted' && !/^(is|where|not)$/.test(it.v)) throw new SyntaxError('after ::slotted()');
+            }
+        }
+        if (pe && !last) throw new SyntaxError('combinator after a pseudo-element');
+    }
 
     function SelectorParser(toks, nested) {
         this.toks = toks;
@@ -239,10 +267,12 @@
             var first = this.compound();
             if (!first) throw new SyntaxError('expected a selector');
             parts.push(first);
+            var prevCompound = first;
             for (;;) {
                 var ws = this.skipWS();
                 t = this.peek();
                 if (!t || t.t === ',' || t.t === ')' || t.t === '{') break;
+                checkCompound(prevCompound, false);
                 var comb = ws ? ' ' : null;
                 if (t.t === 'delim' && (t.v === '>' || t.v === '+' || t.v === '~')) {
                     comb = t.v;
@@ -256,7 +286,9 @@
                 if (!c) throw new SyntaxError('expected a compound selector');
                 parts.push({ comb: comb });
                 parts.push(c);
+                prevCompound = c;
             }
+            checkCompound(prevCompound, true);
             return parts;
         },
         /* type? subclass* (pseudo-element pseudo-class*)*  */
@@ -378,6 +410,7 @@
             if (!element && fn === 'not') {
                 var l = this.list(false, false);
                 if (!l.length) throw new SyntaxError('empty :not');
+                if (JSON.stringify(l).indexOf('"pelem') >= 0) throw new SyntaxError('pseudo-element in :not');
                 return { list: l };
             }
             if (!element && fn === 'has') {
@@ -419,9 +452,12 @@
                 count++;
             }
             raw = raw.trim();
-            if (!raw && fn !== 'heading') throw new SyntaxError('empty argument');
+            if (!raw) throw new SyntaxError('empty argument');
+            if (fn === 'state' && !/^(?:[a-zA-Z_-]|[^\x00-\x7f]|\\.)(?:[\w-]|[^\x00-\x7f]|\\.)*$/.test(raw)) throw new SyntaxError('bad :state');
+            if (element && fn === 'scroll-button' && !/^(\*|up|down|left|right|block-start|block-end|inline-start|inline-end|prev|next)$/i.test(raw)) throw new SyntaxError('bad ::scroll-button');
+            if (element && fn === 'picker' && !/^select$/i.test(raw)) throw new SyntaxError('bad ::picker');
             if (fn === 'dir' && !/^(ltr|rtl)$/i.test(raw)) throw new SyntaxError('bad :dir');
-            if (fn === 'heading' && raw && !/^\s*\d+(\s*,\s*\d+)*\s*$/.test(raw)) throw new SyntaxError('bad :heading');
+            if (fn === 'heading' && raw && !/^\s*[-+]?\d+(\s*,\s*[-+]?\d+)*\s*$/.test(raw)) throw new SyntaxError('bad :heading');
             return { raw: raw };
         },
         /* <an+b>: returns [a, b] */
@@ -466,6 +502,8 @@
             var it = c.items[k];
             switch (it.k) {
             case 'type':
+                /* (an implied * before a pseudo-element goes without saying) */
+                if (it.v === '*' && it.ns === null && c.items[k + 1] && (c.items[k + 1].k === 'pelem' || c.items[k + 1].k === 'pelemfn')) break;
                 if (it.ns !== null) s += (it.ns === '*' ? '*' : serIdent(it.ns)) + '|';
                 s += it.v === '*' ? '*' : serIdent(it.v);
                 break;
@@ -519,9 +557,24 @@
         if (/::view-transition/i.test(text)) global.document.createDocumentFragment().querySelector(text);
         return serList(list);
     }
-    function selectorValid(text) {
-        try { parseSelectorList(text); return true; } catch (e) { return false; }
+    /* (the end of the input closes what's open) */
+    function selectorClosed(text) {
+        var open = [], q = '';
+        for (var i = 0; i < text.length; i++) {
+            var c = text[i];
+            if (c === '\\') { i++; continue; }
+            if (q) { if (c === q) q = ''; continue; }
+            if (c === '"' || c === "'") q = c;
+            else if (c === '(') open.push(')');
+            else if (c === '[') open.push(']');
+            else if (c === ')' || c === ']') { if (open.pop() !== c) return text; }
+        }
+        return text + q + open.reverse().join('');
     }
+    function selectorValid(text) {
+        try { parseSelectorList(selectorClosed(text)); return true; } catch (e) { return false; }
+    }
+    Object.defineProperty(global, '__cyberSelectorValid', { configurable: true, value: selectorValid });
 
     /* ==================================================================
      * MediaList
@@ -681,6 +734,63 @@
     var CSSNamespaceRule = subclass('CSSNamespaceRule', CSSRule);
     var CSSFontFaceRule = subclass('CSSFontFaceRule', CSSRule);
     var CSSPageRule = subclass('CSSPageRule', CSSGroupingRule);
+    /* @container's prelude: names and conditions; what's in parentheses may be anything. */
+    function containerTerms(text) {
+        var out = [], i = 0, n = text.length;
+        while (i < n) {
+            while (i < n && /\s/.test(text[i])) i++;
+            if (i >= n) break;
+            var st = i, d = 0;
+            while (i < n && (d || !/\s/.test(text[i]))) {
+                if (text[i] === '(') d++;
+                else if (text[i] === ')') { d--; if (d < 0) return null; if (!d) { i++; break; } }
+                i++;
+            }
+            if (d) return null;
+            out.push(text.slice(st, i));
+        }
+        return out;
+    }
+    function containerIsTerm(w) { return /^(?:[a-zA-Z_-][\w-]*)?\(/.test(w) && /\)$/.test(w); }
+    function containerConditionValid(w) {
+        if (!w.length) return false;
+        var i = 0;
+        if (/^not$/i.test(w[0])) return w.length === 2 && containerIsTerm(w[1]);
+        if (!containerIsTerm(w[0])) return false;
+        i = 1;
+        var op = null;
+        while (i < w.length) {
+            if (!/^(and|or)$/i.test(w[i])) return false;
+            var o = w[i].toLowerCase();
+            if (op && op !== o) return false;
+            op = o;
+            if (i + 1 >= w.length || !containerIsTerm(w[i + 1])) return false;
+            i += 2;
+        }
+        return true;
+    }
+    function containerPreludeValid(prelude) {
+        var parts = [], d = 0, cur = '';
+        for (var k = 0; k < prelude.length; k++) {
+            var c = prelude[k];
+            if (c === '(') d++; else if (c === ')') d--;
+            if (c === ',' && !d) { parts.push(cur); cur = ''; } else cur += c;
+        }
+        parts.push(cur);
+        for (var q = 0; q < parts.length; q++) {
+            var w = containerTerms(parts[q].replace(/\/\*[\s\S]*?\*\//g, ' '));
+            if (!w || !w.length) return false;
+            /* (a name, if the first word isn't a term or not) */
+            if (!containerIsTerm(w[0]) && !/^not$/i.test(w[0])) {
+                if (!/^(?:[a-zA-Z_-]|[^\x00-\x7f]|\\.)(?:[\w-]|[^\x00-\x7f]|\\.)*$/.test(w[0])) return false;
+                if (/^(and|or|none|default|initial|inherit|unset|revert|revert-layer)$/i.test(w[0])) return false;
+                w.shift();
+                if (!w.length) continue;
+            }
+            if (!containerConditionValid(w)) return false;
+        }
+        return true;
+    }
     /* @font-feature-values: the names of feature values, by kind */
     var FFV_KINDS = { 'stylistic': 1, 'historical-forms': 1, 'styleset': 0, 'character-variant': 2, 'swash': 1, 'ornaments': 1, 'annotation': 1 };
     var CSSFontFeatureValuesRule = subclass('CSSFontFeatureValuesRule', CSSRule);
@@ -1367,7 +1477,7 @@
                 r.__rules = parseRules(p.block, 'group', r);
                 break;
             case 'container':
-                if (p.block === null) return null;
+                if (p.block === null || !containerPreludeValid(p.prelude)) return null;
                 var cm = /^([A-Za-z_-][\w-]*)\s+(.*)$/.exec(p.prelude);
                 var cname = cm && !/^(not|style|scroll-state)$/i.test(cm[1]) && !/^\(/.test(cm[1]) ? cm[1] : '';
                 r = makeRule(CSSContainerRule, 'container', { __cond: p.prelude.replace(/\s+/g, ' ').trim(), __cname: cname,

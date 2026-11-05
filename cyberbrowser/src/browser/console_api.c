@@ -600,12 +600,34 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
             const char *q = p[0] == ':' ? (p[1] == ':' ? p + 2 : p + 1) : NULL;
             if (q && !strcasecmp(q, "before")) ps = 1;
             else if (q && !strcasecmp(q, "after")) ps = 2;
+            else if (q && !strcasecmp(q, "first-letter")) ps = 3;
+            else if (q && !strcasecmp(q, "first-line")) ps = 4;
+            else if (q && p[1] == ':' && !strcasecmp(q, "marker")) ps = 5;
             else if (q && p[1] == ':' && !strcasecmp(q, "scroll-marker")) ps = 6;
             else if (q && p[1] == ':' && !strcasecmp(q, "scroll-marker-group")) ps = 8;
+            /* (what doesn't parse has no style at all) */
+            else if (q && (strchr(q, '(') || strchr(q, ')') || strchr(q, ':'))) {
+                GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberSelectorValid");
+                if (JS_IsFunction(ctx, fn)) {
+                    size_t pl = strlen(p);
+                    char *full = (char *)malloc(pl + 2);
+                    if (full) {
+                        full[0] = '*';
+                        memcpy(full + 1, p, pl + 1);
+                        GCValue arg = JS_NewString(ctx, full);
+                        GCValue ok = JS_Call(ctx, fn, JS_UNDEFINED, 1, &arg);
+                        free(full);
+                        if (JS_IsBool(ok) && !JS_ToBool(ctx, ok)) {
+                            JS_FreeCString(ctx, p);
+                            return css_style_decl_new(ctx, DOM_NULL, NULL);
+                        }
+                    }
+                }
+            }
             JS_FreeCString(ctx, p);
         }
     }
-    const char *key = ps == 1 ? "__cyber_cs_before" : ps == 2 ? "__cyber_cs_after" : ps == 6 ? "__cyber_cs_marker"
+    const char *key = ps == 1 ? "__cyber_cs_before" : ps == 2 ? "__cyber_cs_after" : ps == 3 ? "__cyber_cs_letter" : ps == 4 ? "__cyber_cs_line" : ps == 5 ? "__cyber_cs_list_marker" : ps == 6 ? "__cyber_cs_marker"
                     : ps == 8 ? "__cyber_cs_marker_group" : "__cyber_cs";
     GCValue cached = JS_GetPropertyStr(ctx, element, key);
     if (css_style_decl_is(ctx, cached)) return cached;

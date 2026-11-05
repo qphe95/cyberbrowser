@@ -3285,6 +3285,20 @@ GCValue js_document_getElementById(JSContextHandle ctx, GCValue this_val, int ar
     return dom_js(ctx, found);
 }
 
+/* Whether a selector parses: a pseudo-element's rules are the CSSOM parser's. */
+static bool query_valid(JSContextHandle ctx, const char *s, size_t n) {
+    if ((strstr(s, "::") || strstr(s, ":state") || strstr(s, ":heading") || strstr(s, ":host")) && !strstr(s, "::view-transition")) {
+        GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberSelectorValid");
+        if (JS_IsFunction(ctx, fn)) {
+            GCValue arg = JS_NewStringLen(ctx, s, n);
+            GCValue r = JS_Call(ctx, fn, JS_UNDEFINED, 1, &arg);
+            if (JS_IsBool(r)) return JS_ToBool(ctx, r);
+            if (JS_IsException(r)) JS_GetException(ctx);
+        }
+    }
+    return dom_query_valid(s, n);
+}
+
 /* A SyntaxError for a selector that doesn't parse (frees it). */
 static GCValue bad_selector(JSContextHandle ctx, const char *s) {
     char msg[160];
@@ -3313,7 +3327,7 @@ static GCValue query_first(JSContextHandle ctx, NodeId scope, GCValue sel, bool 
     size_t n = 0;
     const char *s = JS_ToCStringLen(ctx, &n, sel);
     if (!s) return JS_EXCEPTION;
-    if (!dom_query_valid(s, n)) return bad_selector(ctx, s);
+    if (!query_valid(ctx, s, n)) return bad_selector(ctx, s);
     query_note_target(ctx, s, n);
     NodeId r = dom_query_first(scope, s, n, include_self);
     JS_FreeCString(ctx, s);
@@ -3325,7 +3339,7 @@ static GCValue query_all(JSContextHandle ctx, NodeId scope, GCValue sel, bool in
     size_t n = 0;
     const char *s = JS_ToCStringLen(ctx, &n, sel);
     if (!s) return JS_EXCEPTION;
-    if (!dom_query_valid(s, n)) return bad_selector(ctx, s);
+    if (!query_valid(ctx, s, n)) return bad_selector(ctx, s);
     query_note_target(ctx, s, n);
     DomNodeList l = dom_query_all(scope, s, n, include_self);
     JS_FreeCString(ctx, s);
@@ -4805,7 +4819,7 @@ GCValue js_element_matches(JSContextHandle ctx, GCValue this_val,
     if (argc < 1) return JS_ThrowTypeError(ctx, "Failed to execute 'matches': 1 argument required.");
     const char *selector = JS_ToCString(ctx, argv[0]);
     if (!selector) return JS_EXCEPTION;
-    if (!dom_query_valid(selector, strlen(selector))) return bad_selector(ctx, selector);
+    if (!query_valid(ctx, selector, strlen(selector))) return bad_selector(ctx, selector);
     bool r = matches_selector(ctx, this_val, selector);
     JS_FreeCString(ctx, selector);
     return JS_NewBool(ctx, r);
@@ -4816,7 +4830,7 @@ GCValue js_element_closest(JSContextHandle ctx, GCValue this_val,
     if (argc < 1) return JS_ThrowTypeError(ctx, "Failed to execute 'closest': 1 argument required.");
     const char *selector = JS_ToCString(ctx, argv[0]);
     if (!selector) return JS_EXCEPTION;
-    if (!dom_query_valid(selector, strlen(selector))) return bad_selector(ctx, selector);
+    if (!query_valid(ctx, selector, strlen(selector))) return bad_selector(ctx, selector);
 
     query_note_target(ctx, selector, strlen(selector));
     NodeId scope = dom_node_of(this_val);

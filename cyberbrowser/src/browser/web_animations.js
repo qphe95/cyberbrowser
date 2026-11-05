@@ -120,7 +120,7 @@
         return { lits: lits, nums: nums };
     }
     function fmt(v) { return String(Math.round(v * 1e5) / 1e5); }
-    var NONNEG = /^(border-image-(slice|width|outset)|mask-border-(slice|width|outset)|font-stretch|font-width|tab-size|hyphenate-limit-|width|height|min-|max-|padding|border(-[a-z]+)*-(width|radius)|font-size|line-height|flex-grow|flex-shrink|flex-basis|outline-width|column-width|column-gap|row-gap|gap$|perspective$|border-spacing|shape-margin|letter-spacing-none)/;
+    var NONNEG = /^(background-size|mask-size|border-image-(slice|width|outset)|mask-border-(slice|width|outset)|font-stretch|font-width|tab-size|hyphenate-limit-|width|height|min-|max-|padding|border(-[a-z]+)*-(width|radius)|font-size|line-height|flex-grow|flex-shrink|flex-basis|outline-width|column-width|column-gap|row-gap|gap$|perspective$|border-spacing|shape-margin|letter-spacing-none)/;
     var INTEGER = /^(z-index|order|orphans|widows|column-count|flood-none)$/;
     function finish(prop, v) {
         /* (a gap rule's width snaps as a border's does) */
@@ -454,7 +454,6 @@
         return [0, 1, 2, 3].map(function (i) { return a[i] * ka + b[i] * kb; });
     }
     function tfLerpMatrix(A, B, t) {
-        if (is2D(A) && is2D(B)) return lerp2(A, B, t);
         var a = dec3(A), b = dec3(B);
         if (!a || !b) return t < 0.5 ? A : B;
         var l = function (x, y) { return x.map(function (v, i) { return v + (y[i] - v) * t; }); };
@@ -572,8 +571,6 @@
     }
     function individualInterpolate(prop, a, b, t) {
         var out, i;
-        if (t === 0 && a === 'none') return a;
-        if (t === 1 && b === 'none') return b;
         if (prop === 'translate') {
             var ta = translateParts(a), tb = translateParts(b);
             out = [];
@@ -582,8 +579,6 @@
                 if (c === null) return t < 0.5 ? a : b;
                 out.push(c);
             }
-            if (t === 0) return a;
-            if (t === 1) return b;
             var zero = function (s) { return /^-?0(\.0*)?(px)?$/.test(s); };
             if (zero(out[2])) { out.pop(); if (zero(out[1])) out.pop(); }
             return out.join(' ');
@@ -599,7 +594,9 @@
         if (same) {
             var ax = ra.deg || a === 'none' && !rb.deg ? ra : rb, deg = ra.deg + (rb.deg - ra.deg) * t;
             if (!ra.deg && a !== 'none') ax = rb;
-            return (ax.text ? ax.text + ' ' : '') + fmt(deg) + 'deg';
+            /* (the z axis goes without saying; others as unit vectors) */
+            var axis = !ax.text || (Math.abs(ax.z - 1) < 1e-9) ? '' : fine(ax.x) + ' ' + fine(ax.y) + ' ' + fine(ax.z) + ' ';
+            return axis + fmt(deg) + 'deg';
         }
         var quat = function (r) {
             var h = r.deg * DEG / 2, s = Math.sin(h);
@@ -648,7 +645,7 @@
             var v = combine(prop, x, y, how);
             if (v === null) return null;
             /* (a blur is never negative) */
-            out.push(v.replace(/(-?[\d.e-]+px\s+-?[\d.e-]+px\s+)-[\d.e-]+px/, '$10px'));
+            out.push(v.replace(/^((?:rgba?\([^()]*\)\s+)?-?[\d.e-]+px\s+-?[\d.e-]+px\s+)-[\d.e-]+px/, '$10px'));
         }
         return out.join(', ') || 'none';
     }
@@ -984,6 +981,39 @@
     }
     var RULE_LIST = /^(column|row)-rule-(width|color)$/;
     var SHAPE_PROP = /^(clip-path|shape-outside|offset-path)$/;
+    /* border-shape: one or two shapes, each with its box. */
+    function borderShapes(v) {
+        var out = [], s = String(v).trim(), i = 0;
+        while (i < s.length) {
+            while (s[i] === ' ') i++;
+            var o = s.indexOf('(', i);
+            if (o < 0) return null;
+            var d = 0, j = o;
+            for (; j < s.length; j++) { if (s[j] === '(') d++; else if (s[j] === ')' && !--d) break; }
+            var shape = s.slice(i, j + 1), rest = /^\s+([a-z-]+-box)\b/.exec(s.slice(j + 1));
+            out.push({ fn: s.slice(i, o).toLowerCase(), shape: shape, box: rest ? rest[1] : '' });
+            i = j + 1 + (rest ? rest[0].length : 0);
+        }
+        return out;
+    }
+    function borderShapeInterpolate(a, b, t) {
+        if (a === 'none' || b === 'none') return null;
+        var x = borderShapes(a), y = borderShapes(b);
+        if (!x || !y) return null;
+        var one = function (l) { return l.length === 1 ? [{ fn: l[0].fn, shape: l[0].shape, box: l[0].box || 'half-border-box' }, { fn: l[0].fn, shape: l[0].shape, box: l[0].box || 'half-border-box' }] : l; };
+        if (x.length !== y.length) { x = one(x); y = one(y); }
+        var out = [];
+        for (var k = 0; k < x.length; k++) {
+            if (x[k].fn !== y[k].fn || x[k].box !== y[k].box) return null;
+            var m = pathInterpolate(x[k].shape, y[k].shape, t);
+            if (m === null) m = shapeInterpolate(x[k].shape, y[k].shape, t);
+            if (m === null) m = insetInterpolate(x[k].shape, y[k].shape, t, 'clip-path');
+            if (m === null) m = combine('clip-path', x[k].shape, y[k].shape, function (p, q) { return p + (q - p) * t; });
+            if (m === null) return null;
+            out.push(m + (x[k].box ? ' ' + x[k].box : ''));
+        }
+        return out.join(' ');
+    }
     /* (four numbers that are one, or two, as box values come to) */
     function boxCollapse(v) {
         var p = v.split(' ');
@@ -1146,18 +1176,88 @@
         if (!m) return null;
         return /infinity/i.test(m[1]) ? (m[1][0] === '-' ? -Infinity : Infinity) : parseFloat(m[1]);
     }
+    function rgbaOf(v) {
+        var m = /^\s*rgba?\(\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)(?:,\s*([-\d.]+))?\s*\)\s*$/.exec(String(v));
+        return m ? [+m[1], +m[2], +m[3], m[4] === undefined ? 1 : +m[4]] : null;
+    }
+    /* offset-rotate: whether it follows the path, and the angle over that. */
+    var IMAGE_PROP = /^background-image$/;
+    function offsetRotateParts(v) {
+        var m = /^(?:(auto|reverse)\s*)?([^\s]*?)(?:\s*(auto|reverse))?$/i.exec(String(v).trim());
+        if (!m) return null;
+        var kw = (m[1] || m[3] || '').toLowerCase(), deg = 0;
+        if (m[2]) {
+            var n = /^(-?[\d.]+(?:e[-+]?\d+)?)(deg|grad|rad|turn)$/i.exec(m[2]);
+            if (!n) return null;
+            var u = n[2].toLowerCase();
+            deg = parseFloat(n[1]) * (u === 'deg' ? 1 : u === 'grad' ? 0.9 : u === 'rad' ? 180 / Math.PI : 360);
+        }
+        return { flag: !!kw, deg: deg + (kw === 'reverse' ? 180 : 0) };
+    }
     function interpolate(prop, a, b, t) {
+        if (prop === 'border-shape') {
+            var bs = borderShapeInterpolate(a, b, t);
+            return bs === null ? (t < 0.5 ? a : b) : bs;
+        }
+        if (prop === 'offset-rotate') {
+            var r0 = offsetRotateParts(a), r1 = offsetRotateParts(b);
+            if (!r0 || !r1 || r0.flag !== r1.flag) return t < 0.5 ? a : b;
+            return (r0.flag ? 'auto ' : '') + fmt(+(r0.deg + (r1.deg - r0.deg) * t).toFixed(4)) + 'deg';
+        }
+        /* (normal is no slant at all; italic doesn't go between) */
+        if (prop === 'font-style') {
+            var slant = function (v) {
+                v = String(v).trim();
+                if (v === 'normal') return 0;
+                var m = /^oblique(?:\s+(-?[\d.]+)deg)?$/.exec(v);
+                return m ? (m[1] === undefined ? 14 : parseFloat(m[1])) : null;
+            };
+            var s0 = slant(a), s1 = slant(b);
+            if (s0 === null || s1 === null || a === b) return t < 0.5 ? a : b;
+            var d = s0 + (s1 - s0) * t;
+            d = d < -90 ? -90 : d > 90 ? 90 : d;
+            return Math.abs(d) < 1e-4 ? 'normal' : 'oblique ' + fmt(+d.toFixed(4)) + 'deg';
+        }
         /* (always the pair, as the reference reads) */
         if (prop === 'border-spacing') {
             var two = function (v) { var p = String(v).trim().split(/\s+/); return p.length === 1 ? p[0] + ' ' + p[0] : v; };
             a = two(a);
             b = two(b);
         }
+        if (TRACK_PROP.test(prop)) {
+            var tl = lpListMix(a, b, function (x, y) { return x + (y - x) * t; });
+            if (tl !== null) return tl;
+        }
+        /* (a box's values: all four against all four; ex-height goes without saying) */
+        if (/^(border-image|mask-border)-(slice|width|outset)$/.test(prop)) {
+            var fa = boxFour(a), fb = boxFour(b);
+            if (String(a).split(/\s+/).length !== String(b).split(/\s+/).length) {
+                var four = combine(prop, fa, fb, function (x, y) { return finish(prop, x + (y - x) * t); });
+                if (four !== null) return boxCollapse(four);
+            }
+        }
+        if (prop === 'font-size-adjust') {
+            a = String(a).replace(/^ex-height\s+/, '');
+            b = String(b).replace(/^ex-height\s+/, '');
+        }
         if (RULE_LIST.test(prop) && /,|repeat\(/i.test(String(a) + String(b))) {
             var rl = ruleInterpolate(prop, String(a), String(b), t);
             if (rl !== null) return rl;
         }
         if (a === b) return a;
+        /* (one color and another, premultiplied; alpha then kept to what alpha can be) */
+        if (/(^|-)color$/.test(prop)) {
+            var ca = rgbaOf(a), cb = rgbaOf(b);
+            if (ca && cb) {
+                var alpha = ca[3] + (cb[3] - ca[3]) * t, kept = alpha > 1 ? 1 : alpha;
+                if (kept <= 0) return 'rgba(0, 0, 0, 0)';
+                var ch = [0, 1, 2].map(function (i) {
+                    var pv = ca[i] * ca[3] + (cb[i] * cb[3] - ca[i] * ca[3]) * t;
+                    return Math.max(0, Math.min(255, Math.round(pv / kept + 0.002)));
+                });
+                return kept >= 1 ? 'rgb(' + ch.join(', ') + ')' : 'rgba(' + ch.join(', ') + ', ' + fmt(+kept.toFixed(6)) + ')';
+            }
+        }
         if (/color|shadow|background|border|outline|fill|stroke|caret|accent/.test(prop) && tfEl) {
             var pairs = wideColorPairs(a, b);
             if (pairs) {
@@ -1197,11 +1297,11 @@
             return ov === null ? (t < 0.5 ? a : b) : originTrim(ov);
         }
         if (prop === 'aspect-ratio') {
-            var r0 = ratioParts(a), r1 = ratioParts(b);
+            var q0 = ratioParts(a), q1 = ratioParts(b);
             /* (degenerate ratios and auto on one side alone: no interpolating) */
-            if (!r0 || !r1 || r0.auto !== r1.auto || !r0.w || !r0.h || !r1.w || !r1.h) return t < 0.5 ? a : b;
-            var la0 = Math.log(r0.w / r0.h), la1 = Math.log(r1.w / r1.h);
-            return (r0.auto ? 'auto ' : '') + fmt(Math.exp(la0 + (la1 - la0) * t)) + ' / 1';
+            if (!q0 || !q1 || q0.auto !== q1.auto || !q0.w || !q0.h || !q1.w || !q1.h) return t < 0.5 ? a : b;
+            var la0 = Math.log(q0.w / q0.h), la1 = Math.log(q1.w / q1.h);
+            return (q0.auto ? 'auto ' : '') + fmt(Math.exp(la0 + (la1 - la0) * t)) + ' / 1';
         }
         if (REPEATABLE.test(prop)) {
             var rv = repeatableInterpolate(prop, a, b, lerpHow);
@@ -1236,9 +1336,64 @@
         var v = combine(prop, a, b, function (x, y) { return x + (y - x) * t; });
         return v === null ? (t < 0.5 ? a : b) : v;
     }
+    /* (a box's one to four values, all four) */
+    function boxFour(v) {
+        var fill = /\bfill\b/.test(v), p = String(v).replace(/\bfill\b/, '').trim().split(/\s+/);
+        if (p.length === 1) p = [p[0], p[0], p[0], p[0]];
+        else if (p.length === 2) p = [p[0], p[1], p[0], p[1]];
+        else if (p.length === 3) p = [p[0], p[1], p[2], p[1]];
+        return p.join(' ') + (fill ? ' fill' : '');
+    }
+    /* Track lists of plain lengths and percentages, number by number. */
+    function lpListMix(a, b, how) {
+        var la = shapeWords(String(a)), lb = shapeWords(String(b));
+        if (la.length !== lb.length || !la.length) return null;
+        var LP = /^(?:-?[\d.]+(?:e-?\d+)?(?:px|%)|calc\(.*\))$/;
+        for (var i = 0; i < la.length; i++) if (!LP.test(la[i]) || !LP.test(lb[i])) return null;
+        return la.map(function (x, k) {
+            var p = lpParse(x), q = lpParse(lb[k]);
+            return lpMixText({ px: how(p.px, q.px), pct: how(p.pct, q.pct), has: p.has || q.has });
+        }).join(' ');
+    }
+    /* accumulate on filters: function by function; what starts at 1 counts from it. */
+    function filterAccumulate(prop, under, value) {
+        var x = filterList(under === 'none' ? '' : under), y = filterList(value === 'none' ? '' : value), out = [];
+        var n = Math.max(x.length, y.length);
+        for (var i = 0; i < n; i++) {
+            var p = x[i], q = y[i];
+            var txt = function (f) { return f.n + '(' + f.a + ')'; };
+            if (!p || !q) { out.push(txt(p || q)); continue; }
+            if (p.n !== q.n) return value;
+            var one = /^(brightness|contrast|opacity|saturate)$/.test(p.n);
+            var r = combine(prop, txt(p), txt(q), function (u, v) { return one ? u + v - 1 : u + v; });
+            if (r === null) return value;
+            out.push(r);
+        }
+        return filterTidy(out.join(' '));
+    }
+    /* (amounts in their ranges) */
+    function filterTidy(s) {
+        return String(s).replace(/\b(brightness|contrast|saturate|grayscale|invert|opacity|sepia)\(\s*(-?[\d.e+-]+)\s*\)/g, function (all, fn, v) {
+            var n = parseFloat(v);
+            if (n < 0) n = 0;
+            if (/^(grayscale|invert|opacity|sepia)$/.test(fn) && n > 1) n = 1;
+            return fn + '(' + fmt(n) + ')';
+        });
+    }
     function addValues(prop, under, value, how) {
         if (prop === 'clip') { under = clipRect(under); value = clipRect(value); }
+        if (TRACK_PROP.test(prop)) {
+            var ts = lpListMix(under, value, function (x, y) { return x + y; });
+            if (ts !== null) return ts;
+        }
+        if (prop === 'font-size-adjust') {
+            var sa = combine(prop, under, value, function (x, y) { return x + y; });
+            if (sa !== null) return sa.replace(/^ex-height\s+/, '');
+        }
+        if ((prop === 'filter' || prop === 'backdrop-filter') && how === 'accumulate') return filterAccumulate(prop, under, value);
         if (/^(border-image|mask-border)-(slice|width|outset)$/.test(prop)) {
+            under = boxFour(under);
+            value = boxFour(value);
             var ab = combine(prop, under, value, function (x, y) { return x + y; });
             return ab === null ? value : boxCollapse(ab);
         }
@@ -1284,11 +1439,16 @@
     var COLORISH = /color|background|border|outline|shadow|fill|stroke|caret|accent/;
     var RELATIVE = /\b(inherit|initial|unset|revert|revert-layer|currentcolor)\b|var\(|calc\(|min\(|max\(|clamp\(|[\d.](em|rem|ex|ch|vw|vh|vmin|vmax|lh|rlh|cap|ic|dvh|dvw|svh|svw|lvh|lvw)\b/i;
     function needsResolving(prop, value) {
+        if (/^\s*(unset|initial|inherit|revert|revert-layer)\s*$/i.test(value)) return true;
+        /* (what weighs by name, or sizes by name) */
+        if (prop === 'font-weight' && /[a-z]/i.test(value)) return true;
+        if (prop === 'font-size' && /^\s*[a-z-]+\s*$/i.test(value)) return true;
         /* (what a keyword or a left-out color comes to, in the computed form) */
         if (/^(box-shadow|text-shadow|font-stretch|font-width|corner-.*-shape)$/.test(prop) && value !== 'none') return true;
         if (/^(clip-path|shape-outside|offset-path)$/.test(prop) && /\bat\b|closest-|farthest-|shape\(/.test(value)) return true;
         if (/^(column|row)-rule-width$/.test(prop) && /thin|medium|thick/.test(value)) return true;
         if (prop === 'zoom' && !/^\s*[\d.]+\s*$/.test(value)) return true;
+        if ((prop === 'filter' || prop === 'backdrop-filter') && /%|\(\s*\)/.test(value)) return true;
         if (/^(min-|max-)?(width|height)$/.test(prop) && /calc-size\(|^\s*(auto|min-content|max-content|fit-content|stretch)\s*$/i.test(value)) return true;
         if (RELATIVE.test(value)) return true;
         if (COLORISH.test(prop) && !/^\s*[-+\d.]/.test(value) && value !== 'none') return true;
@@ -1468,10 +1628,22 @@
         if (!applying) applyTarget(el);
         return got || v;
     }
+    /* (the last that covers it: by its name, by a shorthand's, or all) */
+    var longhandsMemo = new Map();
+    function transitionItem(names, prop) {
+        for (var i = names.length - 1; i >= 0; i--) {
+            var nm = names[i];
+            if (nm === prop) return i;
+            if (nm === 'none' || nm === 'all') continue;
+            var ls = longhandsMemo.get(nm);
+            if (ls === undefined) longhandsMemo.set(nm, ls = global.__cyberCssLonghands(nm));
+            if (ls && ls.indexOf(prop) >= 0) return i;
+        }
+        return names.lastIndexOf('all');
+    }
     function cssTransitionOver(el, prop, base, before, specNow, specBefore) {
         var cs = global.getComputedStyle(el), names = String(cs.transitionProperty).split(',').map(function (x) { return x.trim(); });
-        var at = names.lastIndexOf(prop);
-        if (at < 0) at = names.lastIndexOf('all');
+        var at = transitionItem(names, prop);
         var state = transitionsOf.get(el);
         if (!state) transitionsOf.set(el, state = new Map());
         var rec = state.get(prop);
@@ -1518,6 +1690,10 @@
                 if (TRACK_PROP.test(prop)) can = trackInterpolate(from, base, 0) !== null;
                 if (wideColorPairs(from, base)) can = true;
                 if (/^corner-.*-shape$/.test(prop)) can = true;
+                if (prop === 'offset-rotate') { var rf = offsetRotateParts(from), rt = offsetRotateParts(base); can = !!(rf && rt && rf.flag === rt.flag); }
+                if (IMAGE_PROP.test(prop)) can = true;
+                if (prop === 'border-shape') can = borderShapeInterpolate(from, base, 0) !== null;
+                if (prop === 'font-style') can = true;
                 if (prop === 'filter' || prop === 'backdrop-filter') can = filterInterpolate(prop, from, base, id) !== null;
                 if (dur + delay > 0 && (can || discrete)) {
                     var easing;
@@ -1617,15 +1793,23 @@
         tfEl = el;
         if (keyframesOnly) {
             /* (only keyframes with calc-size(): the rest the engine has dealt with) */
-            var names = global.__cyberAnimRunning(el), some = false;
+            var names = global.__cyberAnimRunning(el), some = (global.getComputedStyle(el).animationComposition || 'replace') !== 'replace';
             for (var ni = 0; ni + 1 < names.length && !some; ni += 2) {
                 var fs = keyframesOf(el.ownerDocument, names[ni]);
-                for (var fi = 0; fs && fi < fs.length && !some; fi++) some = /calc-size\(|^\s*(initial|unset)\s*$/.test(fs[fi].style.getPropertyValue(prop) || '') || SIZE_KEYWORD.test(fs[fi].style.getPropertyValue(prop) || '');
+                for (var fi = 0; fs && fi < fs.length && !some; fi++) some = !!fs[fi].style.animationComposition || /calc-size\(|^\s*(initial|unset)\s*$/.test(fs[fi].style.getPropertyValue(prop) || '') || SIZE_KEYWORD.test(fs[fi].style.getPropertyValue(prop) || '');
             }
             if (!some) return undefined;
         }
         var v = keyframesOnly ? base : cssTransitionOver(el, prop, base, before, specNow, specBefore);
-        return cssAnimationsOver(el, prop, v, specNow);
+        v = cssAnimationsOver(el, prop, v, specNow);
+        /* (a size part percentage: the length it comes to on this box) */
+        if (SIZE_PROP.test(prop) && typeof v === 'string' && v !== base && v.indexOf('%') >= 0 && /^(width|height)$/.test(prop)) {
+            var got = readWith(el, prop, v);
+            setStyle(el, null);
+            if (!applying) applyTarget(el);
+            if (got) v = got;
+        }
+        return v;
     } });
 
     /* ---- timing (Web Animations 4.5-4.8) ---- */
@@ -1901,15 +2085,28 @@
     });
 
     /* The value effect gives each property at its progress: added to out. */
+    /* (a frame's values by longhand: a longhand given outright over a shorthand's) */
+    function frameLonghands(f) {
+        if (f.long) return f.long;
+        var out = {}, ks = Object.keys(f.props), rest = [];
+        ks.forEach(function (k) {
+            if (k.indexOf('--') === 0 || k === 'all' || !global.__cyberCssIsShorthand(k)) { rest.push(k); return; }
+            var e = global.__cyberCssExpand(k, f.props[k]);
+            if (e) Object.keys(e).forEach(function (l) { out[l] = e[l]; });
+            else out[k] = f.props[k];
+        });
+        rest.forEach(function (k) { out[k] = f.props[k]; });
+        return f.long = out;
+    }
     function sampleEffect(effect, progress, out, el) {
         var frames = effect._frames, props = {};
-        frames.forEach(function (f) { Object.keys(f.props).forEach(function (p) { props[p] = true; }); });
+        frames.forEach(function (f) { Object.keys(frameLonghands(f)).forEach(function (p) { props[p] = true; }); });
         Object.keys(props).forEach(function (prop) {
-            var list = frames.filter(function (f) { return prop in f.props; });
+            var list = frames.filter(function (f) { return prop in f.long; });
             var first = list[0], last = list[list.length - 1];
             /* (the missing ends: the underlying value) */
             var pts = list.map(function (f) {
-                return { at: f.computed, value: f.props[prop], easing: f.easing, composite: f.composite === 'auto' ? effect._composite : f.composite };
+                return { at: f.computed, value: f.long[prop], easing: f.easing, composite: f.composite === 'auto' ? effect._composite : f.composite };
             });
             if (first.computed !== 0) pts.unshift({ at: 0, value: null, easing: LINEAR, composite: 'add' });
             if (last.computed !== 1) pts.push({ at: 1, value: null, easing: LINEAR, composite: 'add' });
@@ -1929,7 +2126,7 @@
                 if (p.value !== null && (p.composite === 'add' || p.composite === 'accumulate')) u = addValues(prop, under(), u, p.composite);
                 return u;
             };
-            var ends = prop === 'filter' || prop === 'backdrop-filter' || REPEATABLE.test(prop) || prop === 'box-shadow' || prop === 'text-shadow' || SHAPE_PROP.test(prop);
+            var ends = (prop === 'transform' && a.value !== b.value) || prop === 'translate' || prop === 'rotate' || prop === 'scale' || prop === 'offset-rotate' || prop === 'border-shape' || prop === 'filter' || prop === 'backdrop-filter' || REPEATABLE.test(prop) || prop === 'box-shadow' || prop === 'text-shadow' || SHAPE_PROP.test(prop);
             /* (sizes that don't interpolate: the nearer keyframe) */
             if (SIZE_PROP.test(prop) && !sizesInterpolate(el, prop, a.value === null ? under() : a.value,
                                                            b.value === null ? under() : b.value)) {

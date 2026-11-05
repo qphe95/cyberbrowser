@@ -102,6 +102,23 @@ static bool val_same(const AnimVal *x, const AnimVal *y)
                                          fabsf(x->z - y->z) < 1e-4f && fabsf(x->w - y->w) < 1e-4f));
 }
 
+/* (colors: premultiplied, the alpha then kept to what alpha can be) */
+static AnimVal color_mix(const AnimVal *x, const AnimVal *y, double t)
+{
+    if (!x->ok || !y->ok) return t < 0.5 ? *x : *y;
+    double a = x->w + (y->w - x->w) * t;
+    double r = x->x * x->w + (y->x * y->w - x->x * x->w) * t;
+    double g = x->y * x->w + (y->y * y->w - x->y * x->w) * t;
+    double b = x->z * x->w + (y->z * y->w - x->z * x->w) * t;
+    AnimVal o = { 0, 0, 1, 0, 0 };
+    if (a > 0) {
+        if (a > 1) a = 1;
+        o.x = (float)(r / a); o.y = (float)(g / a); o.z = (float)(b / a);
+        o.w = (float)a;
+    }
+    return o;
+}
+
 static AnimVal val_mix(const AnimVal *x, const AnimVal *y, double t)
 {
     if (!x->ok || !y->ok) return t < 0.5 ? *x : *y;
@@ -127,7 +144,12 @@ void anim_val_css(int prop, const AnimVal *v, char *buf, size_t cap)
         else snprintf(buf, cap, "oblique %.6gdeg", deg);
         return;
     }
+    /* (what can't be below nothing) */
+    bool floor0 = prop == ANIM_WIDTH || prop == ANIM_HEIGHT || prop == ANIM_FONT_SIZE ||
+                  (prop >= ANIM_PADDING_TOP && prop <= ANIM_PADDING_LEFT) || (prop >= ANIM_BORDER_TOP && prop <= ANIM_BORDER_LEFT);
     if (prop == ANIM_TRANSFORM) snprintf(buf, cap, "matrix(1, 0, 0, 1, %.6g, %.6g)", v->x, v->y);
+    else if (floor0 && v->x < 0) snprintf(buf, cap, "0px");
+    else if (prop == ANIM_FONT_WEIGHT) snprintf(buf, cap, "%.6g", v->x < 1 ? 1.0 : v->x > 1000 ? 1000.0 : (double)v->x);
     else if (prop == ANIM_OPACITY || prop == ANIM_FONT_WEIGHT) snprintf(buf, cap, "%.6g", v->x);
     else snprintf(buf, cap, "%.6gpx", v->x);
 }
@@ -426,7 +448,10 @@ static AnimVal trans_value(int r, double now)
     double x = A.dur[r] > 0 ? t / A.dur[r] : 1;
     if (x < 0) x = 0;
     if (x > 1) x = 1;
-    return val_mix(&A.a[r], &A.b[r], ease_apply(A.ease[r], A.ep[r], x));
+    double ex = ease_apply(A.ease[r], A.ep[r], x);
+    if (A.prop[r] == ANIM_FONT_STYLE && (A.a[r].y > 0.5f) != (A.b[r].y > 0.5f)) return ex < 0.5 ? A.a[r] : A.b[r];
+    if (A.prop[r] == ANIM_COLOR || A.prop[r] == ANIM_BGCOLOR) return color_mix(&A.a[r], &A.b[r], ex);
+    return val_mix(&A.a[r], &A.b[r], ex);
 }
 
 /* The time row r's animation has reached: a paused one's stays. */
@@ -492,7 +517,9 @@ static bool track_value(int r, double now, AnimVal *out)
     while (i + 2 < n && off[i + 1] <= p) i++;
     double span = off[i + 1] - off[i];
     double local = span > 0 ? (p - off[i]) / span : 1;
-    *out = val_mix(&v[i], &v[i + 1], local);
+    /* (italic doesn't go between) */
+    if (A.prop[r] == ANIM_FONT_STYLE && (v[i].y > 0.5f) != (v[i + 1].y > 0.5f)) *out = local < 0.5 ? v[i] : v[i + 1];
+    else *out = A.prop[r] == ANIM_COLOR || A.prop[r] == ANIM_BGCOLOR ? color_mix(&v[i], &v[i + 1], local) : val_mix(&v[i], &v[i + 1], local);
     return out->ok;
 }
 
@@ -660,6 +687,8 @@ void anim_box(NodeId el, int ps, const char *spec, const AnimVal base[ANIM_NPROP
             if (t >= 0) { note_cancel(t, ANIM_EV_TCANCEL, now); row_free(t); }
             A.a[b] = base[p];
             if (dur <= 0 || !from.ok || !base[p].ok || val_same(&from, &base[p])) continue;
+            /* (italic doesn't transition) */
+            if (p == ANIM_FONT_STYLE && (from.y > 0.5f || base[p].y > 0.5f)) continue;
             /* (what comes down from a parent that is transitioning it doesn't start one) */
             if (inherited_run(el, ps, p, &base[p]) >= 0) continue;
             t = row_new(el, ps, K_TRANS, p);

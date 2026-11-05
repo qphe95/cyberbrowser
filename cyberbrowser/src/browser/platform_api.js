@@ -1311,6 +1311,19 @@
     /* ---- selection (Selection API): document.getSelection() and the
      * members the window's Selection lacks ---- */
     var winGetSelection = global.getSelection;
+    /* (small, full, ...) */
+    var FULL_KANA = [
+                       0x3041, 0x3042, 0x3043, 0x3044, 0x3045, 0x3046, 0x3047, 0x3048, 0x3049, 0x304a, 0x3063, 0x3064, 0x3083, 0x3084, 0x3085, 0x3086, 0x3087, 0x3088,
+                       0x308e, 0x308f, 0x3095, 0x304b, 0x3096, 0x3051, 0x30a1, 0x30a2, 0x30a3, 0x30a4, 0x30a5, 0x30a6, 0x30a7, 0x30a8, 0x30a9, 0x30aa, 0x30c3, 0x30c4,
+                       0x30e3, 0x30e4, 0x30e5, 0x30e6, 0x30e7, 0x30e8, 0x30ee, 0x30ef, 0x30f5, 0x30ab, 0x30f6, 0x30b1, 0x31f0, 0x30af, 0x31f1, 0x30b7, 0x31f2, 0x30b9,
+                       0x31f3, 0x30c8, 0x31f4, 0x30cc, 0x31f5, 0x30cf, 0x31f6, 0x30d2, 0x31f7, 0x30d5, 0x31f8, 0x30d8, 0x31f9, 0x30db, 0x31fa, 0x30e0, 0x31fb, 0x30e9,
+                       0x31fc, 0x30ea, 0x31fd, 0x30eb, 0x31fe, 0x30ec, 0x31ff, 0x30ed, 0x1b132, 0x3053, 0x1b150, 0x3090, 0x1b151, 0x3091, 0x1b152, 0x3092, 0x1b155, 0x30b3,
+                       0x1b164, 0x30f0, 0x1b165, 0x30f1, 0x1b166, 0x30f2, 0x1b167, 0x30f3, 0xff67, 0xff71, 0xff68, 0xff72, 0xff69, 0xff73, 0xff6a, 0xff74, 0xff6b, 0xff75,
+                       0xff6c, 0xff94, 0xff6d, 0xff95, 0xff6e, 0xff96, 0xff6f, 0xff82];
+    /* (from, to, how many) */
+    var MATH_ITALIC = [0x41, 0x1d434, 26, 0x61, 0x1d44e, 7, 0x68, 0x210e, 1, 0x69, 0x1d456, 18, 0x131, 0x1d6a4, 1, 0x237, 0x1d6a5, 1, 0x391, 0x1d6e2, 17, 0x3f4, 0x1d6f3, 1,
+                       0x3a3, 0x1d6f4, 7, 0x2207, 0x1d6fb, 1, 0x3b1, 0x1d6fc, 25, 0x2202, 0x1d715, 1, 0x3f5, 0x1d716, 1, 0x3d1, 0x1d717, 1, 0x3f0, 0x1d718, 1, 0x3d5, 0x1d719, 1,
+                       0x3f1, 0x1d71a, 1, 0x3d6, 0x1d71b, 1];
     function completeSelection(s) {
         if (!s || typeof s !== 'object' || typeof s.setBaseAndExtent === 'function') return s;
         define(s, 'setBaseAndExtent', function setBaseAndExtent(an, ao, fn, fo) {
@@ -1320,6 +1333,22 @@
             if (r.collapsed && (an !== fn || ao !== fo)) { r.setStart(fn, fo >>> 0); r.setEnd(an, ao >>> 0); }
             this.removeAllRanges();
             this.addRange(r);
+        });
+        /* (math-auto shows one letter in its italic form, and that's what's selected) */
+        var plainText = s.toString;
+        define(s, 'toString', function toString() {
+            var t = plainText.call(this), r = this.rangeCount ? this.getRangeAt(0) : null;
+            var n = r && r.startContainer, el = n && (n.nodeType === 1 ? n : n.parentElement);
+            if (!el || !t || Array.from(t).length !== 1) return t;
+            var c = t.codePointAt(0), tt = global.getComputedStyle(el).textTransform, o = null;
+            /* (a small kana, full size) */
+            if (tt === 'full-size-kana') {
+                var ki = FULL_KANA.indexOf(c);
+                return ki >= 0 && !(ki & 1) ? String.fromCodePoint(FULL_KANA[ki + 1]) : t;
+            }
+            if (tt !== 'math-auto') return t;
+            for (var k = 0; k < MATH_ITALIC.length; k += 3) if (c >= MATH_ITALIC[k] && c < MATH_ITALIC[k] + MATH_ITALIC[k + 2]) o = MATH_ITALIC[k + 1] + c - MATH_ITALIC[k];
+            return o === null ? t : String.fromCodePoint(o);
         });
         define(s, 'collapseToStart', function collapseToStart() {
             if (this.rangeCount) { var r = this.getRangeAt(0).cloneRange(); r.collapse(true); this.removeAllRanges(); this.addRange(r); }

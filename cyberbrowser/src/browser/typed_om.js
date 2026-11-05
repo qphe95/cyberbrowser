@@ -1010,6 +1010,7 @@
         return out;
     }
     var LOGICAL_PAIR = /^(margin|padding|inset)-(block|inline)$/;
+    var UNTYPED = /^(border-(bottom|top)-(left|right)-radius|border-image-(outset|repeat|slice|width)|counter-(increment|reset|set)|font-family|grid-(column|row)-(start|end)|scroll-snap-align|transition-property|will-change)$/;
     function reify(prop, text) {
         text = String(text).trim();
         if (/\bvar\(/i.test(text) || prop.slice(0, 2) === '--') return parseUnparsed(text);
@@ -1021,8 +1022,16 @@
             if (!(lone && (LOGICAL_PAIR.test(prop) || (/^border-(block|inline)(-width|-style)?$/.test(prop) && /^[a-z-]+$/i.test(text))))) return generic(text, prop);
         }
         /* (colors: not keywords of their own, but for these) */
-        if (/(^|-)color$/.test(prop) && !/^(currentcolor|transparent)$/i.test(text)) return generic(text, prop);
-        if (/^-?[a-zA-Z_][\w-]*$/.test(text) && !/^(?:e|pi|infinity)$/i.test(text)) return new CSSKeywordValue(text);
+        if (/(^|-)color$/.test(prop) && !/^(currentcolor|auto)$/i.test(text)) return generic(text, prop);
+        /* (what has no typed form yet) */
+        if (UNTYPED.test(prop)) return generic(text, prop);
+        /* (a size or an amount out of range is kept as it was written) */
+        if (/^calc\(\s*[-+]?[\d.]+(?:e[-+]?\d+)?(?:%|[a-z]+)?\s*\)$/i.test(text)) {
+            var lone = null;
+            try { lone = parseNumeric(text.slice(5, -1).trim()); } catch (e) { lone = null; }
+            if (lone) return new CSSMathSum(lone);
+        }
+        if (/^-{0,2}[a-zA-Z_][\w-]*$/.test(text) && !/^(?:e|pi|infinity)$/i.test(text)) return new CSSKeywordValue(text);
         if ((prop === 'transform') && text !== 'none') {
             var tv;
             try { tv = parseTransform(text); } catch (e) { tv = null; }
@@ -1140,6 +1149,7 @@
             if (!LIST_VALUED.test(p)) throw new TypeError(p + ' is not list-valued');
             var vals = Array.prototype.slice.call(arguments, 1).map(function (v) {
                 var t = valueText(p, v);
+                if (/^\s*(initial|inherit|unset|revert|revert-layer)\s*$/i.test(t)) throw new TypeError('A CSS-wide keyword in a list of values');
                 if (!global.CSS.supports(p, t)) throw new TypeError('Invalid value for ' + p + ': ' + t);
                 if (/\bvar\(/i.test(t)) throw new TypeError('var() in a list of values');
                 return t;
@@ -1183,8 +1193,11 @@
                 /* (percentages of these are computed values; used sizes are not) */
                 if (!pseudo && /(^|-)(margin|padding|inset|top|right|bottom|left|width|height|size)(-|$)/.test(p) && global.__cyberComputedValue) {
                     var raw = global.__cyberComputedValue(el, p);
-                    if (raw && (raw.indexOf('%') >= 0 || raw === 'auto')) return raw;
+                    if (raw && (raw.indexOf('%') >= 0 || raw === 'auto')) v = raw;
                 }
+                /* (below what it can be: as low as it can be) */
+                var neg = /^(?:calc()?-[d.]+(?:e[-+]?d+)?(%|[a-z]*))?$/i.exec(v);
+                if (neg && !global.CSS.supports(p, '-1' + neg[1])) return '0' + neg[1];
                 return v;
             },
             write: function () { throw new TypeError('read only'); },

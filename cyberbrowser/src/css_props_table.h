@@ -286,7 +286,7 @@ static const CssTypeDef g_types[] = {
 static CssPropDef g_props[] = {
     L("accent-color", "auto | <color>", "auto", 1),
     L("align-content", "normal | <baseline-position> | <content-distribution> | <overflow-position>? <content-position>", "normal", 0),
-    L("align-items", "normal | <overflow-position> normal | stretch | <baseline-position> | <overflow-position>? <self-position> | anchor-center", "normal", 0),
+    L("align-items", "normal | <overflow-position> normal | stretch | <baseline-position> | <overflow-position>? <self-position>", "normal", 0),
     L("align-self", "auto | normal | <overflow-position> normal | stretch | <baseline-position> | <overflow-position>? <self-position> | anchor-center", "auto", 0),
     L("alignment-baseline", "auto | baseline | before-edge | text-before-edge | middle | central | after-edge | text-after-edge | "
                             "ideographic | alphabetic | hanging | mathematical", "auto", 0),
@@ -373,6 +373,7 @@ static CssPropDef g_props[] = {
     S("border-radius", "<length-percentage [0,inf]>{1,4} [ / <length-percentage [0,inf]>{1,4} ]?",
       "border-top-left-radius border-top-right-radius border-bottom-right-radius border-bottom-left-radius", CSS_SH_SPECIAL),
     BORDER_SIDE("right"),
+    L("border-shape", "none | <basic-shape> [ <geometry-box> | half-border-box ]? [ <basic-shape> [ <geometry-box> | half-border-box ]? ]?", "none", 0),
     L("border-spacing", "<length [0,inf]>{1,2}", "0px", 1),
     L("border-start-end-radius", "<length-percentage [0,inf]>{1,2}", "0px", 0),
     L("border-start-start-radius", "<length-percentage [0,inf]>{1,2}", "0px", 0),
@@ -520,7 +521,7 @@ static CssPropDef g_props[] = {
     S("contain-intrinsic-size", "<'contain-intrinsic-width'> <'contain-intrinsic-height'>?",
       "contain-intrinsic-width contain-intrinsic-height", CSS_SH_PAIR),
     L("contain-intrinsic-width", "<contain-intrinsic>", "none", 0),
-    S("container", "<'container-name'> [ / <'container-type'> ]?", "container-name container-type", CSS_SH_GRAMMAR),
+    S("container", "<'container-name'> [ / <'container-type'> ]?", "container-name container-type", CSS_SH_SPECIAL),
     L("stroke-color", "<color>#", "transparent", 1),
     L("container-name", "none | <custom-ident>+", "none", 0),
     L("container-type", "normal | [ [ size | inline-size ] || scroll-state ]", "normal", 0),
@@ -627,7 +628,7 @@ static CssPropDef g_props[] = {
     L("isolation", "auto | isolate", "auto", 0),
     L("justify-content", "normal | <content-distribution> | <overflow-position>? [ <content-position> | left | right ]", "normal", 0),
     L("justify-items", "normal | <overflow-position> normal | stretch | <baseline-position> | <overflow-position>? [ <self-position> | left | right ] | "
-                       "legacy && [ left | right | center ]? | anchor-center", "legacy", 0),
+                       "legacy && [ left | right | center ]?", "legacy", 0),
     L("justify-self", "auto | normal | <overflow-position> normal | stretch | <baseline-position> | <overflow-position>? [ <self-position> | left | right ] | anchor-center", "auto", 0),
     L("left", "<inset-value>", "auto", 0),
     L("letter-spacing", "normal | <length-percentage>", "normal", 1),
@@ -744,6 +745,7 @@ static CssPropDef g_props[] = {
     L("position", "static | relative | absolute | sticky | fixed", "static", 0),
     L("position-anchor", "auto | none | normal | <dashed-ident>", "auto", 0),
     L("position-area", "none | <any-value>+", "none", 0),
+    S("position-try", "<'position-try-order'>? <'position-try-fallbacks'>", "position-try-order position-try-fallbacks", CSS_SH_SPECIAL),
     L("position-try-fallbacks", "none | <any-value>+", "none", 0),
     L("position-try-order", "normal | most-width | most-height | most-block-size | most-inline-size", "normal", 0),
     L("print-color-adjust", "economy | exact", "economy", 1),

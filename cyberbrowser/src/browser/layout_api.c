@@ -990,6 +990,11 @@ static bool lq_who_affected(void)
 {
     if (g_lq_run_anyway) return true;
     if (!g_lq_ndirty && !g_lq_nanchor) return false;
+    /* (a container's size may be what styles below it read) */
+    {
+        extern bool g_css_saw_container;
+        if (g_css_saw_container) return true;
+    }
     /* (document.body.offsetWidth and the like are how a script flushes style: it
      * is what a later change transitions from.  Worth the layout where a change
      * might, on a page of modest size) */

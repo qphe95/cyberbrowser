@@ -55,6 +55,7 @@ typedef struct CssCompiledSelector CssCompiledSelector;
 typedef struct CssRule {
     char *selector_text;
     char *media_query;   /* enclosing @media condition, e.g. "(min-width:792px)" */
+    char *container_query;  /* enclosing @container preludes, joined by \x01; held to the element */
     int specificity;
     CssDeclaration *declarations;
     int declaration_count;

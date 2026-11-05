@@ -34,6 +34,7 @@
 
 /* A transition has been declared somewhere: see lq_who_affected. */
 bool g_css_saw_transition;
+bool g_css_saw_composition;     /* (animation-composition: what the engine's tracks don't do) */
 
 static bool css_is_space(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
@@ -171,6 +172,7 @@ static bool css_declaration_add(CssRule *rule, const char *prop, size_t prop_len
         rule->declaration_capacity = new_cap;
     }
     if (!strncasecmp(p, "transition", 10)) g_css_saw_transition = true;
+    if (!strncasecmp(p, "animation-composition", 21)) g_css_saw_composition = true;
     rule->declarations[rule->declaration_count].property = p;
     rule->declarations[rule->declaration_count].value = v;
     rule->declarations[rule->declaration_count].important = is_important;
@@ -580,6 +582,7 @@ static void sink_rule(void *ctx, char *prop, char *value, bool important)
     }
     CssDeclaration *d = &rule->declarations[rule->declaration_count++];
     if (prop && !strncasecmp(prop, "transition", 10)) g_css_saw_transition = true;
+    if (prop && !strncasecmp(prop, "animation-composition", 21)) g_css_saw_composition = true;
     d->property = prop;
     d->value = value;
     d->important = important;
@@ -1160,6 +1163,10 @@ static size_t css_prelude_tokens(const char *s, size_t len, size_t pos, bool nes
     return end;
 }
 
+/* The @container preludes around what's being parsed. */
+static __thread char *t_cq_cond;
+bool g_css_saw_container;
+
 typedef enum { AT_SKIP, AT_MEDIA, AT_NEST } AtKind;
 
 /* What an at-rule's block holds: style rules under a media condition
@@ -1423,7 +1430,26 @@ static size_t css_at_rule(const char *s, size_t len, size_t pos, bool nested, Cs
     } else if (cond && cond[0]) {
         eff = strdup(cond);
     }
+    char *held_cq = t_cq_cond;
+    char *cq_here = NULL;
+    if (nl == 9 && !strncasecmp(name, "container", 9)) {
+        char *c = css_strndup_trim(s + pre, pre_end - pre);
+        if (c && strstr(c, "/*")) css_strip_comments(c);
+        if (c) {
+            size_t n = strlen(c) + (held_cq ? strlen(held_cq) : 0) + 2;
+            cq_here = (char *)malloc(n);
+            if (cq_here) {
+                if (held_cq) snprintf(cq_here, n, "%s\x01%s", held_cq, c);
+                else snprintf(cq_here, n, "%s", c);
+                t_cq_cond = cq_here;
+                g_css_saw_container = true;
+            }
+            free(c);
+        }
+    }
     end = css_rule_list(s, len, end, len, true, sheet, eff ? eff : "");
+    t_cq_cond = held_cq;
+    free(cq_here);
     free(eff);
     return end;
 }
@@ -1469,7 +1495,7 @@ static size_t css_rule_item(const char *s, size_t len, size_t pos, bool nested, 
         return pos;
     }
     rule->selector_text = sel;
-    rule->media_query = cond && cond[0] ? strdup(cond) : NULL;
+    rule->media_query = cond && cond[0] ? strdup(cond) : NULL; rule->container_query = t_cq_cond ? strdup(t_cq_cond) : NULL;
     css_parse_rule_block(s, len, &pos, rule, sheet, cond);
     return pos;
 }
@@ -1591,7 +1617,7 @@ static void css_parse_rule_block(const char *s, size_t len, size_t *pos, CssRule
             CssRule *r = resolved && !css_prelude_invalid(resolved) ? css_stylesheet_add_rule(sheet) : NULL;
             if (r) {
                 r->selector_text = resolved;
-                r->media_query = cond && cond[0] ? strdup(cond) : NULL;
+                r->media_query = cond && cond[0] ? strdup(cond) : NULL; r->container_query = t_cq_cond ? strdup(t_cq_cond) : NULL;
                 css_parse_rule_block(s, len, &p, r, sheet, cond);
             } else {
                 free(resolved);
@@ -1603,7 +1629,7 @@ static void css_parse_rule_block(const char *s, size_t len, size_t *pos, CssRule
             CssRule *r = css_stylesheet_add_rule(sheet);
             if (r) {
                 r->selector_text = strdup(parent);
-                r->media_query = cond && cond[0] ? strdup(cond) : NULL;
+                r->media_query = cond && cond[0] ? strdup(cond) : NULL; r->container_query = t_cq_cond ? strdup(t_cq_cond) : NULL;
                 r->declarations = (CssDeclaration *)malloc((size_t)(to - from) * sizeof(CssDeclaration));
                 if (r->declarations) {
                     memcpy(r->declarations, later + (from - first), (size_t)(to - from) * sizeof(CssDeclaration));
@@ -1643,7 +1669,7 @@ static size_t css_rule_list(const char *s, size_t len, size_t pos, size_t stop, 
         CssRule *r = css_stylesheet_add_rule(sheet);
         if (r) {
             r->selector_text = strdup(t_nest_parent);
-            r->media_query = cond && cond[0] ? strdup(cond) : NULL;
+            r->media_query = cond && cond[0] ? strdup(cond) : NULL; r->container_query = t_cq_cond ? strdup(t_cq_cond) : NULL;
             const char *outer = t_nest_parent;
             t_nest_parent = NULL;
             css_parse_rule_block(s, len, &pos, r, sheet, cond);
@@ -1712,6 +1738,7 @@ void css_stylesheet_free(CssStylesheet *sheet) {
         CssRule *rule = &sheet->rules[i];
         free(rule->selector_text);
         free(rule->media_query);
+        free(rule->container_query);
         css_declarations_free(rule->declarations, rule->declaration_count);
         css_rule_compiled_free(rule);
     }

@@ -611,6 +611,8 @@ typedef struct AttrTest {
     char *val;
 } AttrTest;
 
+bool (*g_css_rule_gate)(const char *container_query, int dom);
+
 struct CssStyleSet {
     AttrTest *atests; size_t natests;
     CComp *comps; size_t ncomps;
@@ -1686,6 +1688,7 @@ int css_style_match(const CssStyleSet *S, const CssStyleDoc *D, int dom,
         int32_t g = t->matched.v[k];
         const CRule *cr = &S->rules[g];
         const CssRule *rule = cr->rule;
+        if (rule->container_query && g_css_rule_gate && !g_css_rule_gate(rule->container_query, dom)) continue;
         for (int d = 0; d < rule->declaration_count; d++) {
             CssAppliedDecl a;
             a.decl = &rule->declarations[d];
@@ -1736,6 +1739,10 @@ int css_style_match_after(const CssStyleSet *S, const CssStyleDoc *D, int dom,
     unsigned kinds = 0;
     for (size_t i = 0; i < t->after_hits.n; i++) {
         const CAfter *af = &S->afters[t->after_hits.v[i]];
+        {
+            const CssRule *ar = S->rules[af->rule].rule;
+            if (ar->container_query && g_css_rule_gate && !g_css_rule_gate(ar->container_query, dom)) continue;
+        }
         if (af->rule != last_rule) kinds = 0;
         last_rule = af->rule;
         if (kinds & (1u << af->is_before)) continue;

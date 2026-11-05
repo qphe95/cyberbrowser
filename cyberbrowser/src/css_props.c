@@ -802,10 +802,12 @@ static int unit_dim(const char *u, double *scale) {
     return 0;
 }
 
+static bool tok_ident(const Tok *t, const char *name);
+
 static bool is_math_fn(const char *n) {
     static const char *const fns[] = { "calc", "min", "max", "clamp", "round", "mod", "rem", "abs", "sign",
         "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "pow", "sqrt", "hypot", "log", "exp",
-        "-webkit-calc", "calc-size", "progress", NULL };
+        "-webkit-calc", "calc-size", "progress", "random", "sibling-index", "sibling-count", NULL };
     for (int i = 0; fns[i]; i++) if (strcasecmp(n, fns[i]) == 0) return true;
     return false;
 }
@@ -834,6 +836,8 @@ static int calc_value(const Toks *ts, int i, int pct) {
         if (!is_math_fn(t->str)) return -1;
         const char *f = t->str;
         if (strcasecmp(f, "calc") == 0 || strcasecmp(f, "-webkit-calc") == 0) return calc_sum(ts, t->first, t->end, pct);
+        /* (what comes of the element's place: no arguments) */
+        if (!strcasecmp(f, "sibling-index") || !strcasecmp(f, "sibling-count")) return t->first == t->end ? D_NUMBER : -1;
         /* comma-separated arguments */
         int args[4], na = 0, s = t->first;
         for (int j = t->first; j <= t->end; j = j < t->end ? tok_next(ts, j) : j + 1) {
@@ -847,6 +851,26 @@ static int calc_value(const Toks *ts, int i, int pct) {
                 if (strcasecmp(f, "clamp") == 0 && (na == 0 || na == 2) && ts->t[s].type == T_IDENT && tok_next(ts, s) == j &&
                     strcasecmp(ts->t[s].str, "none") == 0) {
                     args[na++] = 0;
+                    s = j + 1;
+                    continue;
+                }
+                /* random()'s caching options come first */
+                if (strcasecmp(f, "random") == 0 && na == 0 && s == t->first && ts->t[s].type == T_IDENT && !tok_ident(&ts->t[s], "e") &&
+                    !tok_ident(&ts->t[s], "pi") && !tok_ident(&ts->t[s], "infinity") && !tok_ident(&ts->t[s], "-infinity") && !tok_ident(&ts->t[s], "nan")) {
+                    bool all_ok = true, fixed = false, elem = false, prop = false, dashed = false;
+                    for (int q = s; q < j; q = tok_next(ts, q)) {
+                        const Tok *o = &ts->t[q];
+                        if (fixed) { if (o->type != T_NUMBER) all_ok = false; fixed = false; if (q != tok_next(ts, s) || tok_next(ts, q) != j) all_ok = false; continue; }
+                        if (o->type != T_IDENT) { all_ok = false; break; }
+                        if (tok_ident(o, "auto")) { if (q != s || tok_next(ts, s) != j) all_ok = false; }
+                        else if (tok_ident(o, "fixed")) { if (q != s) all_ok = false; fixed = true; }
+                        else if (tok_ident(o, "element-scoped")) { if (elem) all_ok = false; elem = true; }
+                        else if (tok_ident(o, "property-scoped") || tok_ident(o, "property-index-scoped")) { if (prop) all_ok = false; prop = true; }
+                        else if (o->str && !strncmp(o->str, "--", 2)) { if (dashed) all_ok = false; dashed = true; }
+                        else if (o->str && !strncmp(o->str, "ua-", 3)) { if (prop) all_ok = false; prop = true; }
+                        else all_ok = false;
+                    }
+                    if (!all_ok || fixed) return -1;
                     s = j + 1;
                     continue;
                 }
@@ -870,6 +894,7 @@ static int calc_value(const Toks *ts, int i, int pct) {
             return D_NUMBER;
         }
         if (strcasecmp(f, "sign") == 0) return D_NUMBER;
+        if (strcasecmp(f, "random") == 0 && (na < 2 || na > 3)) return -1;
         if (!strcasecmp(f, "sin") || !strcasecmp(f, "cos") || !strcasecmp(f, "tan")) return (args[0] & (D_NUMBER | D_ANGLE)) ? D_NUMBER : -1;
         if (!strcasecmp(f, "asin") || !strcasecmp(f, "acos") || !strcasecmp(f, "atan") || !strcasecmp(f, "atan2")) return D_ANGLE;
         if (!strcasecmp(f, "pow") || !strcasecmp(f, "sqrt") || !strcasecmp(f, "log") || !strcasecmp(f, "exp")) return args[0] == D_NUMBER ? D_NUMBER : -1;
@@ -1670,6 +1695,37 @@ static bool calc_one(const CalcSum *s, double *v, const char **unit) {
  * §10.3-10.8): its value as a one-term sum. */
 static bool calc_math_function(const Toks *ts, const Tok *f, CalcSum *out) {
     const char *name = f->str;
+    /* (random(fixed N, ...) is known now; another random() and the tree's aren't) */
+    if (!strcasecmp(name, "sibling-index") || !strcasecmp(name, "sibling-count")) return false;
+    if (!strcasecmp(name, "random")) {
+        if (f->first >= f->end || !tok_ident(&ts->t[f->first], "fixed")) return false;
+        int q = tok_next(ts, f->first);
+        if (q >= f->end || ts->t[q].type != T_NUMBER) return false;
+        double x = ts->t[q].num;
+        int s0 = tok_next(ts, q);
+        if (s0 >= f->end || ts->t[s0].type != T_COMMA) return false;
+        CalcSum a[3];
+        int nr = 0, s1 = s0 + 1;
+        for (int j = s1; ; j = j < f->end ? tok_next(ts, j) : j + 1) {
+            if (j >= f->end || ts->t[j].type == T_COMMA) {
+                if (nr == 3 || !calc_simplify_sum(ts, s1, j, &a[nr++])) return false;
+                s1 = j + 1;
+                if (j >= f->end) break;
+            }
+        }
+        double lo, hi;
+        const char *ul, *uh;
+        if (nr < 2 || !calc_one(&a[0], &lo, &ul) || !calc_one(&a[1], &hi, &uh) || strcmp(ul, uh)) return false;
+        double val = hi < lo ? lo : lo + x * (hi - lo);
+        if (nr == 3) {
+            double st;
+            const char *us;
+            if (!calc_one(&a[2], &st, &us) || strcmp(us, ul)) return false;
+            if (st > 0.0) { val = lo + floor(x * (hi - lo + st) / st) * st; if (val > hi) val -= st; if (val < lo) val = lo; }
+        }
+        memset(out, 0, sizeof *out);
+        return calc_add(out, val, ul);
+    }
     /* the comma-separated arguments; round()'s first may be a strategy */
     CalcSum args[8];
     int na = 0, strategy = 0;   /* 0 nearest, 1 up, 2 down, 3 to-zero */
@@ -1730,6 +1786,8 @@ static bool calc_math_function(const Toks *ts, const Tok *f, CalcSum *out) {
     } else if (!strcasecmp(name, "abs")) {
         if (na != 1) return false;
         r = fabs(v[0]);
+    } else if (!strcasecmp(name, "random")) {
+        return false;
     } else if (!strcasecmp(name, "sign")) {
         if (na != 1) return false;
         r = v[0] > 0 ? 1 : v[0] < 0 ? -1 : v[0];   /* (keeps -0, 0 and NaN) */
@@ -3366,6 +3424,9 @@ int css_prop_expand(const CssPropDef *p, const char *value, char ***out_vals) {
         *out_vals = out;
         return n;
     }
+    /* (first baseline is what baseline is) */
+    if (!strncmp(p->name, "place-", 6))
+        for (char *fb; (fb = strstr(v, "first baseline")) != NULL; ) memmove(fb, fb + 6, strlen(fb + 6) + 1);
     if (p->shorthand == CSS_SH_SPECIAL) {
         int r = expand_special(p, v, out, names, n);
         free(v);
@@ -3395,7 +3456,9 @@ int css_prop_expand(const CssPropDef *p, const char *value, char ***out_vals) {
             result = n;
         } else if (p->shorthand == CSS_SH_PAIR && n == 2 && nf >= 1 && nf <= 2) {
             out[0] = strdup(vals[0]);
-            out[1] = strdup(vals[nf == 2 ? 1 : 0]);
+            /* (a baseline isn't a justification: start) */
+            if (nf == 1 && !strcmp(p->name, "place-content") && strstr(vals[0], "baseline")) out[1] = strdup("start");
+            else out[1] = strdup(vals[nf == 2 ? 1 : 0]);
             result = n;
         } else if (p->shorthand == CSS_SH_GRAMMAR) {
             for (int i = 0; i < nf; i++) {
@@ -4935,6 +4998,35 @@ static int expand_special(const CssPropDef *p, const char *v, char **out, const 
     const char *nm = p->name;
     if (!strcmp(nm, "animation-range")) return expand_animation_range(v, out);
     if (!strcmp(nm, "text-box")) return expand_text_box(v, out);
+    if (!strcmp(nm, "container")) {
+        const char *sl = strchr(v, '/');
+        char *name = sl ? strndup(v, (size_t)(sl - v)) : strdup(v);
+        const CssPropDef *nd = css_prop_find("container-name", 14), *td = css_prop_find("container-type", 14);
+        char *a = css_prop_parse(nd, name);
+        free(name);
+        char *t = sl ? css_prop_parse(td, sl + 1) : strdup("normal");
+        if (!a || !t) { free(a); free(t); return -1; }
+        out[0] = a;
+        out[1] = t;
+        return 0;
+    }
+    if (!strcmp(nm, "position-try")) {
+        char w[2][160];
+        int nw = canon_words(v, w, 1);
+        const char *rest = v;
+        const CssPropDef *od = css_prop_find("position-try-order", 18), *fd = css_prop_find("position-try-fallbacks", 22);
+        char *ord = nw ? css_prop_parse(od, w[0]) : NULL;
+        if (ord) {
+            while (isspace((unsigned char)*rest)) rest++;
+            rest += strlen(w[0]);
+            while (isspace((unsigned char)*rest)) rest++;
+        }
+        char *fb = *rest ? css_prop_parse(fd, rest) : NULL;
+        if (!fb) { free(ord); return -1; }
+        out[0] = ord ? ord : strdup("normal");
+        out[1] = fb;
+        return 0;
+    }
     if (!strcmp(nm, "offset")) return expand_offset(v, out);
     if (!strcmp(nm, "border")) {
         static const char *const s[] = { "top", "right", "bottom", "left" };
@@ -5066,6 +5158,16 @@ static int serialize_layers(const char *const *vals, const char **names, int n, 
 
 static int serialize_special(const CssPropDef *p, const char *const *vals, const char **names, int n, Buf *b) {
     const char *nm = p->name;
+    if (!strcmp(nm, "position-try")) {
+        if (strcmp(vals[0], "normal")) { buf_str(b, vals[0]); buf_ch(b, ' '); }
+        buf_str(b, vals[1]);
+        return 0;
+    }
+    if (!strcmp(nm, "container")) {
+        buf_str(b, vals[0]);
+        if (strcmp(vals[1], "normal")) { buf_str(b, " / "); buf_str(b, vals[1]); }
+        return 0;
+    }
     if (!strcmp(nm, "text-box")) {
         const char *t = vals[0], *e = vals[1];
         if (!strcmp(e, "auto")) { buf_str(b, !strcmp(t, "none") ? "normal" : t); return 0; }
@@ -5637,6 +5739,193 @@ static char *canon_box_round(const char *v)
     return b.s;
 }
 
+/* position-try-fallbacks: "" if invalid. */
+static char *canon_try_fallbacks(const char *v)
+{
+    char **parts = NULL;
+    int np = split_commas(v, &parts);
+    Buf b = { 0 };
+    bool bad = np < 1;
+    for (int k = 0; k < np && !bad; k++) {
+        char w[8][160];
+        int n = canon_words(parts[k], w, 8);
+        if (n < 1) { bad = true; break; }
+        if (n == 1 && !strcasecmp(w[0], "none")) { if (np > 1) bad = true; else buf_str(&b, "none"); continue; }
+        const char *dashed = NULL;
+        int nf = 0, flips[8];
+        bool others = false;
+        for (int i = 0; i < n; i++) {
+            if (!strncmp(w[i], "--", 2)) { if (dashed || (i != 0 && i != n - 1)) bad = true; dashed = w[i]; }
+            else if (!strcasecmp(w[i], "flip-block") || !strcasecmp(w[i], "flip-inline") || !strcasecmp(w[i], "flip-start") || !strcasecmp(w[i], "flip-x") || !strcasecmp(w[i], "flip-y")) {
+                for (int q = 0; q < nf; q++) if (!strcasecmp(w[flips[q]], w[i])) bad = true;
+                flips[nf++] = i;
+            } else others = true;
+        }
+        if (k) buf_str(&b, ", ");
+        if (others) {
+            if (dashed || nf) { bad = true; break; }
+            char *pa = position_area_canon(parts[k]);
+            if (!pa || !strcasecmp(pa, "none")) { free(pa); bad = true; break; }
+            buf_str(&b, pa);
+            free(pa);
+            continue;
+        }
+        bool sp = false;
+        if (dashed) { buf_str(&b, dashed); sp = true; }
+        for (int q = 0; q < nf; q++) { if (sp) buf_ch(&b, ' '); buf_str(&b, w[flips[q]]); sp = true; }
+    }
+    for (int k = 0; k < np; k++) free(parts[k]);
+    free(parts);
+    if (bad) { free(b.s); return strdup(""); }
+    buf_ch(&b, 0);
+    return b.s;
+}
+
+/* grid-template-*: what the grammar's looseness lets through. true: invalid. */
+static bool grid_tracks_bad(const char *v)
+{
+    if (!strcasecmp(v, "none") || !strncasecmp(v, "subgrid", 7)) return false;
+    int autos = 0;
+    bool has_track = false;
+    const char *p = v;
+    /* (fit-content without its length, a negative, names that can't be) */
+    char *copy = strdup(v);
+    bool bad = false;
+    for (char *q = copy; *q; q++) {
+        if (*q == '[') {
+            char *e = strchr(q, ']');
+            if (!e) break;
+            char name[64];
+            size_t l = (size_t)(e - q - 1);
+            if (l < sizeof name) {
+                memcpy(name, q + 1, l);
+                name[l] = 0;
+                char w[8][160];
+                int n = canon_words(name, w, 8);
+                for (int i = 0; i < n; i++) if (!strcasecmp(w[i], "auto") || !strcasecmp(w[i], "span")) bad = true;
+            }
+            memset(q, ' ', (size_t)(e - q + 1));
+        }
+    }
+    int in_calc = 0;
+    for (p = copy; *p; p++) {
+        bool edge = p == copy || !(isalnum((unsigned char)p[-1]) || p[-1] == '-');
+        if (edge && !strncasecmp(p, "repeat(auto-fi", 14)) autos++;
+        if (edge && (!strncasecmp(p, "calc(", 5) || !strncasecmp(p, "min(", 4) || !strncasecmp(p, "max(", 4) || !strncasecmp(p, "clamp(", 6)) && !in_calc) in_calc = 1;
+        else if (in_calc && *p == '(') in_calc++;
+        else if (in_calc && *p == ')') in_calc--;
+        if (!in_calc && *p == '-' && edge && (isdigit((unsigned char)p[1]) || p[1] == '.')) bad = true;
+        if (edge && !strncasecmp(p, "fit-content", 11) && p[11] != '(') bad = true;
+        if (edge && !strncasecmp(p, "minmax(fit-content", 18)) bad = true;
+        if (!isspace((unsigned char)*p)) has_track = true;
+    }
+    if (!has_track || autos > 1) bad = true;
+    if (autos == 1 && !bad) {
+        /* (an auto repeat's own may be intrinsic; beside one, every track has a fixed size) */
+        char *ar = strstr(copy, "repeat(auto-fi");
+        bool own_intrinsic = false;
+        if (ar) {
+            char *e = ar + 7;
+            int d = 1;
+            for (; *e && d; e++) { if (*e == '(') d++; else if (*e == ')') d--; }
+            for (char *k = ar + 7; k < e; k++) if (!strncasecmp(k, "content", 7) || (!strncasecmp(k, "auto", 4) && strncasecmp(k, "auto-fi", 7))) own_intrinsic = true;
+            memset(ar, ' ', (size_t)(e - ar));
+        }
+        (void)own_intrinsic;
+        for (p = copy; *p; p++) {
+            bool edge = p == copy || !(isalnum((unsigned char)p[-1]) || p[-1] == '-');
+            if (!edge) continue;
+            if (!strncasecmp(p, "minmax(", 7)) {
+                const char *c = p + 7, *e = c;
+                int d = 1, comma = -1;
+                for (; *e && d; e++) {
+                    if (*e == '(') d++;
+                    else if (*e == ')') d--;
+                    else if (*e == ',' && d == 1) comma = (int)(e - c);
+                }
+                if (comma < 0) continue;
+                #define GT_FIXED(s, n) ({ char t_[64]; size_t l_ = (size_t)(n) < 63 ? (size_t)(n) : 63; memcpy(t_, s, l_); t_[l_] = 0; !(strstr(t_, "auto") || strstr(t_, "content") || strstr(t_, "fr")); })
+                bool first_fixed = GT_FIXED(c, comma), second_fixed = GT_FIXED(c + comma + 1, (e - 1) - (c + comma + 1));
+                #undef GT_FIXED
+                if (!first_fixed && !second_fixed) bad = true;
+                p = e - 1;
+                continue;
+            }
+            if (!strncasecmp(p, "min-content", 11) || !strncasecmp(p, "max-content", 11) || !strncasecmp(p, "fit-content", 11)) bad = true;
+            if (!strncasecmp(p, "auto", 4) && strncasecmp(p, "auto-fi", 7)) bad = true;
+        }
+        if (strstr(copy, "fr") && !strstr(copy, "minmax(")) {
+            for (p = copy; (p = strstr(p, "fr")) != NULL; p += 2) if (p > copy && (isdigit((unsigned char)p[-1]) || p[-1] == '.')) bad = true;
+        }
+    }
+    free(copy);
+    return bad;
+}
+
+/* random()'s options as they serialize, knowing the property. */
+static char *canon_random(const char *prop, const char *v)
+{
+    if (!strstr(v, "random(")) return NULL;
+    Buf b = { 0 };
+    const char *q = v;
+    for (const char *r; (r = strstr(q, "random(")); ) {
+        const char *open = r + 7, *e = open;
+        int d = 1;
+        for (; *e; e++) {
+            if (*e == '(') d++;
+            else if (*e == ')' && !--d) break;
+            else if (*e == ',' && d == 1) break;
+        }
+        buf_add(&b, q, (size_t)(open - q));
+        q = open;
+        if (*e != ',') continue;
+        {
+            const char *f0 = open;
+            while (isspace((unsigned char)*f0)) f0++;
+            if (isdigit((unsigned char)*f0) || *f0 == '.' || *f0 == '+' || (*f0 == '-' && f0[1] != '-') || !strncasecmp(f0, "calc(", 5) || !strncasecmp(f0, "min(", 4) || !strncasecmp(f0, "max(", 4)) {
+                buf_str(&b, "element-scoped ua-");
+                buf_str(&b, prop);
+                buf_str(&b, "-1, ");
+                continue;
+            }
+        }
+        char opt[200];
+        size_t ol = (size_t)(e - open);
+        if (ol >= sizeof opt) continue;
+        memcpy(opt, open, ol);
+        opt[ol] = 0;
+        char w[6][160];
+        int n = canon_words(opt, w, 6);
+        if (n < 1 || (!isalpha((unsigned char)w[0][0]) && w[0][0] != '-') || !strcasecmp(w[0], "fixed") || !strcasecmp(w[0], "e") || !strcasecmp(w[0], "pi") || !strcasecmp(w[0], "infinity")) continue;
+        if (!strncasecmp(w[0], "calc", 4) || strchr(w[0], '(')) continue;
+        const char *dashed = NULL, *ua = NULL;
+        bool elem = false, pscoped = false, pindex = false, aut = false;
+        for (int i = 0; i < n; i++) {
+            if (!strncmp(w[i], "--", 2)) dashed = w[i];
+            else if (!strncasecmp(w[i], "ua-", 3)) ua = w[i];
+            else if (!strcasecmp(w[i], "element-scoped")) elem = true;
+            else if (!strcasecmp(w[i], "property-scoped")) pscoped = true;
+            else if (!strcasecmp(w[i], "property-index-scoped")) pindex = true;
+            else if (!strcasecmp(w[i], "auto")) aut = true;
+        }
+        if (aut) { elem = true; pindex = true; }
+        bool sp = false;
+        if (dashed) { buf_str(&b, dashed); sp = true; }
+        if (elem) { if (sp) buf_ch(&b, ' '); buf_str(&b, "element-scoped"); sp = true; }
+        if (ua) { if (sp) buf_ch(&b, ' '); buf_str(&b, ua); sp = true; }
+        else if (pscoped || pindex) {
+            if (sp) buf_ch(&b, ' ');
+            buf_str(&b, "ua-");
+            buf_str(&b, prop);
+            if (pindex) buf_str(&b, "-1");
+        }
+        q = e;
+    }
+    buf_str(&b, q);
+    buf_ch(&b, 0);
+    return b.s;
+}
+
 /* image-set(): each image a url, each with its resolution. */
 static char *canon_image_set(const char *v)
 {
@@ -5797,12 +6086,23 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
 {
     const char *n = p->name;
     if (!strcmp(n, "display")) return canon_display(v);
+    if (!strcmp(n, "container-name")) {
+        char w[8][160];
+        int nw = canon_words(v, w, 8);
+        for (int i = 0; i < nw; i++)
+            if (!strcasecmp(w[i], "and") || !strcasecmp(w[i], "or") || !strcasecmp(w[i], "not") || !strcasecmp(w[i], "default") ||
+                (nw > 1 && !strcasecmp(w[i], "none"))) return strdup("");
+        return NULL;
+    }
     if (!strcmp(n, "white-space")) return canon_white_space(v);
     if (!strcmp(n, "text-box-edge")) return canon_box_edge(v);
     if (!strcmp(n, "offset-rotate")) return canon_offset_rotate(v);
     if (!strcmp(n, "offset-path") && !strncmp(v, "ray(", 4)) return canon_ray(v);
     if (!strcmp(n, "font-palette") && !strncasecmp(v, "palette-mix(", 12)) return canon_palette_mix(v);
     if (strstr(v, "image-set(")) return canon_image_set(v);
+    if (!strcmp(n, "position-try-fallbacks")) return canon_try_fallbacks(v);
+    if ((!strcmp(n, "grid-template-columns") || !strcmp(n, "grid-template-rows")) && grid_tracks_bad(v)) return strdup("");
+    if (strstr(v, "random(")) return canon_random(n, v);
     if ((!strcmp(n, "clip-path") || !strcmp(n, "shape-outside") || !strcmp(n, "offset-path")) && strstr(v, " round ")) return canon_box_round(v);
     return NULL;
 }
@@ -5827,8 +6127,246 @@ static bool will_change_bad(const char *v)
     return bad;
 }
 
+/* ---- calc-mix() ---- */
+#define MIX_MAX 32
+typedef struct { char *item; char *wtext; double w; bool known, has; } MixArg;
+
+static const char *mix_close(const char *q)
+{
+    for (int d = 1; *q; q++) {
+        if (*q == '(') d++;
+        else if (*q == ')' && !--d) return q;
+    }
+    return NULL;
+}
+
+static char *mix_trim(const char *a, const char *b)
+{
+    while (a < b && isspace((unsigned char)*a)) a++;
+    while (b > a && isspace((unsigned char)b[-1])) b--;
+    return strndup(a, (size_t)(b - a));
+}
+
+/* The arguments between a and b; -1 if they can't be. */
+static int mix_args(const char *a, const char *b, MixArg *out)
+{
+    int n = 0;
+    for (const char *s = a; ; ) {
+        const char *e = s;
+        for (int d = 0; e < b && (d || *e != ','); e++) {
+            if (*e == '(') d++;
+            else if (*e == ')') d--;
+        }
+        char *t = mix_trim(s, e);
+        if (!t[0] || n == MIX_MAX) { free(t); return -1; }
+        MixArg *m = &out[n++];
+        memset(m, 0, sizeof *m);
+        /* (the last word, if there's more than one, is the weight) */
+        size_t l = strlen(t);
+        const char *w = NULL;
+        int d = 0;
+        for (size_t i = l; i > 0; i--) {
+            char c = t[i - 1];
+            if (c == ')') d++;
+            else if (c == '(') d--;
+            else if (!d && isspace((unsigned char)c)) { w = t + i; break; }
+        }
+        if (w && (t[l - 1] == '%' || (t[l - 1] == ')' && strchr(w, '%')))) {
+            m->has = true;
+            m->item = mix_trim(t, w);
+            if (t[l - 1] == '%') {
+                char *q = NULL;
+                m->w = strtod(w, &q);
+                if (q == w || *q != '%' || q[1] || m->w < 0.0 || m->w > 100.0) { free(t); return -(n + 1); }
+                m->known = true;
+            } else m->wtext = strdup(w);
+        } else m->item = strdup(t);
+        free(t);
+        if (e >= b) break;
+        s = e + 1;
+    }
+    return n;
+}
+
+static void mix_free(MixArg *m, int n)
+{
+    for (int i = 0; i < n; i++) { free(m[i].item); free(m[i].wtext); }
+}
+
+/* A calc-mix() as it's specified: weights worked out, down to a calc() if it can be. */
+static char *mix_norm(const char *a, const char *b)
+{
+    MixArg m[MIX_MAX];
+    int n = mix_args(a, b, m);
+    if (n <= 0) { mix_free(m, n < -1 ? -n - 1 : 0); return NULL; }
+    bool all_known = true;
+    double sum = 0.0;
+    int missing = 0;
+    for (int i = 0; i < n; i++) {
+        if (m[i].wtext) all_known = false;
+        if (!m[i].has) missing++;
+        if (m[i].known) sum += m[i].w;
+    }
+    bool weights = true;
+    for (int i = 0; i < n; i++) if (m[i].wtext) weights = false;
+    if (weights) {
+        if (sum > 100.0) {
+            for (int i = 0; i < n; i++) m[i].w = m[i].has ? m[i].w * 100.0 / sum : 0.0;
+        } else if (missing) {
+            double each = (100.0 - sum) / missing;
+            for (int i = 0; i < n; i++) if (!m[i].has) m[i].w = each;
+        }
+        for (int i = 0; i < n; i++) { m[i].known = m[i].has = true; }
+    }
+    Buf o = { 0 };
+    char num[64];
+    if (all_known) {
+        /* (nothing weighs anything: nothing of the first's kind) */
+        bool any = false;
+        for (int i = 0; i < n; i++) any = any || m[i].w > 0.0;
+        if (!any) {
+            char *q = NULL;
+            strtod(m[0].item, &q);
+            size_t ul = q ? strcspn(q, " )*/+-") : 0;
+            buf_str(&o, "calc(0");
+            if (ul) buf_add(&o, q, ul);
+            buf_ch(&o, ')');
+            mix_free(m, n);
+            return buf_take(&o);
+        }
+        /* (numbers of one unit: the number) */
+        const char *unit = NULL;
+        bool plain = true;
+        double total = 0.0, wsum = 0.0;
+        for (int i = 0; i < n; i++) {
+            if (m[i].w <= 0.0) continue;
+            char *q = NULL;
+            double v = strtod(m[i].item, &q);
+            if (q == m[i].item || (*q && strspn(q, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ%") != strlen(q))) { plain = false; break; }
+            if (unit && strcasecmp(unit, q)) { plain = false; break; }
+            unit = q;
+            total += v * m[i].w / 100.0;
+            wsum += m[i].w;
+        }
+        if (plain && unit) {
+            snprintf(num, sizeof num, "%.6g", total);
+            buf_str(&o, "calc(");
+            buf_str(&o, num);
+            buf_str(&o, unit);
+            buf_ch(&o, ')');
+            mix_free(m, n);
+            return buf_take(&o);
+        }
+    }
+    buf_str(&o, "calc-mix(");
+    bool first = true;
+    for (int i = 0; i < n; i++) {
+        if (weights && m[i].w <= 0.0) continue;
+        if (!first) buf_str(&o, ", ");
+        first = false;
+        buf_str(&o, m[i].item);
+        if (m[i].wtext) { buf_ch(&o, ' '); buf_str(&o, m[i].wtext); }
+        else if (m[i].has) { snprintf(num, sizeof num, " %.6g%%", m[i].w); buf_str(&o, num); }
+    }
+    buf_ch(&o, ')');
+    mix_free(m, n);
+    return buf_take(&o);
+}
+
+/* value, each calc-mix() as it's specified; NULL: one isn't valid. */
+static char *calc_mix_canon(const char *value)
+{
+    Buf o = { 0 };
+    const char *q = value;
+    for (const char *g; (g = strstr(q, "calc-mix(")); ) {
+        const char *c = mix_close(g + 9);
+        if (!c) { free(o.s); return NULL; }
+        /* (one inside another: that one first) */
+        char *in = strndup(g + 9, (size_t)(c - g - 9));
+        if (strstr(in, "calc-mix(")) {
+            char *r = calc_mix_canon(in);
+            free(in);
+            if (!r) { free(o.s); return NULL; }
+            in = r;
+        }
+        char *n = mix_norm(in, in + strlen(in));
+        free(in);
+        if (!n) { free(o.s); return NULL; }
+        buf_add(&o, q, (size_t)(g - q));
+        buf_str(&o, n);
+        free(n);
+        q = c + 1;
+    }
+    buf_str(&o, q);
+    buf_ch(&o, 0);
+    return o.s;
+}
+
+/* value, each calc-mix() as the sum it is. */
+char *css_calc_mix_expand(const char *value)
+{
+    Buf o = { 0 };
+    const char *q = value;
+    for (const char *g; (g = strstr(q, "calc-mix(")); ) {
+        const char *c = mix_close(g + 9);
+        if (!c) { free(o.s); return NULL; }
+        char *in = strndup(g + 9, (size_t)(c - g - 9));
+        if (strstr(in, "calc-mix(")) {
+            char *r = css_calc_mix_expand(in);
+            free(in);
+            if (!r) { free(o.s); return NULL; }
+            in = r;
+        }
+        MixArg m[MIX_MAX];
+        int n = mix_args(in, in + strlen(in), m);
+        if (n <= 0) { mix_free(m, n < -1 ? -n - 1 : 0); free(in); free(o.s); return NULL; }
+        buf_add(&o, q, (size_t)(g - q));
+        buf_str(&o, "calc(");
+        for (int i = 0; i < n; i++) {
+            char num[48];
+            if (i) buf_str(&o, " + ");
+            buf_ch(&o, '(');
+            buf_str(&o, m[i].item);
+            buf_str(&o, ") * ");
+            if (m[i].wtext) {
+                /* (a weight's percentages, as fractions) */
+                for (const char *w = m[i].wtext; *w; w++) {
+                    if (*w == '%') buf_str(&o, " / 100");
+                    else buf_ch(&o, *w);
+                }
+            } else {
+                snprintf(num, sizeof num, "%.6g", m[i].has ? m[i].w / 100.0 : 1.0 / n);
+                buf_str(&o, num);
+            }
+        }
+        buf_ch(&o, ')');
+        mix_free(m, n);
+        free(in);
+        q = c + 1;
+    }
+    buf_str(&o, q);
+    buf_ch(&o, 0);
+    return o.s;
+}
+
 char *css_prop_parse(const CssPropDef *p, const char *value)
 {
+    /* (worked out as far as it can be; what's left is checked as its sum, and stays) */
+    if (value && strstr(value, "calc-mix(") && !has_substitution(value)) {
+        char *canon = calc_mix_canon(value);
+        if (!canon) return NULL;
+        if (strstr(canon, "calc-mix(")) {
+            char *sum = css_calc_mix_expand(canon);
+            char *ok = sum ? css_prop_parse(p, sum) : NULL;
+            free(sum);
+            if (!ok) { free(canon); return NULL; }
+            free(ok);
+            return canon;
+        }
+        char *r = css_prop_parse(p, canon);
+        free(canon);
+        return r;
+    }
     /* (first baseline is what baseline is) */
     char *firsted = NULL;
     if (value && p && (!strncmp(p->name, "align-", 6) || !strncmp(p->name, "justify-", 8) || !strncmp(p->name, "place-", 6))) {
