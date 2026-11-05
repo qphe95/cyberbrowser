@@ -1084,6 +1084,10 @@
                 var self = bodyForwards(t, type) ? global : t;
                 setHandler(self, type, typeof v === 'function' || (v !== null && typeof v === 'object') ? v : null);
             } });
+        /* (named as an attribute's accessors are) */
+        var d = Object.getOwnPropertyDescriptor(P, name);
+        Object.defineProperty(d.get, 'name', { configurable: true, value: 'get ' + name });
+        Object.defineProperty(d.set, 'name', { configurable: true, value: 'set ' + name });
     }
     /* The handlers <body> (and <frameset>) forward to the window. */
     var BODY_FORWARDED = ['blur', 'error', 'focus', 'load', 'resize', 'scroll'].concat(WINDOW_HANDLERS);

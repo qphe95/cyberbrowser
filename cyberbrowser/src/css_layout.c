@@ -4632,6 +4632,8 @@ static void css_custom_prop_declare(FrameArena *a, CssCustomProps *m, const CssC
 /* Set when a var() had neither a value nor a fallback: the declaration is
  * invalid at computed-value time (the property behaves as `unset`). */
 static __thread bool t_var_failed;
+/* (an env() or ident() that came to nothing: for getComputedStyle's cascade) */
+static __thread bool t_subst_failed;
 static const char *fn_prop_lookup(const CssCustomProps *props, const char *name);
 
 /* Whether a token ending in a and one starting with b would read as something else. */
@@ -4677,7 +4679,13 @@ static char* css_var_subst(const char *value, const CssCustomProps *props)
         p = var + 4;
         while (*p && isspace((unsigned char)*p)) p++;
         const char *name_start = p;
-        while (*p && *p != ',' && *p != ')') p++;
+        /* (the name may be substituted itself: var(var(--n)), var({ --n })) */
+        int nd = 0;
+        while (*p && (nd || (*p != ',' && *p != ')'))) {
+            if (*p == '(' || *p == '{') nd++;
+            else if ((*p == ')' || *p == '}') && nd) nd--;
+            p++;
+        }
         const char *name_end = p;
         while (name_end > name_start && isspace((unsigned char)name_end[-1])) name_end--;
 
@@ -4707,6 +4715,29 @@ static char* css_var_subst(const char *value, const CssCustomProps *props)
         if (!name) break;
         memcpy(name, name_start, name_len);
         name[name_len] = '\0';
+        if (strchr(name, '(') || strchr(name, '{')) {
+            char *nm = name;
+            size_t nl2 = strlen(nm);
+            if (nm[0] == '{' && nl2 >= 2 && nm[nl2 - 1] == '}') { nm[nl2 - 1] = 0; nm++; }
+            bool saved = t_var_failed;
+            t_var_failed = false;
+            char *sub = strstr(nm, "var(") ? css_var_subst(nm, props) : NULL;
+            bool bad = t_var_failed;
+            t_var_failed = saved;
+            const char *s = sub ? sub : nm;
+            while (isspace((unsigned char)*s)) s++;
+            size_t sl = strlen(s);
+            while (sl && isspace((unsigned char)s[sl - 1])) sl--;
+            /* (what it comes to must be one custom property's name) */
+            bool ok = !bad && sl > 2 && s[0] == '-' && s[1] == '-';
+            for (size_t k = 2; ok && k < sl; k++) ok = isalnum((unsigned char)s[k]) || s[k] == '-' || s[k] == '_' || (unsigned char)s[k] >= 0x80;
+            char *nn = (char *)malloc(sl + 1);
+            if (nn) { if (ok) memcpy(nn, s, sl); nn[ok ? sl : 0] = 0; }
+            free(sub);
+            free(name);
+            name = nn;
+            if (!name) break;
+        }
 
         const char *resolved = fn_prop_lookup(props, name);
         free(name);
@@ -5199,6 +5230,24 @@ static char *fn_typed(const char *type, char *val)
     char *c = css_syntax_parse(type, val);
     free(val);
     if (!c) return NULL;
+    /* (an angle in degrees, a time in seconds: as computed) */
+    if (strstr(type, "<angle") || strstr(type, "<time")) {
+        char *e = NULL;
+        double v = strtod(c, &e);
+        if (e && e != c) {
+            double k = 0;
+            const char *u = e;
+            if (strstr(type, "<angle")) k = !strcasecmp(u, "deg") ? 1 : !strcasecmp(u, "rad") ? 180 / M_PI : !strcasecmp(u, "grad") ? 0.9 : !strcasecmp(u, "turn") ? 360 : 0;
+            if (!k && strstr(type, "<time")) k = !strcasecmp(u, "s") ? 1 : !strcasecmp(u, "ms") ? 0.001 : 0;
+            if (k) {
+                char b[64];
+                bool ang = !strcasecmp(u, "deg") || !strcasecmp(u, "rad") || !strcasecmp(u, "grad") || !strcasecmp(u, "turn");
+                snprintf(b, sizeof b, "%.10g%s", v * k, ang ? "deg" : "s");
+                free(c);
+                return strdup(b);
+            }
+        }
+    }
     if (!strncasecmp(c, "calc(", 5) || !strncasecmp(c, "min(", 4) || !strncasecmp(c, "max(", 4) || !strncasecmp(c, "clamp(", 6)) {
         bool len = strstr(type, "<length") != NULL, num = strstr(type, "<number") || strstr(type, "<integer");
         if (len || num) {
@@ -6007,7 +6056,7 @@ static char *ident_subst(const char *v)
                 for (const char *k = s; k < a; k++) if (il < sizeof id - 1) id[il++] = *k;
             } else { ok = false; break; }
         }
-        if (!ok || *a != ')' || !il) { t_var_failed = true; free(out); return NULL; }
+        if (!ok || *a != ')' || !il) { t_var_failed = t_subst_failed = true; free(out); return NULL; }
         id[il] = 0;
         if (o + il + 8 >= cap) { cap = (o + il + 8) * 2; char *t = realloc(out, cap); if (!t) { free(out); return NULL; } out = t; }
         /* (a leading digit, or a dash and a digit: escaped) */
@@ -6025,10 +6074,82 @@ static char *ident_subst(const char *v)
     return out;
 }
 
+/* env( name [integers]? [, fallback]? ): what the environment says.  Here,
+ * with no notch and no on-screen keyboard: the safe-area and keyboard insets
+ * are nothing; anything else is its fallback, or invalid at computed-value
+ * time (t_var_failed).  NULL when there's no env() in v. */
+static char *env_subst(const char *v)
+{
+    if (!v) return NULL;
+    char *cur = NULL;
+    for (int round = 0; round < 8; round++) {
+        const char *s = cur ? cur : v;
+        const char *p = NULL;
+        for (const char *q = s; (q = strchr(q, '(')); q++) {
+            if (q - s >= 3 && !strncasecmp(q - 3, "env", 3) && (q - 3 == s || !(isalnum((unsigned char)q[-4]) || q[-4] == '-' || q[-4] == '_'))) { p = q - 3; break; }
+        }
+        if (!p) return cur;
+        /* (its argument list, to the matching parenthesis) */
+        const char *a = p + 4, *e = a;
+        int d = 1;
+        char qc = 0;
+        for (; *e && d; e++) {
+            if (qc) { if (*e == '\\' && e[1]) e++; else if (*e == qc) qc = 0; continue; }
+            if (*e == '"' || *e == '\'') qc = *e;
+            else if (*e == '(') d++;
+            else if (*e == ')' && --d == 0) break;
+        }
+        if (!*e) { t_var_failed = t_subst_failed = true; free(cur); return NULL; }
+        /* (the name, then maybe a comma and the fallback) */
+        const char *n0 = a;
+        while (n0 < e && isspace((unsigned char)*n0)) n0++;
+        const char *n1 = n0;
+        while (n1 < e && (isalnum((unsigned char)*n1) || *n1 == '-' || *n1 == '_')) n1++;
+        const char *c = n1;
+        while (c < e && *c != ',') c++;
+        const char *rep = NULL;
+        size_t rl = 0;
+        static const char *const zero[] = { "safe-area-inset-top", "safe-area-inset-right", "safe-area-inset-bottom", "safe-area-inset-left",
+            "safe-area-max-inset-top", "safe-area-max-inset-right", "safe-area-max-inset-bottom", "safe-area-max-inset-left",
+            "keyboard-inset-top", "keyboard-inset-right", "keyboard-inset-bottom", "keyboard-inset-left", "keyboard-inset-width",
+            "keyboard-inset-height" };
+        bool known = false;
+        for (size_t k = 0; k < sizeof zero / sizeof zero[0] && !known; k++)
+            known = (size_t)(n1 - n0) == strlen(zero[k]) && !strncasecmp(n0, zero[k], (size_t)(n1 - n0));
+        if (known) { rep = "0px"; rl = 3; }
+        else if (c < e) {
+            rep = c + 1;
+            while (rep < e && isspace((unsigned char)*rep)) rep++;
+            const char *re = e;
+            while (re > rep && isspace((unsigned char)re[-1])) re--;
+            rl = (size_t)(re - rep);
+            if (!rl) { t_var_failed = t_subst_failed = true; free(cur); return NULL; }
+        } else { t_var_failed = t_subst_failed = true; free(cur); return NULL; }
+        size_t pre = (size_t)(p - s), post = strlen(e + 1);
+        char *nx = (char *)malloc(pre + rl + post + 3);
+        if (!nx) { free(cur); return NULL; }
+        memcpy(nx, s, pre);
+        /* (kept apart from what's around it) */
+        size_t o = pre;
+        if (pre && !isspace((unsigned char)s[pre - 1]) && s[pre - 1] != '(' && s[pre - 1] != ',') nx[o++] = ' ';
+        memcpy(nx + o, rep, rl);
+        o += rl;
+        strcpy(nx + o, e + 1);
+        free(cur);
+        cur = nx;
+    }
+    return cur;
+}
+
 static char *css_var_resolve_rest(const char *value, const CssCustomProps *props)
 {
     char *r = css_var_subst(value, props);
     const char *v = r ? r : value;
+    if (v && (strstr(v, "env(") || strstr(v, "ENV(") || strstr(v, "Env("))) {
+        char *t = env_subst(v);
+        if (t) { free(r); r = t; v = r; }
+        else if (t_var_failed) return r;
+    }
     if (v && strchr(v, '(') && (strstr(v, "ident(") || strstr(v, "IDENT("))) {
         char *t = ident_subst(v);
         if (t) { free(r); r = t; v = r; }
@@ -9222,6 +9343,12 @@ static uint64_t ctx_compound_target(const char *s, const char *e)
         if (c == '.' || c == '#') {
             const char *t = ++q;
             while (t < e && ctx_ident_char(*t)) t++;
+            /* (.foo-*: any class that starts so, the class attribute's) */
+            if (c == '.' && t < e && *t == '*') {
+                if (!attr) attr = has_key('[', "class", 5);
+                q = t + 1;
+                continue;
+            }
             if (t > q) {
                 if (c == '#') return has_key('#', q, (size_t)(t - q));
                 if (!cls) cls = has_key('.', q, (size_t)(t - q));
@@ -9258,6 +9385,7 @@ static void ctx_scan_compound(StyleCtxFeatures *f, const char *s, const char *e,
         if (c == '.' || c == '#') {
             const char *t = ++q;
             while (t < e && ctx_ident_char(*t)) t++;
+            if (c == '.' && t < e && *t == '*') { if (ctx) ctx_add(f, '[', "class", 5); q = t + 1; continue; }
             if (ctx && t > q) ctx_add(f, c, q, (size_t)(t - q));
             q = t;
         } else if (c == '[') {
@@ -23014,8 +23142,12 @@ static int layout_fixed_ancestor(LayoutContext *ctx, int idx)
  * This runs after the normal flow passes so containing-block sizes are final. */
 /* Static position (§10.3.7): where the box's margin edge would have been
  * in normal flow, derived from the final positions of its in-flow siblings. */
+/* (the static position just found is of the box's right edge: a vertical-rl line's) */
+static __thread bool t_static_right, t_static_bottom;
+
 static void layout_static_position(LayoutContext *ctx, int idx, double *sx, double *sy)
 {
+    t_static_right = t_static_bottom = false;
     int p = ctx->tree.nodes[idx].parent_idx;
     if (p < 0) { *sx = 0.0; *sy = 0.0; return; }
     LayoutBox *P = layout_box(ctx, p);
@@ -23024,6 +23156,16 @@ static void layout_static_position(LayoutContext *ctx, int idx, double *sx, doub
         /* (from the line it is on: inline layout on items) */
         *sx = P->x + B->static_dx;
         *sy = P->y + B->static_dy;
+        /* (a vertical-lr line's: along it is down, across it is right) */
+        if (P->s->writing_mode >= 1 && P->s->writing_mode <= 4 && !B->s->abs_inline) {
+            bool rl = P->s->writing_mode == 1 || P->s->writing_mode == 3;
+            /* (vertical-rl: across it is leftward, from the right edge; rtl:
+             * along it is upward, from the bottom) */
+            *sx = rl ? P->x + P->width - B->static_dy : P->x + B->static_dy;
+            *sy = P->s->direction == 1 ? P->y + P->height - B->static_dx : P->y + B->static_dx;
+            t_static_right = rl;
+            t_static_bottom = P->s->direction == 1;
+        }
         return;
     }
     *sx = P->x + P->s->border_left + P->padding_left;
@@ -23494,6 +23636,7 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
     /* (an inline-level box's static position from its line: in a right to
      * left one, where its right edge goes) */
     bool line_static = box->has_static && box->s->abs_inline;
+    bool static_right = t_static_right, static_bottom = t_static_bottom;
     box->has_static = 0;
 
     /* The containing block is the padding box of the nearest positioned
@@ -23644,8 +23787,9 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
     /* (stretch: what the containing block leaves after the insets given and the margins) */
     {
         /* (an inset not given: from the static position on that side) */
-        double used_w = (has_left ? box->left : has_right ? 0.0 : static_x - cb_x) + (has_right ? box->right : 0.0);
-        double used_h = (has_top ? box->top : has_bottom ? 0.0 : static_y - cb_y) + (has_bottom ? box->bottom : 0.0);
+        /* (a static position of the right or bottom edge: what's past it) */
+        double used_w = (has_left ? box->left : has_right ? 0.0 : static_right ? cb_x + cb_w - static_x : static_x - cb_x) + (has_right ? box->right : 0.0);
+        double used_h = (has_top ? box->top : has_bottom ? 0.0 : static_bottom ? cb_y + cb_h - static_y : static_y - cb_y) + (has_bottom ? box->bottom : 0.0);
         t_stretch_box = box;
         t_stretch_used_w = used_w;
         t_stretch_used_h = used_h;
@@ -23717,9 +23861,9 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
     const LayoutBox *spb = sp >= 0 ? layout_box(ctx, sp) : NULL;
     if (has_left && !(has_right && cb_rtl && !(box->s->margin_auto & 0xA))) box->x = cb_x + box->left + ml;
     else if (has_right) box->x = cb_x + cb_w - box->right - mr - box->width;
-    else if (spb && spb->s->direction == 1 && line_static)
+    else if ((spb && spb->s->direction == 1 && line_static) || static_right)
         box->x = static_x - mr - box->width;
-    else if (spb && spb->s->direction == 1)
+    else if (spb && spb->s->direction == 1 && !static_bottom)
         box->x = spb->x + spb->s->border_left + spb->padding_left + spb->content_width - mr - box->width;
     else box->x = static_x + ml;
     if (area_x >= 0 && !has_left && !has_right)
@@ -23761,6 +23905,7 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
         height_auto = false;
     }
     if (has_top) box->y = cb_y + box->top + mt;
+    else if (static_bottom && !has_bottom) box->y = static_y - mb - box->height;
     else box->y = static_y + mt;
 
     /* Lay out the subtree at its final x (absolute/fixed boxes were skipped
@@ -24555,18 +24700,22 @@ static bool cascade_at(LayoutContext *ctx, int dom, const CssCustomProps *props,
             if (d == count) break;
             const CssDeclaration *dl = applied[d].decl;
             if (applied[d].important != imp || !dl->property || !dl->value || (dl->property[0] == '-' && dl->property[1] == '-')) continue;
+            t_subst_failed = false;
             char *r = strchr(dl->value, '(') ? css_var_resolve(dl->value, props) : NULL;
-            /* (what it comes to isn't one of its values: as unset) */
-            fn(ud, dl->property, r && css_value_invalid(dl->property, r) ? "unset" : r ? r : dl->value, imp);
+            /* (what it comes to isn't one of its values, or nothing: as unset) */
+            fn(ud, dl->property, t_subst_failed || (r && css_value_invalid(dl->property, r)) ? "unset" : r ? r : dl->value, imp);
+            t_var_failed = false;
             free(r);
         }
         for (int b = 0; b < ninl; b++)
             for (int i = 0; i < inl[b].count; i++) {
                 const CssDeclaration *dl = &inl[b].decls[i];
                 if (dl->important != imp || !dl->property || !dl->value || (dl->property[0] == '-' && dl->property[1] == '-')) continue;
+                t_subst_failed = false;
                 char *r = strchr(dl->value, '(') ? css_var_resolve(dl->value, props) : NULL;
-                /* (what it comes to isn't one of its values: as unset) */
-                fn(ud, dl->property, r && css_value_invalid(dl->property, r) ? "unset" : r ? r : dl->value, imp);
+                /* (what it comes to isn't one of its values, or nothing: as unset) */
+                fn(ud, dl->property, t_subst_failed || (r && css_value_invalid(dl->property, r)) ? "unset" : r ? r : dl->value, imp);
+                t_var_failed = false;
                 free(r);
             }
     }

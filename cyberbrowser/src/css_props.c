@@ -1107,7 +1107,33 @@ static int builtin_type(const GNode *g, const Toks *ts, int i) {
         if (t->type == T_URL) return 1;
         if (t->type == T_FUNC && (strcasecmp(t->str, "url") == 0 || strcasecmp(t->str, "src") == 0)) {
             int j = t->first;
-            return j < t->end && ts->t[j].type == T_STRING;
+            if (!(j < t->end && ts->t[j].type == T_STRING)) return 0;
+            /* (then request modifiers, each once, each of one right argument) */
+            int seen = 0;
+            for (int k = tok_next(ts, j); k < t->end; k = tok_next(ts, k)) {
+                const Tok *m = &ts->t[k];
+                if (m->type != T_FUNC) return 0;
+                int a = m->first, which;
+                if (!strcasecmp(m->str, "cross-origin")) which = 1;
+                else if (!strcasecmp(m->str, "integrity")) which = 2;
+                else if (!strcasecmp(m->str, "referrer-policy")) which = 4;
+                else return 0;
+                if (seen & which) return 0;
+                seen |= which;
+                if (a >= m->end || tok_next(ts, a) != m->end) return 0;
+                const Tok *x = &ts->t[a];
+                if (which == 2) { if (x->type != T_STRING) return 0; continue; }
+                if (x->type != T_IDENT) return 0;
+                if (which == 1 && strcasecmp(x->str, "anonymous") && strcasecmp(x->str, "use-credentials")) return 0;
+                if (which == 4) {
+                    static const char *const rp[] = { "no-referrer", "no-referrer-when-downgrade", "same-origin", "origin",
+                        "strict-origin", "origin-when-cross-origin", "strict-origin-when-cross-origin", "unsafe-url" };
+                    bool ok = false;
+                    for (size_t q = 0; q < sizeof rp / sizeof rp[0] && !ok; q++) ok = !strcasecmp(x->str, rp[q]);
+                    if (!ok) return 0;
+                }
+            }
+            return 1;
         }
         return 0;
     }
@@ -2498,6 +2524,10 @@ static void srgb_to_hwb(const double c[3], double o[3], bool *hue_none) {
     srgb_to_hsl(c, hsl, hue_none);
     double mx = fmax(c[0], fmax(c[1], c[2])), mn = fmin(c[0], fmin(c[1], c[2]));
     o[0] = hsl[0]; o[1] = mn * 100; o[2] = (1 - mx) * 100;
+    /* (HSL's turn for a negative saturation isn't HWB's: its whiteness and
+     * blackness keep the order the channels have) */
+    double l = (mx + mn) / 2;
+    if (fabs(mx - mn) > 2e-5 && l != 0 && l != 1 && (mx - l) / fmin(l, 1 - l) < 0) o[0] = norm_hue(hsl[0] - 180);
     if (o[1] + o[2] >= 100) *hue_none = true;
 }
 
@@ -2887,67 +2917,8 @@ static int color_fn(const Toks *ts, const Tok *f, Color *out, int depth) {
     return res;
 }
 
-/* color-mix() (CSS Color 5 §2): two colors (or one) mixed in a space. */
-static int color_mix(const Toks *ts, const Tok *f, Color *out, int depth) {
-    int cs = CS_OKLAB, hue_method = 0;      /* shorter, longer, increasing, decreasing */
-    int i = f->first;
-    if (i < f->end && tok_ident(&ts->t[i], "in")) {
-        if (++i >= f->end || (cs = cs_from_ident(&ts->t[i])) < 0) return 0;
-        i++;
-        if (i < f->end && ts->t[i].type == T_IDENT && cs_hue(cs) >= 0) {
-            static const char *const m[] = { "shorter", "longer", "increasing", "decreasing" };
-            hue_method = -1;
-            for (int k = 0; k < 4; k++) if (tok_ident(&ts->t[i], m[k])) hue_method = k;
-            if (hue_method < 0 || i + 1 >= f->end || !tok_ident(&ts->t[i + 1], "hue")) return 0;
-            i += 2;
-        }
-        if (i < f->end && ts->t[i].type == T_COMMA) i++;
-    }
-    Color c[2];
-    double p[2];
-    bool has_p[2] = { false, false };
-    int nc = 0, res = 1;
-    while (i < f->end) {
-        if (nc == 2) return -1;     /* more than two: valid, not mixed here */
-        bool got = false;
-        for (int part = 0; part < 2 && i < f->end && ts->t[i].type != T_COMMA; part++) {
-            const Tok *t = &ts->t[i];
-            if (t->type == T_PERCENT || (t->type == T_FUNC && is_math_fn(t->str))) {
-                CalcSum s;
-                double v;
-                const char *u;
-                if (has_p[nc]) return 0;
-                if (t->type == T_PERCENT) v = t->num;
-                else if (!calc_simplify_value(ts, i, &s) || !calc_one(&s, &v, &u) || strcmp(u, "%")) return 0;
-                if (v < 0 || v > 100) return 0;
-                p[nc] = v;
-                has_p[nc] = true;
-            } else {
-                if (got) return 0;
-                int r = color_eval(ts, i, &c[nc], depth + 1);
-                if (!r) return 0;
-                if (r < 0) res = -1;
-                got = true;
-            }
-            i = tok_next(ts, i);
-        }
-        if (!got) return 0;
-        nc++;
-        if (i < f->end) { if (ts->t[i].type != T_COMMA) return 0; i++; if (i >= f->end) return 0; }
-    }
-    if (nc == 0) return 0;
-    if (nc == 1) { has_p[1] = false; p[1] = 0; }
-    if (!has_p[0] && !has_p[1]) p[0] = p[1] = nc == 2 ? 50 : 100;
-    else if (!has_p[0]) p[0] = 100 - p[1];
-    else if (!has_p[1]) p[1] = nc == 2 ? 100 - p[0] : 0;
-    double sum = p[0] + (nc == 2 ? p[1] : 0);
-    if (res < 0) return -1;
-    /* (nothing of either: half and half, and transparent) */
-    double mult = sum < 100 ? sum / 100 : 1;
-    if (sum <= 0) { p[0] = p[1] = 50; sum = 100; mult = 0; }
-    Color a = color_convert(&c[0], cs);
-    Color b = nc == 2 ? color_convert(&c[1], cs) : a;
-    double t = nc == 2 ? p[1] / sum : 0;
+/* Two colors (already in space cs) mixed, t of the second. */
+static void color_mix2(Color a, Color b, double t, int cs, int hue_method, Color *out) {
     memset(out, 0, sizeof *out);
     out->cs = cs;
     out->derived = true;
@@ -2978,7 +2949,96 @@ static int color_mix(const Toks *ts, const Tok *f, Color *out, int depth) {
         double v = a.c[k] * a.alpha * (1 - t) + b.c[k] * b.alpha * t;
         out->c[k] = alpha != 0 ? v / alpha : v;
     }
-    out->alpha = (out->none & 8) ? 0 : alpha * mult;
+    out->alpha = (out->none & 8) ? 0 : alpha;
+}
+
+/* color-mix() (CSS Color 5 §2): one color or more mixed in a space, each by
+ * its share (unsaid shares split what the said leave; under 100% in all, the
+ * mix as transparent as what's missing). */
+static int color_mix(const Toks *ts, const Tok *f, Color *out, int depth) {
+    int cs = CS_OKLAB, hue_method = 0;      /* shorter, longer, increasing, decreasing */
+    int i = f->first;
+    if (i < f->end && tok_ident(&ts->t[i], "in")) {
+        if (++i >= f->end || (cs = cs_from_ident(&ts->t[i])) < 0) return 0;
+        i++;
+        if (i < f->end && ts->t[i].type == T_IDENT && cs_hue(cs) >= 0) {
+            static const char *const m[] = { "shorter", "longer", "increasing", "decreasing" };
+            hue_method = -1;
+            for (int k = 0; k < 4; k++) if (tok_ident(&ts->t[i], m[k])) hue_method = k;
+            if (hue_method < 0 || i + 1 >= f->end || !tok_ident(&ts->t[i + 1], "hue")) return 0;
+            i += 2;
+        }
+        /* (the method, then a comma: always) */
+        if (i < f->end && ts->t[i].type == T_COMMA) i++;
+        else return 0;
+    }
+    enum { MAXC = 16 };
+    Color c[MAXC];
+    double p[MAXC];
+    bool has_p[MAXC];
+    int nc = 0, res = 1;
+    while (i < f->end) {
+        if (nc == MAXC) return -1;     /* (more than kept here: valid, not mixed) */
+        bool got = false;
+        has_p[nc] = false;
+        p[nc] = 0;
+        for (int part = 0; part < 2 && i < f->end && ts->t[i].type != T_COMMA; part++) {
+            const Tok *t = &ts->t[i];
+            if (t->type == T_PERCENT || (t->type == T_FUNC && is_math_fn(t->str))) {
+                CalcSum s;
+                double v;
+                const char *u;
+                if (has_p[nc]) return 0;
+                if (t->type == T_PERCENT) v = t->num;
+                else if (!calc_simplify_value(ts, i, &s) || !calc_one(&s, &v, &u) || strcmp(u, "%")) return 0;
+                if (t->type == T_PERCENT && (v < 0 || v > 100)) return 0;
+                /* (a calc() out of range: clamped) */
+                if (v < 0) v = 0;
+                if (v > 100) v = 100;
+                p[nc] = v;
+                has_p[nc] = true;
+            } else {
+                if (got) return 0;
+                int r = color_eval(ts, i, &c[nc], depth + 1);
+                if (!r) return 0;
+                if (r < 0) res = -1;
+                got = true;
+            }
+            i = tok_next(ts, i);
+        }
+        if (!got) return 0;
+        nc++;
+        if (i < f->end) { if (ts->t[i].type != T_COMMA) return 0; i++; if (i >= f->end) return 0; }
+    }
+    if (nc == 0) return 0;
+    if (res < 0) return -1;
+    /* (the unsaid share what the said leave) */
+    double said = 0;
+    int unsaid = 0;
+    for (int k = 0; k < nc; k++) { if (has_p[k]) said += p[k]; else unsaid++; }
+    double each = unsaid ? (100 - said) / unsaid : 0;
+    if (each < 0) each = 0;
+    double sum = 0;
+    for (int k = 0; k < nc; k++) { if (!has_p[k]) p[k] = each; sum += p[k]; }
+    /* (nothing of any: equal shares, and transparent) */
+    double mult = sum < 100 ? sum / 100 : 1;
+    if (sum <= 0) { for (int k = 0; k < nc; k++) p[k] = 1; sum = nc; mult = 0; }
+    /* (each in turn into what's mixed so far, by its share of the whole so far) */
+    Color acc = color_convert(&c[0], cs);
+    double cum = p[0];
+    if (nc == 1) color_mix2(acc, acc, 0, cs, hue_method, &acc);
+    for (int k = 1; k < nc; k++) {
+        Color b = color_convert(&c[k], cs);
+        double t = cum + p[k] > 0 ? p[k] / (cum + p[k]) : 0;
+        Color m;
+        color_mix2(acc, b, t, cs, hue_method, &m);
+        acc = m;
+        cum += p[k];
+    }
+    *out = acc;
+    out->cs = cs;
+    out->derived = true;
+    if (!(out->none & 8)) out->alpha *= mult;
     return 1;
 }
 
@@ -3185,16 +3245,31 @@ static void color_mix_spec(Buf *b, const Toks *ts, const Tok *f) {
     double p[16];
     for (int k = 0; k < 16; k++) p[k] = pct[k] >= 0 ? ts->t[pct[k]].num : -1;
     bool show = !plain || n != 2 || !((p[0] < 0 || p[0] == 50) && (p[1] < 0 || p[1] == 50));
-    if (plain && n == 2 && show) {
+    /* (one alone at the whole of it: unsaid) */
+    if (plain && n == 1 && (p[0] < 0 || p[0] == 100)) show = false;
+    bool fill = plain && n == 2 && show;
+    if (fill) {
         if (p[0] < 0) p[0] = 100 - p[1];
         if (p[1] < 0) p[1] = 100 - p[0];
+    }
+    /* (more: the unsaid share what the said leave, once any is said) */
+    if (plain && n > 2) {
+        double said = 0;
+        int unsaid = 0;
+        for (int k = 0; k < n; k++) { if (p[k] >= 0) said += p[k]; else unsaid++; }
+        if (unsaid && unsaid < n) {
+            double each = (100 - said) / unsaid;
+            if (each < 0) each = 0;
+            for (int k = 0; k < n; k++) if (p[k] < 0) p[k] = each;
+            fill = true;
+        }
     }
     Ser plain_ser = { ts, NULL, 0, NULL, NULL };
     for (int k = 0; k < n; k++) {
         if (k) buf_str(b, ", ");
         if (col[k] >= 0) color_spec(b, ts, col[k]);
         if (!show) continue;
-        if (plain && n == 2) { buf_ch(b, ' '); fmt_number(b, p[k]); buf_ch(b, '%'); }
+        if (fill) { buf_ch(b, ' '); fmt_number(b, p[k]); buf_ch(b, '%'); }
         else if (pct[k] >= 0) { buf_ch(b, ' '); ser_tok(&plain_ser, pct[k], b, NULL, 0); }
     }
     buf_ch(b, ')');
@@ -3598,6 +3673,79 @@ static bool has_substitution(const char *v) {
 /* Each ident( ... ) in v with something in it, no comma and no {} block at
  * its top level (what's in it is only checked once substituted). */
 static const char *strcasestr_simple(const char *h, const char *n);
+/* Each env( <custom-ident> <integer [0,inf]>* [, <fallback>]? ) in v. */
+static bool env_calls_ok(const char *v) {
+    for (const char *p = v; (p = strcasestr_simple(p, "env(")); p += 4) {
+        if (p > v && (isalnum((unsigned char)p[-1]) || p[-1] == '-' || p[-1] == '_')) continue;
+        const char *a = p + 4;
+        while (isspace((unsigned char)*a)) a++;
+        /* (the name: an identifier, not a function's) */
+        if (!(isalpha((unsigned char)*a) || *a == '-' || *a == '_' || (unsigned char)*a >= 0x80)) return false;
+        if (*a == '-' && isdigit((unsigned char)a[1])) return false;
+        while (isalnum((unsigned char)*a) || *a == '-' || *a == '_' || (unsigned char)*a >= 0x80) a++;
+        if (*a == '(') return false;
+        /* (then indices: non-negative integers) */
+        for (;;) {
+            const char *b = a;
+            while (isspace((unsigned char)*a)) a++;
+            if (*a == ',' || *a == ')') break;
+            if (a == b || !isdigit((unsigned char)*a)) return false;
+            while (isdigit((unsigned char)*a)) a++;
+            if (*a && !isspace((unsigned char)*a) && *a != ',' && *a != ')') return false;
+        }
+    }
+    return true;
+}
+/* Each --name( ... ) call's arguments: a named one with a value, a {} one
+ * with something in it and no !important, no bad url. */
+static bool dashed_calls_ok(const char *v) {
+    for (const char *p = v; *p; p++) {
+        if (!(p[0] == '-' && p[1] == '-') || (p > v && (isalnum((unsigned char)p[-1]) || p[-1] == '-' || p[-1] == '_'))) continue;
+        const char *n = p + 2;
+        while (isalnum((unsigned char)*n) || *n == '-' || *n == '_' || (unsigned char)*n >= 0x80) n++;
+        if (*n != '(') continue;
+        /* (its arguments, comma by comma at its own level) */
+        const char *a = n + 1;
+        for (;;) {
+            const char *e = a;
+            int d = 0;
+            char q = 0;
+            for (; *e; e++) {
+                if (q) { if (*e == '\\' && e[1]) e++; else if (*e == q) q = 0; continue; }
+                if (*e == '"' || *e == '\'') { q = *e; continue; }
+                if (*e == '(' || *e == '{' || *e == '[') d++;
+                else if (*e == ')' || *e == '}' || *e == ']') { if (d == 0) break; d--; }
+                else if (*e == ',' && d == 0) break;
+            }
+            const char *s = a, *t = e;
+            while (s < t && isspace((unsigned char)*s)) s++;
+            while (t > s && isspace((unsigned char)t[-1])) t--;
+            if (s < t && *s == '{') {
+                /* (a block: the whole argument, not empty, not important) */
+                if (t[-1] != '}') return false;
+                const char *bs = s + 1, *be = t - 1;
+                while (bs < be && isspace((unsigned char)*bs)) bs++;
+                if (bs >= be) return false;
+                for (const char *k = bs; k + 1 < be; k++) if (*k == '!') return false;
+            }
+            if (s + 2 < t && s[0] == '-' && s[1] == '-') {
+                const char *k = s + 2;
+                while (k < t && (isalnum((unsigned char)*k) || *k == '-' || *k == '_' || (unsigned char)*k >= 0x80)) k++;
+                while (k < t && isspace((unsigned char)*k)) k++;
+                if (k < t && *k == ':') {
+                    k++;
+                    while (k < t && isspace((unsigned char)*k)) k++;
+                    if (k >= t) return false;
+                }
+            }
+            for (const char *k = s; k + 4 < t; k++)
+                if (!strncasecmp(k, "url(", 4)) for (const char *u = k + 4; u < t && *u != ')'; u++) if (*u == '\\' && u[1] == '\n') return false;
+            if (*e != ',') break;
+            a = e + 1;
+        }
+    }
+    return true;
+}
 static bool ident_calls_ok(const char *v) {
     for (const char *p = v; (p = strcasestr_simple(p, "ident(")); p += 6) {
         if (p > v && (isalnum((unsigned char)p[-1]) || p[-1] == '-' || p[-1] == '_')) continue;
@@ -3724,7 +3872,7 @@ static char *prop_parse_raw(const CssPropDef *p, const char *value) {
         return v;
     }
     if (has_substitution(v)) {
-        if (!ident_calls_ok(v)) { free(v); return NULL; }
+        if (!ident_calls_ok(v) || !env_calls_ok(v) || !dashed_calls_ok(v)) { free(v); return NULL; }
         return v;
     }
     if (p->shorthand != CSS_SH_NONE) {
@@ -4307,6 +4455,20 @@ static bool sup_selector_one(const char *s, size_t n, bool relative)
     extern bool css_selector_text_invalid(const char *sel);
     (void)dom_selector_valid;
     if (ok) ok = !css_selector_text_invalid(x);
+    /* (:host()'s is one compound, however deep: no combinator in it) */
+    for (const char *h = x; ok && (h = strstr(h, ":host(")); h++) {
+        const char *c = h + 6;
+        int d = 1;
+        char q = 0;
+        for (; *c && d; c++) {
+            if (q) { if (*c == q) q = 0; continue; }
+            if (*c == '"' || *c == '\'') { q = *c; continue; }
+            if (*c == '(') d++;
+            else if (*c == ')') d--;
+            else if (*c == '>' || *c == '+' || *c == '~') ok = false;
+            else if (isspace((unsigned char)*c) && c[-1] != ',' && c[-1] != '(' && c[1] && !strchr(",)", c[1]) && !isspace((unsigned char)c[1])) ok = false;
+        }
+    }
     /* (what the lists inside say, each strictly) */
     for (const char *p = x; ok && (p = strchr(p, ':')); p++) {
         static const struct { const char *n; int kind; } fns[] = {
@@ -4343,7 +4505,11 @@ static bool sup_selector_one(const char *s, size_t n, bool relative)
                     }
                 }
                 if (ok && of) ok = sup_selector_branches(of + 4, (size_t)(a + an - of - 4), false);
-            } else ok = sup_selector_branches(a, an, fns[k].kind == 1);
+            } else {
+                /* (no pseudo-element in a list of elements) */
+                for (size_t c = 0; c + 1 < an && ok; c++) if (a[c] == ':' && a[c + 1] == ':') ok = false;
+                if (ok) ok = sup_selector_branches(a, an, fns[k].kind == 1);
+            }
             break;
         }
     }
@@ -4806,8 +4972,10 @@ static int expand_background(const char *v, char **out, const char **names, int 
             org[l] = hit_text(&P, a);
             clip[l] = hit_text(&P, b);
         } else if (m[4] >= 0 || m[5] >= 0) {
-            org[l] = hit_text(&P, m[4] >= 0 ? m[4] : m[5]);
-            clip[l] = strdup(org[l]);
+            char *one = hit_text(&P, m[4] >= 0 ? m[4] : m[5]);
+            /* (a clip that isn't a box: border-area, text: the clip alone) */
+            if (!strcmp(one, "border-box") || !strcmp(one, "padding-box") || !strcmp(one, "content-box")) { org[l] = one; clip[l] = strdup(one); }
+            else { org[l] = strdup("padding-box"); clip[l] = one; }
         } else {
             org[l] = strdup("padding-box");
             clip[l] = strdup("border-box");
@@ -7527,7 +7695,7 @@ static char *canon_palette_mix(const char *v)
             if (is_polar && n != 2 && !(n == 4 && !strcasecmp(w[3], "hue") && (!strcasecmp(w[2], "shorter") || !strcasecmp(w[2], "longer") || !strcasecmp(w[2], "increasing") || !strcasecmp(w[2], "decreasing")))) bad = true;
             if (!bad && strcasecmp(w[1], "oklab")) {
                 bool hue = n == 4 && strcasecmp(w[2], "shorter");
-                snprintf(space, sizeof space, "in %s%s%s%s", w[1], hue ? " " : "", hue ? w[2] : "", hue ? " hue" : "");
+                snprintf(space, sizeof space, "in %s%s%s%s", !strcasecmp(w[1], "xyz") ? "xyz-d65" : w[1], hue ? " " : "", hue ? w[2] : "", hue ? " hue" : "");
             }
         }
         if (np - first < 1) bad = true;
@@ -7547,6 +7715,7 @@ static char *canon_palette_mix(const char *v)
         if (n == 2 && pi < 0) { bad = true; break; }
         const char *nm = w[pi == 0 ? 1 : 0];
         if (n == 1 && pi == 0) { bad = true; break; }
+        (void)0;
         if (strncasecmp(nm, "palette-mix(", 12) && strncmp(nm, "--", 2) && strcasecmp(nm, "normal") && strcasecmp(nm, "light") && strcasecmp(nm, "dark")) { bad = true; break; }
         snprintf(words[i][0], 160, "%s", nm);
         name[i] = words[i][0];
@@ -7560,14 +7729,19 @@ static char *canon_palette_mix(const char *v)
             if (pct[i] < 0.0 || pct[i] > 100.0) bad = true;
         }
     }
+    double fillv = 0.0;
+    bool fill = false;
     if (!bad) {
         if (space[0]) { buf_str(&b, space); buf_str(&b, ", "); }
-        bool fill = ni == 2 && has[0] != has[1];
-        /* (half and half goes without saying) */
-        if (fill && pct[has[0] ? 0 : 1] == 50.0) { fill = false; has[0] = has[1] = false; }
-        bool all_zero = ni > 1;
-        for (int i = 0; i < ni; i++) if (!has[i] || pct[i] != 0.0) all_zero = false;
-        if (all_zero) bad = true;
+        /* (the unsaid share what the said leave, unless a calc() says it) */
+        int nsaid = 0, ncalc = 0;
+        double sum = 0.0;
+        for (int i = 0; i < ni; i++) if (has[i]) { nsaid++; sum += pct[i]; if (!strncasecmp(words[i][1], "calc(", 5)) ncalc++; }
+        if (nsaid && nsaid < ni && !ncalc) { fill = true; fillv = (100.0 - sum) / (ni - nsaid); if (fillv < 0) fillv = 0; }
+        /* (every one equal and the whole: unsaid) */
+        bool even = !ncalc && ni <= 2;
+        for (int i = 0; even && i < ni; i++) even = fabs((has[i] ? pct[i] : fill ? fillv : 100.0 / ni) - 100.0 / ni) < 1e-9;
+        if (even && (nsaid || fill)) { fill = false; for (int i = 0; i < ni; i++) has[i] = false; }
         for (int i = 0; !bad && i < ni; i++) {
             if (i) buf_str(&b, ", ");
             if (!strncasecmp(name[i], "palette-mix(", 12)) {
@@ -7578,7 +7752,7 @@ static char *canon_palette_mix(const char *v)
             } else buf_str(&b, name[i]);
             char num[48];
             if (has[i]) { buf_ch(&b, ' '); buf_str(&b, words[i][1]); }
-            else if (fill) { snprintf(num, sizeof num, " %.6g%%", 100.0 - pct[1 - i]); buf_str(&b, num); }
+            else if (fill) { snprintf(num, sizeof num, " %.6g%%", fillv); buf_str(&b, num); }
         }
     }
     free(words);
@@ -8300,6 +8474,53 @@ char *css_calc_mix_expand(const char *value)
     return o.s;
 }
 
+/* A url()'s request modifiers in their order: cross-origin, integrity,
+ * referrer-policy.  NULL when nothing moves. */
+static char *url_mods_canon(const char *v)
+{
+    if (!strstr(v, "url(")) return NULL;
+    Buf b = { 0 };
+    bool moved = false;
+    for (const char *p = v; *p; ) {
+        if (strncasecmp(p, "url(", 4)) { buf_ch(&b, *p++); continue; }
+        const char *s = p + 4;
+        while (isspace((unsigned char)*s)) s++;
+        if (*s != '"' && *s != '\'') { buf_ch(&b, *p++); continue; }
+        char q = *s;
+        const char *e = s + 1;
+        while (*e && *e != q) { if (*e == '\\' && e[1]) e++; e++; }
+        if (!*e) { buf_ch(&b, *p++); continue; }
+        e++;
+        /* (the modifiers: name( ... ) each) */
+        const char *ms[3] = { 0 }, *me[3] = { 0 };
+        int order[3], n = 0;
+        const char *k = e;
+        bool ok = true;
+        while (ok) {
+            while (isspace((unsigned char)*k)) k++;
+            if (*k == ')' || !*k) break;
+            int w = !strncasecmp(k, "cross-origin(", 13) ? 0 : !strncasecmp(k, "integrity(", 10) ? 1 : !strncasecmp(k, "referrer-policy(", 16) ? 2 : -1;
+            if (w < 0 || ms[w]) { ok = false; break; }
+            const char *x = strchr(k, '(') + 1;
+            char qq = 0;
+            for (; *x && (qq || *x != ')'); x++) { if (qq) { if (*x == qq) qq = 0; } else if (*x == '"' || *x == '\'') qq = *x; }
+            if (!*x) { ok = false; break; }
+            ms[w] = k; me[w] = x + 1;
+            order[n++] = w;
+            k = x + 1;
+        }
+        if (!ok || *k != ')' || n < 2) { buf_add(&b, p, (size_t)(e - p)); p = e; continue; }
+        for (int i = 1; i < n; i++) if (order[i] < order[i - 1]) moved = true;
+        buf_add(&b, p, (size_t)(e - p));
+        for (int w = 0; w < 3; w++) if (ms[w]) { buf_ch(&b, ' '); buf_add(&b, ms[w], (size_t)(me[w] - ms[w])); }
+        buf_ch(&b, ')');
+        p = k + 1;
+    }
+    buf_ch(&b, 0);
+    if (!moved) { free(b.s); return NULL; }
+    return b.s;
+}
+
 char *css_prop_parse(const CssPropDef *p, const char *value)
 {
     /* (worked out as far as it can be; what's left is checked as its sum, and stays) */
@@ -8349,6 +8570,10 @@ char *css_prop_parse(const CssPropDef *p, const char *value)
         if (!v) { free(renamed); return NULL; }
     }
     if (firsted && !v) { free(firsted); return NULL; }
+    if (v && strstr(v, "url(") && (strstr(v, "cross-origin(") || strstr(v, "integrity(") || strstr(v, "referrer-policy("))) {
+        char *u = url_mods_canon(v);
+        if (u) { free(v); v = u; }
+    }
     if (v && p && !has_substitution(v) && !css_is_wide_keyword(v, strlen(v))) {
         if (!strcmp(p->name, "will-change") && will_change_bad(v)) { free(v); return NULL; }
         char *c = css_prop_canon(p, v);

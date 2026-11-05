@@ -31,7 +31,7 @@ static const CssTypeDef g_types[] = {
     { "colorspace-params", "<predefined-rgb> [ <number> | <percentage> | none ]{3} | <xyz-space> [ <number> | <percentage> | none ]{3}" },
     { "predefined-rgb", "srgb | srgb-linear | display-p3 | display-p3-linear | a98-rgb | prophoto-rgb | rec2020" },
     { "xyz-space", "xyz | xyz-d50 | xyz-d65" },
-    { "color-mix", "color-mix( <color-interpolation-method>? ,? [ <color> && <percentage [0,100]>? ]#{1,} )" },
+    { "color-mix", "color-mix( [ <color-interpolation-method> , ]? [ <color> && <percentage [0,100]>? ]#{1,} )" },
     { "color-interpolation-method", "in [ <rectangular-color-space> | <polar-color-space> <hue-interpolation-method>? ]" },
     { "rectangular-color-space", "srgb | srgb-linear | display-p3 | display-p3-linear | a98-rgb | prophoto-rgb | rec2020 | lab | oklab | xyz | xyz-d50 | xyz-d65" },
     { "polar-color-space", "hsl | hwb | lch | oklch" },
@@ -226,8 +226,8 @@ static const CssTypeDef g_types[] = {
     { "line-name-list", "[ <line-names> | repeat( [ <integer [1,inf]> | auto-fill ] , <line-names>+ ) ]+" },
 
     /* the special shorthands' layers (css_props.c reads their members by position) */
-    { "bg-layer", "<bg-image> || <bg-position> [ / <bg-size> ]? || <repeat-style> || <attachment> || <visual-box> || <visual-box>" },
-    { "final-bg-layer", "<bg-image> || <bg-position> [ / <bg-size> ]? || <repeat-style> || <attachment> || <visual-box> || <visual-box> || <color>" },
+    { "bg-layer", "<bg-image> || <bg-position> [ / <bg-size> ]? || <repeat-style> || <attachment> || <visual-box> || <bg-clip>" },
+    { "final-bg-layer", "<bg-image> || <bg-position> [ / <bg-size> ]? || <repeat-style> || <attachment> || <visual-box> || <bg-clip> || <color>" },
     { "background-syntax", "[ <bg-layer> , ]* <final-bg-layer>" },
     { "mask-layer", "[ none | <image> ] || <position> [ / <bg-size> ]? || <repeat-style> || <coord-box> || [ <coord-box> | no-clip ] || "
                     "[ add | subtract | intersect | exclude ] || [ alpha | luminance | match-source ]" },

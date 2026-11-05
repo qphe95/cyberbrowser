@@ -584,6 +584,11 @@
             if (Object.prototype.hasOwnProperty.call(global.CSS, name)) return;
             Object.defineProperty(global.CSS, name, { configurable: true, enumerable: true, writable: true, value: function (v) { return new CSSUnitValue(Number(v), u); } });
         });
+        /* (the factories named as the units are written: Q, Hz, kHz) */
+        [['Q', 'q'], ['Hz', 'hz'], ['kHz', 'khz']].forEach(function (p) {
+            if (!Object.prototype.hasOwnProperty.call(global.CSS, p[0]))
+                Object.defineProperty(global.CSS, p[0], { configurable: true, enumerable: true, writable: true, value: function (v) { return new CSSUnitValue(Number(v), p[1]); } });
+        });
     }
 
     /* ---- parsing numeric text ---- */

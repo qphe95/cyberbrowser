@@ -20,6 +20,7 @@
 #define CSS_ATTR_OP_PREFIX   4  /* [a^=v]   */
 #define CSS_ATTR_OP_SUFFIX   5  /* [a$=v]   */
 #define CSS_ATTR_OP_SUBSTR   6  /* [a*=v]   */
+#define CSS_ATTR_OP_TOKPREFIX 7 /* .v-*: a token starting with v */
 
 #include <string.h>
 #include <strings.h>
@@ -57,6 +58,18 @@ static inline bool css_attr_value_matches(int op, bool ci, const char *want,
         return wl > 0 && hl >= wl && ncmp(have, want, wl) == 0;
     case CSS_ATTR_OP_SUFFIX:
         return wl > 0 && hl >= wl && ncmp(have + hl - wl, want, wl) == 0;
+    case CSS_ATTR_OP_TOKPREFIX: {
+        if (wl == 0) return false;
+        const char *p = have;
+        while (*p) {
+            while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\f') p++;
+            const char *st = p;
+            while (*p && !(*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\f')) p++;
+            /* (more after it, and not another dash) */
+            if ((size_t)(p - st) > wl && st[wl] != '-' && ncmp(st, want, wl) == 0) return true;
+        }
+        return false;
+    }
     case CSS_ATTR_OP_SUBSTR:
         if (wl == 0) return false;
         for (size_t i = 0; i + wl <= hl; i++)

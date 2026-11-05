@@ -307,6 +307,15 @@
                     var n = this.peek(1);
                     if (!n || n.t !== 'ident') throw new SyntaxError('bad class');
                     this.i += 2;
+                    /* (.foo-*: a class prefix, the asterisk right after the dash) */
+                    var star = this.toks[this.i];
+                    if (star && star.t === 'delim' && star.v === '*' && /-$/.test(n.v) && n.v !== '-') {
+                        this.i++;
+                        items.push({ k: 'classprefix', v: n.v });
+                        var after = this.toks[this.i];
+                        if (after && after.t === 'delim' && after.v === '*') throw new SyntaxError('bad class prefix');
+                        continue;
+                    }
                     items.push({ k: 'class', v: n.v });
                 } else if (t.t === '[') {
                     items.push(this.attribute());
@@ -509,6 +518,7 @@
                 break;
             case 'id': s += '#' + serIdent(it.v); break;
             case 'class': s += '.' + serIdent(it.v); break;
+            case 'classprefix': s += '.' + serIdent(it.v) + '*'; break;
             case 'nest': s += '&'; break;
             case 'attr':
                 s += '[';
@@ -699,7 +709,7 @@
 
     function CSSRule() { throw new TypeError('Illegal constructor'); }
     var RULE_TYPES = { style: 1, charset: 2, import: 3, media: 4, 'font-face': 5, page: 6, keyframes: 7,
-                       keyframe: 8, namespace: 10, 'counter-style': 11, supports: 12, 'font-feature-values': 14 };
+                       keyframe: 8, margin: 9, namespace: 10, 'counter-style': 11, supports: 12, 'font-feature-values': 14 };
     ['STYLE_RULE', 'CHARSET_RULE', 'IMPORT_RULE', 'MEDIA_RULE', 'FONT_FACE_RULE', 'PAGE_RULE', 'KEYFRAMES_RULE',
      'KEYFRAME_RULE', 'MARGIN_RULE', 'NAMESPACE_RULE', 'COUNTER_STYLE_RULE', 'SUPPORTS_RULE', 'DOCUMENT_RULE',
      'FONT_FEATURE_VALUES_RULE'].forEach(function (n, k) {
@@ -748,6 +758,7 @@
     var CSSNamespaceRule = subclass('CSSNamespaceRule', CSSRule);
     var CSSFontFaceRule = subclass('CSSFontFaceRule', CSSRule);
     var CSSPageRule = subclass('CSSPageRule', CSSGroupingRule);
+    var CSSMarginRule = subclass('CSSMarginRule', CSSRule);
     /* @container's prelude: names and conditions; what's in parentheses may be anything. */
     function containerTerms(text) {
         var out = [], i = 0, n = text.length;
@@ -1518,7 +1529,16 @@
     getter(CSSPageRule.prototype, 'style', function () { return this.__style; }, function (v) { this.__style.cssText = v; });
     CSSPageRule.prototype.__text = function () {
         var d = declText(this.__style);
+        /* (its margin rules after its declarations) */
+        var m = (this.__rules || []).map(function (x) { return x.__text(); }).join(' ');
+        if (m) d = d ? d + ' ' + m : m;
         return '@page' + (this.__selector ? ' ' + this.__selector : '') + ' {' + (d ? ' ' + d + ' ' : ' ') + '}';
+    };
+    getter(CSSMarginRule.prototype, 'name', function () { return this.__name; });
+    getter(CSSMarginRule.prototype, 'style', function () { return this.__style; }, function (v) { this.__style.cssText = v; });
+    CSSMarginRule.prototype.__text = function () {
+        var d = declText(this.__style);
+        return '@' + this.__name + ' {' + (d ? ' ' + d + ' ' : ' ') + '}';
     };
     getter(CSSKeyframesRule.prototype, 'name', function () { return this.__name; }, function (v) { this.__name = String(v); touched(this); });
     getter(CSSKeyframesRule.prototype, 'cssRules', function () { return ruleList(this.__rules, this); });
@@ -1540,14 +1560,18 @@
         return parts.indexOf(null) >= 0 ? null : parts.join(', ');
     }
     define(CSSKeyframesRule.prototype, 'appendRule', function (text) {
+        if (!(this instanceof CSSKeyframesRule)) throw new TypeError('Illegal invocation');
+        if (arguments.length < 1) throw new TypeError("Failed to execute 'appendRule' on 'CSSKeyframesRule': 1 argument required");
         var r = parseRules(String(text), 'keyframes', this)[0];
         if (r) { this.__rules.push(r); changedList(this); touched(this); }
     });
     define(CSSKeyframesRule.prototype, 'deleteRule', function (key) {
+        if (arguments.length < 1) throw new TypeError("Failed to execute 'deleteRule' on 'CSSKeyframesRule': 1 argument required");
         var k = keyText(String(key));
         for (var i = this.__rules.length - 1; i >= 0; i--) if (this.__rules[i].__key === k) { this.__rules.splice(i, 1); changedList(this); touched(this); return; }
     });
     define(CSSKeyframesRule.prototype, 'findRule', function (key) {
+        if (arguments.length < 1) throw new TypeError("Failed to execute 'findRule' on 'CSSKeyframesRule': 1 argument required");
         var k = keyText(String(key));
         for (var i = this.__rules.length - 1; i >= 0; i--) if (this.__rules[i].__key === k) return this.__rules[i];
         return null;
@@ -1558,7 +1582,7 @@
         this.__key = k;
         touched(this);
     });
-    getter(CSSKeyframeRule.prototype, 'style', function () { return this.__style; });
+    getter(CSSKeyframeRule.prototype, 'style', function () { return this.__style; }, function (v) { this.__style.cssText = v; });
     CSSKeyframeRule.prototype.__text = function () { var d = declText(this.__style); return this.__key + ' {' + (d ? ' ' + d + ' ' : ' ') + '}'; };
     getter(CSSPropertyRule.prototype, 'name', function () { return this.__name; });
     getter(CSSPropertyRule.prototype, 'syntax', function () { return this.__descs.syntax || ''; });
@@ -2075,7 +2099,20 @@
             case 'page':
                 if (p.block === null) return null;
                 r = makeRule(CSSPageRule, 'page', { __selector: p.prelude, __style: null, __rules: [] });
-                r.__style = decls(p.block, r);
+                /* (the margin at-rules in it: rules of their own; the rest its declarations) */
+                var pdecl = '', pi2 = 0, pb = p.block;
+                while (pi2 < pb.length) {
+                    var pit = blockItem(pb, pi2), seg = pb.slice(pi2, pit.end);
+                    var mm = pit.rule && /^\s*@([a-z-]+)\s*\{([\s\S]*)\}\s*$/i.exec(seg);
+                    if (mm && /^(top|bottom)-(left-corner|left|center|right|right-corner)$|^(left|right)-(top|middle|bottom)$/i.test(mm[1])) {
+                        var mr = makeRule(CSSMarginRule, 'margin', { __name: mm[1].toLowerCase(), __style: null });
+                        mr.__style = decls(mm[2], mr);
+                        mr.__parentRule = r;
+                        r.__rules.push(mr);
+                    } else if (!pit.rule) pdecl += seg;
+                    pi2 = pit.end;
+                }
+                r.__style = decls(pdecl, r);
                 break;
             case 'keyframes':
             case '-webkit-keyframes':

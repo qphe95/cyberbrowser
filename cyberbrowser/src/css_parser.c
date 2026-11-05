@@ -2398,7 +2398,25 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
         if (s[i] == '.') {
             i++;
             size_t start = i;
-            i = css_sel_name_end(s, n, i, ".#[:");
+            i = css_sel_name_end(s, n, i, ".#[:*");
+            /* (.foo-*: a class prefix, an attribute test on class's tokens) */
+            if (i < n && s[i] == '*' && i > start + 1 && s[i - 1] == '-') {
+                if (out->attr_count < CSS_MAX_ATTRS) {
+                    int k = out->attr_count;
+                    css_sel_name_copy(out->attrs[k], "class", 5, sizeof(out->attrs[0]));
+                    out->attr_ops[k] = (unsigned char)CSS_ATTR_OP_TOKPREFIX;
+                    out->attr_ci[k] = false;
+                    size_t vl = i - start < sizeof(out->attr_vals[0]) - 1 ? i - start : sizeof(out->attr_vals[0]) - 1;
+                    memcpy(out->attr_vals[k], s + start, vl);
+                    out->attr_vals[k][vl] = 0;
+                    out->attr_count++;
+                    out->has_substantive = true;
+                }
+                i++;
+                if (i < n && s[i] == '*') out->never_match = true;
+                continue;
+            }
+            if (i < n && s[i] == '*') out->never_match = true;     /* (.foo*: no such selector) */
             if (out->class_count < CSS_MAX_CLASSES) {
                 css_sel_name_copy(out->classes[out->class_count], s + start, i - start,
                                   sizeof(out->classes[0]));

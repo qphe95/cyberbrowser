@@ -52,7 +52,7 @@ enum {
     SS_ANY,          /* unsupported pseudo-class: matches */
     SS_NEVER,        /* pseudo-element: never matches */
 };
-enum { AO_EXISTS, AO_EQ, AO_WORD, AO_DASH, AO_PREFIX, AO_SUFFIX, AO_SUBSTR };
+enum { AO_EXISTS, AO_EQ, AO_WORD, AO_DASH, AO_PREFIX, AO_SUFFIX, AO_SUBSTR, AO_TOKPREFIX };
 
 struct SelList;
 
@@ -314,7 +314,15 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
             if (!ident_start(sp)) { sp->err = true; break; }
             s.kind = SS_CLASS;
             s.val = sp_ident(sp, &s.vlen);
-            if (s.val && s.vlen) {
+            /* (.foo-*: a class that starts so) */
+            if (s.val && s.vlen > 1 && s.val[s.vlen - 1] == '-' && sp->p < sp->e && *sp->p == '*') {
+                sp->p++;
+                css_atom_reserve(1);
+                s.kind = SS_ATTR;
+                s.atom = css_atom_intern("class", 5);
+                s.op = AO_TOKPREFIX;
+                if (sp->p < sp->e && *sp->p == '*') { sp->err = true; free(s.val); break; }
+            } else if (s.val && s.vlen) {
                 css_atom_reserve(1);
                 s.atom = css_atom_intern(s.val, s.vlen);
                 for (uint32_t k = 0; k < s.vlen; k++)
@@ -769,6 +777,15 @@ static bool attr_ok(uint32_t s, const SelSimple *ss) {
         case AO_SUFFIX: m = n && vn >= n && cmp_n(v + vn - n, ss->val, n, ci); break;
         case AO_SUBSTR:
             for (size_t k = 0; n && k + n <= vn && !m; k++) m = cmp_n(v + k, ss->val, n, ci);
+            break;
+        case AO_TOKPREFIX:
+            /* (a class prefix: some token that starts so) */
+            for (size_t k = 0; k < vn && !m; ) {
+                while (k < vn && (v[k] == ' ' || v[k] == '\t' || v[k] == '\n' || v[k] == '\r' || v[k] == '\f')) k++;
+                size_t st = k;
+                while (k < vn && !(v[k] == ' ' || v[k] == '\t' || v[k] == '\n' || v[k] == '\r' || v[k] == '\f')) k++;
+                m = k - st > n && n && v[st + n] != '-' && cmp_n(v + st, ss->val, n, ci);
+            }
             break;
         }
         /* (any namespace's: the next one may) */
