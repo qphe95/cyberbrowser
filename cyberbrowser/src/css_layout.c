@@ -840,7 +840,7 @@ static CssLen calc_parse_function(CalcParser *p)
     size_t ns = p->pos;
     while (p->pos < p->len && (isalnum((unsigned char)p->s[p->pos]) || p->s[p->pos] == '-')) p->pos++;
     size_t nl = p->pos - ns;
-    char name[8] = {0};
+    char name[12] = {0};
     if (nl >= sizeof(name) || p->pos >= p->len || p->s[p->pos] != '(') return zero;
     for (size_t i = 0; i < nl; i++) name[i] = (char)tolower((unsigned char)p->s[ns + i]);
     p->pos++;
@@ -863,6 +863,13 @@ static CssLen calc_parse_function(CalcParser *p)
         }
     }
 
+    /* (progress()'s clamping, ahead of its numbers) */
+    bool no_clamp = false;
+    if (!strcmp(name, "progress")) {
+        calc_skip_space(p);
+        if (p->len - p->pos > 9 && !strncasecmp(p->s + p->pos, "no-clamp ", 9)) { p->pos += 9; no_clamp = true; }
+        else if (p->len - p->pos > 6 && !strncasecmp(p->s + p->pos, "clamp ", 6)) p->pos += 6;
+    }
     bool trig = !strcmp(name, "sin") || !strcmp(name, "cos") || !strcmp(name, "tan");
     if (trig) t_calc_trig++;
     CssLen args[8];
@@ -894,6 +901,11 @@ static CssLen calc_parse_function(CalcParser *p)
         else if (!strcmp(name, "exp")) m = exp(a0);
         else if (!strcmp(name, "log")) m = n > 1 ? log(a0) / log(a1) : log(a0);
         else if (!strcmp(name, "sign")) m = a0 > 0.0 ? 1.0 : a0 < 0.0 ? -1.0 : 0.0;
+        else if (!strcmp(name, "progress") && n >= 3) {
+            double a2 = calc_cmp_value(args[2]);
+            m = (a0 - a1) / (a2 - a1);
+            if (!no_clamp) m = m < 0.0 ? 0.0 : m > 1.0 ? 1.0 : m;
+        }
         else if (!strcmp(name, "hypot")) {
             double h = 0.0;
             for (int i = 0; i < n; i++) { double a = calc_cmp_value(args[i]); h += a * a; }
@@ -3104,11 +3116,11 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             box->s->mm_kw_h = (unsigned char)(ckw ? (box->s->mm_kw_h | bit) : (box->s->mm_kw_h & ~bit));
         }
     }
-    if (prop[0] == 'w' || prop[0] == 'h' || prop[0] == 'm') {
+    if (prop[0] == 'w' || prop[0] == 'h' || prop[0] == 'm' || prop[0] == 'f') {
         bool is_w = !strcasecmp(prop, "width"), is_h = !is_w && !strcasecmp(prop, "height");
         if (is_w) box->s->csz_w = NULL;
         if (is_h) box->s->csz_h = NULL;
-        if ((is_w || is_h || !strncasecmp(prop, "min-", 4) || !strncasecmp(prop, "max-", 4)) && strstr(value, "calc-size(")) {
+        if ((is_w || is_h || !strncasecmp(prop, "min-", 4) || !strncasecmp(prop, "max-", 4) || !strcasecmp(prop, "flex-basis")) && strstr(value, "calc-size(")) {
             char *bas = NULL, *ex = NULL;
             if (csz_parts(value, &bas, &ex)) {
                 bool any = !strcasecmp(bas, "any");
@@ -3129,6 +3141,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                 if (d.value) layout_apply_declaration(box, &d, parent_width, viewport_width, base_url);
                 if (kw && is_w) box->s->csz_w = layout_intern(ex, strlen(ex));
                 if (kw && is_h) box->s->csz_h = layout_intern(ex, strlen(ex));
+                if (kw && prop[0] == 'f') box->s->fb_csz = layout_intern(ex, strlen(ex));
                 free(text);
                 free(bas);
                 free(ex);
@@ -3711,6 +3724,9 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     } else if (PK(57)) {
         box->s->order = atoi(value);
     } else if (PK(58)) {
+        box->s->fb_csz = NULL;
+        box->s->fb_kw = !strcasecmp(value, "min-content") ? 1 : !strcasecmp(value, "max-content") ? 2 :
+                        !strcasecmp(value, "fit-content") ? 3 : !strcasecmp(value, "content") ? 4 : 0;
         css_parse_flex_basis(value, &box->s->flex_basis, &box->s->flex_basis_percent,
                              &box->s->flex_basis_pct_px, box->s->font_size);
     } else if (PK(59)) {
@@ -18512,12 +18528,31 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
         }
 
         double basis = -1.0;
-        if (child->s->flex_basis_percent > 0.0) {
+        /* (by its content, whatever its width says) */
+        if (child->s->fb_kw && is_row) {
+            unsigned char held_set = child->s->width_set;
+            double held_mn = child->min_width, held_mx = child->max_width;
+            child->s->width_set = 0;
+            child->min_width = 0.0;
+            child->max_width = -1.0;
+            double mn = layout_intrinsic_compute(ctx, c, false), mx = layout_intrinsic_compute(ctx, c, true);
+            child->s->width_set = held_set;
+            child->min_width = held_mn;
+            child->max_width = held_mx;
+            int k = child->s->fb_kw;
+            double av = avail_main - it->mm_s - it->mm_e;
+            basis = k == 1 ? mn : k == 3 ? (mx < av ? mx : (mn > av ? mn : av)) : mx;
+            if (child->s->fb_csz) {
+                double bw = layout_horizontal_border_padding(child);
+                basis = csz_eval(child->s->fb_csz, basis - bw, avail_main, ctx->viewport_width, child->s->font_size) + bw;
+            }
+        }
+        else if (child->s->flex_basis_percent > 0.0) {
             if (main_def) basis = layout_flex_main_total(child, avail_main * child->s->flex_basis_percent + child->s->flex_basis_pct_px, is_row);
         } else if (child->s->flex_basis >= 0.0) {
             basis = layout_flex_main_total(child, child->s->flex_basis, is_row);
         }
-        if (basis < 0.0 && main_def_item) basis = is_row ? child->width : child->height;
+        if (basis < 0.0 && main_def_item && !child->s->fb_kw) basis = is_row ? child->width : child->height;
         if (basis < 0.0) {
             if (is_row) {
                 basis = layout_intrinsic_width(ctx, c, true);
@@ -18571,6 +18606,10 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
             FlexItem *it = &items[measure[k]];
             LayoutBox *child = layout_box(ctx, it->idx);
             it->base = child->height;
+            if (child->s->fb_csz) {
+                double bh = layout_vertical_border_padding(child);
+                it->base = csz_eval(child->s->fb_csz, child->height - bh, ct->content_height, ctx->viewport_width, child->s->font_size) + bh;
+            }
             if (child->s->overflow == 0 && !(child->s->min_size_set & 2) && child->min_height <= 0.0) {
                 double mc = child->height;
                 if (it->max_main > 0.0 && mc > it->max_main) mc = it->max_main;

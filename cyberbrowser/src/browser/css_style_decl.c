@@ -194,6 +194,10 @@ static char *block_text(StyleBlock *b) {
             int nsh = css_prop_shorthands_of(d->prop, &shs);
             for (int k = 0; k < nsh && !sh_value; k++) {
                 const CssPropDef *s = shs[k];
+                /* (a corner's or a side's radii: never what the whole list is written as) */
+                size_t snl = strlen(s->name);
+                if ((snl > 7 && !strcmp(s->name + snl - 7, "-radius") && strcmp(s->name, "border-radius")) ||
+                    (!strncmp(s->name, "corner", 6) && (snl < 6 || strcmp(s->name + snl - 6, "-shape")))) continue;
                 const char **names;
                 int n = css_prop_longhands(s, &names);
                 bool all_undone = true;

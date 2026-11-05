@@ -45,6 +45,7 @@ enum {
     SS_LINK,         /* :link, :any-link: a and area with href */
     SS_TARGET,       /* :target: the element the URL's fragment names */
     SS_LANG,         /* :lang(val) */
+    SS_DIR,          /* :dir(ltr), :dir(rtl): a is 1 for rtl */
     SS_HEADING,      /* :heading, :heading(levels): a, a bit for each level */
     SS_HOST,         /* :host: only across a combinator out of a shadow tree */
     SS_VALID, SS_INVALID,
@@ -532,6 +533,15 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                     s.vlen = (uint32_t)(ae - a);
                     s.val = strndup(a, s.vlen);
                 }
+                else if (strcmp(name, "dir") == 0) {
+                    const char *a = args, *ae = args ? args + alen : NULL;
+                    while (a && a < ae && (*a == ' ' || *a == '\t' || *a == '\n')) a++;
+                    while (a && ae > a && (ae[-1] == ' ' || ae[-1] == '\t' || ae[-1] == '\n')) ae--;
+                    if (!a || ae <= a) { sp->err = true; free(name); break; }
+                    /* (only those two ever match, whatever else it's given) */
+                    s.kind = ae - a == 3 && !strncasecmp(a, "ltr", 3) ? SS_DIR : ae - a == 3 && !strncasecmp(a, "rtl", 3) ? SS_DIR : SS_NEVER;
+                    s.a = ae - a == 3 && !strncasecmp(a, "rtl", 3) ? 1 : 0;
+                }
                 else if (strcmp(name, "before") == 0 || strcmp(name, "after") == 0 ||
                          strcmp(name, "first-line") == 0 || strcmp(name, "first-letter") == 0) s.kind = SS_NEVER;
                 else if (strcmp(name, "host") == 0 && !args) s.kind = SS_HOST;
@@ -883,6 +893,117 @@ static bool lang_ok(uint32_t s, const char *want, uint32_t wn) {
     return false;
 }
 
+static const char *attr_val(uint32_t s, CssAtom a, uint32_t *len);
+
+/* ---- an element's directionality (HTML 3.2.6.5): 0 ltr, 1 rtl ---- */
+const char *(*g_dom_query_value)(NodeId el);
+
+/* The first strong character's: 0 left to right, 1 right to left, -1 none. */
+static int bidi_first_strong(const char *t, size_t n)
+{
+    for (size_t i = 0; i < n; ) {
+        unsigned char c = (unsigned char)t[i];
+        uint32_t cp = c;
+        size_t l = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+        if (l > 1 && i + l <= n) {
+            cp = c & (0xFF >> (l + 1));
+            for (size_t k = 1; k < l; k++) cp = (cp << 6) | ((unsigned char)t[i + k] & 0x3F);
+        }
+        i += l;
+        if ((cp >= 0x590 && cp <= 0x8FF) || (cp >= 0xFB1D && cp <= 0xFDFF) || (cp >= 0xFE70 && cp <= 0xFEFF) ||
+            (cp >= 0x10800 && cp <= 0x10FFF) || (cp >= 0x1E800 && cp <= 0x1EFFF) || cp == 0x200F) {
+            /* (Arabic's digits and marks are weak) */
+            if ((cp >= 0x591 && cp <= 0x5BD) || (cp >= 0x660 && cp <= 0x669) || (cp >= 0x6F0 && cp <= 0x6F9) || (cp >= 0x610 && cp <= 0x61A) || (cp >= 0x64B && cp <= 0x65F)) continue;
+            return 1;
+        }
+        if ((cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z') || cp == 0x200E) return 0;
+        if (cp >= 0xC0 && cp != 0xD7 && cp != 0xF7 && !(cp >= 0x2000 && cp <= 0x2BFF) && !(cp >= 0x3000 && cp <= 0x303F) && !(cp >= 0x300 && cp <= 0x36F)) return 0;
+    }
+    return -1;
+}
+
+static const char *dir_attr(uint32_t s)
+{
+    static CssAtom a;
+    if (!a) { css_atom_reserve(1); a = css_atom_intern("dir", 3); }
+    uint32_t n = 0;
+    const char *v = g_dom.ns[s] == DOM_NS_HTML ? attr_val(s, a, &n) : NULL;
+    if (!v) return NULL;
+    if (n == 3 && !strncasecmp(v, "ltr", 3)) return "ltr";
+    if (n == 3 && !strncasecmp(v, "rtl", 3)) return "rtl";
+    if (n == 4 && !strncasecmp(v, "auto", 4)) return "auto";
+    return NULL;
+}
+
+static bool tag_is(uint32_t s, const char *t)
+{
+    
+    const char *q = css_atom_str(g_dom.tag[s]);
+    return q && !strcasecmp(q, t);
+}
+
+static int auto_dir(uint32_t s)
+{
+    int found = -1;
+    uint32_t x = g_dom.first[s];
+    while (x && found < 0) {
+        bool skip = false;
+        if (g_dom.kind[x] == DOM_K_ELEMENT) {
+            skip = (g_dom.ns[x] == DOM_NS_HTML && (tag_is(x, "bdi") || tag_is(x, "script") || tag_is(x, "style") || tag_is(x, "textarea"))) || dir_attr(x) != NULL;
+        } else if (g_dom.kind[x] == DOM_K_TEXT) {
+            uint32_t n = 0;
+            const char *t = dom_text(dom_id_of(x), &n);
+            if (t) found = bidi_first_strong(t, n);
+        }
+        if (skip) {
+            /* (past it, not into it) */
+            uint32_t nx = g_dom.next[x];
+            for (uint32_t u = x; !nx && u != s; ) {
+                u = g_dom.parent[u];
+                if (u == s) break;
+                nx = g_dom.next[u];
+            }
+            x = nx;
+        } else x = dom_next_in_subtree(x, s);
+    }
+    return found;
+}
+
+static int elem_dir(uint32_t s)
+{
+    for (uint32_t x = s; x; ) {
+        if (g_dom.kind[x] != DOM_K_ELEMENT) {
+            /* (a shadow root: its host's) */
+            uint32_t h = g_dom.host[x];
+            if (!h) return 0;
+            x = h;
+            continue;
+        }
+        const char *d = dir_attr(x);
+        if (d && d[0] == 'l') return 0;
+        if (d && d[0] == 'r') return 1;
+        bool input = g_dom.ns[x] == DOM_NS_HTML && tag_is(x, "input");
+        if (d) {
+            /* auto: a control by its value, the rest by what they hold */
+            int got = -1;
+            if ((input || (g_dom.ns[x] == DOM_NS_HTML && tag_is(x, "textarea"))) && g_dom_query_value) {
+                const char *v = g_dom_query_value(dom_id_of(x));
+                if (v) got = bidi_first_strong(v, strlen(v));
+            } else got = auto_dir(x);
+            return got > 0;
+        }
+        /* (a phone number runs left to right, wherever it is) */
+        if (input) {
+            const char *ty = dom_get_attr_str(dom_id_of(x), "type");
+            if (ty && !strcasecmp(ty, "tel")) return 0;
+        }
+        /* (bdi with no dir: as auto) */
+        if (g_dom.ns[x] == DOM_NS_HTML && tag_is(x, "bdi")) return auto_dir(x) > 0;
+        x = g_dom.parent[x];
+    }
+    return 0;
+}
+
 static const char *attr_val(uint32_t s, CssAtom a, uint32_t *len) {
     DomAttrList *l = &g_dom.attrs[s];
     for (int i = 0; i < l->n; i++)
@@ -1001,6 +1122,7 @@ static bool simple_ok(uint32_t s, const SelSimple *ss, uint32_t scope) {
         return g_dom.kind[r] == DOM_K_DOCUMENT;
     }
     case SS_LANG: return lang_ok(s, ss->val, ss->vlen);
+    case SS_DIR: return elem_dir(s) == ss->a;
     case SS_HEADING: {
         if (g_dom.ns[s] != DOM_NS_HTML) return false;
         static uint32_t h[7];

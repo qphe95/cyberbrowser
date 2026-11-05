@@ -4184,6 +4184,18 @@ static GCValue js_attr_ctor(JSContextHandle ctx, GCValue this_val, int argc, GCV
 }
 
 /* The Attr interface on the global (its prototype Node's). */
+static const char *control_value(NodeId n) {
+    extern JSContextHandle g_js_context;
+    static char *held;
+    JSContextHandle ctx = g_js_context;
+    GCValue el = dom_js(ctx, n);
+    if (!JS_IsObject(el)) return NULL;
+    const char *t = JS_ToCString(ctx, JS_GetPropertyStr(ctx, el, "value"));
+    free(held);
+    held = t ? strdup(t) : NULL;
+    return held;
+}
+
 /* A control's validity for :valid and :invalid (form_controls.js has the
  * constraints): 0 not a candidate for validation, 1 valid, 2 invalid. */
 static int control_validity(NodeId n) {
@@ -4223,6 +4235,7 @@ void dom_referrer_apply(JSContextHandle ctx, char *url, size_t cap) {
 
 void attr_api_install(JSContextHandle ctx, GCValue global) {
     g_dom_query_validity = control_validity;
+    g_dom_query_value = control_value;
     GCValue node = JS_GetPropertyStr(ctx, global, "Node");
     GCValue np = JS_IsObject(node) ? JS_GetPropertyStr(ctx, node, "prototype") : JS_UNDEFINED;
     GCValue proto = JS_NewObject(ctx);

@@ -378,6 +378,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
 
     double flex_basis;
     double flex_basis_percent; /* >0 when flex-basis was a percentage */
+    unsigned char fb_kw;       /* by content: 1 min-content, 2 max-content, 3 fit-content, 4 content */
+    const char *fb_csz;        /* with calc-size(): what it comes to, of size */
     double flex_basis_pct_px;  /* px addend of a calc() basis with a % part */
     double flex_grow;
     double flex_shrink;

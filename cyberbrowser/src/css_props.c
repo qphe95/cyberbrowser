@@ -874,6 +874,9 @@ static int calc_value(const Toks *ts, int i, int pct) {
                     s = j + 1;
                     continue;
                 }
+                /* progress()'s clamping comes first, with no comma */
+                if (strcasecmp(f, "progress") == 0 && na == 0 && ts->t[s].type == T_IDENT &&
+                    (tok_ident(&ts->t[s], "no-clamp") || tok_ident(&ts->t[s], "clamp"))) s = tok_next(ts, s);
                 /* round()'s optional rounding strategy */
                 if (strcasecmp(f, "round") == 0 && na == 0 && ts->t[s].type == T_IDENT && tok_next(ts, s) == j &&
                     (strcasecmp(ts->t[s].str, "nearest") == 0 || strcasecmp(ts->t[s].str, "up") == 0 ||
@@ -921,7 +924,15 @@ static int calc_product(const Toks *ts, int b, int e, int pct) {
         int v = calc_value(ts, i, pct);
         if (v < 0) return -1;
         if (first) d = v;
-        else if (divide) { if (v != D_NUMBER) return -1; }
+        else if (divide) {
+            /* (of the same kind: a number) */
+            if (v != D_NUMBER) {
+                if (((d | v) & D_PERCENT) && !pct) return -1;
+                if ((d & ~D_PERCENT) != (v & ~D_PERCENT) && !((d & D_PERCENT) && (v & D_PERCENT))) return -1;
+                if (d == D_NUMBER) return -1;
+                d = D_NUMBER;
+            }
+        }
         else if (d == D_NUMBER) d = v;
         else if (v != D_NUMBER) return -1;
         first = false;
@@ -1746,6 +1757,8 @@ static bool calc_math_function(const Toks *ts, const Tok *f, CalcSum *out) {
                 args[na].n = 1;
                 args[na].t[0].v = na == 0 ? -INFINITY : INFINITY;
                 na++;
+            } else if (!strcasecmp(name, "progress") && na == 0 && ts->t[s].type == T_IDENT && (tok_ident(&ts->t[s], "no-clamp") || tok_ident(&ts->t[s], "clamp"))) {
+                if (!calc_simplify_sum(ts, tok_next(ts, s), j, &args[na++])) return false;
             } else if (!calc_simplify_sum(ts, s, j, &args[na++])) return false;
             s = j + 1;
             if (j >= f->end) break;
@@ -1782,6 +1795,7 @@ static bool calc_math_function(const Toks *ts, const Tok *f, CalcSum *out) {
         if (na != 3) return false;
         SAME_UNITS();
         r = (v[0] - v[1]) / (v[2] - v[1]);
+        if (!(f->first < f->end && tok_ident(&ts->t[f->first], "no-clamp"))) r = isnan(r) ? r : r < 0 ? 0 : r > 1 ? 1 : r;
         unit = "";
     } else if (!strcasecmp(name, "abs")) {
         if (na != 1) return false;
@@ -1878,6 +1892,14 @@ static bool calc_simplify_product(const Toks *ts, int b, int e, CalcSum *out) {
             /* one side must be a plain number */
             bool vnum = v.n == 1 && !v.t[0].unit[0], onum = out->n == 1 && !out->t[0].unit[0];
             if (divide) {
+                /* (of one unit: a plain number) */
+                if (!vnum && v.n == 1 && out->n == 1 && !strcmp(v.t[0].unit, out->t[0].unit)) {
+                    out->t[0].v /= v.t[0].v;
+                    out->t[0].unit[0] = 0;
+                    first = false;
+                    i = tok_next(ts, i);
+                    continue;
+                }
                 if (!vnum) return false;     /* (by zero: an infinity, by its sign) */
                 for (int k = 0; k < out->n; k++) out->t[k].v /= v.t[0].v;
             } else if (vnum) {
@@ -4368,6 +4390,183 @@ static int expand_grid(const char *nm, const char *v, char **out, const char **n
     }
     return n;
 }
+/* corner and its sides: radius and shape, per corner, by slashes */
+static bool corner_item(const char *t, char *radius, size_t rc, char *shape, size_t sc)
+{
+    const CssPropDef *rp = css_prop_find("border-top-left-radius", 22), *sp = css_prop_find("corner-top-left-shape", 21);
+    char r[256] = "", s[128] = "";
+    /* (normal: nothing rounded, in the round) */
+    while (isspace((unsigned char)*t)) t++;
+    size_t tl = strlen(t);
+    while (tl && isspace((unsigned char)t[tl - 1])) tl--;
+    if (tl == 6 && !strncasecmp(t, "normal", 6)) { snprintf(radius, rc, "0px"); snprintf(shape, sc, "round"); return true; }
+    const char *p = t, *end = t + tl;
+    while (p < end) {
+        while (p < end && isspace((unsigned char)*p)) p++;
+        if (p >= end) break;
+        const char *q = p;
+        int d = 0;
+        while (q < end && (d || !isspace((unsigned char)*q))) { if (*q == '(') d++; else if (*q == ')') d--; q++; }
+        char w[128];
+        size_t l = (size_t)(q - p);
+        if (l >= sizeof w) return false;
+        memcpy(w, p, l);
+        w[l] = 0;
+        char *as_s = sp ? prop_parse_raw(sp, w) : NULL;
+        if (as_s) {
+            if (s[0]) { free(as_s); return false; }
+            snprintf(s, sizeof s, "%s", as_s);
+            free(as_s);
+        } else {
+            /* (the radii stay together) */
+            if (r[0] && strchr(r, ' ')) return false;
+            size_t have = strlen(r);
+            snprintf(r + have, sizeof r - have, "%s%s", have ? " " : "", w);
+        }
+        p = q;
+    }
+    /* (it takes both) */
+    if (!r[0] || !s[0]) return false;
+    {
+        char *ok = rp ? prop_parse_raw(rp, r) : NULL;
+        if (!ok) return false;
+        snprintf(radius, rc, "%s", ok);
+        free(ok);
+    }
+    snprintf(shape, sc, "%s", s[0] ? s : "round");
+    return true;
+}
+
+static int corner_count(const char *nm)
+{
+    static const struct { const char *n; int c; } k[] = {
+        { "corner", 4 },
+        { "corner-top", 2 },
+        { "corner-bottom", 2 },
+        { "corner-left", 2 },
+        { "corner-right", 2 },
+        { "corner-block-start", 2 },
+        { "corner-block-end", 2 },
+        { "corner-inline-start", 2 },
+        { "corner-inline-end", 2 },
+        { "corner-top-left", 1 },
+        { "corner-top-right", 1 },
+        { "corner-bottom-left", 1 },
+        { "corner-bottom-right", 1 },
+        { "corner-start-start", 1 },
+        { "corner-start-end", 1 },
+        { "corner-end-start", 1 },
+        { "corner-end-end", 1 },
+    };
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; i++) if (!strcmp(k[i].n, nm)) return k[i].c;
+    return 0;
+}
+
+static int expand_corner(const char *nm, const char *v, char **out)
+{
+    int want = corner_count(nm);
+    char item[4][256];
+    int n = 0;
+    const char *p = v;
+    for (;;) {
+        const char *q = p;
+        int d = 0;
+        while (*q && (d || *q != '/')) { if (*q == '(') d++; else if (*q == ')') d--; q++; }
+        if (n == 4 || (size_t)(q - p) >= sizeof item[0]) return -1;
+        memcpy(item[n], p, (size_t)(q - p));
+        item[n][q - p] = 0;
+        n++;
+        if (!*q) break;
+        p = q + 1;
+    }
+    if (n > want) return -1;
+    static const int fill[4][4] = { { 0, 0, 0, 0 }, { 0, 1, 0, 1 }, { 0, 1, 2, 1 }, { 0, 1, 2, 3 } };
+    for (int i = 0; i < want; i++) {
+        char r[256], s[128];
+        int k = want == 4 ? fill[n - 1][i] : (i < n ? i : 0);
+        if (!corner_item(item[k], r, sizeof r, s, sizeof s)) return -1;
+        set_out(out, i * 2, r);
+        set_out(out, i * 2 + 1, s);
+    }
+    return 0;
+}
+
+static void corner_text(const char *r, const char *s, char *o, size_t cap)
+{
+    if (!strcmp(r, "0px") && !strcmp(s, "round")) snprintf(o, cap, "normal");
+    else snprintf(o, cap, "%s %s", r, s);
+}
+
+static int serialize_corner(const char *nm, const char *const *vals, int n, Buf *b)
+{
+    int want = corner_count(nm);
+    if (n != want * 2) return -1;
+    char t[4][400];
+    for (int i = 0; i < want; i++) {
+        if (!vals[i * 2] || !vals[i * 2 + 1]) return -1;
+        corner_text(vals[i * 2], vals[i * 2 + 1], t[i], sizeof t[i]);
+    }
+    int show = want;
+    if (want == 4) {
+        if (!strcmp(t[3], t[1])) { show = 3; if (!strcmp(t[2], t[0])) { show = 2; if (!strcmp(t[1], t[0])) show = 1; } }
+    } else if (want == 2 && !strcmp(t[0], t[1])) show = 1;
+    for (int i = 0; i < show; i++) {
+        if (i) buf_str(b, " / ");
+        buf_str(b, t[i]);
+    }
+    return 0;
+}
+
+/* border-top-radius and the like: two corners' radii. */
+static int expand_side_radius(const char *v, char **out)
+{
+    const CssPropDef *rp = css_prop_find("border-top-left-radius", 22);
+    const char *sl = strchr(v, '/');
+    char h[2][96] = { "", "" }, w[2][96] = { "", "" }, ex[8] = "";
+    char left[256], right[256] = "";
+    size_t ll = sl ? (size_t)(sl - v) : strlen(v);
+    if (ll >= sizeof left) return -1;
+    memcpy(left, v, ll);
+    left[ll] = 0;
+    if (sl) snprintf(right, sizeof right, "%s", sl + 1);
+    int nh = sscanf(left, "%95s %95s %7s", h[0], h[1], ex);
+    if (nh < 1 || nh > 2) return -1;
+    int nv = sl ? sscanf(right, "%95s %95s %7s", w[0], w[1], ex) : 0;
+    if (sl && (nv < 1 || nv > 2)) return -1;
+    if (nh == 1) strcpy(h[1], h[0]);
+    if (nv == 1) strcpy(w[1], w[0]);
+    if (!nv) { strcpy(w[0], h[0]); strcpy(w[1], h[1]); }
+    for (int i = 0; i < 2; i++) {
+        char t[200];
+        if (!strcmp(h[i], w[i])) snprintf(t, sizeof t, "%s", h[i]);
+        else snprintf(t, sizeof t, "%s %s", h[i], w[i]);
+        char *ok = rp ? prop_parse_raw(rp, t) : NULL;
+        if (!ok) return -1;
+        set_out(out, i, ok);
+        free(ok);
+    }
+    return 0;
+}
+
+static int serialize_side_radius(const char *const *vals, int n, Buf *b)
+{
+    if (n != 2 || !vals[0] || !vals[1]) return -1;
+    char h[2][96], w[2][96];
+    for (int i = 0; i < 2; i++) {
+        int c = sscanf(vals[i], "%95s %95s", h[i], w[i]);
+        if (c < 1) return -1;
+        if (c == 1) strcpy(w[i], h[i]);
+    }
+    buf_str(b, h[0]);
+    if (strcmp(h[0], h[1])) { buf_ch(b, ' '); buf_str(b, h[1]); }
+    if (strcmp(h[0], w[0]) || strcmp(h[1], w[1])) {
+        buf_str(b, " / ");
+        buf_str(b, w[0]);
+        if (strcmp(w[0], w[1])) { buf_ch(b, ' '); buf_str(b, w[1]); }
+    }
+    return 0;
+}
+
 /* grid-lanes: its words in any order; a string, the direction, the rest the tracks. */
 static int expand_grid_lanes(const char *v, char **out)
 {
@@ -5176,6 +5375,8 @@ static int expand_special(const CssPropDef *p, const char *v, char **out, const 
     if (!strcmp(nm, "mask")) return expand_mask(v, out, names, n);
     if (!strcmp(nm, "grid-template") || !strcmp(nm, "grid")) return expand_grid(nm, v, out, names, n);
     if (!strcmp(nm, "grid-lanes")) return expand_grid_lanes(v, out);
+    if (corner_count(nm)) return expand_corner(nm, v, out);
+    if (!strncmp(nm, "border-", 7) && strcmp(nm, "border-radius") && !strcmp(nm + strlen(nm) - 7, "-radius")) return expand_side_radius(v, out);
     if (gap_same(nm) || gap_pairs(nm) || gap_insets(nm) || gap_rule(nm) || !strcmp(nm, "corner-shape")) return expand_gap(nm, v, out, names, n);
     if (!strcmp(nm, "background-position")) return expand_background_position(v, out);
     if (!strcmp(nm, "font")) return expand_font(v, out, names, n);
@@ -5453,6 +5654,8 @@ static int serialize_special(const CssPropDef *p, const char *const *vals, const
     }
     if (!strcmp(nm, "grid-template") || !strcmp(nm, "grid")) return serialize_grid(nm, vals, names, n, b);
     if (!strcmp(nm, "grid-lanes")) return serialize_grid_lanes(vals, names, n, b);
+    if (corner_count(nm)) return serialize_corner(nm, vals, n, b);
+    if (!strncmp(nm, "border-", 7) && !strcmp(nm + strlen(nm) - 7, "-radius") && n == 2) return serialize_side_radius(vals, n, b);
     if (gap_same(nm) || gap_pairs(nm) || gap_insets(nm) || gap_rule(nm) || !strcmp(nm, "corner-shape")) return serialize_gap(nm, vals, n, b);
     if (!strcmp(nm, "mask")) {
         static const char *const lnames[] = { "mask-image", "mask-position", "mask-size", "mask-repeat",
@@ -6215,6 +6418,88 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
 {
     const char *n = p->name;
     if (!strcmp(n, "display")) return canon_display(v);
+    if (!strcmp(n, "vertical-align")) {
+        /* first or last; how it's aligned, if not as the baseline; the shift, if any */
+        char w[3][160], *fl = NULL, *al = NULL, *sh = NULL;
+        int nw = canon_words(v, w, 3);
+        /* (one word: as it is, a length going between lengths) */
+        if (nw < 2) return NULL;
+        for (int i = 0; i < nw; i++) {
+            if (!strcasecmp(w[i], "first") || !strcasecmp(w[i], "last")) fl = w[i];
+            else if (!strcasecmp(w[i], "baseline") || isalpha((unsigned char)w[i][0]) ? strcasecmp(w[i], "sub") && strcasecmp(w[i], "super") && strncasecmp(w[i], "calc", 4) : false) al = w[i];
+            else sh = w[i];
+        }
+        if (al && !strcasecmp(al, "baseline")) al = NULL;
+        if (sh && (!strcmp(sh, "0") || !strcmp(sh, "0px"))) sh = NULL;
+        char o[400];
+        snprintf(o, sizeof o, "%s%s%s%s%s", fl ? fl : "", fl && (al || sh) ? " " : "", al ? al : "", al && sh ? " " : "", sh ? sh : "");
+        return strdup(o[0] ? o : "baseline");
+    }
+    if (!strcmp(n, "margin-trim")) {
+        char w[2][160];
+        if (canon_words(v, w, 2) == 2) return strdup("block");
+        return NULL;
+    }
+    if (!strcmp(n, "max-lines")) {
+        char w[2][160];
+        if (canon_words(v, w, 2) == 2 && !strcasecmp(w[0], "auto")) { char o[330]; snprintf(o, sizeof o, "%s auto", w[1]); return strdup(o); }
+        return NULL;
+    }
+    if (!strcmp(n, "line-clamp")) {
+        /* the count, auto where it isn't, the end; ellipsis is what it does anyway */
+        char w[5][160], *num = NULL, *end = NULL;
+        bool has_auto = false, legacy = false;
+        int nw = canon_words(v, w, 5);
+        if (nw == 1 && !strcasecmp(w[0], "none")) return NULL;
+        for (int i = 0; i < nw; i++) {
+            if (!strcasecmp(w[i], "auto")) has_auto = true;
+            else if (!strcasecmp(w[i], "-webkit-legacy")) legacy = true;
+            else if (!strcasecmp(w[i], "ellipsis")) continue;
+            else if (isdigit((unsigned char)w[i][0]) || !strncasecmp(w[i], "calc", 4)) num = w[i];
+            else end = w[i];
+        }
+        char o[600];
+        snprintf(o, sizeof o, "%s%s%s%s%s%s", num ? num : "", num && (has_auto || !num) ? " " : "", has_auto || !num ? "auto" : "",
+                 end ? " " : "", end ? end : "", legacy ? " -webkit-legacy" : "");
+        return strdup(o[0] == ' ' ? o + 1 : o);
+    }
+    if (!strcmp(n, "color-scheme")) {
+        char w[8][160];
+        int nw = canon_words(v, w, 8);
+        for (int i = 0; nw > 1 && i < nw; i++) if (!strcasecmp(w[i], "normal")) return strdup("");
+        /* (only at either end) */
+        for (int i = 1; i + 1 < nw; i++) if (!strcasecmp(w[i], "only")) return strdup("");
+        if (nw && !strcasecmp(w[0], "only") && nw == 1) return strdup("");
+        return NULL;
+    }
+    if (!strcmp(n, "font-language-override") || !strcmp(n, "font-variation-settings") || !strcmp(n, "font-feature-settings")) {
+        /* (a tag: four printable characters) */
+        bool lang = n[5] == 'l';
+        if (strchr(v, '\\')) return NULL;
+        for (const char *q = v; *q; q++) {
+            if (*q != '"' && *q != '\'') continue;
+            const char *e = strchr(q + 1, *q);
+            if (!e) break;
+            size_t tl = (size_t)(e - q - 1);
+            if (lang ? (tl < 1 || tl > 4) : tl != 4) return strdup("");
+            for (const char *c = q + 1; c < e; c++) if ((unsigned char)*c < 0x20 || (unsigned char)*c > 0x7e) return strdup("");
+            q = e;
+        }
+        return NULL;
+    }
+    if (!strcmp(n, "grid-template-areas") && *v == '"') {
+        /* (a row with no cell in it isn't one) */
+        for (const char *q = v; *q; q++) {
+            if (*q != '"') continue;
+            const char *e = strchr(q + 1, '"');
+            if (!e) break;
+            bool any = false;
+            for (const char *c = q + 1; c < e; c++) if (!isspace((unsigned char)*c)) any = true;
+            if (!any) return strdup("");
+            q = e;
+        }
+        return NULL;
+    }
     if (!strcmp(n, "container-name")) {
         char w[8][160];
         int nw = canon_words(v, w, 8);

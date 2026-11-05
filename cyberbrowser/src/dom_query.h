@@ -43,6 +43,8 @@ DomNodeList dom_query_all(NodeId scope, const char *sel, size_t len, bool includ
 /* A control's validity, for :valid and :invalid: 0 not a candidate, 1 valid,
  * 2 invalid (the DOM API's; none: no control is a candidate). */
 extern int (*g_dom_query_validity)(NodeId el);
+/* A control's value (borrowed till the next call), for :dir() on dir=auto. */
+extern const char *(*g_dom_query_value)(NodeId el);
 
 bool dom_query_matches(NodeId el, const char *sel, size_t len);
 /* Whether el matches sel with :scope the element scope. */
