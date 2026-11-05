@@ -126,6 +126,7 @@ typedef struct CssSimpleSelector {
      * recursively at match time.  :where() contributes zero specificity;
      * :is() is treated the same here (a slight specificity deviation). */
     bool where_active;
+    bool is_weighted;           /* :is(), not :where(): weighs its most specific selector */
     unsigned char lang_count;   /* :lang() pseudo-classes (each one in the specificity) */
     char where_arg[400];
     /* :has(<relative selector>): leading combinator (0 descendant, '>' '+'
@@ -169,6 +170,12 @@ int css_sel_parse_chain(const char *s, CssSelectorPart *parts, int max_parts);
 int css_sel_chain_specificity(const CssSelectorPart *parts, int count);
 
 /* True for the parser's whitespace set (space, tab, CR, LF, FF). */
+/* (a compound of nothing but pseudo-classes tests something too; a pseudo-element alone doesn't) */
+static inline bool css_simple_substantive(const CssSimpleSelector *s) {
+    return s->has_substantive || s->child_pos || s->type_pos || s->nth_kind || s->state_mask || s->requires_empty ||
+           s->requires_link || s->not_active || s->not_list_active || s->lang_count;
+}
+
 static inline bool css_sel_is_space(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
 }

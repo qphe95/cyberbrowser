@@ -690,6 +690,14 @@
         var text = a.filter(function (t) { return !/[a-zA-Z]\s*$/.test(t) || /^(x|y|z)$/i.test(t); }).join(' ');
         return { x: axis[0] / l, y: axis[1] / l, z: axis[2] / l, deg: angle, text: text };
     }
+    /* (an axis by name where it has one) */
+    function rotateAxisText(x, y, z) {
+        var near = function (v, w) { return Math.abs(v - w) < 1e-9; };
+        if (near(x, 1) && near(y, 0) && near(z, 0)) return 'x ';
+        if (near(x, 0) && near(y, 1) && near(z, 0)) return 'y ';
+        if (near(x, 0) && near(y, 0) && near(z, 1)) return '';
+        return fine(x) + ' ' + fine(y) + ' ' + fine(z) + ' ';
+    }
     function individualInterpolate(prop, a, b, t) {
         var out, i;
         if (prop === 'translate') {
@@ -716,16 +724,15 @@
             var ax = ra.deg || a === 'none' && !rb.deg ? ra : rb, deg = ra.deg + (rb.deg - ra.deg) * t;
             if (!ra.deg && a !== 'none') ax = rb;
             /* (the z axis goes without saying; others as unit vectors) */
-            var axis = !ax.text || (Math.abs(ax.z - 1) < 1e-9) ? '' : fine(ax.x) + ' ' + fine(ax.y) + ' ' + fine(ax.z) + ' ';
-            return axis + fmt(deg) + 'deg';
+            return (ax.text ? rotateAxisText(ax.x, ax.y, ax.z) : '') + fmt(deg) + 'deg';
         }
         var quat = function (r) {
             var h = r.deg * DEG / 2, s = Math.sin(h);
             return [r.x * s, r.y * s, r.z * s, Math.cos(h)];
         };
         var q = slerp(quat(ra), quat(rb), t), w = Math.max(-1, Math.min(1, q[3])), an = 2 * Math.acos(w), sn = Math.sin(an / 2);
-        if (Math.abs(sn) < 1e-9) return '0 0 1 0deg';
-        return fine(q[0] / sn) + ' ' + fine(q[1] / sn) + ' ' + fine(q[2] / sn) + ' ' + fmt(an / DEG) + 'deg';
+        if (Math.abs(sn) < 1e-9) return '0deg';
+        return rotateAxisText(q[0] / sn, q[1] / sn, q[2] / sn) + fmt(an / DEG) + 'deg';
     }
     /* ---- lists ---- */
     function splitTop(text) {

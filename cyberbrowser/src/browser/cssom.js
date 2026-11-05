@@ -1370,6 +1370,22 @@
         for (var k = 0; k < this.__rules.length; k++) s += '\n  ' + this.__rules[k].__text().replace(/\n/g, '\n  ');
         return s + '\n}';
     };
+    /* (a style rule holds rules too) */
+    define(CSSStyleRule.prototype, 'insertRule', function (rule, index) {
+        if (arguments.length < 1) throw new TypeError("Failed to execute 'insertRule': 1 argument required");
+        var k = insertInto(this.__rules || (this.__rules = []), String(rule), index === undefined ? 0 : index >>> 0, true, this);
+        changedList(this);
+        touched(this);
+        return k;
+    });
+    define(CSSStyleRule.prototype, 'deleteRule', function (index) {
+        index = index >>> 0;
+        var rules = this.__rules || [];
+        if (index >= rules.length) throw domException("Failed to execute 'deleteRule': index out of range.", 'IndexSizeError');
+        rules.splice(index, 1);
+        changedList(this);
+        touched(this);
+    });
     /* grouping rules: cssRules, insertRule, deleteRule */
     getter(CSSGroupingRule.prototype, 'cssRules', function () { return ruleList(this.__rules, this); });
     define(CSSGroupingRule.prototype, 'insertRule', function (rule, index) {
@@ -1694,6 +1710,100 @@
         return out;
     }
 
+    /* (rules under a style rule or an @scope may start with a combinator) */
+    var relativeOk = 0;
+    function nestedUnder(rule) {
+        for (var q = rule; q; q = q.__parentRule) if (q.__kind === 'scope' || q.__kind === 'style') return true;
+        return false;
+    }
+    function topCommas(text) {
+        var out = [], d = 0, cur = '';
+        for (var i = 0; i < text.length; i++) {
+            var c = text[i];
+            if (c === '\\') { cur += c + (text[++i] || ''); continue; }
+            if (c === '(' || c === '[') d++;
+            else if (c === ')' || c === ']') d--;
+            if (c === ',' && !d) { out.push(cur.trim()); cur = ''; } else cur += c;
+        }
+        out.push(cur.trim());
+        return out;
+    }
+    function relativeList(text, amp) {
+        return topCommas(text).map(function (one) {
+            var m = /^([>+~])\s*([\s\S]*)$/.exec(one);
+            return m ? (amp ? '& ' : '') + m[1] + ' ' + parseSelectorList(m[2]) : parseSelectorList(one);
+        }).join(', ');
+    }
+    /* @scope's [(start)]? [to (end)]?: [start, end], null if not one. */
+    function scopeSelector(text) {
+        if (!text.trim() || text.replace(/\[[^\]]*\]/g, '').indexOf('::') >= 0) return false;
+        try { relativeList(text.replace(/&/g, '*')); return true; } catch (e) { return false; }
+    }
+    function scopePrelude(text) {
+        var t = text.trim(), i = 0, out = ['', ''];
+        var part = function () {
+            if (t[i] !== '(') return null;
+            var d = 0, j = i;
+            for (; j < t.length; j++) {
+                if (t[j] === '(') d++;
+                else if (t[j] === ')' && --d === 0) break;
+            }
+            if (j >= t.length) return null;
+            var v = t.slice(i + 1, j).trim();
+            i = j + 1;
+            while (/\s/.test(t[i] || '')) i++;
+            return scopeSelector(v) ? v : null;
+        };
+        if (t[i] === '(') { out[0] = part(); if (out[0] === null) return null; }
+        if (/^to(\s|\()/i.test(t.slice(i))) {
+            i += 2;
+            while (/\s/.test(t[i] || '')) i++;
+            out[1] = part();
+            if (out[1] === null) return null;
+        }
+        return i === t.length ? out : null;
+    }
+    /* An @scope's block in order: runs of declarations are rules of their own. */
+    function nestedDeclarations(text, parent) {
+        var r = makeRule(CSSNestedDeclarations, 'nested-declarations', { __style: null });
+        r.__style = decls(text, r);
+        r.__parentRule = parent;
+        return r.__style.length ? r : null;
+    }
+    function scopeBody(block, parent) {
+        var out = [], i = 0, n = block.length, run = '';
+        var flush = function () {
+            var d = run.trim() ? nestedDeclarations(run, parent) : null;
+            if (d) out.push(d);
+            run = '';
+        };
+        while (i < n) {
+            var j = i, depth = 0, q = null, kind = null;
+            while (j < n) {
+                var c = block[j];
+                if (q) { if (c === '\\') { j += 2; continue; } if (c === q) q = null; j++; continue; }
+                if (c === '"' || c === "'") { q = c; j++; continue; }
+                if (c === '(' || c === '[') depth++;
+                else if ((c === ')' || c === ']') && depth) depth--;
+                else if (!depth && c === ';') { kind = 'decl'; break; }
+                else if (!depth && c === '{') { kind = 'rule'; break; }
+                j++;
+            }
+            if (kind === 'rule') {
+                var bd = 1, k = j + 1;
+                while (k < n && bd) { if (block[k] === '{') bd++; else if (block[k] === '}') bd--; k++; }
+                flush();
+                parseRules(block.slice(i, k), 'group', parent).forEach(function (x) { out.push(x); });
+                i = k;
+            } else {
+                run += block.slice(i, kind ? j + 1 : n);
+                i = kind ? j + 1 : n;
+            }
+        }
+        flush();
+        return out;
+    }
+
     function buildRule(p, ctx, parent) {
         var r = null;
         if (ctx === 'keyframes') {
@@ -1705,7 +1815,7 @@
         } else if (!p.at) {
             if (p.block === null) return null;
             var sel;
-            try { sel = parseSelectorList(p.prelude); } catch (e) { return null; }
+            try { sel = ctx === 'style' || relativeOk > 0 || nestedUnder(parent) ? relativeList(p.prelude, ctx === 'style') : parseSelectorList(p.prelude); } catch (e) { return null; }
             var b = splitBlock(p.block);
             r = makeRule(CSSStyleRule, 'style', { __selector: sel, __style: null, __rules: [] });
             r.__style = decls(b[0], r);
@@ -1763,10 +1873,12 @@
                 break;
             case 'scope':
                 if (p.block === null) return null;
-                var sm = /^(?:\(([^)]*)\))?\s*(?:to\s*\(([^)]*)\))?$/.exec(p.prelude);
+                var sm = scopePrelude(p.prelude);
                 if (!sm) return null;
-                r = makeRule(CSSScopeRule, 'scope', { __start: sm[1] ? sm[1].trim() : '', __end: sm[2] ? sm[2].trim() : '', __rules: [] });
-                r.__rules = parseRules(p.block, 'group', r);
+                r = makeRule(CSSScopeRule, 'scope', { __start: sm[0], __end: sm[1], __rules: [] });
+                relativeOk++;
+                r.__rules = scopeBody(p.block, r);
+                relativeOk--;
                 break;
             case 'import':
                 if (ctx !== 'top' || p.block !== null) return null;
@@ -1895,9 +2007,11 @@
     /* insertRule's steps: index k of rules (CSSOM "insert a CSS rule") */
     function insertInto(rules, text, index, nested, parent) {
         if (index > rules.length) throw domException("Failed to execute 'insertRule': The index provided (" + index + ") is larger than the maximum index (" + rules.length + ").", 'IndexSizeError');
-        var parts = splitRules(text);
+        /* (bare declarations go in a style rule or an @scope) */
+        var bare = nested && nestedUnder(parent) && text.indexOf('{') < 0 ? nestedDeclarations(text, parent) : null;
+        var parts = bare ? [null] : splitRules(text);
         if (parts.length !== 1) throw domException("Failed to execute 'insertRule': Failed to parse the rule '" + text + "'.", 'SyntaxError');
-        var r = buildRule(parts[0], nested ? (parent && parent.__kind === 'style' ? 'style' : 'group') : 'top', parent);
+        var r = bare || buildRule(parts[0], nested ? (parent && parent.__kind === 'style' ? 'style' : 'group') : 'top', parent);
         if (!r) throw domException("Failed to execute 'insertRule': Failed to parse the rule '" + text + "'.", 'SyntaxError');
         /* @import / @namespace only before other rules */
         if (r.__kind === 'import' && rules.slice(0, index).some(function (x) { return x.__kind !== 'import' && x.__kind !== 'layer'; }))

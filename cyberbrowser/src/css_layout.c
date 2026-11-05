@@ -16724,6 +16724,20 @@ static int layout_baseline_item(LayoutContext *ctx, int i, bool first)
     return pick;
 }
 
+extern __thread bool t_wm_across_ext;
+/* (in a vertical flow, not sideways, boxes line up on their middles) */
+static bool wm_central(const LayoutBox *b)
+{
+    return t_wm_across_ext && (b->s->writing_mode == 1 || b->s->writing_mode == 2);
+}
+
+/* A text fragment's baseline, at its dy in box cb. */
+static double frag_baseline(const LayoutBox *cb, const IfcVa *m, double dy)
+{
+    if (wm_central(cb)) return cb->y + dy + m->adv / 2.0;
+    return cb->y + dy + (m->A - (m->adv - m->fs) / 2.0);
+}
+
 static double layout_baseline_walk(LayoutContext *ctx, int i, int depth, bool first, bool atomic)
 {
     double best = NAN;
@@ -16738,14 +16752,14 @@ static double layout_baseline_walk(LayoutContext *ctx, int i, int depth, bool fi
             IfcVa m;
             ifc_va_metrics(cb, &m);
             for (int q = 0; q < tf->n; q++) {
-                double y = cb->y + tf->f[q].dy + (m.A - (m.adv - m.fs) / 2.0);
+                double y = frag_baseline(cb, &m, tf->f[q].dy);
                 if (isnan(best) || (first ? y < best : y > best)) best = y;
             }
             return best;
         }
         if (cb->s->overflow == 0) best = layout_baseline_walk(ctx, c, depth + 1, first, atomic);
         /* (no line in it: its bottom border edge) */
-        if (isnan(best) && atomic) best = cb->y + cb->height;
+        if (isnan(best) && atomic) best = cb->y + (wm_central(cb) ? cb->height / 2.0 : cb->height);
         /* (one that scrolls keeps it within itself) */
         if (!isnan(best) && own->s->overflow != 0 && best > own->y + own->height) best = own->y + own->height;
         return best;
@@ -16759,7 +16773,7 @@ static double layout_baseline_walk(LayoutContext *ctx, int i, int depth, bool fi
             IfcVa m;
             ifc_va_metrics(cb, &m);
             for (int q = 0; q < tf->n; q++) {
-                double y = cb->y + tf->f[q].dy + (m.A - (m.adv - m.fs) / 2.0);
+                double y = frag_baseline(cb, &m, tf->f[q].dy);
                 if (isnan(v) || (first ? y < v : y > v)) v = y;
             }
         } else if (cb->s->overflow == 0) {
@@ -16767,7 +16781,8 @@ static double layout_baseline_walk(LayoutContext *ctx, int i, int depth, bool fi
         }
         /* (for a flex or grid item: an atomic inline with no line in it has its
          * bottom margin edge) */
-        if (atomic && isnan(v) && cb->s->display == CSS_DISPLAY_INLINE_BLOCK) v = cb->y + cb->height + cb->margin_bottom;
+        if (atomic && isnan(v) && cb->s->display == CSS_DISPLAY_INLINE_BLOCK)
+            v = wm_central(cb) ? cb->y + cb->height / 2.0 : cb->y + cb->height + cb->margin_bottom;
         HtmlNode *cn = css_layout_box_node(ctx, c);
         if (isnan(v) && cn && cn->type == HTML_NODE_TEXT && !ifc_text_blank(cb, css_layout_node_text(ctx, cn))) {
             /* (text drawn nowhere, as at font-size 0: where its line put it) */
@@ -18405,12 +18420,15 @@ typedef struct {
     bool min_only;                      /* measured for its minimum alone */
     int baseline;                       /* 1 first, 2 last baseline alignment */
     double base_at;                     /* its baseline from its side of the line */
+    bool base_far;                      /* (across a column, lines running down: lines up at the far side) */
+    bool base_across;                   /* (and it does) */
 } FlexItem;
 
 typedef struct {
     int start, count;
     double cross_size;
     double base_above;                  /* the baseline group's, from the line's side */
+    double base_far;                    /* (and of the group at the far side) */
     double cross_pos;
 } FlexLineSeg;
 
@@ -18964,15 +18982,44 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
     double inner_cross = is_row ? (cross_def ? chh : 0.0) : cw;
     double total_cross = 0.0;
     for (int li = 0; li < nlines; li++) {
-        double m = 0.0, above = 0.0, below = 0.0;
+        double m = 0.0, above = 0.0, below = 0.0, far_above = 0.0, far_below = 0.0;
         for (int j = 0; j < lines[li].count; j++) {
             FlexItem *it = &items[lines[li].start + j];
             double o = it->cross + it->cm_s + it->cm_e;
-            if (it->baseline && is_row && !ct->s->writing_mode && !(it->auto_cs || it->auto_ce)) {
+            /* (a column's item whose lines run down: its first line faces its block's start) */
+            int iwm = it->is_text ? 0 : layout_box(ctx, it->idx)->s->writing_mode;
+            it->base_across = false;
+            bool ct_vert = is_row && wm_central(ct) && !wrap_rev;
+            if (it->baseline && !it->is_text && !(it->auto_cs || it->auto_ce) && (iwm == 1 || iwm == 2) &&
+                (ct_vert || (!is_row && !ct->s->writing_mode))) {
+                const LayoutBox *ib = layout_box(ctx, it->idx);
+                if (ct_vert && iwm == ct->s->writing_mode) {
+                    /* (the same flow: its lines where they are) */
+                    double b = layout_baseline_walk(ctx, it->idx, 0, it->baseline == 1, true);
+                    b = isnan(b) ? it->cross / 2.0 : b - ib->y;
+                    it->base_far = it->baseline != 1;
+                    it->base_at = it->base_far ? it->cm_e + it->cross - b : it->cm_s + b;
+                } else {
+                    /* (the other way: its first or last line, against one of its sides) */
+                    bool right = (iwm == 1) == (it->baseline == 1);
+                    it->base_far = ct_vert && ct->s->writing_mode == 1 ? !right : right;
+                    IfcVa m;
+                    ifc_va_metrics(ib, &m);
+                    double edge = is_row ? (it->base_far ? ib->s->border_bottom + ib->padding_bottom : ib->s->border_top + ib->padding_top)
+                                         : (it->base_far ? ib->s->border_right + ib->padding_right : ib->s->border_left + ib->padding_left);
+                    it->base_at = (it->base_far ? it->cm_e : it->cm_s) + edge + m.adv / 2.0;
+                }
+                it->base_across = true;
+                double *a = it->base_far ? &far_above : &above, *d = it->base_far ? &far_below : &below;
+                if (it->base_at > *a) *a = it->base_at;
+                if (o - it->base_at > *d) *d = o - it->base_at;
+                continue;
+            }
+            if (it->baseline && is_row && !(it->auto_cs || it->auto_ce)) {
                 /* (its baseline, from the line's side the group lines up at) */
                 double b = it->is_text ? NAN : layout_baseline_walk(ctx, it->idx, 0, it->baseline == 1, true);
                 /* (no line in it: its border box's edge stands in) */
-                b = isnan(b) ? it->cross : b - layout_box(ctx, it->idx)->y;
+                b = isnan(b) ? (wm_central(ct) ? it->cross / 2.0 : it->cross) : b - layout_box(ctx, it->idx)->y;
                 it->base_at = it->baseline == 1 ? it->cm_s + b : it->cm_e + it->cross - b;
                 if (wrap_rev && it->baseline == 1) it->base_at = it->cm_e + it->cross - b;
                 if (it->base_at > above) above = it->base_at;
@@ -18982,7 +19029,9 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
             if (o > m) m = o;
         }
         lines[li].base_above = above;
+        lines[li].base_far = far_above;
         if (above + below > m) m = above + below;
+        if (far_above + far_below > m) m = far_above + far_below;
         lines[li].cross_size = m;
         total_cross += m;
     }
@@ -19058,7 +19107,10 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
                 default: break;
                 }
                 if (it->safe && off < 0.0) off = 0.0;
-                if (it->baseline && is_row && !ct->s->writing_mode && !it->is_text) {
+                if (it->base_across) {
+                    double shift = (it->base_far ? lines[li].base_far : lines[li].base_above) - it->base_at;
+                    off = it->base_far ? room - size - shift : shift;
+                } else if (it->baseline && is_row && !it->is_text) {
                     /* (the group's baselines in line, and it at its side of the line) */
                     double shift = lines[li].base_above - it->base_at;
                     off = (it->baseline == 1) != wrap_rev ? shift : room - size - shift;
@@ -20242,7 +20294,7 @@ static void layout_grid_container(LayoutContext *ctx, int idx)
         if (!base_most) break;
         bool first = it->base_r == 1;
         double b = layout_baseline_walk(ctx, it->idx, 0, first, true);
-        b = isnan(b) ? child->height : b - child->y;
+        b = isnan(b) ? (wm_central(ct) ? child->height / 2.0 : child->height) : b - child->y;
         it->shim_r = first ? b + child->margin_top : child->height - b + child->margin_bottom;
         int key = first ? it->r * 2 : (it->r + it->rs - 1) * 2 + 1;
         if (it->shim_r > base_most[key]) base_most[key] = it->shim_r;

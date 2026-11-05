@@ -712,6 +712,8 @@ void css_declarations_free(CssDeclaration *decls, int count) {
 /* (inside @layer: where the rules go) */
 static __thread char *t_layer_path;
 static __thread char *t_scope_a, *t_scope_b;
+/* (the block being parsed is an @scope's own: its rules are relative to the root) */
+static __thread bool t_scope_body;
 
 static CssRule* css_stylesheet_add_rule(CssStylesheet *sheet) {
     if (sheet->rule_count >= sheet->rule_capacity) {
@@ -724,7 +726,7 @@ static CssRule* css_stylesheet_add_rule(CssStylesheet *sheet) {
     CssRule *rule = &sheet->rules[sheet->rule_count++];
     memset(rule, 0, sizeof(*rule));
     if (t_layer_path) rule->layer_name = strdup(t_layer_path);
-    rule->scoped = t_scope_a != NULL;
+    if (t_scope_a) rule->scope_root = strdup(t_scope_a);
     return rule;
 }
 
@@ -1549,7 +1551,16 @@ static size_t css_at_rule(const char *s, size_t len, size_t pos, bool nested, Cs
             }
             if (!*q) { bad = true; break; }
             parts[k] = css_strndup_trim(p + 1, (size_t)(q - p - 1));
-            if (!parts[k] || !parts[k][0] || css_prelude_invalid(parts[k])) bad = true;
+            /* (no pseudo-elements; a relative selector checked past its combinator) */
+            const char *pv = parts[k] ? parts[k] : "";
+            if (*pv == '>' || *pv == '+' || *pv == '~') { pv++; while (css_is_space(*pv)) pv++; }
+            bool pe_in = false;
+            for (const char *q2 = pv, *qb = NULL; *q2 && !pe_in; q2++) {
+                if (*q2 == '[') qb = q2;
+                else if (*q2 == ']') qb = NULL;
+                else if (!qb && q2[0] == ':' && q2[1] == ':') pe_in = true;
+            }
+            if (!pv[0] || pe_in || css_prelude_invalid(pv)) bad = true;
             p = q + 1;
         }
         while (!bad && css_is_space(*p)) p++;
@@ -1567,7 +1578,7 @@ static size_t css_at_rule(const char *s, size_t len, size_t pos, bool nested, Cs
         const char *start = parts[0] ? parts[0] : ":has(> style, > link)";
         const char *oa = t_nest_parent ? t_nest_parent : t_scope_a, *ob = t_nest_parent ? NULL : t_scope_b;
         sc_a = oa ? scope_apply(start, oa, ob, !t_nest_parent) : strdup(start);
-        if (parts[1]) sc_b = scope_apply(parts[1], sc_a, NULL, false);
+        if (parts[1]) sc_b = scope_apply(parts[1], sc_a, NULL, true);
         free(parts[0]); free(parts[1]);
     }
     char *eff = NULL;
@@ -1727,7 +1738,7 @@ static char *scope_apply(const char *sel, const char *a, const char *b, bool pre
             if (quote) { if (*c == quote) quote = 0; sel_append(&out, &n, &cap, c, 1); continue; }
             if (*c == '"' || *c == '\'') { quote = *c; sel_append(&out, &n, &cap, c, 1); continue; }
             if (*c == '&') {
-                sel_append(&out, &n, &cap, ":is(", 4);
+                sel_append(&out, &n, &cap, ":where(", 7);
                 sel_append(&out, &n, &cap, a, strlen(a));
                 sel_append(&out, &n, &cap, ")", 1);
                 continue;
@@ -1743,13 +1754,10 @@ static char *scope_apply(const char *sel, const char *a, const char *b, bool pre
             sel_append(&out, &n, &cap, c, 1);
         }
         if (b) {
+            /* (the limit, already in terms of the root, and what's under it) */
             sel_append(&out, &n, &cap, ":not(:where(", 12);
-            sel_append(&out, &n, &cap, a, strlen(a));
-            sel_append(&out, &n, &cap, ") :where(", 9);
             sel_append(&out, &n, &cap, b, strlen(b));
             sel_append(&out, &n, &cap, "), :where(", 10);
-            sel_append(&out, &n, &cap, a, strlen(a));
-            sel_append(&out, &n, &cap, ") :where(", 9);
             sel_append(&out, &n, &cap, b, strlen(b));
             sel_append(&out, &n, &cap, ") *)", 4);
         }
@@ -1826,6 +1834,8 @@ static char *nest_resolve(const char *parent, const char *child)
 /* A style rule's block, at pos (past its {): its declarations, then its rules. */
 static void css_parse_rule_block(const char *s, size_t len, size_t *pos, CssRule *rule, CssStylesheet *sheet, const char *cond)
 {
+    bool body = t_scope_body;
+    t_scope_body = false;
     CssNestList saved = t_nest;
     memset(&t_nest, 0, sizeof t_nest);
     t_nest.on = sheet != NULL;
@@ -1848,12 +1858,12 @@ static void css_parse_rule_block(const char *s, size_t len, size_t *pos, CssRule
     for (int i = 0; parent && i < mine.n; i++) {
         size_t a = mine.v[i].start, b = mine.v[i].brace;
         if (s[a] == '@') {
-            t_nest_parent = parent;
+            t_nest_parent = body ? NULL : parent;
             css_at_rule(s, len, a, true, sheet, cond, NULL);
             t_nest_parent = outer;
         } else {
             char *child = css_strndup_trim(s + a, b - a);
-            char *resolved = child && child[0] ? nest_resolve(parent, child) : NULL;
+            char *resolved = !child || !child[0] ? NULL : body ? scope_apply(child, t_scope_a, t_scope_b, true) : nest_resolve(parent, child);
             free(child);
             size_t p = b + 1;
             CssRule *r = resolved && !css_prelude_invalid(resolved) ? css_stylesheet_add_rule(sheet) : NULL;
@@ -1919,6 +1929,26 @@ static size_t css_rule_list(const char *s, size_t len, size_t pos, size_t stop, 
             return pos;
         }
     }
+    /* (an @scope's block: declarations of their own apply to the root, without weight) */
+    if (nested && t_scope_a && sheet) {
+        char *root = scope_apply(":scope", t_scope_a, t_scope_b, false);
+        size_t rl = root ? strlen(root) + 9 : 0;
+        char *rs = root ? (char *)malloc(rl) : NULL;
+        CssRule *r = rs ? css_stylesheet_add_rule(sheet) : NULL;
+        if (r) {
+            snprintf(rs, rl, ":where(%s)", root);
+            free(root);
+            r->selector_text = rs;
+            r->media_query = cond && cond[0] ? strdup(cond) : NULL; r->container_query = t_cq_cond ? strdup(t_cq_cond) : NULL;
+            bool held = t_scope_body;
+            t_scope_body = true;
+            css_parse_rule_block(s, len, &pos, r, sheet, cond);
+            t_scope_body = held;
+            return pos;
+        }
+        free(root);
+        free(rs);
+    }
     while (pos < len && (nested || pos < stop)) {
         css_skip_space_and_comments(s, len, &pos);
         if (pos >= len) break;
@@ -1980,6 +2010,7 @@ void css_stylesheet_free(CssStylesheet *sheet) {
         CssRule *rule = &sheet->rules[i];
         free(rule->selector_text);
         free(rule->layer_name);
+        free(rule->scope_root);
         free(rule->try_name);
         free(rule->media_query);
         free(rule->container_query);
@@ -2103,6 +2134,11 @@ static void css_apply_pseudo(CssSimpleSelector *out,
         out->is_pseudo_element = true;
         return;
     }
+    /* (:host outside of a shadow tree's own rewriting: there's no such element) */
+    if (css_pseudo_name_is(name, nl, "host") || css_pseudo_name_is(name, nl, "host-context")) {
+        out->never_match = true;
+        return;
+    }
     if (css_pseudo_name_is(name, nl, "root")) {
         out->is_root = true;
         out->has_substantive = true;
@@ -2202,6 +2238,7 @@ static void css_apply_pseudo(CssSimpleSelector *out,
             memcpy(out->where_arg, arg, copy);
             out->where_arg[copy] = '\0';
             out->where_active = true;
+            out->is_weighted = !css_pseudo_name_is(name, nl, "where");
             out->has_substantive = true;
         }
         return;
@@ -2253,6 +2290,7 @@ static void css_apply_pseudo(CssSimpleSelector *out,
     if (css_pseudo_name_is(name, nl, "has")) {
         /* Relative selector: an optional leading combinator, then a selector
          * matched against descendants / children / following siblings. */
+        out->has_substantive = true;
         if (arg && al > 0) {
             size_t k = 0;
             while (k < al && css_is_space(arg[k])) k++;
@@ -2291,7 +2329,7 @@ static void css_simple_reset(CssSimpleSelector *out) {
     out->child_pos = out->type_pos = out->nth_kind = out->nth_a = out->nth_b = 0;
     out->not_active = out->not_has_tag = out->not_has_id = false;
     out->not_class_count = out->not_attr_count = 0;
-    out->where_active = out->has_active = false;
+    out->where_active = out->has_active = out->is_weighted = false;
     out->lang_count = 0;
     out->has_comb = 0;
 }
@@ -2507,6 +2545,29 @@ static int css_parse_selector_chain(const char *s, CssSelectorPart *parts, int m
     return count;
 }
 
+/* A selector list's most specific selector (past a relative's combinator). */
+static int css_list_best_specificity(const char *p)
+{
+    int best = 0;
+    while (*p) {
+        const char *e = p;
+        int depth = 0;
+        for (; *e && (depth || *e != ','); e++) depth += *e == '(' ? 1 : *e == ')' ? -1 : 0;
+        const char *st = p;
+        while (st < e && css_is_space(*st)) st++;
+        if (st < e && (*st == '>' || *st == '+' || *st == '~')) st++;
+        char one[400];
+        size_t l = (size_t)(e - st);
+        if (l >= sizeof one) l = sizeof one - 1;
+        memcpy(one, st, l);
+        one[l] = '\0';
+        int s = css_specificity_from_selector_text(one);
+        if (s > best) best = s;
+        p = *e ? e + 1 : e;
+    }
+    return best;
+}
+
 static int css_specificity_from_simple(const CssSimpleSelector *simple) {
     int a = simple->has_id ? 1 : 0;
     int b = simple->class_count;
@@ -2524,24 +2585,9 @@ static int css_specificity_from_simple(const CssSimpleSelector *simple) {
     if (simple->not_active && simple->not_has_tag) c++;
     int spec = a * 1000 + b * 10 + c;
     /* (:not() of a list: its most specific selector) */
-    if (simple->not_list_active) {
-        int best = 0;
-        const char *p = simple->not_list_arg;
-        while (*p) {
-            const char *e = p;
-            int depth = 0;
-            for (; *e && (depth || *e != ','); e++) depth += *e == '(' ? 1 : *e == ')' ? -1 : 0;
-            char one[400];
-            size_t l = (size_t)(e - p);
-            if (l >= sizeof one) l = sizeof one - 1;
-            memcpy(one, p, l);
-            one[l] = '\0';
-            int s = css_specificity_from_selector_text(one);
-            if (s > best) best = s;
-            p = *e ? e + 1 : e;
-        }
-        spec += best;
-    }
+    if (simple->not_list_active) spec += css_list_best_specificity(simple->not_list_arg);
+    if (simple->where_active && simple->is_weighted) spec += css_list_best_specificity(simple->where_arg);
+    if (simple->has_active) spec += css_list_best_specificity(simple->has_arg);
     return spec;
 }
 
@@ -2636,7 +2682,7 @@ static bool css_simple_matches_ex(const CssSimpleSelector *simple, HtmlDocument 
      * fall through to the "universal" return-true below and erroneously match
      * every node, applying pseudo-element-only declarations (often
      * display:none) to real elements. */
-    if (!simple->has_substantive) return false;
+    if (!css_simple_substantive(simple)) return false;
     if (simple->never_match || simple->state_mask) return false;
     if (simple->is_root) {
         /* :root matches the document root element (html). */
@@ -2915,6 +2961,7 @@ int css_applied_decl_compare(const void *a, const void *b) {
      * higher specificity wins; ties broken by source order. */
     if (da->important != db->important) return da->important ? 1 : -1;
     if (da->specificity != db->specificity) return da->specificity - db->specificity;
+    if (da->proximity != db->proximity) return db->proximity - da->proximity;
     return da->order - db->order;
 }
 

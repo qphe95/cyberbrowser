@@ -589,6 +589,7 @@ typedef struct CRule {
     int32_t aspect;         /* list index, -1 = none */
     bool ua;                /* from the user agent's sheet */
     int layer_bias;         /* how far below no layer at all its layer is */
+    int32_t scope;          /* its @scope root's list, -1 = none */
 } CRule;
 
 /* Cascade layers, as first named across the sheets: a layer's sublayers below
@@ -734,7 +735,7 @@ static void compile_comp(Builder *b, const CssSimpleSelector *s, int comb, CComp
     c->state = s->state_mask;
     c->not_state = s->not_state;
     c->comb = (uint8_t)comb;
-    c->never = (!s->has_substantive || s->never_match) ? 1 : 0;
+    c->never = (!css_simple_substantive(s) || s->never_match) ? 1 : 0;
     c->tag = s->has_tag ? atom_cstr(s->tag) : CSS_ATOM_NONE;
     c->id = s->has_id ? atom_cstr(s->id) : CSS_ATOM_NONE;
     c->cls_n = (uint8_t)s->class_count;
@@ -1405,6 +1406,7 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
             cr->index = r;
             cr->ua = sheet->user_agent;
             cr->aspect = -1;
+            cr->scope = -1;
             if (!rule->selector_text || !rule->selector_text[0]) continue;
             const char *sel = rule->selector_text;
 
@@ -1426,6 +1428,7 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
             }
 
             if (!css_rule_media_matches(rule, vw, vh)) continue;
+            if (rule->scope_root) cr->scope = compile_list(&b, rule->scope_root);
 
             /* Normal branches into the rule buckets. */
             rchains.n = 0;
@@ -1806,6 +1809,12 @@ int css_style_match(const CssStyleSet *S, const CssStyleDoc *D, int dom,
         const CRule *cr = &S->rules[g];
         const CssRule *rule = cr->rule;
         if (rule->container_query && g_css_rule_gate && !g_css_rule_gate(rule->container_query, dom)) continue;
+        /* (the fewer steps up to the scope's root, the nearer) */
+        int prox = 1 << 20;
+        if (cr->scope >= 0) {
+            prox = 0;
+            for (int up = dom; up >= 0 && !list_match(S, D, cr->scope, up); up = D->parent[up]) prox++;
+        }
         for (int d = 0; d < rule->declaration_count; d++) {
             CssAppliedDecl a;
             a.decl = &rule->declarations[d];
@@ -1814,7 +1823,8 @@ int css_style_match(const CssStyleSet *S, const CssStyleDoc *D, int dom,
             a.specificity = t->rule_spec[g] - (cr->ua ? (1 << 28) : 0);
             /* (layers ahead of specificity; the earlier win when important) */
             if (cr->layer_bias) a.specificity += (rule->declarations[d].important ? cr->layer_bias : -cr->layer_bias) * (1 << 22);
-            a.order = (int)((uint32_t)cr->sheet * 1000000u + (uint32_t)cr->index * 1000u + (uint32_t)d + (rule->scoped ? 1u << 30 : 0u));
+            a.order = (int)((uint32_t)cr->sheet * 1000000u + (uint32_t)cr->index * 1000u + (uint32_t)d);
+            a.proximity = prox;
             a.important = rule->declarations[d].important;
             a.rule = g;
             VEC_PUSH(t->applied, a);
