@@ -706,6 +706,7 @@
 
     function subclass(name, parent) {
         var C = illegal(name);
+        Object.defineProperty(C, 'name', { configurable: true, value: name });
         C.prototype = Object.create(parent.prototype);
         define(C.prototype, 'constructor', C);
         Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
@@ -1339,8 +1340,107 @@
         ['syntax', 'inherits', 'initial-value'].forEach(function (k) { if (d[k] !== undefined) s += ' ' + k + ': ' + (k === 'syntax' ? serString(d[k]) : d[k]) + ';'; });
         return s + ' }';
     };
-    getter(CSSCounterStyleRule.prototype, 'name', function () { return this.__name; });
-    CSSCounterStyleRule.prototype.__text = function () { return '@counter-style ' + this.__name + ' {' + (this.__body ? ' ' + this.__body + ' ' : ' ') + '}'; };
+    /* @counter-style's descriptors: each checked and put as it's written out */
+    function csWords(v) {
+        var o = [], m, re = /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s"'(]+\((?:[^()]|\([^()]*\))*\)|[^\s,]+|,/g;
+        while ((m = re.exec(v))) o.push(m[0]);
+        return o;
+    }
+    var CS_WIDE = /^(?:initial|inherit|unset|revert|revert-layer|default)$/i;
+    function csIdent(w) { return /^-?(?:[a-zA-Z_\u0080-\uffff]|--)[-\w\u0080-\uffff]*$/.test(w) && !CS_WIDE.test(w); }
+    function csSymbol(w) { return /^["']/.test(w) || /^(?:url|image-set|-webkit-image-set|linear-gradient|radial-gradient)\(/i.test(w) || csIdent(w); }
+    function csInt(w) { return /^[-+]?\d+$/.test(w); }
+    function csPair(a, b) {
+        /* (<integer> and <symbol>, either way round) */
+        var n = csInt(a) ? a : csInt(b) ? b : null, y = n === a ? b : a;
+        if (n === null || +n < 0 || !csSymbol(y) || csInt(y)) return null;
+        return String(+n) + ' ' + y;
+    }
+    var CS_DESC = {
+        system: function (w) {
+            if (w.length === 1 && /^(?:cyclic|numeric|alphabetic|symbolic|additive|fixed)$/i.test(w[0])) return w[0].toLowerCase();
+            if (w.length === 2 && /^fixed$/i.test(w[0]) && csInt(w[1])) return 'fixed ' + w[1];
+            if (w.length === 2 && /^extends$/i.test(w[0]) && csIdent(w[1]) && !/^none$/i.test(w[1])) return 'extends ' + w[1];
+            return null;
+        },
+        negative: function (w) { return (w.length === 1 || w.length === 2) && w.every(csSymbol) ? w.join(' ') : null; },
+        prefix: function (w) { return w.length === 1 && csSymbol(w[0]) ? w[0] : null; },
+        suffix: function (w) { return w.length === 1 && csSymbol(w[0]) ? w[0] : null; },
+        range: function (w) {
+            if (w.length === 1 && /^auto$/i.test(w[0])) return 'auto';
+            var out = [], i = 0;
+            for (;;) {
+                var a = w[i], b = w[i + 1], ok = function (x) { return x !== undefined && (csInt(x) || /^infinite$/i.test(x)); };
+                if (!ok(a) || !ok(b)) return null;
+                if (csInt(a) && csInt(b) && +a > +b) return null;
+                out.push(a.toLowerCase() + ' ' + b.toLowerCase());
+                i += 2;
+                if (i === w.length) return out.join(', ');
+                if (w[i] !== ',') return null;
+                i++;
+            }
+        },
+        pad: function (w) { return w.length === 2 ? csPair(w[0], w[1]) : null; },
+        fallback: function (w) { return w.length === 1 && csIdent(w[0]) ? w[0] : null; },
+        symbols: function (w) { return w.length && w.every(csSymbol) ? w.join(' ') : null; },
+        'additive-symbols': function (w) {
+            var out = [], last = Infinity;
+            for (var i = 0; i < w.length; i += 3) {
+                var p = csPair(w[i], w[i + 1]);
+                if (!p) return null;
+                var n = parseInt(p, 10);
+                if (n >= last) return null;
+                last = n;
+                out.push(p);
+                if (i + 2 < w.length && w[i + 2] !== ',') return null;
+                if (i + 2 === w.length - 1) return null;
+            }
+            return out.length ? out.join(', ') : null;
+        },
+        'speak-as': function (w) { return w.length === 1 && (/^(?:auto|bullets|numbers|words|spell-out)$/i.test(w[0]) || (csIdent(w[0]) && !/^none$/i.test(w[0]))) ? w[0] : null; },
+    };
+    var CS_ORDER = ['system', 'symbols', 'additive-symbols', 'negative', 'prefix', 'suffix', 'range', 'pad', 'speak-as', 'fallback'];
+    function csParse(body) {
+        var o = {}, depth = 0, q = 0, at = 0, parts = [];
+        for (var i = 0; i < body.length; i++) {
+            var c = body[i];
+            if (q) { if (c === '\\') i++; else if (c === q) q = 0; continue; }
+            if (c === '"' || c === "'") q = c;
+            else if (c === '(') depth++;
+            else if (c === ')') depth--;
+            else if (c === ';' && !depth) { parts.push(body.slice(at, i)); at = i + 1; }
+        }
+        parts.push(body.slice(at));
+        parts.forEach(function (d) {
+            var k = d.indexOf(':');
+            if (k < 0) return;
+            var n = d.slice(0, k).trim().toLowerCase(), f = CS_DESC[n];
+            if (!f) return;
+            var v = f(csWords(d.slice(k + 1).trim()));
+            if (v !== null) o[n] = v;
+        });
+        return o;
+    }
+    function csName(v) {
+        v = String(v).trim();
+        return csIdent(v) && !/^(?:none|decimal|disc|square|circle|disclosure-open|disclosure-closed)$/i.test(v);
+    }
+    getter(CSSCounterStyleRule.prototype, 'name', function () { return this.__name; }, function (v) {
+        if (csName(v)) { this.__name = String(v).trim(); touched(this); }
+    });
+    [['system', 'system'], ['symbols', 'symbols'], ['additiveSymbols', 'additive-symbols'], ['negative', 'negative'], ['prefix', 'prefix'],
+     ['suffix', 'suffix'], ['range', 'range'], ['pad', 'pad'], ['speakAs', 'speak-as'], ['fallback', 'fallback']].forEach(function (m) {
+        getter(CSSCounterStyleRule.prototype, m[0], function () { return this.__descs[m[1]] || ''; }, function (v) {
+            var r = CS_DESC[m[1]](csWords(String(v).trim()));
+            if (r !== null) { this.__descs[m[1]] = r; touched(this); }
+        });
+    });
+    CSSCounterStyleRule.prototype.__text = function () {
+        var d = this.__descs, s = '@counter-style ' + this.__name + ' {';
+        CS_ORDER.forEach(function (k) { if (d[k] !== undefined) s += ' ' + k + ': ' + d[k] + ';'; });
+        return s + ' }';
+    };
+    CSSCounterStyleRule.prototype.__unused = function () { return '@counter-style ' + this.__name + ' {' + (this.__body ? ' ' + this.__body + ' ' : ' ') + '}'; };
     getter(CSSNestedDeclarations.prototype, 'style', function () { return this.__style; });
     CSSNestedDeclarations.prototype.__text = function () { return declText(this.__style); };
 
@@ -1617,7 +1717,8 @@
                 break;
             case 'counter-style':
                 if (p.block === null) return null;
-                r = makeRule(CSSCounterStyleRule, 'counter-style', { __name: p.prelude, __body: p.block.trim().replace(/\s+/g, ' ') });
+                if (!csName(p.prelude)) return null;
+                r = makeRule(CSSCounterStyleRule, 'counter-style', { __name: p.prelude.trim(), __descs: csParse(p.block) });
                 break;
             default:
                 return null;    /* unknown at-rules are dropped */

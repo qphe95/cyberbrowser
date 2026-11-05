@@ -135,11 +135,14 @@ static bool css_declaration_add(CssRule *rule, const char *prop, size_t prop_len
         free(p); free(v);
         return false;
     }
+    /* (a custom property can be nothing but space; "--" alone isn't one) */
+    if (!strcmp(p, "--")) { free(p); free(v); return false; }
+    if (p[0] == '-' && p[1] == '-' && v[0] == '\0') { free(v); v = strdup(" "); }
     if (p[0] == '\0' || v[0] == '\0') {
         free(p); free(v);
         return false;
     }
-    css_str_tolower(p);
+    if (!(p[0] == '-' && p[1] == '-')) css_str_tolower(p);
 
     /* Detect and strip trailing !important (case-insensitive) from the value.
      * The important flag is stored on the declaration so the cascade can
@@ -464,10 +467,14 @@ static void decl_finish(const CssTz *tz, const TokBuf *b, DeclSink sink, void *c
     const char *pv = css_tok_val(&tz->arena, &t[0], &pl);
     char *prop = (char *)malloc(pl + 1);
     char *value = decl_value_text(tz, t, k, e);
+    /* (a custom property's name is as written, and it can be nothing but space) */
+    bool custom = pl > 2 && pv[0] == '-' && pv[1] == '-';
+    if (pl == 2 && pv[0] == '-' && pv[1] == '-') { free(prop); free(value); return; }
+    if (custom && value && !value[0]) { free(value); value = strdup(" "); }
     if (!prop || !value || !value[0]) { free(prop); free(value); return; }
     memcpy(prop, pv, pl);
     prop[pl] = 0;
-    css_str_tolower(prop);
+    if (!custom) css_str_tolower(prop);
     sink(ctx, prop, value, important);
 }
 

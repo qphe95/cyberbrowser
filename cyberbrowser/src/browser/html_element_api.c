@@ -166,6 +166,7 @@ static const char k_html_element_js[] =
 "  });\n"
 "\n"
 "  method('checkVisibility', function(opts){\n"
+"    if (!(this instanceof Element)) throw new TypeError('Illegal invocation');\n"
 "    opts = opts || {};\n"
 "    if (!this.isConnected) return false;\n"
 "    var op = opts.checkOpacity || opts.opacityProperty, vis = opts.checkVisibilityCSS || opts.visibilityProperty;\n"

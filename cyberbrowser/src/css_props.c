@@ -2058,7 +2058,8 @@ static void srgb_to_hsl(const double c[3], double o[3], bool *hue_none) {
     double mx = fmax(c[0], fmax(c[1], c[2])), mn = fmin(c[0], fmin(c[1], c[2]));
     double l = (mx + mn) / 2, d = mx - mn, h = 0, s = 0;
     *hue_none = true;
-    if (d != 0) {
+    /* (near enough to gray that noise is all the hue there is) */
+    if (fabs(d) > 2e-5) {
         s = (l == 0 || l == 1) ? 0 : (mx - l) / fmin(l, 1 - l);
         if (mx == c[0]) h = (c[1] - c[2]) / d + (c[1] < c[2] ? 6 : 0);
         else if (mx == c[1]) h = (c[2] - c[0]) / d + 2;

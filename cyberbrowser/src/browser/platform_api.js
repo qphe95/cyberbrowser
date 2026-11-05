@@ -776,6 +776,73 @@
                     held.set(this, ok);
                 } });
         });
+        /* (the rest of its descriptors: held here, nothing in them reaches the font yet) */
+        var ffOverride = function (v) { v = String(v).trim(); return v === 'normal' || /^[+]?[\d.]+%$/.test(v) ? v : null; };
+        var ffSettings = function (v) {
+            v = String(v).trim();
+            if (v === 'normal') return v;
+            return global.CSS && global.CSS.supports('font-feature-settings', v) ? v : null;
+        };
+        var ffVariations = function (v) {
+            v = String(v).trim();
+            if (v === 'normal') return v;
+            return global.CSS && global.CSS.supports('font-variation-settings', v) ? v : null;
+        };
+        var ffMore = {
+            unicodeRange: ['U+0-10FFFF', function (v) {
+                v = String(v).trim();
+                return /^[uU]\+[0-9a-fA-F?]{1,6}(-[0-9a-fA-F]{1,6})?(\s*,\s*[uU]\+[0-9a-fA-F?]{1,6}(-[0-9a-fA-F]{1,6})?)*$/.test(v) ? v.toUpperCase() : null;
+            }],
+            variant: ['normal', function (v) { return global.CSS && global.CSS.supports('font-variant', String(v)) ? String(v).trim() : null; }],
+            featureSettings: ['normal', ffSettings],
+            variationSettings: ['normal', ffVariations],
+            display: ['auto', function (v) { v = String(v).trim(); return /^(auto|block|swap|fallback|optional)$/.test(v) ? v : null; }],
+            ascentOverride: ['normal', ffOverride],
+            descentOverride: ['normal', ffOverride],
+            lineGapOverride: ['normal', ffOverride],
+        };
+        var ffHeld = new WeakMap(), ffOf = function (f) {
+            if (!(f instanceof global.FontFace)) throw new TypeError('Illegal invocation');
+            var h = ffHeld.get(f);
+            if (!h) ffHeld.set(f, h = {});
+            return h;
+        };
+        Object.keys(ffMore).forEach(function (k) {
+            var def = ffMore[k][0], check = ffMore[k][1];
+            Object.defineProperty(global.FontFace.prototype, k, { enumerable: true, configurable: true,
+                get: function () { var h = ffOf(this); return k in h ? h[k] : def; },
+                set: function (v) {
+                    var h = ffOf(this), ok = check(v);
+                    if (ok === null) throw new global.DOMException("'" + v + "' is not a valid value for " + k, 'SyntaxError');
+                    h[k] = ok;
+                } });
+        });
+        /* (a name that isn't one, as a string) */
+        var ffFamily = function (v) {
+            v = String(v).trim();
+            if (/^["'].*["']$/.test(v)) return v;
+            if (/^-?(?:[a-zA-Z_\u0080-\uffff]|--)[-\w\u0080-\uffff]*$/.test(v) && !/^(?:initial|inherit|unset|revert|revert-layer|default)$/i.test(v)) return v;
+            return '"' + v.replace(/(["\\])/g, '\\$1') + '"';
+        };
+        var ffFam = Object.getOwnPropertyDescriptor(global.FontFace.prototype, 'family');
+        if (ffFam && ffFam.get) Object.defineProperty(global.FontFace.prototype, 'family', { enumerable: true, configurable: true,
+            get: function () { var h = ffOf(this); return 'family' in h ? h.family : ffFamily(ffFam.get.call(this)); },
+            set: function (v) { ffOf(this).family = ffFamily(v); if (ffFam.set) ffFam.set.call(this, v); } });
+        var ffOrig = global.FontFace, ffCtor = function FontFace(family, source) {
+            if (!new.target) throw new TypeError("Failed to construct 'FontFace': Please use the 'new' operator");
+            if (arguments.length < 2) throw new TypeError("Failed to construct 'FontFace': 2 arguments required");
+            var f = Reflect.construct(ffOrig, arguments, new.target === ffCtor ? ffOrig : new.target), init = arguments[2];
+            if (init && typeof init === 'object') Object.keys(ffMore).forEach(function (k) {
+                if (init[k] === undefined) return;
+                var ok = ffMore[k][1](init[k]);
+                if (ok !== null) ffOf(f)[k] = ok;
+            });
+            return f;
+        };
+        Object.defineProperty(ffCtor, 'length', { configurable: true, value: 2 });
+        Object.defineProperty(ffCtor, 'prototype', { value: ffOrig.prototype, writable: false });
+        Object.defineProperty(ffOrig.prototype, 'constructor', { configurable: true, writable: true, value: ffCtor });
+        Object.defineProperty(global, 'FontFace', { configurable: true, writable: true, value: ffCtor });
     }
     /* (a screen, what the media features' device says) */
     function liveInterface(name, parent, ro) {
@@ -1452,6 +1519,7 @@
     if (rawTop && rawLeft) [['scrollTop', rawTop], ['scrollLeft', rawLeft]].forEach(function (d) {
         var top = d[0] === 'scrollTop', raw = d[1];
         Object.defineProperty(ELP, d[0], { configurable: true, enumerable: raw.enumerable, get: raw.get, set: function (v) {
+            if (!(this instanceof global.Element)) throw new TypeError('Illegal invocation');
             scrollGo(this, top ? undefined : +v, top ? +v : undefined);
         } });
     });
@@ -1461,13 +1529,14 @@
     }
     [['scroll', false], ['scrollTo', false], ['scrollBy', true]].forEach(function (m) {
         var name = m[0], by = m[1];
-        if (ELP) Object.defineProperty(ELP, name, { configurable: true, enumerable: true, writable: true, value: function () {
+        var named = function (f) { Object.defineProperty(f, 'name', { configurable: true, value: name }); return f; };
+        if (ELP) Object.defineProperty(ELP, name, { configurable: true, enumerable: true, writable: true, value: named(function () {
             return scrollApply(this, scrollArgs(name, 'Element', arguments), by);
-        } });
-        Object.defineProperty(global, name, { configurable: true, enumerable: true, writable: true, value: function () {
+        }) });
+        Object.defineProperty(global, name, { configurable: true, enumerable: true, writable: true, value: named(function () {
             var o = scrollArgs(name, 'Window', arguments), el = scrollViewportElement();
             return el ? scrollApply(el, o, by) : Promise.resolve({ interrupted: false });
-        } });
+        }) });
     });
     [['scrollX', 'scrollLeft'], ['pageXOffset', 'scrollLeft'], ['scrollY', 'scrollTop'], ['pageYOffset', 'scrollTop']].forEach(function (m) {
         Object.defineProperty(global, m[0], { configurable: true, enumerable: true,
@@ -1528,7 +1597,7 @@
     }
     Object.defineProperty(global, '__cyberScrollIntoView', { configurable: true, value: scrollIntoViewOf });
     if (ELP) {
-        Object.defineProperty(ELP, 'scrollIntoView', { configurable: true, enumerable: true, writable: true, value: function () {
+        Object.defineProperty(ELP, 'scrollIntoView', { configurable: true, enumerable: true, writable: true, value: function scrollIntoView() {
             scrollWith = typeof arguments[0] === 'object' && arguments[0] ? arguments[0].behavior : undefined;
             scrollLast = null;
             var arg = arguments[0], block = 'start', inline = 'nearest', LOGICAL = ['start', 'center', 'end', 'nearest'];
@@ -1621,8 +1690,136 @@
             scrollIntoViewOf(this, 'nearest', 'nearest');
         } });
     }
+    /* ---- CSS Custom Highlight API: the sets and their registry (nothing's painted) ---- */
+    var HL = new WeakMap();
+    var hlOf = function (h) {
+        var s = HL.get(h);
+        if (!s) throw new TypeError('Illegal invocation');
+        return s;
+    };
+    var hlMethods = function (P, kind) {
+        var entries = function () { return hlOf(this).entries(); };
+        var keys = function () { return hlOf(this).keys(); };
+        var values = function () { return hlOf(this).values(); };
+        var hm = function (o) {
+            Object.keys(o).forEach(function (k) {
+                Object.defineProperty(o[k], 'name', { configurable: true, value: k });
+                Object.defineProperty(P, k, { configurable: true, enumerable: true, writable: true, value: o[k] });
+            });
+        };
+        hm({ entries: entries, values: values,
+            forEach: function (cb) {
+                if (typeof cb !== 'function') throw new TypeError('The callback provided as parameter 1 is not a function.');
+                var self = this, that = arguments[1];
+                hlOf(this).forEach(function (v, k) { cb.call(that, v, k, self); });
+            },
+            has: function (k) { if (!arguments.length) throw new TypeError('1 argument required'); return hlOf(this).has(k); },
+            delete: function (k) { if (!arguments.length) throw new TypeError('1 argument required'); return hlOf(this).delete(k); },
+            clear: function () { hlOf(this).clear(); } });
+        Object.defineProperty(P, 'keys', { configurable: true, enumerable: true, writable: true, value: kind === 'set' ? P.values : Object.defineProperty(keys, 'name', { value: 'keys' }) });
+        Object.defineProperty(P, Symbol.iterator, { configurable: true, writable: true, value: kind === 'set' ? P.values : P.entries });
+        Object.defineProperty(P, 'size', { configurable: true, enumerable: true, get: function () { return hlOf(this).size; } });
+    };
+    var HIGHLIGHT_TYPES = ['highlight', 'spelling-error', 'grammar-error'];
+    var Highlight = function Highlight() {
+        if (!new.target) throw new TypeError("Failed to construct 'Highlight': Please use the 'new' operator");
+        var s = new Set();
+        for (var i = 0; i < arguments.length; i++) {
+            if (!(arguments[i] instanceof global.AbstractRange)) throw new TypeError("Failed to construct 'Highlight': not an AbstractRange");
+            s.add(arguments[i]);
+        }
+        HL.set(this, s);
+        hlState.set(this, { priority: 0, type: 'highlight' });
+    };
+    var hlState = new WeakMap();
+    Object.defineProperty(Highlight, 'length', { configurable: true, value: 0 });
+    Object.defineProperty(Highlight.prototype, Symbol.toStringTag, { configurable: true, value: 'Highlight' });
+    hlMethods(Highlight.prototype, 'set');
+    Object.defineProperty(Highlight.prototype, 'add', { configurable: true, enumerable: true, writable: true, value: function add(r) {
+        if (!arguments.length) throw new TypeError('1 argument required');
+        if (!(r instanceof global.AbstractRange)) throw new TypeError("Failed to execute 'add' on 'Highlight': not an AbstractRange");
+        hlOf(this).add(r);
+        return this;
+    } });
+    Object.defineProperty(Highlight.prototype, 'priority', { configurable: true, enumerable: true,
+        get: function () { hlOf(this); return hlState.get(this).priority; },
+        set: function (v) { hlOf(this); hlState.get(this).priority = (Number(v) | 0); } });
+    Object.defineProperty(Highlight.prototype, 'type', { configurable: true, enumerable: true,
+        get: function () { hlOf(this); return hlState.get(this).type; },
+        set: function (v) { hlOf(this); v = String(v); if (HIGHLIGHT_TYPES.indexOf(v) >= 0) hlState.get(this).type = v; } });
+    Object.defineProperty(global, 'Highlight', { configurable: true, writable: true, value: Highlight });
+    var HighlightRegistry = function HighlightRegistry() { throw new TypeError('Illegal constructor'); };
+    Object.defineProperty(HighlightRegistry.prototype, Symbol.toStringTag, { configurable: true, value: 'HighlightRegistry' });
+    hlMethods(HighlightRegistry.prototype, 'map');
+    Object.defineProperty(HighlightRegistry.prototype, 'get', { configurable: true, enumerable: true, writable: true, value: function get(k) {
+        if (!arguments.length) throw new TypeError('1 argument required');
+        return hlOf(this).get(String(k));
+    } });
+    Object.defineProperty(HighlightRegistry.prototype, 'set', { configurable: true, enumerable: true, writable: true, value: function set(k, v) {
+        if (arguments.length < 2) throw new TypeError('2 arguments required');
+        if (!(v instanceof Highlight)) throw new TypeError("Failed to execute 'set' on 'HighlightRegistry': not a Highlight");
+        hlOf(this).set(String(k), v);
+        return this;
+    } });
+    Object.defineProperty(HighlightRegistry.prototype, 'highlightsFromPoint', { configurable: true, enumerable: true, writable: true,
+        value: function highlightsFromPoint(x, y) {
+            if (arguments.length < 2) throw new TypeError('2 arguments required');
+            return [];
+        } });
+    Object.defineProperty(global, 'HighlightRegistry', { configurable: true, writable: true, value: HighlightRegistry });
+    var theRegistry = Object.create(HighlightRegistry.prototype);
+    HL.set(theRegistry, new Map());
+    Object.defineProperty(global, '__cyberHighlights', { configurable: true, value: theRegistry });
+    if (global.CSS) Object.defineProperty(global.CSS, 'highlights', { configurable: true, enumerable: true, get: function () { return theRegistry; } });
+
+    /* ---- Window's sizes and offsets: read through getters that know their object ---- */
+    ['innerWidth', 'innerHeight', 'outerWidth', 'outerHeight', 'screenX', 'screenY', 'screenLeft', 'screenTop', 'devicePixelRatio',
+     'scrollX', 'scrollY', 'pageXOffset', 'pageYOffset', 'screen', 'visualViewport'].forEach(function (k) {
+        var d = Object.getOwnPropertyDescriptor(global, k), val;
+        if (!d) return;
+        var mine = function () { return this === undefined || this === null || this === global; };
+        var get = d.get ? function () { if (!mine.call(this)) throw new TypeError('Illegal invocation'); return d.get.call(global); }
+                        : function () { if (!mine.call(this)) throw new TypeError('Illegal invocation'); return val; };
+        if (!d.get) val = d.value;
+        Object.defineProperty(global, k, { configurable: true, enumerable: true, get: get,
+            set: d.get ? d.set : function (v) { val = v; } });
+    });
+    ['moveTo', 'moveBy', 'resizeTo', 'resizeBy'].forEach(function (n) {
+        var was = global[n];
+        var f = function (a, b) {
+            if (arguments.length < 2) throw new TypeError("Failed to execute '" + n + "' on 'Window': 2 arguments required");
+            if (typeof was === 'function') return was.call(this, a, b);
+        };
+        Object.defineProperty(f, 'name', { configurable: true, value: n });
+        Object.defineProperty(global, n, { configurable: true, enumerable: true, writable: true, value: f });
+    });
+    /* (the box its scrolling is by, up the containing blocks) */
+    if (global.Element) Object.defineProperty(global.Element.prototype, 'scrollParent', { configurable: true, enumerable: true, writable: true,
+        value: function scrollParent() {
+            if (!(this instanceof global.Element)) throw new TypeError('Illegal invocation');
+            var d = this.ownerDocument, cs = global.getComputedStyle(this);
+            if (!this.isConnected || cs.display === 'none' || this === d.documentElement) return null;
+            var pos = cs.position;
+            for (var a = this.assignedSlot || this.parentNode || this.host; a; a = a.assignedSlot || a.parentNode || a.host) {
+                if (a.nodeType !== 1) continue;
+                var s = global.getComputedStyle(a);
+                var box = s.transform !== 'none' || s.perspective !== 'none' || s.filter !== 'none' || /paint|layout|strict|content/.test(s.contain || '');
+                /* (what isn't its containing block doesn't scroll it) */
+                if ((pos === 'absolute' && s.position === 'static' && !box) || (pos === 'fixed' && !box)) continue;
+                if (a === d.documentElement) return d.scrollingElement;
+                if (isScrollBox(s) && a !== d.body) return a;
+                pos = s.position;
+            }
+            return pos === 'fixed' ? null : d.scrollingElement;
+        } });
+    if (global.HTMLImageElement) [['x', 6], ['y', 7]].forEach(function (m) {
+        if (m[0] in global.HTMLImageElement.prototype) return;
+        Object.defineProperty(global.HTMLImageElement.prototype, m[0], { configurable: true, enumerable: true,
+            get: function () { var v = global.__cyberBoxMap(this); return v ? Math.round(v[m[1]]) : 0; } });
+    });
     if (DOCP && !('elementsFromPoint' in DOCP))
-        Object.defineProperty(DOCP, 'elementsFromPoint', { configurable: true, enumerable: true, writable: true, value: function (x, y) {
+        Object.defineProperty(DOCP, 'elementsFromPoint', { configurable: true, enumerable: true, writable: true, value: function elementsFromPoint(x, y) {
+            if (arguments.length < 2) throw new TypeError("Failed to execute 'elementsFromPoint' on 'Document': 2 arguments required");
             var out = [];
             for (var e = this.elementFromPoint(x, y); e; e = e.parentElement) out.push(e);
             return out;

@@ -1785,6 +1785,7 @@ static void lq_scroll_size(int idx, bool root, double *cw, double *ch, double *s
 static GCValue lq_metric(JSContextHandle ctx, GCValue this_val, int which)
 {
     NodeId id = dom_node_of(this_val);
+    if (!id) return JS_ThrowTypeError(ctx, "Illegal invocation");
     g_lq_ask = which == M_SCROLL_W || which == M_SCROLL_H ? LQ_ASK_EXTENT :
                which == M_OFFSET_T || which == M_OFFSET_L ? LQ_ASK_POS : LQ_ASK_SIZE;
     int idx = lq_query(ctx, this_val);

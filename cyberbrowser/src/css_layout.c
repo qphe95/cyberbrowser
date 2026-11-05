@@ -10249,9 +10249,26 @@ static bool layout_apply_wide_keyword(LayoutBox *box, const LayoutBox *parent,
         return true;
     }
 
-    /* Inherited properties: inheritance fills the value in (initial is
-     * approximated the same way). */
+    /* Inherited properties: inheritance fills the value in; initial is its own,
+     * for those with one that's no matter of the UA's. */
     if (inherited_prop) {
+        if (initial) {
+            static const struct { const char *prop, *value; } own[] = {
+                { "color", "rgb(0, 0, 0)" }, { "letter-spacing", "normal" }, { "word-spacing", "normal" },
+                { "line-height", "normal" }, { "font-weight", "normal" }, { "font-style", "normal" },
+                { "text-align", "start" }, { "text-indent", "0px" }, { "text-transform", "none" },
+                { "white-space", "normal" }, { "visibility", "visible" }, { "direction", "ltr" },
+            };
+            for (size_t i = 0; i < sizeof own / sizeof own[0]; i++) {
+                if (strcasecmp(prop, own[i].prop)) continue;
+                CssDeclaration d;
+                memset(&d, 0, sizeof d);
+                d.property = (char *)own[i].prop;
+                d.value = (char *)own[i].value;
+                layout_apply_declaration(box, &d, parent ? parent->content_width : viewport_width, viewport_width, base_url);
+                return true;
+            }
+        }
         layout_unset_property(box, prop);
         return true;
     }
@@ -10928,6 +10945,10 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
             CssDeclaration decl = *applied[d].decl;
             decl.value = resolved ? resolved : applied[d].decl->value;
             layout_decl_copy_validity(&decl, applied[d].decl, resolved != NULL);
+            /* (what it comes to isn't one of the property's values: as unset, not as if it weren't there) */
+            if (resolved && !t_var_failed && css_value_invalid(decl.property, decl.value) &&
+                !layout_apply_wide_keyword(box, parent, decl.property, "unset", ctx->viewport_width, ctx->base_url)) t_var_failed = true;
+            else if (resolved && !t_var_failed && css_value_invalid(decl.property, decl.value)) { free(resolved); continue; }
             if (t_var_failed) layout_unset_property(box, decl.property);
             else if (!layout_apply_wide_keyword(box, parent, decl.property, decl.value,
                                                 ctx->viewport_width, ctx->base_url))
@@ -11779,6 +11800,10 @@ static void layout_pseudo_style(LayoutContext *ctx, int pe, int owner, const Pse
         CssDeclaration decl = *src;
         decl.value = resolved ? resolved : src->value;
         layout_decl_copy_validity(&decl, src, resolved != NULL);
+        /* (what it comes to isn't one of the property's values: as unset, not as if it weren't there) */
+        if (resolved && !t_var_failed && css_value_invalid(decl.property, decl.value) &&
+            !layout_apply_wide_keyword(box, NULL, decl.property, "unset", ctx->viewport_width, ctx->base_url)) t_var_failed = true;
+        else if (resolved && !t_var_failed && css_value_invalid(decl.property, decl.value)) { free(resolved); continue; }
         if (t_var_failed) layout_unset_property(box, decl.property);
         else if (!layout_apply_wide_keyword(box, ob, decl.property, decl.value, ctx->viewport_width, ctx->base_url))
             layout_apply_declaration(box, &decl, ctx->viewport_width, ctx->viewport_width, ctx->base_url);
@@ -20862,6 +20887,12 @@ static void layout_anim_frame(void *ud, const void *decls, int n, AnimVal out[AN
             script[p] = true;
             continue;
         }
+        /* (colors that go in oklab: script's) */
+        if ((p == ANIM_COLOR || p == ANIM_BGCOLOR) && d[i].value &&
+            (strstr(d[i].value, "color(") || strstr(d[i].value, "lab(") || strstr(d[i].value, "lch(") || strstr(d[i].value, "color-mix("))) {
+            script[p] = has[p] = true;
+            continue;
+        }
         /* (the text color things start with) */
         if (p == ANIM_COLOR && d[i].value && !strcasecmp(d[i].value, "initial")) {
             CssDeclaration black = d[i];
@@ -23637,7 +23668,8 @@ static bool cascade_at(LayoutContext *ctx, int dom, const CssCustomProps *props,
             const CssDeclaration *dl = applied[d].decl;
             if (applied[d].important != imp || !dl->property || !dl->value || (dl->property[0] == '-' && dl->property[1] == '-')) continue;
             char *r = strchr(dl->value, '(') ? css_var_resolve(dl->value, props) : NULL;
-            fn(ud, dl->property, r ? r : dl->value, imp);
+            /* (what it comes to isn't one of its values: as unset) */
+            fn(ud, dl->property, r && css_value_invalid(dl->property, r) ? "unset" : r ? r : dl->value, imp);
             free(r);
         }
         for (int b = 0; b < ninl; b++)
@@ -23645,7 +23677,8 @@ static bool cascade_at(LayoutContext *ctx, int dom, const CssCustomProps *props,
                 const CssDeclaration *dl = &inl[b].decls[i];
                 if (dl->important != imp || !dl->property || !dl->value || (dl->property[0] == '-' && dl->property[1] == '-')) continue;
                 char *r = strchr(dl->value, '(') ? css_var_resolve(dl->value, props) : NULL;
-                fn(ud, dl->property, r ? r : dl->value, imp);
+                /* (what it comes to isn't one of its values: as unset) */
+                fn(ud, dl->property, r && css_value_invalid(dl->property, r) ? "unset" : r ? r : dl->value, imp);
                 free(r);
             }
     }

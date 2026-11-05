@@ -17,7 +17,7 @@ const path = require('path');
 const wpt = process.argv[2];
 if (!wpt) { console.error('usage: gen_idl_table.js <wpt dir>'); process.exit(1); }
 const WebIDL2 = require(path.join(path.resolve(wpt), 'resources/webidl2/lib/webidl2.js'));
-const SPECS = ['dom', 'fullscreen', 'cssom', 'cssom-view', 'css-typed-om', 'geometry', 'css-conditional', 'css-conditional-5', 'css-fonts',
+const SPECS = ['css-fonts-5', 'dom', 'fullscreen', 'cssom', 'cssom-view', 'css-typed-om', 'geometry', 'css-conditional', 'css-conditional-5', 'css-fonts',
                'css-font-loading', 'css-anchor-position', 'css-animations', 'css-transitions', 'css-counter-styles', 'css-nesting', 'css-highlight-api',
                'css-properties-values-api', 'css-mixins', 'web-animations', 'css-masking', 'css-pseudo', 'css-parser-api'];
 const ast = SPECS.flatMap(s => WebIDL2.parse(fs.readFileSync(path.join(wpt, 'interfaces', s + '.idl'), 'utf8')));

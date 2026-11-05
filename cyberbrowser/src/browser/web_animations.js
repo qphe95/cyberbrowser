@@ -1131,6 +1131,12 @@
         }
         return true;
     }
+    function trackAligned(l) {
+        var o = [], pend = null;
+        l.forEach(function (e) { if (e.k === 'names') pend = e; else { o.push(pend || { k: 'names', v: '' }); o.push(e); pend = null; } });
+        o.push(pend || { k: 'names', v: '' });
+        return o;
+    }
     function trackInterpolate(a, b, t) {
         if (/\b(none|subgrid|masonry)\b/.test(a + ' ' + b)) return null;
         var x = trackList(a), y = trackList(b);
@@ -1143,6 +1149,34 @@
             return o;
         };
         return trackMix(align(x), align(y), t).replace(/\s+/g, ' ').trim();
+    }
+    /* Added track by track; what won't add stays as the later one says. */
+    function trackSizeAdd(a, b) {
+        var ma = /^(-?[\d.]+(?:e[-+]?\d+)?)(px|%|fr)$/i.exec(a), mb = /^(-?[\d.]+(?:e[-+]?\d+)?)(px|%|fr)$/i.exec(b);
+        if (ma && mb && ma[2] === mb[2]) return +(+ma[1] + +mb[1]).toFixed(6) + ma[2];
+        if (ma && mb && ma[2] !== 'fr' && mb[2] !== 'fr') {
+            var px = ma[2] === 'px' ? ma : mb, pc = ma[2] === 'px' ? mb : ma;
+            return 'calc(' + px[1] + 'px + ' + pc[1] + '%)';
+        }
+        return b;
+    }
+    function trackAddList(x, y) {
+        var out = [];
+        for (var i = 0; i < x.length; i++) {
+            var p = x[i], q = y[i];
+            if (p.k === 'names') { out.push(q.v || p.v); continue; }
+            if (p.k === 'repeat') { out.push('repeat(' + p.n + ', ' + trackAddList(p.v, q.v) + ')'); continue; }
+            if (p.k === 'size' && q.k === 'size') { out.push(trackSizeAdd(p.v, q.v)); continue; }
+            if (p.k === q.k) { out.push(p.k + '(' + p.v.map(function (u, j) { return trackSizeAdd(u, q.v[j]); }).join(', ') + ')'); continue; }
+            out.push(q.k === 'size' ? q.v : q.k + '(' + q.v.join(', ') + ')');
+        }
+        return out.join(' ');
+    }
+    function trackAdd(a, b) {
+        if (/\b(none|subgrid|masonry)\b/.test(a + ' ' + b)) return null;
+        var x = trackList(a), y = trackList(b);
+        if (!x || !y || !trackShape(x, y)) return null;
+        return trackAddList(trackAligned(x), trackAligned(y)).replace(/\s+/g, ' ').trim();
     }
     var TRACK_PROP = /^grid-template-(rows|columns)$/;
     /* Colors other than sRGB's old forms go in oklab, premultiplied, and stay
@@ -1206,6 +1240,17 @@
         return { flag: !!kw, deg: deg + (kw === 'reverse' ? 180 : 0) };
     }
     function interpolate(prop, a, b, t) {
+        /* (axis by axis, in the order of their tags; the last of a tag counts) */
+        if (prop === 'font-variation-settings') {
+            var axes = function (v) {
+                var o = {}, m, re = /["']([^"']{4})["']\s+(-?[\d.]+(?:e[-+]?\d+)?)/g;
+                while ((m = re.exec(String(v)))) o[m[1]] = +m[2];
+                return o;
+            };
+            var ax = axes(a), bx = axes(b), ka = Object.keys(ax).sort(), kb = Object.keys(bx).sort();
+            if (!ka.length || ka.join() !== kb.join()) return t < 0.5 ? a : b;
+            return ka.map(function (k) { return '"' + k + '" ' + fmt(+(ax[k] + (bx[k] - ax[k]) * t).toFixed(6)); }).join(', ');
+        }
         /* (normal is none at all, but at its own end) */
         if (prop === 'letter-spacing' || prop === 'word-spacing') {
             if (a === 'normal' && t === 0) return a;
@@ -1425,8 +1470,8 @@
     function addValues(prop, under, value, how) {
         if (prop === 'clip') { under = clipRect(under); value = clipRect(value); }
         if (TRACK_PROP.test(prop)) {
-            var ts = lpListMix(under, value, function (x, y) { return x + y; });
-            if (ts !== null) return ts;
+            var ts = trackAdd(under, value);
+            return ts === null ? value : ts;
         }
         if (prop === 'font-size-adjust') {
             var sa = combine(prop, under, value, function (x, y) { return x + y; });
@@ -1854,7 +1899,8 @@
     }
     function transitionValue(prop, run, now) {
         var x = run.dur > 0 ? (now - run.start - run.delay) / run.dur : 1;
-        if (x <= 0) return run.from;
+        /* (colors in oklab are in it at their ends too) */
+        if (x <= 0) return wideColorPairs(run.from, run.to) ? interpolate(prop, run.from, run.to, 0) : run.from;
         if (x >= 1) return run.to;
         if (run.flip) return run.easing.fn(x) < 0.5 ? run.from : run.to;
         return interpolate(prop, run.from, run.to, run.easing.fn(x));
@@ -1866,7 +1912,7 @@
             var names = global.__cyberAnimRunning(el), some = (global.getComputedStyle(el).animationComposition || 'replace') !== 'replace';
             for (var ni = 0; ni + 1 < names.length && !some; ni += 2) {
                 var fs = keyframesOf(el.ownerDocument, names[ni]);
-                for (var fi = 0; fs && fi < fs.length && !some; fi++) some = !!fs[fi].style.animationComposition || /calc-size\(|^\s*(initial|unset)\s*$/.test(fs[fi].style.getPropertyValue(prop) || '') || SIZE_KEYWORD.test(fs[fi].style.getPropertyValue(prop) || '');
+                for (var fi = 0; fs && fi < fs.length && !some; fi++) some = (/color/.test(prop) && /\b(?:color|lab|lch|oklab|oklch|color-mix)\(/.test(fs[fi].style.getPropertyValue(prop))) || !!fs[fi].style.animationComposition || /calc-size\(|^\s*(initial|unset)\s*$/.test(fs[fi].style.getPropertyValue(prop) || '') || SIZE_KEYWORD.test(fs[fi].style.getPropertyValue(prop) || '');
             }
             if (!some) return undefined;
         }
@@ -2196,7 +2242,7 @@
                 if (p.value !== null && (p.composite === 'add' || p.composite === 'accumulate')) u = addValues(prop, under(), u, p.composite);
                 return u;
             };
-            var ends = (prop === 'transform' && a.value !== b.value) || prop === 'translate' || prop === 'rotate' || prop === 'scale' || prop === 'offset-rotate' || prop === 'border-shape' || /^(border-image|mask-border)-(slice|width|outset)$/.test(prop) || prop === 'filter' || prop === 'backdrop-filter' || REPEATABLE.test(prop) || prop === 'box-shadow' || prop === 'text-shadow' || SHAPE_PROP.test(prop);
+            var ends = /color/.test(prop) && !!wideColorPairs(a.value === null ? under() : resolve(a), b.value === null ? under() : resolve(b)) || (prop === 'transform' && a.value !== b.value) || prop === 'translate' || prop === 'rotate' || prop === 'scale' || prop === 'offset-rotate' || prop === 'border-shape' || /^(border-image|mask-border)-(slice|width|outset)$/.test(prop) || prop === 'filter' || prop === 'backdrop-filter' || REPEATABLE.test(prop) || prop === 'box-shadow' || prop === 'text-shadow' || SHAPE_PROP.test(prop);
             /* (an inset that's auto doesn't go between) */
             var autoish = function (v) { return v !== null && /^\s*(auto|initial|unset|revert|revert-layer)\s*$/i.test(v); };
             if (/^(top|right|bottom|left)$/.test(prop) && (autoish(a.value) || autoish(b.value))) {
