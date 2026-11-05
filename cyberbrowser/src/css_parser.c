@@ -1213,6 +1213,7 @@ static size_t css_prelude_tokens(const char *s, size_t len, size_t pos, bool nes
 static __thread char *t_cq_cond;
 bool g_css_saw_container;
 
+static void css_parse_rule_block(const char *s, size_t len, size_t *pos, CssRule *rule, CssStylesheet *sheet, const char *cond);
 typedef enum { AT_SKIP, AT_MEDIA, AT_NEST } AtKind;
 
 /* What an at-rule's block holds: style rules under a media condition
@@ -1501,6 +1502,16 @@ static size_t css_at_rule(const char *s, size_t len, size_t pos, bool nested, Cs
     if (!block) return end;
     if (sheet && ((nl == 9 && !strncasecmp(name, "keyframes", 9)) || (nl == 17 && !strncasecmp(name, "-webkit-keyframes", 17))))
         return css_keyframes_rule(s, len, pre, pre_end, end, sheet);
+    if (sheet && nl == 12 && !strncasecmp(name, "position-try", 12)) {
+        char *c = css_strndup_trim(s + pre, pre_end - pre);
+        CssRule *r = c && c[0] == '-' && c[1] == '-' ? css_stylesheet_add_rule(sheet) : NULL;
+        if (r) {
+            r->try_name = c;
+            css_parse_rule_block(s, len, &end, r, sheet, cond);
+            return end;
+        }
+        free(c);
+    }
     if (kind == AT_SKIP || !sheet) {
         free(layer_here);
         size_t e;
@@ -1969,6 +1980,7 @@ void css_stylesheet_free(CssStylesheet *sheet) {
         CssRule *rule = &sheet->rules[i];
         free(rule->selector_text);
         free(rule->layer_name);
+        free(rule->try_name);
         free(rule->media_query);
         free(rule->container_query);
         css_declarations_free(rule->declarations, rule->declaration_count);

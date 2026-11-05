@@ -3271,6 +3271,32 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         if (box->s->anchor_name) g_layout_anchor_any = 1;
         return;
     }
+    if (prop[0] == 'p' && (!strcasecmp(prop, "position-try-fallbacks") || !strcasecmp(prop, "position-try"))) {
+        const char *v = value;
+        /* (the shorthand's order, if it says one) */
+        if (prop[12] == 0) {
+            while (isspace((unsigned char)*v)) v++;
+            static const char *const ord[] = { "normal", "most-width", "most-height", "most-block-size", "most-inline-size" };
+            for (size_t k = 0; k < 5; k++) {
+                size_t l = strlen(ord[k]);
+                if (!strncasecmp(v, ord[k], l) && (!v[l] || isspace((unsigned char)v[l]))) { v += l; break; }
+            }
+            while (isspace((unsigned char)*v)) v++;
+        }
+        box->s->try_list = *v && strcasecmp(v, "none") ? layout_intern(v, strlen(v)) : NULL;
+        if (prop[12] == 0) {
+            box->s->try_order = !strncasecmp(value, "most-width", 10) ? 1 : !strncasecmp(value, "most-height", 11) ? 2 :
+                                !strncasecmp(value, "most-block-size", 15) ? 3 : !strncasecmp(value, "most-inline-size", 16) ? 4 : 0;
+        }
+        return;
+    }
+    if (prop[0] == 'p' && !strcasecmp(prop, "position-try-order")) {
+        box->s->try_order = !strcasecmp(value, "most-width") ? 1 : !strcasecmp(value, "most-height") ? 2 :
+                            !strcasecmp(value, "most-block-size") ? 3 : !strcasecmp(value, "most-inline-size") ? 4 : 0;
+        return;
+    }
+    if (prop[0] == 'j' && !strcasecmp(prop, "justify-self")) box->s->js_text = layout_intern(value, strlen(value));
+    if (prop[0] == 'a' && !strcasecmp(prop, "align-self")) box->s->as_text = layout_intern(value, strlen(value));
     if (prop[0] == 'p' && !strncasecmp(prop, "position-a", 10)) {
         const char **slot = !strcasecmp(prop, "position-anchor") ? &box->s->position_anchor : !strcasecmp(prop, "position-area") ? &box->s->position_area : NULL;
         if (slot) {
@@ -10189,6 +10215,11 @@ static bool layout_apply_wide_keyword(LayoutBox *box, const LayoutBox *parent,
     bool unset = strcasecmp(value, "unset") == 0 || strcasecmp(value, "revert") == 0 ||
                  strcasecmp(value, "revert-layer") == 0;
     if (!inherit && !initial && !unset) return false;
+    /* (the shorthand: each side as if none had been given) */
+    if (!strcasecmp(prop, "inset") && !inherit) {
+        for (int k = 0; k < 4; k++) layout_set_inset(box, k, "auto", 0.0, viewport_width);
+        return true;
+    }
     /* font-size's parser handles its keywords (initial = medium). */
     if (strcasecmp(prop, "font-size") == 0) return false;
     /* (the font shorthand gives each longhand the keyword itself) */
@@ -22756,6 +22787,12 @@ static bool anchor_fn_value(const AnchorQuery *q, const char *a, const char *e, 
     if (name) an = layout_anchor_find(q->ctx, q->self, name, nl);
     else if (s->position_anchor) an = layout_anchor_find(q->ctx, q->self, s->position_anchor, strlen(s->position_anchor));
     bool horizontal = side == 1 || side == 3 || side == 4;
+    /* (start and end: of the containing block's flow, or with self-, its own; along this axis) */
+    const LayoutStyle *cbs = q->cb >= 0 ? q->ctx->boxes[q->cb].s : q->ctx->boxes[q->ctx->tree.root_idx].s;
+    #define AX_REV(st) (horizontal ? ((st)->writing_mode == 0 ? (st)->direction == 1 : ((st)->writing_mode == 1 || (st)->writing_mode == 3)) \
+                                   : ((st)->writing_mode == 0 ? false : ((st)->writing_mode == 4 ? (st)->direction != 1 : (st)->direction == 1)))
+    bool cb_rev = AX_REV(cbs), self_rev = AX_REV(s);
+    #undef AX_REV
     bool ok = an >= 0;
     double v = 0.0;
     if (ok) {
@@ -22766,10 +22803,10 @@ static bool anchor_fn_value(const AnchorQuery *q, const char *a, const char *e, 
             if (what) {
                 if (wl == 5 && !strncasecmp(what, "width", 5)) w_dim = true;
                 else if (wl == 6 && !strncasecmp(what, "height", 6)) w_dim = false;
-                else if (wl == 6 && !strncasecmp(what, "inline", 6)) w_dim = true;
-                else if (wl == 5 && !strncasecmp(what, "block", 5)) w_dim = false;
-                else if (wl == 11 && !strncasecmp(what, "self-inline", 11)) w_dim = true;
-                else if (wl == 10 && !strncasecmp(what, "self-block", 10)) w_dim = false;
+                else if (wl == 6 && !strncasecmp(what, "inline", 6)) w_dim = cbs->writing_mode == 0;
+                else if (wl == 5 && !strncasecmp(what, "block", 5)) w_dim = cbs->writing_mode != 0;
+                else if (wl == 11 && !strncasecmp(what, "self-inline", 11)) w_dim = s->writing_mode == 0;
+                else if (wl == 10 && !strncasecmp(what, "self-block", 10)) w_dim = s->writing_mode != 0;
                 else ok = false;
             }
             v = w_dim ? r[2] : r[3];
@@ -22781,18 +22818,21 @@ static bool anchor_fn_value(const AnchorQuery *q, const char *a, const char *e, 
             if (wl == 6 && !strncasecmp(what, "center", 6)) pos = lo + len / 2.0;
             else if (wl == 6 && !strncasecmp(what, "inside", 6)) pos = far_side ? lo + len : lo;
             else if (wl == 7 && !strncasecmp(what, "outside", 7)) pos = far_side ? lo : lo + len;
-            else if ((wl == 5 && !strncasecmp(what, "start", 5)) || (wl == 10 && !strncasecmp(what, "self-start", 10))) pos = lo;
-            else if ((wl == 3 && !strncasecmp(what, "end", 3)) || (wl == 8 && !strncasecmp(what, "self-end", 8))) pos = lo + len;
+            else if (wl == 5 && !strncasecmp(what, "start", 5)) pos = cb_rev ? lo + len : lo;
+            else if (wl == 3 && !strncasecmp(what, "end", 3)) pos = cb_rev ? lo : lo + len;
+            else if (wl == 10 && !strncasecmp(what, "self-start", 10)) pos = self_rev ? lo + len : lo;
+            else if (wl == 8 && !strncasecmp(what, "self-end", 8)) pos = self_rev ? lo : lo + len;
             else if (wl == 4 && !strncasecmp(what, "left", 4) && horizontal) pos = lo;
             else if (wl == 5 && !strncasecmp(what, "right", 5) && horizontal) pos = lo + len;
             else if (wl == 3 && !strncasecmp(what, "top", 3) && !horizontal) pos = lo;
             else if (wl == 6 && !strncasecmp(what, "bottom", 6) && !horizontal) pos = lo + len;
-            else if (strchr(what, '%') && what[wl] == 0) pos = lo + len * css_parse_length(what, 1.0, q->ctx->viewport_width, s->font_size);
             else if (strchr(what, '%') && wl < 64) {
+                /* (a percentage runs from the start) */
                 char t[64];
                 memcpy(t, what, wl);
                 t[wl] = 0;
-                pos = lo + len * css_parse_length(t, 1.0, q->ctx->viewport_width, s->font_size);
+                double fr = css_parse_length(t, 1.0, q->ctx->viewport_width, s->font_size);
+                pos = lo + len * (cb_rev ? 1.0 - fr : fr);
             } else ok = false;
             /* (from the containing block's edge that this inset is from) */
             double extent = horizontal ? q->cb_w : q->cb_h;
@@ -23008,7 +23048,10 @@ static double abs_align_place(double lo, double size, double i0, double i1, doub
     return at;
 }
 
-static void layout_position_absolute_box(LayoutContext *ctx, int idx)
+/* (what the insets leave of its containing block, in the placing just done) */
+static __thread double t_imcb[4];
+
+static void layout_place_absolute(LayoutContext *ctx, int idx)
 {
     LayoutBox *box = layout_box(ctx, idx);
     double static_x, static_y;
@@ -23074,6 +23117,13 @@ static void layout_position_absolute_box(LayoutContext *ctx, int idx)
             {
                 const LayoutBox *wb = cbb ? cbb : layout_box(ctx, ctx->tree.root_idx);
                 position_area_parse(as->position_area, x, y, wb->s->writing_mode, wb->s->direction == 1, as->writing_mode, as->direction == 1);
+                /* (as a fallback's flips have it) */
+                for (int fk = 0; fk < as->try_pa_n; fk++) {
+                    int how = as->try_pa[fk], t0;
+                    if (how == 0) { t0 = x[0]; x[0] = 2 - x[1]; x[1] = 2 - t0; }
+                    else if (how == 1) { t0 = y[0]; y[0] = 2 - y[1]; y[1] = 2 - t0; }
+                    else { t0 = x[0]; x[0] = y[0]; y[0] = t0; t0 = x[1]; x[1] = y[1]; y[1] = t0; }
+                }
             }
             double ex[4] = { 0.0, r[0], r[0] + r[2], cb_w }, ey[4] = { 0.0, r[1], r[1] + r[3], cb_h };
             for (int k = 1; k < 3; k++) {
@@ -23130,6 +23180,10 @@ static void layout_position_absolute_box(LayoutContext *ctx, int idx)
     }
 
     HtmlNode *adom = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+    t_imcb[0] = cb_x + (has_left ? box->left : 0.0);
+    t_imcb[1] = cb_y + (has_top ? box->top : 0.0);
+    t_imcb[2] = cb_x + cb_w - (has_right ? box->right : 0.0);
+    t_imcb[3] = cb_y + cb_h - (has_bottom ? box->bottom : 0.0);
     layout_resolve_used_sizes(box, adom, cb_w, cb_h);
     bool width_auto = !(box->s->width_set || box->s->width_percent > 0.0 || box->s->width_keyword);
     if (layout_is_svg_box(adom)) {
@@ -23368,6 +23422,267 @@ static void layout_position_absolute_box(LayoutContext *ctx, int idx)
         double ny = !has_top && !has_bottom ? oy + mt + ky * fy : box->y;
         if (nx != box->x || ny != box->y) layout_move_box(ctx, idx, nx, ny);
     }
+}
+
+/* ---- position-try-fallbacks: placed as said; if that overflows, each option till one fits ---- */
+static const CssStyleSet *styleset_cached(uint64_t gen, double vw, double vh);
+
+static void try_align_apply(LayoutContext *ctx, LayoutBox *box);
+static void try_swap_d(double *a, double *b) { double t = *a; *a = *b; *b = t; }
+
+/* s with each of its words a and b swapped. */
+static const char *try_swap_words(const char *s, const char *const *pairs, int np, bool flip_pct)
+{
+    if (!s) return NULL;
+    char buf[1024];
+    size_t o = 0;
+    for (const char *p = s; *p && o + 32 < sizeof buf; ) {
+        bool edge = p == s || !(isalnum((unsigned char)p[-1]) || p[-1] == '_');
+        bool hit = false;
+        /* (anchor(10%): from the other side, 90%) */
+        if (flip_pct && edge && !strncasecmp(p, "anchor(", 7)) {
+            memcpy(buf + o, p, 7);
+            o += 7;
+            p += 7;
+            while (isspace((unsigned char)*p)) buf[o++] = *p++;
+            if (p[0] == '-' && p[1] == '-') {
+                while (*p && !isspace((unsigned char)*p) && *p != ',' && *p != ')') buf[o++] = *p++;
+                while (isspace((unsigned char)*p)) buf[o++] = *p++;
+            }
+            char *pe = NULL;
+            double pv = strtod(p, &pe);
+            if (!strncasecmp(p, "calc(", 5)) {
+                const char *cq = p + 5;
+                int cd = 1;
+                while (*cq && cd) { if (*cq == '(') cd++; else if (*cq == ')') cd--; cq++; }
+                o += (size_t)snprintf(buf + o, sizeof buf - o, "calc(100%% - %.*s)", (int)(cq - p), p);
+                p = cq;
+            } else if (pe != p && *pe == '%') {
+                o += (size_t)snprintf(buf + o, 32, "%g%%", 100.0 - pv);
+                p = pe + 1;
+            }
+            continue;
+        }
+        for (int i = 0; edge && i < np && !hit; i++) {
+            size_t l = strlen(pairs[i]);
+            if (strncasecmp(p, pairs[i], l) || isalnum((unsigned char)p[l]) || p[l] == '_') continue;
+            /* (a word's own "-start" comes with it) */
+            if (p[l] == '-') continue;
+            const char *to = pairs[i ^ 1];
+            memcpy(buf + o, to, strlen(to));
+            o += strlen(to);
+            p += l;
+            hit = true;
+        }
+        if (!hit) buf[o++] = *p++;
+    }
+    buf[o] = 0;
+    return layout_intern(buf, o);
+}
+
+/* Over one axis (0 left and right, 1 top and bottom), or across both (2). */
+static void try_flip(LayoutBox *box, int how)
+{
+    static const char *const xw[] = { "left", "right", "start", "end", "self-start", "self-end" };
+    static const char *const yw[] = { "top", "bottom", "start", "end", "self-start", "self-end" };
+    static const char *const dw[] = { "left", "top", "right", "bottom", "width", "height", "inline", "block", "self-inline", "self-block" };
+    static const char *const al[] = { "start", "end", "flex-start", "flex-end", "self-start", "self-end", "left", "right", "top", "bottom" };
+    LayoutStyle *s = box->s;
+    const char *const *w = how == 0 ? xw : how == 1 ? yw : dw;
+    int nw = how == 2 ? 10 : 6;
+    /* (sides as the arrays have them: 0 top, 1 right, 2 bottom, 3 left) */
+    int a = how == 0 ? 3 : 0, b = how == 0 ? 1 : how == 1 ? 2 : 3;
+    int pairs = how == 2 ? 2 : 1;
+    double *si[4] = { &s->top, &s->right, &s->bottom, &s->left };
+    double *bi[4] = { &box->top, &box->right, &box->bottom, &box->left };
+    double *sm[4] = { &s->margin_top, &s->margin_right, &s->margin_bottom, &s->margin_left };
+    double *bm[4] = { &box->margin_top, &box->margin_right, &box->margin_bottom, &box->margin_left };
+    static const uint32_t bits[4] = { LAYOUT_SIDE_TOP, LAYOUT_SIDE_RIGHT, LAYOUT_SIDE_BOTTOM, LAYOUT_SIDE_LEFT };
+    /* (margin_auto's bits: 1 top, 2 right, 4 bottom, 8 left; as the inset percentages') */
+    for (int k = 0; k < pairs; k++) {
+        int p = k == 0 ? a : 1, q = k == 0 ? b : 2;
+        try_swap_d(si[p], si[q]);
+        try_swap_d(bi[p], bi[q]);
+        try_swap_d(sm[p], sm[q]);
+        try_swap_d(bm[p], bm[q]);
+        try_swap_d(&s->inset_pct[p], &s->inset_pct[q]);
+        try_swap_d(&s->margin_pct[p], &s->margin_pct[q]);
+        try_swap_d(&s->margin_base[p], &s->margin_base[q]);
+        const char *e = s->anchor_expr[p];
+        s->anchor_expr[p] = s->anchor_expr[q];
+        s->anchor_expr[q] = e;
+        uint32_t sp = s->positioned_sides & bits[p], sq = s->positioned_sides & bits[q];
+        s->positioned_sides &= ~(bits[p] | bits[q]);
+        if (sp) s->positioned_sides |= bits[q];
+        if (sq) s->positioned_sides |= bits[p];
+        unsigned char bp = 1u << p, bq = 1u << q, m = s->inset_pct_bits, ma = s->margin_auto;
+        s->inset_pct_bits = (unsigned char)((m & ~(bp | bq)) | ((m & bp) ? bq : 0) | ((m & bq) ? bp : 0));
+        s->margin_auto = (unsigned char)((ma & ~(bp | bq)) | ((ma & bp) ? bq : 0) | ((ma & bq) ? bp : 0));
+    }
+    /* (an anchor() on this axis measures from the other side now) */
+    for (int k = 0; k < 6; k++) {
+        if (!s->anchor_expr[k]) continue;
+        if (how == 2 || (how == 0 && (k == 1 || k == 3)) || (how == 1 && (k == 0 || k == 2)))
+            s->anchor_expr[k] = try_swap_words(s->anchor_expr[k], w, nw, how != 2);
+    }
+    if (s->try_pa_n < 4) s->try_pa[s->try_pa_n++] = (unsigned char)how;
+    /* (alignment: over its own axis, or the two changing places) */
+    bool vert = s->writing_mode != 0;
+    if (how == 2) {
+        const char *t = s->js_text, *u = s->as_text;
+        #define TRY_DIAG(x) (!(x) ? NULL : !strcasecmp(x, "left") || !strcasecmp(x, "top") ? "self-start" : !strcasecmp(x, "right") || !strcasecmp(x, "bottom") ? "self-end" : (x))
+        s->js_text = TRY_DIAG(u);
+        s->as_text = TRY_DIAG(t);
+        #undef TRY_DIAG
+    } else if ((how == 0) != vert) {
+        if (s->js_text) s->js_text = try_swap_words(s->js_text, al, 10, false);
+    } else {
+        if (s->as_text) s->as_text = try_swap_words(s->as_text, al, 10, false);
+    }
+    if (how == 2) {
+        const char *e = s->anchor_expr[4];
+        s->anchor_expr[4] = s->anchor_expr[5];
+        s->anchor_expr[5] = e;
+        try_swap_d(&s->css_width, &s->css_height);
+        try_swap_d(&s->width_percent, &s->height_percent);
+        try_swap_d(&s->width_pct_px, &s->height_pct_px);
+        try_swap_d(&s->min_width, &s->min_height);
+        try_swap_d(&s->max_width, &s->max_height);
+        try_swap_d(&box->min_width, &box->min_height);
+        try_swap_d(&box->max_width, &box->max_height);
+        unsigned char t = s->width_set;
+        s->width_set = s->height_set;
+        s->height_set = t;
+    }
+}
+
+/* One option of the list: a rule by name and/or flips. */
+static bool try_apply_option(LayoutContext *ctx, LayoutBox *box, const CssStyleSet *set, const char *o, const char *e)
+{
+    bool any = false;
+    bool vert = box->s->writing_mode != 0;
+    /* (the rule first, then the flips, in the order they're written) */
+    for (int pass = 0; pass < 2; pass++) {
+        const char *p = o;
+        while (p < e) {
+            while (p < e && isspace((unsigned char)*p)) p++;
+            const char *q = p;
+            while (q < e && !isspace((unsigned char)*q)) q++;
+            size_t l = (size_t)(q - p);
+            if (!l) break;
+            if (pass == 0 && l > 2 && p[0] == '-' && p[1] == '-' && set) {
+                const CssRule *found = NULL;
+                for (int r = css_styleset_rule_count(set) - 1; r >= 0 && !found; r--) {
+                    const CssRule *cr = css_styleset_rule(set, r);
+                    if (cr && cr->try_name && strlen(cr->try_name) == l && !strncmp(cr->try_name, p, l)) found = cr;
+                }
+                if (!found) return false;
+                for (int d = 0; d < found->declaration_count; d++) {
+                    const CssDeclaration *dl = &found->declarations[d];
+                    if (!dl->property || !dl->value) continue;
+                    bool wide = !strcasecmp(dl->value, "unset") || !strcasecmp(dl->value, "initial") || !strcasecmp(dl->value, "revert") || !strcasecmp(dl->value, "revert-layer");
+                    if (wide && !strcasecmp(dl->property, "inset")) {
+                        for (int k = 0; k < 4; k++) layout_set_inset(box, k, "auto", 0.0, ctx->viewport_width);
+                        continue;
+                    }
+                    CssDeclaration c = *dl;
+                    c.invalid = 0;
+                    if (wide && layout_apply_wide_keyword(box, NULL, c.property, c.value, ctx->viewport_width, ctx->base_url)) continue;
+                    layout_apply_declaration(box, &c, ctx->viewport_width, ctx->viewport_width, ctx->base_url);
+                }
+                box->top = box->s->top; box->right = box->s->right; box->bottom = box->s->bottom; box->left = box->s->left;
+                any = true;
+            } else if (pass == 1) {
+                #define TW(w) (l == strlen(w) && !strncasecmp(p, w, l))
+                if (TW("flip-x") || (TW("flip-inline") && !vert) || (TW("flip-block") && vert)) { try_flip(box, 0); any = true; }
+                else if (TW("flip-y") || (TW("flip-block") && !vert) || (TW("flip-inline") && vert)) { try_flip(box, 1); any = true; }
+                else if (TW("flip-start")) { try_flip(box, 2); any = true; }
+                #undef TW
+            }
+            p = q;
+        }
+    }
+    if (any && box->s->try_pa_n) try_align_apply(ctx, box);
+    return any;
+}
+
+/* Its self-alignment, as flips left it. */
+static void try_align_apply(LayoutContext *ctx, LayoutBox *box)
+{
+    const char *jt = box->s->js_text, *at = box->s->as_text;
+    CssDeclaration c;
+    memset(&c, 0, sizeof c);
+    c.property = (char *)"justify-self";
+    c.value = (char *)(jt ? jt : "auto");
+    layout_apply_declaration(box, &c, ctx->viewport_width, ctx->viewport_width, ctx->base_url);
+    c.property = (char *)"align-self";
+    c.value = (char *)(at ? at : "auto");
+    layout_apply_declaration(box, &c, ctx->viewport_width, ctx->viewport_width, ctx->base_url);
+}
+
+static bool try_fits(const LayoutBox *b)
+{
+    double x0 = b->x - b->margin_left, y0 = b->y - b->margin_top;
+    double x1 = b->x + b->width + b->margin_right, y1 = b->y + b->height + b->margin_bottom;
+    return x0 >= t_imcb[0] - 0.5 && y0 >= t_imcb[1] - 0.5 && x1 <= t_imcb[2] + 0.5 && y1 <= t_imcb[3] + 0.5;
+}
+
+static void layout_position_absolute_box(LayoutContext *ctx, int idx)
+{
+    LayoutBox *box = layout_box(ctx, idx);
+    const char *list = box->s->try_list;
+    if (!list || !strcasecmp(list, "none")) { layout_place_absolute(ctx, idx); return; }
+    LayoutStyle base_style = *box->s;
+    LayoutBox base_box = *box;
+    layout_place_absolute(ctx, idx);
+    if (try_fits(box)) return;
+    const CssStyleSet *set = styleset_cached(ctx->style_gen, ctx->viewport_width, ctx->viewport_height);
+    LayoutStyle *sp = box->s;
+    /* (the options, in the order they're to be tried) */
+    enum { TRY_MAX = 16 };
+    const char *ob[TRY_MAX], *oe[TRY_MAX];
+    double size[TRY_MAX];
+    int nopt = 0;
+    for (const char *o = list; *o && nopt < TRY_MAX; ) {
+        const char *e = o;
+        int d = 0;
+        while (*e && (d || *e != ',')) { if (*e == '(') d++; else if (*e == ')') d--; e++; }
+        ob[nopt] = o;
+        oe[nopt] = e;
+        size[nopt++] = 0.0;
+        o = *e ? e + 1 : e;
+    }
+    if (base_style.try_order) {
+        bool vert = base_style.writing_mode != 0;
+        bool wide = base_style.try_order == 1 || (base_style.try_order == 4 && !vert) || (base_style.try_order == 3 && vert);
+        for (int i = 0; i < nopt; i++) {
+            *sp = base_style;
+            { LayoutBox t = base_box; t.s = sp; *box = t; }
+            if (try_apply_option(ctx, box, set, ob[i], oe[i])) {
+                layout_place_absolute(ctx, idx);
+                size[i] = wide ? t_imcb[2] - t_imcb[0] : t_imcb[3] - t_imcb[1];
+            } else size[i] = -1.0;
+        }
+        for (int i = 1; i < nopt; i++) {
+            const char *b0 = ob[i], *e0 = oe[i];
+            double s0 = size[i];
+            int j = i - 1;
+            for (; j >= 0 && size[j] < s0; j--) { ob[j + 1] = ob[j]; oe[j + 1] = oe[j]; size[j + 1] = size[j]; }
+            ob[j + 1] = b0; oe[j + 1] = e0; size[j + 1] = s0;
+        }
+    }
+    for (int i = 0; i < nopt; i++) {
+        *sp = base_style;
+        { LayoutBox t = base_box; t.s = sp; *box = t; }
+        if (try_apply_option(ctx, box, set, ob[i], oe[i])) {
+            layout_place_absolute(ctx, idx);
+            if (try_fits(box)) return;
+        }
+    }
+    /* (nothing fit: as it said to begin with) */
+    *sp = base_style;
+    { LayoutBox t = base_box; t.s = sp; *box = t; }
+    layout_place_absolute(ctx, idx);
 }
 
 static void layout_position_absolute_subtree(LayoutContext *ctx, int idx)

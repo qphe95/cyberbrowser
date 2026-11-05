@@ -1612,6 +1612,35 @@
             scrollWith = undefined;
             return scrollLast || Promise.resolve({ interrupted: false });
         } });
+        /* ---- CSSPseudoElement: one object per element and type ---- */
+        var PSEUDO = new WeakMap(), pseudoOf = new WeakMap();
+        var PSEUDO_TYPES = /^::(?:before|after|marker|backdrop|scroll-marker|scroll-marker-group|column|view-transition|check|picker-icon)$/;
+        var PS_BUTTON = /^::scroll-button\((block-start|block-end|inline-start|inline-end|up|down|left|right|prev|next)\)$/;
+        var CSSPseudoElement = function CSSPseudoElement() { throw new TypeError('Illegal constructor'); };
+        var pseudoProto = CSSPseudoElement.prototype;
+        Object.defineProperty(pseudoProto, Symbol.toStringTag, { configurable: true, value: 'CSSPseudoElement' });
+        var psGet = function (self) { var s = PSEUDO.get(self); if (!s) throw new TypeError('Illegal invocation'); return s; };
+        ['type', 'element', 'parent', 'selectorText'].forEach(function (k) {
+            Object.defineProperty(pseudoProto, k, { configurable: true, enumerable: true, get: function () { return psGet(this)[k]; } });
+        });
+        var makePseudo = function (owner, type) {
+            if (arguments.length < 2) throw new TypeError("Failed to execute 'pseudo': 1 argument required");
+            type = String(type).toLowerCase();
+            var btn = PS_BUTTON.exec(type);
+            if (!btn && !PSEUDO_TYPES.test(type)) return null;
+            var map = pseudoOf.get(owner);
+            if (!map) pseudoOf.set(owner, map = new Map());
+            var p = map.get(type);
+            if (p) return p;
+            p = Object.create(pseudoProto);
+            var st = PSEUDO.get(owner);
+            PSEUDO.set(p, { type: btn ? '::scroll-button' : type, element: st ? st.element : owner, parent: owner, selectorText: type });
+            map.set(type, p);
+            return p;
+        };
+        Object.defineProperty(ELP, 'pseudo', { configurable: true, enumerable: true, writable: true, value: function pseudo(type) { return makePseudo.apply(null, [this].concat([].slice.call(arguments))); } });
+        Object.defineProperty(pseudoProto, 'pseudo', { configurable: true, enumerable: true, writable: true, value: function pseudo(type) { return makePseudo.apply(null, [this].concat([].slice.call(arguments))); } });
+        Object.defineProperty(global, 'CSSPseudoElement', { configurable: true, writable: true, value: CSSPseudoElement });
         /* ---- GeometryUtils (CSSOM View): a box's corners, through the transforms ---- */
         var geoPx = function (v) { return parseFloat(v) || 0; };
         /* (a node as [matrix to the viewport, its box's rect there before that]) */
@@ -1622,6 +1651,25 @@
             if (node === document || (node && node.nodeType === 9)) {
                 var sx = global.scrollX || 0, sy = global.scrollY || 0;
                 return { m: [1, 0, 0, 1, 0, 0], x: -sx, y: -sy, w: global.innerWidth, h: global.innerHeight };
+            }
+            if (global.CSSPseudoElement && node instanceof global.CSSPseudoElement) {
+                /* (its own box from its style; where it starts, the element's content) */
+                var pe = node.element, pc = global.getComputedStyle(pe, node.type);
+                var ev = pe.isConnected ? global.__cyberBoxMap(pe) : null;
+                if (!ev || pc.display === 'none' || pc.content === 'none') throw new DOMException('The node has no box.', 'InvalidStateError');
+                var ec = global.getComputedStyle(pe);
+                var side = function (s, k) { return geoPx(s[k]); };
+                var bl = side(pc, 'borderLeftWidth'), bt0 = side(pc, 'borderTopWidth'), pl = side(pc, 'paddingLeft'), pt = side(pc, 'paddingTop');
+                var ww = side(pc, 'width') + pl + side(pc, 'paddingRight') + bl + side(pc, 'borderRightWidth');
+                var hh = side(pc, 'height') + pt + side(pc, 'paddingBottom') + bt0 + side(pc, 'borderBottomWidth');
+                var px0 = ev[6] + side(ec, 'borderLeftWidth') + side(ec, 'paddingLeft') + side(pc, 'marginLeft');
+                var py0 = ev[7] + side(ec, 'borderTopWidth') + side(ec, 'paddingTop') + side(pc, 'marginTop');
+                if (pc.position === 'absolute') { px0 += geoPx(pc.left); py0 += geoPx(pc.top); }
+                var o0 = box === 'margin' ? -side(pc, 'marginLeft') : box === 'border' ? 0 : box === 'padding' ? bl : bl + pl;
+                var o1 = box === 'margin' ? -side(pc, 'marginTop') : box === 'border' ? 0 : box === 'padding' ? bt0 : bt0 + pt;
+                var e0 = box === 'margin' ? -side(pc, 'marginRight') : box === 'border' ? 0 : box === 'padding' ? side(pc, 'borderRightWidth') : side(pc, 'borderRightWidth') + side(pc, 'paddingRight');
+                var e1 = box === 'margin' ? -side(pc, 'marginBottom') : box === 'border' ? 0 : box === 'padding' ? side(pc, 'borderBottomWidth') : side(pc, 'borderBottomWidth') + side(pc, 'paddingBottom');
+                return { m: ev.slice(0, 6), x: px0 + o0, y: py0 + o1, w: ww - o0 - e0, h: hh - o1 - e1 };
             }
             if (node && node.nodeType === 3) {
                 var rg = document.createRange();
@@ -1653,7 +1701,13 @@
             return { x: o.x - to.x, y: o.y - to.y };
         };
         var geoQuads = function getBoxQuads() {
-            var o = arguments[0] || {}, b = geoBox(this, o.box, 'getBoxQuads');
+            var o = arguments[0] || {};
+            /* (no generated box: none to give) */
+            if (global.CSSPseudoElement && this instanceof global.CSSPseudoElement) {
+                var ps0 = global.getComputedStyle(this.element, this.type);
+                if (!this.element.isConnected || ps0.display === 'none' || ps0.content === 'none') return [];
+            }
+            var b = geoBox(this, o.box, 'getBoxQuads');
             var to = o.relativeTo !== undefined ? geoBox(o.relativeTo, 'border', 'getBoxQuads') : { m: [1, 0, 0, 1, 0, 0], x: 0, y: 0 };
             var c = [[0, 0], [b.w, 0], [b.w, b.h], [0, b.h]].map(function (k) { return geoPoint(b, to, { x: k[0], y: k[1] }); });
             return [new global.DOMQuad(c[0], c[1], c[2], c[3])];
@@ -1682,7 +1736,7 @@
             },
         };
         Object.keys(geoMethods).forEach(function (k) {
-            [ELP, DOCP, global.Text && global.Text.prototype].forEach(function (P) {
+            [ELP, DOCP, global.Text && global.Text.prototype, pseudoProto].forEach(function (P) {
                 if (P) Object.defineProperty(P, k, { configurable: true, enumerable: true, writable: true, value: geoMethods[k] });
             });
         });

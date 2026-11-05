@@ -1322,7 +1322,7 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
     bool generic = ap < 0 && !in_hook && !g_comp_base && !g_in_calc && !cs->pseudo && strncmp(n, "animation", 9) && strncmp(n, "transition", 10);
     /* (one the engine animates, with nothing of its own on it: keyframes it can't read) */
     bool keyframes_only = false;
-    if (!generic && sized_prop && !in_hook && !g_in_calc && !cs->pseudo && anim_has(cs->el, 0) &&
+    if (!generic && (sized_prop || color_prop) && !in_hook && !g_in_calc && !cs->pseudo && anim_has(cs->el, 0) &&
         !anim_value(cs->el, cs->pseudo, ap, (double)anim_time_ms(), &av)) {
         generic = true;
         keyframes_only = true;

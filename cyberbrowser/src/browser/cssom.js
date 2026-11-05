@@ -1092,6 +1092,74 @@
         var body = this.__body.replace(/\s+/g, ' ').trim();
         return '@function ' + this.__name + '(' + ps + ')' + (this.__returns && fnTypeText(this.__returns) !== '*' ? ' returns ' + this.__returns : '') + ' {' + (body ? ' ' + body + ' ' : ' ') + '}';
     };
+    /* @mixin and what it holds (css-mixins): @layer goes wherever it is */
+    function dropLayers(b) {
+        var out = '', i = 0, q = 0;
+        while (i < b.length) {
+            var c = b[i];
+            if (q) { out += c; if (c === '\\') { out += b[i + 1] || ''; i++; } else if (c === q) q = 0; i++; continue; }
+            if (c === '"' || c === "'") { q = c; out += c; i++; continue; }
+            if (c === '@' && /^@layer\b/i.test(b.slice(i, i + 7))) {
+                var j = i, d = 0;
+                for (; j < b.length; j++) {
+                    if (b[j] === '{') d++;
+                    else if (b[j] === '}') { if (--d <= 0) { j++; break; } }
+                    else if (b[j] === ';' && !d) { j++; break; }
+                }
+                i = j;
+                continue;
+            }
+            out += c;
+            i++;
+        }
+        return out;
+    }
+    var CSSMixinRule = subclass('CSSMixinRule', CSSGroupingRule);
+    getter(CSSMixinRule.prototype, 'name', function () { return fnUnescape(this.__name); });
+    getter(CSSMixinRule.prototype, 'contents', function () { return !!this.__contents; });
+    define(CSSMixinRule.prototype, 'getParameters', function () {
+        return this.__params.map(function (x) {
+            var o = { name: x.name, type: x.type ? fnTypeText(x.type) : '*' };
+            if (x.def !== undefined) o.defaultValue = x.def;
+            return o;
+        });
+    });
+    CSSMixinRule.prototype.__text = function () {
+        var ps = this.__params.map(function (x) { return x.name + (x.type ? ' ' + x.type : '') + (x.def !== undefined ? ': ' + x.def : ''); }).join(', ');
+        return '@mixin ' + this.__name + '(' + ps + ') { ' + this.__body.replace(/\s+/g, ' ').trim() + ' }';
+    };
+    var CSSResultRule = subclass('CSSResultRule', CSSGroupingRule);
+    CSSResultRule.prototype.__text = function () { return '@result { ' + this.__body.replace(/\s+/g, ' ').trim() + ' }'; };
+    /* @private: variables of the rule it's in */
+    var CSSPrivateRule = subclass('CSSPrivateRule', CSSRule);
+    CSSPrivateRule.prototype.__text = function () {
+        var d = this.__vars;
+        return '@private {' + (d.length ? ' ' + d.map(function (v) { return v.name + (v.type ? ' ' + v.type : '') + ': ' + v.value + ';'; }).join(' ') + ' ' : ' ') + '}';
+    };
+    function privateVars(block) {
+        var out = [], parts = [], q = 0, d = 0, at = 0;
+        for (var i = 0; i < block.length; i++) {
+            var c = block[i];
+            if (c === '\\') { i++; continue; }
+            if (q) { if (c === q) q = 0; continue; }
+            if (c === '"' || c === "'") q = c;
+            else if (c === '(' || c === '{' || c === '[') d++;
+            else if (c === ')' || c === '}' || c === ']') d--;
+            else if (c === ';' && !d) { parts.push(block.slice(at, i)); at = i + 1; }
+        }
+        parts.push(block.slice(at));
+        parts.forEach(function (t) {
+            t = t.trim();
+            var m = /^(--(?:[^\s:\\]|\\[^\n])+)\s*([^:]*?)\s*:([\s\S]*)$/.exec(t);
+            if (!m || /!\s*important\s*$/i.test(m[3])) return;
+            var type = m[2].trim(), one = /^type\(\s*(<[^|>]+>)\s*\)$/i.exec(type), value = m[3].trim();
+            if (one) type = one[1];
+            if (!value) return;
+            for (var k = 0; k < out.length; k++) if (out[k].name === m[1]) out.splice(k--, 1);
+            out.push({ name: m[1], type: type, value: value });
+        });
+        return out;
+    }
     /* A function's type: one component of a syntax, or type() of any syntax. */
     function fnTypeValid(t) {
         t = t.trim();
@@ -1663,6 +1731,23 @@
                 if (!fnp) return null;
                 r = makeRule(CSSFunctionRule, 'function', { __name: fnp.name, __params: fnp.params, __returns: fnp.returns, __body: p.block, __rules: [] });
                 r.__rules = fnBody(p.block, r);
+                break;
+            case 'mixin':
+                if (p.block === null) return null;
+                var mxp = fnParse(p.prelude);
+                if (!mxp) return null;
+                var mxb = dropLayers(p.block);
+                r = makeRule(CSSMixinRule, 'mixin', { __name: mxp.name, __params: mxp.params, __body: mxb, __rules: [], __contents: /@contents\b/i.test(mxb) });
+                r.__rules = parseRules(mxb, 'mixin', r);
+                break;
+            case 'result':
+                if (p.block === null || ctx !== 'mixin') return null;
+                r = makeRule(CSSResultRule, 'result', { __body: p.block, __rules: [] });
+                r.__rules = parseRules(p.block, 'group', r);
+                break;
+            case 'private':
+                if (p.block === null || !parent || parent.__kind !== 'style') return null;
+                r = makeRule(CSSPrivateRule, 'private', { __vars: privateVars(p.block) });
                 break;
             case 'position-try':
                 if (p.block === null || !/^--(?:[\w-]|[^\x00-\x7f]|\\.)+$/.test(p.prelude)) return null;

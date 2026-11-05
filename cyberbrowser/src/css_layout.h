@@ -210,6 +210,10 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * written; insets and sizes that use anchor() or anchor-size() (top, right,
      * bottom, left, width, height); self-alignment anchor-center (1 justify, 2 align). */
     const char *anchor_name, *position_anchor, *position_area;
+    const char *try_list;           /* position-try-fallbacks, as written */
+    const char *js_text, *as_text;  /* justify-self and align-self, as written */
+    unsigned char try_pa[4], try_pa_n;  /* flips position-area goes through: 0 x, 1 y, 2 across */
+    unsigned char try_order;        /* position-try-order: 0 normal, 1 most-width, 2 most-height, 3 block, 4 inline */
     const char *anchor_expr[6];
     unsigned char self_anchor;
     unsigned char anchor_fail;      /* of those insets, the ones with no value: bit k */
