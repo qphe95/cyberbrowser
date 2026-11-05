@@ -64,6 +64,10 @@ static const CssTypeDef g_types[] = {
                          "-webkit-gradient( <any-value>+ )" },
 
     /* positions and boxes */
+    { "position-xy", "x-start | x-end | y-start | y-end | [ x-start | x-end ] center | center [ y-start | y-end ] | "
+                     "[ x-start | x-end ] <length-percentage> | <length-percentage> [ y-start | y-end ] | "
+                     "[ [ x-start | x-end ] <length-percentage> ] && [ [ top | bottom | y-start | y-end ] <length-percentage> ] | "
+                     "[ [ left | right ] <length-percentage> ] && [ [ y-start | y-end ] <length-percentage> ]" },
     { "position", "[ left | center | right | top | bottom | <length-percentage> ] | "
                   "[ left | center | right ] && [ top | center | bottom ] | "
                   "[ left | center | right | <length-percentage> ] [ top | center | bottom | <length-percentage> ] | "
@@ -713,13 +717,15 @@ static CssPropDef g_props[] = {
     L("min-width", "<size-value>", "auto", 0),
     L("mix-blend-mode", "<blend-mode> | plus-darker | plus-lighter", "normal", 0),
     L("object-fit", "fill | none | [ contain | cover ] || scale-down", "fill", 0),
-    L("object-position", "<position>", "50% 50%", 0),
+    /* (takes the wide keywords alone: each longhand gets it where it's applied) */
+    L("all", "initial", "initial", 0),
+    L("object-position", "<position> | <position-xy>", "50% 50%", 0),
     L("object-view-box", "none | inset( <any-value>+ ) | xywh( <any-value>+ ) | rect( <any-value>+ )", "none", 0),
     S("offset", "[ <'offset-position'>? [ <'offset-path'> [ <'offset-distance'> || <'offset-rotate'> ]? ]? ]! [ / <'offset-anchor'> ]?",
       "offset-position offset-path offset-distance offset-rotate offset-anchor", CSS_SH_SPECIAL),
     L("offset-anchor", "auto | <position>", "auto", 0),
     L("offset-distance", "<length-percentage>", "0px", 0),
-    L("offset-path", "none | [ ray( <any-value>+ ) | <url> | <basic-shape> ] || <coord-box>", "none", 0),
+    L("offset-path", "none | [ ray( <angle> && [ closest-side | closest-corner | farthest-side | farthest-corner | sides ]? && contain? && [ at <position> ]? ) | <url> | <basic-shape> ] || <coord-box>", "none", 0),
     L("offset-position", "normal | auto | <position>", "normal", 0),
     L("offset-rotate", "[ auto | reverse ] || <angle>", "auto", 0),
     L("opacity", "<alpha-value>", "1", 0),

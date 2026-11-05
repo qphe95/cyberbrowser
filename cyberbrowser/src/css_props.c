@@ -6435,6 +6435,21 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
         snprintf(o, sizeof o, "%s%s%s%s%s", fl ? fl : "", fl && (al || sh) ? " " : "", al ? al : "", al && sh ? " " : "", sh ? sh : "");
         return strdup(o[0] ? o : "baseline");
     }
+    if (!strcmp(n, "object-position") && (strstr(v, "x-start") || strstr(v, "x-end") || strstr(v, "y-start") || strstr(v, "y-end"))) {
+        char w[4][160];
+        int nw = canon_words(v, w, 4);
+        char b[340];
+        /* (one word: the other's the center; two pairs: the x axis first) */
+        if (nw == 1) {
+            snprintf(b, sizeof b, w[0][0] == 'x' ? "%s center" : "center %s", w[0]);
+            return strdup(b);
+        }
+        if (nw == 4 && (w[0][0] == 'y' || !strcasecmp(w[0], "top") || !strcasecmp(w[0], "bottom"))) {
+            snprintf(b, sizeof b, "%s %s %s %s", w[2], w[3], w[0], w[1]);
+            return strdup(b);
+        }
+        return NULL;
+    }
     if (!strcmp(n, "margin-trim")) {
         char w[2][160];
         if (canon_words(v, w, 2) == 2) return strdup("block");

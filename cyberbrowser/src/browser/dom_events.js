@@ -1777,6 +1777,12 @@
     /* What the wheel moves: on each axis, the nearest box the user can scroll
      * that has room, going out to the viewport (overscroll-behavior stops it). */
     function wheelScroll(t, dx, dy, keyed) {
+        /* (the user's scroll snaps as it ends, not step by step) */
+        if (global.__cyberSnapHold) global.__cyberSnapHold(1);
+        try { return wheelScrollNow(t, dx, dy, keyed); }
+        finally { if (global.__cyberSnapHold) global.__cyberSnapHold(-1); }
+    }
+    function wheelScrollNow(t, dx, dy, keyed) {
         var aim = function (el) {
             if (keyed && global.__cyberSnapIntent)
                 global.__cyberSnapIntent(el, el.scrollLeft, el.scrollTop, Math.sign(dx), Math.sign(dy));
@@ -1882,7 +1888,9 @@
             if (into) { into.input.move(x - into.left, y - into.top); return; }
             if (pointer.bar) {
                 var pos = pointer.bar.prop === 'scrollTop' ? y : x;
+                if (global.__cyberSnapHold) global.__cyberSnapHold(1);
                 pointer.bar.el[pointer.bar.prop] += (pos - pointer.bar.last) * pointer.bar.size / pointer.bar.track;
+                if (global.__cyberSnapHold) global.__cyberSnapHold(-1);
                 pointer.bar.last = pos;
             }
             var was = pointer.over;

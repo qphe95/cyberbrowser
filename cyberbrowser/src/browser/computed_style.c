@@ -133,6 +133,15 @@ static void collect(void *ud, const char *prop, const char *value, bool importan
     if (cs->pseudo == 3 && (!strcmp(prop, "position") || !strncmp(prop, "transition", 10) || !strcmp(prop, "transform") || !strcmp(prop, "word-break"))) return;
     const CssPropDef *p = css_prop_find(prop, pl);
     if (!p) return;
+    /* (all: every longhand but the two that say how text runs) */
+    if (!strcmp(p->name, "all")) {
+        for (int i = 0; i < css_prop_count(); i++) {
+            const CssPropDef *lp = css_prop_at(i);
+            if (lp->longhands || lp == p || !strcmp(lp->name, "direction") || !strcmp(lp->name, "unicode-bidi")) continue;
+            set_spec(cs, lp, value);
+        }
+        return;
+    }
     /* var() that did not resolve: invalid at computed-value time (unset) */
     bool unresolved = strstr(value, "var(") != NULL;
     if (p->longhands) {
@@ -383,8 +392,9 @@ static void env_of(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p, 
     env->vw = cs->vw;
     env->vh = cs->vh;
     env->color[3] = 1;
-    /* currentcolor: the color (for color itself, the parent's) */
-    if (!mentions(v, "currentcolor")) return;
+    /* currentcolor: the color (for color itself, the parent's; a shadow with none
+     * has it too) */
+    if (!mentions(v, "currentcolor") && strcmp(p->name, "box-shadow") && strcmp(p->name, "text-shadow")) return;
     const char *c = is_color ? (par ? computed_of(ctx, par, "color") : "rgb(0, 0, 0)") : computed_of(ctx, cs, "color");
     double rgba[4];
     if (css_color_parse(c, rgba)) memcpy(env->color, rgba, sizeof rgba);
@@ -397,8 +407,91 @@ static int weight_num(const char *w) {
 }
 
 /* The computed value of v for p (not a CSS-wide keyword). */
+/* Each drop-shadow() in filter list r, its color first (none: the color). */
+static char *filter_shadows(JSContextHandle ctx, ComputedStyle *cs, char *r)
+{
+    if (!strstr(r, "drop-shadow(")) return r;
+    size_t cap = strlen(r) * 2 + 128, n = 0;
+    char *out = malloc(cap);
+    if (!out) return r;
+    const char *cur = computed_of(ctx, cs, "color");
+    const char *q = r;
+    for (const char *h; (h = strstr(q, "drop-shadow(")); ) {
+        size_t lead = (size_t)(h - q) + 12;
+        memcpy(out + n, q, lead);
+        n += lead;
+        const char *a = h + 12, *e = a;
+        for (int d = 0; *e && (d > 0 || *e != ')'); e++) d += *e == '(' ? 1 : *e == ')' ? -1 : 0;
+        /* (the words at the top level: what starts like a number is a length) */
+        const char *col = NULL, *col_e = NULL;
+        size_t lens = 0;
+        char lenbuf[256];
+        for (const char *w = a; w < e; ) {
+            while (w < e && *w == ' ') w++;
+            const char *x = w;
+            for (int d = 0; x < e && (d > 0 || *x != ' '); x++) d += *x == '(' ? 1 : *x == ')' ? -1 : 0;
+            if (x == w) break;
+            bool len = strchr("0123456789+-.", *w) || !strncmp(w, "calc(", 5);
+            if (len && lens + (size_t)(x - w) + 2 < sizeof lenbuf) {
+                if (lens) lenbuf[lens++] = ' ';
+                memcpy(lenbuf + lens, w, (size_t)(x - w));
+                lens += (size_t)(x - w);
+            } else if (!len) { col = w; col_e = x; }
+            w = x;
+        }
+        lenbuf[lens] = 0;
+        size_t cl = col ? (size_t)(col_e - col) : (cur ? strlen(cur) : 0);
+        if (n + cl + lens + (size_t)strlen(e) + 8 > cap) { free(out); return r; }
+        if (cl) { memcpy(out + n, col ? col : cur, cl); n += cl; out[n++] = ' '; }
+        memcpy(out + n, lenbuf, lens);
+        n += lens;
+        q = e;
+    }
+    size_t rest = strlen(q);
+    if (n + rest + 1 > cap) { free(out); return r; }
+    memcpy(out + n, q, rest + 1);
+    free(r);
+    return out;
+}
+
+/* A position's x- and y- words as sides, on this box's flow. */
+static char *position_xy_sides(JSContextHandle ctx, ComputedStyle *cs, const char *v)
+{
+    const char *wm = computed_of(ctx, cs, "writing-mode"), *dir = computed_of(ctx, cs, "direction");
+    bool rtl = dir && !strcmp(dir, "rtl");
+    bool horiz = !wm || !strcmp(wm, "horizontal-tb");
+    bool lr = wm && (!strcmp(wm, "vertical-lr") || !strcmp(wm, "sideways-lr"));
+    bool slr = wm && !strcmp(wm, "sideways-lr");
+    /* (the block axis starts where the mode says; the inline axis by direction) */
+    bool x_rev = horiz ? rtl : !lr;
+    bool y_rev = horiz ? false : (slr ? !rtl : rtl);
+    size_t cap = strlen(v) * 2 + 16, o = 0;
+    char *out = malloc(cap);
+    if (!out) return NULL;
+    for (const char *q = v; *q; ) {
+        const char *rep = NULL;
+        size_t skip = 0;
+        if (!strncmp(q, "x-start", 7)) { rep = x_rev ? "right" : "left"; skip = 7; }
+        else if (!strncmp(q, "x-end", 5)) { rep = x_rev ? "left" : "right"; skip = 5; }
+        else if (!strncmp(q, "y-start", 7)) { rep = y_rev ? "bottom" : "top"; skip = 7; }
+        else if (!strncmp(q, "y-end", 5)) { rep = y_rev ? "top" : "bottom"; skip = 5; }
+        if (rep) { size_t l = strlen(rep); memcpy(out + o, rep, l); o += l; q += skip; }
+        else out[o++] = *q++;
+    }
+    out[o] = 0;
+    return out;
+}
+
 static char *compute_value(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p, const char *v) {
     const char *n = p->name;
+    if (!strcmp(n, "object-position") && (strstr(v, "x-start") || strstr(v, "x-end") || strstr(v, "y-start") || strstr(v, "y-end"))) {
+        char *sides = position_xy_sides(ctx, cs, v);
+        if (sides) {
+            char *r = compute_value(ctx, cs, p, sides);
+            free(sides);
+            return r;
+        }
+    }
     if (!strcmp(n, "font-size")) {
         if (cs->used.font_size > 0) return px(cs->used.font_size);
         /* no styled box: from the declaration and the parent's size */
@@ -441,6 +534,7 @@ static char *compute_value(JSContextHandle ctx, ComputedStyle *cs, const CssProp
     env_of(ctx, cs, p, v, &env);
     char *r = css_prop_compute(p, v, &env);
     if (!r) return strdup(v);
+    if (!strcmp(n, "filter") || !strcmp(n, "backdrop-filter")) return filter_shadows(ctx, cs, r);
     if (!strcmp(n, "overflow-clip-margin") && strchr(r, '-')) {
         /* (the box first; padding-box is where it starts anyway; no margin needn't be said) */
         char a[64] = "", c[64] = "";
@@ -1565,7 +1659,7 @@ static void longhands_init(void) {
     if (g_longhands) return;
     g_longhands = calloc((size_t)css_prop_count(), sizeof(*g_longhands));
     for (int i = 0; i < css_prop_count(); i++)
-        if (!css_prop_at(i)->longhands) g_longhands[g_nlonghands++] = css_prop_at(i);
+        if (!css_prop_at(i)->longhands && strcmp(css_prop_at(i)->name, "all")) g_longhands[g_nlonghands++] = css_prop_at(i);
 }
 
 int computed_style_length(ComputedStyle *cs) {

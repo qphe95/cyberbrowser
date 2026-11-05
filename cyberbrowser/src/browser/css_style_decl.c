@@ -147,6 +147,18 @@ static const CssPropDef *lookup(const char *name, size_t len) {
     return css_prop_find(name, len);
 }
 
+/* (all covers everything but the two that say how text runs, and custom properties) */
+static bool all_covers(const CssPropDef *p)
+{
+    return p && strcmp(p->name, "direction") && strcmp(p->name, "unicode-bidi") && strcmp(p->name, "all");
+}
+static StyleDecl *all_decl(StyleBlock *b)
+{
+    static const CssPropDef *ap;
+    if (!ap) ap = css_prop_find("all", 3);
+    return ap ? find_decl(b, ap, NULL) : NULL;
+}
+
 /* The value of a shorthand from the block's longhands ("" when it has not
  * all of them, or they differ in importance); *important their priority. */
 static char *shorthand_value(StyleBlock *b, const CssPropDef *p, bool *important) {
@@ -158,6 +170,7 @@ static char *shorthand_value(StyleBlock *b, const CssPropDef *p, bool *important
     for (int i = 0; i < n && i < 64; i++) {
         const CssPropDef *lp = css_prop_find(names[i], strlen(names[i]));
         StyleDecl *d = lp ? find_decl(b, lp, NULL) : NULL;
+        if (!d && all_covers(lp)) d = all_decl(b);
         if (!d) return NULL;
         if (imp >= 0 && imp != d->important) return NULL;
         imp = d->important;
@@ -291,6 +304,11 @@ static bool block_set(StyleBlock *b, const char *prop, size_t plen, const char *
     }
     const CssPropDef *p = lookup(prop, plen);
     if (!p) return false;
+    /* (all takes the place of what it covers) */
+    if (!strcmp(p->name, "all")) {
+        for (int i = b->n - 1; i >= 0; i--)
+            if (all_covers(b->d[i].prop)) remove_decl(b, b->d[i].prop, NULL);
+    }
     if (!value[0]) {
         /* removeProperty */
         if (p->longhands) {
@@ -352,6 +370,11 @@ static char *block_get(StyleBlock *b, const char *prop, size_t plen, bool *impor
         return v ? v : strdup("");
     }
     StyleDecl *d = find_decl(b, p, NULL);
+    /* (all: as long as nothing it covers has been set since) */
+    if (d && !strcmp(p->name, "all")) {
+        for (int i = 0; i < b->n; i++) if (all_covers(b->d[i].prop)) return strdup("");
+    }
+    if (!d && all_covers(p)) d = all_decl(b);
     if (!d) return strdup("");
     if (important) *important = d->important;
     return strdup(d->value);

@@ -1223,13 +1223,18 @@
             computed: true,
             read: function (p) {
                 var v = cs().getPropertyValue(p);
+                /* (going between functions: still those functions) */
+                if (p === 'transform' && !pseudo && global.__cyberAnimTransform) {
+                    var fv = global.__cyberAnimTransform(el);
+                    if (fv) return fv;
+                }
                 /* (percentages of these are computed values; used sizes are not) */
                 if (!pseudo && /(^|-)(margin|padding|inset|top|right|bottom|left|width|height|size)(-|$)/.test(p) && global.__cyberComputedValue) {
                     var raw = global.__cyberComputedValue(el, p);
                     if (raw && (raw.indexOf('%') >= 0 || raw === 'auto')) v = raw;
                 }
                 /* (below what it can be: as low as it can be) */
-                var neg = /^(?:calc()?-[d.]+(?:e[-+]?d+)?(%|[a-z]*))?$/i.exec(v);
+                var neg = /^(?:calc\()?-[\d.]+(?:e[-+]?\d+)?(%|[a-z]*)\)?$/i.exec(v);
                 if (neg && !global.CSS.supports(p, '-1' + neg[1])) return '0' + neg[1];
                 return v;
             },

@@ -3076,6 +3076,17 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     const char *prop = decl->property;
     const char *value = decl->value;
     if (!prop || !value) return;
+    /* (all: every longhand but the two that say how text runs) */
+    if (prop[0] == 'a' && !strcasecmp(prop, "all")) {
+        for (int i = 0; i < css_prop_count(); i++) {
+            const CssPropDef *lp = css_prop_at(i);
+            if (lp->longhands || !strcmp(lp->name, "all") || !strcmp(lp->name, "direction") || !strcmp(lp->name, "unicode-bidi")) continue;
+            CssDeclaration ld = *decl;
+            ld.property = lp->name;
+            layout_apply_declaration(box, &ld, parent_width, viewport_width, base_url);
+        }
+        return;
+    }
     box->s->render_features |= decl->feature;
     /* (hidden contents say nothing about a box's size either) */
     if (prop[0] == 'c' && !strcasecmp(prop, "content-visibility") && !strcasecmp(value, "hidden")) box->s->contain_size = 3;
@@ -14682,6 +14693,10 @@ static bool layout_is_table_part(const LayoutBox *b)
 static bool ifc_eligible(LayoutContext *ctx, int idx);
 static double ifc_intrinsic(LayoutContext *ctx, int idx, bool want_max);
 
+extern __thread bool t_wm_across_ext;
+static __thread bool t_across_trial;    /* (laid out only to see how wide it comes to) */
+static void layout_node_serial_impl(LayoutContext *ctx, int idx);
+
 static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_max)
 {
     LayoutBox *box = layout_box(ctx, idx);
@@ -14710,6 +14725,7 @@ static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_ma
                                                                 : box->s->css_width + hpb;
         return t < 0.0 ? 0.0 : t;
     }
+
 
     double content = 0.0;
     const char *tag = dom->tag_name ? dom->tag_name : "";
@@ -14828,6 +14844,28 @@ static double layout_intrinsic_width(LayoutContext *ctx, int idx, bool want_max)
     /* (contained: its content says nothing about its size) */
     {
         const LayoutBox *cb = layout_box(ctx, idx);
+        /* (a flex or grid item in a flow across this one: its width is its block
+         * size, known by laying it out; not what's kept for its own flow's width) */
+        if ((cb->s->writing_mode != 0) != t_wm_across_ext && cb->s->display != CSS_DISPLAY_INLINE &&
+            cb->s->position != CSS_POSITION_ABSOLUTE && cb->s->position != CSS_POSITION_FIXED &&
+            !cb->s->width_set && cb->s->width_percent <= 0.0 && !cb->s->width_keyword) {
+            int up = ctx->tree.nodes[idx].parent_idx;
+            const LayoutBox *ub = up >= 0 ? layout_box(ctx, up) : NULL;
+            if (ub && (ub->s->display == CSS_DISPLAY_FLEX || ub->s->display == CSS_DISPLAY_GRID)) {
+                LayoutBox *tb = layout_box(ctx, idx);
+                double hx = tb->x, hy = tb->y, hw = tb->width, hh = tb->height;
+                t_across_trial = true;
+                layout_node_serial_impl(ctx, idx);
+                t_across_trial = false;
+                double w = tb->width;
+                tb->x = hx;
+                tb->y = hy;
+                tb->width = hw;
+                tb->height = hh;
+                layout_update_content_sizes(tb);
+                return w;
+            }
+        }
         if ((cb->s->contain_size & 1) && cb->s->display != CSS_DISPLAY_GRID) return cb->s->cis_w + cb->s->padding_left + cb->s->padding_right + cb->s->border_left + cb->s->border_right;
     }
     double *cache = ctx->intrinsic_cache;
@@ -14835,7 +14873,12 @@ static double layout_intrinsic_width(LayoutContext *ctx, int idx, bool want_max)
         double v = cache[2 * (size_t)idx + (want_max ? 1 : 0)];
         if (v >= 0.0) return v;
     }
+    /* (what's inside it goes by its own flow) */
+    bool held_across = t_wm_across_ext;
+    const LayoutBox *ob = layout_box(ctx, idx);
+    if (ob->s->display != CSS_DISPLAY_INLINE) t_wm_across_ext = ob->s->writing_mode != 0;
     double v = layout_intrinsic_compute(ctx, idx, want_max);
+    t_wm_across_ext = held_across;
     if (cache) cache[2 * (size_t)idx + (want_max ? 1 : 0)] = v;
     return v;
 }
@@ -18321,6 +18364,7 @@ typedef struct {
     int align;
     int order, seq;
     bool safe;                          /* (safe alignment: never past the line's start) */
+    bool min_only;                      /* measured for its minimum alone */
     int baseline;                       /* 1 first, 2 last baseline alignment */
     double base_at;                     /* its baseline from its side of the line */
 } FlexItem;
@@ -18553,6 +18597,17 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
             basis = layout_flex_main_total(child, child->s->flex_basis, is_row);
         }
         if (basis < 0.0 && main_def_item && !child->s->fb_kw) basis = is_row ? child->width : child->height;
+        /* (a size by flex-basis, in a column: its content still floors it) */
+        if (basis >= 0.0 && !is_row && !main_def_item && child->s->overflow == 0 && !(child->s->min_size_set & 2) &&
+            child->min_height <= 0.0) {
+            child->x = content_x + it->cm_s;
+            child->y = content_y + it->mm_s;
+            child->height = 0.0;
+            layout_update_content_sizes(child);
+            measure[nmeasure++] = i;
+            it->measured = true;
+            it->min_only = true;
+        }
         if (basis < 0.0) {
             if (is_row) {
                 basis = layout_intrinsic_width(ctx, c, true);
@@ -18605,8 +18660,8 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
         for (int k = 0; k < nmeasure; k++) {
             FlexItem *it = &items[measure[k]];
             LayoutBox *child = layout_box(ctx, it->idx);
-            it->base = child->height;
-            if (child->s->fb_csz) {
+            if (!it->min_only) it->base = child->height;
+            if (child->s->fb_csz && !it->min_only) {
                 double bh = layout_vertical_border_padding(child);
                 it->base = csz_eval(child->s->fb_csz, child->height - bh, ct->content_height, ctx->viewport_width, child->s->font_size) + bh;
             }
@@ -18631,10 +18686,16 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
     {
         int start = 0;
         double used = 0.0;
+        /* (no size of its own: it wraps at its largest) */
+        double wrap_at = avail_main;
+        if (!main_def && ct->max_height > 0.0) {
+            wrap_at = ct->max_height;
+            if (ct->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX) wrap_at -= layout_vertical_border_padding(ct);
+        }
         for (int i = 0; i < nkids; i++) {
             double outer = items[i].hypo + items[i].mm_s + items[i].mm_e;
             double add = (i > start ? gap_main : 0.0) + outer;
-            if (do_wrap && main_def && i > start && used + add > avail_main + 0.01) {
+            if (do_wrap && (main_def || ct->max_height > 0.0) && i > start && used + add > wrap_at + 0.01) {
                 lines[nlines].start = start;
                 lines[nlines].count = i - start;
                 nlines++;
@@ -19371,6 +19432,9 @@ typedef struct {
     double min_w, max_w;               /* column contributions (margin box) */
     double h;                          /* margin-box height at its column width */
     int order, seq;
+    double shim_c, shim_r;             /* its baseline group's push, on each axis */
+    unsigned char base_c, base_r;      /* 1 first, 2 last baseline alignment */
+    bool rl_c;                         /* blocks going right to left: a group of their own */
 } GridItem;
 
 typedef struct {
@@ -19804,6 +19868,44 @@ static void grid_column_contributions(GridState *G)
         it->min_w = layout_intrinsic_contribution(G->ctx, it->idx, false);
         it->max_w = layout_intrinsic_contribution(G->ctx, it->idx, true);
     }
+    /* (first or last baseline in a column: a box's edge, each group's edges in line) */
+    const LayoutBox *ct = layout_box(G->ctx, G->idx);
+    double *most = NULL;
+    for (int i = 0; i < G->nitems; i++) {
+        GridItem *it = &G->items[i];
+        if (it->is_text) continue;
+        const LayoutBox *child = layout_box(G->ctx, it->idx);
+        if (child->s->margin_auto & 0xA) continue;
+        int k = (child->s->justify_self ? child->s->js_kw : ct->s->ji_kw) & 0x7f;
+        it->base_c = k == ALIGN_KW_BASELINE ? 1 : k == ALIGN_KW_LAST_BASELINE ? 2 : 0;
+        if (!it->base_c) continue;
+        if (!most) most = (double *)calloc((size_t)G->ncols * 4 + 4, sizeof(double));
+        if (!most) return;
+        /* (lines running down have a baseline to give; ones whose blocks go the other
+         * way line up by themselves) */
+        int wm = child->s->writing_mode;
+        bool down = !ct->s->writing_mode && wm != 0 && ct == layout_box(G->ctx, G->idx);
+        it->rl_c = down && (wm == 1 || wm == 3);
+        int key = (it->base_c == 1 ? it->c * 2 : (it->c + it->cs - 1) * 2 + 1) * 2 + (it->rl_c ? 1 : 0);
+        it->shim_c = it->base_c == 1 ? child->margin_left : child->margin_right;
+        if (down && it->base_c == 1 && G->ctx->tree.nodes[it->idx].first_child_idx >= 0) {
+            IfcVa m;
+            ifc_va_metrics(child, &m);
+            double wd = it->max_w - child->margin_left - child->margin_right;
+            it->shim_c += it->rl_c ? wd - child->s->border_right - child->padding_right - m.A
+                                   : child->s->border_left + child->padding_left + (m.adv - m.A);
+        }
+        if (it->shim_c > most[key]) most[key] = it->shim_c;
+    }
+    if (!most) return;
+    for (int i = 0; i < G->nitems; i++) {
+        GridItem *it = &G->items[i];
+        if (!it->base_c) continue;
+        it->shim_c = most[(it->base_c == 1 ? it->c * 2 : (it->c + it->cs - 1) * 2 + 1) * 2 + (it->rl_c ? 1 : 0)] - it->shim_c;
+        it->min_w += it->shim_c;
+        it->max_w += it->shim_c;
+    }
+    free(most);
 }
 
 static double grid_tracks_total(const GridSize *t, int n, double gap)
@@ -20046,7 +20148,7 @@ static void layout_grid_container(LayoutContext *ctx, int idx)
                      layout_is_img(dom);
         unsigned char ma = child->s->margin_auto;
         double ml = (ma & 8) ? 0.0 : child->margin_left, mr = (ma & 2) ? 0.0 : child->margin_right;
-        double room = aw - ml - mr;
+        double room = aw - ml - mr - it->shim_c;
         if (room < 0.0) room = 0.0;
         int js_mode = grid_self_mode(ct, child, true);
         int js = js_mode < 0 ? CSS_ALIGN_STRETCH : js_mode == 1 ? CSS_ALIGN_CENTER : js_mode == 2 ? CSS_ALIGN_FLEX_END : CSS_ALIGN_FLEX_START;
@@ -20071,6 +20173,7 @@ static void layout_grid_container(LayoutContext *ctx, int idx)
             if (js == CSS_ALIGN_CENTER) off = free_w / 2.0;
             else if (js == CSS_ALIGN_FLEX_END) off = free_w;
         }
+        if (it->base_c == 1) off += it->shim_c;
         child->x = content_x + ax + ml + off;
         child->y = content_y + child->margin_top;
         layout_update_content_sizes(child);
@@ -20084,6 +20187,35 @@ static void layout_grid_container(LayoutContext *ctx, int idx)
         double mt = (child->s->margin_auto & 1) ? 0.0 : child->margin_top;
         double mb = (child->s->margin_auto & 4) ? 0.0 : child->margin_bottom;
         it->h = child->height + mt + mb;
+    }
+    /* (baseline alignment: each row's group, first by what's above, last by
+     * what's below; the push counts toward the row) */
+    double *base_most = NULL;
+    for (int i = 0; i < G.nitems; i++) {
+        GridItem *it = &G.items[i];
+        if (it->is_text) continue;
+        LayoutBox *child = layout_box(ctx, it->idx);
+        if (child->s->margin_auto & 5) continue;
+        int k = (child->s->align_self ? child->s->as_kw : ct->s->ai_kw) & 0x7f;
+        it->base_r = k == ALIGN_KW_BASELINE ? 1 : k == ALIGN_KW_LAST_BASELINE ? 2 : 0;
+        if (!it->base_r) continue;
+        if (!base_most) base_most = (double *)calloc((size_t)G.nrows * 2 + 2, sizeof(double));
+        if (!base_most) break;
+        bool first = it->base_r == 1;
+        double b = layout_baseline_walk(ctx, it->idx, 0, first, true);
+        b = isnan(b) ? child->height : b - child->y;
+        it->shim_r = first ? b + child->margin_top : child->height - b + child->margin_bottom;
+        int key = first ? it->r * 2 : (it->r + it->rs - 1) * 2 + 1;
+        if (it->shim_r > base_most[key]) base_most[key] = it->shim_r;
+    }
+    if (base_most) {
+        for (int i = 0; i < G.nitems; i++) {
+            GridItem *it = &G.items[i];
+            if (!it->base_r) continue;
+            it->shim_r = base_most[it->base_r == 1 ? it->r * 2 : (it->r + it->rs - 1) * 2 + 1] - it->shim_r;
+            it->h += it->shim_r;
+        }
+        free(base_most);
     }
 
     grid_size_tracks(G.rows, G.nrows, chh, gap_r, G.items, G.nitems, true, 0, !(ct->s->content_set & 2));
@@ -20124,24 +20256,8 @@ static void layout_grid_container(LayoutContext *ctx, int idx)
                 if (as == CSS_ALIGN_CENTER) off = free_h / 2.0;
                 else if (as == CSS_ALIGN_FLEX_END) off = free_h;
             }
-            /* (first baseline: with the others in its row that have it) */
-            int kb = (child->s->align_self ? child->s->as_kw : ct->s->ai_kw) & 0x7f;
-            if (kb == ALIGN_KW_BASELINE && !(ma & 5)) {
-                double most = 0.0, own = -1.0;
-                for (int o = 0; o < G.nitems; o++) {
-                    GridItem *ot = &G.items[o];
-                    if (ot->is_text || ot->r != it->r) continue;
-                    LayoutBox *oc = layout_box(ctx, ot->idx);
-                    int ok = (oc->s->align_self ? oc->s->as_kw : ct->s->ai_kw) & 0x7f;
-                    if (ok != ALIGN_KW_BASELINE) continue;
-                    double b = layout_baseline_walk(ctx, ot->idx, 0, true, true);
-                    b = isnan(b) ? oc->height : b - oc->y;
-                    b += (oc->s->margin_auto & 1) ? 0.0 : oc->margin_top;
-                    if (b > most) most = b;
-                    if (o == i) own = b;
-                }
-                if (own >= 0.0) off = most - own;
-            }
+            if (it->base_r == 1) off = it->shim_r;
+            else if (it->base_r == 2) off = free_h - it->shim_r;
         }
         layout_move_box(ctx, it->idx, child->x, content_y + ay + mt + off);
     }
@@ -22399,7 +22515,9 @@ static void layout_flow_across(LayoutContext *ctx, int idx)
     bool w_auto = !(b->s->width_set || b->s->width_percent > 0.0 || b->s->width_keyword);
     bool h_auto = !(b->s->height_set || b->s->height_percent > 0.0);
     /* (filled by what it is in: its size across the flow is given) */
-    bool w_given = w_auto && ((P && !out_of_flow && (P->s->display == CSS_DISPLAY_FLEX || P->s->display == CSS_DISPLAY_GRID)) ||
+    bool trial = t_across_trial;
+    t_across_trial = false;
+    bool w_given = w_auto && !trial && ((P && !out_of_flow && (P->s->display == CSS_DISPLAY_FLEX || P->s->display == CSS_DISPLAY_GRID)) ||
                               (out_of_flow && (sides & LAYOUT_SIDE_LEFT) && (sides & LAYOUT_SIDE_RIGHT)));
     bool h_given = h_auto && out_of_flow && (sides & LAYOUT_SIDE_TOP) && (sides & LAYOUT_SIDE_BOTTOM);
     double pcw = P ? P->content_width : ctx->viewport_width, pch = P ? P->content_height : ctx->viewport_height;

@@ -975,21 +975,45 @@
         var r = el.getBoundingClientRect(), left = isRoot ? 0 : r.left + el.clientLeft, top = isRoot ? 0 : r.top + el.clientTop;
         var sx = el.scrollLeft, sy = el.scrollTop, cw = el.clientWidth, ch = el.clientHeight;
         var maxX = el.scrollWidth - cw, maxY = el.scrollHeight - ch, out = { x: [], y: [] };
-        var at = function (align, lo, hi, view) { return align === 'start' ? lo : align === 'end' ? hi - view : (lo + hi - view) / 2; };
+        /* (the snapport is the scrollport less scroll-padding; a snap area is the box and its scroll-margin) */
+        var ecs = global.getComputedStyle(el), elPx = function (v, of) {
+            var m = /^(-?[\d.]+)(px|%)$/.exec(v || '');
+            return !m ? 0 : m[2] === '%' ? +m[1] * of / 100 : +m[1];
+        };
+        var padL = elPx(ecs.scrollPaddingLeft, cw), padR = elPx(ecs.scrollPaddingRight, cw), padT = elPx(ecs.scrollPaddingTop, ch), padB = elPx(ecs.scrollPaddingBottom, ch);
+        var at = function (align, lo, hi, view, pa, pb) {
+            return align === 'start' ? lo - pa : align === 'end' ? hi - view + pb : (lo + hi - view - pa + pb) / 2 ;
+        };
         /* (what the cascade says has a scroll-snap-align, in tree order; a
          * nested scroller's targets are its own) */
         var aligned = global.__cyberRenderElements(16);
         for (var i = 0; i < aligned.length; i++) {
             var c = aligned[i], up = flatParent(c);
-            while (up && up !== el && !(up.nodeType === 1 && isScrollBox(global.getComputedStyle(up)))) up = flatParent(up);
+            /* (out of flow: only what it's positioned in holds it) */
+            var outOf = /^(absolute|fixed)$/.test(global.getComputedStyle(c).position);
+            while (up && up !== el) {
+                if (up.nodeType === 1) {
+                    var ups = global.getComputedStyle(up);
+                    if (!outOf || ups.position !== 'static') {
+                        if (isScrollBox(ups)) break;
+                        outOf = /^(absolute|fixed)$/.test(ups.position);
+                    }
+                }
+                up = flatParent(up);
+            }
             if (up !== el || !c.getClientRects().length) continue;
             var align = global.getComputedStyle(c).scrollSnapAlign;
             if (!align || align === 'none') continue;
             var parts = align.split(' '), block = parts[0], inline = parts[1] || parts[0], b = c.getBoundingClientRect();
-            if (axes.x && inline !== 'none')
-                out.x.push({ t: c, pos: Math.max(0, Math.min(maxX, at(inline, b.left - left + sx, b.right - left + sx, cw))) });
-            if (axes.y && block !== 'none')
-                out.y.push({ t: c, pos: Math.max(0, Math.min(maxY, at(block, b.top - top + sy, b.bottom - top + sy, ch))) });
+            var tcs = global.getComputedStyle(c);
+            if (axes.x && inline !== 'none') {
+                var xlo = b.left - left + sx - elPx(tcs.scrollMarginLeft, 0), xhi = b.right - left + sx + elPx(tcs.scrollMarginRight, 0);
+                out.x.push({ t: c, pos: Math.max(0, Math.min(maxX, at(inline, xlo, xhi, cw, padL, padR))), lo: xlo - padL, hi: xhi + padR });
+            }
+            if (axes.y && block !== 'none') {
+                var ylo = b.top - top + sy - elPx(tcs.scrollMarginTop, 0), yhi = b.bottom - top + sy + elPx(tcs.scrollMarginBottom, 0);
+                out.y.push({ t: c, pos: Math.max(0, Math.min(maxY, at(block, ylo, yhi, ch, padT, padB))), lo: ylo - padT, hi: yhi + padB });
+            }
         }
         return out;
     }
@@ -1002,6 +1026,26 @@
         var out = [];
         for (var i = 0; pos !== null && i < list.length; i++) if (Math.abs(list[i].pos - pos) < 1) out.push(list[i].t);
         return out;
+    }
+    /* (a programmatic scroll lands on a snap position; in an area bigger than
+     * the snapport, anywhere that it still fills is one) */
+    var snapHeld = 0;
+    Object.defineProperty(global, '__cyberSnapHold', { configurable: true, value: function (d) { snapHeld += d; } });
+    function snapGoal(el, left, top) {
+        if (snapHeld || !global.__cyberHasSnap || !global.__cyberHasSnap() || !el.isConnected) return null;
+        var axes = snapAxes(global.getComputedStyle(el));
+        if (!axes) return null;
+        var lists = snapLists(el, axes), cw = el.clientWidth, ch = el.clientHeight;
+        var pick = function (list, cur, view) {
+            for (var i = 0; i < list.length; i++) if (list[i].hi - list[i].lo > view && list[i].lo <= cur && list[i].hi >= cur + view) return cur;
+            var best = snapNearest(list, cur);
+            if (best !== null && axes.proximity && Math.abs(best - cur) > view / 3) return cur;
+            return best === null ? cur : best;
+        };
+        var maxX = el.scrollWidth - cw, maxY = el.scrollHeight - ch;
+        var l = left === undefined ? rawLeft.get.call(el) : Math.max(0, Math.min(maxX, left));
+        var t = top === undefined ? rawTop.get.call(el) : Math.max(0, Math.min(maxY, top));
+        return [axes.x ? pick(lists.x, l, cw) : left, axes.y ? pick(lists.y, t, ch) : top];
     }
     /* (the one it follows: the focused one's, or the first) */
     function snapPreferred(targets) {
@@ -1472,6 +1516,8 @@
         return !!el.isConnected && global.getComputedStyle(el).scrollBehavior === 'smooth';
     }
     function scrollGo(el, left, top, behavior) {
+        var goal = snapGoal(el, left, top);
+        if (goal) { left = goal[0]; top = goal[1]; }
         if (!scrollSmoothly(el, behavior)) {
             scrollInterrupt(el);
             if (left !== undefined) rawLeft.set.call(el, left);

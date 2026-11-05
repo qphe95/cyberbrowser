@@ -2359,6 +2359,12 @@ static void lq_scroll_fire(JSContextHandle ctx, NodeId id, const char *type)
     timer_microtask_checkpoint(ctx);
 }
 
+static GCValue js_has_snap(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    return JS_NewBool(ctx, (g_css_render_features & CSS_FEAT_SNAP) != 0);
+}
+
 /* Does the box (or the document's root scroller) snap (platform_api.js)?
  * True: it moved, so it isn't ending yet. */
 static bool lq_scroll_snap(JSContextHandle ctx, NodeId id)
@@ -2577,6 +2583,7 @@ void layout_api_install(JSContextHandle ctx, GCValue element_proto)
     {
         GCValue glob = JS_GetGlobalObject(ctx);
         JS_SetPropertyStr(ctx, glob, "__cyberBoxMap", JS_NewCFunction(ctx, js_box_map, "__cyberBoxMap", 1));
+        JS_SetPropertyStr(ctx, glob, "__cyberHasSnap", JS_NewCFunction(ctx, js_has_snap, "__cyberHasSnap", 0));
         JS_SetPropertyStr(ctx, glob, "__cyberScrollHold", JS_NewCFunction(ctx, js_scroll_hold, "__cyberScrollHold", 1));
     }
     define_accessor(ctx, element_proto, "offsetWidth", js_offset_width, NULL);

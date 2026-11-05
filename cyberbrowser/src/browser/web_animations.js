@@ -128,7 +128,11 @@
         /* (no size at all is the size it was) */
         if (prop === 'zoom') return v <= 0 ? 1 : v;
         if (prop === 'opacity' || /-opacity$/.test(prop) || prop === 'shape-image-threshold') v = Math.max(0, Math.min(1, v));
-        else if (INTEGER.test(prop)) v = Math.round(v);
+        else if (INTEGER.test(prop)) {
+            v = Math.round(v);
+            /* (never under one of these) */
+            if (v < 1 && (prop === 'widows' || prop === 'orphans' || prop === 'column-count')) v = 1;
+        }
         else if (NONNEG.test(prop) && v < 0) v = 0;
         return v;
     }
@@ -492,7 +496,121 @@
         default: return undefined;
         }
     }
+    /* (the same step as functions, for what typed OM reads: percentages kept,
+     * each function by its family; what mixes units or axes: null) */
+    var tfLast = new WeakMap();
+    function tfOne(s) {
+        var m = /^([a-zA-Z0-9]+)\(([^()]*)\)$/.exec(s.trim());
+        if (!m) return null;
+        var n = m[1].toLowerCase(), v = m[2].trim().split(/\s*,\s*|\s+/);
+        return { n: n, v: v };
+    }
+    function tfSplit(s) {
+        return s === 'none' ? [] : (String(s).match(/[a-zA-Z0-9]+\([^()]*\)/g) || []);
+    }
+    function tfRound(x) { return '' + (+(+x).toFixed(6)); }
+    function tfDim(a, b, t) {
+        var ma = /^([-+]?[\d.]+(?:e[-+]?\d+)?)([a-z%]*)$/i.exec(a), mb = /^([-+]?[\d.]+(?:e[-+]?\d+)?)([a-z%]*)$/i.exec(b);
+        if (!ma || !mb) return null;
+        var x = +ma[1], y = +mb[1], u = ma[2].toLowerCase(), w = mb[2].toLowerCase();
+        if (!x && !y) return '0px';
+        if (!x) u = w;
+        else if (!y) w = u;
+        if (u !== w) return null;
+        var z = x + (y - x) * t;
+        return tfRound(z) + (u || 'px');
+    }
+    function tfDeg(a) {
+        var m = /^([-+]?[\d.]+(?:e[-+]?\d+)?)(deg|rad|grad|turn)?$/i.exec(a);
+        if (!m) return null;
+        var k = (m[2] || 'deg').toLowerCase();
+        return +m[1] * (k === 'rad' ? 180 / Math.PI : k === 'grad' ? 0.9 : k === 'turn' ? 360 : 1);
+    }
+    function tfTranslate(f) {
+        var v = f.v;
+        switch (f.n) {
+        case 'translatex': return [v[0], '0', '0', false];
+        case 'translatey': return ['0', v[0], '0', false];
+        case 'translatez': return ['0', '0', v[0], true];
+        case 'translate': return [v[0], v[1] || '0', '0', false];
+        case 'translate3d': return [v[0], v[1], v[2], true];
+        }
+        return null;
+    }
+    function tfScale(f) {
+        var v = f.v;
+        switch (f.n) {
+        case 'scalex': return [+v[0], 1, 1, false];
+        case 'scaley': return [1, +v[0], 1, false];
+        case 'scalez': return [1, 1, +v[0], true];
+        case 'scale': return [+v[0], v.length > 1 ? +v[1] : +v[0], 1, false];
+        case 'scale3d': return [+v[0], +v[1], +v[2], true];
+        }
+        return null;
+    }
+    function tfRotate(f) {
+        var v = f.v;
+        switch (f.n) {
+        case 'rotate': return [0, 0, 1, tfDeg(v[0]), false];
+        case 'rotatez': return [0, 0, 1, tfDeg(v[0]), true];
+        case 'rotatex': return [1, 0, 0, tfDeg(v[0]), true];
+        case 'rotatey': return [0, 1, 0, tfDeg(v[0]), true];
+        case 'rotate3d': return [+v[0], +v[1], +v[2], tfDeg(v[3]), true];
+        }
+        return null;
+    }
+    function tfTypedOne(a, b, t) {
+        var pa = tfTranslate(a), pb = tfTranslate(b);
+        if (pa && pb) {
+            var r = [tfDim(pa[0], pb[0], t), tfDim(pa[1], pb[1], t), tfDim(pa[2], pb[2], t)];
+            if (r[0] === null || r[1] === null || r[2] === null) return null;
+            return pa[3] || pb[3] ? 'translate3d(' + r.join(', ') + ')' : 'translate(' + r[0] + ', ' + r[1] + ')';
+        }
+        pa = tfScale(a); pb = tfScale(b);
+        if (pa && pb) {
+            var sc = [0, 1, 2].map(function (i) { return tfRound(pa[i] + (pb[i] - pa[i]) * t); });
+            return pa[3] || pb[3] ? 'scale3d(' + sc.join(', ') + ')' : 'scale(' + sc[0] + ', ' + sc[1] + ')';
+        }
+        pa = tfRotate(a); pb = tfRotate(b);
+        if (pa && pb) {
+            var deg = tfRound(pa[3] + (pb[3] - pa[3]) * t) + 'deg';
+            if (!pa[4] && !pb[4]) return 'rotate(' + deg + ')';
+            var ax = pa[3] === 0 ? pb : pa;
+            if (pa[3] !== 0 && pb[3] !== 0 && (pa[0] !== pb[0] || pa[1] !== pb[1] || pa[2] !== pb[2])) return null;
+            return 'rotate3d(' + ax[0] + ', ' + ax[1] + ', ' + ax[2] + ', ' + deg + ')';
+        }
+        if (a.n === b.n && /^skew[xy]?$/.test(a.n)) {
+            var sk = [];
+            for (var i = 0; i < Math.max(a.v.length, b.v.length); i++) {
+                var dx = tfDeg(a.v[i] || '0'), dy = tfDeg(b.v[i] || '0');
+                if (dx === null || dy === null) return null;
+                sk.push(tfRound(dx + (dy - dx) * t) + 'deg');
+            }
+            return (a.n === 'skew' ? 'skew' : a.n === 'skewx' ? 'skewX' : 'skewY') + '(' + sk.join(', ') + ')';
+        }
+        if (a.n === 'perspective' && b.n === 'perspective') {
+            var ia = a.v[0] === 'none' ? 0 : 1 / parseFloat(a.v[0]), ib = b.v[0] === 'none' ? 0 : 1 / parseFloat(b.v[0]);
+            var iv = ia + (ib - ia) * t;
+            return 'perspective(' + (iv > 0 ? tfRound(1 / iv) + 'px' : 'none') + ')';
+        }
+        return null;
+    }
+    function tfTyped(el) {
+        var l = tfLast.get(el);
+        if (!l) return null;
+        var A = tfSplit(l[0]), B = tfSplit(l[1]), out = [];
+        if (A.length !== B.length || !A.length) return null;
+        for (var i = 0; i < A.length; i++) {
+            var fa = tfOne(A[i]), fb = tfOne(B[i]);
+            var r = fa && fb ? tfTypedOne(fa, fb, l[2]) : null;
+            if (r === null) return null;
+            out.push(r);
+        }
+        return out.join(' ');
+    }
+    Object.defineProperty(global, '__cyberAnimTransform', { value: tfTyped, configurable: true, writable: true, enumerable: false });
     function tfInterpolate(ta, tb, t) {
+        if (tfEl) tfLast.set(tfEl, [ta, tb, t]);
         var la = tfParse(ta === 'none' ? '' : ta), lb = tfParse(tb === 'none' ? '' : tb);
         if (!la || !lb) return null;
         var box = tfBox(), out = [], n = Math.max(la.length, lb.length);
@@ -666,6 +784,11 @@
             } else if (!arg && (name === 'blur' || name === 'hue-rotate')) {
                 arg = FILTER_ZERO[name];
             }
+            /* (angles in one unit, to go between) */
+            if (name === 'hue-rotate') {
+                var hm = /^([-+]?[\d.]+(?:e[-+]?\d+)?)(grad|rad|turn)$/i.exec(arg);
+                if (hm) arg = fmt(+hm[1] * (hm[2].toLowerCase() === 'grad' ? 0.9 : hm[2].toLowerCase() === 'turn' ? 360 : 180 / Math.PI)) + 'deg';
+            }
             /* (a shadow with no blur: of none, to go against one with) */
             if (name === 'drop-shadow') {
                 var lens = arg.match(/-?[\d.]+(?:e[-+]?\d+)?px/g);
@@ -682,8 +805,19 @@
             var x = la[i], y = lb[i];
             if (x && y && x.n !== y.n) return null;
             var name = (x || y).n;
-            var v = combine(prop, x ? x.a : FILTER_ZERO[name], y ? y.a : FILTER_ZERO[name], how);
+            var fa = x ? x.a : FILTER_ZERO[name], fb = y ? y.a : FILTER_ZERO[name];
+            /* (rgb() against rgba(): the same count of numbers) */
+            if (name === 'drop-shadow' && /rgba\(/.test(fa) !== /rgba\(/.test(fb)) {
+                var fAlpha = function (s) { return s.replace(/rgb\(([^()]*)\)/, 'rgba($1, 1)'); };
+                fa = fAlpha(fa); fb = fAlpha(fb);
+            }
+            var v = combine(prop, fa, fb, how);
             if (v === null) return null;
+            /* (a blur is never negative, and none needn't be said) */
+            if (name === 'drop-shadow') {
+                v = v.replace(/^((?:rgba?\([^()]*\)\s+)?-?[\d.e-]+px\s+-?[\d.e-]+px\s+)-[\d.e-]+px/, '$10px')
+                     .replace(/^((?:rgba?\([^()]*\)\s+)?-?[\d.e-]+px\s+-?[\d.e-]+px)\s+0px$/, '$1');
+            }
             if (name !== 'hue-rotate' && name !== 'drop-shadow') {
                 var fn = parseFloat(v);
                 if (fn < 0) v = v.replace(/^-?[\d.]+/, '0');
@@ -1239,7 +1373,63 @@
         }
         return { flag: !!kw, deg: deg + (kw === 'reverse' ? 180 : 0) };
     }
+    /* (a position's words as what they come to: a percentage and a length on each axis) */
+    var POS_PROP = /^(object-position|offset-anchor|offset-position|transform-origin|perspective-origin)$/;
+    function posWords(v) {
+        var out = [], d = 0, cur = '';
+        String(v).split('').forEach(function (c) {
+            if (c === '(') d++;
+            if (c === ')') d--;
+            if (c === ' ' && !d) { if (cur) out.push(cur); cur = ''; } else cur += c;
+        });
+        if (cur) out.push(cur);
+        return out;
+    }
+    function posNormal(v, prop) {
+        var w = posWords(v), z = '';
+        if (!w.length || !/\b(left|right|top|bottom|center)\b/i.test(v)) return v;
+        if (prop === 'transform-origin' && w.length === 3) z = ' ' + w.pop();
+        var isK = function (s) { return /^(left|right|top|bottom|center)$/i.test(s); };
+        var X = /^(left|right)$/i, Y = /^(top|bottom)$/i;
+        var edge = function (k, off) {
+            var l = off ? lpParse(off) : { px: 0, pct: 0 };
+            if (/^center$/i.test(k)) return { px: 0, pct: 50 };
+            return /^(right|bottom)$/i.test(k) ? from100(l) : l;
+        };
+        var x = { px: 0, pct: 50 }, y = { px: 0, pct: 50 };
+        if (w.length === 1) {
+            if (Y.test(w[0])) y = edge(w[0]);
+            else if (isK(w[0])) x = edge(w[0]);
+            else return v;
+        } else if (w.length === 2) {
+            var sw = Y.test(w[0]) || X.test(w[1]);
+            var wx = sw ? w[1] : w[0], wy = sw ? w[0] : w[1];
+            x = isK(wx) ? edge(wx) : lpParse(wx);
+            y = isK(wy) ? edge(wy) : lpParse(wy);
+        } else {
+            /* (each edge with its offset) */
+            for (var i = 0; i < w.length; i++) {
+                if (!isK(w[i])) continue;
+                var off = i + 1 < w.length && !isK(w[i + 1]) ? w[i + 1] : '';
+                if (X.test(w[i])) x = edge(w[i], off);
+                else if (Y.test(w[i])) y = edge(w[i], off);
+                else if (!off && i === 0 && Y.test(w[i + 1])) x = edge(w[i]);
+                else if (!off) y = edge(w[i]);
+            }
+        }
+        x.zeroPct = y.zeroPct = true;
+        return lpText(x) + ' ' + lpText(y) + z;
+    }
+    /* (these change all at once) */
+    var DISCRETE = /^(overflow-clip-margin|mask-border-source|border-image-source|list-style-image)$/;
     function interpolate(prop, a, b, t) {
+        if (DISCRETE.test(prop)) return t < 0.5 ? a : b;
+        /* (the baseline is where a length starts from) */
+        if (prop === 'vertical-align') {
+            if (a === 'baseline' && b !== 'baseline' && /[\d)]/.test(b)) a = '0px';
+            else if (b === 'baseline' && a !== 'baseline' && /[\d)]/.test(a)) b = '0px';
+        }
+        if (POS_PROP.test(prop)) { a = posNormal(a, prop); b = posNormal(b, prop); }
         /* (axis by axis, in the order of their tags; the last of a tag counts) */
         if (prop === 'font-variation-settings') {
             var axes = function (v) {
@@ -1468,6 +1658,12 @@
         });
     }
     function addValues(prop, under, value, how) {
+        if (POS_PROP.test(prop)) { under = posNormal(under, prop); value = posNormal(value, prop); }
+        /* (the lists repeated to the same length, each item added) */
+        if (REPEATABLE.test(prop)) {
+            var rl = repeatableInterpolate(prop, under, value, function (x, y) { return x + y; });
+            if (rl !== null) return rl;
+        }
         if (prop === 'clip') { under = clipRect(under); value = clipRect(value); }
         if (TRACK_PROP.test(prop)) {
             var ts = trackAdd(under, value);
@@ -1542,7 +1738,7 @@
         if (/^(clip-path|shape-outside|offset-path)$/.test(prop) && /\bat\b|closest-|farthest-|shape\(/.test(value)) return true;
         if (/^(column|row)-rule-width$/.test(prop) && /thin|medium|thick/.test(value)) return true;
         if (prop === 'zoom' && !/^\s*[\d.]+\s*$/.test(value)) return true;
-        if ((prop === 'filter' || prop === 'backdrop-filter') && /%|\(\s*\)/.test(value)) return true;
+        if ((prop === 'filter' || prop === 'backdrop-filter') && /%|\(\s*\)|drop-shadow\(/.test(value)) return true;
         if (/^(min-|max-)?(width|height)$/.test(prop) && /calc-size\(|^\s*(auto|min-content|max-content|fit-content|stretch)\s*$/i.test(value)) return true;
         if (RELATIVE.test(value)) return true;
         if (COLORISH.test(prop) && !/^\s*[-+\d.]/.test(value) && value !== 'none') return true;
@@ -1557,6 +1753,10 @@
             if (sized !== null) return sized;
         }
         setStyle(el, value === null ? null : prop + ': ' + value);
+        /* (a size comes from the box: with this one) */
+        if (prop === 'font-size') void el.offsetHeight;
+        /* (no inset at all doesn't go between, whatever it's used as) */
+        if (/^(left|right|top|bottom)$/.test(prop) && global.__cyberComputedValue(el, prop) === 'auto') return 'auto';
         return global.getComputedStyle(el).getPropertyValue(prop);
     }
 
@@ -2288,6 +2488,7 @@
     }
     function applyTargetNow(el) {
         tfEl = el;
+        tfLast.delete(el);
         var list = [];
         animations.forEach(function (a) { if (a._effect && a._effect._target === el && !a._effect._pseudo) list.push(a); });
         list.sort(function (x, y) { return x._seq - y._seq; });
