@@ -22654,6 +22654,8 @@ static void layout_node_serial_impl(LayoutContext *ctx, int idx);
 
 /* (an out of flow box of a vertical flow aligned, not stretched, along it: its height fits) */
 static __thread const LayoutBox *t_fit_along;
+/* (an out of flow box stretched between insets it was given by its position-area) */
+static __thread const LayoutBox *t_area_stretch_w, *t_area_stretch_h;
 
 static void layout_flow_across(LayoutContext *ctx, int idx)
 {
@@ -22673,8 +22675,8 @@ static void layout_flow_across(LayoutContext *ctx, int idx)
     bool trial = t_across_trial;
     t_across_trial = false;
     bool w_given = w_auto && !trial && ((P && !out_of_flow && (P->s->display == CSS_DISPLAY_FLEX || P->s->display == CSS_DISPLAY_GRID)) ||
-                              (out_of_flow && (sides & LAYOUT_SIDE_LEFT) && (sides & LAYOUT_SIDE_RIGHT)));
-    bool h_given = h_auto && out_of_flow && (sides & LAYOUT_SIDE_TOP) && (sides & LAYOUT_SIDE_BOTTOM);
+                              (out_of_flow && (((sides & LAYOUT_SIDE_LEFT) && (sides & LAYOUT_SIDE_RIGHT)) || t_area_stretch_w == b)));
+    bool h_given = h_auto && out_of_flow && (((sides & LAYOUT_SIDE_TOP) && (sides & LAYOUT_SIDE_BOTTOM)) || t_area_stretch_h == b);
     double pcw = P ? P->content_width : ctx->viewport_width, pch = P ? P->content_height : ctx->viewport_height;
     double along = h_given ? assigned_h : P && !layout_height_auto(P) && !out_of_flow ? P->content_height : ctx->viewport_height;
 
@@ -22992,17 +22994,44 @@ static bool anchor_list_has(const char *list, const char *name, size_t nl)
 }
 
 /* The last box in tree order with that name this box may anchor to. */
+/* The next box up a box's containing block chain: an absolutely positioned one's
+ * positioned ancestor, a fixed one's viewport (-1), another's parent. */
+static int anchor_cb_of(LayoutContext *ctx, int i)
+{
+    CssPosition ps = ctx->boxes[i].s->position;
+    if (ps == CSS_POSITION_FIXED) return -1;
+    int p = ctx->tree.nodes[i].parent_idx;
+    if (ps != CSS_POSITION_ABSOLUTE) return p;
+    for (; p >= 0; p = ctx->tree.nodes[p].parent_idx) {
+        const LayoutStyle *s = ctx->boxes[p].s;
+        if (s->position != CSS_POSITION_STATIC || s->abs_cb) return p;
+    }
+    return -1;
+}
+
+static bool anchor_out_of_flow(LayoutContext *ctx, int i)
+{
+    CssPosition ps = ctx->boxes[i].s->position;
+    return ps == CSS_POSITION_ABSOLUTE || ps == CSS_POSITION_FIXED;
+}
+
 static int layout_anchor_find(LayoutContext *ctx, int self, const char *name, size_t nl)
 {
+    int cb = anchor_cb_of(ctx, self);
     for (int k = g_anchor_n - 1; k >= 0; k--) {
         int a = g_anchor_boxes[k];
         if (a == self || !anchor_list_has(ctx->boxes[a].s->anchor_name, name, nl)) continue;
-        /* (not inside it; one placed after it isn't placed yet) */
-        bool inside = false;
-        for (int p = ctx->tree.nodes[a].parent_idx; p >= 0 && !inside; p = ctx->tree.nodes[p].parent_idx) inside = p == self;
-        if (inside) continue;
-        CssPosition ap = ctx->boxes[a].s->position;
-        if ((ap == CSS_POSITION_ABSOLUTE || ap == CSS_POSITION_FIXED) && a > self) continue;
+        /* (not inside it) */
+        bool inside = false, under_cb = cb < 0;
+        for (int p = ctx->tree.nodes[a].parent_idx; p >= 0 && !inside; p = ctx->tree.nodes[p].parent_idx) {
+            inside = p == self;
+            if (p == cb) under_cb = true;
+        }
+        if (inside || !under_cb) continue;
+        /* (the last of its containing blocks before the query's: laid out before it) */
+        int x = a, guard = 0;
+        for (int c = anchor_cb_of(ctx, x); c != cb && c >= 0 && guard < 4096; c = anchor_cb_of(ctx, x), guard++) x = c;
+        if (anchor_out_of_flow(ctx, x) && x > self) continue;
         return a;
     }
     return -1;
@@ -23645,7 +23674,12 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
         box->height = h < 0.0 ? 0.0 : h;
         t_fit_along = box;
     }
+    if (area_x >= 0 || area_y >= 0 || box->s->position_area) {
+        if (has_left && has_right && j_mode < 0) t_area_stretch_w = box;
+        if (has_top && has_bottom && a_mode < 0) t_area_stretch_h = box;
+    }
     layout_node_serial(ctx, idx);
+    t_area_stretch_w = t_area_stretch_h = NULL;
     t_fit_along = NULL;
     /* (its flow across its containing block's: its size only now known) */
     if (box->s->writing_mode != 0 && has_right && !has_left) box->x = cb_x + cb_w - box->right - mr - box->width;
