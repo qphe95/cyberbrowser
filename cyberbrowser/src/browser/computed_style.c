@@ -1054,6 +1054,58 @@ static char *grid_tracks_resolved(const char *spec, const double *tr, int nt, in
 }
 
 static int g_comp_base;
+/* Whether s's anchor functions can find an anchor here: only an absolutely
+ * positioned box has one, and without a name, only by its position-anchor. */
+static bool anchor_fns_valid(JSContextHandle ctx, ComputedStyle *cs, const char *s)
+{
+    const char *pos = computed_of(ctx, cs, "position");
+    if (strcmp(pos, "absolute") && strcmp(pos, "fixed")) return false;
+    const char *pa = computed_of(ctx, cs, "position-anchor");
+    bool has_default = pa && strcmp(pa, "auto") && strcmp(pa, "none") && pa[0];
+    for (const char *f = s; (f = strstr(f, "anchor")); f++) {
+        const char *open = strchr(f, '(');
+        if (!open || (f > s && (isalnum((unsigned char)f[-1]) || f[-1] == '-'))) continue;
+        const char *a = open + 1;
+        while (*a == ' ') a++;
+        /* (a side or size without a name of its own) */
+        bool named = a[0] == '-' && a[1] == '-';
+        if (!named && !has_default) return false;
+    }
+    return true;
+}
+
+/* s with each anchor function as its fallback (malloc'd); NULL if one has none. */
+static char *anchor_fallbacks(const char *s)
+{
+    size_t n = strlen(s);
+    char *out = (char *)malloc(n + 1);
+    if (!out) return NULL;
+    size_t o = 0;
+    for (size_t i = 0; i < n; ) {
+        bool fn = (!strncmp(s + i, "anchor(", 7) || !strncmp(s + i, "anchor-size(", 12)) &&
+                  (i == 0 || !(isalnum((unsigned char)s[i - 1]) || s[i - 1] == '-'));
+        if (!fn) { out[o++] = s[i++]; continue; }
+        const char *open = strchr(s + i, '(');
+        int depth = 0;
+        const char *comma = NULL, *close = NULL;
+        for (const char *c = open; *c; c++) {
+            if (*c == '(') depth++;
+            else if (*c == ')' && --depth == 0) { close = c; break; }
+            else if (*c == ',' && depth == 1 && !comma) comma = c;
+        }
+        if (!close || !comma) { free(out); return NULL; }
+        const char *fb = comma + 1;
+        while (*fb == ' ') fb++;
+        size_t fl = (size_t)(close - fb);
+        while (fl && fb[fl - 1] == ' ') fl--;
+        memcpy(out + o, fb, fl);
+        o += fl;
+        i = (size_t)(close - s) + 1;
+    }
+    out[o] = 0;
+    return out;
+}
+
 static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p) {
     CST("compute %s", p->name);
     if (!cs->styled) return strdup("");
@@ -1089,7 +1141,14 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
         r = par && par->styled ? strdup(computed_of(ctx, par, n)) : compute_value(ctx, cs, p, p->initial);
         /* (an inherited font-weight etc. is the parent's computed value) */
     } else {
-        r = compute_value(ctx, cs, p, !strcmp(s, "initial") ? p->initial : s);
+        /* (anchor functions with nothing to anchor to: their fallbacks, or the property's start) */
+        char *swapped = NULL;
+        if ((strstr(s, "anchor(") || strstr(s, "anchor-size(")) && !anchor_fns_valid(ctx, cs, s)) {
+            swapped = anchor_fallbacks(s);
+            if (!swapped) s = "initial";
+        }
+        r = compute_value(ctx, cs, p, !strcmp(s, "initial") ? p->initial : swapped ? swapped : s);
+        free(swapped);
     }
     /* the properties whose computed value depends on another one */
     if (strstr(n, "-width") && !strncmp(n, "border-", 7) && !strstr(n, "image")) {

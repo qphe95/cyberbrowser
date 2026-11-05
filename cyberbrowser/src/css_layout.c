@@ -22656,6 +22656,9 @@ static void layout_node_serial_impl(LayoutContext *ctx, int idx);
 static __thread const LayoutBox *t_fit_along;
 /* (an out of flow box stretched between insets it was given by its position-area) */
 static __thread const LayoutBox *t_area_stretch_w, *t_area_stretch_h;
+/* (an out of flow box whose lines run down: the room its insets leave along them) */
+static __thread const LayoutBox *t_abs_along_box;
+static __thread double t_abs_along;
 
 static void layout_flow_across(LayoutContext *ctx, int idx)
 {
@@ -22678,7 +22681,7 @@ static void layout_flow_across(LayoutContext *ctx, int idx)
                               (out_of_flow && (((sides & LAYOUT_SIDE_LEFT) && (sides & LAYOUT_SIDE_RIGHT)) || t_area_stretch_w == b)));
     bool h_given = h_auto && out_of_flow && (((sides & LAYOUT_SIDE_TOP) && (sides & LAYOUT_SIDE_BOTTOM)) || t_area_stretch_h == b);
     double pcw = P ? P->content_width : ctx->viewport_width, pch = P ? P->content_height : ctx->viewport_height;
-    double along = h_given ? assigned_h : P && !layout_height_auto(P) && !out_of_flow ? P->content_height : ctx->viewport_height;
+    double along = h_given ? assigned_h : t_abs_along_box == b ? t_abs_along : P && !layout_height_auto(P) && !out_of_flow ? P->content_height : ctx->viewport_height;
 
     HtmlNode *dom = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
     if (out_rl) { wm_flip_style(b->s, false); wm_flip_box(b); }
@@ -23593,11 +23596,7 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
             box->width = cb_w - box->left - box->right - ml - mr;
         } else {
             double avail = cb_w - (has_left ? box->left : 0.0) - (has_right ? box->right : 0.0) - ml - mr;
-            if (has_center_x) {
-                double lo = cb_x + (has_left ? box->left : 0.0), hi = cb_x + cb_w - (has_right ? box->right : 0.0);
-                double side = fmin(anchor_cx - lo, hi - anchor_cx);
-                avail = 2.0 * side - ml - mr;
-            }
+            /* (anchor-center: sized in what the insets leave, then shifted to stay in it) */
             box->width = layout_shrink_to_fit(ctx, idx, avail < 0.0 ? 0.0 : avail);
         }
         if (box->max_width >= 0.0 || box->min_width > 0.0) {
@@ -23639,7 +23638,13 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
         double lo = cb_x + box->left + ml, hi = cb_x + cb_w - box->right - mr - box->width;
         box->x = area_x == 0 ? lo : area_x == 2 ? hi : (lo + hi) / 2.0;
     }
-    if (has_center_x) box->x = anchor_cx - box->width / 2.0;
+    if (has_center_x) {
+        double lo = cb_x + (has_left ? box->left : 0.0) + ml, hi = cb_x + cb_w - (has_right ? box->right : 0.0) - mr - box->width;
+        double x = anchor_cx - box->width / 2.0;
+        if (hi >= lo) x = x < lo ? lo : x > hi ? hi : x;
+        else x = lo;
+        box->x = x;
+    }
     else if (has_left && has_right && j_mode >= 0 && !(box->s->margin_auto & 0xA)) {
         box->x = abs_align_place(cb_x, cb_w, box->left, box->right, ml, mr, box->width, j_mode, j_kw, cbb, true, cross);
     }
@@ -23678,7 +23683,13 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
         if (has_left && has_right && j_mode < 0) t_area_stretch_w = box;
         if (has_top && has_bottom && a_mode < 0) t_area_stretch_h = box;
     }
+    if (box->s->writing_mode != 0 && (has_center_x || has_center_y || box->s->position_area)) {
+        t_abs_along_box = box;
+        t_abs_along = cb_h - (has_top ? box->top : 0.0) - (has_bottom ? box->bottom : 0.0) - mt - mb;
+        if (t_abs_along < 0.0) t_abs_along = 0.0;
+    }
     layout_node_serial(ctx, idx);
+    t_abs_along_box = NULL;
     t_area_stretch_w = t_area_stretch_h = NULL;
     t_fit_along = NULL;
     /* (its flow across its containing block's: its size only now known) */
@@ -23692,7 +23703,11 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
         double y = abs_align_place(cb_y, cb_h, box->top, box->bottom, mt, mb, box->height, a_mode, a_kw, cbb, false, cross);
         if (y != box->y) layout_move_box(ctx, idx, box->x, y);
     } else if (has_center_y) {
-        layout_move_box(ctx, idx, box->x, anchor_cy - box->height / 2.0);
+        double lo = cb_y + (has_top ? box->top : 0.0) + mt, hi = cb_y + cb_h - (has_bottom ? box->bottom : 0.0) - mb - box->height;
+        double y = anchor_cy - box->height / 2.0;
+        if (hi >= lo) y = y < lo ? lo : y > hi ? hi : y;
+        else y = lo;
+        layout_move_box(ctx, idx, box->x, y);
     } else if (area_y >= 0 && !has_top && !has_bottom) {
         double y = area_y == 0 ? cb_y + mt : area_y == 2 ? cb_y + cb_h - mb - box->height : cb_y + (cb_h - box->height) / 2.0;
         if (y != box->y) layout_move_box(ctx, idx, box->x, y);
