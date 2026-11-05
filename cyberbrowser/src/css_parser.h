@@ -169,6 +169,8 @@ bool css_media_query_matches(const char *query, double viewport_width, double vi
 /* Transform a stylesheet's selectors for a shadow host (e.g. :host, ::slotted).
  * Used by both the JS CSS applier and the layout-engine collector. */
 void css_scope_stylesheet(CssStylesheet *sheet, const char *host_tag);
+/* ::part() selectors as the flattened tree's descendants with the part names. */
+void css_rewrite_parts(CssStylesheet *sheet);
 
 /* One matched declaration with specificity/order for cascading. */
 typedef struct CssAppliedDecl {

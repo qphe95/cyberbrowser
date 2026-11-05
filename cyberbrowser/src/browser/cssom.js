@@ -1525,7 +1525,19 @@
     };
     getter(CSSFontFaceRule.prototype, 'style', function () { return this.__style; });
     CSSFontFaceRule.prototype.__text = function () { var d = declText(this.__style), fx = this.__style.__faceText ? this.__style.__faceText() : ''; if (fx) d = d ? d + ' ' + fx : fx; return '@font-face {' + (d ? ' ' + d + ' ' : ' ') + '}'; };
-    getter(CSSPageRule.prototype, 'selectorText', function () { return this.__selector; }, function (v) { this.__selector = String(v).trim(); touched(this); });
+    /* (a page selector list: names and :first, :left, :right, :blank) */
+    function pageSelectorOk(t) {
+        t = String(t).trim();
+        if (!t) return true;
+        return t.split(',').every(function (p) {
+            p = p.trim();
+            return !!p && /^(?:-?[a-zA-Z_\u0080-\uffff][\w\u0080-\uffff-]*)?(?::(?:first|left|right|blank))*$/i.test(p) && !/^--/.test(p);
+        });
+    }
+    getter(CSSPageRule.prototype, 'selectorText', function () { return this.__selector; }, function (v) {
+        if (!pageSelectorOk(v)) return;
+        this.__selector = String(v).trim(); touched(this);
+    });
     getter(CSSPageRule.prototype, 'style', function () { return this.__style; }, function (v) { this.__style.cssText = v; });
     CSSPageRule.prototype.__text = function () {
         var d = declText(this.__style);
@@ -2098,6 +2110,7 @@
                 break;
             case 'page':
                 if (p.block === null) return null;
+                if (!pageSelectorOk(p.prelude)) return null;
                 r = makeRule(CSSPageRule, 'page', { __selector: p.prelude, __style: null, __rules: [] });
                 /* (the margin at-rules in it: rules of their own; the rest its declarations) */
                 var pdecl = '', pi2 = 0, pb = p.block;

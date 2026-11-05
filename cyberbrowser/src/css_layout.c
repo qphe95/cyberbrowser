@@ -6420,6 +6420,8 @@ static void parse_merge_cont(Job *j)
         free(c->rules);
         free(c);
     }
+    /* (a shadow tree's own ::part() rules reach only deeper trees' parts: not modelled) */
+    if (!t->host) css_rewrite_parts(sheet);
     if (t->host) css_scope_stylesheet(sheet, t->host);
     t->result = sheet;
 }
@@ -6430,6 +6432,7 @@ static void parse_sheet_job(Job *j)
     if (t->nchunks <= 1) {
         size_t end = 0;
         t->result = css_stylesheet_parse_range(t->text, t->len, 0, t->len, &end);
+        if (!t->host) css_rewrite_parts(t->result);
         if (t->result && t->host) css_scope_stylesheet(t->result, t->host);
         return;
     }

@@ -3796,6 +3796,49 @@ static char* css_transform_selectors_for_host(const char *selector_text, const c
     return out ? out : css_strdup("");
 }
 
+/* ::part(a b): in the flattened tree a shadow tree's elements are its host's
+ * descendants, so a part is a descendant whose part attribute has each name. */
+void css_rewrite_parts(CssStylesheet *sheet) {
+    if (!sheet) return;
+    for (int r = 0; r < sheet->rule_count; r++) {
+        CssRule *rule = &sheet->rules[r];
+        const char *s = rule->selector_text;
+        if (!s || !strstr(s, "::part(")) continue;
+        char *out = NULL;
+        size_t out_len = 0, out_cap = 0, len = strlen(s), i = 0;
+        while (i < len) {
+            if (i + 7 <= len && !strncmp(s + i, "::part(", 7)) {
+                size_t open = i + 6, close = css_match_paren(s, open, len);
+                css_buf_append_cstr(&out, &out_len, &out_cap, " ");
+                size_t k = open + 1;
+                bool any = false;
+                while (k < close) {
+                    while (k < close && css_is_space(s[k])) k++;
+                    size_t st = k;
+                    while (k < close && !css_is_space(s[k])) k++;
+                    if (k > st) {
+                        css_buf_append_cstr(&out, &out_len, &out_cap, "[part~=\"");
+                        css_buf_append(&out, &out_len, &out_cap, s + st, k - st);
+                        css_buf_append_cstr(&out, &out_len, &out_cap, "\"]");
+                        any = true;
+                    }
+                }
+                /* (no name: nothing it can be) */
+                if (!any) css_buf_append_cstr(&out, &out_len, &out_cap, ":not(*)");
+                i = close < len ? close + 1 : len;
+                continue;
+            }
+            css_buf_append(&out, &out_len, &out_cap, s + i, 1);
+            i++;
+        }
+        if (!out) continue;
+        free(rule->selector_text);
+        rule->selector_text = out;
+        rule->specificity = 0;
+        css_rule_compiled_free(rule);
+    }
+}
+
 void css_scope_stylesheet(CssStylesheet *sheet, const char *host_tag) {
     if (!sheet || !host_tag) return;
     for (int r = 0; r < sheet->rule_count; r++) {

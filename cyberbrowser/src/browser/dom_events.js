@@ -258,6 +258,7 @@
     eventClass('SubmitEvent', Event, { submitter: nul() });
     eventClass('FormDataEvent', Event, { formData: nul() });
     eventClass('ToggleEvent', Event, { oldState: str(''), newState: str('') });
+    eventClass('FontFaceSetLoadEvent', Event, { fontfaces: function (v) { return Object.freeze(arguments.length && v != null ? Array.prototype.slice.call(v) : []); } });
     eventClass('StorageEvent', Event, { key: nul(), oldValue: nul(), newValue: nul(), url: str(''),
                                          storageArea: nul() });
     eventClass('MessageEvent', Event, { data: nul(), origin: str(''), lastEventId: str(''),

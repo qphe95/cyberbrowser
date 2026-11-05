@@ -869,6 +869,12 @@
                 var ok = ffMore[k][1](init[k]);
                 if (ok !== null) ffOf(f)[k] = ok;
             });
+            /* (weight, style and stretch too; width is stretch, and goes first) */
+            if (init && typeof init === 'object') ['weight', 'style', 'stretch'].forEach(function (k) {
+                var v = k === 'stretch' && init.width !== undefined ? init.width : init[k];
+                if (v === undefined) return;
+                try { f[k] = v; } catch (e) { /* (invalid: as if not given) */ }
+            });
             return f;
         };
         var ffLoad = ffOrig.prototype.load;
@@ -876,11 +882,55 @@
             if (ffOf(this).badSrc) return Promise.reject(new global.DOMException('The source provided could not be parsed as a value list.', 'SyntaxError'));
             return ffLoad.call(this);
         } });
+        /* (width: stretch's other name) */
+        Object.defineProperty(ffOrig.prototype, 'width', { enumerable: true, configurable: true,
+            get: function () { return this.stretch; }, set: function (v) { this.stretch = v; } });
         Object.defineProperty(ffCtor, 'length', { configurable: true, value: 2 });
         Object.defineProperty(ffCtor, 'prototype', { value: ffOrig.prototype, writable: false });
         Object.defineProperty(ffOrig.prototype, 'constructor', { configurable: true, writable: true, value: ffCtor });
         Object.defineProperty(global, 'FontFace', { configurable: true, writable: true, value: ffCtor });
     }
+    /* (FontFaceSet: load() and check() of a font that isn't one, a SyntaxError;
+     * size; no constructor) */
+    (function () {
+        var FS = global.FontFaceSet, FP = FS && FS.prototype;
+        if (!FP && global.document && global.document.fonts) FP = Object.getPrototypeOf(global.document.fonts);
+        if (!FP || FP === Object.prototype) return;
+        /* (an interface with that prototype, no constructor of its own) */
+        if (!FS || !Object.prototype.hasOwnProperty.call(FS, 'prototype')) {
+            var C = { FontFaceSet: function () { throw new TypeError('Illegal constructor'); } }.FontFaceSet;
+            Object.defineProperty(C, 'length', { configurable: true, value: 1 });
+            Object.defineProperty(C, 'prototype', { value: FP, writable: false });
+            Object.defineProperty(FP, 'constructor', { configurable: true, writable: true, value: C });
+            Object.defineProperty(global, 'FontFaceSet', { configurable: true, writable: true, value: C });
+        }
+        var bad = function (spec) {
+            spec = String(spec);
+            var words = spec.trim().split(/\s+/);
+            var wide = /^(initial|inherit|unset|default|revert|revert-layer)$/i;
+            return words.some(function (w) { return wide.test(w); }) || !spec.trim();
+        };
+        ['load', 'check'].forEach(function (name) {
+            var orig = FP[name];
+            if (typeof orig !== 'function') return;
+            var fn = function (font) {
+                if (bad(font)) {
+                    var err = new global.DOMException("'" + font + "' is not a valid font", 'SyntaxError');
+                    if (name === 'check') throw err;
+                    return Promise.reject(err);
+                }
+                return orig.apply(this, arguments);
+            };
+            Object.defineProperty(fn, 'name', { configurable: true, value: name });
+            Object.defineProperty(fn, 'length', { configurable: true, value: 1 });
+            Object.defineProperty(FP, name, { configurable: true, enumerable: true, writable: true, value: fn });
+        });
+        if (!('size' in FP)) Object.defineProperty(FP, 'size', { configurable: true, enumerable: true, get: function () {
+            var n = 0;
+            if (typeof this.forEach === 'function') this.forEach(function () { n++; });
+            return n;
+        } });
+    })();
     /* (a screen, what the media features' device says) */
     function liveInterface(name, parent, ro) {
         var C = { f: function () { throw new TypeError('Illegal constructor'); } }.f;

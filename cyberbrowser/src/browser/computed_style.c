@@ -1727,6 +1727,37 @@ static char *registered_item(JSContextHandle ctx, ComputedStyle *cs, const char 
         else snprintf(tmp, sizeof tmp, "%.6g", d);
         return strdup(tmp);
     }
+    /* (a resolution in dppx) */
+    if (!strcmp(type, "resolution")) {
+        char *e = NULL;
+        double d = strtod(v, &e);
+        if (e && e != v) {
+            double k = !strcasecmp(e, "dpi") ? 1.0 / 96 : !strcasecmp(e, "dpcm") ? 2.54 / 96 : (!strcasecmp(e, "dppx") || !strcasecmp(e, "x")) ? 1 : 0;
+            if (k) { char tmp[64]; snprintf(tmp, sizeof tmp, "%.6gdppx", d * k); return strdup(tmp); }
+        }
+        return strdup(v);
+    }
+    /* (a string in double quotes) */
+    if (!strcmp(type, "string")) {
+        const char *s = v;
+        while (isspace((unsigned char)*s)) s++;
+        size_t n = strlen(s);
+        while (n && isspace((unsigned char)s[n - 1])) n--;
+        if (n >= 2 && s[0] == '\'' && s[n - 1] == '\'') {
+            char *o = malloc(n * 2 + 3);
+            size_t k = 0;
+            o[k++] = '"';
+            for (size_t i = 1; i + 1 < n; i++) {
+                if (s[i] == '\\' && i + 2 < n) { o[k++] = s[i++]; o[k++] = s[i]; continue; }
+                if (s[i] == '"') o[k++] = '\\';
+                o[k++] = s[i];
+            }
+            o[k++] = '"';
+            o[k] = 0;
+            return o;
+        }
+        return strdup(v);
+    }
     if (!as) return strdup(v);
     const CssPropDef *p = css_prop_find(as, strlen(as));
     if (!p) return strdup(v);

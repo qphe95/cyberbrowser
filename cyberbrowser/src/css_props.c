@@ -900,7 +900,13 @@ static int calc_value(const Toks *ts, int i, int pct) {
         if (strcasecmp(f, "random") == 0 && (na < 2 || na > 3)) return -1;
         if (!strcasecmp(f, "sin") || !strcasecmp(f, "cos") || !strcasecmp(f, "tan")) return (args[0] & (D_NUMBER | D_ANGLE)) ? D_NUMBER : -1;
         if (!strcasecmp(f, "asin") || !strcasecmp(f, "acos") || !strcasecmp(f, "atan") || !strcasecmp(f, "atan2")) return D_ANGLE;
-        if (!strcasecmp(f, "pow") || !strcasecmp(f, "sqrt") || !strcasecmp(f, "log") || !strcasecmp(f, "exp")) return args[0] == D_NUMBER ? D_NUMBER : -1;
+        /* (numbers only, and as many as each takes) */
+        if (!strcasecmp(f, "pow") || !strcasecmp(f, "sqrt") || !strcasecmp(f, "log") || !strcasecmp(f, "exp")) {
+            int want_lo = !strcasecmp(f, "pow") ? 2 : 1, want_hi = !strcasecmp(f, "pow") || !strcasecmp(f, "log") ? 2 : 1;
+            if (na < want_lo || na > want_hi) return -1;
+            for (int a = 0; a < na; a++) if (args[a] != D_NUMBER) return -1;
+            return D_NUMBER;
+        }
         int d = 0;
         for (int a = 0; a < na; a++) if (args[a]) { if (d && (d & ~D_PERCENT) && (args[a] & ~D_PERCENT) && (d & ~D_PERCENT) != (args[a] & ~D_PERCENT)) return -1; d |= args[a]; }
         if (strcasecmp(f, "clamp") == 0 && na != 3) return -1;
@@ -3962,7 +3968,8 @@ char *css_prop_compute(const CssPropDef *p, const char *value, const CssComputeE
         toks_free(&ts);
     }
     free(v);
-    if (out && (!strcmp(p->name, "contain") || !strcmp(p->name, "text-fit"))) {
+    if (out && (!strcmp(p->name, "contain") || !strcmp(p->name, "text-fit") ||
+                (strstr(p->name, "timing-function") && strstr(out, "linear(")))) {
         g_canon_computed = true;
         char *cc = css_prop_canon(p, out);
         g_canon_computed = false;
@@ -7637,6 +7644,13 @@ static char *canon_image_set(const char *v)
                 else if (!strncasecmp(w[i], "type(", 5)) type = w[i];
                 else res = w[i];
             }
+            /* (a resolution below nothing: no such option) */
+            if (res && res[0] == '-' && (isdigit((unsigned char)res[1]) || res[1] == '.')) {
+                for (int j = k; j < np; j++) free(parts[j]);
+                free(parts);
+                free(b.s);
+                return strdup("");
+            }
             if (k) buf_str(&b, ", ");
             if (!img) { for (int i = 0; i < n; i++) { if (i) buf_ch(&b, ' '); buf_str(&b, w[i]); } free(parts[k]); continue; }
             size_t il = strlen(img);
@@ -7667,6 +7681,96 @@ static char *canon_image_set(const char *v)
 }
 
 /* palette-mix(): the default space gone, the second percentage filled in; "" if invalid. */
+/* linear() easing in a timing function list: two stops or more; computed,
+ * each stop one point with its position (the unsaid spread evenly between
+ * the said, the first 0%, the last 100%, none before the one before it).
+ * NULL: as it is; "": invalid. */
+static void lin_num(Buf *b, double v) {
+    char t[48];
+    snprintf(t, sizeof t, "%.6f", v);
+    char *e = t + strlen(t) - 1;
+    while (e > t && *e == '0') *e-- = 0;
+    if (*e == '.') *e = 0;
+    if (!strcmp(t, "-0")) strcpy(t, "0");
+    buf_str(b, t);
+}
+static double lin_val(const char *w) {
+    if (!strncasecmp(w, "calc(", 5)) w += 5;
+    return strtod(w, NULL);
+}
+static char *canon_linear(const char *v, bool computed)
+{
+    if (!strstr(v, "linear(")) return NULL;
+    Buf b = { 0 };
+    bool changed = false;
+    for (const char *p = v; *p; ) {
+        if (strncasecmp(p, "linear(", 7) || (p > v && (isalnum((unsigned char)p[-1]) || p[-1] == '-'))) { buf_ch(&b, *p++); continue; }
+        const char *a = p + 7, *e = a;
+        int d = 1;
+        for (; *e && d; e++) { if (*e == '(') d++; else if (*e == ')' && --d == 0) break; }
+        if (!*e) { buf_ch(&b, *p++); continue; }
+        char *inner = strndup(a, (size_t)(e - a));
+        char **parts = NULL;
+        int np = split_commas(inner, &parts);
+        free(inner);
+        if (np < 2) { for (int k = 0; k < np; k++) free(parts[k]); free(parts); free(b.s); return strdup(""); }
+        if (!computed) {
+            for (int k = 0; k < np; k++) free(parts[k]);
+            free(parts);
+            buf_add(&b, p, (size_t)(e + 1 - p));
+            p = e + 1;
+            continue;
+        }
+        /* (the points: an output and a position, or none yet) */
+        int cap = np * 2, n = 0;
+        double *out = calloc((size_t)cap, sizeof(double)), *pos = calloc((size_t)cap, sizeof(double));
+        bool *has = calloc((size_t)cap, sizeof(bool));
+        for (int k = 0; k < np; k++) {
+            char w[3][160];
+            int nw = canon_words(parts[k], w, 3);
+            double o = 0;
+            double ps[2];
+            int npc = 0;
+            for (int i = 0; i < nw; i++) {
+                if (strchr(w[i], '%')) { if (npc < 2) ps[npc++] = lin_val(w[i]); }
+                else { o = lin_val(w[i]); if (o != o) o = 0; }
+            }
+            if (npc == 0) { out[n] = o; has[n] = false; n++; }
+            for (int i = 0; i < npc; i++) { out[n] = o; pos[n] = ps[i]; has[n] = true; n++; }
+        }
+        for (int k = 0; k < np; k++) free(parts[k]);
+        free(parts);
+        if (!has[0]) { pos[0] = 0; has[0] = true; }
+        if (!has[n - 1]) { pos[n - 1] = 100; has[n - 1] = true; }
+        /* (never before the largest so far) */
+        double mx = pos[0];
+        for (int i = 0; i < n; i++) if (has[i]) { if (pos[i] < mx) pos[i] = mx; mx = pos[i]; }
+        for (int i = 0; i < n; ) {
+            if (has[i]) { i++; continue; }
+            int j = i;
+            while (!has[j]) j++;
+            double from = pos[i - 1], to = pos[j];
+            for (int k = i; k < j; k++) pos[k] = from + (to - from) * (k - i + 1) / (j - i + 1);
+            i = j;
+        }
+        buf_str(&b, "linear(");
+        for (int i = 0; i < n; i++) {
+            if (i) buf_str(&b, ", ");
+            lin_num(&b, out[i]);
+            buf_ch(&b, ' ');
+            lin_num(&b, pos[i]);
+            buf_ch(&b, '%');
+        }
+        buf_ch(&b, ')');
+        free(out); free(pos); free(has);
+        changed = true;
+        p = e + 1;
+    }
+    buf_ch(&b, 0);
+    if (!changed || !strcmp(b.s, v)) { free(b.s); return NULL; }
+    return b.s;
+}
+
 static char *canon_palette_mix(const char *v)
 {
     size_t vl = strlen(v);
@@ -8153,6 +8257,21 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
         if (!changed || !strcmp(s.s, v)) { free(s.s); return NULL; }
         return s.s;
     }
+    if (!strcmp(n, "size")) {
+        /* (a square once, a portrait page size by its name, names in lower case) */
+        char w[2][160];
+        int nw = canon_words(v, w, 2);
+        for (int i = 0; i < nw; i++) for (char *c = w[i]; *c; c++) *c = (char)tolower((unsigned char)*c);
+        Buf s = { 0 };
+        if (nw == 2 && !strcmp(w[0], w[1])) buf_str(&s, w[0]);
+        else if (nw == 2 && !strcmp(w[1], "portrait")) buf_str(&s, w[0]);
+        else if (nw == 2 && !strcmp(w[0], "portrait")) buf_str(&s, w[1]);
+        else if (nw == 2 && (!strcmp(w[0], "landscape"))) { buf_str(&s, w[1]); buf_str(&s, " landscape"); }
+        else { for (int i = 0; i < nw; i++) { if (i) buf_ch(&s, ' '); buf_str(&s, w[i]); } }
+        char *r = buf_take(&s);
+        if (!strcmp(r, v)) { free(r); return NULL; }
+        return r;
+    }
     if (!strcmp(n, "flex-wrap")) {
         /* (balance wraps: wrap goes without saying, wrap-reverse first) */
         char w[2][160];
@@ -8190,6 +8309,8 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
     if (!strcmp(n, "offset-rotate")) return canon_offset_rotate(v);
     if (!strcmp(n, "offset-path") && !strncmp(v, "ray(", 4)) return canon_ray(v);
     if (!strcmp(n, "font-palette") && !strncasecmp(v, "palette-mix(", 12)) return canon_palette_mix(v);
+    if ((!strcmp(n, "animation-timing-function") || !strcmp(n, "transition-timing-function")) && strstr(v, "linear("))
+        return canon_linear(v, g_canon_computed);
     if (strstr(v, "image-set(")) return canon_image_set(v);
     if (!strcmp(n, "position-try-fallbacks")) return canon_try_fallbacks(v);
     if ((!strcmp(n, "grid-template-columns") || !strcmp(n, "grid-template-rows")) && strstr(v, "[") && strncasecmp(v, "subgrid", 7)) {

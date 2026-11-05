@@ -1168,7 +1168,7 @@ static bool simple_ok(uint32_t s, const SelSimple *ss, uint32_t scope) {
     case SS_FIRST_CHILD: case SS_LAST_CHILD: case SS_ONLY_CHILD:
     case SS_NTH_CHILD: case SS_NTH_LAST_CHILD: case SS_NTH_OF_TYPE: case SS_NTH_LAST_OF_TYPE:
     case SS_FIRST_OF_TYPE: case SS_LAST_OF_TYPE: case SS_ONLY_OF_TYPE: {
-        if (!g_dom.parent[s]) return false;
+        /* (no parent: the only child there is) */
         bool of_type = ss->kind == SS_FIRST_OF_TYPE || ss->kind == SS_LAST_OF_TYPE || ss->kind == SS_ONLY_OF_TYPE ||
                        ss->kind == SS_NTH_OF_TYPE || ss->kind == SS_NTH_LAST_OF_TYPE;
         int before = 0, after = 0;
