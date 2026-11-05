@@ -2086,7 +2086,7 @@
 "        define(global, 'matchMedia', function matchMedia(query) {\n"
 "            if (arguments.length < 1) throw new TypeError(\"Failed to execute 'matchMedia' on 'Window': 1 argument required, but only 0 present.\");\n"
 "            var q = String(query), mql = Object.create(MediaQueryList.prototype);\n"
-"            MQL_PRIVATE.set(mql, { query: q, media: evalMedia.call(global, q).media, last: false, onchange: null });\n"
+"            MQL_PRIVATE.set(mql, { query: q, media: global.__cyberMediaText ? global.__cyberMediaText(q) : evalMedia.call(global, q).media, last: false, onchange: null });\n"
 "            return mql;\n"
 "        });\n"
 "        Object.defineProperty(global, '__cyberMediaCheck', { configurable: true, value: function () {\n"

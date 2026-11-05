@@ -5561,7 +5561,7 @@ static bool cq_value(const char *t, const CqBox *b, bool ratio, double *out)
         *out = y != 0.0 ? x / y : 0.0;
         return true;
     }
-    if (!(isdigit((unsigned char)*t) || *t == '.' || *t == '-' || *t == '+' || !strncasecmp(t, "calc(", 5))) return false;
+    if (!(isdigit((unsigned char)*t) || *t == '.' || *t == '-' || *t == '+' || !strncasecmp(t, "calc(", 5) || !strncasecmp(t, "min(", 4) || !strncasecmp(t, "max(", 4) || !strncasecmp(t, "clamp(", 6))) return false;
     double held_w = t_cq_w, held_h = t_cq_h;
     const CqBox *up = g_cq_ctx ? cq_find(g_cq_ctx, b->dom, NULL, 0, 1) : NULL;
     t_cq_w = up ? up->w : 0.0;
@@ -5617,6 +5617,7 @@ static int cq_size_query(const LayoutContext *ctx, int dom, const char *cname, s
     parts[np++] = q;
     for (char *c = q; *c && np < 3; c++) {
         if (*c == '<' || *c == '>' || *c == '=') {
+            if (*c == '=' && c[1] == '=') return -1;
             opv[no][0] = *c;
             *c = 0;
             if (c[1] == '=') { opv[no][1] = '='; c++; *c = 0; }
@@ -5634,6 +5635,8 @@ static int cq_size_query(const LayoutContext *ctx, int dom, const char *cname, s
         if (cq_known_feature(w)) feat = i;
     }
     if (feat < 0 || !b || !cq_feature(b, parts[feat], &v, &ratio, &orient) || orient) return -1;
+    /* (between two values: the feature in the middle, both the same way) */
+    if (no == 2 && (feat != 1 || opv[0][0] == '=' || opv[1][0] == '=' || opv[0][0] != opv[1][0])) return -1;
     int yes = 1;
     for (int i = 0; i < no; i++) {
         double l, r;
@@ -24730,8 +24733,8 @@ again:
     ctx->cache_readonly = saved_readonly;
     ctx->viewport_width = viewport_width;
     ctx->viewport_height = viewport_height;
-    g_unit_vw = viewport_width > 0.0 ? viewport_width : 1024.0;
-    g_unit_vh = viewport_height > 0.0 ? viewport_height : 768.0;
+    g_unit_vw = viewport_width >= 0.0 ? viewport_width : 1024.0;
+    g_unit_vh = viewport_height >= 0.0 ? viewport_height : 768.0;
     g_unit_rem = 16.0;
     /* Base URL for resolving relative stylesheet/image URLs: the URL of the
      * document's realm (a frame's page has its own), else the start URL. */

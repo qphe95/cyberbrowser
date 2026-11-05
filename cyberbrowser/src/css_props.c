@@ -6883,6 +6883,72 @@ char *css_shape_computed(const char *n, const char *v)
     return r;
 }
 
+/* grid-template-areas: its strings' cells spaced, "" if not rows of one length with
+ * every name a rectangle. */
+static char *canon_grid_areas(const char *v)
+{
+    enum { MAX_CELLS = 400, MAX_NAME = 48 };
+    static __thread char cells[MAX_CELLS][MAX_NAME];
+    int rows = 0, cols = -1, nc = 0;
+    Buf b = { 0 };
+    for (const char *q = v; *q; ) {
+        if (isspace((unsigned char)*q)) { q++; continue; }
+        if (*q != '"') { free(b.s); return strdup(""); }
+        const char *e = strchr(q + 1, '"');
+        if (!e) { free(b.s); return strdup(""); }
+        int here = 0;
+        if (rows) buf_ch(&b, ' ');
+        buf_ch(&b, '"');
+        for (const char *c = q + 1; c < e; ) {
+            if (isspace((unsigned char)*c)) { c++; continue; }
+            char name[MAX_NAME];
+            size_t l = 0;
+            if (*c == '.') {
+                while (c < e && *c == '.') c++;
+                name[l++] = '.';
+            } else {
+                const char *st = c;
+                while (c < e && (isalnum((unsigned char)*c) || *c == '-' || *c == '_' || (unsigned char)*c >= 0x80 || *c == 92)) c++;
+                if (c == st || (size_t)(c - st) >= MAX_NAME) { free(b.s); return c == st ? strdup("") : NULL; }
+                l = (size_t)(c - st);
+                memcpy(name, st, l);
+            }
+            name[l] = 0;
+            if (nc >= MAX_CELLS) { free(b.s); return NULL; }
+            memcpy(cells[nc++], name, l + 1);
+            if (here++) buf_ch(&b, ' ');
+            buf_str(&b, name);
+        }
+        buf_ch(&b, '"');
+        if (!here || (cols >= 0 && here != cols)) { free(b.s); return strdup(""); }
+        cols = here;
+        rows++;
+        q = e + 1;
+    }
+    if (!rows) { free(b.s); return strdup(""); }
+    /* (each name fills its bounding box) */
+    for (int i = 0; i < nc; i++) {
+        if (cells[i][0] == '.') continue;
+        bool first = true;
+        for (int j = 0; j < i && first; j++) if (!strcmp(cells[i], cells[j])) first = false;
+        if (!first) continue;
+        int r0 = i / cols, r1 = r0, c0 = i % cols, c1 = c0, count = 0;
+        for (int j = 0; j < nc; j++) {
+            if (strcmp(cells[i], cells[j])) continue;
+            int r = j / cols, c = j % cols;
+            if (r < r0) r0 = r;
+            if (r > r1) r1 = r;
+            if (c < c0) c0 = c;
+            if (c > c1) c1 = c;
+            count++;
+        }
+        if (count != (r1 - r0 + 1) * (c1 - c0 + 1)) { free(b.s); return strdup(""); }
+    }
+    buf_ch(&b, 0);
+    if (!strcmp(b.s, v)) { free(b.s); return NULL; }
+    return b.s;
+}
+
 /* position-try-fallbacks: "" if invalid. */
 static char *canon_try_fallbacks(const char *v)
 {
@@ -7398,19 +7464,7 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
         }
         return NULL;
     }
-    if (!strcmp(n, "grid-template-areas") && *v == '"') {
-        /* (a row with no cell in it isn't one) */
-        for (const char *q = v; *q; q++) {
-            if (*q != '"') continue;
-            const char *e = strchr(q + 1, '"');
-            if (!e) break;
-            bool any = false;
-            for (const char *c = q + 1; c < e; c++) if (!isspace((unsigned char)*c)) any = true;
-            if (!any) return strdup("");
-            q = e;
-        }
-        return NULL;
-    }
+    if (!strcmp(n, "grid-template-areas") && *v == '"') return canon_grid_areas(v);
     if (!strcmp(n, "container-name")) {
         char w[8][160];
         int nw = canon_words(v, w, 8);
@@ -7426,6 +7480,32 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
     if (!strcmp(n, "font-palette") && !strncasecmp(v, "palette-mix(", 12)) return canon_palette_mix(v);
     if (strstr(v, "image-set(")) return canon_image_set(v);
     if (!strcmp(n, "position-try-fallbacks")) return canon_try_fallbacks(v);
+    if ((!strcmp(n, "grid-template-columns") || !strcmp(n, "grid-template-rows")) && strstr(v, "[") && strncasecmp(v, "subgrid", 7)) {
+        /* (a set of no line names says nothing) */
+        Buf nb = { 0 };
+        bool gone = false;
+        for (const char *q = v; *q; ) {
+            if (*q == '[') {
+                const char *c = q + 1;
+                while (isspace((unsigned char)*c)) c++;
+                if (*c == ']') {
+                    q = c + 1;
+                    while (isspace((unsigned char)*q)) q++;
+                    gone = true;
+                    continue;
+                }
+            }
+            buf_ch(&nb, *q++);
+        }
+        buf_ch(&nb, 0);
+        if (gone) {
+            size_t nl = strlen(nb.s);
+            while (nl && isspace((unsigned char)nb.s[nl - 1])) nb.s[--nl] = 0;
+            if (!grid_tracks_bad(nb.s) && nl) return nb.s;
+            if (nl && grid_tracks_bad(nb.s)) { free(nb.s); return strdup(""); }
+        }
+        free(nb.s);
+    }
     if ((!strcmp(n, "grid-template-columns") || !strcmp(n, "grid-template-rows")) && grid_tracks_bad(v)) return strdup("");
     if (strstr(v, "random(")) return canon_random(n, v);
     if (!strcmp(n, "clip-path") || !strcmp(n, "shape-outside")) {

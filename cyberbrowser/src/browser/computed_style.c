@@ -1142,7 +1142,8 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
             bool rows_asked = n[14] == 'r';
             if (cs->used.writing_mode != 0) rows_asked = !rows_asked;
             int nt = layout_query_grid_tracks(cs->el, rows_asked, tracks, 2000);
-            if (nt >= 0) {
+            /* (no tracks but the one an empty grid has: none) */
+            if (nt >= 0 && !(!strcmp(r, "none") && (nt == 0 || (nt == 1 && tracks[0] == 0.0)))) {
                 char *g = grid_tracks_resolved(r, tracks, nt, layout_query_grid_lead(cs->el, rows_asked));
                 free(r);
                 r = g;

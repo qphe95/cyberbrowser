@@ -3241,8 +3241,9 @@ static bool mq_ratio(const char *s, const char *e, double *out) {
     const char *slash = memchr(s, '/', (size_t)(e - s));
     if (!slash) return mq_number(s, e, out);
     double a, b;
-    if (!mq_number(s, slash, &a) || !mq_number(slash + 1, e, &b) || b == 0.0) return false;
-    *out = a / b;
+    if (!mq_number(s, slash, &a) || !mq_number(slash + 1, e, &b) || a < 0.0 || b < 0.0) return false;
+    /* (a degenerate ratio is a value, matching nothing but itself) */
+    *out = b != 0.0 ? a / b : NAN;
     return true;
 }
 
@@ -3275,7 +3276,7 @@ static bool mq_feature_lookup(const char *name, double vw, double vh, MqFeature 
         { "hover", "hover" }, { "any-hover", "hover" }, { "pointer", "fine" }, { "any-pointer", "fine" },
         { "display-mode", "browser" }, { "color-gamut", "srgb" }, { "dynamic-range", "standard" },
         { "video-dynamic-range", "standard" }, { "update", "fast" }, { "overflow-block", "scroll" },
-        { "overflow-inline", "scroll" }, { "scripting", "enabled" }, { "scan", "progressive" },
+        { "overflow-inline", "scroll" }, { "scripting", "enabled" }, { "scan", "none" },
     };
     memset(f, 0, sizeof(*f));
     f->name = name;
@@ -3397,6 +3398,8 @@ static int mq_feature(const char *s, const char *e, double vw, double vh) {
         }
         double v;
         if (!mq_value(&f, colon + 1, e, &v)) return -1;
+        /* (a whole number's written as one) */
+        if (f.type == MQ_NUM && strcmp(n, "device-pixel-ratio") && memchr(colon + 1, '.', (size_t)(e - colon - 1))) return -1;
         /* (out of the feature's range: not a value of it) */
         if ((f.type == MQ_RES || f.type == MQ_RATIO) && v < 0) return -1;
         if (f.type == MQ_NUM && strcmp(n, "device-pixel-ratio") && (v < 0 || v != (double)(long long)v)) return -1;
@@ -3466,7 +3469,8 @@ static int mq_in_parens(Mq *m) {
         if (*close == '(') depth++;
         else if (*close == ')' && --depth == 0) break;
     }
-    if (close >= m->end) { m->bad = true; return -1; }
+    /* (the end of the query closes what's open) */
+    if (close > m->end) close = m->end;
     Mq in = { m->p + 1, close, m->vw, m->vh, false };
     mq_ws(&in);
     int r;
@@ -3478,7 +3482,7 @@ static int mq_in_parens(Mq *m) {
     } else {
         r = mq_feature(m->p + 1, close, m->vw, m->vh);
     }
-    m->p = close + 1;
+    m->p = close < m->end ? close + 1 : m->end;
     return r;
 }
 

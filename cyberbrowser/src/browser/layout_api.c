@@ -186,7 +186,8 @@ static double window_number(JSContextHandle ctx, const char *name, double fallba
     GCValue v = JS_GetPropertyStr(ctx, global, name);
     double d = fallback;
     if (JS_IsNumber(v)) JS_ToFloat64(ctx, &d, v);
-    return d > 0.0 ? d : fallback;
+    /* (a frame can be of no size at all) */
+    return d >= 0.0 ? d : fallback;
 }
 
 static void lq_map_slots(void)

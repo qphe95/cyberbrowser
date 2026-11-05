@@ -770,6 +770,37 @@
         }
         return true;
     }
+    /* A @container prelude as it serializes. */
+    function containerCondText(text) {
+        var parts = [], d = 0, cur = '';
+        for (var k = 0; k < text.length; k++) {
+            var c = text[k];
+            if (c === '(') d++; else if (c === ')') d--;
+            if (c === ',' && !d) { parts.push(cur); cur = ''; } else cur += c;
+        }
+        parts.push(cur);
+        var low = function (m) { return m.toLowerCase(); };
+        var one = function (seg) {
+            return seg.replace(/\s+/g, ' ').replace(/\(\s+/g, '(').replace(/\s+\)/g, ')')
+                .replace(/\s*(<=|>=|<|>|=)\s*/g, ' $1 ').replace(/\s*:\s*/g, ': ')
+                .replace(/\([A-Za-z-]+(?=\)|:| [<>=])/g, low)
+                .replace(/[<>=] [A-Za-z-]+(?=\)| [<>=])/g, low);
+        };
+        return parts.map(function (part) {
+            /* (what's in style() goes as written) */
+            var out = '', t = part.trim(), i = 0;
+            while (i < t.length) {
+                var at = t.slice(i).search(/style\(/i);
+                if (at < 0) { out += one(t.slice(i)); break; }
+                out += one(t.slice(i, i + at));
+                var j = i + at + 6, depth = 1;
+                while (j < t.length && depth) { if (t[j] === '(') depth++; else if (t[j] === ')') depth--; j++; }
+                out += t.slice(i + at, j);
+                i = j;
+            }
+            return out;
+        }).join(', ');
+    }
     function containerPreludeValid(prelude) {
         var parts = [], d = 0, cur = '';
         for (var k = 0; k < prelude.length; k++) {
@@ -1731,7 +1762,10 @@
     function relativeList(text, amp) {
         return topCommas(text).map(function (one) {
             var m = /^([>+~])\s*([\s\S]*)$/.exec(one);
-            return m ? (amp ? '& ' : '') + m[1] + ' ' + parseSelectorList(m[2]) : parseSelectorList(one);
+            if (m) return (amp ? '& ' : '') + m[1] + ' ' + parseSelectorList(m[2]);
+            /* (under a style rule, what doesn't say & is under it) */
+            var text1 = parseSelectorList(one);
+            return amp && one.indexOf('&') < 0 ? '& ' + text1 : text1;
         }).join(', ');
     }
     /* @scope's [(start)]? [to (end)]?: [start, end], null if not one. */
@@ -1763,6 +1797,56 @@
         }
         return i === t.length ? out : null;
     }
+    /* A block's declarations up to its first rule, and the rest. */
+    function leadingDecls(block) {
+        var i = 0, n = block.length, end = 0, kept = "", from = 0;
+        while (i < n) {
+            var it = blockItem(block, i);
+            /* (an at-rule that means nothing here is passed over) */
+            if (it.rule && /^\s*@/.test(block.slice(i, it.end)) && !/^\s*@(private|result|media|supports|container|layer|scope|starting-style|font-face|keyframes|-webkit-keyframes|page|property|counter-style|position-try|view-transition|document|-moz-document|mixin|function|contents|apply|font-feature-values|font-palette-values|namespace|import|charset|custom-media)\b/i.test(block.slice(i, it.end))) {
+                kept += block.slice(from, i);
+                i = end = from = it.end;
+                continue;
+            }
+            if (it.rule) break;
+            i = end = it.end;
+        }
+        return [kept + block.slice(from, end), block.slice(end)];
+    }
+    /* The declaration or rule at i in a block: where it ends, and which. The block of
+     * a custom property's value is its value; strings hold what they hold. */
+    function blockItem(block, i) {
+        var n = block.length, j = i, depth = 0, q = null;
+        while (j < n) {
+            var c = block[j];
+            if (q) { if (c === '\\') { j += 2; continue; } if (c === q) q = null; j++; continue; }
+            if (c === '"' || c === "'") { q = c; j++; continue; }
+            if (c === '(' || c === '[') depth++;
+            else if ((c === ')' || c === ']') && depth) depth--;
+            else if (!depth && c === ';') return { rule: false, end: j + 1 };
+            else if (!depth && c === '{') {
+                var e = braceEnd(block, j);
+                var before = block.slice(i, j);
+                /* (a value that is or holds a block, not a selector) */
+                if (/^\s*--[^\s:{]*\s*:/.test(before) || /^\s*[-\w]+\s*:\s*$/.test(before) || /^\s*[-\w]+\s*:.*var\(/.test(before)) { j = e; continue; }
+                return { rule: true, end: e };
+            }
+            j++;
+        }
+        return { rule: false, end: n };
+    }
+    function braceEnd(block, open) {
+        var d = 1, k = open + 1, q = null, n = block.length;
+        while (k < n && d) {
+            var c = block[k];
+            if (q) { if (c === '\\') { k += 2; continue; } if (c === q) q = null; k++; continue; }
+            if (c === '"' || c === "'") q = c;
+            else if (c === '{') d++;
+            else if (c === '}') d--;
+            k++;
+        }
+        return k;
+    }
     /* An @scope's block in order: runs of declarations are rules of their own. */
     function nestedDeclarations(text, parent) {
         var r = makeRule(CSSNestedDeclarations, 'nested-declarations', { __style: null });
@@ -1770,7 +1854,13 @@
         r.__parentRule = parent;
         return r.__style.length ? r : null;
     }
-    function scopeBody(block, parent) {
+    /* A group rule's block: as a rule list, or under a style rule or @scope in order. */
+    function groupBody(block, r, ctx) {
+        if (ctx === 'style') return scopeBody(block, r, 'style');
+        if (relativeOk > 0) return scopeBody(block, r, 'group');
+        return parseRules(block, 'group', r);
+    }
+    function scopeBody(block, parent, ctx) {
         var out = [], i = 0, n = block.length, run = '';
         var flush = function () {
             var d = run.trim() ? nestedDeclarations(run, parent) : null;
@@ -1778,27 +1868,14 @@
             run = '';
         };
         while (i < n) {
-            var j = i, depth = 0, q = null, kind = null;
-            while (j < n) {
-                var c = block[j];
-                if (q) { if (c === '\\') { j += 2; continue; } if (c === q) q = null; j++; continue; }
-                if (c === '"' || c === "'") { q = c; j++; continue; }
-                if (c === '(' || c === '[') depth++;
-                else if ((c === ')' || c === ']') && depth) depth--;
-                else if (!depth && c === ';') { kind = 'decl'; break; }
-                else if (!depth && c === '{') { kind = 'rule'; break; }
-                j++;
-            }
-            if (kind === 'rule') {
-                var bd = 1, k = j + 1;
-                while (k < n && bd) { if (block[k] === '{') bd++; else if (block[k] === '}') bd--; k++; }
+            var it = blockItem(block, i);
+            if (it.rule) {
                 flush();
-                parseRules(block.slice(i, k), 'group', parent).forEach(function (x) { out.push(x); });
-                i = k;
+                parseRules(block.slice(i, it.end), ctx || 'group', parent).forEach(function (x) { out.push(x); });
             } else {
-                run += block.slice(i, kind ? j + 1 : n);
-                i = kind ? j + 1 : n;
+                run += block.slice(i, it.end);
             }
+            i = it.end;
         }
         flush();
         return out;
@@ -1816,32 +1893,30 @@
             if (p.block === null) return null;
             var sel;
             try { sel = ctx === 'style' || relativeOk > 0 || nestedUnder(parent) ? relativeList(p.prelude, ctx === 'style') : parseSelectorList(p.prelude); } catch (e) { return null; }
-            var b = splitBlock(p.block);
             r = makeRule(CSSStyleRule, 'style', { __selector: sel, __style: null, __rules: [] });
-            r.__style = decls(b[0], r);
-            for (var k = 0; k < b[1].length; k++) {
-                var nested = parseRules(b[1][k], 'style', r);
-                for (var m = 0; m < nested.length; m++) r.__rules.push(nested[m]);
-            }
+            /* (what comes before the first rule inside is its own; later ones are rules of their own) */
+            var lead = leadingDecls(p.block);
+            r.__style = decls(lead[0], r);
+            r.__rules = scopeBody(lead[1], r, 'style');
         } else {
             switch (p.at) {
             case 'media':
                 if (p.block === null) return null;
                 r = makeRule(CSSMediaRule, 'media', { __mediaText: p.prelude, __media: null, __rules: [] });
-                r.__rules = parseRules(p.block, 'group', r);
+                r.__rules = groupBody(p.block, r, ctx);
                 break;
             case 'supports':
                 if (p.block === null) return null;
                 r = makeRule(CSSSupportsRule, 'supports', { __cond: p.prelude.replace(/\s+/g, ' ').trim(), __rules: [] });
-                r.__rules = parseRules(p.block, 'group', r);
+                r.__rules = groupBody(p.block, r, ctx);
                 break;
             case 'container':
                 if (p.block === null || !containerPreludeValid(p.prelude)) return null;
                 var cm = /^([A-Za-z_-][\w-]*)\s+(.*)$/.exec(p.prelude);
                 var cname = cm && !/^(not|style|scroll-state)$/i.test(cm[1]) && !/^\(/.test(cm[1]) ? cm[1] : '';
-                r = makeRule(CSSContainerRule, 'container', { __cond: p.prelude.replace(/\s+/g, ' ').trim(), __cname: cname,
+                r = makeRule(CSSContainerRule, 'container', { __cond: containerCondText(p.prelude), __cname: cname,
                     __cquery: cname ? cm[2].trim() : p.prelude.trim(), __rules: [] });
-                r.__rules = parseRules(p.block, 'group', r);
+                r.__rules = groupBody(p.block, r, ctx);
                 break;
             case 'layer':
                 var names = p.prelude ? p.prelude.split(',').map(function (x) { return x.trim(); }) : [];
@@ -1869,7 +1944,7 @@
             case 'starting-style':
                 if (p.block === null) return null;
                 r = makeRule(CSSStartingStyleRule, 'starting-style', { __rules: [] });
-                r.__rules = parseRules(p.block, 'group', r);
+                r.__rules = groupBody(p.block, r, ctx);
                 break;
             case 'scope':
                 if (p.block === null) return null;
@@ -1934,7 +2009,7 @@
             case 'result':
                 if (p.block === null || ctx !== 'mixin') return null;
                 r = makeRule(CSSResultRule, 'result', { __body: p.block, __rules: [] });
-                r.__rules = parseRules(p.block, 'group', r);
+                r.__rules = groupBody(p.block, r, ctx);
                 break;
             case 'private':
                 if (p.block === null || !parent || parent.__kind !== 'style') return null;
@@ -2240,5 +2315,6 @@
 
     /* for querySelector and CSS.supports(selector()) */
     Object.defineProperty(global, '__cyberSelectorValid', { value: selectorValid, configurable: true });
+    Object.defineProperty(global, '__cyberMediaText', { value: function (q) { return newMediaList(q).mediaText; }, configurable: true });
     Object.defineProperty(global, '__cyberSelectorSerialize', { value: parseSelectorList, configurable: true });
 })
