@@ -91,6 +91,9 @@
         return null;
     }
 
+    /* (for others: a color's serialization, as canvas reads it) */
+    if (!global.__cyberParseColor) Object.defineProperty(global, '__cyberParseColor', { configurable: true, value: parseColor });
+
     /* ---- gradients, patterns, ImageData, Path2D ---- */
     function CanvasGradient() { illegal(); }
     define(CanvasGradient.prototype, 'addColorStop', function addColorStop(offset, color) {

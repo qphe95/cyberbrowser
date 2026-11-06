@@ -5568,6 +5568,20 @@ static const CqBox *cq_find(const LayoutContext *ctx, int dom, const char *name,
     return NULL;
 }
 
+/* Container units' bases: the inline axis from the nearest container of any
+ * size type, the block axis only from one of type size (0: none, the viewport's). */
+static void cq_unit_bases(const LayoutContext *ctx, int dom, double *w, double *h)
+{
+    *w = *h = 0.0;
+    bool got_w = false, got_h = false;
+    for (int p = cq_parent(ctx, dom); p >= 0 && (!got_w || !got_h); p = cq_parent(ctx, p)) {
+        const CqBox *b = cq_lookup(p);
+        if (!b || !b->type) continue;
+        if (!got_w) { *w = b->w; got_w = true; }
+        if (!got_h && b->type == 2) { *h = b->h; got_h = true; }
+    }
+}
+
 static const CssCustomProps *cq_props_of(const LayoutContext *ctx, int dom)
 {
     if (!ctx->custom_props) return NULL;
@@ -5615,9 +5629,8 @@ static bool cq_value(const char *t, const CqBox *b, bool ratio, double *out)
     }
     if (!(isdigit((unsigned char)*t) || *t == '.' || *t == '-' || *t == '+' || !strncasecmp(t, "calc(", 5) || !strncasecmp(t, "min(", 4) || !strncasecmp(t, "max(", 4) || !strncasecmp(t, "clamp(", 6))) return false;
     double held_w = t_cq_w, held_h = t_cq_h;
-    const CqBox *up = g_cq_ctx ? cq_find(g_cq_ctx, b->dom, NULL, 0, 1) : NULL;
-    t_cq_w = up ? up->w : 0.0;
-    t_cq_h = up ? up->h : 0.0;
+    if (g_cq_ctx) cq_unit_bases(g_cq_ctx, b->dom, &t_cq_w, &t_cq_h);
+    else t_cq_w = t_cq_h = 0.0;
     *out = css_parse_length(t, 0.0, g_unit_vw, b->fs > 0.0 ? b->fs : 16.0);
     t_cq_w = held_w;
     t_cq_h = held_h;
@@ -11100,9 +11113,8 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
         t_cq_idx = idx;
         {
             /* (cq units: of the nearest container with the size) */
-            const CqBox *qb = g_cq_n ? cq_find(ctx, dom, NULL, 0, 1) : NULL;
-            t_cq_w = qb ? qb->w : 0.0;
-            t_cq_h = qb ? qb->h : 0.0;
+            if (g_cq_n) cq_unit_bases(ctx, dom, &t_cq_w, &t_cq_h);
+            else t_cq_w = t_cq_h = 0.0;
         }
         int count = css_style_match(P->set, P->sd, dom, T->scratch, &applied);
 
@@ -21382,8 +21394,22 @@ static int layout_anim_keyframes(void *ud, const char *name, const float **offs,
     return n;
 }
 
-/* A keyframe's values: its declarations applied to the box's style. */
+static void layout_anim_frame_in(void *ud, const void *decls, int n, AnimVal out[ANIM_NPROP], bool has[ANIM_NPROP]);
+
+/* A keyframe's values, its container units of the box's containers. */
 static void layout_anim_frame(void *ud, const void *decls, int n, AnimVal out[ANIM_NPROP], bool has[ANIM_NPROP])
+{
+    LayoutAnimUd *u = (LayoutAnimUd *)ud;
+    double held_w = t_cq_w, held_h = t_cq_h;
+    ptrdiff_t bi = u->box - u->ctx->boxes;
+    if (g_cq_n && bi >= 0 && bi < u->ctx->tree.count) cq_unit_bases(u->ctx, u->ctx->tree.nodes[bi].dom_node_idx, &t_cq_w, &t_cq_h);
+    layout_anim_frame_in(ud, decls, n, out, has);
+    t_cq_w = held_w;
+    t_cq_h = held_h;
+}
+
+/* A keyframe's values: its declarations applied to the box's style. */
+static void layout_anim_frame_in(void *ud, const void *decls, int n, AnimVal out[ANIM_NPROP], bool has[ANIM_NPROP])
 {
     LayoutAnimUd *u = (LayoutAnimUd *)ud;
     LayoutStyle tmp = *u->box->s;
@@ -24669,11 +24695,8 @@ static bool cascade_at(LayoutContext *ctx, int dom, const CssCustomProps *props,
     const CssAppliedDecl *applied = NULL;
     t_cq_idx = -1;
     g_cq_ctx = ctx;
-    {
-        const CqBox *qb = g_cq_n ? cq_find(ctx, dom, NULL, 0, 1) : NULL;
-        t_cq_w = qb ? qb->w : 0.0;
-        t_cq_h = qb ? qb->h : 0.0;
-    }
+    if (g_cq_n) cq_unit_bases(ctx, dom, &t_cq_w, &t_cq_h);
+    else t_cq_w = t_cq_h = 0.0;
     int count = css_style_match(set, sd, dom, t, &applied);
     InlineBlock inl[4];
     int ninl = 0;

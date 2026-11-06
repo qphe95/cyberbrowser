@@ -149,7 +149,9 @@
             if (key !== ILLEGAL) throw new TypeError('Illegal constructor');
         }
         add() {
-            var a = [this].concat(Array.prototype.map.call(arguments, rectify));
+            if (!arguments.length) return this;
+            /* (a sum's own values first, then the rest: all one unit, one value) */
+            var a = (this instanceof CSSMathSum ? this.__args.slice() : [this]).concat(Array.prototype.map.call(arguments, rectify));
             if (a.every(function (x) { return x instanceof CSSUnitValue && x.unit === a[0].unit; }))
                 return new CSSUnitValue(a.reduce(function (s, x) { return s + x.value; }, 0), a[0].unit);
             var flat = [];
@@ -161,7 +163,8 @@
             return CSSNumericValue.prototype.add.apply(this, a);
         }
         mul() {
-            var a = [this].concat(Array.prototype.map.call(arguments, rectify));
+            if (!arguments.length) return this;
+            var a = (this instanceof CSSMathProduct ? this.__args.slice() : [this]).concat(Array.prototype.map.call(arguments, rectify));
             var nums = a.filter(function (x) { return x instanceof CSSUnitValue && x.unit === 'number'; });
             var units = a.filter(function (x) { return x instanceof CSSUnitValue && x.unit !== 'number'; });
             if (nums.length + units.length === a.length && units.length <= 1) {
@@ -192,7 +195,7 @@
         }
         to(unit) {
             unit = canonUnit(unit);
-            if (!(unit in UNITS)) throw new SyntaxError('Unknown unit');
+            if (!(unit in UNITS)) throw syntaxError('Unknown unit');
             var sum = sumOf(this);
             if (!sum || sum.length !== 1) throw new TypeError('Cannot convert to ' + unit);
             var k = Object.keys(sum[0].units);
@@ -208,7 +211,7 @@
         toSum() {
             var units = Array.prototype.map.call(arguments, function (u) {
                 var c = canonUnit(u);
-                if (!(c in UNITS)) throw new SyntaxError('Unknown unit ' + u);
+                if (!(c in UNITS)) throw syntaxError('Unknown unit ' + u);
                 return c;
             });
             var sum = sumOf(this);
@@ -333,7 +336,8 @@
         return new CSSMathNegate(v);
     }
     function minMax(self, args, Cls, fn) {
-        var a = [self].concat(Array.prototype.map.call(args, rectify));
+        if (!args.length) return self;
+        var a = (self instanceof Cls ? self.__args.slice() : [self]).concat(Array.prototype.map.call(args, rectify));
         if (a.every(function (x) { return x instanceof CSSUnitValue && x.unit === a[0].unit; }))
             return new CSSUnitValue(fn.apply(null, a.map(function (x) { return x.value; })), a[0].unit);
         return makeMath(Cls, a);
@@ -420,7 +424,7 @@
     }
     function argsOf(args) {
         var a = Array.prototype.map.call(args, rectify);
-        if (!a.length) throw new SyntaxError('No arguments');
+        if (!a.length) throw syntaxError('No arguments');
         return a;
     }
     function checkSumType(a) {
@@ -1383,8 +1387,34 @@
             if (key !== ILLEGAL) throw new TypeError('Illegal constructor');
         }
         static parse(cssText) {
-            if (!global.CSS.supports('color', String(cssText))) throw syntaxError('Not a color: ' + cssText);
-            return generic(String(cssText));
+            var t = String(cssText).trim();
+            if (!global.CSS.supports('color', t) || /^(initial|inherit|unset|revert|revert-layer)$/i.test(t)) throw syntaxError('Not a color: ' + cssText);
+            /* (rgb(), hsl(), hwb(): their own channels; hex and names: as rgb) */
+            var m = /^(rgba?|hsla?|hwb)\(([^()]*)\)$/i.exec(t);
+            var parts = m ? m[2].trim().split(/\s*[,\/]\s*|\s+/).filter(Boolean) : null;
+            var alphaOf = function (x) {
+                if (x === undefined) return new CSSUnitValue(100, 'percent');
+                return /%$/.test(x) ? new CSSUnitValue(parseFloat(x), 'percent') : new CSSUnitValue(parseFloat(x) * 100, 'percent');
+            };
+            var chan = function (x) { return /%$/.test(x) ? new CSSUnitValue(parseFloat(x), 'percent') : new CSSUnitValue(parseFloat(x), 'number'); };
+            var hue = function (x) {
+                var u = /(deg|rad|grad|turn)$/i.exec(x);
+                return new CSSUnitValue(parseFloat(x), u ? u[1].toLowerCase() : 'deg');
+            };
+            if (m && parts.length >= 3 && parts.length <= 4 && parts.every(function (p) { return /^[-+]?[\d.]+(e[-+]?\d+)?(%|deg|rad|grad|turn)?$/i.test(p); })) {
+                var fn = m[1].toLowerCase();
+                if (fn[0] === 'r') return new global.CSSRGB(chan(parts[0]), chan(parts[1]), chan(parts[2]), alphaOf(parts[3]));
+                if (fn[0] === 'h' && fn[1] === 's') return new global.CSSHSL(hue(parts[0]), new CSSUnitValue(parseFloat(parts[1]), 'percent'), new CSSUnitValue(parseFloat(parts[2]), 'percent'), alphaOf(parts[3]));
+                return new global.CSSHWB(hue(parts[0]), new CSSUnitValue(parseFloat(parts[1]), 'percent'), new CSSUnitValue(parseFloat(parts[2]), 'percent'), alphaOf(parts[3]));
+            }
+            var s = global.__cyberParseColor ? global.__cyberParseColor(t) : null, h;
+            if (s && (h = /^#([0-9a-f]{6})$/i.exec(s)))
+                return new global.CSSRGB(new CSSUnitValue(parseInt(h[1].slice(0, 2), 16), 'number'), new CSSUnitValue(parseInt(h[1].slice(2, 4), 16), 'number'),
+                                         new CSSUnitValue(parseInt(h[1].slice(4, 6), 16), 'number'));
+            if (s && (h = /^rgba\((\d+), (\d+), (\d+), ([\d.]+)\)$/.exec(s)))
+                return new global.CSSRGB(new CSSUnitValue(+h[1], 'number'), new CSSUnitValue(+h[2], 'number'), new CSSUnitValue(+h[3], 'number'),
+                                         new CSSUnitValue(+h[4] * 100, 'percent'));
+            return generic(t);
         }
     }
     /* members: [name, conversion]; the last, alpha, is optional and 100% */
