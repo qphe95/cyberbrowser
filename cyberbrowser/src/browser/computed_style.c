@@ -1197,6 +1197,18 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
         for (size_t k = 0; k < sizeof map / sizeof map[0]; k++)
             if (!strcmp(r, map[k][0])) { free(r); r = strdup(map[k][1]); break; }
     }
+    /* (an axis that scrolls makes the other one scroll too: visible as auto, clip as hidden) */
+    if (r && (!strcmp(n, "overflow-x") || !strcmp(n, "overflow-y")) && !strcmp(r, "visible")) {
+        static __thread int ov_depth;
+        ov_depth++;
+        const char *o = ov_depth == 1 ? computed_of(ctx, cs, n[9] == 'x' ? "overflow-y" : "overflow-x") : NULL;
+        ov_depth--;
+        if (o && (!strcmp(o, "hidden") || !strcmp(o, "scroll") || !strcmp(o, "auto"))) {
+            bool vis = !strcmp(r, "visible");
+            free(r);
+            r = strdup(vis ? "auto" : "hidden");
+        }
+    }
     if (r && !strcmp(n, "display")) {
         /* (math outside MathML: flow) */
         if (strstr(r, "math") && dom_valid(cs->el) && g_dom.ns[dom_slot(cs->el)] != DOM_NS_MATHML) {

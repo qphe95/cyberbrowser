@@ -2415,6 +2415,22 @@
     StyleSheetList.prototype[Symbol.iterator] = Array.prototype[Symbol.iterator];
     Object.defineProperty(StyleSheetList.prototype, Symbol.toStringTag, { value: 'StyleSheetList', configurable: true });
     expose('StyleSheetList', StyleSheetList);
+    /* CSS.escape (CSSOM 2.1): an identifier's escaped form */
+    if (global.CSS) Object.defineProperty(global.CSS, 'escape', { configurable: true, enumerable: true, writable: true,
+        value: function escape(ident) {
+            if (arguments.length < 1) throw new TypeError("Failed to execute 'escape' on 'CSS': 1 argument required");
+            var s = String(ident), n = s.length, out = '', first = n ? s.charCodeAt(0) : 0;
+            if (n === 1 && first === 0x2d) return '\\' + s;
+            for (var i = 0; i < n; i++) {
+                var c = s.charCodeAt(i);
+                if (c === 0) { out += '\uFFFD'; continue; }
+                if ((c >= 0x1 && c <= 0x1f) || c === 0x7f || (i === 0 && c >= 0x30 && c <= 0x39) ||
+                    (i === 1 && c >= 0x30 && c <= 0x39 && first === 0x2d)) { out += '\\' + c.toString(16) + ' '; continue; }
+                if (c >= 0x80 || c === 0x2d || c === 0x5f || (c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a)) { out += s.charAt(i); continue; }
+                out += '\\' + s.charAt(i);
+            }
+            return out;
+        } });
     /* (a namespace object isn't enumerable) */
     if (Object.getOwnPropertyDescriptor(global, 'CSS')) Object.defineProperty(global, 'CSS', { enumerable: false });
     var DP = global.Document && global.Document.prototype;

@@ -4029,7 +4029,7 @@ char *css_prop_compute(const CssPropDef *p, const char *value, const CssComputeE
         if (ok) { buf_ch(&sb, 0); free(out); out = sb.s; } else free(sb.s);
     }
     if (out && (!strcmp(p->name, "contain") || !strcmp(p->name, "text-fit") ||
-                strstr(p->name, "timing-function"))) {
+                strstr(p->name, "timing-function") || !strncmp(p->name, "animation-range-", 16))) {
         g_canon_computed = true;
         char *cc = css_prop_canon(p, out);
         g_canon_computed = false;
@@ -8146,6 +8146,13 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
         /* (only at either end) */
         for (int i = 1; i + 1 < nw; i++) if (!strcasecmp(w[i], "only")) return strdup("");
         if (nw && !strcasecmp(w[0], "only") && nw == 1) return strdup("");
+        /* (only first: last) */
+        if (nw > 1 && !strcasecmp(w[0], "only")) {
+            Buf s = { 0 };
+            for (int i = 1; i < nw; i++) { if (s.n) buf_ch(&s, ' '); buf_str(&s, w[i]); }
+            buf_str(&s, " only");
+            return buf_take(&s);
+        }
         return NULL;
     }
     if (!strcmp(n, "font-language-override") || !strcmp(n, "font-variation-settings") || !strcmp(n, "font-feature-settings")) {
@@ -8270,6 +8277,18 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
         if (nw == 2 && !strcasecmp(w[1], "consistent")) return strdup(w[0]);
         return NULL;
     }
+    if (!strcmp(n, "content") && (strstr(v, "attr()") || strstr(v, "attr( )"))) return strdup("");
+    if (!strcmp(n, "content") && strcasestr_simple(v, "symbols(")) {
+        /* (numeric and alphabetic symbols: two at least) */
+        for (const char *p = v; (p = strcasestr_simple(p, "symbols(")); p += 8) {
+            const char *a = p + 8, *e = strchr(a, ')');
+            if (!e) break;
+            int strings = 0;
+            for (const char *k = a; k < e; k++) if (*k == '"' || *k == '\'') { char q = *k; strings++; for (k++; k < e && *k != q; k++) ; }
+            while (isspace((unsigned char)*a)) a++;
+            if ((!strncasecmp(a, "numeric", 7) || !strncasecmp(a, "alphabetic", 10)) && strings < 2) return strdup("");
+        }
+    }
     if (!strcmp(n, "content") && strcasestr_simple(v, "counter")) {
         /* (counter() and counters(): a predefined style's name lower-cased, decimal unsaid) */
         static const char *pre[] = { "decimal", "disc", "circle", "square", "none", "lower-roman", "upper-roman", "lower-alpha",
@@ -8314,6 +8333,8 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
             const char *st = lc + 1, *se = e;
             while (st < se && isspace((unsigned char)*st)) st++;
             while (se > st && isspace((unsigned char)se[-1])) se--;
+            /* (none is no style a counter can be in) */
+            if (se - st == 4 && !strncasecmp(st, "none", 4)) { free(s.s); return strdup(""); }
             int k = 0;
             for (; pre[k]; k++) if ((size_t)(se - st) == strlen(pre[k]) && !strncasecmp(st, pre[k], strlen(pre[k]))) break;
             if (!pre[k]) { buf_add(&s, p, (size_t)(e + 1 - p)); p = e + 1; continue; }
@@ -8344,6 +8365,89 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
         char b[32];
         snprintf(b, sizeof b, "digits %d", (int)d);
         return strdup(b);
+    }
+    if (!strcmp(n, "color-scheme")) {
+        /* (only: last) */
+        char w[16][160];
+        int nw = canon_words(v, w, 16);
+        if (nw < 2 || strcasecmp(w[0], "only")) return NULL;
+        Buf s = { 0 };
+        for (int i = 1; i < nw; i++) { if (s.n) buf_ch(&s, ' '); buf_str(&s, w[i]); }
+        buf_str(&s, " only");
+        return buf_take(&s);
+    }
+    if ((!strcmp(n, "filter") || !strcmp(n, "backdrop-filter")) && strchr(v, '(')) {
+        /* (amounts past the whole of what they do: the whole; a turn of nothing in degrees) */
+        Buf s = { 0 };
+        bool changed = false;
+        for (const char *p = v; *p; ) {
+            static const char *const capped[] = { "grayscale(", "invert(", "opacity(", "sepia(" };
+            int which = -1;
+            for (int k = 0; k < 4; k++) if (!strncmp(p, capped[k], strlen(capped[k])) && (p == v || p[-1] == ' ')) which = k;
+            if (which >= 0) {
+                const char *a = p + strlen(capped[which]);
+                char *e = NULL;
+                double d = strtod(a, &e);
+                if (e != a && (*e == '%' ? e[1] == ')' && d > 100 : *e == ')' && d > 1)) {
+                    buf_add(&s, p, (size_t)(a - p));
+                    buf_str(&s, *e == '%' ? "100%)" : "1)");
+                    p = (*e == '%' ? e + 2 : e + 1);
+                    changed = true;
+                    continue;
+                }
+            }
+            if (!strncmp(p, "hue-rotate(0)", 13) && (p == v || p[-1] == ' ')) { buf_str(&s, "hue-rotate(0deg)"); p += 13; changed = true; continue; }
+            buf_ch(&s, *p++);
+        }
+        buf_ch(&s, 0);
+        if (!changed) { free(s.s); return NULL; }
+        return s.s;
+    }
+    if (!strcmp(n, "mask-position") && !g_canon_computed) {
+        /* (each one value: the other axis's center said too) */
+        char **parts = NULL;
+        int np = split_commas(v, &parts);
+        Buf s = { 0 };
+        bool changed = false;
+        for (int k = 0; k < np; k++) {
+            char w[2][160];
+            if (k) buf_str(&s, ", ");
+            if (canon_words(parts[k], w, 2) == 1) {
+                if (!strcasecmp(w[0], "top") || !strcasecmp(w[0], "bottom")) { buf_str(&s, "center "); buf_str(&s, w[0]); }
+                else { buf_str(&s, w[0]); buf_str(&s, " center"); }
+                changed = true;
+            } else {
+                char *t = parts[k];
+                while (isspace((unsigned char)*t)) t++;
+                buf_str(&s, t);
+            }
+            free(parts[k]);
+        }
+        free(parts);
+        buf_ch(&s, 0);
+        if (!changed) { free(s.s); return NULL; }
+        return s.s;
+    }
+    if ((!strcmp(n, "animation-range-start") || !strcmp(n, "animation-range-end")) && g_canon_computed) {
+        /* (a range name at its own start or end: the name alone) */
+        const char *dflt = !strcmp(n, "animation-range-start") ? " 0%" : " 100%";
+        char **parts = NULL;
+        int np = split_commas(v, &parts);
+        Buf s = { 0 };
+        bool changed = false;
+        for (int k = 0; k < np; k++) {
+            char *t = parts[k];
+            while (isspace((unsigned char)*t)) t++;
+            size_t tl = strlen(t), dl = strlen(dflt);
+            if (k) buf_str(&s, ", ");
+            if (tl > dl && !strcmp(t + tl - dl, dflt) && isalpha((unsigned char)t[0])) { buf_add(&s, t, tl - dl); changed = true; }
+            else buf_str(&s, t);
+            free(parts[k]);
+        }
+        free(parts);
+        buf_ch(&s, 0);
+        if (!changed) { free(s.s); return NULL; }
+        return s.s;
     }
     if (!strcmp(n, "transform-origin") && !g_canon_computed) {
         /* (one value: the other axis's center said too) */
