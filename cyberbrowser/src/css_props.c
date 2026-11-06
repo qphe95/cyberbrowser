@@ -1650,16 +1650,19 @@ static double relative_px(const char *u) {
         { "em", 0, 1 }, { "rem", 1, 1 }, { "ex", 0, 0.5 }, { "rex", 1, 0.5 }, { "ch", 0, 0.5 }, { "rch", 1, 0.5 },
         { "cap", 0, 0.7 }, { "rcap", 1, 0.7 }, { "ic", 0, 1 }, { "ric", 1, 1 }, { "lh", 0, 1.2 }, { "rlh", 1, 1.2 },
         { "vw", 2, 1 }, { "svw", 2, 1 }, { "lvw", 2, 1 }, { "dvw", 2, 1 }, { "vi", 2, 1 }, { "svi", 2, 1 },
-        { "lvi", 2, 1 }, { "dvi", 2, 1 }, { "cqw", 2, 1 }, { "cqi", 2, 1 },
+        { "lvi", 2, 1 }, { "dvi", 2, 1 }, { "cqw", 6, 1 }, { "cqi", 6, 1 },
         { "vh", 3, 1 }, { "svh", 3, 1 }, { "lvh", 3, 1 }, { "dvh", 3, 1 }, { "vb", 3, 1 }, { "svb", 3, 1 },
-        { "lvb", 3, 1 }, { "dvb", 3, 1 }, { "cqh", 3, 1 }, { "cqb", 3, 1 },
-        { "vmin", 4, 1 }, { "svmin", 4, 1 }, { "lvmin", 4, 1 }, { "dvmin", 4, 1 }, { "cqmin", 4, 1 },
-        { "vmax", 5, 1 }, { "svmax", 5, 1 }, { "lvmax", 5, 1 }, { "dvmax", 5, 1 }, { "cqmax", 5, 1 },
+        { "lvb", 3, 1 }, { "dvb", 3, 1 }, { "cqh", 7, 1 }, { "cqb", 7, 1 },
+        { "vmin", 4, 1 }, { "svmin", 4, 1 }, { "lvmin", 4, 1 }, { "dvmin", 4, 1 }, { "cqmin", 8, 1 },
+        { "vmax", 5, 1 }, { "svmax", 5, 1 }, { "lvmax", 5, 1 }, { "dvmax", 5, 1 }, { "cqmax", 9, 1 },
     };
+    /* (container units: the query container's, else the viewport's) */
+    double cw = e->cq_w > 0 ? e->cq_w / 100 : vw, ch = e->cq_h > 0 ? e->cq_h / 100 : vh;
     for (size_t i = 0; i < sizeof rel / sizeof rel[0]; i++) {
         if (strcasecmp(u, rel[i].u)) continue;
-        double base = rel[i].k == 0 ? em : rel[i].k == 1 ? e->root_font_size : rel[i].k == 2 ? vw :
-                      rel[i].k == 3 ? vh : rel[i].k == 4 ? (vw < vh ? vw : vh) : (vw > vh ? vw : vh);
+        int k = rel[i].k;
+        double base = k == 0 ? em : k == 1 ? e->root_font_size : k == 2 ? vw : k == 3 ? vh : k == 4 ? (vw < vh ? vw : vh) :
+                      k == 5 ? (vw > vh ? vw : vh) : k == 6 ? cw : k == 7 ? ch : k == 8 ? (cw < ch ? cw : ch) : (cw > ch ? cw : ch);
         if (e->ch_ratio > 0 && !strcasecmp(u, "ch")) return em * e->ch_ratio;
         if (e->ex_ratio > 0 && !strcasecmp(u, "ex")) return em * e->ex_ratio;
         return base * rel[i].f;

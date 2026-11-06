@@ -88,6 +88,7 @@ typedef struct CssComputeEnv {
     double vw, vh;          /* the viewport, px */
     double color[4];        /* currentcolor (0-255, alpha 0-1) */
     double ch_ratio, ex_ratio;  /* ch and ex over em, of the font (0: not known) */
+    double cq_w, cq_h;          /* the query container's content box, px (0: none, the viewport's) */
 } CssComputeEnv;
 
 /* The computed value of a valid specified value of longhand p (as

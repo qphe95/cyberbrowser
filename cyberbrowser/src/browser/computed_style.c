@@ -392,6 +392,22 @@ static void env_of(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p, 
     env->vw = cs->vw;
     env->vh = cs->vh;
     env->color[3] = 1;
+    /* (container units: the nearest size container's content box, each axis its own) */
+    if (v && strstr(v, "cq") && dom_valid(cs->el)) {
+        for (NodeId a = dom_parent(cs->el); a && dom_kind(a) == DOM_K_ELEMENT && (!env->cq_w || !env->cq_h); a = dom_parent(a)) {
+            ComputedStyle *as = computed_style_new(a);
+            if (!as) break;
+            refresh(ctx, as);
+            const char *ct = as->styled ? computed_of(ctx, as, "container-type") : NULL;
+            bool inl = ct && strstr(ct, "inline-size"), both = ct && !inl && strstr(ct, "size");
+            double w = 0, h = 0;
+            if ((inl || both) && layout_query_content_size(a, &w, &h)) {
+                if (!env->cq_w) env->cq_w = w > 0 ? w : 0.0001;
+                if (both && !env->cq_h) env->cq_h = h > 0 ? h : 0.0001;
+            }
+            computed_style_free(as);
+        }
+    }
     /* currentcolor: the color (for color itself, the parent's; a shadow with none
      * has it too) */
     if (!mentions(v, "currentcolor") && strcmp(p->name, "box-shadow") && strcmp(p->name, "text-shadow")) return;
