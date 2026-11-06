@@ -403,7 +403,23 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                 for (char *q = name; *q; q++) *q = (char)tolower((unsigned char)*q);
                 bool known = known_name(name, k_pseudo_elements) || !strncmp(name, "-webkit-", 8);
                 bool vt_fn = !strncmp(name, "view-transition-", 16), vt_root = !strcmp(name, "view-transition");
+                bool hl = !strcmp(name, "highlight");
                 free(name);
+                /* (::highlight(): one name, or *) */
+                if (hl && sp->p < sp->e && *sp->p == '(') {
+                    const char *a = sp->p + 1, *e = a;
+                    while (e < sp->e && *e != ')') e++;
+                    while (a < e && isspace((unsigned char)*a)) a++;
+                    const char *z = e;
+                    while (z > a && isspace((unsigned char)z[-1])) z--;
+                    bool ok = z > a;
+                    if (ok && !(z - a == 1 && *a == '*')) {
+                        for (const char *k = a; k < z && ok; k++)
+                            ok = isalnum((unsigned char)*k) || *k == '-' || *k == '_' || (unsigned char)*k >= 0x80 || *k == '\\';
+                        if (ok && isdigit((unsigned char)*a)) ok = false;
+                    }
+                    if (!ok) { sp->err = true; break; }
+                }
                 if (!known || sp->no_pe) { sp->err = true; break; }
                 bool paren = sp->p < sp->e && *sp->p == '(';
                 if (vt_root && paren) { sp->err = true; break; }

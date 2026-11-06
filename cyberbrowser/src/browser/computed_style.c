@@ -1193,6 +1193,8 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
             { "table-column", "block" }, { "table-column-group", "block" }, { "table-header-group", "block" },
             { "table-footer-group", "block" }, { "table-row", "block" }, { "table-cell", "block" },
             { "table-caption", "block" }, { "inline list-item", "block list-item" }, { "-webkit-inline-box", "-webkit-box" },
+            { "ruby-base", "block" }, { "ruby-text", "block" }, { "ruby-base-container", "block" }, { "ruby-text-container", "block" },
+            { "ruby", "block ruby" },
         };
         for (size_t k = 0; k < sizeof map / sizeof map[0]; k++)
             if (!strcmp(r, map[k][0])) { free(r); r = strdup(map[k][1]); break; }

@@ -466,6 +466,7 @@
 "            if (fn === 'state' && !/^(?:[a-zA-Z_-]|[^\\x00-\\x7f]|\\\\.)(?:[\\w-]|[^\\x00-\\x7f]|\\\\.)*$/.test(raw)) throw new SyntaxError('bad :state');\n"
 "            if (element && fn === 'scroll-button' && !/^(\\*|up|down|left|right|block-start|block-end|inline-start|inline-end|prev|next)$/i.test(raw)) throw new SyntaxError('bad ::scroll-button');\n"
 "            if (element && fn === 'picker' && !/^select$/i.test(raw)) throw new SyntaxError('bad ::picker');\n"
+"            if (element && fn === 'highlight' && !/^(?:\\*|-?(?:[a-zA-Z_]|[^\\x00-\\x7f]|\\\\.)(?:[\\w-]|[^\\x00-\\x7f]|\\\\.)*)$/.test(raw)) throw new SyntaxError('bad ::highlight');\n"
 "            if (fn === 'dir' && !/^(ltr|rtl)$/i.test(raw)) throw new SyntaxError('bad :dir');\n"
 "            if (fn === 'heading' && raw && !/^\\s*[-+]?\\d+(\\s*,\\s*[-+]?\\d+)*\\s*$/.test(raw)) throw new SyntaxError('bad :heading');\n"
 "            return { raw: raw };\n"

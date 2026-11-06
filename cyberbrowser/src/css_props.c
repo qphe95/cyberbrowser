@@ -4029,7 +4029,10 @@ char *css_prop_compute(const CssPropDef *p, const char *value, const CssComputeE
         if (ok) { buf_ch(&sb, 0); free(out); out = sb.s; } else free(sb.s);
     }
     if (out && (!strcmp(p->name, "contain") || !strcmp(p->name, "text-fit") ||
-                strstr(p->name, "timing-function") || !strncmp(p->name, "animation-range-", 16))) {
+                strstr(p->name, "timing-function") || !strncmp(p->name, "animation-range-", 16) ||
+                !strcmp(p->name, "counter-increment") || !strcmp(p->name, "counter-set") || !strcmp(p->name, "font-weight") ||
+                !strcmp(p->name, "font-width") || !strcmp(p->name, "font-stretch") || !strcmp(p->name, "font-style") ||
+                !strncmp(p->name, "scroll-padding", 14))) {
         g_canon_computed = true;
         char *cc = css_prop_canon(p, out);
         g_canon_computed = false;
@@ -8365,6 +8368,44 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
         char b[32];
         snprintf(b, sizeof b, "digits %d", (int)d);
         return strdup(b);
+    }
+    if ((!strcmp(n, "counter-increment") || !strcmp(n, "counter-set")) && g_canon_computed) {
+        /* (computed: each name with its number, 1 or 0 when unsaid) */
+        char w[32][160];
+        int nw = canon_words(v, w, 32);
+        if (nw < 1 || (nw == 1 && !strcasecmp(w[0], "none"))) return NULL;
+        const char *dflt = n[8] == 'i' ? " 1" : " 0";
+        Buf s = { 0 };
+        bool changed = false;
+        for (int i = 0; i < nw; i++) {
+            if (i) buf_ch(&s, ' ');
+            buf_str(&s, w[i]);
+            bool name = !isdigit((unsigned char)w[i][0]) && w[i][0] != '-' && w[i][0] != '+' && strncasecmp(w[i], "calc(", 5);
+            bool next_num = i + 1 < nw && (isdigit((unsigned char)w[i + 1][0]) || w[i + 1][0] == '-' || w[i + 1][0] == '+' || !strncasecmp(w[i + 1], "calc(", 5));
+            if (name && !next_num) { buf_str(&s, dflt); changed = true; }
+        }
+        if (changed) return buf_take(&s);
+        free(s.s);
+        return NULL;
+    }
+    if (g_canon_computed && (!strcmp(n, "font-weight") || !strcmp(n, "font-width") || !strcmp(n, "font-stretch") ||
+                             !strncmp(n, "scroll-padding", 14))) {
+        /* (computed: within what each can be) */
+        char *e = NULL;
+        double d = strtod(v, &e);
+        if (e == v) return NULL;
+        char b[64];
+        if (!strcmp(n, "font-weight") && !*e && (d < 1 || d > 1000)) { snprintf(b, sizeof b, "%g", d < 1 ? 1.0 : 1000.0); return strdup(b); }
+        if ((n[5] == 'w' || n[5] == 's') && n[0] == 'f' && !strcmp(e, "%") && d < 0) return strdup("0%");
+        if (n[0] == 's' && d < 0 && !strchr(e, ' ')) return strdup("0px");
+        return NULL;
+    }
+    if (!strcmp(n, "font-style") && g_canon_computed && !strncasecmp(v, "oblique ", 8)) {
+        /* (computed: the angle within -90deg to 90deg, none of it normal) */
+        double d = strtod(v + 8, NULL);
+        if (d == 0) return strdup("normal");
+        if (d > 90 || d < -90) return strdup(d > 0 ? "oblique 90deg" : "oblique -90deg");
+        return NULL;
     }
     if (!strcmp(n, "color-scheme")) {
         /* (only: last) */
