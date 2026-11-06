@@ -378,6 +378,10 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
 /* (size containment from contain, content-visibility, or container-type: 1 inline axis, 2 block axis) */
 #define CSS_CONTAIN_SIZE_OF(s) (((s)->table_role >= 2 && (s)->table_role != 5) ? 0 :     ((s)->contain_size | ((s)->container_type == 2 ? 3 : (s)->container_type == 1 ? 1 : 0)))
     float cis_w, cis_h;     /* contain-intrinsic-width and -height, px; 0 none */
+    unsigned char cis_auto; /* auto before them: the last remembered size first (1 width, 2 height) */
+    unsigned char cv_hidden; /* content-visibility: hidden (its contents skipped) */
+    unsigned char margin_trim; /* margin-trim: 1 block-start, 2 inline-start, 4 block-end, 8 inline-end */
+    unsigned char baseline_src; /* baseline-source: 0 auto, 1 first, 2 last */
     CssAlignItems align_items;
 
     double flex_basis;

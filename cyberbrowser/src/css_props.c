@@ -711,7 +711,7 @@ bool css_is_wide_keyword(const char *v, size_t n) {
     while (n && isspace((unsigned char)*v)) { v++; n--; }
     while (n && isspace((unsigned char)v[n - 1])) n--;
     return ieq(v, n, "initial") || ieq(v, n, "inherit") || ieq(v, n, "unset") || ieq(v, n, "revert") ||
-           ieq(v, n, "revert-layer");
+           ieq(v, n, "revert-layer") || ieq(v, n, "revert-rule");
 }
 
 static GNode *prop_grammar(int i) {
@@ -998,7 +998,7 @@ static bool color_tok_valid(const Toks *ts, int i);
 
 static bool tok_ident(const Tok *t, const char *kw) { return t->type == T_IDENT && strcasecmp(t->str, kw) == 0; }
 
-static const char *const g_css_wide[] = { "initial", "inherit", "unset", "revert", "revert-layer", "default", NULL };
+static const char *const g_css_wide[] = { "initial", "inherit", "unset", "revert", "revert-layer", "revert-rule", "default", NULL };
 
 static bool custom_ident_ok(const Tok *t) {
     if (t->type != T_IDENT) return false;
@@ -1673,6 +1673,9 @@ static double relative_px(const char *u) {
     for (size_t i = 0; i < sizeof rel / sizeof rel[0]; i++) {
         if (strcasecmp(u, rel[i].u)) continue;
         int k = rel[i].k;
+        /* (inline and block: the viewport's axes as the box's writing mode turns them) */
+        size_t ul = strlen(u);
+        if (e->vertical && (k == 2 || k == 3) && ul && (tolower((unsigned char)u[ul - 1]) == 'i' || tolower((unsigned char)u[ul - 1]) == 'b')) k = 5 - k;
         double base = k == 0 ? em : k == 1 ? e->root_font_size : k == 2 ? vw : k == 3 ? vh : k == 4 ? (vw < vh ? vw : vh) :
                       k == 5 ? (vw > vh ? vw : vh) : k == 6 ? cw : k == 7 ? ch : k == 8 ? (cw < ch ? cw : ch) : (cw > ch ? cw : ch);
         if (e->ch_ratio > 0 && !strcasecmp(u, "ch")) return em * e->ch_ratio;
@@ -1783,13 +1786,19 @@ static bool calc_math_function(const Toks *ts, const Tok *f, CalcSum *out) {
         double lo, hi;
         const char *ul, *uh;
         if (nr < 2 || !calc_one(&a[0], &lo, &ul) || !calc_one(&a[1], &hi, &uh) || strcmp(ul, uh)) return false;
-        double val = hi < lo ? lo : lo + x * (hi - lo);
+        double st = 0;
         if (nr == 3) {
-            double st;
             const char *us;
             if (!calc_one(&a[2], &st, &us) || strcmp(us, ul)) return false;
-            if (st > 0.0) { val = lo + floor(x * (hi - lo + st) / st) * st; if (val > hi) val -= st; if (val < lo) val = lo; }
         }
+        /* (NaN anywhere is NaN; an infinite min is the value, an infinite max NaN) */
+        double val;
+        if (isnan(lo) || isnan(hi) || isnan(st)) val = NAN;
+        else if (hi <= lo) val = lo;
+        else if (isinf(lo) || isinf(hi)) val = NAN;
+        else if (st > 0.0 && isinf(st)) val = lo;
+        else if (st > 0.0) { val = lo + floor(x * (hi - lo + st) / st) * st; if (val > hi) val -= st; if (val < lo) val = lo; }
+        else val = lo + x * (hi - lo);
         memset(out, 0, sizeof *out);
         return calc_add(out, val, ul);
     }
@@ -1845,13 +1854,18 @@ static bool calc_math_function(const Toks *ts, const Tok *f, CalcSum *out) {
         for (int i = 1; i < na; i++) {
             if (isnan(v[i])) { r = NAN; break; }
             r = !strcasecmp(name, "min") ? (v[i] < r ? v[i] : r) : (v[i] > r ? v[i] : r);
+            /* (between zeros: min takes -0, max +0) */
+            if (v[i] == 0.0 && r == 0.0) r = !strcasecmp(name, "min") ? (signbit(v[i]) || signbit(r) ? -0.0 : 0.0)
+                                                                       : (!signbit(v[i]) || !signbit(r) ? 0.0 : -0.0);
         }
     } else if (!strcasecmp(name, "clamp")) {
         if (na != 3) return false;
         SAME_UNITS();
         if (!strcmp(unit, "%") && !clamp_none && !t_pct_numbers) return false;
         r = v[1] < v[0] ? v[0] : v[1];
+        if (r == 0.0 && v[0] == 0.0 && v[1] == 0.0) r = signbit(v[0]) && signbit(v[1]) ? -0.0 : 0.0;
         if (r > v[2]) r = v[2];
+        else if (r == 0.0 && v[2] == 0.0) r = signbit(r) || signbit(v[2]) ? -0.0 : 0.0;
         if (v[0] > v[2]) r = v[0];
         if (isnan(v[0]) || isnan(v[1]) || isnan(v[2])) r = NAN;
     } else if (!strcasecmp(name, "progress")) {
@@ -1876,8 +1890,8 @@ static bool calc_math_function(const Toks *ts, const Tok *f, CalcSum *out) {
         if (na == 2) SAME_UNITS();
         if (!strcasecmp(name, "round")) {
             if (b == 0 || isnan(a) || isnan(b)) r = NAN;
-            else if (isinf(b)) r = isinf(a) ? NAN : (strategy == 1 ? (a > 0 ? INFINITY : -0.0) :
-                                                   strategy == 2 ? (a < 0 ? -INFINITY : 0.0) : (a < 0 ? -0.0 : 0.0));
+            else if (isinf(b)) r = isinf(a) ? NAN : (strategy == 1 ? (a > 0 ? INFINITY : copysign(0.0, a)) :
+                                                   strategy == 2 ? (a < 0 ? -INFINITY : copysign(0.0, a)) : copysign(0.0, a));
             else if (isinf(a)) r = a;
             else {
                 double q = a / b, lo = floor(q) * b, hi = ceil(q) * b;
@@ -1892,7 +1906,12 @@ static bool calc_math_function(const Toks *ts, const Tok *f, CalcSum *out) {
         } else {
             if (b == 0 || isinf(a) || isnan(a) || isnan(b)) r = NAN;
             else if (isinf(b)) r = !strcasecmp(name, "rem") || (a >= 0) == (b > 0) ? a : NAN;
-            else r = !strcasecmp(name, "mod") ? a - b * floor(a / b) : a - b * trunc(a / b);
+            else {
+                /* (a zero takes the sign of the divisor for mod, of the dividend for rem) */
+                r = fmod(a, b);
+                if (!strcasecmp(name, "mod")) { if (r != 0.0 && (r < 0.0) != (b < 0.0)) r += b; if (r == 0.0) r = copysign(0.0, b); }
+                else if (r == 0.0) r = copysign(0.0, a);
+            }
         }
     } else if (!strcasecmp(name, "sin") || !strcasecmp(name, "cos") || !strcasecmp(name, "tan")) {
         if (na != 1 || (u[0][0] && strcmp(u[0], "deg"))) return false;
@@ -1912,6 +1931,8 @@ static bool calc_math_function(const Toks *ts, const Tok *f, CalcSum *out) {
     } else if (!strcasecmp(name, "pow")) {
         if (na != 2 || u[0][0] || u[1][0]) return false;
         r = pow(v[0], v[1]);
+        /* (NaN in, NaN out; one to an infinite power has no answer) */
+        if (isnan(v[0]) || isnan(v[1]) || (fabs(v[0]) == 1.0 && isinf(v[1]))) r = NAN;
     } else if (!strcasecmp(name, "sqrt")) {
         if (na != 1 || u[0][0]) return false;
         r = sqrt(v[0]);
@@ -1921,6 +1942,7 @@ static bool calc_math_function(const Toks *ts, const Tok *f, CalcSum *out) {
         for (int i = 0; i < na; i++) r += v[i] * v[i];
         r = sqrt(r);
         for (int i = 0; i < na; i++) if (isinf(v[i])) r = INFINITY;
+        for (int i = 0; i < na; i++) if (isnan(v[i])) r = NAN;
     } else if (!strcasecmp(name, "log")) {
         if (na > 2 || u[0][0] || (na == 2 && u[1][0])) return false;
         r = na == 2 ? log(v[0]) / log(v[1]) : log(v[0]);
@@ -2211,6 +2233,7 @@ static void math_sum_tokens(const Toks *ts, int b, int e, MathSum *out, bool neg
         bool f_is_sum = false;
         bool any_num = false, divided = false, after_nums = false;
         const char *unit = NULL;
+        char ucanon[12];
         int nf = 0, only = -1;
         Buf f = { 0 }, after = { 0 };
         bool wanted_paren_sum = false;
@@ -2255,6 +2278,9 @@ static void math_sum_tokens(const Toks *ts, int b, int e, MathSum *out, bool neg
             if ((x->type == T_PERCENT || x->type == T_DIM) && !unit) {
                 k *= x->num;
                 unit = x->type == T_PERCENT ? "%" : x->str;
+                /* (in its canonical unit, as one that's worked out would be) */
+                double sc = 1.0;
+                if (x->type == T_DIM && (unit_dim(x->str, NULL) == D_ANGLE || unit_dim(x->str, NULL) == D_TIME) && calc_unit_canon(x->str, &sc, ucanon, sizeof ucanon)) { k *= sc; unit = ucanon; }
                 continue;
             }
             if (nf) buf_str(&f, " * ");
@@ -2524,8 +2550,8 @@ static void srgb_to_hsl(const double c[3], double o[3], bool *hue_none) {
     double mx = fmax(c[0], fmax(c[1], c[2])), mn = fmin(c[0], fmin(c[1], c[2]));
     double l = (mx + mn) / 2, d = mx - mn, h = 0, s = 0;
     *hue_none = true;
-    /* (near enough to gray that noise is all the hue there is) */
-    if (fabs(d) > 2e-5) {
+    /* (gray but for conversion noise) */
+    if (fabs(d) > 1e-7) {
         s = (l == 0 || l == 1) ? 0 : (mx - l) / fmin(l, 1 - l);
         if (mx == c[0]) h = (c[1] - c[2]) / d + (c[1] < c[2] ? 6 : 0);
         else if (mx == c[1]) h = (c[2] - c[0]) / d + 2;
@@ -2548,7 +2574,8 @@ static void hsl_to_srgb(const double hsl[3], double o[3]) {
 
 static void hwb_to_srgb(const double hwb[3], double o[3]) {
     double w = hwb[1] / 100, b = hwb[2] / 100;
-    if (w + b >= 1) { o[0] = o[1] = o[2] = w / (w + b); return; }
+    /* (within 1e-5 of the whole: gray) */
+    if (w + b >= 1 - 1.000001e-5) { o[0] = o[1] = o[2] = w / (w + b); return; }
     double full[3] = { hwb[0], 100, 50 };
     hsl_to_srgb(full, o);
     for (int i = 0; i < 3; i++) o[i] = o[i] * (1 - w - b) + w;
@@ -2562,7 +2589,7 @@ static void srgb_to_hwb(const double c[3], double o[3], bool *hue_none) {
     /* (HSL's turn for a negative saturation isn't HWB's: its whiteness and
      * blackness keep the order the channels have) */
     double l = (mx + mn) / 2;
-    if (fabs(mx - mn) > 2e-5 && l != 0 && l != 1 && (mx - l) / fmin(l, 1 - l) < 0) o[0] = norm_hue(hsl[0] - 180);
+    if (fabs(mx - mn) > 1e-7 && l != 0 && l != 1 && (mx - l) / fmin(l, 1 - l) < 0) o[0] = norm_hue(hsl[0] - 180);
     if (o[1] + o[2] >= 100) *hue_none = true;
 }
 
@@ -2594,6 +2621,7 @@ static void rect_to_polar(const double r[3], double o[3], double eps, bool *hue_
     double c = sqrt(r[1] * r[1] + r[2] * r[2]);
     o[0] = r[0]; o[1] = c; o[2] = norm_hue(atan2(r[2], r[1]) * 180 / M_PI);
     *hue_none = c <= eps;
+    if (*hue_none) o[1] = 0;
 }
 
 /* Channels of space cs (missing ones as 0) to XYZ D65. */
@@ -2682,6 +2710,8 @@ static Color color_convert(const Color *c, int cs) {
     if (c->cs == cs) return r;
     double v[3], xyz[3];
     for (int i = 0; i < 3; i++) v[i] = (c->none >> i & 1) ? 0 : c->c[i];
+    /* (colorfulness within noise of none: gray, as it leaves) */
+    if ((c->cs == CS_LCH && v[1] <= 0.0015) || (c->cs == CS_OKLCH && v[1] <= 0.000004) || (c->cs == CS_HSL && fabs(v[1]) <= 0.001)) v[1] = 0;
     bool hue_none = false;
     if ((c->cs == CS_SRGB || c->cs == CS_HSL || c->cs == CS_HWB) && (cs == CS_SRGB || cs == CS_HSL || cs == CS_HWB)) {
         double s[3];
@@ -2704,12 +2734,14 @@ static Color color_convert(const Color *c, int cs) {
     bool from_opposing = (c->cs == CS_LAB || c->cs == CS_OKLAB) && (sn & 6) == 6;
     bool from_chroma = ((c->cs == CS_LCH || c->cs == CS_OKLCH) && (sn & 2)) || (c->cs == CS_HSL && (sn & 2));
     bool from_whiteblack = c->cs == CS_HWB && (sn & 6) == 6;
+    bool from_light_chroma = ((c->cs == CS_HSL && (sn & 6) == 6) || ((c->cs == CS_LCH || c->cs == CS_OKLCH) && (sn & 3) == 3));
     if (sn == 7) r.none |= 7;
     for (int i = 0; i < 3; i++) {
         int k = channel_kind(cs, i);
         if ((from_opposing || from_chroma) && (k == 5 || k == 6)) r.none |= 1u << i;
         if (from_chroma && (k == 7 || k == 8)) r.none |= 1u << i;
         if (from_whiteblack && (k == 4 || k == 5 || k == 10 || k == 11)) r.none |= 1u << i;
+        if (from_light_chroma && (k == 10 || k == 11)) r.none |= 1u << i;
     }
     return r;
 }
@@ -3129,11 +3161,39 @@ static int color_eval(const Toks *ts, int i, Color *out, int depth) {
         if (!strcasecmp(t->str, "transparent")) { out->alpha = 0; return 1; }
         if (!strcasecmp(t->str, "currentcolor")) {
             if (!g_env) return -1;
+            /* (the color in its own space, not its 8 bits) */
+            if (g_env->color_text[0] && !strstr(g_env->color_text, "urrent")) {
+                Toks ct;
+                if (tokenize(g_env->color_text, strlen(g_env->color_text), &ct)) {
+                    int r = ct.n > 0 ? color_eval(&ct, 0, out, depth + 1) : 0;
+                    toks_free(&ct);
+                    if (r == 1) return 1;
+                }
+                memset(out, 0, sizeof *out);
+                out->cs = CS_SRGB;
+                out->alpha = 1;
+                out->legacy = true;
+            }
             for (int k = 0; k < 3; k++) out->c[k] = g_env->color[k] / 255;
             out->alpha = g_env->color[3];
             return 1;
         }
         if (css_color_system(t->str)) {
+            /* (a dark color scheme's own) */
+            static const struct { const char *n; double c[3]; } dark[] = {
+                { "canvas", {18,18,18} }, { "canvastext", {255,255,255} }, { "field", {59,59,59} }, { "fieldtext", {255,255,255} },
+                { "buttontext", {255,255,255} }, { "visitedtext", {208,173,240} }, { "activetext", {255,158,158} },
+                { "graytext", {128,128,128} }, { "menu", {59,59,59} }, { "menutext", {255,255,255} },
+                { "window", {18,18,18} }, { "windowtext", {255,255,255} }, { "buttonhighlight", {107,107,107} },
+                { "buttonshadow", {107,107,107} }, { "threedface", {107,107,107} }, { "infobackground", {59,59,59} },
+                { "infotext", {255,255,255} },
+            };
+            if (g_env && g_env->dark)
+                for (size_t k = 0; k < sizeof dark / sizeof dark[0]; k++)
+                    if (!strcasecmp(t->str, dark[k].n)) {
+                        for (int j = 0; j < 3; j++) out->c[j] = dark[k].c[j] / 255;
+                        return 1;
+                    }
             for (size_t k = 0; k < sizeof g_system_colors / sizeof g_system_colors[0]; k++)
                 if (!strcasecmp(t->str, g_system_colors[k].n))
                     for (int j = 0; j < 3; j++) out->c[j] = g_system_colors[k].c[j] / 255;
@@ -4432,8 +4492,12 @@ static char *g_color_raw[COLOR_RAW_N][2];
 static int g_color_raw_next;
 
 static void color_raw_note(const char *canon, const char *raw) {
+    /* (the latest raw wins: hsl(0 0 50%) and hsl(180 0 50%) are one rgb()) */
     for (int i = 0; i < COLOR_RAW_N; i++)
-        if (g_color_raw[i][0] && !strcmp(g_color_raw[i][0], canon)) return;
+        if (g_color_raw[i][0] && !strcmp(g_color_raw[i][0], canon)) {
+            if (strcmp(g_color_raw[i][1], raw)) { free(g_color_raw[i][1]); g_color_raw[i][1] = strdup(raw); }
+            return;
+        }
     int k = g_color_raw_next++ % COLOR_RAW_N;
     free(g_color_raw[k][0]);
     free(g_color_raw[k][1]);
@@ -4484,6 +4548,19 @@ static char *css_prop_compute_in(const CssPropDef *p, const char *value, const C
         toks_free(&ts);
     }
     free(v);
+    /* (an integer property's math: rounded to the nearest, halves up) */
+    if (out && strchr(value, '(') && p->grammar && strstr(p->grammar, "<integer") && !strstr(p->grammar, "<number")) {
+        bool wrap = !strncmp(out, "calc(", 5);
+        const char *st = out + (wrap ? 5 : 0);
+        char *e = NULL;
+        double d = strtod(st, &e);
+        if (e != st && (wrap ? e[0] == ')' && !e[1] : !e[0]) && isfinite(d) && fabs(d) < 2147483647.0) {
+            char nb[32];
+            snprintf(nb, sizeof nb, "%.0f", floor(d + 0.5));
+            free(out);
+            out = strdup(nb);
+        }
+    }
     /* (scale's percentages, computed: the numbers they are) */
     if (out && !strcmp(p->name, "scale") && strchr(out, '%')) {
         char w[3][160];
@@ -4506,7 +4583,7 @@ static char *css_prop_compute_in(const CssPropDef *p, const char *value, const C
                 strstr(p->name, "timing-function") || !strncmp(p->name, "animation-range-", 16) ||
                 !strcmp(p->name, "counter-increment") || !strcmp(p->name, "counter-set") || !strcmp(p->name, "font-weight") ||
                 !strcmp(p->name, "font-width") || !strcmp(p->name, "font-stretch") || !strcmp(p->name, "font-style") ||
-                !strncmp(p->name, "scroll-padding", 14) || !strcmp(p->name, "hyphenate-limit-chars"))) {
+                !strncmp(p->name, "scroll-padding", 14) || !strcmp(p->name, "hyphenate-limit-chars") || !strcmp(p->name, "offset-rotate"))) {
         g_canon_computed = true;
         char *cc = css_prop_canon(p, out);
         g_canon_computed = false;
@@ -6730,6 +6807,16 @@ static int expand_offset(const char *v, char **out) {
 
 static int expand_special(const CssPropDef *p, const char *v, char **out, const char **names, int n) {
     const char *nm = p->name;
+    /* (the legacy page-break-*: always is page, the rest as they are) */
+    if (!strncmp(nm, "page-break-", 11)) {
+        static const char *const ok[] = { "auto", "always", "avoid", "left", "right", "recto", "verso", NULL };
+        bool inside = !strcmp(nm, "page-break-inside");
+        for (int i = 0; ok[i]; i++) {
+            if (inside && strcmp(ok[i], "auto") && strcmp(ok[i], "avoid")) continue;
+            if (!strcasecmp(v, ok[i])) { out[0] = strdup(!strcmp(ok[i], "always") ? "page" : ok[i]); return 1; }
+        }
+        return -1;
+    }
     if (!strcmp(nm, "animation-range")) return expand_animation_range(v, out);
     if (!strcmp(nm, "text-box")) return expand_text_box(v, out);
     if (!strcmp(nm, "container")) {
@@ -6914,6 +7001,16 @@ static int serialize_layers(const char *const *vals, const char **names, int n, 
 }
 
 static int serialize_special(const CssPropDef *p, const char *const *vals, const char **names, int n, Buf *b) {
+    if (!strncmp(p->name, "page-break-", 11) && n == 1) {
+        static const char *const ok[] = { "auto", "avoid", "left", "right", "recto", "verso", NULL };
+        bool inside = !strcmp(p->name, "page-break-inside");
+        if (!inside && !strcmp(vals[0], "page")) { buf_str(b, "always"); return 0; }
+        for (int i = 0; ok[i]; i++) {
+            if (inside && strcmp(ok[i], "auto") && strcmp(ok[i], "avoid")) continue;
+            if (!strcmp(vals[0], ok[i])) { buf_str(b, ok[i]); return 0; }
+        }
+        return -1;
+    }
     const char *nm = p->name;
     if (!strcmp(nm, "position-try")) {
         if (strcmp(vals[0], "normal")) { buf_str(b, vals[0]); buf_ch(b, ' '); }
@@ -7405,10 +7502,20 @@ static char *canon_offset_rotate(const char *v)
 {
     char w[3][160];
     int n = canon_words(v, w, 3);
+    /* (computed, reverse is auto and half a turn) */
+    if (g_canon_computed && n == 1 && !strcasecmp(w[0], "reverse")) return strdup("auto 180deg");
     if (n != 2) return NULL;
     bool kw0 = !strcasecmp(w[0], "auto") || !strcasecmp(w[0], "reverse");
     const char *k = kw0 ? w[0] : w[1], *a = kw0 ? w[1] : w[0];
     char b[200];
+    if (g_canon_computed && !strcasecmp(k, "reverse")) {
+        char *e = NULL;
+        double d = strtod(a, &e);
+        if (e && e != a && !strcasecmp(e, "deg")) {
+            snprintf(b, sizeof b, "auto %.6gdeg", d + 180.0);
+            return strdup(b);
+        }
+    }
     if (!strcasecmp(k, "auto") && strtod(a, NULL) == 0.0 && (isdigit((unsigned char)a[0]) || a[0] == '.' || a[0] == '-')) return strdup("auto");
     snprintf(b, sizeof b, "%s %s", k, a);
     return strdup(b);
@@ -8293,8 +8400,94 @@ static bool grid_tracks_bad(const char *v)
     return bad;
 }
 
+/* One math argument in canonical form, as calc() would have it (without
+ * calc() round a single term); NULL when it won't go. */
+static char *math_arg_canon(const char *x, size_t n)
+{
+    Buf in = { 0 };
+    buf_str(&in, "calc(");
+    buf_add(&in, x, n);
+    buf_ch(&in, ')');
+    buf_ch(&in, 0);
+    Toks ts;
+    char *out = NULL;
+    if (tokenize(in.s, strlen(in.s), &ts)) {
+        int i = 0;
+        while (i < ts.n && ts.t[i].type != T_FUNC) i++;
+        if (i < ts.n) out = math_fn_text(&ts, i);
+        toks_free(&ts);
+    }
+    free(in.s);
+    if (out && !strncmp(out, "calc(", 5)) {
+        size_t l = strlen(out);
+        const char *b = out + 5;
+        int d = 0;
+        bool sum = false;
+        for (const char *c = b; c < out + l - 1; c++) {
+            if (*c == '(') d++; else if (*c == ')') d--;
+            else if (!d && (*c == ' ') && (c[1] == '+' || c[1] == '-') && c[2] == ' ') sum = true;
+        }
+        if (!sum && !strchr(b, ' ')) { memmove(out, b, l - 5); out[l - 6] = 0; }
+    }
+    return out;
+}
+
 /* random()'s options as they serialize, knowing the property. */
+static char *canon_random_args(const char *v);
+static char *canon_random_keys(const char *prop, const char *v);
 static char *canon_random(const char *prop, const char *v)
+{
+    char *o = canon_random_keys(prop, v);
+    char *a = canon_random_args(o ? o : v);
+    if (a) { free(o); return a; }
+    return o;
+}
+/* (each argument after the options: in canonical form) */
+static char *canon_random_args(const char *v)
+{
+    if (!strstr(v, "random(")) return NULL;
+    Buf b = { 0 };
+    bool changed = false;
+    const char *q = v;
+    for (const char *r; (r = strstr(q, "random(")); ) {
+        const char *open = r + 7, *e = open;
+        int d = 1;
+        for (; *e; e++) { if (*e == '(') d++; else if (*e == ')' && !--d) break; }
+        if (!*e) break;
+        buf_add(&b, q, (size_t)(open - q));
+        /* (the arguments, split at the top level) */
+        const char *s = open;
+        int k = 0;
+        for (const char *c = open; ; c++) {
+            if (c == e || (*c == ',' && !d)) {
+                const char *a0 = s, *a1 = c;
+                while (a0 < a1 && isspace((unsigned char)*a0)) a0++;
+                while (a1 > a0 && isspace((unsigned char)a1[-1])) a1--;
+                if (k) buf_str(&b, ", ");
+                bool opt = k == 0 && a1 > a0 && (isalpha((unsigned char)*a0) || (*a0 == '-' && a0[1] == '-')) &&
+                           strncasecmp(a0, "calc(", 5) && strncasecmp(a0, "min(", 4) && strncasecmp(a0, "max(", 4) &&
+                           strncasecmp(a0, "e ", 2) && strncasecmp(a0, "pi", 2) && strncasecmp(a0, "infinity", 8);
+                char *cv = !opt && a1 > a0 && !memchr(a0, '(', (size_t)(a1 - a0)) ? math_arg_canon(a0, (size_t)(a1 - a0)) : NULL;
+                if (cv && strncmp(cv, "calc(", 5) && (strlen(cv) != (size_t)(a1 - a0) || memcmp(cv, a0, (size_t)(a1 - a0)))) { buf_str(&b, cv); changed = true; }
+                else buf_add(&b, a0, (size_t)(a1 - a0));
+                free(cv);
+                k++;
+                s = c + 1;
+                if (c == e) break;
+                continue;
+            }
+            if (*c == '(') d++;
+            else if (*c == ')') d--;
+        }
+        buf_ch(&b, ')');
+        q = e + 1;
+    }
+    buf_str(&b, q);
+    buf_ch(&b, 0);
+    if (!changed) { free(b.s); return NULL; }
+    return b.s;
+}
+static char *canon_random_keys(const char *prop, const char *v)
 {
     if (!strstr(v, "random(")) return NULL;
     Buf b = { 0 };
@@ -8616,10 +8809,62 @@ static char *canon_palette_mix(const char *v)
 }
 
 /* A value's form where its grammar leaves several ways to write it (NULL: as it is). */
+static char *css_prop_canon_in(const CssPropDef *p, const char *v);
 static char *css_prop_canon(const CssPropDef *p, const char *v)
 {
     const char *n = p->name;
+    char *pre = NULL;
+    /* (symbols(): symbolic, the default, unsaid) */
+    if ((!strcmp(n, "content") || !strcmp(n, "list-style-type") || !strcmp(n, "list-style")) && strcasestr_simple(v, "symbols(symbolic ")) {
+        Buf s = { 0 };
+        for (const char *q = v; *q; ) {
+            if (!strncasecmp(q, "symbols(symbolic ", 17)) { buf_str(&s, "symbols("); q += 17; continue; }
+            buf_ch(&s, *q++);
+        }
+        pre = buf_take(&s);
+    }
+    /* (a calc() of a tree-counting function alone: the function) */
+    if (strstr(pre ? pre : v, "calc(sibling-")) {
+        const char *src = pre ? pre : v;
+        Buf s = { 0 };
+        for (const char *q = src; *q; ) {
+            if (!strncmp(q, "calc(sibling-index())", 21)) { buf_str(&s, "sibling-index()"); q += 21; continue; }
+            if (!strncmp(q, "calc(sibling-count())", 21)) { buf_str(&s, "sibling-count()"); q += 21; continue; }
+            buf_ch(&s, *q++);
+        }
+        free(pre);
+        pre = buf_take(&s);
+    }
+    char *r = css_prop_canon_in(p, pre ? pre : v);
+    if (pre) { if (!r) return pre; free(pre); }
+    return r;
+}
+static char *css_prop_canon_in(const CssPropDef *p, const char *v)
+{
+    const char *n = p->name;
     if (!strcmp(n, "display")) return canon_display(v);
+    if (!strcmp(n, "aspect-ratio")) {
+        /* (auto first; a lone number is that number over 1) */
+        char w[4][160];
+        int nw = canon_words(v, w, 4);
+        bool au = false;
+        Buf s = { 0 };
+        int rest = 0;
+        for (int i = 0; i < nw; i++) if (!strcasecmp(w[i], "auto")) au = true; else rest++;
+        if (!rest || nw > 4) return NULL;
+        bool slash = false;
+        if (au) buf_str(&s, "auto");
+        for (int i = 0; i < nw; i++) {
+            if (!strcasecmp(w[i], "auto")) continue;
+            if (!strcmp(w[i], "/")) slash = true;
+            if (s.n) buf_ch(&s, ' ');
+            buf_str(&s, w[i]);
+        }
+        if (!slash && rest == 1) buf_str(&s, " / 1");
+        char *o = buf_take(&s);
+        if (o && !strcmp(o, v)) { free(o); return NULL; }
+        return o;
+    }
     if (!strcmp(n, "vertical-align")) {
         /* first or last; how it's aligned, if not as the baseline; the shift, if any */
         char w[3][160], *fl = NULL, *al = NULL, *sh = NULL;
@@ -8772,7 +9017,7 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
         return buf_take(&s);
     }
     /* (an axis that's an axis, by its name; a negative one is the angle turned round) */
-    if (!strcmp(n, "rotate")) {
+    if (!strcmp(n, "rotate") && !strstr(v, "random(")) {
         char w[4][160];
         int rw = canon_words(v, w, 4);
         if (rw == 2) {
@@ -9975,6 +10220,22 @@ bool css_calc_number(const char *v, double *out) {
     char *e = NULL;
     *out = strtod(n, &e);
     bool ok = e != n && (*e == 0 || *e == ')');
+    free(t);
+    return ok;
+}
+
+/* A time with math in it, in ms (false: not one that resolves). */
+bool css_calc_time(const char *v, double *ms) {
+    const CssPropDef *p = css_prop_find("animation-delay", 15);
+    char *t = p ? prop_parse_raw(p, v) : NULL;
+    if (!t) return false;
+    const char *n = !strncasecmp(t, "calc(", 5) ? t + 5 : t;
+    char *e = NULL;
+    double d = strtod(n, &e);
+    bool ok = e != n;
+    if (ok && !strncasecmp(e, "ms", 2)) *ms = d;
+    else if (ok && (*e == 's' || *e == 'S')) *ms = d * 1000.0;
+    else ok = false;
     free(t);
     return ok;
 }

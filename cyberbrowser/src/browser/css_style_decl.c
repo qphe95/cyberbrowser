@@ -257,6 +257,8 @@ static char *block_text(StyleBlock *b) {
                 const CssPropDef *s = ord[k];
                 /* (a corner's or a side's radii: never what the whole list is written as) */
                 size_t snl = strlen(s->name);
+                /* (nor a legacy shorthand) */
+                if (!strncmp(s->name, "page-break-", 11)) continue;
                 if ((snl > 7 && !strcmp(s->name + snl - 7, "-radius") && strcmp(s->name, "border-radius")) ||
                     (!strncmp(s->name, "corner", 6) && (snl < 6 || strcmp(s->name + snl - 6, "-shape")))) continue;
                 const char **names;

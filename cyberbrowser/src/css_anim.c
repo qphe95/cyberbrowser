@@ -247,6 +247,11 @@ static const char *list_item(const SpecList *L, int j, const char *def, char *bu
 
 static double parse_time(const char *s)
 {
+    /* (math: as far as it resolves) */
+    if (strchr(s, '(')) {
+        double ms;
+        return css_calc_time(s, &ms) ? ms : 0;
+    }
     char *e = NULL;
     double v = strtod(s, &e);
     if (e == s) return 0;
@@ -299,7 +304,8 @@ static double ease_apply(uint8_t kind, const float p[4], double x)
     if (kind == E_LINEAR) return x;
     if (kind == E_STEPS) {
         int steps = (int)p[0], pos = (int)p[1];
-        double cur = floor(x * steps);
+        /* (a step's edge reached through clock rounding counts as reached) */
+        double cur = floor(x * steps + 1e-6);
         if (pos == 0 || pos == 3) cur += 1;
         int jumps = pos == 3 ? steps + 1 : pos == 2 ? steps - 1 : steps;
         if (jumps < 1) jumps = 1;
@@ -670,6 +676,13 @@ void anim_box(NodeId el, int ps, const char *spec, const AnimVal base[ANIM_NPROP
             else if (!strcasecmp(nm, "border-width") || !strcasecmp(nm, "border"))
                 for (int p = ANIM_BORDER_TOP; p <= ANIM_BORDER_LEFT; p++) cover[p] = j;
             else if (!strcasecmp(nm, "inset")) for (int p = ANIM_LEFT; p <= ANIM_BOTTOM; p++) cover[p] = j;
+            /* (the logical pairs, in a horizontal flow) */
+            else if (!strcasecmp(nm, "margin-block")) { cover[ANIM_MARGIN_TOP] = j; cover[ANIM_MARGIN_BOTTOM] = j; }
+            else if (!strcasecmp(nm, "margin-inline")) { cover[ANIM_MARGIN_LEFT] = j; cover[ANIM_MARGIN_RIGHT] = j; }
+            else if (!strcasecmp(nm, "padding-block")) { cover[ANIM_PADDING_TOP] = j; cover[ANIM_PADDING_BOTTOM] = j; }
+            else if (!strcasecmp(nm, "padding-inline")) { cover[ANIM_PADDING_LEFT] = j; cover[ANIM_PADDING_RIGHT] = j; }
+            else if (!strcasecmp(nm, "inset-block")) { cover[ANIM_TOP] = j; cover[ANIM_BOTTOM] = j; }
+            else if (!strcasecmp(nm, "inset-inline")) { cover[ANIM_LEFT] = j; cover[ANIM_RIGHT] = j; }
         }
         for (int p = 0; p < ANIM_NPROP; p++) {
             int b = row_find(el, ps, K_BASE, p, NULL), t = row_find(el, ps, K_TRANS, p, NULL);

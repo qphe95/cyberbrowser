@@ -459,6 +459,12 @@
         var ka = Math.cos(t * th) - dot * w, kb = sign * w;
         return [0, 1, 2, 3].map(function (i) { return a[i] * ka + b[i] * kb; });
     }
+    /* (null when either won't decompose: the caller steps the whole list) */
+    function tfLerpMatrixOrNull(A, B, t) {
+        var a = dec3(A), b = dec3(B);
+        if (!a || !b) return null;
+        return tfLerpMatrix(A, B, t);
+    }
     function tfLerpMatrix(A, B, t) {
         var a = dec3(A), b = dec3(B);
         if (!a || !b) return t < 0.5 ? A : B;
@@ -609,7 +615,66 @@
         return out.join(' ');
     }
     Object.defineProperty(global, '__cyberAnimTransform', { value: tfTyped, configurable: true, writable: true, enumerable: false });
+    /* (what commitStyles() writes: each function by its own name, or the
+     * primitive two names share, its lengths unresolved) */
+    var TF_NAME = { translatex: 'translateX', translatey: 'translateY', translatez: 'translateZ', rotatex: 'rotateX', rotatey: 'rotateY',
+                    rotatez: 'rotateZ', scalex: 'scaleX', scaley: 'scaleY', scalez: 'scaleZ' };
+    function tfCommitOne(a, b, t) {
+        var same = a.n === b.n, name = TF_NAME[a.n] || a.n, pa = tfTranslate(a), pb = tfTranslate(b);
+        if (pa && pb) {
+            var r = [tfDim(pa[0], pb[0], t), tfDim(pa[1], pb[1], t), tfDim(pa[2], pb[2], t)];
+            if (r[0] === null || r[1] === null || r[2] === null) return null;
+            var zero = function (v) { return parseFloat(v) === 0; };
+            if (same && a.n === 'translatex') return 'translateX(' + r[0] + ')';
+            if (same && a.n === 'translatey') return 'translateY(' + r[1] + ')';
+            if (same && a.n === 'translatez') return 'translateZ(' + r[2] + ')';
+            if (pa[3] || pb[3]) return 'translate3d(' + r.join(', ') + ')';
+            return 'translate(' + r[0] + (zero(r[1]) ? '' : ', ' + r[1]) + ')';
+        }
+        pa = tfScale(a); pb = tfScale(b);
+        if (pa && pb) {
+            var sc = [0, 1, 2].map(function (i) { return tfRound(pa[i] + (pb[i] - pa[i]) * t); });
+            if (same && a.n === 'scalex') return 'scaleX(' + sc[0] + ')';
+            if (same && a.n === 'scaley') return 'scaleY(' + sc[1] + ')';
+            if (same && a.n === 'scalez') return 'scaleZ(' + sc[2] + ')';
+            if (pa[3] || pb[3]) return 'scale3d(' + sc.join(', ') + ')';
+            return 'scale(' + sc[0] + (sc[1] === sc[0] ? '' : ', ' + sc[1]) + ')';
+        }
+        pa = tfRotate(a); pb = tfRotate(b);
+        if (pa && pb && same && a.n !== 'rotate3d') {
+            if (pa[3] === null || pb[3] === null) return null;
+            return name + '(' + tfRound(pa[3] + (pb[3] - pa[3]) * t) + 'deg)';
+        }
+        return tfTypedOne(a, b, t);
+    }
+    function tfCommit(ta, tb, t) {
+        var A = tfSplit(ta), B = tfSplit(tb), out = [];
+        if (A.length !== B.length || !A.length) return null;
+        for (var i = 0; i < A.length; i++) {
+            var fa = tfOne(A[i]), fb = tfOne(B[i]);
+            if (!fa || !fb || /^matrix/.test(fa.n) || /^matrix/.test(fb.n)) return null;
+            var r = tfCommitOne(fa, fb, t);
+            if (r === null) return null;
+            out.push(r);
+        }
+        return out.join(' ');
+    }
+    var tfCommitting = false;
     function tfInterpolate(ta, tb, t) {
+        if (tfCommitting) {
+            var cr = tfCommit(ta, tb, t);
+            if (cr !== null) return cr;
+            tfCommitting = false;
+            var mr = tfInterpolate(ta, tb, t);
+            tfCommitting = true;
+            /* (a 2D matrix as matrix()) */
+            var mm = mr && /^matrix3d\(([^()]*)\)$/.exec(mr);
+            if (mm) {
+                var m = mm[1].split(/\s*,\s*/).map(Number);
+                if (m.length === 16 && is2D(m)) return 'matrix(' + [m[0], m[1], m[4], m[5], m[12], m[13]].map(fine).join(', ') + ')';
+            }
+            return mr;
+        }
         if (tfEl) tfLast.set(tfEl, [ta, tb, t]);
         var la = tfParse(ta === 'none' ? '' : ta), lb = tfParse(tb === 'none' ? '' : tb);
         if (!la || !lb) return null;
@@ -624,12 +689,17 @@
                 else if (a.k === 'perspective') {
                     var ia = isFinite(a.a[0]) ? 1 / Math.max(a.a[0], 1) : 0, ib = isFinite(b.a[0]) ? 1 / Math.max(b.a[0], 1) : 0, iv = l(ia, ib);
                     r = { k: a.k, a: [iv > 0 ? 1 / iv : Infinity] };
-                } else r = { k: 'matrix', m: ml(a.m, b.m) };
+                } else {
+                    var mm = tfLerpMatrixOrNull(a.m, b.m, t);
+                    r = mm ? { k: 'matrix', m: mm } : null;
+                }
             }
             if (!r) {
-                /* (the rest, as matrices) */
+                /* (the rest, as matrices; ones that won't decompose: a step between the wholes) */
                 var ra = la.slice(i), rb = lb.slice(i);
-                out.push('matrix3d(' + ml(tfListMatrix(ra, box), tfListMatrix(rb, box)).map(fine).join(', ') + ')');
+                var MA = tfListMatrix(ra, box), MB = tfListMatrix(rb, box), MM = tfLerpMatrixOrNull(MA, MB, t);
+                if (!MM) { MA = tfListMatrix(la, box); MB = tfListMatrix(lb, box); out = []; MM = tfLerpMatrixOrNull(MA, MB, t) || (t < 0.5 ? MA : MB); }
+                out.push('matrix3d(' + MM.map(fine).join(', ') + ')');
                 return out.join(' ');
             }
             out.push(tfText(r, box));
@@ -730,7 +800,10 @@
             var h = r.deg * DEG / 2, s = Math.sin(h);
             return [r.x * s, r.y * s, r.z * s, Math.cos(h)];
         };
-        var q = slerp(quat(ra), quat(rb), t), w = Math.max(-1, Math.min(1, q[3])), an = 2 * Math.acos(w), sn = Math.sin(an / 2);
+        /* (the shorter way round: a quaternion and its negation are one rotation) */
+        var qa = quat(ra), qb = quat(rb);
+        if (qa[0] * qb[0] + qa[1] * qb[1] + qa[2] * qb[2] + qa[3] * qb[3] < 0) qa = qa.map(function (v) { return -v; });
+        var q = slerp(qa, qb, t), w = Math.max(-1, Math.min(1, q[3])), an = 2 * Math.acos(w), sn = Math.sin(an / 2);
         if (Math.abs(sn) < 1e-9) return '0deg';
         return rotateAxisText(q[0] / sn, q[1] / sn, q[2] / sn) + fmt(an / DEG) + 'deg';
     }
@@ -754,6 +827,8 @@
             var ia = la[i % la.length], ib = lb[i % lb.length];
             /* (the same keyword at both ends: as it is, the rest going between) */
             if (ia === ib && /^\s*(contain|cover|auto)\s*$/.test(ia)) { out.push(ia.trim()); continue; }
+            /* (positions with edges named: as lengths from the top left, both ends alike) */
+            if (/-position$/.test(prop) && /\b(left|right|top|bottom|center)\b/i.test(ia + ib)) { ia = posNormal(ia, prop); ib = posNormal(ib, prop); }
             var v = combine(prop, ia, ib, how);
             if (v === null) return null;
             out.push(v);
@@ -931,6 +1006,42 @@
         }
         return { box: box, round: round };
     }
+    /* (an inset's corner radii: all eight, as border-radius spreads them) */
+    function roundEight(r) {
+        var s = String(r || '').replace(/^\s*round\s*/i, '').trim();
+        if (!s) return ['0px', '0px', '0px', '0px', '0px', '0px', '0px', '0px'];
+        var halves = s.split('/'), four = function (t) {
+            var w = tfArgs(t.trim());
+            if (!w.length || w.length > 4) return null;
+            if (w.length === 1) w = [w[0], w[0], w[0], w[0]];
+            else if (w.length === 2) w = [w[0], w[1], w[0], w[1]];
+            else if (w.length === 3) w = [w[0], w[1], w[2], w[1]];
+            return w;
+        };
+        var h = four(halves[0]), v = halves.length > 1 ? four(halves[1]) : h;
+        return h && v ? h.concat(v) : null;
+    }
+    function roundText(e) {
+        var short = function (w) {
+            w = w.slice();
+            if (w[3] === w[1]) { w.pop(); if (w[2] === w[0]) { w.pop(); if (w[1] === w[0]) w.pop(); } }
+            return w.join(' ');
+        };
+        var h = e.slice(0, 4), v = e.slice(4);
+        if (e.every(function (x) { return /^-?0(px|%)?$/.test(x); })) return '';
+        return ' round ' + short(h) + (h.join() === v.join() ? '' : ' / ' + short(v));
+    }
+    function roundMix(ra, rb, t) {
+        var ea = roundEight(ra), eb = roundEight(rb);
+        if (!ea || !eb) return null;
+        var out = [];
+        for (var i = 0; i < 8; i++) {
+            var m = lpMixText(lpMix(lpParse(ea[i]), lpParse(eb[i]), t));
+            if (/^-[\d.]/.test(m)) m = '0px';
+            out.push(m);
+        }
+        return roundText(out);
+    }
     function insetInterpolate(a, b, t, prop) {
         var boxA = BOX_AFTER.exec(a), boxB = BOX_AFTER.exec(b);
         if (boxA || boxB) {
@@ -958,9 +1069,9 @@
         var txt = v[1] === v[0] && v[2] === v[0] && v[3] === v[0] ? v[0] : v.join(' ');
         var rv = '';
         if (pa.round || pb.round) {
-            var ra = pa.round || 'round 0px', rb = pb.round || 'round 0px', c = combine('clip-path', ra, rb, function (x, y) { return x + (y - x) * t; });
-            if (c === null) return null;
-            if (!/^round -?0(px)?$/.test(c)) rv = ' ' + c;
+            var rm = roundMix(pa.round, pb.round, t);
+            if (rm === null) return null;
+            rv = rm;
         }
         return 'inset(' + txt + rv + ')';
     }
@@ -1383,6 +1494,11 @@
         }
         return { flag: !!kw, deg: deg + (kw === 'reverse' ? 180 : 0) };
     }
+    /* (as it computes: reverse is auto and half a turn, angles in degrees) */
+    function offsetRotateText(p) {
+        var d = +p.deg.toFixed(4);
+        return p.flag ? (d ? 'auto ' + fmt(d) + 'deg' : 'auto') : fmt(d) + 'deg';
+    }
     /* (a position's words as what they come to: a percentage and a length on each axis) */
     var POS_PROP = /^(object-position|offset-anchor|offset-position|transform-origin|perspective-origin)$/;
     function posWords(v) {
@@ -1431,9 +1547,12 @@
         return lpText(x) + ' ' + lpText(y) + z;
     }
     /* (these change all at once) */
-    var DISCRETE = /^(overflow-clip-margin|mask-border-source|border-image-source|list-style-image)$/;
+    var DISCRETE = /^(overflow-clip-margin|mask-border-source|border-image-source|list-style-image|background-image|mask-image|counter-increment|counter-reset|counter-set)$/;
     function interpolate(prop, a, b, t) {
         if (DISCRETE.test(prop)) return t < 0.5 ? a : b;
+        /* (display to or from none: shown all the way between) */
+        if (prop === 'display' && a !== b && (String(a).trim() === 'none' || String(b).trim() === 'none'))
+            return String(a).trim() === 'none' ? (t > 0 ? b : a) : (t < 1 ? a : b);
         /* (palettes: a mix of the two between them) */
         if (prop === 'font-palette') {
             if (String(a) === String(b) || t <= 0) return a;
@@ -1507,7 +1626,7 @@
             };
             var ax = axes(a), bx = axes(b), ka = Object.keys(ax).sort(), kb = Object.keys(bx).sort();
             if (!ka.length || ka.join() !== kb.join()) return t < 0.5 ? a : b;
-            return ka.map(function (k) { return '"' + k + '" ' + fmt(+(ax[k] + (bx[k] - ax[k]) * t).toFixed(6)); }).join(', ');
+            return ka.map(function (k) { return '"' + k + '" ' + fmt(+(ax[k] + (bx[k] - ax[k]) * t).toFixed(4)); }).join(', ');
         }
         /* (normal is none at all, but at its own end) */
         if (prop === 'letter-spacing' || prop === 'word-spacing') {
@@ -1549,8 +1668,9 @@
         }
         if (prop === 'offset-rotate') {
             var r0 = offsetRotateParts(a), r1 = offsetRotateParts(b);
-            if (!r0 || !r1 || r0.flag !== r1.flag) return t < 0.5 ? a : b;
-            return (r0.flag ? 'auto ' : '') + fmt(+(r0.deg + (r1.deg - r0.deg) * t).toFixed(4)) + 'deg';
+            if (!r0 || !r1) return t < 0.5 ? a : b;
+            if (r0.flag !== r1.flag) return offsetRotateText(t < 0.5 ? r0 : r1);
+            return offsetRotateText({ flag: r0.flag, deg: r0.deg + (r1.deg - r0.deg) * t });
         }
         /* (normal is no slant at all; italic doesn't go between) */
         if (prop === 'font-style') {
@@ -1705,6 +1825,9 @@
     }
     /* accumulate on filters: function by function; what starts at 1 counts from it. */
     function filterAccumulate(prop, under, value) {
+        /* (each side in its range first; their sum may leave it) */
+        under = filterTidy(under);
+        value = filterTidy(value);
         var x = filterList(under === 'none' ? '' : under), y = filterList(value === 'none' ? '' : value), out = [];
         var n = Math.max(x.length, y.length);
         for (var i = 0; i < n; i++) {
@@ -1730,6 +1853,27 @@
         });
     }
     function addValues(prop, under, value, how) {
+        /* (two insets: side by side and corner by corner) */
+        if (SHAPE_PROP.test(prop) && /^\s*inset\(/i.test(under) && /^\s*inset\(/i.test(value) && !BOX_AFTER.test(under) && !BOX_AFTER.test(value)) {
+            var iu = insetParts(under), iv = insetParts(value), eu = roundEight(iu && iu.round), ev = roundEight(iv && iv.round);
+            if (iu && iv && eu && ev) {
+                var sv = iu.box.map(function (x, k) { return lpText({ px: x.px + iv.box[k].px, pct: x.pct + iv.box[k].pct }); });
+                var sr = eu.map(function (x, k) { var p = lpParse(x), q = lpParse(ev[k]); return lpText({ px: p.px + q.px, pct: p.pct + q.pct }); });
+                return 'inset(' + sv.join(' ') + roundText(sr) + ')';
+            }
+        }
+        /* (ratios add as their logarithms do: multiplied) */
+        if (prop === 'aspect-ratio') {
+            var au = ratioParts(under), av = ratioParts(value);
+            if (!au || !av || !au.w || !au.h || !av.w || !av.h) return value;
+            return (av.auto ? 'auto ' : '') + fmt(+((au.w / au.h) * (av.w / av.h)).toFixed(6)) + ' / 1';
+        }
+        /* (the angles summed where both follow the path or neither does) */
+        if (prop === 'offset-rotate') {
+            var ou = offsetRotateParts(under), ov = offsetRotateParts(value);
+            if (!ou || !ov) return value;
+            return offsetRotateText({ flag: ov.flag, deg: ou.flag === ov.flag ? ou.deg + ov.deg : ov.deg });
+        }
         /* (axis by axis; what's only on one side stays) */
         if (prop === 'font-variation-settings') {
             var fva = function (v) {
@@ -1739,6 +1883,8 @@
             };
             var fu = fva(under), fv = fva(value);
             if (!Object.keys(fv).length) return value;
+            /* (axes that aren't the same ones: the value alone) */
+            if (Object.keys(fu).sort().join() !== Object.keys(fv).sort().join()) return value;
             Object.keys(fv).forEach(function (k) { fu[k] = (fu[k] || 0) + fv[k]; });
             var fk = Object.keys(fu).sort();
             return fk.length ? fk.map(function (k) { return '"' + k + '" ' + fmt(fu[k]); }).join(', ') : 'normal';
@@ -2181,12 +2327,20 @@
                 var id = function (x) { return x; };
                 var can = /^(transform|filter|backdrop-filter|translate|rotate|scale|transform-origin|font-palette)$/.test(prop) ||
                           (SHAPE_PROP.test(prop) && (pathInterpolate(from, base, 0) !== null || shapeInterpolate(from, base, 0) !== null || insetInterpolate(from, base, 0, prop) !== null)) ||
-                          (RULE_LIST.test(prop) && /repeat\(/i.test(from + base) && ruleInterpolate(prop, from, base, 0) !== null) ||
+                          (RULE_LIST.test(prop) && /,|repeat\(/i.test(from + base) && ruleInterpolate(prop, from, base, 0) !== null) ||
                           (REPEATABLE.test(prop) ? repeatableInterpolate(prop, from, base, id) !== null :
                            prop === 'box-shadow' || prop === 'text-shadow' ? shadowInterpolate(prop, from, base, id) !== null :
+                           prop === 'font-variation-settings' ? (function () {
+                               /* (the same axes, in any order) */
+                               var tags = function (v) { var o = [], m, re = /["']([^"']{4})["']\s+-?[\d.]/g; while ((m = re.exec(String(v)))) o.push(m[1]); return o.sort().join(); };
+                               var ta = tags(from);
+                               return !!ta && ta === tags(base);
+                           })() :
                            prop === 'aspect-ratio' ? (function () { var p0 = ratioParts(from), p1 = ratioParts(base); return !!(p0 && p1 && p0.auto === p1.auto && p0.w && p0.h && p1.w && p1.h); })() :
                            combine(prop, from, base, id) !== null);
                 if (SIZE_PROP.test(prop)) can = sizesInterpolate(el, prop, fromSpec, specNow);
+                /* (what only steps: no transition but by allow-discrete) */
+                if (DISCRETE.test(prop)) can = false;
                 if (TRACK_PROP.test(prop)) can = trackInterpolate(from, base, 0) !== null;
                 if (wideColorPairs(from, base)) can = true;
                 if (/^corner-.*-shape$/.test(prop)) can = true;
@@ -2650,7 +2804,7 @@
                 if (p.value !== null && (p.composite === 'add' || p.composite === 'accumulate')) u = addValues(prop, under(), u, p.composite);
                 return u;
             };
-            var ends = /color/.test(prop) && !!wideColorPairs(a.value === null ? under() : resolve(a), b.value === null ? under() : resolve(b)) || (prop === 'transform' && a.value !== b.value) || prop === 'translate' || prop === 'rotate' || prop === 'scale' || prop === 'offset-rotate' || prop === 'border-shape' || /^(border-image|mask-border)-(slice|width|outset)$/.test(prop) || prop === 'filter' || prop === 'backdrop-filter' || REPEATABLE.test(prop) || prop === 'box-shadow' || prop === 'text-shadow' || SHAPE_PROP.test(prop);
+            var ends = /color/.test(prop) && !!wideColorPairs(a.value === null ? under() : resolve(a), b.value === null ? under() : resolve(b)) || (prop === 'transform' && a.value !== b.value) || prop === 'translate' || prop === 'rotate' || prop === 'scale' || prop === 'offset-rotate' || prop === 'aspect-ratio' || prop === 'border-spacing' || (RULE_LIST.test(prop) && /,/.test(String(a.value) + String(b.value))) || prop === 'border-shape' || /^(border-image|mask-border)-(slice|width|outset)$/.test(prop) || prop === 'filter' || prop === 'backdrop-filter' || REPEATABLE.test(prop) || prop === 'box-shadow' || prop === 'text-shadow' || SHAPE_PROP.test(prop);
             /* (an inset that's auto doesn't go between) */
             var autoish = function (v) { return v !== null && /^\s*(auto|initial|unset|revert|revert-layer)\s*$/i.test(v); };
             if (/^(top|right|bottom|left)$/.test(prop) && (autoish(a.value) || autoish(b.value))) {
@@ -2669,6 +2823,8 @@
     function baseValue(effect, el, prop) {
         var base = effect._values && effect._values.base;
         if (!base) return global.getComputedStyle(el).getPropertyValue(prop);
+        /* (a transform as its functions where it was written inline: accumulate pairs them) */
+        if (!(prop in base) && prop === 'transform' && el.style && el.style.getPropertyValue('transform')) base[prop] = el.style.getPropertyValue('transform');
         if (!(prop in base)) base[prop] = readWith(el, prop, null);
         return base[prop];
     }
@@ -3093,7 +3249,8 @@
             var c = computedTiming(e);
             if (c.progress === null) return;
             var values = new Map();
-            sampleEffect(e, c.progress, values, e._target);
+            tfCommitting = true;
+            try { sampleEffect(e, c.progress, values, e._target); } finally { tfCommitting = false; }
             values.forEach(function (v, p) { e._target.style.setProperty(p, v); });
         }
     });

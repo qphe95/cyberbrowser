@@ -472,6 +472,11 @@ static void env_of(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p, 
     bool is_fs = !strncmp(p->name, "font", 4), is_color = !strcmp(p->name, "color");
     ComputedStyle *par = (is_fs || is_color) ? parent_of(ctx, cs) : NULL;
     env->font_size = is_fs ? (par ? font_px(ctx, par) : 16) : font_px(ctx, cs);
+    /* (a font of no size: its em is nothing, whatever layout keeps it at) */
+    if (env->font_size > 0.0 && env->font_size < 0.0101 && !is_fs && strcmp(p->name, "line-height")) {
+        ComputedStyle *fc = is_fs ? par : cs;
+        if (fc && fc->styled && !strcmp(computed_of(ctx, fc, "font-size"), "0px")) env->font_size = 0.0;
+    }
     env->root_font_size = cs->root_font_size;
     /* (ch and ex: of the font it has) */
     if (v && (strstr(v, "ch") || strstr(v, "ex")) && (!is_fs || strchr(v, '('))) {
@@ -484,6 +489,31 @@ static void env_of(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p, 
     }
     env->vw = cs->vw;
     env->vh = cs->vh;
+    /* (a system color: of the color scheme it's used in) */
+    {
+        static __thread int in_scheme;
+        /* (only a value that names one: the scheme is read for nothing else) */
+        bool letters = false;
+        static const char *const sysw[] = { "canvas", "field", "button", "menu", "window", "graytext", "infotext", "infobackground",
+                                            "threed", "visitedtext", "activetext", "linktext", "scrollbar", "background", "caption", "border", NULL };
+        char lowv[256];
+        size_t lv = 0;
+        for (const char *q = v; q && *q && lv + 1 < sizeof lowv; q++) lowv[lv++] = (char)tolower((unsigned char)*q);
+        lowv[lv] = 0;
+        for (int k = 0; v && sysw[k] && !letters; k++) letters = strstr(lowv, sysw[k]) != NULL;
+        const char *pn = p->name;
+        bool colorish = strstr(pn, "color") || strstr(pn, "shadow") || !strcmp(pn, "fill") || !strcmp(pn, "stroke") || !strncmp(pn, "border", 6) || !strncmp(pn, "background", 10) || !strncmp(pn, "outline", 7) || !strncmp(pn, "column-rule", 11) || !strncmp(pn, "text-decoration", 15);
+        if (letters && colorish && !in_scheme && strcmp(pn, "color-scheme")) {
+            in_scheme++;
+            const char *scheme = computed_of(ctx, cs, "color-scheme");
+            in_scheme--;
+            env->dark = scheme && strstr(scheme, "dark") && !strstr(scheme, "light");
+        }
+    }
+    if (v && (strstr(v, "vi") || strstr(v, "vb")) && strcmp(p->name, "writing-mode")) {
+        const char *wm = computed_of(ctx, cs, "writing-mode");
+        env->vertical = wm && strncmp(wm, "horizontal", 10) != 0;
+    }
     env->color[3] = 1;
     /* (container units: the nearest size container's content box, each axis its own) */
     if (v && strstr(v, "cq") && dom_valid(cs->el)) {
@@ -507,6 +537,7 @@ static void env_of(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p, 
     const char *c = is_color ? (par ? computed_of(ctx, par, "color") : "rgb(0, 0, 0)") : computed_of(ctx, cs, "color");
     double rgba[4];
     if (css_color_parse(c, rgba)) memcpy(env->color, rgba, sizeof rgba);
+    if (c && strlen(c) < sizeof env->color_text) strcpy(env->color_text, c);
 }
 
 static int weight_num(const char *w) {
@@ -674,7 +705,7 @@ static char *compute_value(JSContextHandle ctx, ComputedStyle *cs, const CssProp
     }
     /* line widths: thin, medium, thick */
     if (strstr(n, "-width") && (strstr(n, "border") || strstr(n, "outline") || strstr(n, "rule-width"))) {
-        const char *kw = !strcmp(r, "thin") ? "1px" : !strcmp(r, "medium") ? "3px" : !strcmp(r, "thick") ? "5px" : NULL;
+        const char *kw = !strcmp(r, "thin") || !strcmp(r, "hairline") ? "1px" : !strcmp(r, "medium") ? "3px" : !strcmp(r, "thick") ? "5px" : NULL;
         if (kw) { free(r); r = strdup(kw); }
     }
     return r;
@@ -1238,6 +1269,54 @@ static char *anchor_fallbacks(const char *s)
     return out;
 }
 
+/* One word of an origin against its span: a keyword, a length, a percentage
+ * or calc(A% +/- Bpx); false when it's none of these. */
+static bool origin_word_px(const char *t, double span, double *v) {
+    if (!strcmp(t, "center")) { *v = span / 2.0; return true; }
+    if (!strcmp(t, "left") || !strcmp(t, "top")) { *v = 0.0; return true; }
+    if (!strcmp(t, "right") || !strcmp(t, "bottom")) { *v = span; return true; }
+    double a = 0.0, b = 0.0;
+    char op = 0;
+    if (sscanf(t, "calc(%lf%% %c %lfpx)", &a, &op, &b) == 3 && (op == '+' || op == '-')) { *v = a * span / 100.0 + (op == '-' ? -b : b); return true; }
+    if (strchr(t, '(')) return false;
+    *v = strchr(t, '%') ? atof(t) * span / 100.0 : atof(t);
+    return true;
+}
+
+/* An origin in pixels, where there is a box (r is taken). */
+static char *origin_px(ComputedStyle *cs, const char *n, char *r) {
+    if (!r || !cs->used.rendered || cs->pseudo || (strcmp(n, "transform-origin") && strcmp(n, "perspective-origin"))) return r;
+    if (!strchr(r, '%') && !strstr(r, "left") && !strstr(r, "right") && !strstr(r, "top") && !strstr(r, "bottom") && !strstr(r, "center")) return r;
+    double w = cs->used.content_width + cs->used.padding[1] + cs->used.padding[3] + cs->used.border[1] + cs->used.border[3];
+    double h = cs->used.content_height + cs->used.padding[0] + cs->used.padding[2] + cs->used.border[0] + cs->used.border[2];
+    /* (words at the top level: a calc()'s spaces are its own) */
+    char a[3][64] = { "", "", "" };
+    int got = 0, depth = 0;
+    size_t l = 0;
+    for (const char *q = r; ; q++) {
+        if (*q == '(') depth++;
+        else if (*q == ')') depth--;
+        if (!*q || (*q == ' ' && depth == 0)) {
+            if (l) { a[got][l] = 0; if (++got == 3) break; l = 0; }
+            if (!*q) break;
+            continue;
+        }
+        if (l < 63) a[got][l++] = *q;
+    }
+    if (!got) return r;
+    double v[2] = { 0.5 * w, 0.5 * h };
+    const char *word[2] = { a[0], got > 1 ? a[1] : "center" };
+    /* (a vertical keyword first: the other way round) */
+    if (!strcmp(a[0], "top") || !strcmp(a[0], "bottom") || !strcmp(a[1], "left") || !strcmp(a[1], "right")) { word[0] = got > 1 ? a[1] : "center"; word[1] = a[0]; }
+    for (int k = 0; k < 2; k++)
+        if (!origin_word_px(word[k], k ? h : w, &v[k])) return r;
+    char out[160];
+    if (got > 2 && atof(a[2]) != 0.0) snprintf(out, sizeof out, "%.6gpx %.6gpx %s", v[0], v[1], a[2]);
+    else snprintf(out, sizeof out, "%.6gpx %.6gpx", v[0], v[1]);
+    free(r);
+    return strdup(out);
+}
+
 static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p) {
     CST("compute %s", p->name);
     if (!cs->styled) return strdup("");
@@ -1265,7 +1344,7 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
     }
     /* (a pseudo-element's math is flow: only math elements have its layout) */
     if (s && cs->pseudo && !strcmp(n, "display") && strstr(s, "math")) s = strstr(s, "block") ? "block" : "inline";
-    if (!s || !strcmp(s, "unset") || !strcmp(s, "revert") || !strcmp(s, "revert-layer"))
+    if (!s || !strcmp(s, "unset") || !strcmp(s, "revert") || !strcmp(s, "revert-layer") || !strcmp(s, "revert-rule"))
         s = p->inherited ? "inherit" : "initial";
     char *r;
     if (!strcmp(s, "inherit")) {
@@ -1391,10 +1470,37 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
             else if (!strcmp(n, pd)) { free(r); r = px(cs->used.padding[k]); }
         }
     }
+    /* (subgrid on a grid with no grid around it, and intrinsic auto-repeat
+     * anywhere but grid lanes: as good as none) */
+    bool gt_none = false;
+    if (cs->used.rendered && !cs->pseudo && r && (!strcmp(n, "grid-template-columns") || !strcmp(n, "grid-template-rows"))) {
+        const char *dsp = computed_of(ctx, cs, "display");
+        bool lanes = strstr(dsp, "grid-lanes") != NULL, grid = !strcmp(dsp, "grid") || !strcmp(dsp, "inline-grid");
+        if (!strncmp(r, "subgrid", 7) && (grid || lanes)) {
+            ComputedStyle *par = parent_of(ctx, cs);
+            const char *pd = par ? computed_of(ctx, par, "display") : "block";
+            if (!strstr(pd, "grid")) { free(r); r = strdup("none"); gt_none = true; }
+        } else if (!lanes && strstr(r, "repeat(auto-")) {
+            bool intrinsic = false;
+            for (const char *q = r; !intrinsic && (q = strstr(q, "repeat(auto-")); q++) {
+                int d = 0;
+                const char *e = strchr(q, '(');
+                for (const char *w = e; *w; w++) {
+                    if (*w == '(') d++;
+                    else if (*w == ')' && !--d) break;
+                    /* (a word at the repeat's own level, minmax()'s aside) */
+                    if (d == 1 && (w[-1] == ' ' || w[-1] == ',' || w[-1] == '(') &&
+                        (!strncmp(w, "auto", 4) && !isalpha((unsigned char)w[4]) && w[4] != '-' ? true :
+                         !strncmp(w, "min-content", 11) || !strncmp(w, "max-content", 11) || !strncmp(w, "fit-content(", 12))) intrinsic = true;
+                }
+            }
+            if (intrinsic) { free(r); r = strdup("none"); gt_none = true; }
+        }
+    }
     /* (a grid's tracks: as they came out) */
     /* (none stays none, implicit tracks or not) */
     if (cs->used.rendered && !cs->pseudo && r && (!strcmp(n, "grid-template-columns") || !strcmp(n, "grid-template-rows")) &&
-        !strstr(r, "subgrid") && s && strcmp(s, "none")) {
+        !strstr(r, "subgrid") && s && strcmp(s, "none") && !gt_none) {
         const char *dsp = computed_of(ctx, cs, "display");
         if (!strcmp(dsp, "grid") || !strcmp(dsp, "inline-grid") || strstr(dsp, "grid-lanes")) {
             static double tracks[2000];
@@ -1438,32 +1544,7 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
         free(r);
         r = strdup(out);
     }
-    /* (an origin: in pixels, where there is a box) */
-    if (r && cs->used.rendered && !cs->pseudo && (!strcmp(n, "transform-origin") || !strcmp(n, "perspective-origin")) &&
-        (strchr(r, '%') || strstr(r, "left") || strstr(r, "right") || strstr(r, "top") || strstr(r, "bottom") || strstr(r, "center")) && !strchr(r, '(')) {
-        double w = cs->used.content_width + cs->used.padding[1] + cs->used.padding[3] + cs->used.border[1] + cs->used.border[3];
-        double h = cs->used.content_height + cs->used.padding[0] + cs->used.padding[2] + cs->used.border[0] + cs->used.border[2];
-        char a0[48] = "", a1[48] = "", a2[48] = "";
-        int got = sscanf(r, "%47s %47s %47s", a0, a1, a2);
-        double v[2] = { 0.5 * w, 0.5 * h };
-        const char *word[2] = { a0, got > 1 ? a1 : "center" };
-        /* (a vertical keyword first: the other way round) */
-        if (!strcmp(a0, "top") || !strcmp(a0, "bottom") || !strcmp(a1, "left") || !strcmp(a1, "right")) { word[0] = got > 1 ? a1 : "center"; word[1] = a0; }
-        for (int k = 0; k < 2; k++) {
-            const char *t = word[k];
-            double span = k ? h : w;
-            if (!strcmp(t, "center")) v[k] = span / 2.0;
-            else if (!strcmp(t, "left") || !strcmp(t, "top")) v[k] = 0.0;
-            else if (!strcmp(t, "right") || !strcmp(t, "bottom")) v[k] = span;
-            else if (strchr(t, '%')) v[k] = atof(t) * span / 100.0;
-            else v[k] = atof(t);
-        }
-        char out[160];
-        if (got > 2 && atof(a2) != 0.0) snprintf(out, sizeof out, "%.6gpx %.6gpx %s", v[0], v[1], a2);
-        else snprintf(out, sizeof out, "%.6gpx %.6gpx", v[0], v[1]);
-        free(r);
-        r = strdup(out);
-    }
+    r = origin_px(cs, n, r);
     /* (a font's width: the percentage its keyword stands for) */
     if (r && (!strcmp(n, "font-stretch") || !strcmp(n, "font-width"))) {
         static const char *const fw[][2] = { { "ultra-condensed", "50%" }, { "extra-condensed", "62.5%" }, { "condensed", "75%" },
@@ -1813,6 +1894,37 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
             }
         }
     }
+    /* (an animated origin too) */
+    if (!in_hook) r = origin_px(cs, n, r);
+    /* (an image an animation stepped to: its gradients as computed) */
+    if (r && !in_hook && strstr(r, "gradient(") && (!strcmp(n, "background-image") || !strcmp(n, "list-style-image") || !strcmp(n, "mask-image") ||
+                                                     !strcmp(n, "border-image-source") || !strcmp(n, "mask-border-source"))) {
+        CssComputeEnv ev;
+        env_of(ctx, cs, p, r, &ev);
+        char *cv = css_prop_compute(p, r, &ev);
+        if (cv) { free(r); r = cv; }
+        char *gc = css_gradient_computed(r);
+        if (gc) { free(r); r = gc; }
+    }
+    /* (an animated margin that came to auto: what layout made of it) */
+    if (r && !in_hook && cs->used.rendered && !cs->pseudo && !strcmp(r, "auto") && !strncmp(n, "margin-", 7)) {
+        static const char *const ms[] = { "margin-top", "margin-right", "margin-bottom", "margin-left" };
+        for (int k = 0; k < 4; k++) if (!strcmp(n, ms[k])) { free(r); r = px(cs->used.margin[k]); break; }
+    }
+    /* (an animated margin or padding with a percentage: in px, of what the parent's content box is) */
+    if (r && !in_hook && cs->used.rendered && !cs->pseudo && strchr(r, '%') && (!strncmp(n, "margin-", 7) || !strncmp(n, "padding-", 8))) {
+        ComputedStyle *par = parent_of(ctx, cs);
+        if (par) {
+            refresh(ctx, par);
+            double base = par->used.rendered ? par->used.content_width : 0.0, a = 0.0, b = 0.0, v = 0.0;
+            char op = 0;
+            bool ok = false;
+            if (sscanf(r, "calc(%lf%% %c %lfpx)", &a, &op, &b) == 3 && (op == '+' || op == '-')) { v = a * base / 100.0 + (op == '-' ? -b : b); ok = true; }
+            else if (sscanf(r, "calc(%lfpx %c %lf%%)", &b, &op, &a) == 3 && (op == '+' || op == '-')) { v = b + (op == '-' ? -a : a) * base / 100.0; ok = true; }
+            else { char *e = NULL; a = strtod(r, &e); if (e && e != r && e[0] == '%' && !e[1]) { v = a * base / 100.0; ok = true; } }
+            if (ok && par->used.rendered) { free(r); r = px(v); }
+        }
+    }
     /* (an inset an animation left at auto: what it comes to on the box, as unanimated) */
     if (r && !strcmp(r, "auto") && cs->used.rendered && !cs->pseudo && !in_hook) {
         int side = !strcmp(n, "top") ? 0 : !strcmp(n, "right") ? 1 : !strcmp(n, "bottom") ? 2 : !strcmp(n, "left") ? 3 : -1;
@@ -1956,7 +2068,8 @@ static char *registered_item(JSContextHandle ctx, ComputedStyle *cs, const char 
                    : !strcmp(type, "color") ? "background-color" : !strcmp(type, "transform-function") ? "transform"
                    : !strcmp(type, "transform-list") ? "transform" : !strcmp(type, "time") ? "transition-duration"
                    : !strcmp(type, "angle") ? "rotate"
-                   : !strcmp(type, "percentage") && strchr(v, '(') ? "width" : NULL;
+                   : !strcmp(type, "percentage") && strchr(v, '(') ? "width"
+                   : !strcmp(type, "url") ? "background-image" : NULL;
     if (!strcmp(type, "integer") || !strcmp(type, "number")) {
         const char *b = v;
         while (*b && isspace((unsigned char)*b)) b++;
@@ -2015,6 +2128,12 @@ static char *registered_item(JSContextHandle ctx, ComputedStyle *cs, const char 
     if (!p) return strdup(v);
     char *c = compute_value(ctx, cs, p, v);
     if (!c) return strdup(v);
+    /* (a percentage: the one it comes to, not a calc() of it) */
+    if (!strcmp(type, "percentage") && !strncmp(c, "calc(", 5)) {
+        char *e = NULL;
+        double d = strtod(c + 5, &e);
+        if (e && e != c + 5 && e[0] == '%' && e[1] == ')' && !e[2]) { char tmp[64]; snprintf(tmp, sizeof tmp, "%.6g%%", d); free(c); c = strdup(tmp); }
+    }
     /* (a function's name as written in the specs: the property's value has it folded) */
     if (!strcmp(as, "transform")) {
         static const char *const names[] = { "translateX", "translateY", "translateZ", "translate3d", "scaleX", "scaleY",

@@ -3343,6 +3343,7 @@ static bool mq_feature_lookup(const char *name, double vw, double vh, MqFeature 
         { "display-mode", "browser" }, { "color-gamut", "srgb" }, { "dynamic-range", "standard" },
         { "video-dynamic-range", "standard" }, { "update", "fast" }, { "overflow-block", "scroll" },
         { "overflow-inline", "scroll" }, { "scripting", "enabled" }, { "scan", "none" },
+        { "display-state", "normal" }, { "resizable", "true" }, { "navigation-controls", "none" },
     };
     memset(f, 0, sizeof(*f));
     f->name = name;
@@ -3386,6 +3387,8 @@ static bool mq_ident_allowed(const char *name, const char *v) {
         { "video-dynamic-range", " standard high " }, { "update", " none slow fast " },
         { "overflow-block", " none scroll paged " }, { "overflow-inline", " none scroll " },
         { "scripting", " none initial-only enabled " }, { "scan", " interlace progressive " },
+        { "display-state", " normal minimized maximized fullscreen " }, { "resizable", " true false " },
+        { "navigation-controls", " none back-button " },
     };
     char key[72];
     snprintf(key, sizeof key, " %s ", v);

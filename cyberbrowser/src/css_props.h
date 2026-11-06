@@ -87,6 +87,9 @@ typedef struct CssComputeEnv {
     double root_font_size;  /* px: rem */
     double vw, vh;          /* the viewport, px */
     double color[4];        /* currentcolor (0-255, alpha 0-1) */
+    char color_text[160];   /* currentcolor as computed, in its own space ("": only color[]) */
+    bool vertical;          /* a vertical writing mode: vi and vb are the viewport's height and width */
+    bool dark;              /* the used color scheme is dark: system colors are its */
     double ch_ratio, ex_ratio;  /* ch and ex over em, of the font (0: not known) */
     double cq_w, cq_h;          /* the query container's content box, px (0: none, the viewport's) */
 } CssComputeEnv;
@@ -133,6 +136,8 @@ char *css_syntax_parse(const char *syntax, const char *value);
 bool css_syntax_component(const char *syntax, const char *value, char *type, size_t cap, char *mult);
 bool css_value_depends_on_context(const char *v);
 bool css_calc_number(const char *v, double *out);
+/* A time with math in it, in ms. */
+bool css_calc_time(const char *v, double *ms);
 /* clip-path's or shape-outside's value in its computed form; NULL if it already is. */
 char *css_shape_computed(const char *n, const char *v);
 /* An image list's radial and conic gradients in their computed form; NULL if already. */

@@ -544,12 +544,12 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                 else if (strcmp(name, "target") == 0) s.kind = SS_TARGET;
                 else if (strcmp(name, "heading") == 0) {
                     s.kind = SS_HEADING;
-                    s.a = args ? 0 : 0x7e;
+                    s.a = args ? 0 : 0x3fe;
                     for (size_t k = 0; args && k < alen; k++) {
                         if (args[k] < '0' || args[k] > '9') continue;
                         int v = 0;
                         while (k < alen && args[k] >= 0x30 && args[k] <= 0x39) { if (v < 100) v = v * 10 + (args[k] - 0x30); k++; }
-                        if (v >= 1 && v <= 6) s.a |= 1 << v;
+                        if (v >= 1 && v <= 9) s.a |= 1 << v;
                     }
                 }
                 else if (strcmp(name, "lang") == 0) {
@@ -1244,7 +1244,28 @@ static bool simple_ok(uint32_t s, const SelSimple *ss, uint32_t scope) {
         if (g_dom.ns[s] != DOM_NS_HTML) return false;
         static uint32_t h[7];
         if (!h[1]) for (int i = 1; i <= 6; i++) { char t[3] = { 'h', (char)('0' + i), 0 }; h[i] = css_atom_intern(t, 2); }
-        for (int i = 1; i <= 6; i++) if (g_dom.tag[s] == h[i]) return (ss->a >> i) & 1;
+        static CssAtom off_a, reset_a;
+        if (!off_a) { off_a = css_atom_intern("headingoffset", 13); reset_a = css_atom_intern("headingreset", 12); }
+        for (int i = 1; i <= 6; i++) {
+            if (g_dom.tag[s] != h[i]) continue;
+            /* (its level: offsets of it and what's above, up to a reset; at most 9) */
+            int lv = i;
+            for (uint32_t x = s; x && g_dom.kind[x] == DOM_K_ELEMENT && lv < 9; x = g_dom.parent[x]) {
+                uint32_t l = 0;
+                const char *v = attr_val(x, off_a, &l);
+                if (v && l && l < 8) {
+                    char b[8];
+                    memcpy(b, v, l);
+                    b[l] = 0;
+                    char *e = NULL;
+                    long o = strtol(b, &e, 10);
+                    if (e != b && o > 0) lv += o > 8 ? 8 : (int)o;
+                }
+                if (attr_val(x, reset_a, &l)) break;
+            }
+            if (lv > 9) lv = 9;
+            return (ss->a >> lv) & 1;
+        }
         return false;
     }
     case SS_VALID:

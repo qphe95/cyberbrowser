@@ -233,14 +233,17 @@
         skipWS: function () { var had = false; while (this.peek() && this.peek().t === 'ws') { this.i++; had = true; } return had; },
         /* <complex-selector-list> (or <relative-...> for :has) */
         list: function (relative, forgiving) {
-            var out = [];
+            var out = [], raws = [], failed = false;
             for (;;) {
                 this.skipWS();
                 var start = this.i, sel = null;
                 try { sel = this.complex(relative); } catch (e) { if (!forgiving) throw e; }
+                /* (what a forgiving list can't have where it is: a pseudo-element; more than a compound in :host()) */
+                if (forgiving && sel && (JSON.stringify(sel).indexOf('"pelem') >= 0 || (this.inHost && sel.length > 1))) sel = null;
                 this.skipWS();
                 var t = this.peek();
                 if (sel === null || (t && t.t !== ',' && t.t !== ')')) {
+                    failed = true;
                     if (!forgiving) throw new SyntaxError('bad selector');
                     /* forgiving: skip to the next top-level comma */
                     this.i = start;
@@ -255,10 +258,17 @@
                     sel = null;
                 }
                 if (sel) out.push(sel);
+                if (forgiving) {
+                    var rt = '';
+                    for (var ri = start; ri < this.i; ri++) rt += this.toks[ri].raw || '';
+                    raws.push(rt.trim());
+                }
                 t = this.peek();
                 if (t && t.t === ',') { this.i++; continue; }
                 break;
             }
+            /* (an item it had to forgive: the list as it was written, CSSOM's way) */
+            if (forgiving && failed) out.raw = raws.join(', ');
             return out;
         },
         complex: function (relative) {
@@ -429,7 +439,10 @@
                 return { list: l };
             }
             if (!element && fn === 'has') {
-                var h = this.list(true, false);
+                if (this.inHas) throw new SyntaxError(':has() in :has()');
+                this.inHas = (this.inHas || 0) + 1;
+                var h;
+                try { h = this.list(true, false); } finally { this.inHas--; }
                 if (!h.length) throw new SyntaxError('empty :has');
                 return { list: h, relative: true };
             }
@@ -440,7 +453,9 @@
                 return { list: hs };
             }
             if (!element && (fn === 'host' || fn === 'host-context')) {
-                var c = this.compound();
+                this.inHost = (this.inHost || 0) + 1;
+                var c;
+                try { c = this.compound(); } finally { this.inHost--; }
                 if (!c) throw new SyntaxError('bad :host()');
                 this.skipWS();
                 return { compound: c };
@@ -553,7 +568,8 @@
             case 'pelemfn':
                 s += (it.k === 'pelemfn' ? '::' : ':') + it.v + '(';
                 var a = it.arg;
-                if (a.list) s += serList(a.list);
+                if (a.list && a.list.raw !== undefined) s += a.list.raw;
+                else if (a.list) s += serList(a.list);
                 else if (a.compound) s += serCompound(a.compound);
                 else if (a.ab) s += serAnB(a.ab) + (a.of ? ' of ' + serList(a.of) : '');
                 else s += a.raw;
@@ -950,13 +966,24 @@
             /* (what's in style() goes as written) */
             var out = '', t = part.trim(), i = 0;
             while (i < t.length) {
-                var at = t.slice(i).search(/style\(/i);
-                if (at < 0) { out += one(t.slice(i)); break; }
+                var rest = t.slice(i), at = rest.search(/(^|[^\w-])(style|scroll-state)\(/i);
+                if (at < 0) { out += one(rest); break; }
+                if (!/^(style|scroll-state)\(/i.test(rest.slice(at))) at++;
+                var ss = /^scroll-state\(/i.test(rest.slice(at)), fl = ss ? 13 : 6;
                 out += one(t.slice(i, i + at));
-                var j = i + at + 6, depth = 1;
+                var j = i + at + fl, depth = 1;
                 while (j < t.length && depth) { if (t[j] === '(') depth++; else if (t[j] === ')') depth--; j++; }
-                /* (the function's name in lower case; its query normalized) */
-                out += 'style(' + styleQueryText(t.slice(i + at + 6, j - 1)) + ')';
+                var inner = t.slice(i + at + fl, j - 1);
+                if (ss) {
+                    /* (scroll-state(): keywords all, lower case and spaced; one that isn't a query, as written) */
+                    var n = one(inner).trim().replace(/\(\s+/g, '(').replace(/\s+\)/g, ')');
+                    var feat = /^\(?\s*[A-Za-z-]+\s*(:\s*[A-Za-z-]+)?\s*\)?$/;
+                    var ok = n.split(/\s+(?:and|or)\s+/i).every(function (x) { return feat.test(x.replace(/^not\s+/i, '')); });
+                    out += ok ? 'scroll-state(' + n.toLowerCase() + ')' : t.slice(i + at, j);
+                } else {
+                    /* (the function's name in lower case; its query normalized) */
+                    out += 'style(' + styleQueryText(inner) + ')';
+                }
                 i = j;
             }
             return out;
@@ -1246,6 +1273,56 @@
         'ascent-override': facePct, 'descent-override': facePct, 'line-gap-override': facePct,
         'size-adjust': function (v) { v = String(v).trim().toLowerCase(); return /^\+?[\d.]+(e[-+]?\d+)?%$/.test(v) ? v.replace(/^\+/, '') : null; }
     };
+    /* (one value as the property has it; null if the property won't take it) */
+    var faceScratch = null;
+    function faceOne(prop, v) {
+        var d = global.document;
+        if (!d || /^(inherit|initial|unset|revert|revert-layer|default)$/i.test(v)) return null;
+        if (!faceScratch) faceScratch = d.createElement('div').style;
+        faceScratch.setProperty(prop, '');
+        faceScratch.setProperty(prop, v);
+        var r = faceScratch.getPropertyValue(prop);
+        faceScratch.setProperty(prop, '');
+        return r || null;
+    }
+    function faceWords(v) {
+        var out = [], d = 0, cur = '';
+        for (var i = 0; i < v.length; i++) {
+            var c = v[i];
+            if (c === '(') d++;
+            else if (c === ')') d--;
+            if (/\s/.test(c) && !d) { if (cur) out.push(cur); cur = ''; } else cur += c;
+        }
+        if (cur) out.push(cur);
+        return out;
+    }
+    /* font-weight and font-stretch in @font-face: auto, or one value or a range of two */
+    function faceRange(prop, bad) {
+        return function (v) {
+            v = String(v).trim();
+            if (/^auto$/i.test(v)) return 'auto';
+            var w = faceWords(v);
+            if (!w.length || w.length > 2) return null;
+            var c = w.map(function (x) { return bad.test(x) ? null : faceOne(prop, x); });
+            if (c.some(function (x) { return x === null || /\s/.test(x) && !/\(/.test(x); })) return null;
+            return c.length === 2 && c[0] === c[1] ? c[0] : c.join(' ');
+        };
+    }
+    function faceStyle(v) {
+        v = String(v).trim();
+        if (/^(auto|normal|italic|oblique)$/i.test(v)) return v.toLowerCase();
+        var w = faceWords(v);
+        if (w.length < 2 || w.length > 3 || !/^oblique$/i.test(w[0])) return null;
+        var a = w.slice(1).map(function (x) { var c = faceOne('font-style', 'oblique ' + x); return c && /^oblique\s/.test(c) ? c.slice(8).trim() : null; });
+        if (a.some(function (x) { return x === null; })) return null;
+        if (a.length === 2 && a[0] === a[1]) a.pop();
+        if (a.every(function (x) { return parseFloat(x) === 0 && !/\(/.test(x); })) return 'normal';
+        return 'oblique ' + a.join(' ');
+    }
+    FACE_DESC['font-weight'] = faceRange('font-weight', /^(lighter|bolder)$/i);
+    FACE_DESC['font-stretch'] = faceRange('font-stretch', /^$/);
+    FACE_DESC['font-width'] = FACE_DESC['font-stretch'];
+    FACE_DESC['font-style'] = faceStyle;
     function facePct(v) {
         v = String(v).trim().toLowerCase();
         if (v === 'normal') return v;
@@ -1264,10 +1341,20 @@
             }
         });
         var set = style.setProperty, get = style.getPropertyValue, remove = style.removeProperty;
-        var low = function (n) { return String(n).trim().toLowerCase(); };
+        /* (font-width is font-stretch, as a descriptor too) */
+        var low = function (n) { n = String(n).trim().toLowerCase(); return n === 'font-width' ? 'font-stretch' : n; };
+        if (desc['font-width'] !== undefined) { desc['font-stretch'] = desc['font-width']; delete desc['font-width']; }
+        ['fontWeight', 'fontStretch', 'fontWidth', 'fontStyle'].forEach(function (k) {
+            var n = k.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); });
+            [k, n].forEach(function (key) {
+                Object.defineProperty(style, key, { configurable: true, enumerable: true,
+                    get: function () { return this.getPropertyValue(n); }, set: function (v) { this.setProperty(n, String(v)); } });
+            });
+        });
         var is = function (n) { return low(n) === 'unicode-range'; };
         Object.defineProperty(style, 'setProperty', { configurable: true, writable: true, value: function setProperty(n, v, pri) {
             if (low(n) in FACE_DESC) {
+                if (String(v).trim() === '') { delete desc[low(n)]; return; }
                 var dv = FACE_DESC[low(n)](v);
                 if (dv !== null) desc[low(n)] = dv;
                 return;

@@ -1790,8 +1790,23 @@ static void cascade_reverts(const CssStyleSet *S, CssStyleScratch *t)
         const char *v = a->decl->value;
         if (!v || (v[0] | 32) != 'r') continue;
         bool layer = !strcasecmp(v, "revert-layer");
-        if (!layer && strcasecmp(v, "revert")) continue;
         const CRule *ar = &S->rules[a->rule];
+        if (!strcasecmp(v, "revert-rule")) {
+            /* (revert-rule: as if its rule weren't there; what came before it stands) */
+            const char *prop = a->decl->property;
+            size_t pl = strlen(prop);
+            bool all = !strcmp(prop, "all");
+            for (size_t j = 0; j < k; j++) {
+                CssAppliedDecl *b = &t->applied.v[j];
+                if (!b->decl || b->rule != a->rule) continue;
+                const char *bp = b->decl->property;
+                size_t bl = strlen(bp);
+                if (all || (bl == pl && !strcmp(bp, prop)) || (bl > pl && !strncmp(bp, prop, pl) && bp[pl] == '-')) b->decl = NULL;
+            }
+            a->decl = NULL;
+            continue;
+        }
+        if (!layer && strcasecmp(v, "revert")) continue;
         if (ar->ua) continue;
         const char *prop = a->decl->property;
         size_t pl = strlen(prop);
