@@ -86,6 +86,7 @@ typedef struct Win {
     int order[MAX_TABS];        /* its tabs (indices into g_tabs), left to right */
     int n, active;              /* active: index into order, -1 none */
     UgWindow told;              /* what the GPU process was last told */
+    uint64_t chrome;            /* what its strip, title and address bar last showed (chrome_key) */
 } Win;
 
 static Chan g_coord;            /* side 1: the UI */
@@ -215,8 +216,36 @@ static void end_process(Tab *t) {
     t->id = 0;
 }
 
+/* What window w's chrome shows, as one number: its tabs' titles, URLs and
+ * states, which is active, and its size. */
+static uint64_t chrome_mix(uint64_t h, const void *p, size_t n) {
+    for (size_t i = 0; i < n; i++) h = (h ^ ((const uint8_t *)p)[i]) * 1099511628211ull;
+    return h;
+}
+static uint64_t chrome_key(const Win *w) {
+    uint64_t h = 1469598103934665603ull;
+    h = chrome_mix(h, &w->n, sizeof w->n);
+    h = chrome_mix(h, &w->active, sizeof w->active);
+    h = chrome_mix(h, &w->cw, sizeof w->cw);
+    h = chrome_mix(h, &w->ch, sizeof w->ch);
+    bool typing = GetFocus() == w->addr;
+    h = chrome_mix(h, &typing, sizeof typing);
+    for (int i = 0; i < w->n; i++) {
+        const Tab *t = &g_tabs[w->order[i]];
+        int st[3] = { t->state, t->started, t->shown };
+        h = chrome_mix(h, st, sizeof st);
+        h = chrome_mix(h, t->title, strlen(t->title) + 1);
+        h = chrome_mix(h, t->url, strlen(t->url) + 1);
+    }
+    return h ? h : 1;
+}
+
 static void update_chrome(Win *w) {
     if (!w->used) return;
+    /* (unchanged: nothing to set or paint again; a page's load sends several) */
+    uint64_t key = chrome_key(w);
+    if (key == w->chrome) { show_content(w); return; }
+    w->chrome = key;
     wchar_t buf[PROTO_URL_MAX + 64];
     Tab *t = active_tab(w);
     if (t) {
@@ -711,9 +740,13 @@ static void paint_window(Win *w) {
 
 /* A content window's pixels, from the GPU process (BGRX, top-down, into a
  * malloc'd *px): false if it shows nothing. */
-static bool content_pixels(const Win *w, uint8_t **px, uint32_t *pw, uint32_t *ph) {
-    UgShot q = { (uint64_t)(uintptr_t)w->content };
+/* (rle: *px is an .rle file's bytes, *len of them) */
+static bool content_pixels_then(const Win *w, uint8_t **px, uint32_t *pw, uint32_t *ph, void (*then)(void),
+                                bool rle, size_t *len) {
+    UgShot q = { (uint64_t)(uintptr_t)w->content, rle ? 1u : 0u, 0 };
     if (!g_have_gpu || !big_send(&g_gpu, UG_SHOT, &q, sizeof(q), NULL, 0, NULL, 0, 1000)) return false;
+    /* (while the GPU process reads them back) */
+    if (then) then();
     DWORD start = GetTickCount();
     while (GetTickCount() - start < 10000) {
         int r = big_recv(&g_gpu, &g_gpu_rx);
@@ -729,58 +762,41 @@ static bool content_pixels(const Win *w, uint8_t **px, uint32_t *pw, uint32_t *p
         GuShot s;
         if (g_gpu_rx.total < sizeof(s)) return false;
         memcpy(&s, g_gpu_rx.buf, sizeof(s));
+        size_t bytes = g_gpu_rx.total - sizeof(s);
         if (!s.width || !s.height || s.width > SURFACE_MAX_W || s.height > SURFACE_MAX_H ||
-            g_gpu_rx.total - sizeof(s) != (size_t)s.width * s.height * 4)
+            (rle ? bytes < 12 : bytes != (size_t)s.width * s.height * 4))
             return false;
-        *px = (uint8_t *)malloc((size_t)s.width * s.height * 4);
+        *px = (uint8_t *)malloc(bytes);
         if (!*px) return false;
-        memcpy(*px, g_gpu_rx.buf + sizeof(s), (size_t)s.width * s.height * 4);
+        memcpy(*px, g_gpu_rx.buf + sizeof(s), bytes);
         *pw = s.width;
         *ph = s.height;
+        if (len) *len = bytes;
         return true;
     }
     return false;
 }
 
-/* pw x ph pixels (BGRA, top-down) as path, run-length encoded: "CBRL",
- * the width and height (uint32 each), then runs of 5 bytes: a count
- * (uint16, 1..65535) and the color (B, G, R), row after row.  A page of
- * flat color is bytes, not a 1.4 MB bitmap a screenshot. */
-static bool write_rle(const char *path, const uint8_t *px, uint32_t pw, uint32_t ph) {
-    size_t n = (size_t)pw * ph, cap = 12 + n * 5, o = 12;
-    uint8_t *file = (uint8_t *)malloc(cap);
-    if (!file) return false;
-    memcpy(file, "CBRL", 4);
-    memcpy(file + 4, &pw, 4);
-    memcpy(file + 8, &ph, 4);
-    for (size_t i = 0; i < n;) {
-        const uint8_t *c = px + i * 4;
-        size_t j = i + 1;
-        while (j < n && j - i < 65535 && !memcmp(px + j * 4, c, 3)) j++;
-        uint16_t count = (uint16_t)(j - i);
-        memcpy(file + o, &count, 2);
-        memcpy(file + o + 2, c, 3);
-        o += 5;
-        i = j;
-    }
-    HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    DWORD wrote = 0;
-    bool ok = h != INVALID_HANDLE_VALUE && WriteFile(h, file, (DWORD)o, &wrote, NULL) && wrote == o;
-    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
-    free(file);
-    return ok;
+static bool content_pixels(const Win *w, uint8_t **px, uint32_t *pw, uint32_t *ph) {
+    return content_pixels_then(w, px, pw, ph, NULL, false, NULL);
 }
 
 /* The content alone (the page as the GPU process drew it), saved as a
- * 24-bit BMP, or run-length encoded for a path ending ".rle": what
+ * 24-bit BMP, or for a path ending ".rle" run-length encoded (by the GPU
+ * process: "CBRL", width, height, then runs of a uint16 count and B, G, R): what
  * reftests compare. */
-static bool save_content_shot(const Win *w, const char *path) {
+static bool save_content_shot_then(const Win *w, const char *path, void (*then)(void)) {
     uint8_t *px = NULL;
     uint32_t pw = 0, ph = 0;
-    if (!IsWindowVisible(w->content) || !content_pixels(w, &px, &pw, &ph)) return false;
-    size_t plen = strlen(path);
-    if (plen > 4 && !_stricmp(path + plen - 4, ".rle")) {
-        bool ok = write_rle(path, px, pw, ph);
+    size_t plen = strlen(path), len = 0;
+    /* (.rle: encoded by the GPU process, as the file is) */
+    bool rle = plen > 4 && !_stricmp(path + plen - 4, ".rle");
+    if (!IsWindowVisible(w->content) || !content_pixels_then(w, &px, &pw, &ph, then, rle, &len)) return false;
+    if (rle) {
+        HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        DWORD wrote = 0;
+        bool ok = h != INVALID_HANDLE_VALUE && WriteFile(h, px, (DWORD)len, &wrote, NULL) && wrote == len;
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
         free(px);
         return ok;
     }
@@ -1122,6 +1138,56 @@ static FILE *g_script;
 static char g_cmd[PROTO_URL_MAX + 64];
 static bool g_cmd_pending;
 static DWORD g_cmd_start;
+static uint32_t g_cmd_seq;      /* (a new one for each command read) */
+/* A waitfile's folder, watched for new names (the loop sleeps on it, not a
+ * millisecond timer: six shards' UIs woke a thousand times a second each). */
+static HANDLE g_wf_note = INVALID_HANDLE_VALUE;
+static char g_wf_dir[MAX_PATH];
+static bool g_in_waitfile;
+
+static void watch_folder_of(const char *path) {
+    char dir[MAX_PATH];
+    size_t n = strlen(path);
+    if (n >= sizeof dir) return;
+    memcpy(dir, path, n + 1);
+    char *slash = NULL;
+    for (char *p = dir; *p; p++) if (*p == '/' || *p == '\\') slash = p;
+    if (!slash) return;
+    *slash = 0;
+    if (g_wf_note != INVALID_HANDLE_VALUE && !strcmp(dir, g_wf_dir)) return;
+    if (g_wf_note != INVALID_HANDLE_VALUE) FindCloseChangeNotification(g_wf_note);
+    g_wf_note = FindFirstChangeNotificationA(dir, FALSE, FILE_NOTIFY_CHANGE_FILE_NAME);
+    memcpy(g_wf_dir, dir, strlen(dir) + 1);
+}
+/* (the line after a shotc, read ahead: a go there starts while the shot is read back) */
+static char g_ahead[PROTO_URL_MAX + 64];
+static bool g_have_ahead;
+static Tab *g_ahead_tab;
+
+static void script_log_cmd(const char *cmd) {
+    /* (when, to the millisecond, by the clock tab logs use too: where a script's time goes) */
+    FILETIME ft;
+    GetSystemTimePreciseAsFileTime(&ft);
+    ULARGE_INTEGER t = { .LowPart = ft.dwLowDateTime, .HighPart = ft.dwHighDateTime };
+    ui_log("[script] %.1f %s", (double)(t.QuadPart % 1000000000ull) / 1e4, cmd);
+}
+
+static bool script_read_line(char *out, size_t cap) {
+    for (;;) {
+        if (!fgets(out, (int)cap, g_script)) return false;
+        out[strcspn(out, "\r\n")] = 0;
+        if (out[0] != '#') return true;
+    }
+}
+
+static void navigate(Tab *t, const char *url);
+static void go_ahead(void) {
+    char url[PROTO_URL_MAX + 64];
+    if (!g_ahead_tab || sscanf(g_ahead, "go %4095s", url) != 1) return;
+    script_log_cmd(g_ahead);
+    navigate(g_ahead_tab, url);
+    g_have_ahead = false;
+}
 
 /* Run (or continue) the current command; true when it is done. */
 static bool script_command(void) {
@@ -1131,12 +1197,26 @@ static bool script_command(void) {
     if (!g_wins[g_focus].used) return true;
     Win *w = &g_wins[g_focus];
     Tab *t = active_tab(w);
+    /* waitfile <path> <ms>: until the file exists (a test server says it is done), or ms.
+     * (parsed once: it is asked again every millisecond) */
+    if (!strncmp(g_cmd, "waitfile ", 9)) {
+        static char wf_path[PROTO_URL_MAX + 64];
+        static int wf_ms;
+        static uint32_t wf_seq;
+        if (wf_seq != g_cmd_seq) {
+            wf_seq = g_cmd_seq;
+            if (sscanf(g_cmd, "waitfile %4095s %d", wf_path, &wf_ms) != 2) wf_path[0] = 0;
+            else watch_folder_of(wf_path);
+        }
+        if (wf_path[0]) {
+            bool done = GetFileAttributesA(wf_path) != INVALID_FILE_ATTRIBUTES || now - g_cmd_start >= (DWORD)wf_ms;
+            g_in_waitfile = !done;
+            return done;
+        }
+    }
     if (sscanf(g_cmd, "open %4095s", arg) == 1) { open_tab_in(g_focus, arg); return true; }
     if (sscanf(g_cmd, "go %4095s", arg) == 1) { if (t) navigate(t, arg); return true; }
     if (sscanf(g_cmd, "wait %d", &a) == 1) return now - g_cmd_start >= (DWORD)a;
-    /* waitfile <path> <ms>: until the file exists (a test server says it is done), or ms. */
-    if (sscanf(g_cmd, "waitfile %4095s %d", arg, &a) == 2)
-        return GetFileAttributesA(arg) != INVALID_FILE_ATTRIBUTES || now - g_cmd_start >= (DWORD)a;
     if (!strncmp(g_cmd, "waitload", 8)) {
         int limit = 60000, quiet = 1000;
         sscanf(g_cmd, "waitload %d %d", &limit, &quiet);
@@ -1226,9 +1306,13 @@ static bool script_command(void) {
         drain_all();
         if (t && (!t->has_frame || !t->frames) && now - g_cmd_start < 3000) return false;
         /* (again until the content has a frame to read, for up to 3 s: the
-         * first tab's may not be shown yet) */
-        bool ok = save_content_shot(w, arg);
-        if (!ok && now - g_cmd_start < 3000) return false;
+         * first tab's may not be shown yet; a go next starts once the
+         * frame is asked for: the tab's next frame is a reset and a load away) */
+        if (!g_have_ahead && script_read_line(g_ahead, sizeof g_ahead)) g_have_ahead = true;
+        bool fuse = g_have_ahead && t && !strncmp(g_ahead, "go ", 3) && !getenv("CYBER_UI_NOFUSE");
+        g_ahead_tab = t;
+        bool ok = save_content_shot_then(w, arg, fuse ? go_ahead : NULL);
+        if (!ok && g_have_ahead && now - g_cmd_start < 3000) return false;
         ui_log("[script] shotc %s: %s", arg, ok ? "saved" : "FAILED");
         return true;
     }
@@ -1249,17 +1333,16 @@ static bool script_command(void) {
 static void script_step(void) {
     while (g_script) {
         if (!g_cmd_pending) {
-            if (!fgets(g_cmd, sizeof(g_cmd), g_script)) { fclose(g_script); g_script = NULL; return; }
-            g_cmd[strcspn(g_cmd, "\r\n")] = 0;
-            if (g_cmd[0] == '#') continue;
+            if (g_have_ahead) {
+                memcpy(g_cmd, g_ahead, sizeof g_cmd);
+                g_have_ahead = false;
+            } else if (!script_read_line(g_cmd, sizeof g_cmd)) {
+                fclose(g_script); g_script = NULL; return;
+            }
             g_cmd_pending = true;
             g_cmd_start = GetTickCount();
-            /* (when, to the millisecond, by the clock tab logs use too:
-             * where a script's time goes) */
-            FILETIME ft;
-            GetSystemTimePreciseAsFileTime(&ft);
-            ULARGE_INTEGER t = { .LowPart = ft.dwLowDateTime, .HighPart = ft.dwHighDateTime };
-            ui_log("[script] %.1f %s", (double)(t.QuadPart % 1000000000ull) / 1e4, g_cmd);
+            g_cmd_seq++;
+            script_log_cmd(g_cmd);
         }
         if (!script_command()) return;
         g_cmd_pending = false;
@@ -1336,7 +1419,7 @@ int main(int argc, char **argv) {
 
     for (;;) {
         /* Sleep until a window message or a message on any channel. */
-        HANDLE waits[MAX_TABS + 2];
+        HANDLE waits[MAX_TABS + 3];
         int n = 0;
         bool ready = !chan_arm(&g_coord);
         waits[n++] = chan_event(&g_coord);
@@ -1349,7 +1432,13 @@ int main(int argc, char **argv) {
             if (!chan_arm(&g_tabs[i].chan)) ready = true;
             waits[n++] = chan_event(&g_tabs[i].chan);
         }
-        if (!ready) MsgWaitForMultipleObjectsEx((DWORD)n, waits, g_script ? 1 : INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        /* (a script polls every millisecond, but a waitfile wakes on its folder) */
+        DWORD timeout = g_script ? 1 : INFINITE;
+        bool note = g_script && g_in_waitfile && g_wf_note != INVALID_HANDLE_VALUE;
+        if (note) { waits[n++] = g_wf_note; timeout = 20; }
+        if (!ready) MsgWaitForMultipleObjectsEx((DWORD)n, waits, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        if (note && WaitForSingleObject(g_wf_note, 0) == WAIT_OBJECT_0) FindNextChangeNotification(g_wf_note);
+        g_in_waitfile = false;
         chan_disarm(&g_coord);
         if (g_have_gpu) chan_disarm(&g_gpu);
         for (int i = 0; i < MAX_TABS; i++)

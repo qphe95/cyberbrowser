@@ -1492,6 +1492,111 @@ void gc_handle_array_compact(JSHandleArray *arr) {
  * Initialization
  * ============================================================================ */
 
+/* A heap kept by gc_cleanup for the next gc_init (gc_keep_heap_once: a
+ * new document in this process): its reservation, region table, liveness
+ * words and cards, with every region it used zeroed and free, still
+ * committed up to GC_KEEP_REGIONS of them.  The next heap claims them
+ * without the OS's page faults (thousands a document). */
+#define GC_KEEP_REGIONS 64
+static struct {
+    bool on;
+    void *reservation;
+    uint8_t *base;
+    GCRegion *regions;
+    uint32_t hwm, committed;
+    uint64_t *alive;
+    uint8_t *cards;
+} g_kept;
+static bool g_keep_next;
+
+void gc_keep_heap_once(void) { g_keep_next = true; }
+
+/* (gc_cleanup's part, while g_core still describes the heap) */
+static bool gc_keep_heap(void) {
+    if (!g_keep_next || g_handle_history || g_core.poison || g_core.trace_handle) return false;
+    g_keep_next = false;
+    uint32_t hwm = atomic_load(&g_core.region_hwm), kept = 0;
+    for (uint32_t i = 1; i < hwm; i++) {
+        GCRegion *x = &g_core.regions[i];
+        if (x->decommitted) continue;
+        uint8_t *base = gc_core_region_start(x);
+        if (kept >= GC_KEEP_REGIONS) {
+            gc_os_decommit(base, GC_REGION_SIZE);
+            x->decommitted = true;
+            atomic_fetch_sub_explicit(&g_core.pages_decommitted, x->pages_off_n, memory_order_relaxed);
+            memset(x->pages_off, 0, sizeof(x->pages_off));
+            x->pages_off_n = 0;
+            continue;
+        }
+        if (x->pages_off_n) {
+            /* (the pages its holes gave back: committed again, zero; the rest zeroed here) */
+            if (!gc_os_commit(base, GC_REGION_SIZE)) {
+                gc_os_decommit(base, GC_REGION_SIZE);
+                x->decommitted = true;
+                memset(x->pages_off, 0, sizeof(x->pages_off));
+                x->pages_off_n = 0;
+                continue;
+            }
+            for (uint32_t pg = 0; pg < GC_REGION_SIZE / GC_OS_PAGE_SIZE; pg++)
+                if (!page_off(x, pg)) memset(base + (size_t)pg * GC_OS_PAGE_SIZE, 0, GC_OS_PAGE_SIZE);
+            memset(x->pages_off, 0, sizeof(x->pages_off));
+            x->pages_off_n = 0;
+        } else if (atomic_load(&x->state) != GC_RS_FREE || !x->zeroed) {
+            memset(base, 0, GC_REGION_SIZE);
+        }
+        x->zeroed = true;
+        x->used_before = true;
+        kept++;
+    }
+    g_kept.on = true;
+    g_kept.reservation = g_core.heap_reservation;
+    g_kept.base = g_gc.heap_base;
+    g_kept.regions = g_core.regions;
+    g_kept.hwm = hwm;
+    g_kept.committed = kept;
+    g_kept.alive = g_gc.alive;
+    g_kept.cards = g_gc.cards;
+    return true;
+}
+
+/* (gc_init's part: the kept heap as the new one's, every region free) */
+static bool gc_take_kept_heap(void) {
+    g_kept.on = false;
+    g_core.heap_reservation = g_kept.reservation;
+    g_gc.heap_base = g_kept.base;
+    g_gc.heap_reserved = GC_HEAP_RESERVE;
+    g_core.regions = g_kept.regions;
+    g_gc.alive = g_kept.alive;
+    g_gc.cards = g_kept.cards;
+    uint32_t hwm = g_kept.hwm;
+    for (uint32_t i = 1; i < hwm; i++) {
+        GCRegion *x = &g_core.regions[i];
+        x->space = 0;
+        x->alloc_owner = GC_OWNER_NONE;
+        x->humongous_head = x->humongous_count = 0;
+        x->collecting = x->permanent = x->pinned = x->has_young = false;
+        atomic_store(&x->top, 0);
+        x->tams = x->safe_top = x->scan_top = 0;
+        x->live_bytes = 0;
+        atomic_store(&x->recycle_state, GC_RECYCLE_IDLE);
+        atomic_store(&x->has_new_lines, false);
+        x->in_recyclable = false;
+        atomic_store(&x->state, GC_RS_FREE);
+    }
+    memset(g_gc.alive, 0, (size_t)hwm * ALIVE_REGION_WORDS * sizeof(uint64_t));
+#if GC_SOFTWARE_DIRTY
+    memset(g_gc.cards, 0, ((size_t)hwm * GC_REGION_SIZE) >> GC_CARD_SHIFT);
+#endif
+    atomic_store(&g_core.regions[0].state, GC_RS_CLAIMED);
+    atomic_store(&g_core.region_hwm, hwm);
+    atomic_store(&g_core.regions_committed, hwm - 1);
+    atomic_store(&g_core.free_committed, g_kept.committed);
+    atomic_store(&g_gc.handle_limit, 0);
+    for (uint32_t i = 0; i < hwm; i++)
+        if (!region_commit_handles(i)) return false;
+    return true;
+}
+
 bool gc_init(void) {
     if (g_gc.initialized) return true;
     memset(&g_core, 0, sizeof(g_core));
@@ -1522,6 +1627,10 @@ bool gc_init(void) {
 #endif
     }
 
+    if (g_kept.on) {
+        if (!gc_take_kept_heap()) return false;
+        goto contexts;
+    }
     /* Reserve one extra region so the base can be region-aligned. */
     size_t reserve = GC_HEAP_RESERVE + GC_REGION_SIZE;
     /* The OS write watch: the dirty tracking itself, or what the barrier
@@ -1558,6 +1667,7 @@ bool gc_init(void) {
     atomic_store(&g_gc.handle_limit, 0);
     if (!region_commit_handles(0)) return false;
 
+contexts:
     /* Young objects are the unmarked ones, wherever they are: the young
      * context fills holes like the others. */
     g_core.js_young.space = GC_RS_OLD;
@@ -1608,14 +1718,15 @@ void gc_cleanup(void) {
     gc_handle_array_free(&g_gc.weakref_handles);
     gc_handle_array_free(&g_gc.finrec_handles);
     gc_handle_array_free(&g_gc.viewed_buffers);
-    for (uint32_t i = 0; i < GC_MAX_REGIONS; i++) {
+    bool kept = gc_keep_heap();
+    for (uint32_t i = 0; i < GC_MAX_REGIONS && !kept; i++) {
         GCRegion *r = &g_core.regions[i];
         free(r->line_first);
         free(r->new_lines);
         free(r->mark_bits[0]);
         free(r->mark_bits[1]);
     }
-    free(g_core.regions);
+    if (!kept) free(g_core.regions);
     gc_core_free_retired();
     free(g_retired);
     g_retired = NULL;
@@ -1623,14 +1734,16 @@ void gc_cleanup(void) {
     free(g_core.contexts.items);
     free(g_core.finalizers.items);
     free(g_core.roots.items);
-    gc_os_release(g_core.heap_reservation, GC_HEAP_RESERVE + GC_REGION_SIZE);
-    gc_os_release(g_gc.alive, (size_t)GC_MAX_HANDLES / 8);
+    if (!kept) {
+        gc_os_release(g_core.heap_reservation, GC_HEAP_RESERVE + GC_REGION_SIZE);
+        gc_os_release(g_gc.alive, (size_t)GC_MAX_HANDLES / 8);
+    }
     if (g_handle_history) {
         gc_os_release(g_handle_history, (size_t)GC_MAX_HANDLES * sizeof(GCHandleHistory));
         g_handle_history = NULL;
     }
 #if GC_SOFTWARE_DIRTY
-    gc_os_release(g_gc.cards, GC_HEAP_RESERVE >> GC_CARD_SHIFT);
+    if (!kept) gc_os_release(g_gc.cards, GC_HEAP_RESERVE >> GC_CARD_SHIFT);
 #endif
     memset(&g_core, 0, sizeof(g_core));
     memset(&g_gc, 0, sizeof(g_gc));

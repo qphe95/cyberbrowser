@@ -1317,6 +1317,10 @@ bool page_engine_reset(void) {
     g_ctx = GC_HANDLE_NULL;
     g_global = JS_UNDEFINED;
     uint64_t t1 = gc_os_now_ns();
+    {
+        extern void gc_keep_heap_once(void);
+        if (!getenv("CYBER_GC_NOKEEP")) gc_keep_heap_once();    /* (the next heap takes this one's memory: no page faults) */
+    }
     gc_cleanup();
     uint64_t t2 = gc_os_now_ns();
     dom_store_reset();

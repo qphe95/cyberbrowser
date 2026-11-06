@@ -67,6 +67,14 @@ static char g_title[PROTO_TITLE_MAX];
 static char g_next_url[PROTO_URL_MAX + 1];
 static void navigate_request(const uint8_t *url, uint32_t len);
 
+/* CYBER_REFTEST_HOOKS=1 (a reftest run's): __cyberFramePending(), true while
+ * what the page last laid out (or is to lay out) has not gone to the GPU
+ * process; the harness's ready script waits a frame more then. */
+static GCValue js_frame_pending(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    return JS_NewBool(ctx, g_need_paint || page_needs_layout());
+}
+
 /* CYBER_TRACE_STEPS=1: a timestamped line at each step of a load (by the
  * clock the UI's script log uses), to see where a page's time goes. */
 static void trace(const char *what, unsigned v) {
@@ -1123,6 +1131,9 @@ load:
     page_set_viewport((int)g_width, (int)g_height);
     JSContextHandle ctx = page_engine_context();
     JS_Eval(ctx, CLICK_JS, sizeof(CLICK_JS) - 1, "<tab-click>", JS_EVAL_TYPE_GLOBAL);
+    if (getenv("CYBER_REFTEST_HOOKS"))
+        JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberFramePending",
+                                  JS_NewCFunction(ctx, js_frame_pending, "__cyberFramePending", 0), JS_PROP_CONFIGURABLE);
     bool blank = strcmp(url, "about:blank") == 0;
     g_main_thread = GetCurrentThreadId();
     page_set_load_progress(load_progress);

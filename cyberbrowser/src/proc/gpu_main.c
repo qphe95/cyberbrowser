@@ -525,15 +525,15 @@ static void ui_message(void) {
         /* (the frames the tab sent first: it may have sent its last one
          * before what made the UI ask, on its own channel) */
         while (c && big_recv(&c->chan, &c->rx) > 0) client_message(c);
-        static uint8_t *px, *out;
+        /* (kept from shot to shot: fresh buffers were a thousand page faults each) */
+        static uint8_t *px, *out, *rle;
+        static size_t px_have, out_have, rle_have;
         double t0 = stat_now();
         GuShot s = { 0, 0 };
         if (c && c->target && w->h) {
-            free(px);
-            free(out);
-            size_t px_cap = (size_t)c->width * c->height * 4;
-            px = (uint8_t *)malloc(px_cap);
-            out = (uint8_t *)malloc((size_t)c->width * w->h * 4);
+            size_t px_cap = (size_t)c->width * c->height * 4, out_cap = (size_t)c->width * w->h * 4;
+            if (px_have < px_cap) { free(px); px = (uint8_t *)malloc(px_cap); px_have = px ? px_cap : 0; }
+            if (out_have < out_cap) { free(out); out = (uint8_t *)malloc(out_cap); out_have = out ? out_cap : 0; }
             uint32_t tw = 0, th = 0;
             /* (The target can differ from the tab's size, if a resize was
              * made and its render failed: the readback is refused then, and
@@ -549,7 +549,34 @@ static void ui_message(void) {
                 s.height = w->h;
             }
         }
-        big_send(&g_ui, GU_SHOT, &s, sizeof(s), out, s.width * s.height * 4, NULL, 0, 5000);
+        if (q.rle && s.width) {
+            /* (as the .rle file: "CBRL", width, height, then runs of a uint16 count and B, G, R;
+             * a reftest's page is mostly flat color, so kilobytes cross, not megabytes) */
+            size_t n = (size_t)s.width * s.height, cap = 12 + n * 5, k = 12;
+            if (rle_have < cap) { free(rle); rle = (uint8_t *)malloc(cap); rle_have = rle ? cap : 0; }
+            if (rle) {
+                memcpy(rle, "CBRL", 4);
+                memcpy(rle + 4, &s.width, 4);
+                memcpy(rle + 8, &s.height, 4);
+                const uint32_t *p = (const uint32_t *)out;
+                for (size_t i = 0; i < n;) {
+                    uint32_t col = p[i] & 0xFFFFFFu;
+                    size_t j = i + 1;
+                    while (j < n && j - i < 65535 && (p[j] & 0xFFFFFFu) == col) j++;
+                    uint16_t count = (uint16_t)(j - i);
+                    memcpy(rle + k, &count, 2);
+                    memcpy(rle + k + 2, out + i * 4, 3);
+                    k += 5;
+                    i = j;
+                }
+                big_send(&g_ui, GU_SHOT, &s, sizeof(s), rle, (uint32_t)k, NULL, 0, 5000);
+            } else {
+                GuShot none = { 0, 0 };
+                big_send(&g_ui, GU_SHOT, &none, sizeof(none), NULL, 0, NULL, 0, 5000);
+            }
+        } else {
+            big_send(&g_ui, GU_SHOT, &s, sizeof(s), out, s.width * s.height * 4, NULL, 0, 5000);
+        }
         stat_add(ST_SHOT, t0);
     }
 }

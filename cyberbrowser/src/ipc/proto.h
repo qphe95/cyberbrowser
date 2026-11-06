@@ -351,7 +351,7 @@ typedef struct WtFrame {
 enum {
     UG_WINDOW = 1,      /* UgWindow: that content window shows that tab (0: none; 0 x 0: the window is gone) */
     UG_SHOT,            /* UgShot: send what that content window shows, as GU_SHOT */
-    GU_SHOT,            /* GuShot + width * height * 4 bytes, BGRX, top-down */
+    GU_SHOT,            /* GuShot + width * height * 4 bytes, BGRX, top-down (UgShot.rle: an .rle file) */
     GU_SHOWN,           /* GuShown: a frame of that tab is in that content window */
     UG_SCROLL,          /* UgScroll: the user scrolled that tab; move its content now (compositor scrolling) */
 };
@@ -366,6 +366,8 @@ typedef struct UgWindow {
 
 typedef struct UgShot {
     uint64_t hwnd;
+    uint32_t rle;               /* 1: GU_SHOT's bytes after the GuShot are an .rle file's (run-length encoded) */
+    uint32_t pad;
 } UgShot;
 
 typedef struct UgScroll {

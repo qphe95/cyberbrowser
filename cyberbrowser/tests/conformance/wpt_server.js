@@ -227,7 +227,13 @@ const REFREADY = `<script style="display: none !important">//<![CDATA[
     /* (two frames, as wptrunner waits: the second callback runs once the
      * first frame is with the GPU process, and an image that frame was
      * still waiting for is in the one built after it) */
-    var go = function () { requestAnimationFrame(function () { requestAnimationFrame(function () { setTimeout(ready, 0); }); }); };
+    /* (and, when what was laid out since has not gone to the GPU process yet (a web
+     * font's relayout, say), a frame more: __cyberFramePending, the tab's in a reftest run) */
+    var settled = function () {
+      if (window.__cyberFramePending && window.__cyberFramePending()) requestAnimationFrame(function () { setTimeout(settled, 0); });
+      else ready();
+    };
+    var go = function () { requestAnimationFrame(function () { requestAnimationFrame(function () { setTimeout(settled, 0); }); }); };
     if (document.fonts && document.fonts.ready) document.fonts.ready.then(go, go); else go();
   }
   if (document.readyState === 'complete') setTimeout(check, 0); else addEventListener('load', function () { setTimeout(check, 0); });
