@@ -1706,6 +1706,26 @@ static CssDisplay css_parse_display(const char *value) {
     return CSS_DISPLAY_OTHER;
 }
 
+/* Percentage gaps (which: 1 row, 2 column, 3 both from a shorthand): kept as
+ * fractions, the length left 0, for layout to resolve. */
+static void gap_pct_one(double *gap, float *pct, const char *w)
+{
+    size_t l = strlen(w);
+    if (l > 1 && w[l - 1] == '%' && !strchr(w, '(')) { *pct = (float)(strtod(w, NULL) / 100.0); *gap = 0.0; }
+    else *pct = 0.0f;
+}
+static void gap_pct_parse(LayoutStyle *s, const char *v, int which)
+{
+    char a[64] = { 0 }, b[64] = { 0 };
+    if (!v || sscanf(v, "%63s %63s", a, b) < 1) { if (which & 1) s->gap_row_pct = 0.0f; if (which & 2) s->gap_col_pct = 0.0f; return; }
+    if (which == 3) {
+        if (!b[0]) memcpy(b, a, sizeof b);
+        gap_pct_one(&s->gap_row, &s->gap_row_pct, a);
+        gap_pct_one(&s->gap_col, &s->gap_col_pct, b);
+    } else if (which == 1) gap_pct_one(&s->gap_row, &s->gap_row_pct, a);
+    else gap_pct_one(&s->gap_col, &s->gap_col_pct, a);
+}
+
 /* inline-flex / inline-grid / inline-table: atomic inline-level boxes whose
  * inner display css_parse_display already returned. */
 static bool css_display_is_inline_level(const char *value) {
@@ -2560,6 +2580,7 @@ static void layout_apply_grid_declaration(LayoutBox *box, const char *prop, cons
         if (prop[5] == 'g') css_parse_shorthand_1_or_2(value, parent_width, viewport_width, s->font_size, r, c);
         else if (prop[5] == 'r') *r = css_parse_length(value, parent_width, viewport_width, s->font_size);
         else *c = css_parse_length(value, parent_width, viewport_width, s->font_size);
+        gap_pct_parse(s, value, prop[5] == 'g' ? 3 : prop[5] == 'r' ? 1 : 2);
     } else if (strcasecmp(prop, "flex-flow") == 0) {
         char toks[2][128];
         int n = css_split_values(value, toks, 2);
@@ -3422,11 +3443,35 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     }
     if (prop[0] == 'j' && !strcasecmp(prop, "justify-self")) box->s->js_text = layout_intern(value, strlen(value));
     if (prop[0] == 'a' && !strcasecmp(prop, "align-self")) box->s->as_text = layout_intern(value, strlen(value));
+    if (prop[0] == 'a' && !strcasecmp(prop, "anchor-scope")) {
+        box->s->anchor_scope = strcasecmp(value, "none") ? layout_intern(value, strlen(value)) : NULL;
+        return;
+    }
     if (prop[0] == 'p' && !strncasecmp(prop, "position-a", 10)) {
         const char **slot = !strcasecmp(prop, "position-anchor") ? &box->s->position_anchor : !strcasecmp(prop, "position-area") ? &box->s->position_area : NULL;
         if (slot) {
             *slot = strcasecmp(value, "none") && strcasecmp(value, "auto") ? layout_intern(value, strlen(value)) : NULL;
             return;
+        }
+    }
+    if (prop[0] == 'm' && (!strcasecmp(prop, "min-width") || !strcasecmp(prop, "min-height") || !strcasecmp(prop, "max-width") || !strcasecmp(prop, "max-height"))) {
+        /* (anchor-size() in a min or max: worked out where it's placed) */
+        int k = 10 + (prop[1] == 'a' ? 2 : 0) + (prop[4] == 'h' ? 1 : 0);
+        box->s->anchor_expr[k] = NULL;
+        if (strstr(value, "anchor-size(")) {
+            box->s->anchor_expr[k] = layout_intern(value, strlen(value));
+            return;
+        }
+    }
+    if (prop[0] == 'm' && !strncasecmp(prop, "margin-", 7)) {
+        /* (anchor-size() in a margin: worked out where it's placed) */
+        int k = !strcasecmp(prop + 7, "top") ? 0 : !strcasecmp(prop + 7, "right") ? 1 : !strcasecmp(prop + 7, "bottom") ? 2 : !strcasecmp(prop + 7, "left") ? 3 : -1;
+        if (k >= 0) {
+            box->s->anchor_expr[6 + k] = NULL;
+            if (strstr(value, "anchor-size(")) {
+                box->s->anchor_expr[6 + k] = layout_intern(value, strlen(value));
+                return;
+            }
         }
     }
     if ((prop[0] == 'w' && !strcasecmp(prop, "width")) || (prop[0] == 'h' && !strcasecmp(prop, "height"))) {
@@ -3856,10 +3901,13 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     } else if (PK(62)) {
         css_parse_shorthand_1_or_2(value, parent_width, viewport_width,
                                    box->s->font_size, &box->s->gap_row, &box->s->gap_col);
+        gap_pct_parse(box->s, value, 3);
     } else if (PK(63)) {
         box->s->gap_row = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
+        gap_pct_parse(box->s, value, 1);
     } else if (PK(64)) {
         box->s->gap_col = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
+        gap_pct_parse(box->s, value, 2);
     } else if (PK(65)) {
         while (isspace((unsigned char)*value)) value++;
         if (strncasecmp(value, "currentcolor", 12) == 0) { box->s->fill_kind = 1; box->s->fill_set = 1; }
@@ -6261,6 +6309,41 @@ static int cq_scroll_feature(const char *a, const char *b)
     return -1;
 }
 
+/* An anchored() feature: fallback alone is false (no fallback in use), fallback: none
+ * true, another fallback false; -1 when it isn't one. */
+static __thread bool t_cq_anch_on;
+static int cq_anchored_feature(const char *a, const char *b)
+{
+    while (a < b && isspace((unsigned char)*a)) a++;
+    while (b > a && isspace((unsigned char)b[-1])) b--;
+    const char *colon = memchr(a, ':', (size_t)(b - a));
+    const char *ne = colon ? colon : b;
+    while (ne > a && isspace((unsigned char)ne[-1])) ne--;
+    if (!((size_t)(ne - a) == 8 && !strncasecmp(a, "fallback", 8))) return -1;
+    if (!colon) return 0;
+    const char *v = colon + 1;
+    while (v < b && isspace((unsigned char)*v)) v++;
+    if (v >= b) return -1;
+    if ((size_t)(b - v) == 4 && !strncasecmp(v, "none", 4)) return 1;
+    static const char *const kw[] = { "any", "flip-x", "flip-y", "flip-start", "flip-block", "flip-inline", "top", "bottom", "left", "right",
+        "center", "start", "end", "self-start", "self-end", "inline-start", "inline-end", "block-start", "block-end",
+        "self-inline-start", "self-inline-end", "self-block-start", "self-block-end", "span-all", "span-top", "span-bottom",
+        "span-left", "span-right", "span-start", "span-end", "span-inline-start", "span-inline-end", "span-block-start",
+        "span-block-end", NULL };
+    for (const char *p = v; p < b; ) {
+        while (p < b && isspace((unsigned char)*p)) p++;
+        const char *q = p;
+        while (q < b && !isspace((unsigned char)*q)) q++;
+        size_t l = (size_t)(q - p);
+        if (!l) break;
+        bool ok = l > 2 && p[0] == '-' && p[1] == '-';
+        for (int i = 0; kw[i] && !ok; i++) ok = strlen(kw[i]) == l && !strncasecmp(p, kw[i], l);
+        if (!ok) return -1;
+        p = q;
+    }
+    return 0;
+}
+
 /* One parenthesized or functional term at *s. */
 static int cq_term(const LayoutContext *ctx, int dom, const char *cname, size_t cl, const char **s, const char *e, int depth)
 {
@@ -6314,6 +6397,25 @@ static int cq_term(const LayoutContext *ctx, int dom, const char *cname, size_t 
         }
         return cq_scroll_feature(open + 1, close);
     }
+    /* (anchored(): no fallback known to be in use) */
+    if (fl == 8 && !strncasecmp(p, "anchored", 8)) {
+        const char *in = open + 1;
+        while (in < close && isspace((unsigned char)*in)) in++;
+        if (in < close && (*in == '(' || !strncasecmp(in, "not", 3))) {
+            bool held = t_cq_anch_on;
+            t_cq_anch_on = true;
+            r = cq_cond(ctx, dom, cname, cl, &in, close, depth + 1);
+            t_cq_anch_on = held;
+            return r;
+        }
+        return cq_anchored_feature(open + 1, close);
+    }
+    if (t_cq_anch_on && !fl) {
+        const char *in = open + 1;
+        while (in < close && isspace((unsigned char)*in)) in++;
+        if (in < close && (*in == 40 || !strncasecmp(in, "not", 3))) return cq_cond(ctx, dom, cname, cl, &in, close, depth + 1);
+        return cq_anchored_feature(open + 1, close);
+    }
     if (t_cq_scroll_on && !fl) {
         const char *in = open + 1;
         while (in < close && isspace((unsigned char)*in)) in++;
@@ -6323,7 +6425,7 @@ static int cq_term(const LayoutContext *ctx, int dom, const char *cname, size_t 
     if (fl) return -1;              /* (a function it doesn't know) */
     const char *q = open + 1;
     while (q < close && isspace((unsigned char)*q)) q++;
-    if (q < close && (*q == '(' || !strncasecmp(q, "not ", 4) || !strncasecmp(q, "not(", 4) || !strncasecmp(q, "style(", 6) || !strncasecmp(q, "scroll-state(", 13))) {
+    if (q < close && (*q == '(' || !strncasecmp(q, "not ", 4) || !strncasecmp(q, "not(", 4) || !strncasecmp(q, "style(", 6) || !strncasecmp(q, "scroll-state(", 13) || !strncasecmp(q, "anchored(", 9))) {
         const char *in = q;
         return cq_cond(ctx, dom, cname, cl, &in, close, depth + 1);
     }
@@ -6758,7 +6860,43 @@ static char *ident_subst(const char *v)
             } else if (isalpha((unsigned char)*a) || *a == '-' || *a == '_' || (unsigned char)*a >= 0x80) {
                 const char *s = a;
                 while (*a && (isalnum((unsigned char)*a) || *a == '-' || *a == '_' || (unsigned char)*a >= 0x80)) a++;
-                if (*a == '(') { ok = false; break; }     /* (a function: not an ident-arg) */
+                if (*a == '(') {
+                    /* (math that comes to an integer: its digits) */
+                    const char *f = a + 1;
+                    int d = 1;
+                    while (*f && d) { if (*f == '(') d++; else if (*f == ')') d--; f++; }
+                    char expr[256];
+                    size_t el = (size_t)(f - s);
+                    double num = 0.0;
+                    bool got = false;
+                    if (!d && el < sizeof expr) {
+                        memcpy(expr, s, el);
+                        expr[el] = 0;
+                        got = css_calc_number(expr, &num) && isfinite(num) && num == floor(num) && fabs(num) < 1e15;
+                        if (!got) {
+                            /* (font-relative lengths: at the default size, which is all a sign or a ratio needs) */
+                            char ex2[512];
+                            size_t o2 = 0;
+                            for (const char *k = expr; *k && o2 + 24 < sizeof ex2; ) {
+                                char *ne = NULL;
+                                if ((isdigit((unsigned char)*k) || *k == '.') && (k == expr || !isalnum((unsigned char)k[-1]))) {
+                                    double nv = strtod(k, &ne);
+                                    int ul = !strncasecmp(ne, "rem", 3) ? 3 : !strncasecmp(ne, "em", 2) ? 2 : 0;
+                                    if (ul && !isalpha((unsigned char)ne[ul])) { o2 += (size_t)snprintf(ex2 + o2, sizeof ex2 - o2, "%gpx", nv * 16.0); k = ne + ul; continue; }
+                                }
+                                ex2[o2++] = *k++;
+                            }
+                            ex2[o2] = 0;
+                            got = css_calc_number(ex2, &num) && isfinite(num) && num == floor(num) && fabs(num) < 1e15;
+                        }
+                    }
+                    if (!got) { ok = false; break; }     /* (another function: not an ident-arg) */
+                    char nb[32];
+                    int nl2 = snprintf(nb, sizeof nb, "%.0f", num);
+                    for (int k = 0; k < nl2; k++) if (il < sizeof id - 1) id[il++] = nb[k];
+                    a = f;
+                    continue;
+                }
                 for (const char *k = s; k < a; k++) if (il < sizeof id - 1) id[il++] = *k;
             } else { ok = false; break; }
         }
@@ -19782,8 +19920,11 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
     bool main_def = is_row ? true : height_def;
     bool cross_def = is_row ? height_def : true;
     double avail_main = is_row ? cw : chh;
-    double gap_main = is_row ? ct->s->gap_col : ct->s->gap_row;
-    double gap_cross = is_row ? ct->s->gap_row : ct->s->gap_col;
+    /* (percentage gaps: of its own content box; an unknown height's, none) */
+    double gcol = ct->s->gap_col_pct > 0.0f ? ct->s->gap_col_pct * cw : ct->s->gap_col;
+    double grow_ = ct->s->gap_row_pct > 0.0f ? ct->s->gap_row_pct * (height_def ? chh : 0.0) : ct->s->gap_row;
+    double gap_main = is_row ? gcol : grow_;
+    double gap_cross = is_row ? grow_ : gcol;
     double main_start = is_row ? content_x : content_y;
     double cross_start = is_row ? content_y : content_x;
 
@@ -21029,8 +21170,16 @@ static int grid_place_items(GridItem *it, int n, const bool *rdef, const bool *c
     }
     cap += span_max * n;
     if (cap > 100000) cap = 100000;
-    unsigned char *occ = (unsigned char *)calloc((size_t)cap * (size_t)M, 1);
-    if (!occ) { *out_cols = M; return nmaj; }
+    /* (room across for the items locked to a line of the major axis, which may make tracks of their own) */
+    int S = M;
+    for (int i = 0; i < n; i++) {
+        bool jdef = column_flow ? cdef[i] : rdef[i], mdef = column_flow ? rdef[i] : cdef[i];
+        if (jdef && !mdef) S += column_flow ? it[i].rs : it[i].cs;
+    }
+    if (S > 4096) S = 4096;
+    int *cursor = (int *)calloc((size_t)cap, sizeof(int));
+    unsigned char *occ = (unsigned char *)calloc((size_t)cap * (size_t)S, 1);
+    if (!occ || !cursor) { free(occ); free(cursor); *out_cols = M; return nmaj; }
 #define MAJ(i) (column_flow ? it[i].c : it[i].r)
 #define MAJS(i) (column_flow ? it[i].cs : it[i].rs)
 #define MIN_(i) (column_flow ? it[i].r : it[i].c)
@@ -21042,21 +21191,26 @@ static int grid_place_items(GridItem *it, int n, const bool *rdef, const bool *c
     for (int i = 0; i < n; i++) {
         if (!(rdef[i] && cdef[i])) continue;
         for (int a = MAJ(i); a < MAJ(i) + MAJS(i) && a < cap; a++)
-            for (int b = MIN_(i); b < MIN_(i) + MINS(i) && b < M; b++) occ[(size_t)a * M + b] = 1;
+            for (int b = MIN_(i); b < MIN_(i) + MINS(i) && b < S; b++) occ[(size_t)a * S + b] = 1;
         if (MAJ(i) + MAJS(i) > used) used = MAJ(i) + MAJS(i);
     }
-    /* 2. major axis definite only */
+    /* 2. major axis definite only: past what this step put in that line before (sparse), tracks across as needed */
+    int Mreal = M;
     for (int i = 0; i < n; i++) {
         bool jdef = column_flow ? cdef[i] : rdef[i], mdef = column_flow ? rdef[i] : cdef[i];
         if (!jdef || mdef) continue;
-        int mj = MAJ(i), mjs = MAJS(i), mns = MINS(i), at = 0;
-        while (at + mns <= M && grid_occupied(occ, M, mj, mjs, at, mns, cap)) at++;
-        if (at + mns > M) at = 0;
+        int mj = MAJ(i), mjs = MAJS(i), mns = MINS(i);
+        int at = !dense && mj >= 0 && mj < cap ? cursor[mj] : 0;
+        while (at + mns <= S && grid_occupied(occ, S, mj, mjs, at, mns, cap)) at++;
+        if (at + mns > S) at = 0;
         SETPOS(i, mj, at);
+        if (mj >= 0 && mj < cap) cursor[mj] = at + mns;
+        if (at + mns > Mreal) Mreal = at + mns;
         for (int a = mj; a < mj + mjs && a < cap; a++)
-            for (int b = at; b < at + mns && b < M; b++) occ[(size_t)a * M + b] = 1;
+            for (int b = at; b < at + mns && b < S; b++) occ[(size_t)a * S + b] = 1;
         if (mj + mjs > used) used = mj + mjs;
     }
+    M = Mreal;
     /* 3. the rest, in order */
     int cr = 0, cc = 0;
     for (int i = 0; i < n; i++) {
@@ -21067,7 +21221,7 @@ static int grid_place_items(GridItem *it, int n, const bool *rdef, const bool *c
         if (mdef) {
             int mn = MIN_(i);
             if (!dense && mn < cc) cr++;
-            while (cr + mjs <= cap && grid_occupied(occ, M, cr, mjs, mn, mns, cap)) cr++;
+            while (cr + mjs <= cap && grid_occupied(occ, S, cr, mjs, mn, mns, cap)) cr++;
             if (cr + mjs > cap) cr = cap - mjs;
             SETPOS(i, cr, mn);
             cc = mn + mns;
@@ -21075,16 +21229,17 @@ static int grid_place_items(GridItem *it, int n, const bool *rdef, const bool *c
             for (;;) {
                 if (cc + mns > M) { cr++; cc = 0; }
                 if (cr + mjs > cap) { cr = cap - mjs; break; }
-                if (!grid_occupied(occ, M, cr, mjs, cc, mns, cap)) break;
+                if (!grid_occupied(occ, S, cr, mjs, cc, mns, cap)) break;
                 cc++;
             }
             SETPOS(i, cr, cc);
             cc += mns;
         }
         for (int a = MAJ(i); a < MAJ(i) + mjs && a < cap; a++)
-            for (int b = MIN_(i); b < MIN_(i) + mns && b < M; b++) occ[(size_t)a * M + b] = 1;
+            for (int b = MIN_(i); b < MIN_(i) + mns && b < S; b++) occ[(size_t)a * S + b] = 1;
         if (MAJ(i) + mjs > used) used = MAJ(i) + mjs;
     }
+    free(cursor);
 #undef MAJ
 #undef MAJS
 #undef MIN_
@@ -21766,6 +21921,10 @@ static int grid_self_mode(const LayoutBox *ct, const LayoutBox *child, bool inli
     }
 }
 
+/* (rows' percentage gaps of a height not known while sizing: what the body applies after) */
+static __thread float t_grid_gpr;
+static void layout_grid_body(LayoutContext *ctx, int idx, LayoutBox *ct, double content_x, double content_y, double cw,
+                             bool height_def, double chh);
 static void layout_grid_container(LayoutContext *ctx, int idx)
 {
     LayoutBox *ct = layout_box(ctx, idx);
@@ -21774,6 +21933,21 @@ static void layout_grid_container(LayoutContext *ctx, int idx)
     double cw = ct->content_width;
     bool height_def = !layout_height_auto(ct) || ct->height > 0.0;
     double chh = height_def ? ct->content_height : -1.0;
+    /* (percentage gaps: of its own content box; a height not yet known, none till it is) */
+    double held_gc = ct->s->gap_col, held_gr = ct->s->gap_row;
+    float gpr = ct->s->gap_row_pct;
+    if (ct->s->gap_col_pct > 0.0f) ct->s->gap_col = ct->s->gap_col_pct * (cw > 0.0 ? cw : 0.0);
+    if (gpr > 0.0f) ct->s->gap_row = height_def ? gpr * (chh > 0.0 ? chh : 0.0) : 0.0;
+    t_grid_gpr = !height_def ? gpr : 0.0f;
+    layout_grid_body(ctx, idx, ct, content_x, content_y, cw, height_def, chh);
+    t_grid_gpr = 0.0f;
+    ct->s->gap_col = held_gc;
+    ct->s->gap_row = held_gr;
+}
+
+static void layout_grid_body(LayoutContext *ctx, int idx, LayoutBox *ct, double content_x, double content_y, double cw,
+                             bool height_def, double chh)
+{
     double gap_c = ct->s->gap_col, gap_r = ct->s->gap_row;
 
     GridState G;
@@ -21972,6 +22146,16 @@ static void layout_grid_container(LayoutContext *ctx, int idx)
     free(cpos);
     free(rpos);
     free(todo);
+    /* (row gaps of the height it came to: each row down by its gaps above) */
+    if (t_grid_gpr > 0.0f) {
+        double g = t_grid_gpr * ct->content_height;
+        for (int i = 0; i < G.nitems && g > 0.0; i++) {
+            GridItem *it = &G.items[i];
+            if (it->is_text || it->r <= 0) continue;
+            LayoutBox *cb = layout_box(ctx, it->idx);
+            layout_move_box(ctx, it->idx, cb->x, cb->y + it->r * g);
+        }
+    }
     if (ct->s->direction == 1) layout_mirror_children(ctx, idx, content_x, ct->content_width);
     grid_state_free(&G);
 }
@@ -24647,6 +24831,19 @@ static int layout_anchor_find(LayoutContext *ctx, int self, const char *name, si
             if (p == cb) under_cb = true;
         }
         if (inside || !under_cb) continue;
+        /* (anchor-scope: the nearest that keeps this name to its subtree must hold the query too) */
+        {
+            bool hidden = false;
+            for (int p = a; p >= 0; p = ctx->tree.nodes[p].parent_idx) {
+                const char *sc = ctx->boxes[p].s->anchor_scope;
+                if (!sc || !(!strcasecmp(sc, "all") || anchor_list_has(sc, name, nl))) continue;
+                bool holds = false;
+                for (int q = self; q >= 0 && !holds; q = ctx->tree.nodes[q].parent_idx) holds = q == p;
+                hidden = !holds;
+                break;
+            }
+            if (hidden) continue;
+        }
         /* (the last of its containing blocks before the query's: laid out before it) */
         int x = a, guard = 0;
         for (int c = anchor_cb_of(ctx, x); c != cb && c >= 0 && guard < 4096; c = anchor_cb_of(ctx, x), guard++) x = c;
@@ -25077,6 +25274,22 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
     /* (a grid's: the area its lines say) */
     if (anc >= 0 && layout_box(ctx, anc)->s->display == CSS_DISPLAY_GRID)
         grid_area_as_cb(layout_box(ctx, anc), anc, box->s, &cb_x, &cb_y, &cb_w, &cb_h);
+    /* (anchored in a scroll container: the scrollable containing block, as far as what scrolls in it goes) */
+    else if (anc >= 0 && box->s->position_anchor && layout_box(ctx, anc)->s->overflow != 0 && layout_box(ctx, anc)->s->writing_mode == 0) {
+        const LayoutBox *a = layout_box(ctx, anc);
+        double r = 0.0, bt = 0.0;
+        for (int c = ctx->tree.nodes[anc].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+            const LayoutBox *cb = layout_box(ctx, c);
+            if (!layout_is_in_flow(cb) || cb->s->display == CSS_DISPLAY_NONE) continue;
+            double cr = cb->x + cb->width + cb->margin_right - cb_x, cbm = cb->y + cb->height + cb->margin_bottom - cb_y;
+            if (cr > r) r = cr;
+            if (cbm > bt) bt = cbm;
+        }
+        r += a->padding_right;
+        bt += a->padding_bottom;
+        if (r > cb_w) cb_w = r;
+        if (bt > cb_h) cb_h = bt;
+    }
     bool has_left = (box->s->positioned_sides & LAYOUT_SIDE_LEFT) != 0;
     bool has_right = (box->s->positioned_sides & LAYOUT_SIDE_RIGHT) != 0;
     bool has_top = (box->s->positioned_sides & LAYOUT_SIDE_TOP) != 0;
@@ -25119,11 +25332,12 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
                     else { t0 = x[0]; x[0] = y[0]; y[0] = t0; t0 = x[1]; x[1] = y[1]; y[1] = t0; }
                 }
             }
+            /* (an anchor past the containing block: the grid's outer lines go out to it) */
             double ex[4] = { 0.0, r[0], r[0] + r[2], cb_w }, ey[4] = { 0.0, r[1], r[1] + r[3], cb_h };
-            for (int k = 1; k < 3; k++) {
-                ex[k] = ex[k] < 0.0 ? 0.0 : ex[k] > cb_w ? cb_w : ex[k];
-                ey[k] = ey[k] < 0.0 ? 0.0 : ey[k] > cb_h ? cb_h : ey[k];
-            }
+            if (ex[1] < ex[0]) ex[0] = ex[1];
+            if (ex[2] > ex[3]) ex[3] = ex[2];
+            if (ey[1] < ey[0]) ey[0] = ey[1];
+            if (ey[2] > ey[3]) ey[3] = ey[2];
             area_x = position_area_align(x);
             area_y = position_area_align(y);
             cb_x += ex[x[0]];
@@ -25162,6 +25376,24 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
             bool got = anchor_eval(&q, as->anchor_expr[k], k, &v);
             if (k == 4) { ms->width_set = got; ms->css_width = got ? v : 0.0; }
             else { ms->height_set = got; ms->css_height = got ? v : 0.0; }
+        }
+        double *mf[4] = { &box->margin_top, &box->margin_right, &box->margin_bottom, &box->margin_left };
+        double *msf[4] = { &ms->margin_top, &ms->margin_right, &ms->margin_bottom, &ms->margin_left };
+        for (int k = 6; k < 10; k++) {
+            if (!as->anchor_expr[k]) continue;
+            double v = 0.0;
+            if (anchor_eval(&q, as->anchor_expr[k], k - 6, &v)) { *mf[k - 6] = v; *msf[k - 6] = v; }
+        }
+        /* (min and max: 4 for the widths, 5 the heights, as anchor-size()'s own axis) */
+        for (int k = 10; k < 14; k++) {
+            if (!as->anchor_expr[k]) continue;
+            double v = 0.0;
+            bool got = anchor_eval(&q, as->anchor_expr[k], (k & 1) ? 5 : 4, &v);
+            if (!got) continue;
+            if (k == 10) { ms->min_width = v; box->min_width = v; }
+            else if (k == 11) { ms->min_height = v; box->min_height = v; }
+            else if (k == 12) { ms->max_width = v; box->max_width = v; }
+            else { ms->max_height = v; box->max_height = v; }
         }
         if (as->self_anchor && an >= 0) {
             double r[4];
@@ -25594,6 +25826,24 @@ static bool try_apply_option(LayoutContext *ctx, LayoutBox *box, const CssStyleS
 {
     bool any = false;
     bool vert = box->s->writing_mode != 0;
+    /* (a <position-area> for an option: as a rule of position-area alone) */
+    {
+        const char *p = o;
+        while (p < e && isspace((unsigned char)*p)) p++;
+        const char *q = e;
+        while (q > p && isspace((unsigned char)q[-1])) q--;
+        if (q > p && !(p[0] == '-' && p[1] == '-') && strncasecmp(p, "flip-", 5)) {
+            char v[256];
+            size_t l = (size_t)(q - p) < sizeof v - 1 ? (size_t)(q - p) : sizeof v - 1;
+            memcpy(v, p, l);
+            v[l] = 0;
+            CssDeclaration c = { 0 };
+            c.property = (char *)"position-area";
+            c.value = v;
+            layout_apply_declaration(box, &c, ctx->viewport_width, ctx->viewport_width, ctx->base_url);
+            return true;
+        }
+    }
     /* (the rule first, then the flips, in the order they're written) */
     for (int pass = 0; pass < 2; pass++) {
         const char *p = o;
@@ -25624,6 +25874,9 @@ static bool try_apply_option(LayoutContext *ctx, LayoutBox *box, const CssStyleS
                     layout_apply_declaration(box, &c, ctx->viewport_width, ctx->viewport_width, ctx->base_url);
                 }
                 box->top = box->s->top; box->right = box->s->right; box->bottom = box->s->bottom; box->left = box->s->left;
+                /* (and its margins: the rule's, as the box uses them) */
+                box->margin_top = box->s->margin_top; box->margin_right = box->s->margin_right;
+                box->margin_bottom = box->s->margin_bottom; box->margin_left = box->s->margin_left;
                 any = true;
             } else if (pass == 1) {
                 #define TW(w) (l == strlen(w) && !strncasecmp(p, w, l))

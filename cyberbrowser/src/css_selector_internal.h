@@ -22,6 +22,13 @@
 #define CSS_ATTR_OP_SUBSTR   6  /* [a*=v]   */
 #define CSS_ATTR_OP_TOKPREFIX 7 /* .v-*: a token starting with v */
 
+/* (set once a sheet has [*|name]: the style snapshot then gives each attribute
+ * a "*|local" entry too, whatever its prefix) */
+extern int g_css_attr_any_ns;
+/* (set once a type selector names a namespace: the snapshot then gives each
+ * element a "-cb-ns" entry, its namespace's URI ("" none)) */
+extern int g_css_type_ns;
+
 #include <string.h>
 #include <strings.h>
 

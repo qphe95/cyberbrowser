@@ -892,6 +892,15 @@
         /* (width: stretch's other name) */
         Object.defineProperty(ffOrig.prototype, 'width', { enumerable: true, configurable: true,
             get: function () { return this.stretch; }, set: function (v) { this.stretch = v; } });
+        /* (features, variations and palettes: the font's, empty until it says) */
+        [['features', 'FontFaceFeatures'], ['variations', 'FontFaceVariations'], ['palettes', 'FontFacePalettes']].forEach(function (p) {
+            if (Object.getOwnPropertyDescriptor(ffOrig.prototype, p[0])) return;
+            Object.defineProperty(ffOrig.prototype, p[0], { enumerable: true, configurable: true, get: function () {
+                var h = ffOf(this), key = '__' + p[0];
+                if (!h[key]) { var I = global[p[1]]; h[key] = I && I.prototype ? Object.create(I.prototype) : {}; }
+                return h[key];
+            } });
+        });
         Object.defineProperty(ffCtor, 'length', { configurable: true, value: 2 });
         Object.defineProperty(ffCtor, 'prototype', { value: ffOrig.prototype, writable: false });
         Object.defineProperty(ffOrig.prototype, 'constructor', { configurable: true, writable: true, value: ffCtor });

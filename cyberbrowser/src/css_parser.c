@@ -35,6 +35,19 @@
 /* A transition has been declared somewhere: see lq_who_affected. */
 bool g_css_saw_transition;
 bool g_css_saw_composition;     /* (animation-composition: what the engine's tracks don't do) */
+int g_css_attr_any_ns;
+int g_css_type_ns;
+
+/* @namespace prefixes seen (all sheets alike; a later one of a prefix wins), and the default */
+static struct { char p[32]; char uri[200]; } g_css_ns[16];
+static int g_css_nns;
+static char g_css_ns_default[200];
+static bool g_css_ns_has_default;
+static const char *css_ns_lookup(const char *p, size_t n)
+{
+    for (int i = g_css_nns - 1; i >= 0; i--) if (strlen(g_css_ns[i].p) == n && !strncmp(g_css_ns[i].p, p, n)) return g_css_ns[i].uri;
+    return NULL;
+}
 
 static bool css_is_space(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
@@ -1466,6 +1479,29 @@ static size_t css_at_rule(const char *s, size_t len, size_t pos, bool nested, Cs
     /* (one that needs a block, @media; or @page;, is invalid: dropped, it
      * does not count; of the statements only @namespace does) */
     bool is_namespace = nl == 9 && !strncasecmp(name, "namespace", 9);
+    if (is_namespace && !block) {
+        /* (its prefix, if any, and URI: url(...) or a string) */
+        char *c = css_strndup_trim(s + pre, pre_end - pre);
+        const char *p = c ? c : "";
+        char pfx[32] = { 0 }, uri[200] = { 0 };
+        size_t k = 0;
+        while (*p && !css_is_space(*p) && strncasecmp(p, "url(", 4) && *p != '"' && *p != '\'' && k + 1 < sizeof pfx) pfx[k++] = *p++;
+        while (*p && css_is_space(*p)) p++;
+        if (!*p && k) { memcpy(uri, pfx, sizeof pfx); pfx[0] = 0; p = ""; }
+        const char *u = p;
+        if (!strncasecmp(u, "url(", 4)) u += 4;
+        while (*u && css_is_space(*u)) u++;
+        char q = (*u == '"' || *u == '\'') ? *u++ : 0;
+        size_t ul = 0;
+        while (*u && (q ? *u != q : (*u != ')' && !css_is_space(*u))) && ul + 1 < sizeof uri) uri[ul++] = *u++;
+        if (ul) uri[ul] = 0;
+        if (pfx[0] && g_css_nns < 16) {
+            snprintf(g_css_ns[g_css_nns].p, sizeof g_css_ns[0].p, "%s", pfx);
+            snprintf(g_css_ns[g_css_nns].uri, sizeof g_css_ns[0].uri, "%s", uri);
+            g_css_nns++;
+        } else if (!pfx[0]) { snprintf(g_css_ns_default, sizeof g_css_ns_default, "%s", uri); g_css_ns_has_default = true; }
+        free(c);
+    }
     if (counts) *counts = css_at_known(name, nl) && !is_charset && !is_import && (block ? true : is_namespace);
     bool is_layer = nl == 5 && !strncasecmp(name, "layer", 5);
     char *layer_here = NULL;
@@ -2238,6 +2274,7 @@ static void css_apply_pseudo(CssSimpleSelector *out,
             return;
         }
         CssSimpleSelector tmp;
+        /* (namespaces aren't flattened into :not(): as before, not tested there) */
         css_parse_simple_selector(arg, al, &tmp);
         if (tmp.has_tag || tmp.has_id || tmp.class_count > 0 || tmp.attr_count > 0 ||
             tmp.universal || tmp.state_mask) {
@@ -2371,6 +2408,32 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
     size_t i = 0;
     css_skip_space(s, n, &i);
     if (i >= n) return;
+    /* (a namespace prefix before the type: ns|, *| or |; the namespace as a test of "-cb-ns") */
+    {
+        size_t k = i;
+        if (s[k] == '*') k++;
+        else if (s[k] != '|') k = css_sel_name_end(s, n, k, ".#[:|");
+        const char *want = NULL;
+        bool has_prefix = k < n && s[k] == '|' && (k + 1 >= n || s[k + 1] != '=');
+        if (has_prefix) {
+            if (k == i) want = "";
+            else if (!(k == i + 1 && s[i] == '*')) {
+                want = css_ns_lookup(s + i, k - i);
+                if (!want) out->never_match = true;     /* (a prefix never declared: invalid) */
+            }
+            i = k + 1;
+        }
+        /* (a default namespace isn't applied: the table outlives its sheet) */
+        (void)g_css_ns_default; (void)g_css_ns_has_default;
+        if (want && out->attr_count < CSS_MAX_ATTRS) {
+            int a = out->attr_count++;
+            snprintf(out->attrs[a], sizeof out->attrs[0], "-cb-ns");
+            out->attr_ops[a] = CSS_ATTR_OP_EQ;
+            out->attr_ci[a] = false;
+            snprintf(out->attr_vals[a], sizeof out->attr_vals[0], "%s", want);
+            g_css_type_ns = 1;
+        }
+    }
 
     if (s[i] == '*') {
         out->universal = true;
@@ -2443,9 +2506,21 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
              * each optionally followed by an i/s case flag. */
             i++;
             while (i < n && css_is_space(s[i])) i++;
-            /* `*|name` / `|name`: attributes carry no namespace here. */
-            if (i + 1 < n && s[i] == '*' && s[i + 1] == '|') i += 2;
+            /* `*|name`: any namespace (a "*|" entry); `|name`: none; `p|name`: the
+             * qualified name p:name, as the document writes it */
+            char qual[64];
+            size_t ql = 0;
+            if (i + 1 < n && s[i] == '*' && s[i + 1] == '|') { i += 2; qual[0] = '*'; qual[1] = '|'; ql = 2; g_css_attr_any_ns = 1; }
             else if (i + 1 < n && s[i] == '|' && s[i + 1] != '=') i++;
+            else {
+                size_t j = css_sel_name_end(s, n, i, "=~|^$*] \t\n\r\f");
+                if (j > i && j + 1 < n && s[j] == '|' && s[j + 1] != '=' && j - i + 1 < sizeof qual) {
+                    memcpy(qual, s + i, j - i);
+                    ql = j - i;
+                    qual[ql++] = ':';
+                    i = j + 1;
+                }
+            }
             size_t attr_start = i;
             i = css_sel_name_end(s, n, i, "=~|^$*] \t\n\r\f");
             size_t attr_end = i;
@@ -2520,6 +2595,11 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
                 int k = out->attr_count;
                 css_sel_name_copy(out->attrs[k], s + attr_start,
                                   attr_end - attr_start, sizeof(out->attrs[0]));
+                if (ql) {
+                    char t[64];
+                    snprintf(t, sizeof t, "%.*s%s", (int)ql, qual, out->attrs[k]);
+                    memcpy(out->attrs[k], t, sizeof t);
+                }
                 out->attr_ops[k] = (unsigned char)op;
                 out->attr_ci[k] = ci;
                 memcpy(out->attr_vals[k], val, sizeof(val));
@@ -3473,7 +3553,9 @@ static int mq_feature(const char *s, const char *e, double vw, double vh) {
         if (f.type == MQ_NUM && strcmp(n, "device-pixel-ratio") && memchr(colon + 1, '.', (size_t)(e - colon - 1))) return -1;
         /* (out of the feature's range: not a value of it) */
         if ((f.type == MQ_RES || f.type == MQ_RATIO) && v < 0) return -1;
-        if (f.type == MQ_NUM && strcmp(n, "device-pixel-ratio") && (v < 0 || v != (double)(long long)v)) return -1;
+        /* (a whole number; a negative one is a value that matches nothing) */
+        if (f.type == MQ_NUM && strcmp(n, "device-pixel-ratio") && v != (double)(long long)v) return -1;
+        if (f.type == MQ_NUM && v < 0 && !strcmp(n, "grid")) return -1;
         if (!strcmp(n, "grid") && (prefix || (v != 0 && v != 1))) return -1;
         return mq_compare(f.num, prefix == 1 ? MQ_GE : prefix == 2 ? MQ_LE : MQ_EQ, v);
     }

@@ -212,11 +212,12 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * written; insets and sizes that use anchor() or anchor-size() (top, right,
      * bottom, left, width, height); self-alignment anchor-center (1 justify, 2 align). */
     const char *anchor_name, *position_anchor, *position_area;
+    const char *anchor_scope;          /* anchor-scope: "all" or the names its subtree keeps to itself (NULL none) */
     const char *try_list;           /* position-try-fallbacks, as written */
     const char *js_text, *as_text;  /* justify-self and align-self, as written */
     unsigned char try_pa[4], try_pa_n;  /* flips position-area goes through: 0 x, 1 y, 2 across */
     unsigned char try_order;        /* position-try-order: 0 normal, 1 most-width, 2 most-height, 3 block, 4 inline */
-    const char *anchor_expr[6];
+    const char *anchor_expr[14];    /* insets (top right bottom left), width, height, margins (6-9, the same order), min-width, min-height, max-width, max-height */
     unsigned char self_anchor;
     unsigned char anchor_fail;      /* of those insets, the ones with no value: bit k */
     /* zoom: its own (0: none), and what the box's lengths were last scaled by (0: 1). */
@@ -402,6 +403,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     double width_percent, width_pct_px;
     double height_percent, height_pct_px;
     double gap_row, gap_col;
+    float gap_row_pct, gap_col_pct;    /* gaps of a percentage (fractions): of the container's own content box, at layout */
 
     /* Preferred aspect ratio as height / width: from the aspect-ratio
      * property (aspect_ratio_prop set; it sizes the box box-sizing names),

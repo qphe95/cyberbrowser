@@ -2401,7 +2401,7 @@
                 ffvBlock(p.block, r.__maps);
                 break;
             case 'font-palette-values':
-                if (p.block === null || !/^--(?:[\w-]|[^\x00-\x7f]|\\.)+$/.test(p.prelude)) return null;
+                if (p.block === null || !/^--(?:[\w-]|[^\x00-\x7f]|\\.)*$/.test(p.prelude)) return null;
                 r = makeRule(CSSFontPaletteValuesRule, 'font-palette-values', { __name: p.prelude, __family: '', __base: '', __colors: '' });
                 paletteBlock(r, p.block);
                 break;

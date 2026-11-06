@@ -259,6 +259,8 @@
         info: nul(), hasUAVisualTransition: bool(false) });
     eventClass('PopStateEvent', Event, { state: nul(), hasUAVisualTransition: bool(false) });
     eventClass('PageTransitionEvent', Event, { persisted: bool(false) });
+    eventClass('PageSwapEvent', Event, { viewTransition: nul(), activation: nul() });
+    eventClass('PageRevealEvent', Event, { viewTransition: nul() });
     eventClass('ProgressEvent', Event, { lengthComputable: bool(false), loaded: num(0), total: num(0) });
     eventClass('AnimationEvent', Event, { animationName: str(''), elapsedTime: dbl(0), pseudoElement: str(''), animation: nul() });
     eventClass('TransitionEvent', Event, { propertyName: str(''), elapsedTime: dbl(0), pseudoElement: str(''), animation: nul() });

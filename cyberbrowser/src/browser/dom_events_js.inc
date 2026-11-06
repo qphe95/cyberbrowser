@@ -260,6 +260,8 @@
 "        info: nul(), hasUAVisualTransition: bool(false) });\n"
 "    eventClass('PopStateEvent', Event, { state: nul(), hasUAVisualTransition: bool(false) });\n"
 "    eventClass('PageTransitionEvent', Event, { persisted: bool(false) });\n"
+"    eventClass('PageSwapEvent', Event, { viewTransition: nul(), activation: nul() });\n"
+"    eventClass('PageRevealEvent', Event, { viewTransition: nul() });\n"
 "    eventClass('ProgressEvent', Event, { lengthComputable: bool(false), loaded: num(0), total: num(0) });\n"
 "    eventClass('AnimationEvent', Event, { animationName: str(''), elapsedTime: dbl(0), pseudoElement: str(''), animation: nul() });\n"
 "    eventClass('TransitionEvent', Event, { propertyName: str(''), elapsedTime: dbl(0), pseudoElement: str(''), animation: nul() });\n"

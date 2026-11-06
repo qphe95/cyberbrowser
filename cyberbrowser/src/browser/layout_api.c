@@ -1613,6 +1613,84 @@ char *layout_query_custom(JSContextHandle ctx, GCValue element, const char *name
     return v ? strdup(v) : NULL;
 }
 
+static bool is_tag(NodeId id, const char *tag);
+static bool is_root_element(NodeId id);
+
+/* Where sticky box a is pushed to by what scrolls it (CSS Position 3 §3.4):
+ * kept its insets inside the scrollport, and inside its containing block. */
+static void lq_sticky_one(int a, double *ox, double *oy)
+{
+    *ox = *oy = 0.0;
+    const LayoutBox *b = &g_lq_layout.boxes[a];
+    unsigned sides = b->s->positioned_sides;
+    if (!sides) return;
+    int s = -1;
+    for (int p = g_lq_layout.tree.nodes[a].parent_idx; p >= 0; p = g_lq_layout.tree.nodes[p].parent_idx) {
+        if (!g_lq_layout.boxes[p].s->overflow) continue;
+        const HtmlNode *hn = css_layout_box_node(&g_lq_layout, p);
+        NodeId pid = hn && hn->type == HTML_NODE_ELEMENT ? hn->store_id : DOM_NULL;
+        if (pid && (is_root_element(pid) || is_tag(pid, "body"))) break;
+        s = p;
+        break;
+    }
+    double vx0, vy0, vw, vh;
+    float sx = 0.0f, sy = 0.0f;
+    if (s >= 0) {
+        const LayoutBox *S = &g_lq_layout.boxes[s];
+        const HtmlNode *hn = css_layout_box_node(&g_lq_layout, s);
+        if (hn && g_dom_scrolls.n) dom_scroll_get(hn->store_id, &sx, &sy);
+        vx0 = S->x + S->s->border_left + S->padding_left;
+        vy0 = S->y + S->s->border_top + S->padding_top;
+        vw = S->width - S->s->border_left - S->s->border_right - S->padding_left - S->padding_right;
+        vh = S->height - S->s->border_top - S->s->border_bottom - S->padding_top - S->padding_bottom;
+    } else {
+        const HtmlNode *hn = css_layout_box_node(&g_lq_layout, a);
+        if (hn && g_dom_scrolls.n) dom_scroll_get(dom_owner(hn->store_id), &sx, &sy);
+        vx0 = 0.0; vy0 = 0.0; vw = g_lq_vw; vh = g_lq_vh;
+    }
+    vx0 += sx;
+    vy0 += sy;
+    int par = g_lq_layout.tree.nodes[a].parent_idx;
+    if (par < 0) return;
+    const LayoutBox *C = &g_lq_layout.boxes[par];
+    double cx0 = C->x + C->s->border_left + C->padding_left, cy0 = C->y + C->s->border_top + C->padding_top;
+    double cx1 = cx0 + C->content_width, cy1 = cy0 + C->content_height;
+    double bx0 = b->x - b->margin_left, by0 = b->y - b->margin_top;
+    double bx1 = b->x + b->width + b->margin_right, by1 = b->y + b->height + b->margin_bottom;
+    double dy = 0.0, dx = 0.0;
+    if (sides & LAYOUT_SIDE_TOP) {
+        double want = vy0 + b->s->top - b->y;
+        if (want > dy) { dy = want; if (by1 + dy > cy1) dy = cy1 - by1 > 0.0 ? cy1 - by1 : 0.0; }
+    }
+    if (sides & LAYOUT_SIDE_BOTTOM) {
+        double want = vy0 + vh - b->s->bottom - (b->y + b->height);
+        if (want < dy) { dy = want; if (by0 + dy < cy0) dy = cy0 - by0 < 0.0 ? cy0 - by0 : 0.0; }
+    }
+    if (sides & LAYOUT_SIDE_LEFT) {
+        double want = vx0 + b->s->left - b->x;
+        if (want > dx) { dx = want; if (bx1 + dx > cx1) dx = cx1 - bx1 > 0.0 ? cx1 - bx1 : 0.0; }
+    }
+    if (sides & LAYOUT_SIDE_RIGHT) {
+        double want = vx0 + vw - b->s->right - (b->x + b->width);
+        if (want < dx) { dx = want; if (bx0 + dx < cx0) dx = cx0 - bx0 < 0.0 ? cx0 - bx0 : 0.0; }
+    }
+    *ox = dx;
+    *oy = dy;
+}
+
+/* All the sticky boxes from idx up: how far they carry it. */
+static void lq_sticky_shift(int idx, double *ox, double *oy)
+{
+    *ox = *oy = 0.0;
+    for (int a = idx; a >= 0; a = g_lq_layout.tree.nodes[a].parent_idx) {
+        if (g_lq_layout.boxes[a].s->position != CSS_POSITION_STICKY) continue;
+        double dx, dy;
+        lq_sticky_one(a, &dx, &dy);
+        *ox += dx;
+        *oy += dy;
+    }
+}
+
 /* From page to client coordinates: what's scrolled above box idx, the viewport too. */
 static void lq_client_shift(NodeId id, int idx, double *dx, double *dy)
 {
@@ -1623,6 +1701,11 @@ static void lq_client_shift(NodeId id, int idx, double *dx, double *dy)
         *dx += vx;
         *dy += vy;
     }
+    /* (sticky ones above it: where scrolling has pushed them) */
+    double sx, sy;
+    lq_sticky_shift(idx, &sx, &sy);
+    *dx -= sx;
+    *dy -= sy;
 }
 
 static bool is_tag(NodeId id, const char *tag);
@@ -1833,6 +1916,11 @@ static GCValue lq_metric(JSContextHandle ctx, GCValue this_val, int which)
     case M_OFFSET_L: {
         NodeId op = lq_offset_parent(id, idx);
         double v = which == M_OFFSET_T ? b->y : b->x;
+        {
+            double sx, sy;
+            lq_sticky_shift(idx, &sx, &sy);
+            v += which == M_OFFSET_T ? sy : sx;
+        }
         int pi = op ? lq_box_index(op) : -1;
         /* Relative to the offset parent's padding edge; to the initial
          * containing block when it is body or there is none. */
@@ -2121,6 +2209,11 @@ bool layout_query_used_inset(uint32_t id, int side, bool side_auto, bool opp_aut
     #define USED(k) ((b->s->inset_pct_bits & (1u << (k))) ? (double)b->s->inset_pct[k] * span[k] + v0[k] : v0[k])
     if (!side_auto) { *out = USED(side); return true; }
     if (pos == CSS_POSITION_STICKY) return false;
+    /* (position-area or anchor-center with a default anchor: its auto insets are nothing) */
+    if (!flow && b->s->position_anchor && (b->s->position_area || b->s->self_anchor)) {
+        bool horiz = side == 1 || side == 3;
+        if (b->s->position_area || (b->s->self_anchor & (horiz ? 1 : 2))) { *out = 0.0; return true; }
+    }
     if (flow) { *out = opp_auto ? 0.0 : -USED((side + 2) % 4); return true; }
     #undef USED
     switch (side) {

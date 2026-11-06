@@ -68,7 +68,10 @@
                                 p[0] * m[2] + p[1] * m[6] + p[2] * m[10] + p[3] * m[14],
                                 p[0] * m[3] + p[1] * m[7] + p[2] * m[11] + p[3] * m[15]);
         }
-        toJSON() { return { x: this.x, y: this.y, z: this.z, w: this.w }; }
+        toJSON() {
+            if (!(this instanceof DOMPointReadOnly)) throw new TypeError('Illegal invocation');
+            return { x: this.x, y: this.y, z: this.z, w: this.w };
+        }
     }
     class DOMPoint extends DOMPointReadOnly {
         constructor(x, y, z, w) { super(x, y, z, w); }
@@ -328,6 +331,7 @@
         flipY() { var r = clone(this, DOMMatrix); var t = identity(); t[5] = -1; mx(r).m = mul(mx(r).m, t); return r; }
         inverse() { var r = clone(this, DOMMatrix); ops.invert(mx(r)); return r; }
         transformPoint(p) {
+            if (!(this instanceof DOMMatrixReadOnly)) throw new TypeError('Illegal invocation');
             var o = dictOf(p, 'point');
             return new DOMPoint(o.x, o.y, o.z, o.w).matrixTransform(this);
         }
@@ -343,6 +347,7 @@
             return 'matrix3d(' + m.map(ser).join(', ') + ')';
         }
         toJSON() {
+            if (!(this instanceof DOMMatrixReadOnly)) throw new TypeError('Illegal invocation');
             var o = {}, t = this;
             ['a', 'b', 'c', 'd', 'e', 'f', 'm11', 'm12', 'm13', 'm14', 'm21', 'm22', 'm23', 'm24', 'm31', 'm32', 'm33', 'm34', 'm41', 'm42', 'm43', 'm44', 'is2D', 'isIdentity'].forEach(function (k) { o[k] = t[k]; });
             return o;
@@ -436,13 +441,23 @@
             var y0 = nan(ys) ? NaN : Math.min.apply(null, ys), y1 = nan(ys) ? NaN : Math.max.apply(null, ys);
             return new global.DOMRect(x0, y0, x1 - x0, y1 - y0);
         }
-        toJSON() { return { p1: this.p1, p2: this.p2, p3: this.p3, p4: this.p4 }; }
+        toJSON() {
+            if (!(this instanceof DOMQuad)) throw new TypeError('Illegal invocation');
+            return { p1: this.p1, p2: this.p2, p3: this.p3, p4: this.p4 };
+        }
     }
     idl(DOMPointReadOnly, 'DOMPointReadOnly');
     idl(DOMPoint, 'DOMPoint');
     idl(DOMMatrixReadOnly, 'DOMMatrixReadOnly');
     idl(DOMMatrix, 'DOMMatrix');
     idl(DOMQuad, 'DOMQuad');
-    expose('SVGMatrix', DOMMatrix);
-    expose('WebKitCSSMatrix', DOMMatrix);
+    /* (the window's legacy names; a worker has none, nor setMatrixValue) */
+    if (global.document) {
+        expose('SVGMatrix', DOMMatrix);
+        expose('WebKitCSSMatrix', DOMMatrix);
+        expose('SVGPoint', DOMPoint);
+        if (global.DOMRect && !Object.prototype.hasOwnProperty.call(global, 'SVGRect')) expose('SVGRect', global.DOMRect);
+    } else {
+        delete DOMMatrix.prototype.setMatrixValue;
+    }
 })

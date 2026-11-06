@@ -171,6 +171,7 @@ enum { DF_LINK = 1, DF_HAS_CHILD = 2 };
 
 struct CssStyleDoc {
     int count;
+    int ns_flags;            /* (what g_css_attr_any_ns and g_css_type_ns were when it was built) */
     uint8_t *is_elem;
     uint8_t *flags;
     uint32_t *state;      /* dom_element_state */
@@ -247,6 +248,22 @@ static void sd_element_features(CssStyleDoc *d, HtmlNode *node, int i)
     d->attr_off[i] = d->pool_n;
     for (HtmlAttribute *a = node->attributes; a; a = a->next)
         sd_pool_push(d, atom_cstr(a->name), a->value ? a->value : "");
+    /* (for a type's namespace: the element's, as its URI) */
+    if (g_css_type_ns) {
+        uint32_t ns = dom_ns(node->store_id);
+        const char *u = ns == DOM_NS_HTML ? "http://www.w3.org/1999/xhtml" : ns == DOM_NS_NULL ? "" : dom_ns_uri(ns);
+        sd_pool_push(d, atom_cstr("-cb-ns"), u ? u : "");
+    }
+    /* (for [*|name]: each one by its local name, in any namespace) */
+    if (g_css_attr_any_ns)
+        for (HtmlAttribute *a = node->attributes; a; a = a->next) {
+            const char *nm = a->name ? a->name : "";
+            const char *c = strchr(nm, ':');
+            if (c && !strncmp(nm, "xmlns", 5)) continue;
+            char t[96];
+            snprintf(t, sizeof t, "*|%s", c ? c + 1 : nm);
+            sd_pool_push(d, atom_cstr(t), a->value ? a->value : "");
+        }
     d->attr_n[i] = (uint16_t)(d->pool_n - d->attr_off[i]);
     d->pool_live += d->cls_n[i] + d->attr_n[i];
 }
@@ -296,7 +313,9 @@ static CssStyleDoc *styledoc_build(HtmlDocument *doc, CssStyleDoc *old, uint32_t
     /* The old build's elements by store id. */
     uint32_t *okeys = NULL, omask = 0;
     int32_t *ovals = NULL;
-    if (old && old->store_id) {
+    /* (namespace entries wanted since: none of old's features stand) */
+    d->ns_flags = g_css_attr_any_ns | (g_css_type_ns << 1);
+    if (old && old->store_id && old->ns_flags == d->ns_flags) {
         uint32_t cap = 64;
         while (cap < (uint32_t)old->count * 2u) cap *= 2;
         okeys = calloc(cap, sizeof(uint32_t));
