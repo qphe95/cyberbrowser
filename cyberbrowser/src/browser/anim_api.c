@@ -240,6 +240,19 @@ static GCValue js_color_scheme(JSContextHandle ctx, GCValue this_val, int argc, 
     return JS_UNDEFINED;
 }
 
+/* __cyberMediaPref(feature, value | null) */
+static GCValue js_media_pref(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    if (argc < 1) return JS_UNDEFINED;
+    const char *n = JS_ToCString(ctx, argv[0]);
+    const char *v = argc > 1 && JS_IsString(argv[1]) ? JS_ToCString(ctx, argv[1]) : NULL;
+    if (n && css_media_set_pref(n, v)) dom_request_relayout();
+    if (n) JS_FreeCString(ctx, n);
+    if (v) JS_FreeCString(ctx, v);
+    return JS_UNDEFINED;
+}
+
 /* __cyberAnimWake(): this realm's animations want turns. */
 static GCValue js_anim_wake(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
 {
@@ -263,6 +276,7 @@ void anim_api_install(JSContextHandle ctx, GCValue global)
     JS_DefinePropertyValueStr(ctx, global, "__cyberAnimRow", JS_NewCFunction(ctx, js_anim_row, "__cyberAnimRow", 4), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberRenderFeature", JS_NewCFunction(ctx, js_render_feature, "__cyberRenderFeature", 1), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberColorScheme", JS_NewCFunction(ctx, js_color_scheme, "__cyberColorScheme", 1), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberMediaPref", JS_NewCFunction(ctx, js_media_pref, "__cyberMediaPref", 2), JS_PROP_CONFIGURABLE);
 }
 
 static void web_animations_tick(JSContextHandle ctx)

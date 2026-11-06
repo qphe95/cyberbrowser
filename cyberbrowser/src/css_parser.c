@@ -3315,6 +3315,22 @@ bool css_media_set_color_scheme(const char *scheme) {
     return true;
 }
 
+/* (navigator.preferences' overrides of the user's preferences, by feature; NULL: none) */
+static const char *const k_mq_pref_names[] = { "prefers-color-scheme", "prefers-reduced-motion", "prefers-contrast",
+                                               "prefers-reduced-transparency", "prefers-reduced-data" };
+static char g_mq_pref[5][24];
+
+bool css_media_set_pref(const char *name, const char *value) {
+    for (int i = 0; i < 5; i++) {
+        if (strcmp(name, k_mq_pref_names[i])) continue;
+        const char *v = value ? value : "";
+        if (!strcmp(g_mq_pref[i], v)) return false;
+        snprintf(g_mq_pref[i], sizeof g_mq_pref[i], "%s", v);
+        return true;
+    }
+    return false;
+}
+
 static bool mq_feature_lookup(const char *name, double vw, double vh, MqFeature *f) {
     t_mq_vw = vw;
     t_mq_vh = vh;
@@ -3348,7 +3364,9 @@ static bool mq_feature_lookup(const char *name, double vw, double vh, MqFeature 
         for (size_t i = 0; i < sizeof(idents) / sizeof(idents[0]); i++)
             if (strcmp(name, idents[i].name) == 0) {
                 f->type = MQ_IDENT;
-                f->ident = i == 0 && g_mq_color_scheme ? g_mq_color_scheme : idents[i].value; return true; }
+                f->ident = i == 0 && g_mq_color_scheme ? g_mq_color_scheme : idents[i].value;
+                for (int k = 0; k < 5; k++) if (!strcmp(name, k_mq_pref_names[k]) && g_mq_pref[k][0]) f->ident = g_mq_pref[k];
+                return true; }
         return false;
     }
     return true;

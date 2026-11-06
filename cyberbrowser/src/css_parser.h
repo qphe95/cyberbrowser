@@ -38,6 +38,8 @@ unsigned char css_note_property(const char *prop);
 /* A page's <meta name=color-scheme> asking for one: prefers-color-scheme says
  * so ("light", "dark", static strings; NULL: as usual).  True if it changed. */
 bool css_media_set_color_scheme(const char *scheme);
+/* navigator.preferences: a preference media feature's override (NULL or "": none); true if it changed. */
+bool css_media_set_pref(const char *name, const char *value);
 
 /* One property/value pair. */
 typedef struct CssDeclaration {

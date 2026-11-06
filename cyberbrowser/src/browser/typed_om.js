@@ -104,7 +104,10 @@
         constructor(key) {
             if (key !== ILLEGAL && new.target === CSSStyleValue) throw new TypeError('Illegal constructor');
         }
-        toString() { return this.__text === undefined ? '' : this.__text; }
+        toString() {
+            if (!(this instanceof CSSStyleValue)) throw new TypeError('Illegal invocation');
+            return this.__text === undefined ? '' : this.__text;
+        }
         static parse(property, cssText) {
             return parseFor(String(property), String(cssText), false);
         }
@@ -194,6 +197,8 @@
             return Array.prototype.every.call(arguments, function (o) { return numEqual(t, rectify(o)); });
         }
         to(unit) {
+            if (!(this instanceof CSSNumericValue)) throw new TypeError('Illegal invocation');
+            if (arguments.length < 1) throw new TypeError("Failed to execute 'to' on 'CSSNumericValue': 1 argument required, but only 0 present.");
             unit = canonUnit(unit);
             if (!(unit in UNITS)) throw syntaxError('Unknown unit');
             var sum = sumOf(this);
@@ -209,6 +214,7 @@
             return new CSSUnitValue(c, unit);
         }
         toSum() {
+            if (!(this instanceof CSSNumericValue)) throw new TypeError('Illegal invocation');
             var units = Array.prototype.map.call(arguments, function (u) {
                 var c = canonUnit(u);
                 if (!(c in UNITS)) throw syntaxError('Unknown unit ' + u);
@@ -783,6 +789,7 @@
         }
         get is2D() { return this.__2d; }
         set is2D(v) { this.__2d = !!v; }
+        toString() { return ''; }
         toMatrix() {
             var D = global.DOMMatrix, m = new D();
             return this.__apply(m);
@@ -1083,7 +1090,14 @@
         text = String(text).trim();
         if (/\bvar\(/i.test(text) || prop.slice(0, 2) === '--') return parseUnparsed(text);
         if (/^(initial|inherit|unset|revert|revert-layer)$/i.test(text)) return new CSSKeywordValue(text.toLowerCase());
-        if (prop === 'vertical-align' && !/^(baseline|[-+]?[\d.]|calc\()/.test(text)) return generic(text, prop);
+        /* (one step at the start or the end: the keyword it was) */
+        if (mode !== 'computed' && /timing-function$/.test(prop) && (text === 'steps(1, start)' || text === 'steps(1)'))
+            return new CSSKeywordValue(text === 'steps(1)' ? 'step-end' : 'step-start');
+        /* (a shorthand now: no typed form) */
+        if (prop === 'vertical-align') return generic(text, prop);
+        /* (a size whose height is auto: its width) */
+        if ((prop === 'background-size' || prop === 'mask-size') && / auto$/.test(text) && text.split(/\s+(?![^(]*\))/).length === 2)
+            text = text.replace(/ auto$/, '');
         /* (lists, as gap decorations are: no typed form, but as specified) */
         if (mode && /^(column|row)-rule-(width|style)$/.test(prop)) return generic(text, prop);
         if (global.__cyberCssIsShorthand && global.__cyberCssIsShorthand(prop)) {
@@ -1324,16 +1338,29 @@
         return map;
     }
     var attrMaps = new WeakMap();
+    /* (indexed lists iterate as arrays do: Array.prototype's own methods) */
+    [CSSNumericArray, CSSUnparsedValue, CSSTransformValue].forEach(function (C) {
+        ['entries', 'keys', 'values', 'forEach'].forEach(function (k) {
+            Object.defineProperty(C.prototype, k, { value: Array.prototype[k], writable: true, enumerable: true, configurable: true });
+        });
+        Object.defineProperty(C.prototype, Symbol.iterator, { value: Array.prototype.values, writable: true, configurable: true });
+    });
+    /* (a map's @@iterator is its entries) */
+    Object.defineProperty(StylePropertyMapReadOnly.prototype, Symbol.iterator, { value: StylePropertyMapReadOnly.prototype.entries, writable: true, configurable: true });
     function install(proto, name, get) {
         if (proto && !(name in proto)) Object.defineProperty(proto, name, { configurable: true, enumerable: true, get: get });
     }
     if (global.Element) {
         if (!('computedStyleMap' in global.Element.prototype))
             Object.defineProperty(global.Element.prototype, 'computedStyleMap', { configurable: true, enumerable: true, writable: true,
-                value: function computedStyleMap() { return computedMap(this); } });
+                value: function computedStyleMap() {
+                    if (!(this instanceof global.Element)) throw new TypeError('Illegal invocation');
+                    return computedMap(this);
+                } });
         [global.HTMLElement, global.SVGElement, global.MathMLElement].forEach(function (C) {
             if (!C) return;
             install(C.prototype, 'attributeStyleMap', function () {
+                if (!(this instanceof C)) throw new TypeError('Illegal invocation');
                 var m = attrMaps.get(this);
                 if (!m) { m = declMap(this.style); attrMaps.set(this, m); }
                 return m;
@@ -1361,9 +1388,18 @@
         if (typeof v === 'string') { if (v.toLowerCase() !== 'none') throw syntaxError(name + ': only none'); return new CSSKeywordValue('none'); }
         if (typeof v === 'number') return new CSSUnitValue(v * 100, 'percent');
         if (v instanceof CSSUnitValue && v.unit === 'percent') return v;
-        if (v instanceof CSSUnitValue && v.unit === 'number') return new CSSUnitValue(v.value * 100, 'percent');
         if (v instanceof CSSMathValue && typesEqual(v.__type(), typeOfUnit('percent'))) return v;
         throw syntaxError(name + ' must be a percentage');
+    }
+    /* (rgb()'s channels: a number is a fraction, as a percentage; a <number> or <percentage> value as it is) */
+    function colorRGB(v, name) {
+        if (v === undefined) throw syntaxError(name + ': not a channel');
+        if (v instanceof CSSKeywordValue) { if (v.value !== 'none') throw syntaxError(name + ': only none'); return v; }
+        if (typeof v === 'string') { if (v.toLowerCase() !== 'none') throw syntaxError(name + ': only none'); return new CSSKeywordValue('none'); }
+        if (typeof v === 'number') return new CSSUnitValue(v * 100, 'percent');
+        if (v instanceof CSSUnitValue && (v.unit === 'number' || v.unit === 'percent')) return v;
+        if (v instanceof CSSMathValue && (typesEqual(v.__type(), typeOfUnit('number')) || typesEqual(v.__type(), typeOfUnit('percent')))) return v;
+        throw syntaxError(name + ' must be a number or percentage');
     }
     function colorNum(v, name) {
         if (v instanceof CSSKeywordValue) { if (v.value !== 'none') throw syntaxError(name + ': only none'); return v; }
@@ -1374,6 +1410,7 @@
         throw syntaxError(name + ' must be a number or percentage');
     }
     function colorAngle(v, name) {
+        if (v === undefined) return new CSSKeywordValue('undefined');
         if (v instanceof CSSKeywordValue) { if (v.value !== 'none') throw syntaxError(name + ': only none'); return v; }
         if (typeof v === 'string') { if (v.toLowerCase() !== 'none') throw syntaxError(name + ': only none'); return new CSSKeywordValue('none'); }
         if (typeof v === 'number') return new CSSUnitValue(v, 'deg');
@@ -1382,9 +1419,9 @@
         throw syntaxError(name + ' must be an angle');
     }
     class CSSColorValue extends CSSStyleValue {
-        constructor(key) {
+        constructor() {
             super(ILLEGAL);
-            if (key !== ILLEGAL) throw new TypeError('Illegal constructor');
+            if (arguments[0] !== ILLEGAL) throw new TypeError('Illegal constructor');
         }
         static parse(cssText) {
             var t = String(cssText).trim();
@@ -1447,13 +1484,19 @@
         idl(cls, name);
     }
     idl(CSSColorValue, 'CSSColorValue');
-    colorClass('CSSRGB', 'rgb', [['r', colorNum], ['g', colorNum], ['b', colorNum]]);
+    colorClass('CSSRGB', 'rgb', [['r', colorRGB], ['g', colorRGB], ['b', colorRGB]]);
     colorClass('CSSHSL', 'hsl', [['h', colorAngle], ['s', colorPct], ['l', colorPct]]);
-    colorClass('CSSHWB', 'hwb', [['h', colorAngle], ['w', colorPct], ['b', colorPct]]);
+    /* (hwb()'s hue: a CSSNumericValue, an angle) */
+    function colorAngleValue(v, name) {
+        if (!(v instanceof CSSNumericValue)) throw new TypeError(name + ' must be a CSSNumericValue');
+        if (!typesEqual(v.__type(), typeOfUnit('deg'))) throw syntaxError(name + ' must be an angle');
+        return v;
+    }
+    colorClass('CSSHWB', 'hwb', [['h', colorAngleValue], ['w', colorPct], ['b', colorPct]]);
     colorClass('CSSLab', 'lab', [['l', colorPct], ['a', colorNum], ['b', colorNum]]);
-    colorClass('CSSLCH', 'lch', [['l', colorPct], ['c', colorNum], ['h', colorAngle]]);
+    colorClass('CSSLCH', 'lch', [['l', colorPct], ['c', colorPct], ['h', colorAngle]]);
     colorClass('CSSOKLab', 'oklab', [['l', colorPct], ['a', colorNum], ['b', colorNum]]);
-    colorClass('CSSOKLCH', 'oklch', [['l', colorPct], ['c', colorNum], ['h', colorAngle]]);
+    colorClass('CSSOKLCH', 'oklch', [['l', colorPct], ['c', colorPct], ['h', colorAngle]]);
 
     [[CSSKeywordValue, 1], [CSSUnitValue, 2], [CSSVariableReferenceValue, 1], [CSSUnparsedValue, 1], [CSSMathNegate, 1], [CSSMathInvert, 1], [CSSMathClamp, 3],
      [CSSTransformValue, 1], [CSSTranslate, 2], [CSSRotate, 1], [CSSScale, 2], [CSSSkew, 1], [CSSSkewX, 1], [CSSSkewY, 1], [CSSPerspective, 1], [CSSMatrixComponent, 1],

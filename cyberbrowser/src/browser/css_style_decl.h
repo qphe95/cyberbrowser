@@ -17,6 +17,8 @@ void css_style_decl_install(JSContextHandle ctx, GCValue proto);
 /* A new declaration block for element owner (DOM_NULL: none), with the
  * declarations of text (the style attribute; may be NULL). */
 GCValue css_style_decl_new(JSContextHandle ctx, NodeId owner, const char *text);
+/* An empty declaration block no one may write (getComputedStyle of no pseudo-element). */
+GCValue css_style_decl_new_empty_readonly(JSContextHandle ctx);
 bool css_style_decl_is(JSContextHandle ctx, GCValue obj);
 /* getComputedStyle(el): a read-only, live declaration block of its resolved values. */
 GCValue css_style_decl_new_computed(JSContextHandle ctx, NodeId el);

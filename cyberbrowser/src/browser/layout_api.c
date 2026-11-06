@@ -1842,10 +1842,13 @@ static GCValue lq_metric(JSContextHandle ctx, GCValue this_val, int which)
         }
         return lq_int(ctx, v / mz);
     }
-    case M_CLIENT_W: return lq_int(ctx, inl ? 0 : (b->width - b->s->border_left - b->s->border_right) / mz);
-    case M_CLIENT_H: return lq_int(ctx, inl ? 0 : (b->height - b->s->border_top - b->s->border_bottom) / mz);
-    case M_CLIENT_T: return lq_int(ctx, inl ? 0 : b->s->border_top / mz);
-    case M_CLIENT_L: return lq_int(ctx, inl ? 0 : b->s->border_left / mz);
+    /* (a table's principal box is its wrapper, which has no borders: its client box is the whole) */
+    case M_CLIENT_W: if (b->s->table_role == 1 && !inl) return lq_int(ctx, b->width / mz);
+                     return lq_int(ctx, inl ? 0 : (b->width - b->s->border_left - b->s->border_right) / mz);
+    case M_CLIENT_H: if (b->s->table_role == 1 && !inl) return lq_int(ctx, b->height / mz);
+                     return lq_int(ctx, inl ? 0 : (b->height - b->s->border_top - b->s->border_bottom) / mz);
+    case M_CLIENT_T: return lq_int(ctx, inl || b->s->table_role == 1 ? 0 : b->s->border_top / mz);
+    case M_CLIENT_L: return lq_int(ctx, inl || b->s->table_role == 1 ? 0 : b->s->border_left / mz);
     case M_SCROLL_W:
     case M_SCROLL_H: {
         if (inl) return JS_NewInt32(ctx, 0);
@@ -2063,6 +2066,19 @@ int layout_query_grid_tracks(uint32_t id, bool rows, double *out, int cap)
 void layout_query_flush(JSContextHandle ctx)
 {
     lq_ensure(ctx);
+}
+
+bool layout_query_container_match(JSContextHandle ctx, GCValue element, const char *query)
+{
+    NodeId id = dom_node_of(element);
+    if (!id || dom_kind(id) != DOM_K_ELEMENT || !lq_ensure(ctx)) return false;
+    /* (no box of its own: the containers of the nearest one that has one, that one included) */
+    bool self = false;
+    for (NodeId a = id; a && dom_kind(a) == DOM_K_ELEMENT; a = dom_parent(a), self = true) {
+        int idx = lq_box_index(a);
+        if (idx >= 0) return css_layout_container_match(&g_lq_layout, g_lq_layout.tree.nodes[idx].dom_node_idx, self, query);
+    }
+    return false;
 }
 
 bool layout_query_used_inset(uint32_t id, int side, bool side_auto, bool opp_auto, double *out)

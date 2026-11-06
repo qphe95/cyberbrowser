@@ -2827,7 +2827,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // ===== CSS API =====
     // Create CSS object
     GCValue css = JS_NewObject(ctx);
-    DEF_FUNC(ctx, css, "supports", js_css_supports, 2);
+    DEF_FUNC(ctx, css, "supports", js_css_supports, 1);
     {
         extern GCValue js_compute_length(JSContextHandle, GCValue, int, GCValue *);
         extern GCValue js_computed_unresolved(JSContextHandle, GCValue, int, GCValue *);

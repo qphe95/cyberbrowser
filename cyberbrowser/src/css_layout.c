@@ -4958,6 +4958,9 @@ static int subst_style_query(const char *a, const char *b, const CssCustomProps 
 }
 
 /* An if() condition: <if-test> with not, and, or, parentheses; -1 when it's none. */
+/* (inside style(): a parenthesized term is a style test, not another condition) */
+static __thread bool t_cond_style;
+
 static int subst_condition(const char *a, const char *b, const CssCustomProps *props, int depth)
 {
     while (a < b && isspace((unsigned char)*a)) a++;
@@ -4980,11 +4983,21 @@ static int subst_condition(const char *a, const char *b, const CssCustomProps *p
         if (!close || close >= b) return -1;
         size_t fl = (size_t)(open - ts);
         int t;
-        if (fl == 0) t = subst_condition(open + 1, close, props, depth);
+        if (fl == 0) {
+            const char *in = open + 1;
+            while (in < close && isspace((unsigned char)*in)) in++;
+            if (t_cond_style && *in != '(' && strncasecmp(in, "not", 3)) t = subst_style_query(in, close, props, depth);
+            else t = subst_condition(open + 1, close, props, depth);
+        }
         else if (fl == 5 && !strncasecmp(ts, "style", 5)) {
             const char *in = open + 1;
             while (in < close && isspace((unsigned char)*in)) in++;
-            if (*in == '(' || !strncasecmp(in, "not", 3)) t = subst_condition(in, close, props, depth);
+            if (*in == '(' || !strncasecmp(in, "not", 3)) {
+                bool held = t_cond_style;
+                t_cond_style = true;
+                t = subst_condition(in, close, props, depth);
+                t_cond_style = held;
+            }
             else t = subst_style_query(in, close, props, depth);
         }
         else if (fl == 5 && !strncasecmp(ts, "media", 5)) {
@@ -5002,14 +5015,21 @@ static int subst_condition(const char *a, const char *b, const CssCustomProps *p
             free(q);
         }
         else if (fl == 8 && !strncasecmp(ts, "supports", 8)) {
-            const char *colon = subst_find(open + 1, close, ":");
+            const char *in = open + 1;
+            while (in < close && isspace((unsigned char)*in)) in++;
             t = 0;
-            if (colon) {
+            /* (a declaration of its own; or a condition as @supports has them: parentheses, selector(), and/or/not) */
+            const char *colon = subst_find(open + 1, close, ":");
+            if (*in != '(' && strncasecmp(in, "selector(", 9) && strncasecmp(in, "not", 3) && colon) {
                 char *pn = subst_trim(open + 1, colon), *pv = subst_trim(colon + 1, close);
                 const CssPropDef *pd = pn ? css_prop_find(pn, strlen(pn)) : NULL;
                 char *got = pd && pv ? css_prop_parse(pd, pv) : NULL;
                 t = got != NULL;
                 free(got); free(pn); free(pv);
+            } else {
+                char *cond = subst_trim(open + 1, close);
+                t = cond && css_supports_condition(cond);
+                free(cond);
             }
         }
         else t = -1;            /* (a function it doesn't know: false, as <general-enclosed>) */
@@ -5471,11 +5491,20 @@ static char *css_fn_subst(const char *value, const CssCustomProps *props, int de
     char *mid = is_if ? subst_if(first + 1, close, props, depth) : subst_attr(first + 1, close, props, depth);
     if (!mid) { t_var_failed = true; mid = strdup(""); }
     size_t pre = (size_t)(fn - value), ml = mid ? strlen(mid) : 0, post = strlen(close + 1);
-    char *joined = (char *)malloc(pre + ml + post + 1);
+    /* (what came in its place and what's beside it, kept apart as tokens: an empty comment between) */
+#define FN_IDENT_CH(c) (isalnum((unsigned char)(c)) || (c) == '-' || (c) == '_' || (unsigned char)(c) >= 0x80)
+    bool sep_before = is_if && ml && pre && FN_IDENT_CH(value[pre - 1]) && FN_IDENT_CH(mid[0]);
+    bool sep_after = is_if && ml && post && FN_IDENT_CH(mid[ml - 1]) && (FN_IDENT_CH(close[1]) || close[1] == '(');
+#undef FN_IDENT_CH
+    char *joined = (char *)malloc(pre + ml + post + 9);
     if (!joined) { free(mid); return NULL; }
+    size_t o = 0;
     memcpy(joined, value, pre);
-    if (ml) memcpy(joined + pre, mid, ml);
-    memcpy(joined + pre + ml, close + 1, post + 1);
+    o = pre;
+    if (sep_before) { memcpy(joined + o, "/**/", 4); o += 4; }
+    if (ml) { memcpy(joined + o, mid, ml); o += ml; }
+    if (sep_after) { memcpy(joined + o, "/**/", 4); o += 4; }
+    memcpy(joined + o, close + 1, post + 1);
     free(mid);
     /* (what it chose may have them too, and what's after) */
     char *more = css_fn_subst(joined, props, depth + 1);
@@ -5492,6 +5521,7 @@ static CqBox *g_cq_box;
 static unsigned g_cq_gen;
 static int g_cq_n;
 static __thread int t_cq_idx = -1;
+static __thread bool t_cq_self;         /* (the first container looked for may be the element itself) */
 
 static const CqBox *cq_lookup(int dom)
 {
@@ -5549,7 +5579,7 @@ static int cq_parent(const LayoutContext *ctx, int dom)
 /* The nearest container at or above dom's parent with this name (NULL: any) and type. */
 static const CqBox *cq_find(const LayoutContext *ctx, int dom, const char *name, size_t nl, int axes)
 {
-    for (int p = cq_parent(ctx, dom); p >= 0; p = cq_parent(ctx, p)) {
+    for (int p = t_cq_self ? dom : cq_parent(ctx, dom); p >= 0; p = cq_parent(ctx, p)) {
         const CqBox *b = cq_lookup(p);
         if (!b) continue;
         if (axes && !b->type) continue;
@@ -5644,8 +5674,17 @@ static int cq_size_query(const LayoutContext *ctx, int dom, const char *cname, s
     char *colon = strchr(q, ':');
     char *ops = strpbrk(q, "<>=");
     const CqBox *b = cq_find(ctx, dom, cname, cl, 1);
-    /* (a container that can't be sized: what's asked of it is unknown) */
-    if (b && b->unsized) return -1;
+    /* (a container that can't be sized: what's asked of it is unknown; as this
+     * pass has styled it, when it has: no box now (contents), inline, or a table's) */
+    bool unsized = b && b->unsized;
+    if (b && t_cq_idx >= 0 && ctx->boxes) {
+        int f = -1;
+        for (int i = ctx->tree.nodes[t_cq_idx].parent_idx; i >= 0; i = ctx->tree.nodes[i].parent_idx)
+            if (ctx->tree.nodes[i].dom_node_idx == b->dom) { f = i; break; }
+        if (f >= 0 && ctx->boxes[f].s) unsized = ctx->boxes[f].s->display == CSS_DISPLAY_INLINE || ctx->boxes[f].s->table_role > 0;
+        else if (f < 0) unsized = true;
+    }
+    if (unsized) return -1;
     double v, x;
     bool ratio, orient;
     if (colon && !ops) {
@@ -5844,6 +5883,23 @@ static bool cq_gate(const char *query, int dom)
     return true;
 }
 
+/* Element.matchContainer(): the query against the containers of dom (self: dom's own too). */
+bool css_layout_container_match(const LayoutContext *ctx, int dom, bool self, const char *query)
+{
+    const LayoutContext *held = g_cq_ctx;
+    int held_idx = t_cq_idx;
+    /* (the containers as this layout has them: a page with no @container rule keeps no table) */
+    cq_table_update((LayoutContext *)ctx);
+    g_cq_ctx = ctx;
+    t_cq_idx = -1;
+    t_cq_self = self;
+    bool r = cq_gate(query, dom);
+    t_cq_self = false;
+    t_cq_idx = held_idx;
+    g_cq_ctx = held;
+    return r;
+}
+
 /* ---- sibling-index(), sibling-count(), random(): what depends on the element ---- */
 static volatile int g_css_tree_fn;      /* (seen: the style cache knows the element's place) */
 
@@ -5887,7 +5943,8 @@ static char *subst_random(const char *a, const char *b)
     if (has_opts) {
         char *o = subst_trim(a, c0);
         h = tree_hash(h, o, strlen(o));
-        shared = strstr(o, "element-scoped") != NULL;
+        /* (a name alone: the same for every element; element-scoped: each element its own) */
+        shared = strstr(o, "--") != NULL && strstr(o, "element-scoped") == NULL;
         const char *fx = strstr(o, "fixed");
         if (fx) fixed = strtod(fx + 5, NULL);
         free(o);
@@ -5949,6 +6006,92 @@ static char *subst_random(const char *a, const char *b)
     return out;
 }
 
+/* random-item(...)'s choice: the item (its {} taken off) that its key picks. */
+static char *subst_random_item(const char *a, const char *b)
+{
+    const char *c0 = subst_find(a, b, ",");
+    if (!c0) return NULL;
+    char *o = subst_trim(a, c0);
+    if (!o) return NULL;
+    /* (the key: auto, a dashed ident, element-scoped, property-scoped, fixed <number>) */
+    bool ok = o[0] != 0, shared = strstr(o, "--") != NULL && strstr(o, "element-scoped") == NULL;
+    bool autok = strstr(o, "--") == NULL && strstr(o, "element-scoped") == NULL;
+    double fixed = -1.0;
+    for (char *w = o; ok && *w; ) {
+        while (isspace((unsigned char)*w)) w++;
+        if (!*w) break;
+        char *e = w;
+        if (!strncasecmp(w, "fixed", 5) && (isspace((unsigned char)w[5]))) {
+            e = w + 5;
+            while (isspace((unsigned char)*e)) e++;
+            char *ne = NULL;
+            if (!strncasecmp(e, "calc(", 5)) {
+                double x = strtod(e + 5, &ne), y = 1.0;
+                while (ne && isspace((unsigned char)*ne)) ne++;
+                if (ne && *ne == '/') y = strtod(ne + 1, &ne);
+                else if (ne && *ne == '*') y = 1.0 / strtod(ne + 1, &ne);
+                while (ne && isspace((unsigned char)*ne)) ne++;
+                if (!ne || *ne != ')' || !(y != 0.0)) { ok = false; break; }
+                fixed = x / y;
+                e = ne + 1;
+            } else {
+                fixed = strtod(e, &ne);
+                if (ne == e) { ok = false; break; }
+                e = ne;
+            }
+            if (fixed < 0.0 || fixed > 1.0) fixed = fixed < 0.0 ? 0.0 : 1.0;
+        } else {
+            while (*e && !isspace((unsigned char)*e)) e++;
+            size_t l = (size_t)(e - w);
+            if (!((l == 4 && !strncasecmp(w, "auto", 4)) || (l == 14 && !strncasecmp(w, "element-scoped", 14)) ||
+                  (l == 15 && !strncasecmp(w, "property-scoped", 15)) || (l >= 2 && w[0] == '-' && w[1] == '-'))) { ok = false; break; }
+        }
+        w = e;
+    }
+    if (!ok) { free(o); return NULL; }
+    /* (the items) */
+    const char *it[64];
+    const char *ie[64];
+    int n = 0;
+    for (const char *p = c0 + 1; n < 64; ) {
+        const char *c = subst_find(p, b, ",");
+        it[n] = p;
+        ie[n] = c ? c : b;
+        n++;
+        if (!c) break;
+        p = c + 1;
+    }
+    /* (the same draw as random()'s for the same key) */
+    uint64_t h = 1469598103934665603ull;
+    static uint64_t seed;
+    if (!seed) seed = (uint64_t)time(NULL) * 2654435761ull + 1;
+    h ^= seed;
+    h = tree_hash(h, o, strlen(o));
+    free(o);
+    /* (auto: this function's own draw, not random()'s) */
+    if (autok) h = tree_hash(h, "random-item", 11);
+    if (!shared && t_subst_node) h = tree_hash(h, (const char *)&t_subst_node, sizeof t_subst_node);
+    if (g_cq_ctx) h = tree_hash(h, (const char *)&g_cq_ctx->doc, sizeof g_cq_ctx->doc);
+    h ^= h >> 33; h *= 0xff51afd7ed558ccdull; h ^= h >> 33;
+    double r = fixed >= 0.0 ? fixed : (double)(h >> 11) / 9007199254740992.0;
+    int k = (int)floor(r * n);
+    if (k >= n) k = n - 1;
+    if (k < 0) k = 0;
+    char *v = subst_trim(it[k], ie[k]);
+    if (v && v[0] == '{') {
+        size_t l = strlen(v);
+        if (l >= 2 && v[l - 1] == '}') {
+            v[l - 1] = 0;
+            char *s = v + 1;
+            while (isspace((unsigned char)*s)) s++;
+            size_t sl = strlen(s);
+            while (sl && isspace((unsigned char)s[sl - 1])) s[--sl] = 0;
+            memmove(v, s, sl + 1);
+        }
+    }
+    return v;
+}
+
 /* value with those worked out; NULL when it has none. */
 extern char *css_calc_mix_expand(const char *value);
 static char *tree_fn_subst(const char *value)
@@ -5961,7 +6104,7 @@ static char *tree_fn_subst(const char *value)
         return sum;
     }
     const char *s = strstr(value, "sibling-"), *rn = strstr(value, "random(");
-    if (!s && !rn) return NULL;
+    if (!s && !rn && !strstr(value, "random-item(")) return NULL;
     g_css_tree_fn = 1;
     size_t cap = strlen(value) + 64, n = 0;
     char *out = (char *)malloc(cap);
@@ -5981,6 +6124,16 @@ static char *tree_fn_subst(const char *value)
                 if (!counted) { tree_counts(t_subst_node, &idx, &cnt); counted = true; }
                 snprintf(num, sizeof num, "%d", p[8] == 'i' || p[8] == 'I' ? idx : cnt);
                 rep = num;
+                next = c + 1;
+            }
+        } else if (edge && !strncasecmp(p, "random-item(", 12)) {
+            const char *c = subst_close(p + 12);
+            if (c) {
+                owned = subst_random_item(p + 12, c);
+                if (!owned) { t_var_failed = t_subst_failed = true; free(out); return NULL; }
+                char *more = tree_fn_subst(owned);
+                if (more) { free(owned); owned = more; }
+                rep = owned;
                 next = c + 1;
             }
         } else if (edge && !strncasecmp(p, "random(", 7)) {
@@ -6091,6 +6244,58 @@ static char *ident_subst(const char *v)
  * with no notch and no on-screen keyboard: the safe-area and keyboard insets
  * are nothing; anything else is its fallback, or invalid at computed-value
  * time (t_var_failed).  NULL when there's no env() in v. */
+/* inherit(--name[, fallback]): the parent's value of that custom property. */
+static char *inherit_subst(const char *v)
+{
+    if (!v) return NULL;
+    char *cur = NULL;
+    for (int round = 0; round < 16; round++) {
+        const char *s = cur ? cur : v;
+        const char *p = NULL;
+        for (const char *q = s; (q = strstr(q, "inherit(")); q += 8)
+            if (q == s || !(isalnum((unsigned char)q[-1]) || q[-1] == '-' || q[-1] == '_')) { p = q; break; }
+        if (!p) return cur;
+        const char *a = p + 8, *e = a;
+        int d = 1;
+        for (; *e && d; e++) {
+            if (*e == '(') d++;
+            else if (*e == ')' && --d == 0) break;
+        }
+        if (!*e) { t_var_failed = t_subst_failed = true; free(cur); return NULL; }
+        const char *n0 = a;
+        while (n0 < e && isspace((unsigned char)*n0)) n0++;
+        const char *n1 = n0;
+        while (n1 < e && (isalnum((unsigned char)*n1) || *n1 == '-' || *n1 == '_' || (unsigned char)*n1 >= 0x80)) n1++;
+        const char *c = n1;
+        while (c < e && isspace((unsigned char)*c)) c++;
+        char name[256];
+        size_t nl = (size_t)(n1 - n0);
+        if (nl < 3 || nl >= sizeof name || n0[0] != '-' || n0[1] != '-' || (c < e && *c != ',')) { t_var_failed = t_subst_failed = true; free(cur); return NULL; }
+        memcpy(name, n0, nl);
+        name[nl] = 0;
+        const char *up = t_subst_parent ? css_custom_props_get(t_subst_parent, name) : NULL;
+        const char *rep;
+        size_t rl;
+        if (up && *up) { rep = up; rl = strlen(up); }
+        else if (c < e) {
+            rep = c + 1;
+            while (rep < e && isspace((unsigned char)*rep)) rep++;
+            const char *re = e;
+            while (re > rep && isspace((unsigned char)re[-1])) re--;
+            rl = (size_t)(re - rep);
+        } else { t_var_failed = t_subst_failed = true; free(cur); return NULL; }
+        size_t pre = (size_t)(p - s), post = strlen(e + 1);
+        char *nx = (char *)malloc(pre + rl + post + 1);
+        if (!nx) { free(cur); return NULL; }
+        memcpy(nx, s, pre);
+        memcpy(nx + pre, rep, rl);
+        strcpy(nx + pre + rl, e + 1);
+        free(cur);
+        cur = nx;
+    }
+    return cur;
+}
+
 static char *env_subst(const char *v)
 {
     if (!v) return NULL;
@@ -6158,6 +6363,11 @@ static char *css_var_resolve_rest(const char *value, const CssCustomProps *props
 {
     char *r = css_var_subst(value, props);
     const char *v = r ? r : value;
+    if (v && strchr(v, '(') && strstr(v, "inherit(")) {
+        char *t = inherit_subst(v);
+        if (t) { free(r); r = t; v = r; }
+        else if (t_var_failed) return r;
+    }
     if (v && (strstr(v, "env(") || strstr(v, "ENV(") || strstr(v, "Env("))) {
         char *t = env_subst(v);
         if (t) { free(r); r = t; v = r; }
@@ -6167,9 +6377,10 @@ static char *css_var_resolve_rest(const char *value, const CssCustomProps *props
         char *t = ident_subst(v);
         if (t) { free(r); r = t; v = r; }
     }
-    if (v && strchr(v, '(') && (strstr(v, "sibling-") || strstr(v, "random("))) {
+    if (v && strchr(v, '(') && (strstr(v, "sibling-") || strstr(v, "random(") || strstr(v, "random-item("))) {
         char *t = tree_fn_subst(v);
         if (t) { free(r); r = t; v = r; }
+        else if (t_var_failed) return r;
     }
     if (v && strchr(v, '(') && (strstr(v, "if(") || strstr(v, "attr(") || strstr(v, "IF(") || strstr(v, "ATTR("))) {
         /* (content's attr() is content's own to read) */
@@ -7526,6 +7737,9 @@ static const char *g_ua_stylesheet_css =
     "table { box-sizing: border-box; }\n"
     "mark { background-color: #ffff00; color: #000000; }\n"
     "button, input, select, textarea { font-size: 13.333px; line-height: normal; }\n"
+    "button, input, select, textarea, meter, progress { appearance: auto; }\n"
+    "label, input[type=range i] { cursor: default; }\n"
+    ":focus-visible { outline: auto 1px; }\n"
     /* (solid, not the outset / inset of HTML's sheet: controls are drawn
      * flat, as browsers' native appearance draws them, not as 3D borders) */
     "button { padding: 1px 6px; border: 2px solid #767676; background-color: #efefef; box-sizing: border-box; text-align: center; }\n"
@@ -15167,7 +15381,7 @@ static double layout_intrinsic_width(LayoutContext *ctx, int idx, bool want_max)
                 return w;
             }
         }
-        if ((cb->s->contain_size & 1) && cb->s->display != CSS_DISPLAY_GRID) return cb->s->cis_w + cb->s->padding_left + cb->s->padding_right + cb->s->border_left + cb->s->border_right;
+        if ((CSS_CONTAIN_SIZE_OF(cb->s) & 1) && cb->s->display != CSS_DISPLAY_GRID) return cb->s->cis_w + cb->s->padding_left + cb->s->padding_right + cb->s->border_left + cb->s->border_right;
     }
     double *cache = ctx->intrinsic_cache;
     if (cache) {
@@ -18595,7 +18809,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
         double total = max_bottom - box->y + box->padding_bottom + box->s->border_bottom;
         if (total < 0.0) total = 0.0;
         /* (contained: as if it had no content, but what it says) */
-        if (box->s->contain_size & 2) {
+        if (CSS_CONTAIN_SIZE_OF(box->s) & 2) {
             total = box->s->cis_h + layout_vertical_border_padding(box);
         }
         /* (what auto came to, in the expression) */
@@ -24706,7 +24920,11 @@ static bool cascade_at(LayoutContext *ctx, int dom, const CssCustomProps *props,
         ninl++;
     }
     t_subst_node = node;
-    t_subst_parent = NULL;
+    /* (inherit(): the parent's custom properties, as this layout has them) */
+    {
+        int pd = po_array_parent(&ctx->doc->array, dom);
+        t_subst_parent = pd >= 0 ? cq_props_of(ctx, pd) : NULL;
+    }
     /* (a table's border and cellspacing attributes: after the user agent's rules, before the author's) */
     char hint_w[32] = "", hint_sp[32] = "";
     if (node->tag_name && !strcasecmp(node->tag_name, "table")) {

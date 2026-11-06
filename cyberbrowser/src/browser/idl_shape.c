@@ -261,6 +261,14 @@ void idl_shape_apply(JSContextHandle ctx, GCValue global) {
         const IdlIface *f = iface_named(k_idl_stubs[s]);
         if (f) stub_interface(ctx, global, f);
     }
+    /* (element and rule declarations: CSSStyleProperties, now that it exists) */
+    {
+        GCValue adopt = JS_GetPropertyStr(ctx, global, "__cyberStylePropsAdopt");
+        if (JS_IsFunction(ctx, adopt)) {
+            GCValue r = JS_Call(ctx, adopt, JS_UNDEFINED, 0, NULL);
+            if (JS_IsException(r)) JS_GetException(ctx);
+        }
+    }
     /* (the interfaces made in script: their accessors check this) */
     {
         GCValue brand_js = JS_GetPropertyStr(ctx, global, "__cyberBrandAccessors");

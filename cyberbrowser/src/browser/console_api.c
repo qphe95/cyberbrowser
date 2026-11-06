@@ -622,7 +622,30 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
     /* (a pseudo-element: ::before / ::after, the legacy one-colon forms too) */
     int ps = 0;
     if (argc > 1 && JS_IsString(argv[1])) {
-        const char *p = JS_ToCString(ctx, argv[1]);
+        size_t raw_n = 0;
+        const char *raw = JS_ToCStringLen(ctx, &raw_n, argv[1]);
+        /* (a NUL in it: no pseudo-element) */
+        if (raw && strlen(raw) != raw_n) { JS_FreeCString(ctx, raw); return css_style_decl_new_empty_readonly(ctx); }
+        /* (escapes read as what they stand for) */
+        char dec[160];
+        const char *p = NULL;
+        if (raw && strchr(raw, '\\')) {
+            size_t k = 0;
+            for (const char *c = raw; *c && k + 8 < sizeof dec; ) {
+                if (*c == '\\' && c[1]) {
+                    c++;
+                    if (isxdigit((unsigned char)*c)) {
+                        unsigned v = 0;
+                        int d = 0;
+                        while (d < 6 && isxdigit((unsigned char)*c)) { v = v * 16 + (unsigned)(isdigit((unsigned char)*c) ? *c - '0' : (tolower((unsigned char)*c) - 'a' + 10)); c++; d++; }
+                        if (*c == ' ') c++;
+                        dec[k++] = v < 0x80 && v ? (char)v : '?';
+                    } else dec[k++] = *c++;
+                } else dec[k++] = *c++;
+            }
+            dec[k] = 0;
+            p = dec;
+        } else p = raw;
         if (p) {
             const char *q = p[0] == ':' ? (p[1] == ':' ? p + 2 : p + 1) : NULL;
             if (q && !strcasecmp(q, "before")) ps = 1;
@@ -645,8 +668,8 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
                         GCValue ok = JS_Call(ctx, fn, JS_UNDEFINED, 1, &arg);
                         free(full);
                         if (JS_IsBool(ok) && !JS_ToBool(ctx, ok)) {
-                            JS_FreeCString(ctx, p);
-                            return css_style_decl_new(ctx, DOM_NULL, NULL);
+                            JS_FreeCString(ctx, raw);
+                            return css_style_decl_new_empty_readonly(ctx);
                         }
                     }
                 }
@@ -664,10 +687,10 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
             }
             /* (with colons, what isn't a pseudo-element has no style at all) */
             if (q && !ps && !gcs_pseudo_known(q, p[1] == ':')) {
-                JS_FreeCString(ctx, p);
-                return css_style_decl_new(ctx, DOM_NULL, NULL);
+                JS_FreeCString(ctx, raw);
+                return css_style_decl_new_empty_readonly(ctx);
             }
-            JS_FreeCString(ctx, p);
+            JS_FreeCString(ctx, raw);
         }
     }
     const char *key = ps == 1 ? "__cyber_cs_before" : ps == 2 ? "__cyber_cs_after" : ps == 3 ? "__cyber_cs_letter" : ps == 4 ? "__cyber_cs_line" : ps == 5 ? "__cyber_cs_list_marker" : ps == 6 ? "__cyber_cs_marker"

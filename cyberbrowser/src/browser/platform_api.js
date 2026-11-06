@@ -899,7 +899,7 @@
         /* (an interface with that prototype, no constructor of its own) */
         if (!FS || !Object.prototype.hasOwnProperty.call(FS, 'prototype')) {
             var C = { FontFaceSet: function () { throw new TypeError('Illegal constructor'); } }.FontFaceSet;
-            Object.defineProperty(C, 'length', { configurable: true, value: 1 });
+            Object.defineProperty(C, 'length', { configurable: true, value: 0 });
             Object.defineProperty(C, 'prototype', { value: FP, writable: false });
             Object.defineProperty(FP, 'constructor', { configurable: true, writable: true, value: C });
             Object.defineProperty(global, 'FontFaceSet', { configurable: true, writable: true, value: C });
@@ -930,6 +930,53 @@
             if (typeof this.forEach === 'function') this.forEach(function () { n++; });
             return n;
         } });
+        /* (an EventTarget; its operations and attributes check their this, a promise's rejecting) */
+        if (global.EventTarget && Object.getPrototypeOf(FP) === Object.prototype) Object.setPrototypeOf(FP, global.EventTarget.prototype);
+        var mine = function (o) { return o !== null && o !== undefined && (o === FP || FP.isPrototypeOf(o)) && o !== FP; };
+        ['add', 'delete', 'clear', 'check', 'has', 'forEach', 'entries', 'keys', 'values', 'load'].forEach(function (name) {
+            var d = Object.getOwnPropertyDescriptor(FP, name);
+            if (!d || typeof d.value !== 'function') return;
+            var orig = d.value, promised = name === 'load';
+            var need = { add: 1, delete: 1, check: 1, has: 1, forEach: 1, load: 1 }[name] || 0;
+            var fn = function () {
+                var e = !mine(this) ? new TypeError('Illegal invocation') :
+                        arguments.length < need ? new TypeError("Failed to execute '" + name + "' on 'FontFaceSet': " + need + ' argument required, but only 0 present.') : null;
+                if (e) {
+                    if (promised) return Promise.reject(e);
+                    throw e;
+                }
+                return orig.apply(this, arguments);
+            };
+            Object.defineProperty(fn, 'name', { configurable: true, value: name });
+            Object.defineProperty(fn, 'length', { configurable: true, value: orig.length });
+            Object.defineProperty(FP, name, { configurable: true, enumerable: true, writable: true, value: fn });
+        });
+        if (typeof FP.values === 'function') Object.defineProperty(FP, Symbol.iterator, { configurable: true, writable: true, value: FP.values });
+        ['status', 'ready'].forEach(function (name) {
+            var d = Object.getOwnPropertyDescriptor(FP, name);
+            if (!d || typeof d.get !== 'function') return;
+            var g = d.get, promised = name === 'ready';
+            var get = function () {
+                if (!mine(this)) {
+                    var e = new TypeError('Illegal invocation');
+                    if (promised) return Promise.reject(e);
+                    throw e;
+                }
+                return g.call(this);
+            };
+            Object.defineProperty(get, 'name', { configurable: true, value: 'get ' + name });
+            Object.defineProperty(FP, name, { configurable: true, enumerable: true, get: get, set: d.set });
+        });
+        /* (fonts: Document.prototype's) */
+        var DPf = global.Document && global.Document.prototype, doc = global.document;
+        if (DPf && doc && Object.prototype.hasOwnProperty.call(doc, 'fonts') && !Object.prototype.hasOwnProperty.call(DPf, 'fonts')) {
+            var dd = Object.getOwnPropertyDescriptor(doc, 'fonts'), theSet = dd.get ? dd.get.call(doc) : dd.value;
+            Object.defineProperty(DPf, 'fonts', { configurable: true, enumerable: true, get: function fonts() {
+                if (!(this instanceof global.Document)) throw new TypeError('Illegal invocation');
+                return this === doc ? theSet : null;
+            } });
+            delete doc.fonts;
+        }
     })();
     /* (a screen, what the media features' device says) */
     function liveInterface(name, parent, ro) {
@@ -991,17 +1038,437 @@
             return r.getBoundingClientRect();
         } });
         var DocP = global.Document && global.Document.prototype;
+        /* (the caret at a point: the text there and the character boundary nearest it; [node, offset] or null) */
+        var caretAt = function (doc, x, y) {
+            if (!(doc instanceof global.Document)) throw new TypeError('Illegal invocation');
+            if (!doc.defaultView) return null;
+            if (x < 0 || y < 0 || x > global.innerWidth || y > global.innerHeight) return null;
+            var el = doc.elementFromPoint(x, y);
+            if (!el) return null;
+            var ln = (el.localName || '').toLowerCase();
+            /* (a textarea: the place in its value, by its lines and its font) */
+            if (ln === 'textarea') {
+                var cs = global.getComputedStyle(el), box = el.getBoundingClientRect(), val = String(el.value);
+                var fs = parseFloat(cs.fontSize) || 13, lh = parseFloat(cs.lineHeight) || 1.2;
+                if (!/px$/.test(cs.lineHeight)) lh *= fs;
+                var top = box.top + (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.paddingTop) || 0);
+                var left = box.left + (parseFloat(cs.borderLeftWidth) || 0) + (parseFloat(cs.paddingLeft) || 0);
+                var lines = val.split('\n'), row = Math.floor((y - top) / lh);
+                if (row < 0) return [el, 0];
+                if (row >= lines.length) return [el, val.length];
+                var start = 0;
+                for (var q = 0; q < row; q++) start += lines[q].length + 1;
+                var cx = null;
+                try { cx = doc.createElement('canvas').getContext('2d'); cx.font = cs.font || (fs + 'px ' + cs.fontFamily); } catch (e) { cx = null; }
+                var line = lines[row], col = line.length;
+                if (cx && line && !(cx.measureText(line).width > 0)) cx = null;
+                for (var c = 0; c < line.length; c++) {
+                    var w0 = cx ? cx.measureText(line.slice(0, c)).width : c * fs * 0.6;
+                    var w1 = cx ? cx.measureText(line.slice(0, c + 1)).width : (c + 1) * fs * 0.6;
+                    if (x - left < (w0 + w1) / 2) { col = c; break; }
+                }
+                return [el, start + col];
+            }
+            /* (audio and video: the place before them in their parent) */
+            if ((ln === 'audio' || ln === 'video') && el.parentNode) return [el.parentNode, Array.prototype.indexOf.call(el.parentNode.childNodes, el)];
+            /* (a control or a replaced element: the element itself) */
+            if (/^(input|select|button|canvas|img|iframe|embed|object)$/.test(ln)) return [el, 0];
+            var texts = [], walk = function (n) {
+                for (var c = n.firstChild; c && texts.length < 64; c = c.nextSibling) {
+                    if (c.nodeType === 3) texts.push(c);
+                    else if (c.nodeType === 1) walk(c.shadowRoot || c);
+                }
+            };
+            walk(el.shadowRoot || el);
+            var best = null, bestD = Infinity, budget = 4000, r = doc.createRange();
+            for (var k = 0; k < texts.length && budget > 0; k++) {
+                var t = texts[k], n = t.data.length;
+                for (var i = 0; i < n && budget > 0; i++, budget--) {
+                    r.setStart(t, i);
+                    r.setEnd(t, i + 1);
+                    var rs = r.getClientRects();
+                    for (var j = 0; j < rs.length; j++) {
+                        var b = rs[j];
+                        if (!b.width && !b.height) continue;
+                        var dy = y < b.top ? b.top - y : y >= b.bottom ? y - b.bottom : 0;
+                        var dx = x < b.left ? b.left - x : x >= b.right ? x - b.right : 0;
+                        var d = dy * 1e4 + dx;
+                        if (d < bestD) { bestD = d; best = [t, x < b.left + b.width / 2 ? i : i + 1]; }
+                        if (!d) break;
+                    }
+                    if (!bestD) break;
+                }
+                if (!bestD) break;
+            }
+            return best || [el.firstChild && el.firstChild.nodeType === 3 ? el.firstChild : el, 0];
+        };
+        /* (elementFromPoint: Document.prototype's, as cssom-view has it, not the document's own) */
+        if (DocP && global.document && Object.prototype.hasOwnProperty.call(global.document, 'elementFromPoint')) {
+            var efp = global.document.elementFromPoint;
+            Object.defineProperty(DocP, 'elementFromPoint', { writable: true, enumerable: true, configurable: true,
+                value: function elementFromPoint(x, y) {
+                    if (!(this instanceof global.Document)) throw new TypeError('Illegal invocation');
+                    if (arguments.length < 2) throw new TypeError("Failed to execute 'elementFromPoint' on 'Document': 2 arguments required, but only " + arguments.length + ' present.');
+                    if (!isFinite(+x) || !isFinite(+y)) throw new TypeError("Failed to execute 'elementFromPoint' on 'Document': The provided double value is non-finite.");
+                    return efp.call(this, x, y);
+                } });
+            delete global.document.elementFromPoint;
+        }
+        var coord = function (v, name) {
+            v = +v;
+            if (!isFinite(v)) throw new TypeError("Failed to execute '" + name + "' on 'Document': The provided double value is non-finite.");
+            return v;
+        };
         if (DocP && !DocP.caretPositionFromPoint) Object.defineProperty(DocP, 'caretPositionFromPoint', { writable: true, enumerable: true, configurable: true,
             value: function caretPositionFromPoint(x, y) {
+                if (!(this instanceof global.Document)) throw new TypeError('Illegal invocation');
                 if (arguments.length < 2) throw new TypeError('caretPositionFromPoint: 2 arguments required');
-                if (x < 0 || y < 0 || x > global.innerWidth || y > global.innerHeight) return null;
-                var el = this.elementFromPoint(x, y);
-                if (!el) return null;
-                var p = Object.create(CaretP.prototype), n = el.firstChild && el.firstChild.nodeType === 3 ? el.firstChild : el;
-                Object.defineProperty(p, '__node', { value: n });
-                Object.defineProperty(p, '__offset', { value: 0 });
+                var at = caretAt(this, coord(x, 'caretPositionFromPoint'), coord(y, 'caretPositionFromPoint'));
+                if (!at) return null;
+                var p = Object.create(CaretP.prototype);
+                Object.defineProperty(p, '__node', { value: at[0] });
+                Object.defineProperty(p, '__offset', { value: at[1] });
                 return p;
             } });
+        if (DocP && !DocP.caretRangeFromPoint) Object.defineProperty(DocP, 'caretRangeFromPoint', { writable: true, enumerable: true, configurable: true,
+            value: function caretRangeFromPoint(x, y) {
+                var at = caretAt(this, x === undefined ? 0 : coord(x, 'caretRangeFromPoint'), y === undefined ? 0 : coord(y, 'caretRangeFromPoint'));
+                if (!at) return null;
+                var r = this.createRange();
+                r.setStart(at[0], at[1]);
+                r.collapse(true);
+                return r;
+            } });
+        /* ---- SVG geometry: shapes as polylines (user units), their lengths,
+         * points, hit tests and boxes; text by its font's measure ---- */
+        var SvgP = global.SVGElement && global.SVGElement.prototype;
+        if (SvgP && !SvgP.getBBox) (function () {
+            var num = function (el, a, d) { var v = parseFloat(el.getAttribute(a)); return isFinite(v) ? v : d; };
+            /* (a path's d: its subpaths, each { p: [[x, y]...], z: closed }) */
+            var pathPolys = function (d) {
+                var toks = String(d || '').match(/[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?/g) || [];
+                var out = [], cur = null, x = 0, y = 0, sx = 0, sy = 0, cmd = '', i = 0, lcx = 0, lcy = 0, lq = null;
+                var n = function () { return +toks[i++]; };
+                var to = function (nx, ny) { if (!cur) { cur = { p: [[x, y]], z: false }; out.push(cur); } cur.p.push([nx, ny]); x = nx; y = ny; };
+                var curve = function (pts) {   /* (cubic or quadratic: sampled) */
+                    var x0 = x, y0 = y, N = 16;
+                    for (var s = 1; s <= N; s++) {
+                        var t = s / N, u = 1 - t, px, py;
+                        if (pts.length === 4) { px = u * u * x0 + 2 * u * t * pts[0] + t * t * pts[2]; py = u * u * y0 + 2 * u * t * pts[1] + t * t * pts[3]; }
+                        else { px = u * u * u * x0 + 3 * u * u * t * pts[0] + 3 * u * t * t * pts[2] + t * t * t * pts[4]; py = u * u * u * y0 + 3 * u * u * t * pts[1] + 3 * u * t * t * pts[3] + t * t * t * pts[5]; }
+                        to(px, py);
+                    }
+                };
+                var arc = function (rx, ry, phi, fa, fs, x2, y2) {
+                    var x1 = x, y1 = y;
+                    rx = Math.abs(rx); ry = Math.abs(ry);
+                    if (!rx || !ry) { to(x2, y2); return; }
+                    var c = Math.cos(phi * Math.PI / 180), s = Math.sin(phi * Math.PI / 180);
+                    var dx = (x1 - x2) / 2, dy = (y1 - y2) / 2, xp = c * dx + s * dy, yp = -s * dx + c * dy;
+                    var lam = xp * xp / (rx * rx) + yp * yp / (ry * ry);
+                    if (lam > 1) { rx *= Math.sqrt(lam); ry *= Math.sqrt(lam); }
+                    var num2 = rx * rx * ry * ry - rx * rx * yp * yp - ry * ry * xp * xp, den = rx * rx * yp * yp + ry * ry * xp * xp;
+                    var k = (fa === fs ? -1 : 1) * Math.sqrt(Math.max(0, num2 / den));
+                    var cxp = k * rx * yp / ry, cyp = -k * ry * xp / rx;
+                    var cx = c * cxp - s * cyp + (x1 + x2) / 2, cy = s * cxp + c * cyp + (y1 + y2) / 2;
+                    var ang = function (ux, uy, vx, vy) { var a = Math.atan2(ux * vy - uy * vx, ux * vx + uy * vy); return a; };
+                    var t1 = ang(1, 0, (xp - cxp) / rx, (yp - cyp) / ry), dt = ang((xp - cxp) / rx, (yp - cyp) / ry, (-xp - cxp) / rx, (-yp - cyp) / ry);
+                    if (!fs && dt > 0) dt -= 2 * Math.PI; else if (fs && dt < 0) dt += 2 * Math.PI;
+                    var N = Math.max(4, Math.ceil(Math.abs(dt) / (Math.PI / 16)));
+                    for (var q = 1; q <= N; q++) {
+                        var t = t1 + dt * q / N;
+                        to(q === N ? x2 : cx + rx * Math.cos(t) * c - ry * Math.sin(t) * s, q === N ? y2 : cy + rx * Math.cos(t) * s + ry * Math.sin(t) * c);
+                    }
+                };
+                while (i < toks.length) {
+                    if (/[A-Za-z]/.test(toks[i])) cmd = toks[i++];
+                    else if (!cmd) break;
+                    var rel = cmd === cmd.toLowerCase() && cmd !== 'z' ? 1 : 0, ox = rel ? x : 0, oy = rel ? y : 0, C = cmd.toUpperCase();
+                    if (C === 'Z') { if (cur) { cur.z = true; x = sx; y = sy; cur = null; } lq = null; continue; }
+                    if (C === 'M') { var mx = n() + ox, my = n() + oy; cur = { p: [[mx, my]], z: false }; out.push(cur); x = sx = mx; y = sy = my; cmd = rel ? 'l' : 'L'; lq = null; continue; }
+                    if (C === 'L') to(n() + ox, n() + oy);
+                    else if (C === 'H') to(n() + ox, y);
+                    else if (C === 'V') to(x, n() + oy);
+                    else if (C === 'C') { var c6 = [n() + ox, n() + oy, n() + ox, n() + oy, n() + ox, n() + oy]; curve(c6); lcx = c6[2]; lcy = c6[3]; lq = 'c'; continue; }
+                    else if (C === 'S') { var r1 = lq === 'c' ? [2 * x - lcx, 2 * y - lcy] : [x, y], s4 = [n() + ox, n() + oy, n() + ox, n() + oy]; curve([r1[0], r1[1], s4[0], s4[1], s4[2], s4[3]]); lcx = s4[0]; lcy = s4[1]; lq = 'c'; continue; }
+                    else if (C === 'Q') { var q4 = [n() + ox, n() + oy, n() + ox, n() + oy]; curve(q4); lcx = q4[0]; lcy = q4[1]; lq = 'q'; continue; }
+                    else if (C === 'T') { var r2 = lq === 'q' ? [2 * x - lcx, 2 * y - lcy] : [x, y], t2 = [n() + ox, n() + oy]; curve([r2[0], r2[1], t2[0], t2[1]]); lcx = r2[0]; lcy = r2[1]; lq = 'q'; continue; }
+                    else if (C === 'A') { var a5 = [n(), n(), n(), n(), n()]; arc(a5[0], a5[1], a5[2], a5[3], a5[4], n() + ox, n() + oy); }
+                    else break;
+                    lq = null;
+                }
+                return out.filter(function (sp) { return sp.p.every(function (pt) { return isFinite(pt[0]) && isFinite(pt[1]); }); });
+            };
+            var shapePolys = function (el) {
+                var ln = el.localName, k, pts;
+                if (ln === 'path') return pathPolys(el.getAttribute('d'));
+                if (ln === 'rect') {
+                    var x = num(el, 'x', 0), y = num(el, 'y', 0), w = num(el, 'width', 0), h = num(el, 'height', 0);
+                    return w > 0 && h > 0 ? [{ p: [[x, y], [x + w, y], [x + w, y + h], [x, y + h], [x, y]], z: true }] : [];
+                }
+                if (ln === 'circle' || ln === 'ellipse') {
+                    var cx = num(el, 'cx', 0), cy = num(el, 'cy', 0), rx = ln === 'circle' ? num(el, 'r', 0) : num(el, 'rx', 0), ry = ln === 'circle' ? rx : num(el, 'ry', 0);
+                    if (!(rx > 0 && ry > 0)) return [];
+                    pts = [];
+                    for (k = 0; k <= 64; k++) pts.push([cx + rx * Math.cos(k * Math.PI / 32), cy + ry * Math.sin(k * Math.PI / 32)]);
+                    return [{ p: pts, z: true }];
+                }
+                if (ln === 'line') return [{ p: [[num(el, 'x1', 0), num(el, 'y1', 0)], [num(el, 'x2', 0), num(el, 'y2', 0)]], z: false }];
+                if (ln === 'polyline' || ln === 'polygon') {
+                    var v = String(el.getAttribute('points') || '').match(/[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?/g) || [];
+                    pts = [];
+                    for (k = 0; k + 1 < v.length; k += 2) pts.push([+v[k], +v[k + 1]]);
+                    if (ln === 'polygon' && pts.length) pts.push(pts[0].slice());
+                    return pts.length ? [{ p: pts, z: ln === 'polygon' }] : [];
+                }
+                return null;
+            };
+            var segLen = function (a, b) { return Math.hypot(b[0] - a[0], b[1] - a[1]); };
+            var polysLength = function (ps) {
+                var L = 0;
+                ps.forEach(function (sp) { for (var k = 1; k < sp.p.length; k++) L += segLen(sp.p[k - 1], sp.p[k]); if (sp.z && sp.p.length) L += segLen(sp.p[sp.p.length - 1], sp.p[0]); });
+                return L;
+            };
+            /* (a transform attribute: [a, b, c, d, e, f]) */
+            var mul = function (m, n2) {
+                return [m[0] * n2[0] + m[2] * n2[1], m[1] * n2[0] + m[3] * n2[1], m[0] * n2[2] + m[2] * n2[3], m[1] * n2[2] + m[3] * n2[3],
+                        m[0] * n2[4] + m[2] * n2[5] + m[4], m[1] * n2[4] + m[3] * n2[5] + m[5]];
+            };
+            var parseTransform = function (t) {
+                var m = [1, 0, 0, 1, 0, 0], re = /(matrix|translate|scale|rotate|skewX|skewY)\s*\(([^)]*)\)/g, g;
+                while ((g = re.exec(String(t || '')))) {
+                    var a = (g[2].match(/[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?/g) || []).map(Number), f = g[1], o;
+                    if (f === 'matrix' && a.length === 6) o = a;
+                    else if (f === 'translate') o = [1, 0, 0, 1, a[0] || 0, a[1] || 0];
+                    else if (f === 'scale') o = [a[0], 0, 0, a.length > 1 ? a[1] : a[0], 0, 0];
+                    else if (f === 'rotate') {
+                        var r = (a[0] || 0) * Math.PI / 180, cs2 = Math.cos(r), sn = Math.sin(r);
+                        o = [cs2, sn, -sn, cs2, 0, 0];
+                        if (a.length === 3) o = mul(mul([1, 0, 0, 1, a[1], a[2]], o), [1, 0, 0, 1, -a[1], -a[2]]);
+                    }
+                    else if (f === 'skewX') o = [1, 0, Math.tan((a[0] || 0) * Math.PI / 180), 1, 0, 0];
+                    else if (f === 'skewY') o = [1, Math.tan((a[0] || 0) * Math.PI / 180), 0, 1, 0, 0];
+                    if (o && o.every(isFinite)) m = mul(m, o);
+                }
+                return m;
+            };
+            var apply = function (m, p) { return [m[0] * p[0] + m[2] * p[1] + m[4], m[1] * p[0] + m[3] * p[1] + m[5]]; };
+            var nearestSvg = function (el) { for (var a = el.parentNode; a && a.nodeType === 1; a = a.parentNode) if (a.localName === 'svg' && a.namespaceURI === el.namespaceURI) return a; return null; };
+            /* (to the nearest <svg>'s user space: the element's own and its ancestors' transforms) */
+            var ctmOf = function (el) {
+                var m = [1, 0, 0, 1, 0, 0];
+                for (var a = el; a && a.nodeType === 1 && !(a !== el && a.localName === 'svg'); a = a.parentNode)
+                    if (a.localName !== 'svg') m = mul(parseTransform(a.getAttribute('transform')), m);
+                return m;
+            };
+            var fontOf = function (el) {
+                var cs = global.getComputedStyle(el), fs = parseFloat(cs.fontSize) || 16;
+                return { fs: fs, font: (cs.fontStyle && cs.fontStyle !== 'normal' ? cs.fontStyle + ' ' : '') + (cs.fontWeight && cs.fontWeight !== '400' ? cs.fontWeight + ' ' : '') + fs + 'px ' + (cs.fontFamily || 'sans-serif') };
+            };
+            var measureCtx = null;
+            var textWidth = function (el, s) {
+                var f = fontOf(el);
+                try {
+                    if (!measureCtx) measureCtx = global.document.createElement('canvas').getContext('2d');
+                    measureCtx.font = f.font;
+                    var w = measureCtx.measureText(s).width;
+                    if (w > 0 || !s) return w;
+                } catch (e) { /* (by estimate) */ }
+                return s.length * f.fs * 0.6;
+            };
+            var isText = function (el) { return /^(text|tspan|textPath)$/.test(el.localName); };
+            var textOrigin = function (el) {
+                for (var a = el; a && a.nodeType === 1 && isText(a); a = a.parentNode) {
+                    var xs = parseFloat(String(a.getAttribute('x') || '').trim().split(/[\s,]+/)[0]), ys = parseFloat(String(a.getAttribute('y') || '').trim().split(/[\s,]+/)[0]);
+                    if (isFinite(xs) || isFinite(ys)) return [isFinite(xs) ? xs : 0, isFinite(ys) ? ys : 0];
+                }
+                return [0, 0];
+            };
+            /* (the box of el in its own user space; null: nothing) */
+            var ownBox = function (el) {
+                var ps = shapePolys(el), b = null, add = function (p) {
+                    if (!b) b = [p[0], p[1], p[0], p[1]];
+                    else { b[0] = Math.min(b[0], p[0]); b[1] = Math.min(b[1], p[1]); b[2] = Math.max(b[2], p[0]); b[3] = Math.max(b[3], p[1]); }
+                };
+                if (ps) { ps.forEach(function (sp) { sp.p.forEach(add); }); return b; }
+                if (isText(el)) {
+                    var s = el.textContent || '', o = textOrigin(el), f = fontOf(el);
+                    if (!s) return null;
+                    return [o[0], o[1] - f.fs * 0.8, o[0] + textWidth(el, s), o[1] + f.fs * 0.2];
+                }
+                /* (a group: its children's, each by its transform) */
+                for (var c = el.firstElementChild; c; c = c.nextElementSibling) {
+                    if (c.localName === 'defs' || c.localName === 'style' || c.localName === 'title' || c.localName === 'desc') continue;
+                    var cb = ownBox(c);
+                    if (!cb) continue;
+                    var m = parseTransform(c.getAttribute('transform'));
+                    [[cb[0], cb[1]], [cb[2], cb[1]], [cb[0], cb[3]], [cb[2], cb[3]]].forEach(function (p) { add(apply(m, p)); });
+                }
+                return b;
+            };
+            var svgBox = function (el) {   /* (in the nearest <svg>'s user space) */
+                var b = ownBox(el);
+                if (!b) return null;
+                var m = mul(ctmOf(el), [1, 0, 0, 1, 0, 0]), q = null;
+                /* (ctmOf includes el's own transform: its box is before it) */
+                [[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]].forEach(function (p) {
+                    var r = apply(m, p);
+                    if (!q) q = [r[0], r[1], r[0], r[1]];
+                    else { q[0] = Math.min(q[0], r[0]); q[1] = Math.min(q[1], r[1]); q[2] = Math.max(q[2], r[0]); q[3] = Math.max(q[3], r[1]); }
+                });
+                return q;
+            };
+            var def = function (name, fn) { Object.defineProperty(SvgP, name, { writable: true, enumerable: true, configurable: true, value: fn }); };
+            var geom = function (el, name) {
+                var ps = shapePolys(el);
+                if (!ps) throw new TypeError("Failed to execute '" + name + "': not a geometry element");
+                return ps;
+            };
+            def('getTotalLength', function getTotalLength() { return polysLength(geom(this, 'getTotalLength')); });
+            def('getPointAtLength', function getPointAtLength(d) {
+                var ps = geom(this, 'getPointAtLength'), left = Math.max(0, +d || 0), last = null;
+                for (var s = 0; s < ps.length; s++) {
+                    var p = ps[s].p.slice();
+                    if (ps[s].z && p.length) p.push(p[0]);
+                    for (var k = 1; k < p.length; k++) {
+                        var L = segLen(p[k - 1], p[k]);
+                        if (left <= L && L > 0) return new global.DOMPoint(p[k - 1][0] + (p[k][0] - p[k - 1][0]) * left / L, p[k - 1][1] + (p[k][1] - p[k - 1][1]) * left / L);
+                        left -= L;
+                        last = p[k];
+                    }
+                    if (!last && p.length) last = p[0];
+                }
+                return new global.DOMPoint(last ? last[0] : 0, last ? last[1] : 0);
+            });
+            def('isPointInFill', function isPointInFill(pt) {
+                var ps = geom(this, 'isPointInFill'), x = +(pt && pt.x) || 0, y = +(pt && pt.y) || 0, wn = 0, odd = false;
+                ps.forEach(function (sp) {
+                    var p = sp.p.slice();
+                    if (p.length) p.push(p[0]);
+                    for (var k = 1; k < p.length; k++) {
+                        var a = p[k - 1], b = p[k];
+                        if ((a[1] <= y) !== (b[1] <= y)) {
+                            var xi = a[0] + (y - a[1]) * (b[0] - a[0]) / (b[1] - a[1]);
+                            if (x < xi) { odd = !odd; wn += b[1] > a[1] ? 1 : -1; }
+                        }
+                    }
+                });
+                return global.getComputedStyle(this).fillRule === 'evenodd' ? odd : wn !== 0;
+            });
+            def('isPointInStroke', function isPointInStroke(pt) {
+                var ps = geom(this, 'isPointInStroke'), x = +(pt && pt.x) || 0, y = +(pt && pt.y) || 0;
+                var sw = parseFloat(global.getComputedStyle(this).strokeWidth);
+                var hw = (isFinite(sw) ? sw : 1) / 2;
+                return ps.some(function (sp) {
+                    var p = sp.p.slice();
+                    if (sp.z && p.length) p.push(p[0]);
+                    for (var k = 1; k < p.length; k++) {
+                        var a = p[k - 1], b = p[k], dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy;
+                        var t = l2 ? Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / l2)) : 0;
+                        if (Math.hypot(x - a[0] - t * dx, y - a[1] - t * dy) <= hw + 1e-9) return true;
+                    }
+                    return false;
+                });
+            });
+            def('getBBox', function getBBox() {
+                var b = ownBox(this);
+                return b ? new global.DOMRect(b[0], b[1], b[2] - b[0], b[3] - b[1]) : new global.DOMRect(0, 0, 0, 0);
+            });
+            def('getCTM', function getCTM() { var m = ctmOf(this); return new global.DOMMatrix(m); });
+            def('getScreenCTM', function getScreenCTM() {
+                var m = ctmOf(this), svg = this.localName === 'svg' ? this : nearestSvg(this);
+                if (svg && svg.getBoundingClientRect) {
+                    var r = svg.getBoundingClientRect(), vb = String(svg.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number), base = [1, 0, 0, 1, r.left, r.top];
+                    if (vb.length === 4 && vb[2] > 0 && vb[3] > 0 && r.width && r.height) {
+                        var s = Math.min(r.width / vb[2], r.height / vb[3]);
+                        base = mul(base, [s, 0, 0, s, (r.width - vb[2] * s) / 2 - vb[0] * s, (r.height - vb[3] * s) / 2 - vb[1] * s]);
+                    }
+                    m = mul(base, m);
+                }
+                return new global.DOMMatrix(m);
+            });
+            Object.defineProperty(SvgP, 'ownerSVGElement', { enumerable: true, configurable: true, get: function () { return nearestSvg(this); } });
+            Object.defineProperty(SvgP, 'viewportElement', { enumerable: true, configurable: true, get: function () { return nearestSvg(this); } });
+            /* (text content) */
+            def('getNumberOfChars', function getNumberOfChars() { return (this.textContent || '').length; });
+            def('getComputedTextLength', function getComputedTextLength() { return textWidth(this, this.textContent || ''); });
+            def('getSubStringLength', function getSubStringLength(i, n) {
+                var s = this.textContent || '';
+                i = i >>> 0;
+                if (i >= s.length) throw new global.DOMException('Index out of range', 'IndexSizeError');
+                return textWidth(this, s.substr(i, n >>> 0));
+            });
+            def('getCharNumAtPosition', function getCharNumAtPosition(pt) {
+                var s = this.textContent || '', o = textOrigin(this), f = fontOf(this), x = +(pt && pt.x) || 0, y = +(pt && pt.y) || 0;
+                if (y < o[1] - f.fs || y > o[1] + f.fs * 0.3) return -1;
+                for (var k = 0; k < s.length; k++) {
+                    var x0 = o[0] + textWidth(this, s.slice(0, k)), x1 = o[0] + textWidth(this, s.slice(0, k + 1));
+                    if (x >= x0 && x < x1) return k;
+                }
+                return -1;
+            });
+            def('getStartPositionOfChar', function getStartPositionOfChar(i) {
+                var s = this.textContent || '', o = textOrigin(this);
+                i = i >>> 0;
+                if (i >= s.length) throw new global.DOMException('Index out of range', 'IndexSizeError');
+                return new global.DOMPoint(o[0] + textWidth(this, s.slice(0, i)), o[1]);
+            });
+            def('getEndPositionOfChar', function getEndPositionOfChar(i) {
+                var s = this.textContent || '', o = textOrigin(this);
+                i = i >>> 0;
+                if (i >= s.length) throw new global.DOMException('Index out of range', 'IndexSizeError');
+                return new global.DOMPoint(o[0] + textWidth(this, s.slice(0, i + 1)), o[1]);
+            });
+            def('getExtentOfChar', function getExtentOfChar(i) {
+                var s = this.textContent || '', o = textOrigin(this), f = fontOf(this);
+                i = i >>> 0;
+                if (i >= s.length) throw new global.DOMException('Index out of range', 'IndexSizeError');
+                var x0 = o[0] + textWidth(this, s.slice(0, i));
+                return new global.DOMRect(x0, o[1] - f.fs * 0.8, textWidth(this, s.charAt(i)), f.fs);
+            });
+            /* (<svg>'s own) */
+            def('createSVGRect', function createSVGRect() { return new global.DOMRect(); });
+            def('createSVGPoint', function createSVGPoint() { return new global.DOMPoint(); });
+            def('createSVGMatrix', function createSVGMatrix() { return new global.DOMMatrix(); });
+            var meets = function (b, r, enclose) {
+                if (!b) return false;
+                var rx = +r.x || 0, ry = +r.y || 0, rr = rx + (+r.width || 0), rb = ry + (+r.height || 0);
+                return enclose ? b[0] >= rx && b[1] >= ry && b[2] <= rr && b[3] <= rb : b[0] <= rr && b[2] >= rx && b[1] <= rb && b[3] >= ry;
+            };
+            def('checkIntersection', function checkIntersection(el, r) { return meets(svgBox(el), r, false); });
+            def('checkEnclosure', function checkEnclosure(el, r) { return meets(svgBox(el), r, true); });
+            var listOf = function (svg, r, ref, enclose) {
+                var out = [], all = svg.querySelectorAll('path, rect, circle, ellipse, line, polyline, polygon, text, image, use');
+                for (var k = 0; k < all.length; k++) {
+                    if (ref && !ref.contains(all[k])) continue;
+                    if (meets(svgBox(all[k]), r, enclose)) out.push(all[k]);
+                }
+                return out;
+            };
+            def('getIntersectionList', function getIntersectionList(r, ref) { return listOf(this, r, ref, false); });
+            /* (SVGAnimatedEnumeration: an attribute's keyword as its number; 0 is unknown) */
+            var enumAttr = function (el, attr, words, dflt) {
+                var o = Object.create(global.SVGAnimatedEnumeration ? global.SVGAnimatedEnumeration.prototype : Object.prototype);
+                var read = function () { var k = words.indexOf(el.getAttribute(attr)); return k > 0 ? k : el.hasAttribute(attr) ? (words.indexOf(dflt) > 0 ? words.indexOf(dflt) : 0) : words.indexOf(dflt); };
+                Object.defineProperty(o, 'baseVal', { enumerable: true, configurable: true, get: read, set: function (v) {
+                    v = Number(v);
+                    if (!(v > 0 && v < words.length && Math.floor(v) === v)) throw new TypeError("Failed to set the 'baseVal' property on 'SVGAnimatedEnumeration': The enumeration value provided (" + v + ') is invalid.');
+                    el.setAttribute(attr, words[v]);
+                } });
+                Object.defineProperty(o, 'animVal', { enumerable: true, configurable: true, get: read });
+                return o;
+            };
+            var BLEND = ['', 'normal', 'multiply', 'screen', 'darken', 'lighten', 'overlay', 'color-dodge', 'color-burn', 'hard-light',
+                         'soft-light', 'difference', 'exclusion', 'hue', 'saturation', 'color', 'luminosity'];
+            var enums = new WeakMap();
+            Object.defineProperty(SvgP, 'mode', { enumerable: true, configurable: true, get: function () {
+                if (this.localName !== 'feBlend') return undefined;
+                var e = enums.get(this);
+                if (!e) { e = enumAttr(this, 'mode', BLEND, 'normal'); enums.set(this, e); }
+                return e;
+            } });
+            def('getEnclosureList', function getEnclosureList(r, ref) { return listOf(this, r, ref, true); });
+        })();
         var ElP = global.Element && global.Element.prototype;
         if (ElP && !('currentCSSZoom' in ElP)) Object.defineProperty(ElP, 'currentCSSZoom', { enumerable: true, configurable: true,
             get: function () {
@@ -1053,7 +1520,7 @@
     function snapAxes(cs) {
         var type = cs.scrollSnapType;
         if (!type || type === 'none') return null;
-        return { x: /\b(x|inline|both|pair)\b/.test(type), y: /\b(y|block|both|pair)\b/.test(type), proximity: /proximity/.test(type) };
+        return { x: /\b(x|inline|both|pair)\b/.test(type), y: /\b(y|block|both|pair)\b/.test(type), proximity: !/mandatory/.test(type) };
     }
     /* Each axis's snap positions, { t: the target, pos: the offset }. */
     function snapLists(el, axes) {
@@ -1433,7 +1900,7 @@
             });
         });
     };
-    var newViewTransition = function (update, types, doc) {
+    var newViewTransition = function (update, types, doc, root) {
         var vt = Object.create(ViewTransition.prototype), resolveReady, rejectReady, resolveFinished, rejectFinished,
             resolveDone, rejectDone, skipped = false, timedOut = false;
         var ready = new Promise(function (a, b) { resolveReady = a; rejectReady = b; });
@@ -1462,25 +1929,85 @@
             rejectReady(reason);
             rejectFinished(reason);
         });
-        Object.defineProperties(vt, {
-            updateCallbackDone: { value: done, enumerable: true }, ready: { value: ready, enumerable: true },
-            finished: { value: finished, enumerable: true },
-            types: { value: new Set(types || []), enumerable: true },
-            __skipped: { get: function () { return skipped; } },
-            skipTransition: { value: function skipTransition() { skipped = true; }, enumerable: true }
-        });
+        VT_STATE.set(vt, { done: done, ready: ready, finished: finished, types: newTypeSet(types),
+                           root: root || (doc && doc.documentElement) || null,
+                           skip: function () { skipped = true; } });
+        Object.defineProperty(vt, '__skipped', { get: function () { return skipped; } });
         return vt;
+    };
+    /* (ViewTransition's attributes and operations, on its prototype) */
+    var VT_STATE = new WeakMap();
+    var vtOf = function (o) {
+        var s = o && typeof o === 'object' ? VT_STATE.get(o) : undefined;
+        if (!s) throw new TypeError('Illegal invocation');
+        return s;
+    };
+    [['updateCallbackDone', 'done'], ['ready', 'ready'], ['finished', 'finished'], ['types', 'types'], ['transitionRoot', 'root']].forEach(function (p) {
+        var get = { get: function () { return vtOf(this)[p[1]]; } };
+        var g = Object.getOwnPropertyDescriptor(get, 'get').value;
+        Object.defineProperty(g, 'name', { configurable: true, value: 'get ' + p[0] });
+        Object.defineProperty(ViewTransition.prototype, p[0], { configurable: true, enumerable: true, get: g });
+    });
+    Object.defineProperty(ViewTransition.prototype, 'skipTransition', { configurable: true, enumerable: true, writable: true,
+        value: function skipTransition() { vtOf(this).skip(); } });
+    Object.defineProperty(ViewTransition.prototype, 'waitUntil', { configurable: true, enumerable: true, writable: true,
+        value: function waitUntil(p) {
+            vtOf(this);
+            if (arguments.length < 1) throw new TypeError("Failed to execute 'waitUntil' on 'ViewTransition': 1 argument required, but only 0 present.");
+            return undefined;
+        } });
+    /* (ViewTransitionTypeSet: a setlike of strings) */
+    var VTTS_SET = new WeakMap();
+    var ViewTransitionTypeSet = function ViewTransitionTypeSet() { throw new TypeError('Illegal constructor'); };
+    var ttsOf = function (o) {
+        var s = o && typeof o === 'object' ? VTTS_SET.get(o) : undefined;
+        if (!s) throw new TypeError('Illegal invocation');
+        return s;
+    };
+    (function (P) {
+        var m = function (name, len, fn) {
+            Object.defineProperty(fn, 'name', { configurable: true, value: name });
+            Object.defineProperty(fn, 'length', { configurable: true, value: len });
+            Object.defineProperty(P, name, { configurable: true, enumerable: true, writable: true, value: fn });
+        };
+        Object.defineProperty(P, 'size', { configurable: true, enumerable: true, get: function size() { return ttsOf(this).size; } });
+        m('has', 1, function (v) { return ttsOf(this).has(String(v)); });
+        m('add', 1, function (v) { ttsOf(this).add(String(v)); return this; });
+        m('delete', 1, function (v) { return ttsOf(this).delete(String(v)); });
+        m('clear', 0, function () { ttsOf(this).clear(); });
+        m('forEach', 1, function (cb, thisArg) { var self = this; ttsOf(this).forEach(function (v) { cb.call(thisArg, v, v, self); }); });
+        m('entries', 0, function () { return ttsOf(this).entries(); });
+        m('values', 0, function () { return ttsOf(this).values(); });
+        Object.defineProperty(P, 'keys', { configurable: true, enumerable: true, writable: true, value: P.values });
+        Object.defineProperty(P, Symbol.iterator, { configurable: true, writable: true, value: P.values });
+        Object.defineProperty(P, Symbol.toStringTag, { configurable: true, value: 'ViewTransitionTypeSet' });
+    })(ViewTransitionTypeSet.prototype);
+    var newTypeSet = function (types) {
+        var o = Object.create(ViewTransitionTypeSet.prototype);
+        VTTS_SET.set(o, new Set(Array.from(types || [], String)));
+        return o;
     };
     if (global.document && !global.Document.prototype.startViewTransition) {
         expose('ViewTransition', ViewTransition);
+        expose('ViewTransitionTypeSet', ViewTransitionTypeSet);
+        /* (a document's, or an element's for a transition scoped to it) */
+        var startOn = function (self, arg, doc, root) {
+            var update = typeof arg === 'function' ? arg : arg && arg.update, types = arg && typeof arg === 'object' ? arg.types : null;
+            /* (a new one skips the one running) */
+            if (self.__cyberViewTransition) self.__cyberViewTransition.skipTransition();
+            var vt = newViewTransition(function () { return update ? update() : undefined; }, types, doc, root);
+            Object.defineProperty(self, '__cyberViewTransition', { value: vt, configurable: true, writable: true });
+            return vt;
+        };
         Object.defineProperty(global.Document.prototype, 'startViewTransition', { configurable: true, enumerable: true, writable: true,
-            value: function startViewTransition(arg) {
-                var update = typeof arg === 'function' ? arg : arg && arg.update, types = arg && typeof arg === 'object' ? arg.types : null;
-                /* (a new one skips the one running) */
-                if (this.__cyberViewTransition) this.__cyberViewTransition.skipTransition();
-                var vt = newViewTransition(function () { return update ? update() : undefined; }, types, this);
-                Object.defineProperty(this, '__cyberViewTransition', { value: vt, configurable: true, writable: true });
-                return vt;
+            value: function startViewTransition() {
+                if (!(this instanceof global.Document)) throw new TypeError('Illegal invocation');
+                return startOn(this, arguments[0], this, this.documentElement);
+            } });
+        if (global.Element) Object.defineProperty(global.Element.prototype, 'startViewTransition', { configurable: true, enumerable: true, writable: true,
+            value: function startViewTransition() {
+                if (!(this instanceof global.Element)) throw new TypeError('Illegal invocation');
+                return startOn(this, arguments[0], null, this);
             } });
     }
     /* The last @view-transition in force in the document's sheets. */
@@ -1530,6 +2057,87 @@
             var vt = rule && rule.navigation === 'auto' ? newViewTransition(nothing, rule.types) : null;
             global.__cyberDispatchTrusted(global, new PageRevealEvent('pagereveal', { viewTransition: vt }));
         } });
+    }
+
+    /* ---- navigator.preferences (Web Preferences API): overrides of the user's
+     * preference media features ---- */
+    if (global.navigator && global.EventTarget && !('preferences' in global.navigator)) (function () {
+        var PREFS = [
+            ['colorScheme', 'prefers-color-scheme', ['light', 'dark']],
+            ['contrast', 'prefers-contrast', ['more', 'less', 'no-preference']],
+            ['reducedMotion', 'prefers-reduced-motion', ['reduce', 'no-preference']],
+            ['reducedTransparency', 'prefers-reduced-transparency', ['reduce', 'no-preference']],
+            ['reducedData', 'prefers-reduced-data', ['reduce', 'no-preference']],
+        ];
+        var STATE = new WeakMap();
+        var st = function (o) { var s = STATE.get(o); if (!s) throw new TypeError('Illegal invocation'); return s; };
+        var PreferenceObject = function PreferenceObject() { throw new TypeError('Illegal constructor'); };
+        PreferenceObject.prototype = Object.create(global.EventTarget.prototype);
+        Object.defineProperty(PreferenceObject.prototype, 'constructor', { value: PreferenceObject, writable: true, configurable: true });
+        Object.defineProperty(PreferenceObject.prototype, Symbol.toStringTag, { value: 'PreferenceObject', configurable: true });
+        /* (at once: each request is told before the next one's handler is in place) */
+        var fire = function (o) { o.dispatchEvent(new global.Event('change')); };
+        var set = function (o, v) {
+            var s = st(o);
+            s.override = v;
+            if (typeof global.__cyberMediaPref === 'function') global.__cyberMediaPref(s.feature, v);
+            fire(o);
+        };
+        Object.defineProperty(PreferenceObject.prototype, 'override', { configurable: true, enumerable: true, get: function () { return st(this).override; } });
+        Object.defineProperty(PreferenceObject.prototype, 'value', { configurable: true, enumerable: true, get: function () {
+            var s = st(this);
+            if (s.override !== null) return s.override;
+            for (var i = 0; i < s.valid.length; i++)
+                if (global.matchMedia('(' + s.feature + ': ' + s.valid[i] + ')').matches) return s.valid[i];
+            return s.valid[s.valid.length - 1];
+        } });
+        Object.defineProperty(PreferenceObject.prototype, 'validValues', { configurable: true, enumerable: true, get: function () { return st(this).valid.slice(); } });
+        Object.defineProperty(PreferenceObject.prototype, 'requestOverride', { configurable: true, enumerable: true, writable: true,
+            value: function requestOverride(v) {
+                var self = this, s;
+                try { s = st(this); } catch (e) { return Promise.reject(e); }
+                if (v === null || v === undefined || v === '') { set(self, null); return Promise.resolve(); }
+                v = String(v);
+                if (s.valid.indexOf(v) < 0) return Promise.reject(new global.DOMException('Not a valid value for this preference: ' + v, 'TypeError'));
+                set(self, v);
+                return Promise.resolve();
+            } });
+        Object.defineProperty(PreferenceObject.prototype, 'clearOverride', { configurable: true, enumerable: true, writable: true,
+            value: function clearOverride() { set(this, null); } });
+        var handlers = new WeakMap();
+        Object.defineProperty(PreferenceObject.prototype, 'onchange', { configurable: true, enumerable: true,
+            get: function () { st(this); return handlers.get(this) || null; },
+            set: function (f) {
+                st(this);
+                if (typeof f === 'function') handlers.set(this, f); else handlers.delete(this);
+            } });
+        var PreferenceManager = function PreferenceManager() { throw new TypeError('Illegal constructor'); };
+        Object.defineProperty(PreferenceManager.prototype, Symbol.toStringTag, { value: 'PreferenceManager', configurable: true });
+        var manager = Object.create(PreferenceManager.prototype);
+        /* (made when first asked for: an EventTarget can't be made this early) */
+        PREFS.forEach(function (p) {
+            var o = null;
+            Object.defineProperty(PreferenceManager.prototype, p[0], { configurable: true, enumerable: true, get: function () {
+                if (!o) {
+                    o = new global.EventTarget();
+                    Object.setPrototypeOf(o, PreferenceObject.prototype);
+                    STATE.set(o, { feature: p[1], valid: p[2], override: null });
+                }
+                return o;
+            } });
+        });
+        Object.defineProperty(global, 'PreferenceManager', { value: PreferenceManager, writable: true, configurable: true });
+        Object.defineProperty(global, 'PreferenceObject', { value: PreferenceObject, writable: true, configurable: true });
+        var NP = Object.getPrototypeOf(global.navigator);
+        Object.defineProperty(NP && NP !== Object.prototype ? NP : global.navigator, 'preferences', { configurable: true, enumerable: true,
+            get: function () { return manager; } });
+    })();
+
+    /* (geometry's legacy window aliases: SVGPoint, SVGRect, SVGMatrix) */
+    if (global.document && global.DOMPoint && !global.SVGPoint) {
+        [['SVGPoint', 'DOMPoint'], ['SVGRect', 'DOMRect'], ['SVGMatrix', 'DOMMatrix']].forEach(function (p) {
+            if (global[p[1]] && !global[p[0]]) Object.defineProperty(global, p[0], { value: global[p[1]], writable: true, configurable: true });
+        });
     }
 
     /* (Performance is an EventTarget) */
@@ -1663,10 +2271,14 @@
     [['scroll', false], ['scrollTo', false], ['scrollBy', true]].forEach(function (m) {
         var name = m[0], by = m[1];
         var named = function (f) { Object.defineProperty(f, 'name', { configurable: true, value: name }); return f; };
+        /* (a promise that rejects for what isn't one: as an operation returning one does) */
         if (ELP) Object.defineProperty(ELP, name, { configurable: true, enumerable: true, writable: true, value: named(function () {
+            if (!(this instanceof global.Element)) return Promise.reject(new TypeError('Illegal invocation'));
             return scrollApply(this, scrollArgs(name, 'Element', arguments), by);
         }) });
         Object.defineProperty(global, name, { configurable: true, enumerable: true, writable: true, value: named(function () {
+            if (this !== undefined && this !== null && this !== global && !(global.Window && this instanceof global.Window))
+                return Promise.reject(new TypeError('Illegal invocation'));
             var o = scrollArgs(name, 'Window', arguments), el = scrollViewportElement();
             return el ? scrollApply(el, o, by) : Promise.resolve({ interrupted: false });
         }) });
@@ -1731,6 +2343,7 @@
     Object.defineProperty(global, '__cyberScrollIntoView', { configurable: true, value: scrollIntoViewOf });
     if (ELP) {
         Object.defineProperty(ELP, 'scrollIntoView', { configurable: true, enumerable: true, writable: true, value: function scrollIntoView() {
+            if (!(this instanceof global.Element)) return Promise.reject(new TypeError('Illegal invocation'));
             scrollWith = typeof arguments[0] === 'object' && arguments[0] ? arguments[0].behavior : undefined;
             scrollLast = null;
             var arg = arguments[0], block = 'start', inline = 'nearest', LOGICAL = ['start', 'center', 'end', 'nearest'];
@@ -1771,9 +2384,41 @@
             map.set(type, p);
             return p;
         };
-        Object.defineProperty(ELP, 'pseudo', { configurable: true, enumerable: true, writable: true, value: function pseudo(type) { return makePseudo.apply(null, [this].concat([].slice.call(arguments))); } });
-        Object.defineProperty(pseudoProto, 'pseudo', { configurable: true, enumerable: true, writable: true, value: function pseudo(type) { return makePseudo.apply(null, [this].concat([].slice.call(arguments))); } });
+        Object.defineProperty(ELP, 'pseudo', { configurable: true, enumerable: true, writable: true, value: function pseudo(type) {
+            if (!(this instanceof global.Element)) throw new TypeError('Illegal invocation');
+            return makePseudo.apply(null, [this].concat([].slice.call(arguments)));
+        } });
+        Object.defineProperty(pseudoProto, 'pseudo', { configurable: true, enumerable: true, writable: true, value: function pseudo(type) {
+            psGet(this);
+            return makePseudo.apply(null, [this].concat([].slice.call(arguments)));
+        } });
         Object.defineProperty(global, 'CSSPseudoElement', { configurable: true, writable: true, value: CSSPseudoElement });
+        /* (getPseudoElements(element, type): a list of the element's pseudo-elements of that type) */
+        var PSLIST = new WeakMap();
+        var CSSPseudoElementList = function CSSPseudoElementList() { throw new TypeError('Illegal constructor'); };
+        var psl = function (o) { var l = PSLIST.get(o); if (!l) throw new TypeError('Illegal invocation'); return l; };
+        Object.defineProperty(CSSPseudoElementList.prototype, Symbol.toStringTag, { configurable: true, value: 'CSSPseudoElementList' });
+        Object.defineProperty(CSSPseudoElementList.prototype, 'length', { configurable: true, enumerable: true, get: function () { return psl(this).length; } });
+        Object.defineProperty(CSSPseudoElementList.prototype, 'item', { configurable: true, enumerable: true, writable: true, value: function item(i) {
+            var l = psl(this);
+            if (arguments.length < 1) throw new TypeError("Failed to execute 'item': 1 argument required");
+            return l[i >>> 0] || null;
+        } });
+        Object.defineProperty(CSSPseudoElementList.prototype, 'getByType', { configurable: true, enumerable: true, writable: true, value: function getByType(t) {
+            var l = psl(this);
+            if (arguments.length < 1) throw new TypeError("Failed to execute 'getByType': 1 argument required");
+            t = String(t);
+            for (var i = 0; i < l.length; i++) if (PSEUDO.get(l[i]).type === t || PSEUDO.get(l[i]).type === '::' + t) return l[i];
+            return null;
+        } });
+        Object.defineProperty(global, 'CSSPseudoElementList', { configurable: true, writable: true, value: CSSPseudoElementList });
+        Object.defineProperty(global, 'getPseudoElements', { configurable: true, enumerable: true, writable: true, value: function getPseudoElements(el, type) {
+            if (arguments.length < 2) throw new TypeError("Failed to execute 'getPseudoElements': 2 arguments required");
+            if (!(el instanceof global.Element)) throw new TypeError("Failed to execute 'getPseudoElements': parameter 1 is not of type 'Element'.");
+            var o = Object.create(CSSPseudoElementList.prototype), p = makePseudo(el, '::' + String(type).replace(/^::/, ''));
+            PSLIST.set(o, p ? [p] : []);
+            return o;
+        } });
         /* ---- GeometryUtils (CSSOM View): a box's corners, through the transforms ---- */
         var geoPx = function (v) { return parseFloat(v) || 0; };
         /* (a node as [matrix to the viewport, its box's rect there before that]) */
@@ -1903,9 +2548,14 @@
             has: function (k) { if (!arguments.length) throw new TypeError('1 argument required'); return hlOf(this).has(k); },
             delete: function (k) { if (!arguments.length) throw new TypeError('1 argument required'); return hlOf(this).delete(k); },
             clear: function () { hlOf(this).clear(); } });
-        Object.defineProperty(P, 'keys', { configurable: true, enumerable: true, writable: true, value: kind === 'set' ? P.values : Object.defineProperty(keys, 'name', { value: 'keys' }) });
+        /* (keys: its own function, named so, a set's being its values) */
+        var keysFn = kind === 'set' ? function () { return hlOf(this).values(); } : keys;
+        Object.defineProperty(keysFn, 'name', { configurable: true, value: 'keys' });
+        Object.defineProperty(P, 'keys', { configurable: true, enumerable: true, writable: true, value: keysFn });
         Object.defineProperty(P, Symbol.iterator, { configurable: true, writable: true, value: kind === 'set' ? P.values : P.entries });
-        Object.defineProperty(P, 'size', { configurable: true, enumerable: true, get: function () { return hlOf(this).size; } });
+        var sizeGet = function () { return hlOf(this).size; };
+        Object.defineProperty(sizeGet, 'name', { configurable: true, value: 'get size' });
+        Object.defineProperty(P, 'size', { configurable: true, enumerable: true, get: sizeGet });
     };
     var HIGHLIGHT_TYPES = ['highlight', 'spelling-error', 'grammar-error'];
     var Highlight = function Highlight() {
@@ -1950,6 +2600,7 @@
     } });
     Object.defineProperty(HighlightRegistry.prototype, 'highlightsFromPoint', { configurable: true, enumerable: true, writable: true,
         value: function highlightsFromPoint(x, y) {
+            if (!(this instanceof HighlightRegistry)) throw new TypeError('Illegal invocation');
             if (arguments.length < 2) throw new TypeError('2 arguments required');
             return [];
         } });
@@ -2185,6 +2836,7 @@
     if (DOCP && !('elementsFromPoint' in DOCP))
         Object.defineProperty(DOCP, 'elementsFromPoint', { configurable: true, enumerable: true, writable: true, value: function elementsFromPoint(x, y) {
             if (arguments.length < 2) throw new TypeError("Failed to execute 'elementsFromPoint' on 'Document': 2 arguments required");
+            if (!isFinite(+x) || !isFinite(+y)) throw new TypeError("Failed to execute 'elementsFromPoint' on 'Document': The provided double value is non-finite.");
             var out = [];
             for (var e = this.elementFromPoint(x, y); e; e = e.parentElement) out.push(e);
             return out;

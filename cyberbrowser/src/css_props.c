@@ -896,7 +896,11 @@ static int calc_value(const Toks *ts, int i, int pct) {
             if (na != 3 || !args[0] || (args[0] & ~args[1]) || (args[1] & ~args[2]) || (args[2] & ~args[0])) return -1;
             return D_NUMBER;
         }
-        if (strcasecmp(f, "sign") == 0) return D_NUMBER;
+        /* (one argument each; a percentage only where there's something it's of) */
+        if ((!strcasecmp(f, "sign") || !strcasecmp(f, "abs")) && na != 1) return -1;
+        /* (round: a value and the step, which only a number may leave out) */
+        if (!strcasecmp(f, "round") && (na > 2 || (na == 1 && args[0] != D_NUMBER))) return -1;
+        if (strcasecmp(f, "sign") == 0) return (args[0] & D_PERCENT) && !pct ? -1 : D_NUMBER;
         if (strcasecmp(f, "random") == 0 && (na < 2 || na > 3)) return -1;
         if (!strcasecmp(f, "sin") || !strcasecmp(f, "cos") || !strcasecmp(f, "tan")) return (args[0] & (D_NUMBER | D_ANGLE)) ? D_NUMBER : -1;
         /* (one number for these three; two of one type for atan2) */
@@ -3680,7 +3684,9 @@ static bool has_substitution(const char *v) {
     for (const char *p = v; *p; p++) {
         if ((p == v || !isalnum((unsigned char)p[-1])) &&
             (strncasecmp(p, "var(", 4) == 0 || strncasecmp(p, "env(", 4) == 0 || strncasecmp(p, "attr(", 5) == 0 ||
-             strncasecmp(p, "if(", 3) == 0 || strncasecmp(p, "ident(", 6) == 0 || css_dashed_call(p)))
+             strncasecmp(p, "if(", 3) == 0 || strncasecmp(p, "ident(", 6) == 0 || strncasecmp(p, "random-item(", 12) == 0 ||
+             (strncasecmp(p, "inherit(", 8) == 0 && p[8 + strspn(p + 8, " \t\n")] == '-' && p[9 + strspn(p + 8, " \t\n")] == '-') ||
+             css_dashed_call(p)))
             return true;
     }
     return false;
@@ -3690,6 +3696,42 @@ static bool has_substitution(const char *v) {
  * its top level (what's in it is only checked once substituted). */
 static const char *strcasestr_simple(const char *h, const char *n);
 /* Each env( <custom-ident> <integer [0,inf]>* [, <fallback>]? ) in v. */
+/* Each random-item( <key>, <item>#? ) in v: brackets that match, a key, a comma,
+ * and no ! or ; outside a block. */
+static bool random_item_calls_ok(const char *v) {
+    for (const char *p = v; (p = strcasestr_simple(p, "random-item(")); p += 12) {
+        if (p > v && (isalnum((unsigned char)p[-1]) || p[-1] == '-' || p[-1] == '_')) continue;
+        const char *a = p + 12;
+        char st[64];
+        int d = 0;
+        bool comma = false, key = false, blk = false, other = false;
+        const char *c = a;
+        for (; *c; c++) {
+            char ch = *c;
+            if (ch == '"' || ch == '\'') { char q = ch; for (c++; *c && *c != q; c++) if (*c == '\\' && c[1]) c++; if (!*c) return false; if (!d && !comma) key = true; if (!d && comma) { if (blk) return false; other = true; } continue; }
+            if (ch == '(' || ch == '[' || ch == '{') {
+                if (d >= 64) return false;
+                if (ch == '{' && !d && !comma) return false;
+                /* (an item in {}: the block and nothing else) */
+                if (!d && comma) { if (ch == '{' ? (blk || other) : blk) return false; if (ch == '{') blk = true; else other = true; }
+                st[d++] = ch == '(' ? ')' : ch == '[' ? ']' : '}';
+                if (!d || !comma) key = true;
+                continue;
+            }
+            if (ch == ')' || ch == ']' || ch == '}') {
+                if (!d) { if (ch == ')') break; return false; }
+                if (st[--d] != ch) return false;
+                continue;
+            }
+            if (!d && (ch == '!' || ch == ';')) return false;
+            if (!d && ch == ',') { if (!comma && !key) return false; comma = true; blk = other = false; continue; }
+            if (!d && !comma && !isspace((unsigned char)ch)) key = true;
+            if (!d && comma && !isspace((unsigned char)ch)) { if (blk) return false; other = true; }
+        }
+        if (*c != ')' || !comma || !key) return false;
+    }
+    return true;
+}
 static bool env_calls_ok(const char *v) {
     for (const char *p = v; (p = strcasestr_simple(p, "env(")); p += 4) {
         if (p > v && (isalnum((unsigned char)p[-1]) || p[-1] == '-' || p[-1] == '_')) continue;
@@ -3910,7 +3952,81 @@ static char *position_area_canon(const char *value)
     return NULL;
 }
 
+/* (set while a value that substitution made is read: what it came to is clamped later, not refused) */
+bool g_css_parse_substituted;
+
+/* dynamic-range-limit-mix( [ <'dynamic-range-limit'> && <percentage [0,100]> ]#{2,} ) at *s;
+ * true and *s past it if it is one.  *nonzero: some percentage isn't 0 (or isn't known). */
+static bool drl_mix(const char **s, bool *nonzero) {
+    const char *p = *s;
+    if (strncasecmp(p, "dynamic-range-limit-mix(", 24)) return false;
+    p += 24;
+    int items = 0;
+    bool any = false;
+    for (;;) {
+        int kw = 0, pct = 0;
+        for (int part = 0; part < 3; part++) {
+            while (isspace((unsigned char)*p)) p++;
+            if (*p == ',' || *p == ')') break;
+            if (!strncasecmp(p, "dynamic-range-limit-mix(", 24)) {
+                bool nz = false;
+                if (kw || !drl_mix(&p, &nz)) return false;
+                kw = 1;
+                continue;
+            }
+            if (!strncasecmp(p, "standard", 8) || !strncasecmp(p, "no-limit", 8) || !strncasecmp(p, "constrained", 11)) {
+                size_t l = !strncasecmp(p, "constrained", 11) ? 11 : 8;
+                if (kw || isalnum((unsigned char)p[l]) || p[l] == '-') return false;
+                kw = 1;
+                p += l;
+                continue;
+            }
+            if (!strncasecmp(p, "calc(", 5)) {
+                if (pct) return false;
+                int d = 0;
+                const char *q = p;
+                for (; *q; q++) { if (*q == '(') d++; else if (*q == ')' && --d == 0) { q++; break; } }
+                if (d) return false;
+                p = q;
+                pct = 1;
+                any = true;
+                continue;
+            }
+            char *e = NULL;
+            double v = strtod(p, &e);
+            if (e == p || *e != '%' || pct) return false;
+            if (v < 0 || v > 100) return false;
+            if (v != 0) any = true;
+            p = e + 1;
+            pct = 1;
+        }
+        if (!kw || !pct) return false;
+        items++;
+        while (isspace((unsigned char)*p)) p++;
+        if (*p == ',') { p++; continue; }
+        if (*p == ')') { p++; break; }
+        return false;
+    }
+    if (items < 2) return false;
+    *nonzero = any;
+    *s = p;
+    return any;
+}
+
 static char *prop_parse_raw(const CssPropDef *p, const char *value) {
+    if (p && value && !strcmp(p->name, "dynamic-range-limit")) {
+        const char *t = value;
+        while (isspace((unsigned char)*t)) t++;
+        if (!strncasecmp(t, "dynamic-range-limit-mix(", 24)) {
+            const char *q = t;
+            bool nz = false;
+            if (!drl_mix(&q, &nz)) return NULL;
+            while (isspace((unsigned char)*q)) q++;
+            if (*q) return NULL;
+            char *r = trim_dup(t);
+            return r;
+        }
+    }
     if (p && value && !strcmp(p->name, "position-area") && strcasecmp(value, "inherit") && strcasecmp(value, "initial") &&
         strcasecmp(value, "unset") && strcasecmp(value, "revert") && strcasecmp(value, "revert-layer"))
         return position_area_canon(value);
@@ -3922,7 +4038,7 @@ static char *prop_parse_raw(const CssPropDef *p, const char *value) {
         return v;
     }
     if (has_substitution(v)) {
-        if (!ident_calls_ok(v) || !env_calls_ok(v) || !dashed_calls_ok(v) || !var_calls_ok(v)) { free(v); return NULL; }
+        if (!ident_calls_ok(v) || !env_calls_ok(v) || !dashed_calls_ok(v) || !var_calls_ok(v) || !random_item_calls_ok(v)) { free(v); return NULL; }
         return v;
     }
     if (p->shorthand != CSS_SH_NONE) {
@@ -3959,6 +4075,48 @@ static char *prop_parse_raw(const CssPropDef *p, const char *value) {
     free(m.hits);
     toks_free(&ts);
     free(v);
+    /* (what the grammar lets by: steps(n, jump-none) needs two steps; a keyword once) */
+    if (out && !g_css_parse_substituted && (!strcmp(p->name, "animation-timing-function") || !strcmp(p->name, "transition-timing-function"))) {
+        for (const char *q = out; (q = strstr(q, "steps(")); q += 6) {
+            const char *e = strchr(q, ')'), *jn = strstr(q, "jump-none");
+            if (!e || !jn || jn > e) continue;
+            char *ne = NULL;
+            double c = strtod(q + 6, &ne);
+            if (ne != q + 6 ? !(c >= 2) : !strncmp(q + 6, "calc(NaN", 8)) { free(out); return NULL; }
+        }
+    }
+    /* (hanging-punctuation and image-resolution keep the order they were written in) */
+    if (out && (!strcmp(p->name, "hanging-punctuation") || !strcmp(p->name, "image-resolution")) && !strchr(value, '(')) {
+        Buf wb = { 0 };
+        for (const char *q = value; *q; ) {
+            while (isspace((unsigned char)*q)) q++;
+            if (!*q) break;
+            if (wb.n) buf_ch(&wb, ' ');
+            while (*q && !isspace((unsigned char)*q)) buf_ch(&wb, (char)tolower((unsigned char)*q++));
+        }
+        buf_ch(&wb, 0);
+        if (wb.s && wb.s[0]) { free(out); out = wb.s; } else free(wb.s);
+    }
+    /* (none only on its own: not a counter's name or one of a list of transitions) */
+    if (out && (!strcmp(p->name, "counter-reset") || !strcmp(p->name, "counter-set") || !strcmp(p->name, "counter-increment") ||
+                !strcmp(p->name, "transition-property"))) {
+        bool list = strchr(out, ' ') || strchr(out, ',') || strchr(out, '(');
+        for (const char *q = out; list && (q = strcasestr_simple(q, "none")); q += 4) {
+            bool start = q == out || q[-1] == ' ' || q[-1] == ',' || q[-1] == '(';
+            bool end = q[4] == 0 || q[4] == ' ' || q[4] == ',' || q[4] == ')';
+            if (start && end) { free(out); return NULL; }
+        }
+    }
+    if (out && !strcmp(p->name, "position-visibility")) {
+        static const char *const kw[] = { "anchors-valid", "anchor-valid", "anchors-visible", "anchor-visible", "no-overflow" };
+        for (size_t k = 0; k < sizeof kw / sizeof kw[0]; k++) {
+            int seen = 0;
+            size_t l = strlen(kw[k]);
+            for (const char *q = out; (q = strstr(q, kw[k])); q += l)
+                if ((q == out || q[-1] == ' ') && (q[l] == 0 || q[l] == ' ')) seen++;
+            if (seen > 1) { free(out); return NULL; }
+        }
+    }
     return out;
 }
 
@@ -4035,7 +4193,7 @@ char *css_prop_compute(const CssPropDef *p, const char *value, const CssComputeE
                 strstr(p->name, "timing-function") || !strncmp(p->name, "animation-range-", 16) ||
                 !strcmp(p->name, "counter-increment") || !strcmp(p->name, "counter-set") || !strcmp(p->name, "font-weight") ||
                 !strcmp(p->name, "font-width") || !strcmp(p->name, "font-stretch") || !strcmp(p->name, "font-style") ||
-                !strncmp(p->name, "scroll-padding", 14))) {
+                !strncmp(p->name, "scroll-padding", 14) || !strcmp(p->name, "hyphenate-limit-chars"))) {
         g_canon_computed = true;
         char *cc = css_prop_canon(p, out);
         g_canon_computed = false;
@@ -4194,6 +4352,11 @@ int css_prop_expand(const CssPropDef *p, const char *value, char ***out_vals) {
             for (int i = 0; i < nf; i++) {
                 int li = lh_index(names, n, g_props[S.hits[found[i]].prop].name);
                 if (li >= 0 && !out[li]) out[li] = strdup(vals[i]);
+                /* (flex-wrap as it is on its own: balance's wrap unsaid) */
+                if (li >= 0 && out[li] && !strcmp(names[li], "flex-wrap") && strstr(out[li], "balance")) {
+                    char *c = css_prop_canon(&g_props[S.hits[found[i]].prop], out[li]);
+                    if (c && c[0]) { free(out[li]); out[li] = c; } else free(c);
+                }
             }
             for (int i = 0; i < n; i++) if (!out[i]) out[i] = initial_of(names[i]);
             result = n;
@@ -6879,7 +7042,8 @@ static char *canon_box_edge(const char *v)
     char w[3][160];
     int n = canon_words(v, w, 3);
     if (n != 2) return NULL;
-    if (!strcasecmp(w[1], "text")) return strdup(w[0]);
+    /* (text under cap or ex: what one of them alone means) */
+    if (!strcasecmp(w[1], "text") && (!strcasecmp(w[0], "cap") || !strcasecmp(w[0], "ex") || !strcasecmp(w[0], "text"))) return strdup(w[0]);
     if (!strcasecmp(w[0], w[1])) return strdup(w[0]);
     if (!strcasecmp(w[0], "text") && !strcasecmp(w[1], "alphabetic")) return strdup("alphabetic");
     return NULL;
@@ -7970,6 +8134,26 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
         snprintf(o, sizeof o, "%s%s%s%s%s", fl ? fl : "", fl && (al || sh) ? " " : "", al ? al : "", al && sh ? " " : "", sh ? sh : "");
         return strdup(o[0] ? o : "baseline");
     }
+    /* (one word: the other axis is the center) */
+    if (!g_canon_computed && (!strcmp(n, "object-position") || !strcmp(n, "perspective-origin")) && !strchr(v, ' ') && !strchr(v, '(') &&
+        !strstr(v, "x-") && !strstr(v, "y-")) {
+        char b[200];
+        if (!strcasecmp(v, "top") || !strcasecmp(v, "bottom")) snprintf(b, sizeof b, "center %s", v);
+        else if (!strcasecmp(v, "center")) snprintf(b, sizeof b, "center center");
+        else snprintf(b, sizeof b, "%s center", v);
+        return strdup(b);
+    }
+    /* (anchor-valid, anchor-visible, no-overflow: in that order) */
+    if (!strcmp(n, "position-visibility") && strchr(v, ' ')) {
+        static const char *const ord[] = { "anchors-valid", "anchor-valid", "anchors-visible", "anchor-visible", "no-overflow" };
+        char b[200] = "";
+        for (size_t k = 0; k < sizeof ord / sizeof ord[0]; k++) {
+            const char *f = strstr(v, ord[k]);
+            bool word = f && (f == v || f[-1] == ' ') && (f[strlen(ord[k])] == 0 || f[strlen(ord[k])] == ' ');
+            if (word) { if (b[0]) strcat(b, " "); strcat(b, ord[k]); }
+        }
+        return b[0] ? strdup(b) : NULL;
+    }
     if (!strcmp(n, "object-position") && (strstr(v, "x-start") || strstr(v, "x-end") || strstr(v, "y-start") || strstr(v, "y-end"))) {
         char w[4][160];
         int nw = canon_words(v, w, 4);
@@ -8559,9 +8743,65 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
         if (bi == 0) { Buf s = { 0 }; buf_str(&s, w[oi]); buf_str(&s, " balance"); return buf_take(&s); }
         return NULL;
     }
+    /* (proximity goes without saying) */
+    if (!strcmp(n, "scroll-snap-type")) {
+        size_t vl = strlen(v);
+        if (vl > 10 && !strcasecmp(v + vl - 10, " proximity")) return strndup(v, vl - 10);
+        return NULL;
+    }
     if (!strcmp(n, "overflow-clip-margin")) {
         char w[2][160];
-        if (canon_words(v, w, 2) == 2 && strtod(w[1], NULL) == 0.0 && isdigit((unsigned char)w[1][0])) return strdup(w[0]);
+        int nw = canon_words(v, w, 2);
+        /* (padding-box goes without saying; with nothing else it's 0px) */
+        for (int i = 0; i < nw; i++)
+            if (!strcasecmp(w[i], "padding-box")) return strdup(nw == 2 ? w[1 - i] : "0px");
+        if (nw == 2 && strtod(w[1], NULL) == 0.0 && isdigit((unsigned char)w[1][0])) return strdup(w[0]);
+        return NULL;
+    }
+    if (!strcmp(n, "counter-increment")) {
+        /* (a name without a number: 1) */
+        char w[16][160];
+        int nw = canon_words(v, w, 16);
+        if (nw < 1 || (nw == 1 && !strcasecmp(w[0], "none"))) return NULL;
+        Buf s = { 0 };
+        bool changed = false;
+        for (int i = 0; i < nw; i++) {
+            if (i) buf_ch(&s, ' ');
+            buf_str(&s, w[i]);
+            bool name = !isdigit((unsigned char)w[i][0]) && w[i][0] != '-' && w[i][0] != '+' && strncasecmp(w[i], "calc(", 5);
+            bool next_num = i + 1 < nw && (isdigit((unsigned char)w[i + 1][0]) || w[i + 1][0] == '-' || w[i + 1][0] == '+' || !strncasecmp(w[i + 1], "calc(", 5));
+            if (name && !next_num) { buf_str(&s, " 1"); changed = true; }
+        }
+        if (changed) return buf_take(&s);
+        free(s.s);
+        return NULL;
+    }
+    /* (the third as the second, the second auto: each unsaid) */
+    if (!strcmp(n, "hyphenate-limit-chars")) {
+        char w[3][160];
+        int nw = canon_words(v, w, 3);
+        /* (only auto and whole numbers from 1: anything else isn't this property's to shorten) */
+        for (int i = 0; i < nw; i++) {
+            if (!strcasecmp(w[i], "auto")) continue;
+            for (const char *c = w[i]; *c; c++) if (!isdigit((unsigned char)*c)) return NULL;
+            if (atoi(w[i]) < 1) return NULL;
+        }
+        if (nw == 3 && !strcasecmp(w[2], w[1])) nw = 2;
+        if (nw == 2 && !strcasecmp(w[1], "auto")) nw = 1;
+        if (nw == 3) return NULL;
+        char b[400];
+        if (nw == 2) snprintf(b, sizeof b, "%s %s", w[0], w[1]); else snprintf(b, sizeof b, "%s", w[0]);
+        return strcmp(b, v) ? strdup(b) : NULL;
+    }
+    /* (padding-box goes without saying; with nothing else it's 0px) */
+    if (!strcmp(n, "overflow-clip-margin") && strstr(v, "padding-box")) {
+        char w[2][160];
+        int nw = canon_words(v, w, 2);
+        for (int i = 0; i < nw; i++)
+            if (!strcasecmp(w[i], "padding-box")) {
+                const char *o = nw == 2 ? w[1 - i] : "0px";
+                return strdup(o);
+            }
         return NULL;
     }
     if (!strcmp(n, "counter-reset") || !strcmp(n, "counter-set")) {
@@ -8576,7 +8816,7 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
             buf_str(&s, w[i]);
             bool name = !isdigit((unsigned char)w[i][0]) && w[i][0] != '-' && w[i][0] != '+' && strncasecmp(w[i], "calc(", 5) && strncasecmp(w[i], "reversed(", 9);
             bool next_num = i + 1 < nw && (isdigit((unsigned char)w[i + 1][0]) || w[i + 1][0] == '-' || w[i + 1][0] == '+' || !strncasecmp(w[i + 1], "calc(", 5));
-            if (name && !next_num && !strcmp(n, "counter-reset")) { buf_str(&s, " 0"); changed = true; }
+            if (name && !next_num) { buf_str(&s, " 0"); changed = true; }
         }
         if (changed) return buf_take(&s);
         free(s.s);
@@ -8588,8 +8828,8 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
     if (!strcmp(n, "font-palette") && !strncasecmp(v, "palette-mix(", 12)) return canon_palette_mix(v);
     if ((!strcmp(n, "animation-timing-function") || !strcmp(n, "transition-timing-function")) && strstr(v, "linear("))
         return canon_linear(v, g_canon_computed);
-    if ((!strcmp(n, "animation-timing-function") || !strcmp(n, "transition-timing-function")) && g_canon_computed &&
-        (strstr(v, "step") || strstr(v, "cubic-bezier("))) {
+    if ((!strcmp(n, "animation-timing-function") || !strcmp(n, "transition-timing-function")) &&
+        (strstr(v, "step") || (g_canon_computed && strstr(v, "cubic-bezier(")))) {
         /* (computed: the step keywords as the steps they are, end unsaid, a curve's x within 0 to 1) */
         Buf b = { 0 };
         bool changed = false;
@@ -8622,7 +8862,7 @@ static char *css_prop_canon(const CssPropDef *p, const char *v)
                     }
                 }
             }
-            if (at_word && !strncmp(p, "cubic-bezier(", 13)) {
+            if (at_word && g_canon_computed && !strncmp(p, "cubic-bezier(", 13)) {
                 const char *e = strchr(p, ')');
                 double x[4];
                 if (e && sscanf(p + 13, "%lf , %lf , %lf , %lf", &x[0], &x[1], &x[2], &x[3]) == 4) {

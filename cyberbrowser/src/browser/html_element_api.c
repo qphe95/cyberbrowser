@@ -81,7 +81,7 @@ static const char k_html_element_js[] =
 "    if (takesText(el)) return true;\n"
 "    if (window.__cyberFocusByMouse) return false;\n"
 "    if (window.__cyberLastInput === 'key') return true;\n"
-"    if (prev && prev.nodeType === 1 && prev !== el.ownerDocument.body) return __cyberElState(prev, ST_VISIBLE);\n"
+"    if (prev && prev.nodeType === 1 && prev.localName !== 'body' && prev !== el.ownerDocument.documentElement) return __cyberElState(prev, ST_VISIBLE);\n"
 "    return window.__cyberLastInput !== 'mouse';\n"
 "  }\n"
 "  method('focus', function(options){\n"

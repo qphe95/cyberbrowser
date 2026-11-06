@@ -373,6 +373,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char mm_kw_w[2], h_kw, mm_kw_h;
     /* (contain: size and inline-size: 1 inline, 2 block; and the sizes it then has) */
     unsigned char contain_size;
+/* (size containment from contain, content-visibility, or container-type: 1 inline axis, 2 block axis) */
+#define CSS_CONTAIN_SIZE_OF(s) (((s)->table_role >= 2 && (s)->table_role != 5) ? 0 :     ((s)->contain_size | ((s)->container_type == 2 ? 3 : (s)->container_type == 1 ? 1 : 0)))
     float cis_w, cis_h;     /* contain-intrinsic-width and -height, px; 0 none */
     CssAlignItems align_items;
 
@@ -885,6 +887,8 @@ void css_layout_box_scrolled(const LayoutContext *ctx, int idx, double *dx, doub
 /* What idx's transforms and its ancestors' (up to, not with, stop) make of points
  * in laid-out coordinates: an affine m[6] (a b c d e f); false when they make nothing of them. */
 bool css_layout_box_map(const LayoutContext *ctx, int idx, int stop, double m[6]);
+/* A container query (a @container prelude) for the DOM node dom; self: dom may be the container. */
+bool css_layout_container_match(const LayoutContext *ctx, int dom, bool self, const char *query);
 /* A rect's bounds under m. */
 void css_layout_map_bounds(const double m[6], double *x, double *y, double *w, double *h);
 

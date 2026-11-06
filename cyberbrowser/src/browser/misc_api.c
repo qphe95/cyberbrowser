@@ -1574,6 +1574,20 @@ GCValue js_custom_elements_define(JSContextHandle ctx, GCValue this_val, int arg
     if (JS_IsFunction(ctx, argv[1]))
         JS_DefinePropertyValueStr(ctx, argv[1], "__cyber_ce_name", JS_NewString(ctx, name),
                                   JS_PROP_CONFIGURABLE);
+    /* (a definition that watches style: CSSOM writes tell it) */
+    if (JS_IsFunction(ctx, argv[1])) {
+        extern bool g_ce_observes_style;
+        GCValue list = JS_GetPropertyStr(ctx, argv[1], "observedAttributes");
+        if (JS_IsException(list)) { JS_GetException(ctx); list = JS_UNDEFINED; }
+        if (JS_IsObject(list)) {
+            uint32_t n = 0;
+            JS_ToUint32(ctx, &n, JS_GetPropertyStr(ctx, list, "length"));
+            for (uint32_t i = 0; i < n && i < 4096 && !g_ce_observes_style; i++) {
+                const char *s = JS_ToCString(ctx, JS_GetPropertyUint32(ctx, list, i));
+                if (s) { if (!strcmp(s, "style")) g_ce_observes_style = true; JS_FreeCString(ctx, s); }
+            }
+        }
+    }
 
     // Enqueue upgrade reactions for any existing elements of this tag name.
     // The spec pushes a CEReactions stack frame while define() runs and flushes

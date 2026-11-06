@@ -1517,8 +1517,9 @@
                     hr.push('auto');
                 } else hr.push(String(Math.round(parseFloat(hx) + (parseFloat(hy) - parseFloat(hx)) * t)));
             }
-            while (hr.length > 2 && hr[hr.length - 1] === 'auto') hr.pop();
-            if (hr.length === 2 && hr[1] === 'auto' && hr[0] === 'auto') return 'auto';
+            /* (the third as the second, the second auto: each unsaid) */
+            if (hr[2] === hr[1]) hr.pop();
+            if (hr.length === 2 && hr[1] === 'auto') hr.pop();
             return hr.join(' ');
         }
         /* (visible all the way, but for the very end of hidden) */
@@ -1936,6 +1937,16 @@
         });
     }
     /* (a custom property under @keyframes, read by script) */
+    /* (a registered custom property under a transition: what it was last, and what it is now) */
+    var customLast = new WeakMap();
+    Object.defineProperty(global, '__cyberCustomTransition', { configurable: true, value: function (el, prop, base) {
+        var m = customLast.get(el);
+        if (!m) customLast.set(el, m = Object.create(null));
+        var before = prop in m ? m[prop] : base;
+        m[prop] = base;
+        var v = cssTransitionOver(el, prop, base, before, base, before);
+        return typeof v === 'string' ? v : base;
+    } });
     Object.defineProperty(global, '__cyberCustomCssAnim', { configurable: true, value: function (el, prop, base) {
         return cssAnimationsOver(el, prop, base, base);
     } });
@@ -1949,10 +1960,10 @@
             var alias = sizeLogical(el, prop);
             for (var f = 0; f < frames.length; f++) {
                 var val = frames[f].style.getPropertyValue(prop);
-                /* (by a logical name: a keyword or calc-size(); a plain length is the engine's) */
+                /* (by a logical name: whatever it says) */
                 if (!val && alias) {
                     var byLogical = frames[f].style.getPropertyValue(alias);
-                    if (byLogical && !/^s*[-+d.]/.test(byLogical)) val = byLogical;
+                    if (byLogical) val = byLogical;
                 }
                 if (val) pts.push({ at: frames[f].at, value: val, composite: frames[f].style.animationComposition || comp });
             }
@@ -2057,7 +2068,7 @@
         var ba = sizeBasis(a), bb = sizeBasis(b);
         return ba === bb || ba === 'any' || bb === 'any';
     }
-    var SIZE_PROP = /^(min-|max-)?(width|height)$/, SIZE_KEYWORD = /^\s*(auto|min-content|max-content|fit-content|stretch|none)\s*$/i;
+    var SIZE_PROP = /^(min-|max-)?(width|height|inline-size|block-size)$/, SIZE_KEYWORD = /^\s*(auto|min-content|max-content|fit-content|stretch|none)\s*$/i;
     var transitionsOf = new WeakMap();
     function listItem(text, i) {
         var parts = String(text).split(/,(?![^(]*\))/).map(function (x) { return x.trim(); });
@@ -2071,7 +2082,10 @@
      * or maximum's too: as width or height have it).  'none' has none. */
     function sizeResolved(el, prop, v) {
         if (!SIZE_PROP.test(prop) || typeof v !== 'string' || !SIZE_KEYWORD.test(v) || /^\s*none\s*$/i.test(v)) return v;
-        var got = readWith(el, /width/.test(prop) ? 'width' : 'height', v);
+        /* (a logical size: the physical one it is in this writing mode) */
+        var horiz = /^horizontal/.test(global.getComputedStyle(el).writingMode || 'horizontal-tb');
+        var wide = /width/.test(prop) || (/inline-size/.test(prop) && horiz) || (/block-size/.test(prop) && !horiz);
+        var got = readWith(el, wide ? 'width' : 'height', v);
         setStyle(el, null);
         if (!applying) applyTarget(el);
         return got || v;
@@ -3042,6 +3056,8 @@
     function CSSTransition() { throw new TypeError('Illegal constructor'); }
     CSSAnimation.prototype = Object.create(Animation.prototype, { constructor: { value: CSSAnimation, writable: true, configurable: true } });
     CSSTransition.prototype = Object.create(Animation.prototype, { constructor: { value: CSSTransition, writable: true, configurable: true } });
+    Object.defineProperty(CSSAnimation.prototype, Symbol.toStringTag, { value: 'CSSAnimation', configurable: true });
+    Object.defineProperty(CSSTransition.prototype, Symbol.toStringTag, { value: 'CSSTransition', configurable: true });
     /* What's left once its row has gone. */
     function settleRow(a) {
         if (a._gone) return;
@@ -3204,8 +3220,13 @@
     }
     var rowsOf = ELP.getAnimations;
     function nativeGetOf(el) {
-        /* (style is up to date first: that's what starts them) */
-        if (el.isConnected) global.getComputedStyle(el).getPropertyValue('opacity');
+        /* (style is up to date first: that's what starts them; a custom property's, by reading it) */
+        if (el.isConnected) {
+            var gcs = global.getComputedStyle(el);
+            gcs.getPropertyValue('opacity');
+            var tp = String(gcs.transitionProperty || '');
+            if (tp.indexOf('--') >= 0) tp.split(',').forEach(function (n) { n = n.trim(); if (n.slice(0, 2) === '--') gcs.getPropertyValue(n); });
+        }
         var got = Array.from(rowsOf.call(el)).map(function (rec) { return wrapRow(rec, el); });
         var st = transitionsOf.get(el);
         if (st) st.forEach(function (rec, prop) { if (rec.run && !rec.run.over && !rec.run.quiet) got.push(transitionAnimation(el, prop, rec.run)); });

@@ -48,6 +48,7 @@ typedef struct StyleBlock {
     NodeId owner;
     bool syncing;               /* applying the style attribute: no write-back */
     ComputedStyle *cs;          /* getComputedStyle's (read-only): its values */
+    bool readonly;              /* (read-only with no values) */
 } StyleBlock;
 
 /* The GC cell the object's opaque handle points at. */
@@ -316,8 +317,20 @@ static void block_changed(JSContextHandle ctx, GCValue obj, StyleBlock *b) {
         char *old = was_style ? strdup(was_style) : NULL;
         bool changed = !old || strcmp(old, text) != 0;
         if (text[0] || was_style) dom_set_attr_str(b->owner, "style", text);
-        /* (the attribute changed: an observer hears of it) */
-        if (changed && (text[0] || old)) mo_notify_attribute(ctx, dom_js(ctx, b->owner), "style", old);
+        /* (the attribute changed: an observer hears of it, and a custom element that watches it) */
+        if (changed && (text[0] || old)) {
+            extern void dom_api_attribute_changed(JSContextHandle ctx, GCValue elem, const char *name, const char *old_val, const char *new_val);
+            extern bool g_ce_observes_style;
+            GCValue el = dom_js(ctx, b->owner);
+            /* (only when some definition watches style: most pages' writes skip the lookup) */
+            if (g_ce_observes_style) {
+                const char *now = dom_get_attr_str(b->owner, "style");
+                char *nowc = now ? strdup(now) : NULL;
+                dom_api_attribute_changed(ctx, el, "style", old, nowc);
+                free(nowc);
+            }
+            mo_notify_attribute(ctx, el, "style", old);
+        }
         free(old);
         free(text);
     }
@@ -351,6 +364,53 @@ static bool block_set(StyleBlock *b, const char *prop, size_t plen, const char *
     }
     const CssPropDef *p = lookup(prop, plen);
     if (!p) return false;
+    /* (an element's size: its width and height, one or two of them; a page's is its own) */
+    if (b->owner != DOM_NULL && !strcmp(p->name, "size")) {
+        const CssPropDef *wp = css_prop_find("width", 5), *hp = css_prop_find("height", 6);
+        if (!wp || !hp) return false;
+        if (!value[0]) { remove_decl(b, wp, NULL); remove_decl(b, hp, NULL); return true; }
+        const char *s = value;
+        while (isspace((unsigned char)*s)) s++;
+        if (css_is_wide_keyword(s, strcspn(s, " \t\n"))) {
+            char *v = css_prop_parse(wp, value);
+            if (!v) return false;
+            put_decl(b, wp, NULL, v, important);
+            put_decl(b, hp, NULL, v, important);
+            free(v);
+            return true;
+        }
+        /* (two values at the top level, split at the space between them) */
+        char one[256], two[256];
+        int depth = 0;
+        const char *sp = NULL;
+        for (const char *c = s; *c; c++) {
+            if (*c == '(') depth++;
+            else if (*c == ')') depth--;
+            else if (!depth && isspace((unsigned char)*c)) {
+                const char *n2 = c;
+                while (isspace((unsigned char)*n2)) n2++;
+                if (*n2) { if (sp) return false; sp = c; c = n2 - 1; }
+            }
+        }
+        size_t l1 = sp ? (size_t)(sp - s) : strlen(s);
+        if (l1 >= sizeof one) return false;
+        memcpy(one, s, l1); one[l1] = 0;
+        two[0] = 0;
+        if (sp) {
+            while (isspace((unsigned char)*sp)) sp++;
+            size_t l2 = strlen(sp);
+            while (l2 && isspace((unsigned char)sp[l2 - 1])) l2--;
+            if (l2 >= sizeof two) return false;
+            memcpy(two, sp, l2); two[l2] = 0;
+        }
+        char *w = css_prop_parse(wp, one), *h = css_prop_parse(hp, two[0] ? two : one);
+        if (!w || !h) { free(w); free(h); return false; }
+        put_decl(b, wp, NULL, w, important);
+        put_decl(b, hp, NULL, h, important);
+        free(w);
+        free(h);
+        return true;
+    }
     /* (all takes the place of what it covers) */
     if (!strcmp(p->name, "all")) {
         for (int i = b->n - 1; i >= 0; i--)
@@ -412,6 +472,16 @@ static char *block_get(StyleBlock *b, const char *prop, size_t plen, bool *impor
     }
     const CssPropDef *p = lookup(prop, plen);
     if (!p) return strdup("");
+    if (b->owner != DOM_NULL && !strcmp(p->name, "size")) {
+        StyleDecl *wd = find_decl(b, css_prop_find("width", 5), NULL), *hd = find_decl(b, css_prop_find("height", 6), NULL);
+        if (!wd || !hd || wd->important != hd->important) return strdup("");
+        if (important) *important = wd->important;
+        if (!strcmp(wd->value, hd->value)) return strdup(wd->value);
+        size_t n = strlen(wd->value) + strlen(hd->value) + 2;
+        char *r = malloc(n);
+        if (r) snprintf(r, n, "%s %s", wd->value, hd->value);
+        return r ? r : strdup("");
+    }
     if (p->longhands) {
         char *v = shorthand_value(b, p, important);
         return v ? v : strdup("");
@@ -488,6 +558,13 @@ GCValue css_style_decl_new(JSContextHandle ctx, NodeId owner, const char *text) 
     return obj;
 }
 
+GCValue css_style_decl_new_empty_readonly(JSContextHandle ctx) {
+    GCValue obj = css_style_decl_new(ctx, DOM_NULL, NULL);
+    StyleBlock *b = block_of(ctx, obj);
+    if (b) b->readonly = true;
+    return obj;
+}
+
 bool css_style_decl_is(JSContextHandle ctx, GCValue obj) { return block_of(ctx, obj) != NULL; }
 
 void css_style_decl_set_owner(JSContextHandle ctx, GCValue obj, NodeId owner) {
@@ -545,7 +622,7 @@ static StyleBlock *this_block(JSContextHandle ctx, GCValue this_val) {
 /* For a write: a computed style is read-only. */
 static StyleBlock *writable_block(JSContextHandle ctx, GCValue this_val) {
     StyleBlock *b = this_block(ctx, this_val);
-    if (b && b->cs) {
+    if (b && (b->cs || b->readonly)) {
         throw_dom_exception(ctx, "NoModificationAllowedError", "These styles are computed, and therefore read-only.");
         return NULL;
     }
@@ -754,6 +831,17 @@ static GCValue js_relayout(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     return JS_UNDEFINED;
 }
 
+/* __cyberMatchContainer(element, query) */
+static GCValue js_match_container(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_FALSE;
+    const char *q = JS_ToCString(ctx, argv[1]);
+    if (!q) return JS_EXCEPTION;
+    bool r = layout_query_container_match(ctx, argv[0], q);
+    JS_FreeCString(ctx, q);
+    return JS_NewBool(ctx, r);
+}
+
 static const JSCFunctionListEntry g_methods[] = {
     JS_CFUNC_DEF("setProperty", 2, js_set_property),
     JS_CFUNC_DEF("removeProperty", 1, js_remove_property),
@@ -773,6 +861,8 @@ void css_style_decl_install(JSContextHandle ctx, GCValue proto) {
                               JS_NewCFunction(ctx, js_new_style_decl, "__cyberStyleDecl", 1), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberRelayout",
                               JS_NewCFunction(ctx, js_relayout, "__cyberRelayout", 0), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberMatchContainer",
+                              JS_NewCFunction(ctx, js_match_container, "__cyberMatchContainer", 2), JS_PROP_CONFIGURABLE);
     JS_SetPropertyFunctionList(ctx, proto, g_attr_entries, g_attr_count);
     static const struct { const char *name; JSCFunction *get, *set; } acc[] = {
         { "cssText", js_get_css_text, js_set_css_text },

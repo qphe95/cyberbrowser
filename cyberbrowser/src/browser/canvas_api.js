@@ -180,6 +180,7 @@
     for (var k in PATH_METHODS) define(Path2D.prototype, k, PATH_METHODS[k]);
     define(Path2D.prototype, 'addPath', function addPath(p) {
         if (!(p instanceof Path2D)) throw new TypeError("parameter 1 is not of type 'Path2D'.");
+        if (arguments[1] !== undefined && arguments[1] !== null && typeof arguments[1] === 'object') check2d(arguments[1]);
         var self = this;
         p[PATH].ops.forEach(function (op) { self[PATH].ops.push(op); });
         var b = p[PATH].bounds;
@@ -284,10 +285,19 @@
                 m[0] * e + m[2] * f + m[4], m[1] * e + m[3] * f + m[5]];
     }
     function setM(c, m) { if (m.every(isFinite)) define(c, '_m', m); }
+    /* (a DOMMatrix2DInit: a and m11, b and m12, ... each the same when both are given) */
+    function check2d(o) {
+        var same = function (x, y) { return x === y || (x !== x && y !== y) || (x === 0 && y === 0); };
+        [['a', 'm11'], ['b', 'm12'], ['c', 'm21'], ['d', 'm22'], ['e', 'm41'], ['f', 'm42']].forEach(function (p) {
+            if (o[p[0]] !== undefined && o[p[1]] !== undefined && !same(Number(o[p[0]]), Number(o[p[1]])))
+                throw new TypeError(p[0] + ' and ' + p[1] + ' must be the same');
+        });
+    }
     define(CP, 'transform', function transform(a, b, c, d, e, f) { setM(this, mul(this._m, +a, +b, +c, +d, +e, +f)); });
     define(CP, 'setTransform', function setTransform(a, b, c, d, e, f) {
         if (a !== null && typeof a === 'object') {
             var o = a;
+            check2d(o);
             setM(this, [num(o.a !== undefined ? o.a : o.m11, 1), num(o.b !== undefined ? o.b : o.m12, 0),
                         num(o.c !== undefined ? o.c : o.m21, 0), num(o.d !== undefined ? o.d : o.m22, 1),
                         num(o.e !== undefined ? o.e : o.m41, 0), num(o.f !== undefined ? o.f : o.m42, 0)]);

@@ -506,15 +506,22 @@
         return s;
     }
 
+    /* (the namespaces the sheet being read declares: its default and its prefixes) */
+    var NS_CTX = { dflt: null, map: Object.create(null) };
     function serCompound(c) {
         var s = '';
         for (var k = 0; k < c.items.length; k++) {
             var it = c.items[k];
             switch (it.k) {
             case 'type':
-                /* (an implied * before a pseudo-element goes without saying) */
-                if (it.v === '*' && it.ns === null && c.items[k + 1] && (c.items[k + 1].k === 'pelem' || c.items[k + 1].k === 'pelemfn')) break;
-                if (it.ns !== null) s += (it.ns === '*' ? '*' : serIdent(it.ns)) + '|';
+                /* (a prefix that says nothing more: any namespace with no default
+                 * one, or the default's own) */
+                var ns = it.ns;
+                if (ns === '*' && NS_CTX.dflt === null) ns = null;
+                else if (ns !== null && ns !== '*' && ns !== '' && NS_CTX.dflt !== null && NS_CTX.map[ns] === NS_CTX.dflt) ns = null;
+                /* (an implied * before what follows it goes without saying) */
+                if (it.v === '*' && ns === null && c.items[k + 1]) break;
+                if (ns !== null) s += (ns === '*' ? '*' : serIdent(ns)) + '|';
                 s += it.v === '*' ? '*' : serIdent(it.v);
                 break;
             case 'id': s += '#' + serIdent(it.v); break;
@@ -701,6 +708,60 @@
     Object.defineProperty(MediaList.prototype, Symbol.toStringTag, { value: 'MediaList', configurable: true });
     MediaList.prototype[Symbol.iterator] = Array.prototype[Symbol.iterator];
     /* (a declaration block is a list of its property names) */
+    /* (CSS Parser API: the namespace's operations, each a parse of its input; nothing is
+     * built from them yet) */
+    if (global.CSS && !global.CSS.parseStylesheet) {
+        [['parseStylesheet', true], ['parseRuleList', true], ['parseRule', true], ['parseDeclarationList', true],
+         ['parseDeclaration', false], ['parseValue', false], ['parseValueList', false], ['parseCommaValueList', false]].forEach(function (p) {
+            var fn = function (input) {
+                if (arguments.length < 1) {
+                    var e = new TypeError("Failed to execute '" + p[0] + "' on 'CSS': 1 argument required, but only 0 present.");
+                    if (p[1]) return Promise.reject(e);
+                    throw e;
+                }
+                if (p[1]) return Promise.resolve([]);
+                return p[0] === 'parseValue' || p[0] === 'parseDeclaration' ? null : [];
+            };
+            Object.defineProperty(fn, 'name', { configurable: true, value: p[0] });
+            Object.defineProperty(global.CSS, p[0], { configurable: true, enumerable: true, writable: true, value: fn });
+        });
+    }
+    /* (an @page rule's declarations: CSSPageDescriptors, with the page's descriptors its own) */
+    var PAGE_DESC = ['margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'size', 'marks', 'bleed'];
+    function pageDescriptorsOf(style) {
+        var PD = global.CSSPageDescriptors, base = Object.getPrototypeOf(style);
+        if (typeof PD !== 'function' || !PD.prototype || !style || typeof style !== 'object') return;
+        var P = PD.prototype;
+        if (!P.__cyberAdopted) {
+            var SD = global.CSSStyleDeclaration && global.CSSStyleDeclaration.prototype;
+            Object.getOwnPropertyNames(P).forEach(function (k) { if (k !== 'constructor') { try { delete P[k]; } catch (e) { /* (kept) */ } } });
+            if (SD) Object.setPrototypeOf(P, SD);
+            PAGE_DESC.forEach(function (n) {
+                [n, n.replace(/-([a-z])/g, function (m, c) { return c.toUpperCase(); })].forEach(function (k) {
+                    var d = null;
+                    for (var o = base; o && !d; o = Object.getPrototypeOf(o)) d = Object.getOwnPropertyDescriptor(o, k);
+                    if (d) Object.defineProperty(P, k, d);
+                });
+            });
+            Object.defineProperty(P, Symbol.toStringTag, { value: 'CSSPageDescriptors', configurable: true });
+            Object.defineProperty(P, '__cyberAdopted', { value: true });
+        }
+        Object.setPrototypeOf(style, P);
+    }
+    /* (CSSStyleProperties: the declarations of elements and style rules, a CSSStyleDeclaration
+     * with the properties; idl_shape.c calls this once its interfaces exist) */
+    Object.defineProperty(global, '__cyberStylePropsAdopt', { configurable: true, value: function () {
+        var SP = global.CSSStyleProperties, D = global.__CSSStyleDeclarationProto, SD = global.CSSStyleDeclaration;
+        if (typeof SP !== 'function' || !SP.prototype || !D || SP.prototype === D || D.__cyberAdopted) return;
+        var P = SP.prototype;
+        Object.getOwnPropertyNames(P).forEach(function (k) { if (k !== 'constructor') { try { delete P[k]; } catch (e) { /* (kept) */ } } });
+        Object.getOwnPropertySymbols(P).forEach(function (k) { try { delete P[k]; } catch (e) { /* (kept) */ } });
+        Object.setPrototypeOf(P, D);
+        if (typeof SD === 'function') Object.setPrototypeOf(SP, SD);
+        Object.defineProperty(P, Symbol.toStringTag, { value: 'CSSStyleProperties', configurable: true });
+        Object.defineProperty(P, '__cyberAdopted', { value: true });
+        global.__CSSStyleDeclarationProto = P;
+    } });
     if (global.__CSSStyleDeclarationProto && !global.__CSSStyleDeclarationProto[Symbol.iterator])
         Object.defineProperty(global.__CSSStyleDeclarationProto, Symbol.iterator, { value: Array.prototype.values, writable: true, configurable: true });
 
@@ -720,6 +781,11 @@
         Object.defineProperty(CSSRule.prototype, n, { value: v, enumerable: true });
     });
     getter(CSSRule.prototype, 'parentRule', function () { return this.__parentRule || null; });
+    /* (a rule taken out: no sheet and no parent any more) */
+    function detachRule(r) {
+        if (!r || typeof r !== 'object') return;
+        try { r.__sheet = null; r.__parentRule = null; } catch (e) { /* (kept) */ }
+    }
     getter(CSSRule.prototype, 'parentStyleSheet', function () {
         for (var r = this; r; r = r.__parentRule) if (r.__sheet) return r.__sheet;
         return null;
@@ -796,6 +862,56 @@
         return true;
     }
     /* A @container prelude as it serializes. */
+    /* A style() query's text: custom property tests as name: value, ranges spaced,
+     * and/or/not in lower case, groups without their padding; anything else as written. */
+    function styleQueryText(s) {
+        var t = s.replace(/^\s+|\s+$/g, '');
+        var close = function (str, k) {
+            for (var d = 0, q = k; q < str.length; q++) { if (str[q] === '(') d++; else if (str[q] === ')' && --d === 0) return q; }
+            return -1;
+        };
+        /* (top-level parts: groups, words) */
+        var parts = [], k = 0;
+        while (k < t.length) {
+            while (k < t.length && /\s/.test(t[k])) k++;
+            if (k >= t.length) break;
+            if (t[k] === '(') {
+                var e = close(t, k);
+                if (e < 0) return t;
+                parts.push({ g: t.slice(k + 1, e) });
+                k = e + 1;
+            } else {
+                var w = k;
+                while (w < t.length && !/\s/.test(t[w]) && t[w] !== '(') w++;
+                parts.push({ w: t.slice(k, w) });
+                k = w;
+            }
+        }
+        var logic = parts.length > 1 && parts.every(function (p) { return p.g !== undefined || /^(and|or|not)$/i.test(p.w); });
+        if (logic || (parts.length === 1 && parts[0].g !== undefined)) {
+            return parts.map(function (p) {
+                if (p.w !== undefined) return p.w.toLowerCase();
+                var inner = p.g.replace(/^\s+|\s+$/g, '');
+                /* (a test of something not a custom property: as written) */
+                if (/^[A-Za-z]/.test(inner) && !/^(not)\b/i.test(inner) && inner.indexOf('(') < 0) return '(' + p.g + ')';
+                return '(' + styleQueryText(p.g) + ')';
+            }).join(' ');
+        }
+        /* (a range: its parts and operators, one space apart) */
+        if (/[<>=]/.test(t) && !/^--[^:]*:/.test(t)) {
+            var toks = t.split(/\s*(<=|>=|<|>|=)\s*/);
+            return toks.map(function (x) { return x.replace(/^\s+|\s+$/g, ''); }).join(' ');
+        }
+        /* (a declaration: name: value, the value's own spaces kept within it) */
+        var c = -1;
+        for (var q = 0, d = 0; q < t.length; q++) {
+            if (t[q] === '\\') { q++; continue; }
+            if (t[q] === '(') d++; else if (t[q] === ')') d--;
+            else if (t[q] === ':' && !d) { c = q; break; }
+        }
+        if (c >= 0 && /^--/.test(t)) return t.slice(0, c).replace(/\s+$/, '') + ': ' + t.slice(c + 1).replace(/^\s+/, '');
+        return t;
+    }
     function containerCondText(text) {
         var parts = [], d = 0, cur = '';
         for (var k = 0; k < text.length; k++) {
@@ -820,12 +936,19 @@
                 out += one(t.slice(i, i + at));
                 var j = i + at + 6, depth = 1;
                 while (j < t.length && depth) { if (t[j] === '(') depth++; else if (t[j] === ')') depth--; j++; }
-                out += t.slice(i + at, j);
+                /* (the function's name in lower case; its query normalized) */
+                out += 'style(' + styleQueryText(t.slice(i + at + 6, j - 1)) + ')';
                 i = j;
             }
             return out;
         }).join(', ');
     }
+    /* (Element.matchContainer's query: its serialization, '' when it isn't one) */
+    Object.defineProperty(global, '__cyberContainerQueryText', { configurable: true, value: function (q) {
+        q = String(q);
+        if (!q.trim() || !containerPreludeValid(q)) return '';
+        return containerCondText(q);
+    } });
     function containerPreludeValid(prelude) {
         var parts = [], d = 0, cur = '';
         for (var k = 0; k < prelude.length; k++) {
@@ -851,7 +974,57 @@
     /* @font-feature-values: the names of feature values, by kind */
     var FFV_KINDS = { 'stylistic': 1, 'historical-forms': 1, 'styleset': 0, 'character-variant': 2, 'swash': 1, 'ornaments': 1, 'annotation': 1 };
     var CSSFontFeatureValuesRule = subclass('CSSFontFeatureValuesRule', CSSRule);
-    getter(CSSFontFeatureValuesRule.prototype, 'fontFamily', function () { return this.__family; });
+    getter(CSSFontFeatureValuesRule.prototype, 'fontFamily', function () { return this.__family; },
+        function (v) { var f = ffvFamily(String(v)); if (f !== null) { this.__family = f; touched(this); } });
+    /* (each kind's names: a CSSFontFeatureValuesMap, live over the rule's own list) */
+    var FFV_MAP_OF = new WeakMap();
+    var CSSFontFeatureValuesMap = global.CSSFontFeatureValuesMap || function CSSFontFeatureValuesMap() { throw new TypeError('Illegal constructor'); };
+    var ffvList = function (m) {
+        var s = FFV_MAP_OF.get(m);
+        if (!s) throw new TypeError('Illegal invocation');
+        var maps = s.rule.__maps;
+        if (!maps[s.kind]) maps[s.kind] = [];
+        return maps[s.kind];
+    };
+    var ffvAt = function (list, name) { for (var i = 0; i < list.length; i++) if (list[i][0] === name) return i; return -1; };
+    (function (P) {
+        var m = function (name, fn) { Object.defineProperty(P, name, { configurable: true, enumerable: true, writable: true, value: fn }); };
+        Object.defineProperty(P, 'size', { configurable: true, enumerable: true, get: function () { return ffvList(this).length; } });
+        m('get', function get(k) { var l = ffvList(this), i = ffvAt(l, String(k)); return i < 0 ? undefined : l[i][1].map(Number); });
+        m('has', function has(k) { return ffvAt(ffvList(this), String(k)) >= 0; });
+        m('set', function set(k, v) {
+            var l = ffvList(this), nums = (Array.isArray(v) ? v : [v]).map(function (x) { return Math.floor(Number(x)); });
+            var i = ffvAt(l, String(k));
+            if (i < 0) l.push([String(k), nums]); else l[i][1] = nums;
+            touched(FFV_MAP_OF.get(this).rule);
+            return this;
+        });
+        m('delete', function (k) {
+            var l = ffvList(this), i = ffvAt(l, String(k));
+            if (i < 0) return false;
+            l.splice(i, 1);
+            touched(FFV_MAP_OF.get(this).rule);
+            return true;
+        });
+        m('clear', function clear() { ffvList(this).length = 0; touched(FFV_MAP_OF.get(this).rule); });
+        m('forEach', function forEach(cb, thisArg) { var self = this; ffvList(this).slice().forEach(function (e) { cb.call(thisArg, e[1].map(Number), e[0], self); }); });
+        m('keys', function keys() { return ffvList(this).map(function (e) { return e[0]; })[Symbol.iterator](); });
+        m('values', function values() { return ffvList(this).map(function (e) { return e[1].map(Number); })[Symbol.iterator](); });
+        m('entries', function entries() { return ffvList(this).map(function (e) { return [e[0], e[1].map(Number)]; })[Symbol.iterator](); });
+        Object.defineProperty(P, Symbol.iterator, { configurable: true, writable: true, value: P.entries });
+    })(CSSFontFeatureValuesMap.prototype);
+    [['annotation', 'annotation'], ['ornaments', 'ornaments'], ['stylistic', 'stylistic'], ['swash', 'swash'],
+     ['characterVariant', 'character-variant'], ['styleset', 'styleset'], ['historicalForms', 'historical-forms']].forEach(function (p) {
+        getter(CSSFontFeatureValuesRule.prototype, p[0], function () {
+            var cache = this.__ffvMaps || (Object.defineProperty(this, '__ffvMaps', { value: {} }), this.__ffvMaps);
+            if (!cache[p[1]]) {
+                var o = Object.create(CSSFontFeatureValuesMap.prototype);
+                FFV_MAP_OF.set(o, { rule: this, kind: p[1] });
+                cache[p[1]] = o;
+            }
+            return cache[p[1]];
+        });
+    });
     CSSFontFeatureValuesRule.prototype.__text = function () {
         var maps = this.__maps, out = '@font-feature-values ' + this.__family + ' {';
         Object.keys(FFV_KINDS).forEach(function (k) {
@@ -1458,7 +1631,7 @@
         index = index >>> 0;
         var rules = this.__rules || [];
         if (index >= rules.length) throw domException("Failed to execute 'deleteRule': index out of range.", 'IndexSizeError');
-        rules.splice(index, 1);
+        detachRule(rules.splice(index, 1)[0]);
         changedList(this);
         touched(this);
     });
@@ -1475,7 +1648,7 @@
         if (arguments.length < 1) throw new TypeError("Failed to execute 'deleteRule' on 'CSSGroupingRule': 1 argument required");
         index = index >>> 0;
         if (index >= this.__rules.length) throw domException("Failed to execute 'deleteRule': index out of range.", 'IndexSizeError');
-        this.__rules.splice(index, 1);
+        detachRule(this.__rules.splice(index, 1)[0]);
         changedList(this);
         touched(this);
     });
@@ -1487,7 +1660,18 @@
     CSSMediaRule.prototype.__condition = function () { return this.__media ? this.__media.mediaText : splitMedia(this.__mediaText).join(', '); };
     CSSMediaRule.prototype.__text = function () { return blockText('@media ' + this.__condition(), this.__rules); };
     CSSSupportsRule.prototype.__condition = function () { return this.__cond; };
+    /* (whether its condition holds, now) */
+    getter(CSSMediaRule.prototype, 'matches', function () {
+        try { return !!global.matchMedia(this.__condition()).matches; } catch (e) { return false; }
+    });
+    getter(CSSSupportsRule.prototype, 'matches', function () {
+        try { return !!global.CSS.supports(this.__cond); } catch (e) { return false; }
+    });
     CSSSupportsRule.prototype.__text = function () { return blockText('@supports ' + this.__cond, this.__rules); };
+    /* (each of its comma-separated conditions: a name and a query) */
+    getter(CSSContainerRule.prototype, 'conditions', function () {
+        return Object.freeze([{ name: this.containerName, query: this.containerQuery }]);
+    });
     getter(CSSContainerRule.prototype, 'containerName', function () { return this.__cname || ''; });
     getter(CSSContainerRule.prototype, 'containerQuery', function () { return this.__cquery || ''; });
     CSSContainerRule.prototype.__condition = function () { return this.__cond; };
@@ -1508,7 +1692,26 @@
     getter(CSSImportRule.prototype, 'href', function () { return this.__href; });
     getter(CSSImportRule.prototype, 'media', function () { return this.__media || (this.__media = newMediaList(this.__mediaText)); },
         function (v) { this.media.mediaText = v; });
-    getter(CSSImportRule.prototype, 'styleSheet', function () { return null; });
+    /* (the sheet it imports: fetched when first asked for; its parent, its rule and its media are the rule's) */
+    getter(CSSImportRule.prototype, 'styleSheet', function () {
+        if (this.__imported !== undefined) return this.__imported;
+        var parent = this.__sheet || null, base = (parent && parent[SHEET] && parent[SHEET].href) || document.baseURI, href;
+        if (parent && parent[SHEET] && parent[SHEET].constructed) return (this.__imported = null);
+        try { href = new URL(this.__href, base).href; } catch (e) { return (this.__imported = null); }
+        var sh = Object.create(CSSStyleSheet.prototype);
+        initSheet(sh, null, '', { title: null, href: href });
+        sh[SHEET].parent = parent;
+        sh[SHEET].ownerRule = this;
+        try {
+            var x = new XMLHttpRequest();
+            x.open('GET', href, false);
+            x.send();
+            sh[SHEET].text = x.status >= 200 && x.status < 300 ? x.responseText : '';
+        } catch (e) { sh[SHEET].text = ''; }
+        try { sh[SHEET].origin_clean = new URL(href).origin === location.origin; } catch (e) { /* (kept) */ }
+        Object.defineProperty(this, '__imported', { value: sh, writable: true, configurable: true });
+        return sh;
+    });
     getter(CSSImportRule.prototype, 'layerName', function () { return this.__layer === undefined ? null : this.__layer; });
     getter(CSSImportRule.prototype, 'supportsText', function () { return this.__supports || null; });
     CSSImportRule.prototype.__text = function () {
@@ -1527,6 +1730,12 @@
     getter(CSSFontFaceRule.prototype, 'style', function () { return this.__style; });
     CSSFontFaceRule.prototype.__text = function () { var d = declText(this.__style), fx = this.__style.__faceText ? this.__style.__faceText() : ''; if (fx) d = d ? d + ' ' + fx : fx; return '@font-face {' + (d ? ' ' + d + ' ' : ' ') + '}'; };
     /* (a page selector list: names and :first, :left, :right, :blank) */
+    /* (the pseudo-pages in lower case) */
+    function pageSelectorCanon(t) {
+        var parts = String(t).trim().split(':');
+        for (var k = 1; k < parts.length; k++) parts[k] = parts[k].toLowerCase();
+        return parts.join(':');
+    }
     function pageSelectorOk(t) {
         t = String(t).trim();
         if (!t) return true;
@@ -1537,7 +1746,7 @@
     }
     getter(CSSPageRule.prototype, 'selectorText', function () { return this.__selector; }, function (v) {
         if (!pageSelectorOk(v)) return;
-        this.__selector = String(v).trim(); touched(this);
+        this.__selector = pageSelectorCanon(String(v).trim()); touched(this);
     });
     getter(CSSPageRule.prototype, 'style', function () { return this.__style; }, function (v) { this.__style.cssText = v; });
     CSSPageRule.prototype.__text = function () {
@@ -1556,6 +1765,10 @@
     getter(CSSKeyframesRule.prototype, 'name', function () { return this.__name; }, function (v) { this.__name = String(v); touched(this); });
     getter(CSSKeyframesRule.prototype, 'cssRules', function () { return ruleList(this.__rules, this); });
     getter(CSSKeyframesRule.prototype, 'length', function () { return this.__rules.length; });
+    /* (its keyframes by index: rule[i]) */
+    for (var kfi = 0; kfi < 256; kfi++) (function (i) {
+        Object.defineProperty(CSSKeyframesRule.prototype, i, { configurable: true, get: function () { return this.__rules ? this.__rules[i] : undefined; } });
+    })(kfi);
     CSSKeyframesRule.prototype.__text = function () {
         var nm = /^[A-Za-z_-][\w-]*$/.test(this.__name) && !/^(none|initial|inherit|unset|default)$/i.test(this.__name) ? this.__name : serString(this.__name);
         return blockText('@keyframes ' + nm, this.__rules);
@@ -1804,6 +2017,8 @@
 
     /* rules of text for a context: 'top', 'group', 'keyframes', 'style' */
     function parseRules(text, ctx, parent) {
+        /* (a whole sheet: its namespaces from nothing) */
+        if (ctx === 'top' && (/@namespace/i.test(text) || text.length > 40)) NS_CTX = { dflt: null, map: Object.create(null) };
         var out = [];
         var parts = splitRules(text);
         for (var k = 0; k < parts.length; k++) {
@@ -1987,7 +2202,7 @@
                 var cm = /^([A-Za-z_-][\w-]*)\s+(.*)$/.exec(p.prelude);
                 var cname = cm && !/^(not|style|scroll-state)$/i.test(cm[1]) && !/^\(/.test(cm[1]) ? cm[1] : '';
                 r = makeRule(CSSContainerRule, 'container', { __cond: containerCondText(p.prelude), __cname: cname,
-                    __cquery: cname ? cm[2].trim() : p.prelude.trim(), __rules: [] });
+                    __cquery: containerCondText(cname ? cm[2] : p.prelude), __rules: [] });
                 r.__rules = groupBody(p.block, r, ctx);
                 break;
             case 'layer':
@@ -2054,6 +2269,7 @@
                 if (!nm) return null;
                 r = makeRule(CSSNamespaceRule, 'namespace', { __prefix: nm[1] || '',
                     __uri: nm[2] !== undefined ? nm[2] : nm[3] !== undefined ? nm[3] : nm[4] !== undefined ? nm[4] : nm[5] !== undefined ? nm[5] : nm[6] });
+                if (r.__prefix) NS_CTX.map[r.__prefix] = r.__uri; else NS_CTX.dflt = r.__uri;
                 break;
             case 'font-face':
                 if (p.block === null || p.prelude) return null;
@@ -2112,7 +2328,7 @@
             case 'page':
                 if (p.block === null) return null;
                 if (!pageSelectorOk(p.prelude)) return null;
-                r = makeRule(CSSPageRule, 'page', { __selector: p.prelude, __style: null, __rules: [] });
+                r = makeRule(CSSPageRule, 'page', { __selector: pageSelectorCanon(p.prelude), __style: null, __rules: [] });
                 /* (the margin at-rules in it: rules of their own; the rest its declarations) */
                 var pdecl = '', pi2 = 0, pb = p.block;
                 while (pi2 < pb.length) {
@@ -2127,6 +2343,7 @@
                     pi2 = pit.end;
                 }
                 r.__style = decls(pdecl, r);
+                pageDescriptorsOf(r.__style);
                 break;
             case 'keyframes':
             case '-webkit-keyframes':
@@ -2179,6 +2396,24 @@
         if (index > rules.length) throw domException("Failed to execute 'insertRule': The index provided (" + index + ") is larger than the maximum index (" + rules.length + ").", 'IndexSizeError');
         /* (bare declarations go in a style rule or an @scope) */
         var bare = nested && nestedUnder(parent) && text.indexOf('{') < 0 ? nestedDeclarations(text, parent) : null;
+        /* (@import and @namespace belong to a sheet, not a grouping rule) */
+        if (nested && /^\s*@(import|namespace)\b/i.test(text))
+            throw domException("Failed to execute 'insertRule': '" + text + "' is not allowed here.", 'HierarchyRequestError');
+        /* (one rule and nothing after it but space and comments) */
+        if (!bare) {
+            var depth = 0, q = '', end = -1;
+            for (var ti = 0; ti < text.length && end < 0; ti++) {
+                var ch = text[ti];
+                if (q) { if (ch === '\\') ti++; else if (ch === q) q = ''; continue; }
+                if (ch === '"' || ch === "'") q = ch;
+                else if (ch === '/' && text[ti + 1] === '*') { var ce = text.indexOf('*/', ti + 2); ti = ce < 0 ? text.length : ce + 1; }
+                else if (ch === '{') depth++;
+                else if (ch === '}') { depth--; if (!depth) end = ti; }
+                else if (ch === ';' && !depth) end = ti;
+            }
+            if (end >= 0 && text.slice(end + 1).replace(/\/\*[\s\S]*?\*\//g, '').trim())
+                throw domException("Failed to execute 'insertRule': Failed to parse the rule '" + text + "'.", 'SyntaxError');
+        }
         var parts = bare ? [null] : splitRules(text);
         if (parts.length !== 1) throw domException("Failed to execute 'insertRule': Failed to parse the rule '" + text + "'.", 'SyntaxError');
         var r = bare || buildRule(parts[0], nested ? (parent && parent.__kind === 'style' ? 'style' : 'group') : 'top', parent);
@@ -2264,14 +2499,23 @@
     }
     getter(CSSStyleSheet.prototype, 'cssRules', function () { checkOrigin(this); return ruleList(sheetRules(this), this); });
     getter(CSSStyleSheet.prototype, 'rules', function () { checkOrigin(this); return ruleList(sheetRules(this), this); });
-    getter(CSSStyleSheet.prototype, 'ownerRule', function () { return null; });
+    getter(CSSStyleSheet.prototype, 'ownerRule', function () { return this[SHEET].ownerRule || null; });
     getter(StyleSheet.prototype, 'type', function () { return 'text/css'; });
     getter(StyleSheet.prototype, 'href', function () { return this[SHEET].href; });
-    getter(StyleSheet.prototype, 'ownerNode', function () { return this[SHEET].owner; });
-    getter(StyleSheet.prototype, 'parentStyleSheet', function () { return null; });
+    /* (an element taken out of the document lets go of its sheet) */
+    getter(StyleSheet.prototype, 'ownerNode', function () {
+        var st = this[SHEET], o = st.owner;
+        if (o && !o.isConnected) {
+            st.owner = null;
+            if (o.__cyberSheet === this) o.__cyberSheet = null;
+        }
+        return st.owner;
+    });
+    getter(StyleSheet.prototype, 'parentStyleSheet', function () { return this[SHEET].parent || null; });
     getter(StyleSheet.prototype, 'title', function () { var t = this[SHEET].title; return t === undefined || t === '' ? null : t; });
     getter(StyleSheet.prototype, 'media', function () {
         var st = this[SHEET], self = this;
+        if (st.ownerRule) return st.ownerRule.media;
         return st.media || (st.media = newMediaList(st.mediaText, function () { self.__changed(); }));
     }, function (v) { this.media.mediaText = v; });
     getter(StyleSheet.prototype, 'disabled', function () { return this[SHEET].disabled; },
@@ -2306,7 +2550,7 @@
         var rules = sheetRules(this);
         index = index >>> 0;
         if (index >= rules.length) throw domException("Failed to execute 'deleteRule': The index provided (" + index + ") is larger than the maximum index (" + (rules.length - 1) + ").", 'IndexSizeError');
-        rules.splice(index, 1);
+        detachRule(rules.splice(index, 1)[0]);
         changedList(this);
         this[SHEET].modified = true;
         this.__changed();
@@ -2353,7 +2597,8 @@
             text = null;
         } else return null;
         var sh = el.__cyberSheet;
-        if (sh && (tag === 'link' ? sh[SHEET].href === href : sh[SHEET].text === text || sh[SHEET].modified)) return sh;
+        /* (the same text: the same sheet, changed through the CSSOM or not; new text: a new sheet) */
+        if (sh && (tag === 'link' ? sh[SHEET].href === href : sh[SHEET].text === text)) return sh;
         sh = Object.create(CSSStyleSheet.prototype);
         initSheet(sh, el, text, { media: el.getAttribute('media') || '', title: el.getAttribute('title'), href: href });
         if (tag === 'link') {

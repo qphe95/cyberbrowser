@@ -647,7 +647,11 @@ static bool attribute_is_observed(JSContextHandle ctx, GCValue elem, const char 
             JS_ToUint32(ctx, &n, JS_GetPropertyStr(ctx, list, "length"));
             for (uint32_t i = 0; i < n; i++) {
                 const char *s = JS_ToCString(ctx, JS_GetPropertyUint32(ctx, list, i));
-                if (s) JS_SetPropertyStr(ctx, set, s, JS_TRUE);
+                if (s) {
+                    extern bool g_ce_observes_style;
+                    if (!strcmp(s, "style")) g_ce_observes_style = true;
+                    JS_SetPropertyStr(ctx, set, s, JS_TRUE);
+                }
             }
         }
         JS_DefinePropertyValue(ctx, ctor, key, set, JS_PROP_CONFIGURABLE);
@@ -677,6 +681,14 @@ static void invoke_attribute_changed(JSContextHandle ctx, GCValue elem,
             JS_GetException(ctx); // clear
         }
     }
+}
+
+/* (some custom element's observedAttributes has had style in it) */
+bool g_ce_observes_style;
+
+/* (for css_style_decl.c: the style attribute changed through the CSSOM) */
+void dom_api_attribute_changed(JSContextHandle ctx, GCValue elem, const char *name, const char *old_val, const char *new_val) {
+    invoke_attribute_changed(ctx, elem, name, old_val, new_val);
 }
 
 /* Candidates (elements whose name contains '-') of the light subtree of

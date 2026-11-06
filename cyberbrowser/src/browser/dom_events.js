@@ -135,6 +135,13 @@
     }
     function any(d) { return function (v) { return arguments.length ? v : d; }; }
     function num(d) { return function (v) { return arguments.length ? Number(v) || 0 : d; }; }
+    /* (a double: a number that is finite, else a TypeError) */
+    function dbl(d) { return function (v) {
+        if (!arguments.length) return d;
+        var n = Number(v);
+        if (!isFinite(n)) throw new TypeError('The provided double value is non-finite.');
+        return n;
+    }; }
     function int(d) { return function (v) { return arguments.length ? (Number(v) | 0) : d; }; }
     function bool(d) { return function (v) { return arguments.length ? !!v : d; }; }
     function str(d) { return function (v) { return arguments.length ? String(v) : d; }; }
@@ -253,8 +260,8 @@
     eventClass('PopStateEvent', Event, { state: nul(), hasUAVisualTransition: bool(false) });
     eventClass('PageTransitionEvent', Event, { persisted: bool(false) });
     eventClass('ProgressEvent', Event, { lengthComputable: bool(false), loaded: num(0), total: num(0) });
-    eventClass('AnimationEvent', Event, { animationName: str(''), elapsedTime: num(0), pseudoElement: str('') });
-    eventClass('TransitionEvent', Event, { propertyName: str(''), elapsedTime: num(0), pseudoElement: str('') });
+    eventClass('AnimationEvent', Event, { animationName: str(''), elapsedTime: dbl(0), pseudoElement: str(''), animation: nul() });
+    eventClass('TransitionEvent', Event, { propertyName: str(''), elapsedTime: dbl(0), pseudoElement: str(''), animation: nul() });
     eventClass('SubmitEvent', Event, { submitter: nul() });
     eventClass('FormDataEvent', Event, { formData: nul() });
     eventClass('ToggleEvent', Event, { oldState: str(''), newState: str('') });
@@ -1123,6 +1130,12 @@
     var WINP = Object.getPrototypeOf(global);
     if (WINP && WINP !== Object.prototype)
         GLOBAL_HANDLERS.concat(WINDOW_HANDLERS).forEach(function (t) { handlerAccessor(WINP, t); });
+    /* (the window's own, as its native handlers are: the global's attributes) */
+    ['transitionrun', 'transitionstart', 'transitionend', 'transitioncancel',
+     'animationstart', 'animationiteration', 'animationend', 'animationcancel'].forEach(function (t) {
+        if (!Object.getOwnPropertyDescriptor(global, 'on' + t)) handlerAccessor(global, t);
+        if (WINP && WINP !== Object.prototype && Object.getOwnPropertyDescriptor(WINP, 'on' + t)) delete WINP['on' + t];
+    });
     if (ELEMENT_P) ['afterprint', 'beforeprint', 'beforeunload', 'hashchange', 'message', 'offline', 'online',
                     'pagehide', 'pageshow', 'popstate', 'storage', 'unload'].forEach(function (t) {
         /* (<body> and <frameset> forward these to the window; kept on the element here) */
@@ -2131,6 +2144,59 @@
                 if (now === p.last) return;
                 p.last = now;
                 global.__cyberDispatchTrusted(mql, new global.MediaQueryListEvent('change', { media: p.media, matches: now }));
+            });
+        } });
+    }
+
+    /* ---- ContainerQueryList (Element.matchContainer): like MediaQueryList, of the
+     * element's containers ---- */
+    if (global.Element) {
+        var CQL_PRIVATE = new WeakMap(), liveContainers = new Set();
+        var cqlMatches = function (l) {
+            var p = CQL_PRIVATE.get(l);
+            if (!p.text || !p.el.isConnected || typeof global.__cyberMatchContainer !== 'function') return false;
+            return !!global.__cyberMatchContainer(p.el, p.raw);
+        };
+        var ContainerQueryList = function ContainerQueryList() { throw new TypeError('Illegal constructor'); };
+        ContainerQueryList.prototype = Object.create(ETP);
+        define(ContainerQueryList.prototype, 'constructor', ContainerQueryList);
+        Object.defineProperty(ContainerQueryList.prototype, Symbol.toStringTag, { value: 'ContainerQueryList', configurable: true });
+        Object.defineProperty(ContainerQueryList.prototype, 'query', { configurable: true, enumerable: true, get: function () { return CQL_PRIVATE.get(this).text; } });
+        Object.defineProperty(ContainerQueryList.prototype, 'container', { configurable: true, enumerable: true, get: function () { return CQL_PRIVATE.get(this).text; } });
+        Object.defineProperty(ContainerQueryList.prototype, 'matches', { configurable: true, enumerable: true, get: function () { return cqlMatches(this); } });
+        var cqWatch = function (l) {
+            if (liveContainers.has(l)) return;
+            CQL_PRIVATE.get(l).last = cqlMatches(l);
+            liveContainers.add(l);
+            if (global.__cyberRenderFeature) global.__cyberRenderFeature(8);
+        };
+        Object.defineProperty(ContainerQueryList.prototype, 'onchange', { configurable: true, enumerable: true,
+            get: function () { return CQL_PRIVATE.get(this).onchange || null; },
+            set: function (f) {
+                var p = CQL_PRIVATE.get(this);
+                p.onchange = typeof f === 'function' ? f : null;
+                if (p.onchange) cqWatch(this);
+            } });
+        define(ContainerQueryList.prototype, 'addEventListener', function (type, fn, opts) {
+            addEventListener.call(this, type, fn, opts);
+            if (String(type) === 'change') cqWatch(this);
+        });
+        define(global, 'ContainerQueryList', ContainerQueryList);
+        define(global.Element.prototype, 'matchContainer', function matchContainer(query) {
+            if (arguments.length < 1) throw new TypeError("Failed to execute 'matchContainer' on 'Element': 1 argument required, but only 0 present.");
+            var raw = String(query), l = Object.create(ContainerQueryList.prototype);
+            var text = global.__cyberContainerQueryText ? global.__cyberContainerQueryText(raw) : '';
+            CQL_PRIVATE.set(l, { el: this, raw: raw, text: text, last: false, onchange: null });
+            return l;
+        });
+        var mediaCheck = global.__cyberMediaCheck;
+        Object.defineProperty(global, '__cyberMediaCheck', { configurable: true, value: function () {
+            if (mediaCheck) mediaCheck();
+            liveContainers.forEach(function (l) {
+                var p = CQL_PRIVATE.get(l), now = cqlMatches(l);
+                if (now === p.last) return;
+                p.last = now;
+                global.__cyberDispatchTrusted(l, new Event('change'));
             });
         } });
     }

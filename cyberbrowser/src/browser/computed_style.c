@@ -162,7 +162,10 @@ static void collect(void *ud, const char *prop, const char *value, bool importan
         return;
     }
     if (unresolved) { set_spec(cs, p, "unset"); return; }
+    extern bool g_css_parse_substituted;
+    g_css_parse_substituted = true;
     char *v = css_prop_parse(p, value);
+    g_css_parse_substituted = false;
     if (!v) return;                 /* invalid: the declaration is ignored */
     set_spec(cs, p, v);
     free(v);
@@ -278,6 +281,23 @@ static const char *computed_of(JSContextHandle ctx, ComputedStyle *cs, const cha
                 if (strncmp(e, "px", 2)) continue;
                 *m = '0';
                 memmove(m + 1, e, strlen(e) + 1);
+            }
+        }
+        /* (a control of base appearance with no cursor of its own: text for what's typed in,
+         * default for the rest, not-allowed when disabled) */
+        if (cs->comp[i] && name[0] == 'c' && !strcmp(name, "cursor") && !cs->pseudo && cs->spec && !cs->spec[i]) {
+            const char *tg = dom_valid(cs->el) ? dom_tag_name(cs->el) : NULL;
+            if (tg && (!strcasecmp(tg, "button") || !strcasecmp(tg, "select") || !strcasecmp(tg, "textarea") || !strcasecmp(tg, "input"))) {
+                const char *ap = computed_of(ctx, cs, "appearance");
+                if (ap && !strncmp(ap, "base", 4)) {
+                    const char *ty = !strcasecmp(tg, "input") ? dom_get_attr_str(cs->el, "type") : NULL;
+                    bool typed = !strcasecmp(tg, "textarea") || (!strcasecmp(tg, "input") && (!ty || !*ty || !strcasecmp(ty, "text") ||
+                                 !strcasecmp(ty, "search") || !strcasecmp(ty, "tel") || !strcasecmp(ty, "url") || !strcasecmp(ty, "email") ||
+                                 !strcasecmp(ty, "password") || !strcasecmp(ty, "number")));
+                    const char *v = dom_get_attr_str(cs->el, "disabled") ? "not-allowed" : typed ? "text" : "default";
+                    free(cs->comp[i]);
+                    cs->comp[i] = strdup(v);
+                }
             }
         }
         /* (gaps don't go below nothing, however they're worked out) */
@@ -585,6 +605,26 @@ static char *compute_value(JSContextHandle ctx, ComputedStyle *cs, const CssProp
         if (kw) { free(r); r = strdup(kw); }
     }
     return r;
+}
+
+/* (a replaced element: no ::before or ::after box; checkboxes and radios
+ * with appearance: none aren't) */
+static bool gcs_replaced(JSContextHandle ctx, NodeId el) {
+    static const char *const tags[] = { "input", "video", "audio", "img", "progress", "meter", "select", "textarea", "iframe",
+                                         "canvas", "embed", "object" };
+    const char *t = dom_valid(el) ? dom_tag_name(el) : NULL;
+    if (!t) return false;
+    bool rep = false;
+    for (size_t i = 0; i < sizeof tags / sizeof tags[0] && !rep; i++) rep = !strcasecmp(t, tags[i]);
+    if (!rep || strcasecmp(t, "input")) return rep;
+    const char *ty = dom_get_attr_str(el, "type");
+    if (ty && (!strcasecmp(ty, "checkbox") || !strcasecmp(ty, "radio"))) {
+        ComputedStyle *s = computed_style_new(el);
+        bool none = false;
+        if (s) { refresh(ctx, s); const char *a = s->styled ? computed_of(ctx, s, "appearance") : NULL; none = a && !strcmp(a, "none"); computed_style_free(s); }
+        return !none;
+    }
+    return true;
 }
 
 /* (computing for Typed OM: js_computed_unresolved) */
@@ -1214,6 +1254,24 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
         };
         for (size_t k = 0; k < sizeof map / sizeof map[0]; k++)
             if (!strcmp(r, map[k][0])) { free(r); r = strdup(map[k][1]); break; }
+    }
+    /* (a ::before or ::after's percentage width: of the box it's in, the nearest that has one) */
+    if (r && (cs->pseudo == 1 || cs->pseudo == 2) && !strcmp(n, "width") && strchr(r, '%') && !strchr(r, '(') && !gcs_replaced(ctx, cs->el)) {
+        double pct = strtod(r, NULL), w = 0, h = 0;
+        for (NodeId a = cs->el; a && dom_kind(a) == DOM_K_ELEMENT; a = dom_parent(a)) {
+            /* (display: contents has no box to be in) */
+            ComputedStyle *as = computed_style_new(a);
+            bool contents = false;
+            if (as) { refresh(ctx, as); const char *d = as->styled ? computed_of(ctx, as, "display") : NULL; contents = d && !strcmp(d, "contents"); computed_style_free(as); }
+            if (contents) continue;
+            if (layout_query_content_size(a, &w, &h) && w > 0) {
+                char b[48];
+                snprintf(b, sizeof b, "%gpx", pct * w / 100);
+                free(r);
+                r = strdup(b);
+                break;
+            }
+        }
     }
     /* (an axis that scrolls makes the other one scroll too: visible as auto, clip as hidden) */
     if (r && (!strcmp(n, "overflow-x") || !strcmp(n, "overflow-y")) && !strcmp(r, "visible")) {
@@ -1882,6 +1940,26 @@ char *computed_style_value(JSContextHandle ctx, ComputedStyle *cs, const char *p
         if (reg >= 0) {
             char *c = registered_computed(ctx, cs, reg, r);
             if (c) { free(r); r = c; }
+        }
+        /* (a registered one under a transition: the transition's value) */
+        if (reg >= 0 && !g_in_hook) {
+            /* (the element's own computed values, ready to be read) */
+            refresh(ctx, cs);
+            const char *tp = cs->styled && cs->spec && cs->comp ? computed_of(ctx, cs, "transition-property") : NULL;
+            char pn[128] = "";
+            if (len < sizeof pn) { memcpy(pn, prop, len); pn[len] = 0; }
+            bool covered = tp && (strstr(tp, "all") || (pn[0] && strstr(tp, pn)));
+            if (covered) {
+                GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberCustomTransition");
+                if (JS_IsFunction(ctx, fn)) {
+                    g_in_hook = true;
+                    GCValue a[3] = { el, JS_NewStringLen(ctx, prop, len), JS_NewString(ctx, r) };
+                    GCValue got = JS_Call(ctx, fn, JS_UNDEFINED, 3, a);
+                    g_in_hook = false;
+                    const char *t = JS_IsString(got) ? JS_ToCString(ctx, got) : NULL;
+                    if (t) { free(r); r = strdup(t); }
+                }
+            }
         }
         /* (under an animation from @keyframes) */
         if (anim_has(cs->el, 0) && !g_in_hook) {

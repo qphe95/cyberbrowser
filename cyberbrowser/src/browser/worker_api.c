@@ -167,6 +167,8 @@ static const char k_worker_setup[] =
     "(function (g, url, windowOnly, shared) {\n"
     "  for (var i = 0; i < windowOnly.length; i++) delete g[windowOnly[i]];\n"
     "  delete g.document; delete g.Window; delete g.window; delete g.event;\n"
+    /* (SVG's interfaces: a document's, none in a worker) */
+    "  Object.getOwnPropertyNames(g).forEach(function (k) { if (/^SVG[A-Z]/.test(k)) { try { delete g[k]; } catch (e) {} } });\n"
     /* (FontFaceSet in a worker: what it refuses; no faces here to wait for) */
     "  function fontError(spec) {\n"
     "    spec = String(spec);\n"
