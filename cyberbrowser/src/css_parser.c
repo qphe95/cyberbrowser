@@ -814,7 +814,7 @@ static bool css_pseudo_known(const char *n, size_t nl, bool elem)
     static const char *const classes[] = {
         "active", "any-link", "autofill", "blank", "buffering", "checked", "closed", "current", "default",
         "defined", "dir", "disabled", "empty", "enabled", "first", "first-child", "first-of-type", "focus",
-        "focus-visible", "focus-within", "fullscreen", "future", "has", "heading", "host", "host-context", "hover",
+        "focus-visible", "focus-within", "fullscreen", "future", "has", "has-slotted", "heading", "host", "host-context", "hover",
         "in-range", "indeterminate", "invalid", "is", "lang", "last-child", "last-of-type", "left", "link",
         "local-link", "matches", "modal", "muted", "not", "nth-child", "nth-last-child", "nth-last-of-type",
         "nth-of-type", "only-child", "only-of-type", "open", "optional", "out-of-range", "past", "paused",

@@ -1386,11 +1386,19 @@ static void layout_resolve_side_pcts(LayoutBox *box, double cb_width)
 /* min-width/max-width/min-height/max-height (which 0..3): returns the px
  * part, recording a percentage part for layout_resolve_minmax_pcts().  A
  * max of none is -1; a negative value is invalid, leaving the size as it was. */
+static __thread bool t_in_csz;   /* (a calc-size()'s basis being applied) */
 static double layout_note_minmax(LayoutBox *box, int which, const char *value)
 {
     double *cur[4] = { &box->s->min_width, &box->s->max_width, &box->s->min_height, &box->s->max_height };
     unsigned char bit = (unsigned char)(1u << which);
     box->s->minmax_stretch &= (unsigned char)~bit;
+    box->s->minmax_content &= (unsigned char)~bit;
+    if ((which & 2) && !t_in_csz && (strstr(value, "min-content") || strstr(value, "max-content") || strstr(value, "fit-content")) && !strchr(value, '(')) {
+        /* (a height's content keywords: the content's height, worked out with the height) */
+        box->s->minmax_pct_bits &= (unsigned char)~bit;
+        box->s->minmax_content |= bit;
+        return (which & 1) ? -1.0 : 0.0;
+    }
     if ((which & 1) && strcasecmp(value, "none") == 0) {
         box->s->minmax_pct_bits &= (unsigned char)~bit;
         return -1.0;
@@ -4846,7 +4854,17 @@ static bool subst_number(const char *s, double *v, char *unit, size_t cap)
         CssLen l = css_parse_len(s, 16.0);
         if (l.pct != 0.0) return false;
         *v = l.px;
-        snprintf(unit, cap, "px");
+        /* (a calc() of numbers alone: a number) */
+        bool dims = false;
+        for (const char *c = s + 5; *c; c++) {
+            if (!strncasecmp(c, "calc(", 5)) { c += 4; continue; }
+            if (isalpha((unsigned char)*c) || *c == '%') {
+                if ((*c == 'e' || *c == 'E') && c > s && isdigit((unsigned char)c[-1]) && (isdigit((unsigned char)c[1]) || c[1] == '-' || c[1] == '+')) continue;
+                dims = true;
+                break;
+            }
+        }
+        snprintf(unit, cap, "%s", dims ? "px" : "");
         return true;
     }
     char *e = NULL;
@@ -4905,21 +4923,62 @@ static int subst_style_query(const char *a, const char *b, const CssCustomProps 
     if (!name) return -1;
     /* (a range: either side a property or a value; a declaration names one) */
     if (*op != ':') {
-        const char *vs0 = op + 1;
-        bool eq0 = false;
-        if ((*op == '<' || *op == '>') && vs0 < b && *vs0 == '=') { eq0 = true; vs0++; }
-        char *rhs = subst_trim(vs0, b);
-        const char *l = subst_side(name, props), *r0 = rhs ? subst_side(rhs, props) : NULL;
-        int yes = 0;
-        double x, y;
-        char ux[32], uy[32];
-        if (l && r0 && subst_number(l, &x, ux, sizeof ux) && subst_number(r0, &y, uy, sizeof uy) && !strcasecmp(ux, uy))
-            yes = *op == '=' ? fabs(x - y) < 1e-6 : *op == '<' ? (eq0 ? x <= y : x < y) : (eq0 ? x >= y : x > y);
-        free(rhs);
+        /* (two or three sides, each compared with the next) */
         free(name);
-        return yes;
+        const char *st[3], *en[3], *ops[2];
+        bool eqs[2];
+        int ns = 0;
+        const char *p = a;
+        for (const char *o = op; ; o = subst_find(p, b, "<>=")) {
+            if (ns == 3) return 0;
+            st[ns] = p;
+            en[ns] = o ? o : b;
+            ns++;
+            if (!o) break;
+            if (ns > 2) return 0;
+            ops[ns - 1] = o;
+            eqs[ns - 1] = (*o == '<' || *o == '>') && o + 1 < b && o[1] == '=';
+            p = o + 1 + eqs[ns - 1];
+        }
+        if (ns < 2) return 0;
+        /* (written wrong: unknown, not false) */
+        if (ns == 3 && (*ops[0] == '=' || *ops[1] == '=' || *ops[0] != *ops[1])) return -1;
+        for (int i = 0; i < ns; i++) {
+            const char *c = st[i];
+            while (c < en[i] && isspace((unsigned char)*c)) c++;
+            if (c >= en[i] || subst_find(st[i], en[i], "!;")) return -1;
+        }
+        double v[3];
+        char u[3][32];
+        for (int i = 0; i < ns; i++) {
+            char *t = subst_trim(st[i], en[i]);
+            if (!t || !t[0]) { free(t); return 0; }
+            const char *src = t;
+            char *s1 = NULL, *s2 = NULL;
+            if (!strncmp(t, "--", 2)) src = fn_prop_lookup(props, t);
+            else {
+                s1 = css_var_subst(t, props);
+                s2 = css_fn_subst(s1 ? s1 : t, props, depth + 1);
+                src = s2 ? s2 : s1 ? s1 : t;
+            }
+            bool ok = src && subst_number(src, &v[i], u[i], sizeof u[i]);
+            free(s1); free(s2); free(t);
+            if (!ok) return 0;
+        }
+        for (int i = 0; i + 1 < ns; i++) {
+            /* (a unitless zero is a length's zero) */
+            bool same = !strcasecmp(u[i], u[i + 1]) || (!u[i][0] && v[i] == 0.0 && !strcmp(u[i + 1], "px")) || (!u[i + 1][0] && v[i + 1] == 0.0 && !strcmp(u[i], "px"));
+            if (!same) return 0;
+            double x = v[i], y = v[i + 1];
+            char c = *ops[i];
+            bool eq = eqs[i];
+            bool hold = c == '=' ? fabs(x - y) < 1e-6 : c == '<' ? (eq ? x <= y + 1e-9 : x < y) : (eq ? x >= y - 1e-9 : x > y);
+            if (!hold) return 0;
+        }
+        return 1;
     }
     if (strncmp(name, "--", 2)) { free(name); return -1; }
+    if (subst_find(op + 1, b, ";")) { free(name); return -1; }
     int kind = *op;
     const char *vs = op + 1;
     bool orequal = false;
@@ -5084,6 +5143,12 @@ static bool css_unit_known(const char *u)
 }
 
 /* What attr(args) comes to (malloc'd); NULL: invalid at computed-value time. */
+/* (the attributes whose values are being worked out, for cycles: one that
+ * comes back to itself is invalid, its fallback used if it has one) */
+static __thread const char *t_attr_stack[16];
+static __thread int t_attr_depth;
+static __thread bool t_attr_cycle;
+
 static char *subst_attr(const char *a, const char *b, const CssCustomProps *props, int depth)
 {
     g_css_attr_fn = 1;
@@ -5100,6 +5165,8 @@ static char *subst_attr(const char *a, const char *b, const CssCustomProps *prop
     char *kind = subst_trim(ne, he);
     const char *val = t_subst_node && t_subst_node->type == HTML_NODE_ELEMENT ? layout_node_attribute(t_subst_node, name) : NULL;
     char *out = NULL;
+    for (int i = 0; i < t_attr_depth; i++)
+        if (!strcmp(t_attr_stack[i], name)) { t_attr_cycle = true; free(kind); return NULL; }
     if (val && kind) {
         if (!kind[0] || !strcasecmp(kind, "raw-string")) {
             /* (as a string) */
@@ -5120,10 +5187,19 @@ static char *subst_attr(const char *a, const char *b, const CssCustomProps *prop
             if (close) {
                 char *syn = subst_trim(kind + 5, close);
                 /* (what's in it may use var() and the rest itself) */
+                bool held_cycle = t_attr_cycle;
+                t_attr_cycle = false;
+                if (t_attr_depth < 16) t_attr_stack[t_attr_depth++] = name;
+                bool held_failed = t_var_failed;
+                t_var_failed = false;
                 char *v1 = css_var_subst(val, props);
                 char *v2 = css_fn_subst(v1 ? v1 : val, props, depth + 1);
+                t_attr_depth--;
+                bool cyc = t_attr_cycle || t_var_failed;
+                t_attr_cycle = held_cycle;
+                t_var_failed = held_failed;
                 const char *use = v2 ? v2 : v1 ? v1 : val;
-                if (syn) out = css_syntax_parse(syn, use);
+                if (syn && !cyc) out = css_syntax_parse(syn, use);
                 free(v1);
                 free(v2);
                 free(syn);
@@ -5140,7 +5216,7 @@ static char *subst_attr(const char *a, const char *b, const CssCustomProps *prop
                            !strcasecmp(kind, "number") || css_unit_known(kind);
             if (unit_ok && e && e != val && !*e) {
                 char tmp[96];
-                snprintf(tmp, sizeof tmp, "%.10g%s", d, kind);
+                snprintf(tmp, sizeof tmp, "%.10g%s", d, strcasecmp(kind, "number") ? kind : "");
                 out = strdup(tmp);
             }
         }
@@ -5758,6 +5834,35 @@ static int cq_size_query(const LayoutContext *ctx, int dom, const char *cname, s
 static int cq_cond(const LayoutContext *ctx, int dom, const char *cname, size_t cl, const char **s, const char *e, int depth);
 static __thread const CssCustomProps *t_cq_style;
 static __thread bool t_cq_style_on;
+static __thread bool t_cq_scroll_on;
+
+/* A scroll-state feature, name and value: 1 for none (nothing scrolls or sticks
+ * that we'd say), 0 for the rest, -1 when it isn't one. */
+static int cq_scroll_feature(const char *a, const char *b)
+{
+    while (a < b && isspace((unsigned char)*a)) a++;
+    while (b > a && isspace((unsigned char)b[-1])) b--;
+    const char *colon = memchr(a, ':', (size_t)(b - a));
+    const char *ne = colon ? colon : b;
+    while (ne > a && isspace((unsigned char)ne[-1])) ne--;
+    static const char *const edges[] = { "none", "top", "left", "bottom", "right", "inline-start", "inline-end", "block-start", "block-end",
+                                         "block", "inline", "x", "y", NULL };
+    static const char *const snaps[] = { "none", "x", "y", "block", "inline", "both", NULL };
+    const char *const *set = NULL;
+    int nedge = 0;
+    size_t nl = (size_t)(ne - a);
+    if ((nl == 10 && !strncasecmp(a, "scrollable", 10)) || (nl == 8 && !strncasecmp(a, "scrolled", 8))) set = edges, nedge = 13;
+    else if (nl == 5 && !strncasecmp(a, "stuck", 5)) set = edges, nedge = 9;
+    else if (nl == 7 && !strncasecmp(a, "snapped", 7)) set = snaps, nedge = 6;
+    if (!set) return -1;
+    if (!colon) return 0;
+    const char *v = colon + 1;
+    while (v < b && isspace((unsigned char)*v)) v++;
+    size_t vl = (size_t)(b - v);
+    for (int i = 0; i < nedge; i++)
+        if (strlen(set[i]) == vl && !strncasecmp(v, set[i], vl)) return i == 0;
+    return -1;
+}
 
 /* One parenthesized or functional term at *s. */
 static int cq_term(const LayoutContext *ctx, int dom, const char *cname, size_t cl, const char **s, const char *e, int depth)
@@ -5800,7 +5905,24 @@ static int cq_term(const LayoutContext *ctx, int dom, const char *cname, size_t 
         return r < 0 ? -1 : r;
     }
     /* (states known, none of them on: nothing scrolls or sticks here that we'd say) */
-    if (fl == 12 && !strncasecmp(p, "scroll-state", 12)) return 0;
+    if (fl == 12 && !strncasecmp(p, "scroll-state", 12)) {
+        const char *in = open + 1;
+        while (in < close && isspace((unsigned char)*in)) in++;
+        if (in < close && (*in == '(' || !strncasecmp(in, "not", 3))) {
+            bool held = t_cq_scroll_on;
+            t_cq_scroll_on = true;
+            r = cq_cond(ctx, dom, cname, cl, &in, close, depth + 1);
+            t_cq_scroll_on = held;
+            return r;
+        }
+        return cq_scroll_feature(open + 1, close);
+    }
+    if (t_cq_scroll_on && !fl) {
+        const char *in = open + 1;
+        while (in < close && isspace((unsigned char)*in)) in++;
+        if (in < close && (*in == 40 || !strncasecmp(in, "not", 3))) return cq_cond(ctx, dom, cname, cl, &in, close, depth + 1);
+        return cq_scroll_feature(open + 1, close);
+    }
     if (fl) return -1;              /* (a function it doesn't know) */
     const char *q = open + 1;
     while (q < close && isspace((unsigned char)*q)) q++;
@@ -5837,7 +5959,7 @@ static int cq_cond(const LayoutContext *ctx, int dom, const char *cname, size_t 
         p += is_and ? 3 : 2;
         int v = cq_term(ctx, dom, cname, cl, &p, e, depth);
         if (is_and) r = (r == 0 || v == 0) ? 0 : (r < 0 || v < 0) ? -1 : 1;
-        else r = (r == 1 || v == 1) ? 1 : (r < 0 || v < 0) ? -1 : 0;
+        else r = (r < 0 || v < 0) ? -1 : (r == 1 || v == 1) ? 1 : 0;   /* (an unknown term: unknown, a true one beside it or not) */
     }
     *s = p;
     return r;
@@ -5923,6 +6045,19 @@ static uint64_t tree_hash(uint64_t h, const char *s, size_t n)
     return h;
 }
 
+/* random()s of percentages and what they came to (the computed value keeps
+ * them as random(fixed ...): getComputedStyle asks after them here). */
+static struct { char val[48]; double r, lo, hi; } g_rand_pct[64];
+static unsigned g_rand_pct_n;
+bool css_random_pct_origin(const char *val, double *r, double *lo, double *hi)
+{
+    for (unsigned i = 0; i < 64 && i < g_rand_pct_n; i++) {
+        unsigned k = (g_rand_pct_n - 1 - i) % 64;
+        if (g_rand_pct[k].val[0] && fabs(strtod(g_rand_pct[k].val, NULL) - strtod(val, NULL)) < 5e-6) { *r = g_rand_pct[k].r; *lo = g_rand_pct[k].lo; *hi = g_rand_pct[k].hi; return true; }
+    }
+    return false;
+}
+
 /* random(...)'s text as a calc() of the value it came to. */
 static char *subst_random(const char *a, const char *b)
 {
@@ -5989,6 +6124,13 @@ static char *subst_random(const char *a, const char *b)
             if (val > vh) val -= vs;
         }
         snprintf(out, cap, "%.9g%s", val, el);
+        if (!strcmp(el, "%") && !st && strlen(out) < sizeof g_rand_pct[0].val) {
+            unsigned k = g_rand_pct_n++ % 64;
+            snprintf(g_rand_pct[k].val, sizeof g_rand_pct[k].val, "%s", out);
+            g_rand_pct[k].r = r;
+            g_rand_pct[k].lo = vl;
+            g_rand_pct[k].hi = vh;
+        }
         free(lo);
         free(hi);
         free(st);
@@ -7745,6 +7887,9 @@ static const char *g_ua_stylesheet_css =
     "button { padding: 1px 6px; border: 2px solid #767676; background-color: #efefef; box-sizing: border-box; text-align: center; }\n"
     "input { padding: 1px 2px; border: 2px solid #767676; }\n"
     "textarea { padding: 2px; border: 1px solid #767676; }\n"
+    /* (the system colors that are what controls are filled with) */
+    "input:is([type=submit i], [type=reset i], [type=button i], [type=color i]) { background-color: ButtonFace; }\n"
+    "input:not([type]), input:is([type=text i], [type=password i], [type=email i], [type=number i], [type=date i], [type=search i], [type=tel i], [type=url i]), textarea { background-color: Field; }\n"
     "select { border: 1px solid #767676; box-sizing: border-box; }\n";
 
 static bool layout_collect_document_stylesheets(LayoutContext *ctx, LayoutStyleSheetList *list,
@@ -7757,6 +7902,7 @@ static bool layout_collect_document_stylesheets(LayoutContext *ctx, LayoutStyleS
     list->items[list->nitems - 1].ua = true;
 
     int root_dom_idx = ctx->tree.nodes[ctx->tree.root_idx].dom_node_idx;
+    css_reg_set_doc(ctx->doc);
     css_reg_forget_rules();
     css_fn_forget();
     layout_collect_stylesheets_recursive(ctx, root_dom_idx, list, base_url);
@@ -11662,8 +11808,37 @@ static void style_finish_box_em(bool em_defer, LayoutBox *box, const LayoutBox *
     if (parent && (box->s->writing_mode != 0) != (parent->s->writing_mode != 0)) box->s->flow_root = 1;
     if (!box->s->line_break_set && parent) box->s->line_break = parent->s->line_break;
     if (!box->s->word_break_set && parent) box->s->word_break = parent->s->word_break;
+    /* (a min or max height of the content's: with a fixed height, the content's
+     * height that height bounds, the one way or the other) */
+    if (box->s->minmax_content & 12) {
+        if (box->s->height_set && box->s->height_percent <= 0.0 && !box->s->height_stretch) {
+            if (box->s->minmax_content & 4) box->s->min_height = box->s->css_height;
+            else box->s->max_height = box->s->css_height;
+            box->s->height_set = 0;
+            box->s->css_height = 0.0;
+        }
+    }
+    /* (stretch in the parent's block axis: a margin that would collapse
+     * through the parent's edge, with no border or padding there, counts as none) */
+    box->s->stretch_drop = 0;
+    if (parent && (box->s->height_stretch || box->s->width_keyword == 4) && box->s->float_side == 0 && box->s->position != CSS_POSITION_ABSOLUTE &&
+        box->s->position != CSS_POSITION_FIXED && box->s->display == CSS_DISPLAY_BLOCK) {
+        const LayoutStyle *ps = parent->s;
+        bool own_fc = ps->flow_root || ps->overflow != 0 || ps->float_side != 0 || ps->position == CSS_POSITION_ABSOLUTE ||
+                      ps->position == CSS_POSITION_FIXED || ps->display == CSS_DISPLAY_FLEX || ps->display == CSS_DISPLAY_GRID ||
+                      ps->display == CSS_DISPLAY_INLINE_BLOCK || ps->table_role != 0;
+        if (!own_fc) {
+            if (ps->writing_mode == 0) {
+                if (ps->border_top <= 0.0 && ps->padding_top <= 0.0) box->s->stretch_drop |= 1;
+                if (ps->border_bottom <= 0.0 && ps->padding_bottom <= 0.0) box->s->stretch_drop |= 4;
+            } else {
+                if (ps->border_right <= 0.0 && ps->padding_right <= 0.0) box->s->stretch_drop |= 2;
+                if (ps->border_left <= 0.0 && ps->padding_left <= 0.0) box->s->stretch_drop |= 8;
+            }
+        }
+    }
     if (box->s->height_stretch) {
-        box->s->height_pct_px = -(box->s->margin_top + box->s->margin_bottom);
+        box->s->height_pct_px = -(((box->s->stretch_drop & 1) ? 0.0 : box->s->margin_top) + ((box->s->stretch_drop & 4) ? 0.0 : box->s->margin_bottom));
         if (box->s->box_sizing != CSS_BOX_SIZING_BORDER_BOX)
             box->s->height_pct_px -= box->s->padding_top + box->s->padding_bottom + box->s->border_top + box->s->border_bottom;
     }
@@ -14328,7 +14503,7 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
         int bidx = (int)(box - g_layout_ctx->boxes);
         double mx = layout_intrinsic_width(g_layout_ctx, bidx, true);
         if (box->s->width_keyword == 4) {
-            used_total_width = parent_content_width - box->margin_left - box->margin_right;
+            used_total_width = parent_content_width - ((box->s->stretch_drop & 8) ? 0.0 : box->margin_left) - ((box->s->stretch_drop & 2) ? 0.0 : box->margin_right);
             if (used_total_width < 0.0) used_total_width = 0.0;
         } else if (box->s->width_keyword == 2) used_total_width = mx;
         else {
@@ -21615,11 +21790,17 @@ static void layout_anim_frame(void *ud, const void *decls, int n, AnimVal out[AN
 {
     LayoutAnimUd *u = (LayoutAnimUd *)ud;
     double held_w = t_cq_w, held_h = t_cq_h;
+    /* (viewport units: of this layout's viewport, whichever document ran last) */
+    double held_vw = g_unit_vw, held_vh = g_unit_vh;
+    if (u->ctx->viewport_width > 0.0) g_unit_vw = u->ctx->viewport_width;
+    if (u->ctx->viewport_height > 0.0) g_unit_vh = u->ctx->viewport_height;
     ptrdiff_t bi = u->box - u->ctx->boxes;
     if (g_cq_n && bi >= 0 && bi < u->ctx->tree.count) cq_unit_bases(u->ctx, u->ctx->tree.nodes[bi].dom_node_idx, &t_cq_w, &t_cq_h);
     layout_anim_frame_in(ud, decls, n, out, has);
     t_cq_w = held_w;
     t_cq_h = held_h;
+    g_unit_vw = held_vw;
+    g_unit_vh = held_vh;
 }
 
 /* A keyframe's values: its declarations applied to the box's style. */
@@ -22966,9 +23147,14 @@ static void wm_swap_style(LayoutStyle *s, bool to)
         s->css_width = 0.0;
         s->height_stretch = 1;
         /* (what will be its height's margins and the rest come off) */
-        s->width_pct_px = -(s->margin_left + s->margin_right);
+        s->width_pct_px = -(((s->stretch_drop & 8) ? 0.0 : s->margin_left) + ((s->stretch_drop & 2) ? 0.0 : s->margin_right));
         if (s->box_sizing != CSS_BOX_SIZING_BORDER_BOX)
             s->width_pct_px -= s->padding_left + s->padding_right + s->border_left + s->border_right;
+    }
+    /* (the margins stretch leaves, as the margins go: top with left, right with bottom) */
+    {
+        unsigned char d = s->stretch_drop;
+        s->stretch_drop = (unsigned char)(((d & 1) << 3) | ((d & 8) >> 3) | ((d & 2) << 1) | ((d & 4) >> 1));
     }
     WM_SWAP_D(s->css_width, s->css_height);
     WM_SWAP_U(s->width_set, s->height_set);

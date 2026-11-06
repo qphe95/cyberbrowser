@@ -118,6 +118,13 @@ static JSContextHandle realm_of_document(NodeId doc) {
     return GC_HANDLE_NULL;
 }
 
+/* Another realm than ctx whose document doc is (a frame's): true with it in *out. */
+bool frame_other_realm_of_document(JSContextHandle ctx, NodeId doc, JSContextHandle *out) {
+    for (Frame *f = g_frames; f; f = f->next)
+        if (f->doc == doc && SAFE_VALID(f->ctx)) { if (f->ctx == ctx) return false; *out = f->ctx; return true; }
+    return false;
+}
+
 /* The URL a realm's document has (its location), for resolving. */
 static char *realm_url(JSContextHandle ctx) {
     GCValue loc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "location");
@@ -650,11 +657,13 @@ static const char frame_window_js[] =
     "  var lastW = w.innerWidth, lastH = w.innerHeight;"
     "  var zoom = 1, lastZ = 1, parentRatio = (parent && (function () { try { return parent.devicePixelRatio; } catch (e) { return 0; } })()) || 1;"
     "  Object.defineProperty(w, 'devicePixelRatio', { configurable: true, enumerable: true, get: function () { return parentRatio * zoom; } });"
-    "  Object.defineProperty(w, '__cyberFrameResized', { configurable: true, value: function (nowHidden, boxW, boxH, z) {"
+    "  Object.defineProperty(w, '__cyberFrameResized', { configurable: true, value: function (nowHidden, boxW, boxH, z, quiet) {"
     "    if (nowHidden !== undefined) hidden = nowHidden;"
     "    if (z > 0) zoom = z;"
     "    if (boxW > 0) box.width = boxW / zoom;"
     "    if (boxH > 0) box.height = boxH / zoom;"
+    /* (only its size, for a style asked after now: the resize comes in its turn) */
+    "    if (quiet) return;"
     "    var a = w.innerWidth, b = w.innerHeight;"
     "    if (a === lastW && b === lastH && zoom === lastZ) return;"
     "    lastW = a; lastH = b; lastZ = zoom;"
@@ -1093,6 +1102,31 @@ static bool parent_scripts_pending(const Frame *f) {
  * out of the tree meanwhile aren't gone) */
 static bool g_frames_held;
 void frame_api_hold(bool hold) { g_frames_held = hold; }
+
+/* A frame realm's size as its parent has it now (a class or sheet may have just
+ * changed it), before its style is asked after; once per change to the page. */
+void frame_api_sync_size(JSContextHandle ctx) {
+    extern uint64_t g_dom_layout_requests;
+    static uint64_t seen;
+    static JSContextHandle seen_ctx;
+    if (!g_frames || (seen == g_dom_layout_requests && seen_ctx == ctx)) return;
+    for (Frame *f = g_frames; f; f = f->next) {
+        if (f->ctx != ctx || f->dead || f->popup || f->state != FRAME_LOADED || !SAFE_VALID(f->parent)) continue;
+        seen = g_dom_layout_requests;
+        seen_ctx = ctx;
+        layout_api_update(f->parent);
+        if (!layout_query_valid()) return;
+        double w = 0.0, h = 0.0;
+        bool hidden = !layout_query_rendered(f->iframe);
+        layout_query_content_size(f->iframe, &w, &h);
+        double z = layout_query_zoom(f->iframe);
+        GCValue fn = JS_GetPropertyStr(f->ctx, JS_GetGlobalObject(f->ctx), "__cyberFrameResized");
+        if (!JS_IsFunction(f->ctx, fn)) return;
+        GCValue args[5] = { JS_NewBool(f->ctx, hidden), JS_NewFloat64(f->ctx, w), JS_NewFloat64(f->ctx, h), JS_NewFloat64(f->ctx, z), JS_TRUE };
+        if (JS_IsException(JS_Call(f->ctx, fn, JS_UNDEFINED, 5, args))) JS_GetException(f->ctx);
+        return;
+    }
+}
 
 /* The frames whose size changed, when anything in the page changed. */
 int frame_api_resize_tick(void) {

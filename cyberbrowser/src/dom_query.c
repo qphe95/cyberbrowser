@@ -207,7 +207,7 @@ static const char *const k_pseudo_classes[] = {
     "placeholder-shown", "playing", "popover-open", "read-only", "read-write", "required", "right", "root",
     "scope", "seeking", "stalled", "state", "target", "target-within", "user-invalid", "user-valid", "valid",
     "visited", "volume-locked", "where", "xr-overlay", "-webkit-any", "-webkit-any-link", "-webkit-autofill",
-    "-webkit-drag", "-webkit-full-screen", "-webkit-full-screen-ancestor", "-webkit-full-page-media",
+    "-webkit-drag", "-webkit-full-screen",
     NULL };
 static const char *const k_pseudo_elements[] = {
     "after", "backdrop", "before", "cue", "cue-region", "details-content", "file-selector-button", "first-letter",
@@ -575,6 +575,20 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                 else if (strcmp(name, "before") == 0 || strcmp(name, "after") == 0 ||
                          strcmp(name, "first-line") == 0 || strcmp(name, "first-letter") == 0) s.kind = SS_NEVER;
                 else if (strcmp(name, "host") == 0 && !args) s.kind = SS_HOST;
+                else if (strcmp(name, "has-slotted") == 0) {
+                    /* (a slot's assigned nodes: a selector of them, no child combinator; nothing's slotted here) */
+                    if (args) {
+                        bool child = false;
+                        for (size_t k = 0; k < alen; k++) if (args[k] == '>') child = true;
+                        SelParser sub = { args, args + alen, false };
+                        sub.no_pe = true;
+                        SelList *l = child ? NULL : parse_list(&sub, true);
+                        bool ok = l && l->ok && l->n == 1;
+                        sel_free(l);
+                        if (!ok) { sp->err = true; free(name); break; }
+                    }
+                    s.kind = SS_NEVER;
+                }
                 else if (strcmp(name, "valid") == 0 || strcmp(name, "invalid") == 0) {
                     s.kind = name[0] == 'v' ? SS_VALID : SS_INVALID;
                     css_atom_reserve(1);

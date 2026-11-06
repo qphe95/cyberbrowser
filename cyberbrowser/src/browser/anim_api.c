@@ -214,7 +214,9 @@ static GCValue js_anim_running(JSContextHandle ctx, GCValue this_val, int argc, 
     if (!el) return out;
     const char *names[32];
     double p[32];
-    int n = anim_running(el, names, p, 32, (double)anim_time_ms());
+    int32_t ps = 0;
+    if (argc > 1) JS_ToInt32(ctx, &ps, argv[1]);
+    int n = anim_running_ps(el, ps, names, p, 32, (double)anim_time_ms());
     for (int i = 0; i < n; i++) {
         JS_SetPropertyUint32(ctx, out, (uint32_t)(2 * i), JS_NewString(ctx, names[i] ? names[i] : ""));
         JS_SetPropertyUint32(ctx, out, (uint32_t)(2 * i + 1), JS_NewFloat64(ctx, p[i]));

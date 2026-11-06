@@ -1315,7 +1315,7 @@
 "                /* (percentages of these are computed values; used sizes are not) */\n"
 "                if (!pseudo && /(^|-)(margin|padding|inset|top|right|bottom|left|width|height|size)(-|$)/.test(p) && global.__cyberComputedValue) {\n"
 "                    var raw = global.__cyberComputedValue(el, p);\n"
-"                    if (raw && (raw.indexOf('%') >= 0 || raw === 'auto')) v = raw;\n"
+"                    if (raw && (raw.indexOf('%') >= 0 || raw === 'auto' || raw.indexOf('calc-size(') >= 0)) v = raw;\n"
 "                }\n"
 "                /* (a line's width whatever its style; currentcolor as itself) */\n"
 "                if (!pseudo && p !== 'color' && /^(border-.*-width|outline-width|column-rule-width|.*-color)$/.test(p) && global.__cyberComputedValue) {\n"

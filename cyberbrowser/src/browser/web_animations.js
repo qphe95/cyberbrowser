@@ -120,7 +120,7 @@
         return { lits: lits, nums: nums };
     }
     function fmt(v) { return String(Math.round(v * 1e5) / 1e5); }
-    var NONNEG = /^(background-size|mask-size|border-image-(slice|width|outset)|mask-border-(slice|width|outset)|font-stretch|font-width|tab-size|hyphenate-limit-|width|height|min-|max-|padding|border(-[a-z]+)*-(width|radius)|font-size|line-height|flex-grow|flex-shrink|flex-basis|outline-width|column-width|column-gap|row-gap|gap$|perspective$|border-spacing|shape-margin|letter-spacing-none)/;
+    var NONNEG = /^(background-size|mask-size|border-image-(slice|width|outset)|mask-border-(slice|width|outset)|font-stretch|font-width|tab-size|hyphenate-limit-|width|height|min-|max-|padding|border(-[a-z]+)*-(width|radius)|font-size|line-height|flex-grow|flex-shrink|flex-basis|outline-width|column-width|column-height|column-rule-width|row-rule-width|column-gap|row-gap|gap$|perspective$|border-spacing|shape-margin|letter-spacing-none)/;
     var INTEGER = /^(z-index|order|orphans|widows|column-count|flood-none)$/;
     function finish(prop, v) {
         /* (a gap rule's width snaps as a border's does) */
@@ -751,7 +751,10 @@
     function repeatableInterpolate(prop, a, b, how) {
         var la = splitTop(a), lb = splitTop(b), n = la.length * lb.length / gcd(la.length, lb.length), out = [];
         for (var i = 0; i < n; i++) {
-            var v = combine(prop, la[i % la.length], lb[i % lb.length], how);
+            var ia = la[i % la.length], ib = lb[i % lb.length];
+            /* (the same keyword at both ends: as it is, the rest going between) */
+            if (ia === ib && /^\s*(contain|cover|auto)\s*$/.test(ia)) { out.push(ia.trim()); continue; }
+            var v = combine(prop, ia, ib, how);
             if (v === null) return null;
             out.push(v);
         }
@@ -1093,8 +1096,8 @@
             var m = { op: c.op, by: c.by, pts: c.pts.map(function (p, k) { return lpMix(p, d.pts[k], t); }), anchors: c.anchors, ctrl: c.ctrl };
             if (c.op === 'arc') {
                 m.one = c.one && d.one;
-                m.cw = c.cw + (d.cw - c.cw) * t !== 0 ? 1 : 0;
-                m.large = c.large + (d.large - c.large) * t !== 0 ? 1 : 0;
+                m.cw = c.cw + (d.cw - c.cw) * t > 0 ? 1 : 0;
+                m.large = c.large + (d.large - c.large) * t > 0 ? 1 : 0;
                 m.rot = c.rot + (d.rot - c.rot) * t;
             }
             out.cmds.push(m);
@@ -1431,6 +1434,13 @@
     var DISCRETE = /^(overflow-clip-margin|mask-border-source|border-image-source|list-style-image)$/;
     function interpolate(prop, a, b, t) {
         if (DISCRETE.test(prop)) return t < 0.5 ? a : b;
+        /* (palettes: a mix of the two between them) */
+        if (prop === 'font-palette') {
+            if (String(a) === String(b) || t <= 0) return a;
+            if (t >= 1) return b;
+            if (Math.abs(t - 0.5) < 1e-9) return 'palette-mix(in oklab, ' + a + ', ' + b + ')';
+            return 'palette-mix(' + a + ' ' + fmt(+((1 - t) * 100).toFixed(4)) + '%, ' + b + ' ' + fmt(+(t * 100).toFixed(4)) + '%)';
+        }
         /* (the box it would have anyway isn't said) */
         if (prop === 'clip-path' || prop === 'offset-path') {
             a = String(a).replace(/\s+border-box\s*$/, '');
@@ -1517,6 +1527,8 @@
                     hr.push('auto');
                 } else hr.push(String(Math.round(parseFloat(hx) + (parseFloat(hy) - parseFloat(hx)) * t)));
             }
+            /* (a count below one is no count: auto, the whole) */
+            if (hr.some(function (x) { return x !== 'auto' && +x < 1; })) return 'auto';
             /* (the third as the second, the second auto: each unsaid) */
             if (hr[2] === hr[1]) hr.pop();
             if (hr.length === 2 && hr[1] === 'auto') hr.pop();
@@ -1802,7 +1814,7 @@
 
     /* ---- what a keyframe's value comes to on an element ---- */
     var COLORISH = /color|background|border|outline|shadow|fill|stroke|caret|accent/;
-    var RELATIVE = /\b(inherit|initial|unset|revert|revert-layer|currentcolor)\b|var\(|calc\(|min\(|max\(|clamp\(|[\d.](em|rem|ex|ch|vw|vh|vmin|vmax|lh|rlh|cap|ic|dvh|dvw|svh|svw|lvh|lvw|q|mm|cm|in|pt|pc)\b/i;
+    var RELATIVE = /\b(inherit|initial|unset|revert|revert-layer|currentcolor)\b|var\(|calc\(|min\(|max\(|clamp\(|[\d.](em|rem|ex|ch|[sld]?v(?:w|h|i|b|min|max)|lh|rlh|cap|ic|q|mm|cm|in|pt|pc)\b/i;
     function needsResolving(prop, value) {
         if (/^\s*(unset|initial|inherit|revert|revert-layer)\s*$/i.test(value)) return true;
         /* (what weighs by name, or sizes by name) */
@@ -1838,16 +1850,31 @@
             var rawPct = global.__cyberComputedValue(el, prop);
             if (rawPct && rawPct.indexOf('%') >= 0 && rawPct.indexOf('calc-size') < 0) return rawPct;
         }
+        /* (what the declaration comes to, not what a running animation makes of it) */
+        if (prop.lastIndexOf('--', 0) !== 0 && !/^(left|right|top|bottom)$/.test(prop) && global.__cyberComputedValue && global.__cyberAnimRunning && global.__cyberAnimRunning(el).length) {
+            var unanimated = global.__cyberComputedValue(el, prop, false, true);
+            if (typeof unanimated === 'string') return unanimated;
+        }
         return global.getComputedStyle(el).getPropertyValue(prop);
     }
 
     /* ---- CSS animations and transitions of what the engine doesn't animate
      * itself: values for getComputedStyle, from the rules and the same
      * interpolation.  (Layout and paint don't see them.) ---- */
-    var keyframesCache = new Map();
+    var keyframesCache = new WeakMap();
     function keyframesOf(doc, name) {
-        var found = keyframesCache.get(name);
-        if (found) return found;
+        /* (each document's own; gone with the sheet it was in, or a change to it) */
+        var byDoc = doc ? keyframesCache.get(doc) : null;
+        if (doc && !byDoc) keyframesCache.set(doc, byDoc = new Map());
+        var hit = byDoc ? byDoc.get(name) : null;
+        if (hit) {
+            var sh = hit.rule.parentStyleSheet;
+            while (sh && sh.parentStyleSheet) sh = sh.parentStyleSheet;
+            var live = sh && (Array.prototype.indexOf.call(doc.styleSheets, sh) >= 0 || (doc.adoptedStyleSheets || []).indexOf(sh) >= 0);
+            if (live && hit.rule.cssRules.length === hit.n && hit.rule.name === name) return hit.frames;
+            byDoc.delete(name);
+        }
+        var found = null;
         var walk = function (rules) {
             for (var i = 0; i < rules.length; i++) {
                 var r = rules[i];
@@ -1868,11 +1895,17 @@
             });
         }
         frames.sort(function (a, b) { return a.at - b.at; });
-        keyframesCache.set(name, frames);
+        if (byDoc) byDoc.set(name, { rule: found, n: found.cssRules.length, frames: frames });
         return frames;
     }
     function computedInContext(el, prop, value, base) {
         if (!needsResolving(prop, value)) return value;
+        /* (a size's plain length: worked out, not read back with the animation on it) */
+        if (SIZE_PROP.test(prop) && global.__cyberComputeLength && value.indexOf('%') < 0 && value.indexOf('var(') < 0 &&
+            (/^\s*[-+\d.][\d.]*[a-z]+\s*$/i.test(value) || /^\s*(calc|min|max|clamp)\(/i.test(value))) {
+            var len = global.__cyberComputeLength(el, value);
+            if (typeof len === 'string' && len) return len;
+        }
         var v = readWith(el, prop, value);
         setStyle(el, null);
         applyTarget(el);
@@ -1950,8 +1983,12 @@
     Object.defineProperty(global, '__cyberCustomCssAnim', { configurable: true, value: function (el, prop, base) {
         return cssAnimationsOver(el, prop, base, base);
     } });
-    function cssAnimationsOver(el, prop, base, specBase) {
-        var running = global.__cyberAnimRunning(el), v = base;
+    /* (a pseudo-element's @keyframes animations: over what its element works out) */
+    Object.defineProperty(global, '__cyberPseudoCssAnim', { configurable: true, value: function (el, ps, prop, base) {
+        return cssAnimationsOver(el, prop, base, base, ps);
+    } });
+    function cssAnimationsOver(el, prop, base, specBase, ps) {
+        var running = global.__cyberAnimRunning(el, ps || 0), v = base;
         for (var i = 0; i + 1 < running.length; i += 2) {
             var frames = keyframesOf(el.ownerDocument, running[i]), p = running[i + 1];
             var comp = listItem(global.getComputedStyle(el).animationComposition || 'replace', i / 2);
@@ -2092,10 +2129,11 @@
     }
     /* (the last that covers it: by its name, by a shorthand's, or all) */
     var longhandsMemo = new Map();
+    var LEGACY_ALIAS = { 'font-stretch': 'font-width', 'font-width': 'font-stretch' };
     function transitionItem(names, prop, alias) {
         for (var i = names.length - 1; i >= 0; i--) {
             var nm = names[i];
-            if (nm === prop || nm === alias) return i;
+            if (nm === prop || nm === alias || LEGACY_ALIAS[prop] === nm) return i;
             if (nm === 'none' || nm === 'all') continue;
             var ls = longhandsMemo.get(nm);
             if (ls === undefined) longhandsMemo.set(nm, ls = global.__cyberCssLonghands(nm));
@@ -2157,6 +2195,11 @@
                 if (prop === 'border-shape') can = borderShapeInterpolate(from, base, 0) !== null;
                 if (prop === 'font-style' || prop === 'dynamic-range-limit') can = true;
                 if (prop === 'visibility') can = true;
+                /* (auto is used as nothing, each side by itself) */
+                if (prop === 'text-decoration-inset') can = true;
+                /* (the baseline goes between lengths as none at all) */
+                if (prop === 'vertical-align' && (from === 'baseline' || base === 'baseline') && /[\d)]/.test(from === 'baseline' ? base : from)) can = true;
+                if (/^border-(top|bottom)-(left|right)-radius$/.test(prop) || /^border-(start|end)-(start|end)-radius$/.test(prop)) can = true;
                 if (/(^|-)color$/.test(prop) && rgbaOf(from) && rgbaOf(base)) can = true;
                 if (prop === 'filter' || prop === 'backdrop-filter') can = filterInterpolate(prop, from, base, id) !== null;
                 if (dur + delay > 0 && (can || discrete)) {
@@ -2258,6 +2301,14 @@
     }
     Object.defineProperty(global, '__cyberGenericAnim', { configurable: true, value: function (el, prop, base, before, keyframesOnly, specNow, specBefore) {
         tfEl = el;
+        /* (a transition script started, of what the engine can't go between: its value) */
+        if (keyframesOnly) {
+            var tst = transitionsOf.get(el), trec = tst && tst.get(prop), tnow = global.__cyberAnimNow();
+            if (trec && trec.run && !transitionDone(trec.run, tnow) && (trec.run.flip || !trec.run.quiet)) {
+                var tv = transitionValue(prop, trec.run, tnow);
+                if (typeof tv === 'string') return cssAnimationsOver(el, prop, tv, specNow);
+            }
+        }
         if (keyframesOnly) {
             /* (only keyframes with calc-size(): the rest the engine has dealt with) */
             var names = global.__cyberAnimRunning(el), some = (global.getComputedStyle(el).animationComposition || 'replace') !== 'replace';
@@ -2271,7 +2322,7 @@
         var v = keyframesOnly ? base : cssTransitionOver(el, prop, base, before, specNow, specBefore);
         v = cssAnimationsOver(el, prop, v, specNow);
         /* (a border of no style has no width, however it's animated) */
-        if (/^(border-(top|right|bottom|left)|outline|column-rule|row-rule)-width$/.test(prop) && typeof v === 'string' && v !== '0px' &&
+        if (/^border-(top|right|bottom|left)-width$/.test(prop) && typeof v === 'string' && v !== '0px' &&
             /^(none|hidden)$/.test(global.getComputedStyle(el).getPropertyValue(prop.replace('width', 'style')))) v = '0px';
         /* (a size part percentage: the length it comes to on this box) */
         if (SIZE_PROP.test(prop) && typeof v === 'string' && v !== base && v.indexOf('%') >= 0 && /^(width|height)$/.test(prop)) {

@@ -1314,7 +1314,7 @@
                 /* (percentages of these are computed values; used sizes are not) */
                 if (!pseudo && /(^|-)(margin|padding|inset|top|right|bottom|left|width|height|size)(-|$)/.test(p) && global.__cyberComputedValue) {
                     var raw = global.__cyberComputedValue(el, p);
-                    if (raw && (raw.indexOf('%') >= 0 || raw === 'auto')) v = raw;
+                    if (raw && (raw.indexOf('%') >= 0 || raw === 'auto' || raw.indexOf('calc-size(') >= 0)) v = raw;
                 }
                 /* (a line's width whatever its style; currentcolor as itself) */
                 if (!pseudo && p !== 'color' && /^(border-.*-width|outline-width|column-rule-width|.*-color)$/.test(p) && global.__cyberComputedValue) {

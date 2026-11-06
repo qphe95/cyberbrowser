@@ -30,7 +30,13 @@
         if (win && win !== global) define(win, name, value);
     }
     function getter(proto, name, get, set) {
-        Object.defineProperty(proto, name, { get: get, set: set, configurable: true, enumerable: true });
+        /* (as an interface's attribute: named so, and only for what it's an interface of) */
+        var own = function (self) { return self !== proto; };
+        var g = get && function () { if (!own(this)) throw new TypeError('Illegal invocation'); return get.call(this); };
+        var s = set && function (v) { if (!own(this)) throw new TypeError('Illegal invocation'); return set.call(this, v); };
+        if (g) Object.defineProperty(g, 'name', { configurable: true, value: 'get ' + name });
+        if (s) Object.defineProperty(s, 'name', { configurable: true, value: 'set ' + name });
+        Object.defineProperty(proto, name, { get: g, set: s, configurable: true, enumerable: true });
     }
     function domException(msg, name) {
         if (typeof global.DOMException === 'function') return new global.DOMException(msg, name);
@@ -178,8 +184,8 @@
         'only-of-type open optional out-of-range past paused picture-in-picture placeholder-shown playing ' +
         'popover-open read-only read-write required right root scope seeking stalled target target-within ' +
         'user-invalid user-valid valid visited volume-locked buffering closed xr-overlay -webkit-autofill ' +
-        '-webkit-any-link -webkit-full-screen').split(' ');
-    var PSEUDO_CLASS_FNS = 'dir has host host-context is lang not nth-child nth-last-child nth-last-of-type nth-of-type state where heading active-view-transition-type'.split(' ');
+        '-webkit-any-link -webkit-full-screen has-slotted').split(' ');
+    var PSEUDO_CLASS_FNS = 'has-slotted dir has host host-context is lang not nth-child nth-last-child nth-last-of-type nth-of-type state where heading active-view-transition-type'.split(' ');
     var PSEUDO_ELEMENTS = ('after backdrop before cue file-selector-button first-letter first-line grammar-error marker ' +
         'placeholder selection spelling-error target-text view-transition details-content checkmark picker-icon ' +
         'scroll-marker scroll-marker-group column search-text -webkit-scrollbar -webkit-scrollbar-thumb ' +
@@ -426,6 +432,12 @@
                 var h = this.list(true, false);
                 if (!h.length) throw new SyntaxError('empty :has');
                 return { list: h, relative: true };
+            }
+            if (!element && fn === 'has-slotted') {
+                /* (one selector of what's slotted, no child combinator) */
+                var hs = this.list(false, false);
+                if (hs.length !== 1 || JSON.stringify(hs).indexOf('">"') >= 0) throw new SyntaxError('bad :has-slotted()');
+                return { list: hs };
             }
             if (!element && (fn === 'host' || fn === 'host-context')) {
                 var c = this.compound();
@@ -727,7 +739,7 @@
         });
     }
     /* (an @page rule's declarations: CSSPageDescriptors, with the page's descriptors its own) */
-    var PAGE_DESC = ['margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'size', 'marks', 'bleed'];
+    var PAGE_DESC = ['margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'size', 'page-orientation', 'marks', 'bleed'];
     function pageDescriptorsOf(style) {
         var PD = global.CSSPageDescriptors, base = Object.getPrototypeOf(style);
         if (typeof PD !== 'function' || !PD.prototype || !style || typeof style !== 'object') return;
@@ -740,7 +752,14 @@
                 [n, n.replace(/-([a-z])/g, function (m, c) { return c.toUpperCase(); })].forEach(function (k) {
                     var d = null;
                     for (var o = base; o && !d; o = Object.getPrototypeOf(o)) d = Object.getOwnPropertyDescriptor(o, k);
-                    if (d) Object.defineProperty(P, k, d);
+                    /* (a page's own descriptor: through its declarations by name) */
+                    if (!d) {
+                        var gf = function () { return this.getPropertyValue(n); }, sf = function (v) { this.setProperty(n, String(v)); };
+                        Object.defineProperty(gf, 'name', { value: 'get ' + k });
+                        Object.defineProperty(sf, 'name', { value: 'set ' + k });
+                        d = { get: gf, set: sf, configurable: true, enumerable: true };
+                    }
+                    Object.defineProperty(P, k, d);
                 });
             });
             Object.defineProperty(P, Symbol.toStringTag, { value: 'CSSPageDescriptors', configurable: true });
@@ -796,7 +815,7 @@
     function subclass(name, parent) {
         var C = illegal(name);
         Object.defineProperty(C, 'name', { configurable: true, value: name });
-        C.prototype = Object.create(parent.prototype);
+        Object.defineProperty(C, 'prototype', { value: Object.create(parent.prototype), writable: false, enumerable: false, configurable: false });
         define(C.prototype, 'constructor', C);
         Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
         Object.setPrototypeOf(C, parent);
@@ -1027,7 +1046,8 @@
     });
     CSSFontFeatureValuesRule.prototype.__text = function () {
         var maps = this.__maps, out = '@font-feature-values ' + this.__family + ' {';
-        Object.keys(FFV_KINDS).forEach(function (k) {
+        /* (each kind where it first came) */
+        Object.keys(maps).forEach(function (k) {
             if (!maps[k] || !maps[k].length) return;
             out += ' @' + k + ' {' + maps[k].map(function (e) { return ' ' + e[0] + ': ' + e[1].join(' ') + ';'; }).join('') + ' }';
         });
@@ -1778,7 +1798,17 @@
             x = x.trim().toLowerCase();
             if (x === 'from') return '0%';
             if (x === 'to') return '100%';
+            /* (a range of a view timeline's before it; a calc() of a percentage as it is) */
+            var rm = /^(normal|cover|contain|entry|exit|entry-crossing|exit-crossing|scroll)\s+(.*)$/.exec(x);
+            var range = rm ? rm[1] + ' ' : '';
+            if (rm) x = rm[2];
+            if (/^calc\(.*%.*\)$/.test(x)) {
+                var dd = 0, okc = true;
+                for (var ci = 0; ci < x.length; ci++) { if (x[ci] === '(') dd++; else if (x[ci] === ')') { dd--; if (dd < 0) okc = false; } }
+                return okc && !dd ? range + x : null;
+            }
             if (!/^[+-]?(\d*\.)?\d+%$/.test(x)) return null;
+            if (range) { var rv = parseFloat(x); return rv < 0 || rv > 100 ? null : range + rv + '%'; }
             var v = parseFloat(x);
             if (v < 0 || v > 100) return null;
             return v + '%';
@@ -2350,8 +2380,8 @@
                 if (p.block === null) return null;
                 var kn = p.prelude;
                 var km = /^"([^"]*)"$|^'([^']*)'$/.exec(kn);
-                if (km) kn = km[1] !== undefined ? km[1] : km[2];
-                else if (!/^[A-Za-z_-][\w-]*$/.test(kn) || /^(none|initial|inherit|unset|default|revert|revert-layer)$/i.test(kn)) return null;
+                if (km) { kn = km[1] !== undefined ? km[1] : km[2]; if (!kn) return null; }
+                else if (!/^[A-Za-z_-][\w-]*$/.test(kn) || /^-\d/.test(kn) || /^(none|initial|inherit|unset|default|revert|revert-layer)$/i.test(kn)) return null;
                 r = makeRule(CSSKeyframesRule, 'keyframes', { __name: kn, __rules: [] });
                 r.__rules = parseRules(p.block, 'keyframes', r);
                 break;

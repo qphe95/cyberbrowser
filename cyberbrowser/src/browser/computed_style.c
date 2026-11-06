@@ -261,6 +261,50 @@ static char *random_fixed(const char *spec, const char *now) {
     return strdup(out);
 }
 
+/* A computed value's url()s made absolute against the document's base (a
+ * fragment alone stays as it is); NULL when there's nothing to resolve. */
+static char *urls_absolute(JSContextHandle ctx, const char *v) {
+    extern char *wurl_resolve(const char *base, const char *href);
+    if (!strstr(v, "url(\"")) return NULL;
+    GCValue doc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document");
+    GCValue bu = JS_IsObject(doc) ? JS_GetPropertyStr(ctx, doc, "baseURI") : JS_UNDEFINED;
+    const char *base = JS_IsString(bu) ? JS_ToCString(ctx, bu) : NULL;
+    if (!base || !*base) return NULL;
+    size_t cap = strlen(v) * 2 + strlen(base) * 4 + 64, on = 0;
+    char *o = (char *)malloc(cap);
+    if (!o) return NULL;
+    bool changed = false;
+    for (const char *p = v; *p; ) {
+        if (!strncmp(p, "url(\"", 5)) {
+            const char *s = p + 5, *e = s;
+            while (*e && *e != '"') { if (*e == '\\' && e[1]) e++; e++; }
+            if (*e == '"') {
+                size_t ul = (size_t)(e - s);
+                char *u = strndup(s, ul);
+                const char *colon = strchr(u, ':'), *slash = strpbrk(u, "/?#");
+                bool absolute = colon && (!slash || colon < slash);
+                char *abs = !absolute && u[0] && u[0] != '#' && !strchr(u, '\\') ? wurl_resolve(base, u) : NULL;
+                const char *put = abs ? abs : u;
+                size_t pl = strlen(put);
+                if (on + pl + 16 >= cap) { cap = (on + pl) * 2 + 64; char *n2 = (char *)realloc(o, cap); if (!n2) { free(abs); free(u); free(o); return NULL; } o = n2; }
+                memcpy(o + on, "url(\"", 5); on += 5;
+                memcpy(o + on, put, pl); on += pl;
+                o[on++] = '"';
+                if (abs) changed = true;
+                free(abs);
+                free(u);
+                p = e + 1;
+                continue;
+            }
+        }
+        if (on + 2 >= cap) { cap *= 2; char *n2 = (char *)realloc(o, cap); if (!n2) { free(o); return NULL; } o = n2; }
+        o[on++] = *p++;
+    }
+    o[on] = 0;
+    if (!changed) { free(o); return NULL; }
+    return o;
+}
+
 static const char *computed_of(JSContextHandle ctx, ComputedStyle *cs, const char *name) {
     const CssPropDef *p = css_prop_find(name, strlen(name));
     if (!p) return "";
@@ -305,10 +349,39 @@ static const char *computed_of(JSContextHandle ctx, ComputedStyle *cs, const cha
             free(cs->comp[i]);
             cs->comp[i] = strdup("0px");
         }
+        /* (a calc() of one value: that value) */
+        if (cs->comp[i] && !strncmp(cs->comp[i], "calc(", 5)) {
+            char *c = cs->comp[i], *e = NULL;
+            strtod(c + 5, &e);
+            if (e && e != c + 5) {
+                const char *u = e;
+                while (isalpha((unsigned char)*u) || *u == '%') u++;
+                if (*u == ')' && !u[1]) {
+                    size_t l = (size_t)(u - (c + 5));
+                    memmove(c, c + 5, l);
+                    c[l] = 0;
+                }
+            }
+        }
+        /* (a url: absolute) */
+        if (cs->comp[i] && strstr(cs->comp[i], "url(\"")) {
+            char *ab = urls_absolute(ctx, cs->comp[i]);
+            if (ab) { free(cs->comp[i]); cs->comp[i] = ab; }
+        }
         /* (a percentage left as it is: its random() stays, with where it fell) */
         if (cs->comp[i] && cs->spec && cs->spec[i] && strstr(cs->spec[i], "random(") && strchr(cs->comp[i], '%') && !strstr(cs->comp[i], "random(")) {
             char *fx2 = random_fixed(cs->spec[i], cs->comp[i]);
             if (fx2) { free(cs->comp[i]); cs->comp[i] = fx2; }
+        } else if (cs->comp[i] && cs->spec && cs->spec[i] && strchr(cs->spec[i], '%') && !strchr(cs->spec[i], 32) && !strchr(cs->comp[i], 32) && fabs(strtod(cs->spec[i], NULL) - strtod(cs->comp[i], NULL)) < 1e-4) {
+            /* (one that the cascade already drew: as it was drawn) */
+            extern bool css_random_pct_origin(const char *val, double *r, double *lo, double *hi);
+            double r, lo, hi;
+            if (css_random_pct_origin(cs->spec[i], &r, &lo, &hi)) {
+                char out[128];
+                snprintf(out, sizeof out, "random(fixed %.6g, %.6g%%, %.6g%%)", r, lo, hi);
+                free(cs->comp[i]);
+                cs->comp[i] = strdup(out);
+            }
         }
         /* (the same shape and box twice: once; each's default box goes without saying) */
         if (cs->comp[i] && name[0] == 'b' && !strcmp(name, "border-shape")) {
@@ -1217,19 +1290,15 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
         snprintf(style, sizeof style, "%.*sstyle", (int)(strlen(n) - 5), n);
         const char *st = g_cs_typed ? "" : computed_of(ctx, cs, style);
         if (!strcmp(st, "none") || !strcmp(st, "hidden")) { free(r); r = strdup("0px"); }
-    } else if (!strcmp(n, "outline-width")) {
-        if (!g_cs_typed && !strcmp(computed_of(ctx, cs, "outline-style"), "none")) { free(r); r = strdup("0px"); }
-    } else if (!strcmp(n, "column-rule-width") || !strcmp(n, "row-rule-width")) {
-        const char *st = computed_of(ctx, cs, n[0] == 'c' ? "column-rule-style" : "row-rule-style");
-        if (!g_cs_typed && (!strcmp(st, "none") || !strcmp(st, "hidden"))) { free(r); r = strdup("0px"); }
     }
+    /* (an outline's and a column rule's width: as given, whatever their style) */
     /* (a line's width, and outline-offset's size, in whole device pixels: one at least) */
     if ((strstr(n, "-width") && (!strncmp(n, "border-", 7) || !strncmp(n, "outline", 7) || !strcmp(n, "column-rule-width") || !strcmp(n, "row-rule-width")) &&
          !strstr(n, "image")) || !strcmp(n, "outline-offset")) {
         char *e = NULL;
         double v = r ? strtod(r, &e) : 0.0;
         if (r && e != r && !strcmp(e, "px") && v != 0.0 && !anim_has(cs->el, 0)) {
-            double m = fabs(v), snapped = m < 1.0 ? 1.0 : floor(m);
+            double m = fabs(v), snapped = m < 1e-6 ? 0.0 : m < 1.0 ? 1.0 : floor(m);
             if (snapped != m) {
                 char b[48];
                 snprintf(b, sizeof b, "%gpx", v < 0 ? -snapped : snapped);
@@ -1412,6 +1481,41 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
     if (r && !strcmp(n, "shape-image-threshold")) {
         double t = atof(r);
         if (t < 0.0 || t > 1.0) { free(r); r = strdup(t < 0.0 ? "0" : "1"); }
+    }
+    /* (a caret's second color, auto: the first's) */
+    if (r && !strcmp(n, "caret-color")) {
+        size_t rl = strlen(r);
+        if (rl > 5 && !strcmp(r + rl - 5, " auto") && strcmp(r, "auto auto")) r[rl - 5] = 0;
+    }
+    /* (an emphasis mark's fill and shape, both: the shape by the writing mode when not given) */
+    if (r && !strcmp(n, "text-emphasis-style") && r[0] != '"' && strcmp(r, "none")) {
+        bool filled = !strncmp(r, "filled", 6), open = !strncmp(r, "open", 4);
+        const char *shape = filled ? r + 6 : open ? r + 4 : r;
+        while (*shape == ' ') shape++;
+        if (!*shape) shape = strncmp(computed_of(ctx, cs, "writing-mode"), "horizontal", 10) ? "sesame" : "circle";
+        char b[96];
+        snprintf(b, sizeof b, "%s%s", open ? "open " : "", shape);
+        free(r);
+        r = strdup(b);
+    }
+    /* (a margin is never below nothing) */
+    if (r && !strcmp(n, "shape-margin") && r[0] == '-' && isdigit((unsigned char)r[1]) && !strchr(r, '%')) { free(r); r = strdup("0px"); }
+    /* (lengths that can't be less than nothing: none, each one) */
+    if (r && strchr(r, '-') && !strchr(r, '(') &&
+        ((strstr(n, "-width") && (!strncmp(n, "border-", 7) || !strncmp(n, "outline", 7) || !strncmp(n, "column-", 7) || !strncmp(n, "row-rule", 8))) ||
+         (!strncmp(n, "border-", 7) && strstr(n, "-radius")) || !strcmp(n, "border-image-width") || !strcmp(n, "border-image-outset") ||
+         !strcmp(n, "background-size") || !strcmp(n, "mask-size") || !strcmp(n, "column-width"))) {
+        char *o = (char *)malloc(strlen(r) * 3 + 4);
+        size_t on = 0;
+        for (const char *q = r; o && *q; ) {
+            if (*q == '-' && (q == r || q[-1] == ' ' || q[-1] == ',') && (isdigit((unsigned char)q[1]) || q[1] == '.')) {
+                char *e = NULL;
+                strtod(q, &e);
+                if (e && !strncmp(e, "px", 2) && (!e[2] || e[2] == ' ' || e[2] == ',')) { memcpy(o + on, "0px", 3); on += 3; q = e + 2; continue; }
+            }
+            o[on++] = *q++;
+        }
+        if (o) { o[on] = 0; free(r); r = o; }
     }
     /* (calc-size(): what it comes to, from what its basis would) */
     bool has_calc_size = s && strstr(s, "calc-size(");
@@ -1650,15 +1754,28 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
         generic = true;
         keyframes_only = true;
     }
-
     char *before_spec = NULL;
     char *now_spec = (sized_prop || color_prop || box_prop) && s ? strdup(s) : NULL;
     char *before = generic && !keyframes_only ? before_swap(cs->el, p, r, now_spec, &before_spec) : NULL;
     /* (a size read now may be what a later change transitions from) */
-    if (!generic && (sized_prop || color_prop || box_prop) && !in_hook && !g_in_calc && !cs->pseudo) {
+    if (!generic && (sized_prop || color_prop || box_prop) && !in_hook && !g_in_calc && !g_comp_base && !cs->pseudo) {
         char *old_spec = NULL;
         free(before_swap(cs->el, p, r, now_spec, &old_spec));
         free(old_spec);
+    }
+    /* (a calc() of one value: that value, as transitions compare it) */
+    if (r && !strncmp(r, "calc(", 5)) {
+        char *e = NULL;
+        strtod(r + 5, &e);
+        if (e && e != r + 5) {
+            const char *u = e;
+            while (isalpha((unsigned char)*u) || *u == '%') u++;
+            if (*u == ')' && !u[1]) {
+                size_t l = (size_t)(u - (r + 5));
+                memmove(r, r + 5, l);
+                r[l] = 0;
+            }
+        }
     }
     if (generic && (anim_has(cs->el, 0) || layout_query_has_anim_spec(cs->el))) {
         GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberGenericAnim");
@@ -1680,6 +1797,27 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
                 }
             }
         }
+    }
+    /* (a marker's @keyframes, of what the engine doesn't run on it: in script) */
+    if (r && cs->pseudo == 5 && !in_hook && !g_in_calc && anim_has(cs->el, 5) && (ap < 0 || !anim_value(cs->el, 5, ap, (double)anim_time_ms(), &av))) {
+        GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberPseudoCssAnim");
+        if (JS_IsFunction(ctx, fn)) {
+            GCValue a4[4] = { dom_js(ctx, cs->el), JS_NewInt32(ctx, 5), JS_NewString(ctx, n), JS_NewString(ctx, r) };
+            in_hook++;
+            GCValue got = JS_Call(ctx, fn, JS_UNDEFINED, 4, a4);
+            in_hook--;
+            if (JS_IsException(got)) JS_GetException(ctx);
+            else if (JS_IsString(got)) {
+                const char *t = JS_ToCString(ctx, got);
+                if (t) { free(r); r = strdup(t); }
+            }
+        }
+    }
+    /* (an inset an animation left at auto: what it comes to on the box, as unanimated) */
+    if (r && !strcmp(r, "auto") && cs->used.rendered && !cs->pseudo && !in_hook) {
+        int side = !strcmp(n, "top") ? 0 : !strcmp(n, "right") ? 1 : !strcmp(n, "bottom") ? 2 : !strcmp(n, "left") ? 3 : -1;
+        double v = 0.0;
+        if (side >= 0 && layout_query_used_inset(cs->el, side, true, true, &v)) { free(r); r = px(v); }
     }
     free(before);
     free(before_spec);
@@ -1779,10 +1917,14 @@ GCValue js_computed_unresolved(JSContextHandle ctx, GCValue this_val, int argc, 
     GCValue out = JS_NULL;
     if (cs) {
         refresh(ctx, cs);
-        cs->used.rendered = false;
+        /* (a fourth: the resolved value, as it is with no animation on it) */
+        bool base = argc > 3 && JS_ToBool(ctx, argv[3]);
+        if (!base) cs->used.rendered = false;
         /* (a third argument: Typed OM's computed value, not the resolved one) */
         g_cs_typed = argc > 2 && JS_ToBool(ctx, argv[2]);
+        if (base) g_comp_base++;
         char *v = computed_style_value(ctx, cs, prop, strlen(prop));
+        if (base) g_comp_base--;
         g_cs_typed = false;
         if (v) { out = JS_NewString(ctx, v); free(v); }
         computed_style_free(cs);

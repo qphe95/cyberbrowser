@@ -125,6 +125,7 @@ int css_reg_find(const char *name);
 bool css_reg_scripted(const char *name);
 bool css_reg_add(const char *name, const char *syntax, bool inherits, const char *initial, bool rule);
 void css_reg_forget_rules(void);
+void css_reg_set_doc(const void *doc);
 void css_reg_reset(void);
 void css_reg_scan_css(const char *css, size_t len);
 bool css_syntax_valid(const char *syntax);

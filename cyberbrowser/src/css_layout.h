@@ -198,6 +198,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * being positioned: a bit per property (contain, transform, filter...). */
     unsigned short abs_cb;
     unsigned char height_stretch;   /* height: stretch */
+    unsigned char stretch_drop;     /* (margins a block-axis stretch leaves on: 1 top, 2 right, 4 bottom, 8 left) */
+    unsigned char minmax_content;   /* (min/max width/height given as min-content, max-content or fit-content: bits as minmax_stretch) */
     unsigned char minmax_stretch;   /* min/max width/height: stretch (bits as minmax_pct_bits) */
     /* writing-mode (0 horizontal-tb, 1 vertical-rl, 2 vertical-lr, 3 sideways-rl, 4 sideways-lr). */
     unsigned char writing_mode, writing_mode_set;

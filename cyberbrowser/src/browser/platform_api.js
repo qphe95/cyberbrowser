@@ -817,7 +817,14 @@
         var ffMore = {
             unicodeRange: ['U+0-10FFFF', function (v) {
                 v = String(v).trim();
-                return /^[uU]\+[0-9a-fA-F?]{1,6}(-[0-9a-fA-F]{1,6})?(\s*,\s*[uU]\+[0-9a-fA-F?]{1,6}(-[0-9a-fA-F]{1,6})?)*$/.test(v) ? v.toUpperCase() : null;
+                if (!/^[uU]\+[0-9a-fA-F?]{1,6}(-[0-9a-fA-F]{1,6})?(\s*,\s*[uU]\+[0-9a-fA-F?]{1,6}(-[0-9a-fA-F]{1,6})?)*$/.test(v)) return null;
+                /* (a range with ? in it: its first and last code points) */
+                return v.split(/\s*,\s*/).map(function (r) {
+                    var m = /^[uU]\+([0-9a-fA-F]*)(\?+)$/.exec(r);
+                    if (!m) return r.toUpperCase();
+                    var lo = (m[1] + m[2].replace(/\?/g, '0')).replace(/^0+(?=.)/, ''), hi = (m[1] + m[2].replace(/\?/g, 'F')).replace(/^0+(?=.)/, '');
+                    return ('U+' + lo + '-' + hi).toUpperCase();
+                }).join(', ');
             }],
             variant: ['normal', function (v) { return global.CSS && global.CSS.supports('font-variant', String(v)) ? String(v).trim() : null; }],
             featureSettings: ['normal', ffSettings],
@@ -951,6 +958,57 @@
             Object.defineProperty(fn, 'length', { configurable: true, value: orig.length });
             Object.defineProperty(FP, name, { configurable: true, enumerable: true, writable: true, value: fn });
         });
+        /* (the document's: its @font-face rules' faces too, CSS-connected) */
+        var cssFaceOf = new WeakMap();
+        var cssFaces = function (set) {
+            var doc = global.document, out = [];
+            if (!doc || set !== doc.fonts || !global.FontFace) return out;
+            var walk = function (rules) {
+                for (var i = 0; rules && i < rules.length; i++) {
+                    var r = rules[i];
+                    if (r.type === 5) {
+                        var f = cssFaceOf.get(r);
+                        if (!f) {
+                            var st = r.style, get = function (n) { return st ? st.getPropertyValue(n) : ''; };
+                            var fam = get('font-family').trim().replace(/^(["'])(.*)\1$/, '$2');
+                            var init = {}, map = { style: 'font-style', weight: 'font-weight', stretch: 'font-stretch', width: 'font-width',
+                                unicodeRange: 'unicode-range', featureSettings: 'font-feature-settings', variationSettings: 'font-variation-settings',
+                                display: 'font-display', ascentOverride: 'ascent-override', descentOverride: 'descent-override', lineGapOverride: 'line-gap-override' };
+                            Object.keys(map).forEach(function (k) { var v = get(map[k]); if (v) init[k] = v; });
+                            try { f = new global.FontFace(fam, get('src') || 'local(none)', init); } catch (e) { f = null; }
+                            if (f) cssFaceOf.set(r, f);
+                        }
+                        if (f) out.push(f);
+                    } else if (r.cssRules && (r.type === 4 || r.type === 12 || r.__kind === 'layer')) walk(r.cssRules);
+                }
+            };
+            var sheets = doc.styleSheets;
+            for (var s = 0; s < sheets.length; s++) { try { walk(sheets[s].cssRules); } catch (e) { /* (not readable) */ } }
+            return out;
+        };
+        var nativeOf = function (set, name) { var d = Object.getOwnPropertyDescriptor(FP, name); return d && d.value ? Array.from(d.value.call(set)) : []; };
+        var baseValues = FP.values, baseEntries = FP.entries, baseForEach = FP.forEach;
+        var all = function (set) {
+            var mine = baseValues ? Array.from(baseValues.call(set)) : [];
+            cssFaces(set).forEach(function (f) { if (mine.indexOf(f) < 0) mine.unshift(f); });
+            return mine;
+        };
+        if (baseValues) {
+            var mk = function (name, fn) {
+                Object.defineProperty(fn, 'name', { configurable: true, value: name });
+                Object.defineProperty(FP, name, { configurable: true, enumerable: true, writable: true, value: fn });
+            };
+            mk('values', function values() { if (!mine(this)) throw new TypeError('Illegal invocation'); return all(this)[Symbol.iterator](); });
+            mk('keys', FP.values);
+            mk('entries', function entries() { if (!mine(this)) throw new TypeError('Illegal invocation'); return all(this).map(function (f) { return [f, f]; })[Symbol.iterator](); });
+            mk('forEach', function forEach(cb) {
+                if (!mine(this)) throw new TypeError('Illegal invocation');
+                if (typeof cb !== 'function') throw new TypeError("Failed to execute 'forEach' on 'FontFaceSet': 1 argument required");
+                var self = this, that = arguments[1];
+                all(this).forEach(function (f) { cb.call(that, f, f, self); });
+            });
+        }
+        void nativeOf; void baseEntries; void baseForEach;
         if (typeof FP.values === 'function') Object.defineProperty(FP, Symbol.iterator, { configurable: true, writable: true, value: FP.values });
         ['status', 'ready'].forEach(function (name) {
             var d = Object.getOwnPropertyDescriptor(FP, name);

@@ -616,9 +616,23 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
     CP_ACC("getComputedStyle");
     GCValue element = argc > 0 ? argv[0] : JS_UNDEFINED;
     NodeId id = JS_IsObject(element) ? dom_node_of(element) : DOM_NULL;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "Failed to execute 'getComputedStyle' on 'Window': 1 argument required, but only 0 present.");
     if (!id) return js_get_computed_style_legacy(ctx, this_val, argc, argv);
     if (dom_kind(id) != DOM_K_ELEMENT)
         return JS_ThrowTypeError(ctx, "Failed to execute 'getComputedStyle' on 'Window': parameter 1 is not of type 'Element'.");
+    /* (an element of a frame's document: styled where it is, in that realm) */
+    {
+        extern void frame_api_sync_size(JSContextHandle ctx);
+        extern bool frame_other_realm_of_document(JSContextHandle ctx, NodeId doc, JSContextHandle *out);
+        NodeId od = dom_owner(id);
+        JSContextHandle rc;
+        if (od && frame_other_realm_of_document(ctx, od, &rc)) {
+            GCValue a2[2] = { dom_js(rc, id), argc > 1 ? argv[1] : JS_UNDEFINED };
+            return js_get_computed_style(rc, JS_UNDEFINED, argc > 1 ? 2 : 1, a2);
+        }
+        frame_api_sync_size(ctx);
+    }
     /* (a pseudo-element: ::before / ::after, the legacy one-colon forms too) */
     int ps = 0;
     if (argc > 1 && JS_IsString(argv[1])) {

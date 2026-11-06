@@ -247,7 +247,7 @@ if(BE_PLATFORM_WINDOWS)
     # The Win32 <pthread.h> (src/win32/pthread.h) for the library and all who
     # use it: no MinGW winpthreads in any executable.
     target_include_directories(cyberbrowser_lib BEFORE PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/win32
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/win32>
     )
 endif()
 

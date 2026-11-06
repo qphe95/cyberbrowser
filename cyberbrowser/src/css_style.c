@@ -1316,10 +1316,7 @@ static int32_t after_base_list(Builder *b, const char *branch, size_t blen, int 
     while (l > 0 && isspace((unsigned char)buf[l - 1])) buf[--l] = '\0';
     char *base = buf;
     while (*base && isspace((unsigned char)*base)) base++;
-    if (!*base) {
-        if (kind != 3) return -1;
-        base = "*";   /* (a bare ::first-line: every element's) */
-    }
+    if (!*base) base = "*";   /* (a bare pseudo-element: every element's) */
     return compile_list(b, base);
 }
 

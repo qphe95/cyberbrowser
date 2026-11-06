@@ -68,6 +68,7 @@ void anim_flow_set(int writing_mode, bool rtl);
 /* el's CSS animations with an effect now: their names and eased progress, in
  * the order they apply; how many. */
 int anim_running(NodeId el, const char **names, double *progress, int cap, double now);
+int anim_running_ps(NodeId el, int ps, const char **names, double *progress, int cap, double now);
 /* Whether any element has rows. */
 bool anim_any(void);
 

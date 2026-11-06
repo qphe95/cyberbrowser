@@ -488,17 +488,22 @@ static bool anim_progress(int r, double now, double *out)
     return true;
 }
 
-int anim_running(NodeId el, const char **names, double *progress, int cap, double now)
+int anim_running_ps(NodeId el, int ps, const char **names, double *progress, int cap, double now)
 {
     int n = 0;
     FOR_ROWS(r, el) {
         double p;
-        if (n < cap && A.ps[r] == 0 && A.kind[r] == K_ANIM && anim_progress(r, now, &p)) {
+        if (n < cap && A.ps[r] == ps && A.kind[r] == K_ANIM && anim_progress(r, now, &p)) {
             names[n] = A.name[r];
             progress[n++] = p;
         }
     }
     return n;
+}
+
+int anim_running(NodeId el, const char **names, double *progress, int cap, double now)
+{
+    return anim_running_ps(el, 0, names, progress, cap, now);
 }
 
 static bool track_value(int r, double now, AnimVal *out)
