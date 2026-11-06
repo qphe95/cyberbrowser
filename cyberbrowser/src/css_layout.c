@@ -759,12 +759,19 @@ static int style_font_slot(const LayoutStyle *s)
                                        s->font_oblique_deg, s->font_stretch);
 }
 
+/* (an ex or ch taken from a fallback while the face it asked for loads:
+ * the styles want the face's, so the page is laid out again once it's in) */
+static volatile int g_unit_font_stale;
+static uint32_t g_unit_font_gen;    /* (bumped when such a face came: in the style cache's key) */
+bool font_registry_any_queued(void);
+
 static double unit_font_ratio(bool ch)
 {
     const LayoutBox *b = t_unit_box;
     if (b && (!b->s->font_family || !b->s->font_family[0]) && t_unit_parent) b = t_unit_parent;
     if (!b || !b->s->font_family || !b->s->font_family[0]) return 0.5;
     TextShaper *f = font_registry_slot(style_font_slot(b->s));
+    if (font_registry_any_queued()) g_unit_font_stale = 1;
     float r = f ? (ch ? text_shaper_zero_advance(f) : text_shaper_x_height(f)) : 0.0f;
     return r > 0.0f ? (double)r : 0.5;
 }
@@ -14523,6 +14530,7 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
             sc_global = style_mix(sc_global, &P.em_defer, sizeof(P.em_defer));
             /* (what container queries read) */
             sc_global = style_mix(sc_global, &g_cq_gen, sizeof(g_cq_gen));
+            sc_global = style_mix(sc_global, &g_unit_font_gen, sizeof(g_unit_font_gen));
             if (sc_global == 0) sc_global = 1;
             static StyleCtxFeatures cf;
             mentions_build(P.set, set_gen);
@@ -15445,7 +15453,13 @@ static void layout_resolve_fonts(LayoutContext *ctx)
     if (font_registry_load_pending() > 0) {
         layout_resolve_fonts_pass(ctx);
         css_layout_retained_invalidate();   /* (text measures differently) */
+        if (g_unit_font_stale) {
+            extern void dom_request_layout(void);
+            g_unit_font_gen++;
+            dom_request_layout();
+        }
     }
+    g_unit_font_stale = 0;
 }
 
 static bool layout_text_is_whitespace(const char *s)

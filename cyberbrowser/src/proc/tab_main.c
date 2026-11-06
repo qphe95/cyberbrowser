@@ -1013,7 +1013,18 @@ static void cpu_ms(double *thread_ms, double *process_ms) {
  * asks: a page's 2 ms setTimeout, and the waits for it, otherwise come
  * every 15.6 ms.  (ntdll's call: winmm's timeBeginPeriod would load user32,
  * which can't start in a process without win32k.) */
+/* (Windows 11 lets a process whose windows aren't seen keep its 1 ms timer only
+ * when it says power throttling of timer resolution is off) */
+static void keep_fine_timer(void) {
+    PROCESS_POWER_THROTTLING_STATE st;
+    memset(&st, 0, sizeof st);
+    st.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    st.ControlMask = PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION | PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+    st.StateMask = 0;
+    SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &st, sizeof st);
+}
 static void fine_timer(void) {
+    keep_fine_timer();
     typedef LONG(NTAPI * SetRes)(ULONG, BOOLEAN, PULONG);
     SetRes set = (SetRes)(void *)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtSetTimerResolution");
     ULONG actual = 0;

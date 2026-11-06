@@ -667,6 +667,11 @@ static void dispatch_page_lifecycle_events(JSContextHandle ctx) {
         pump_due_work(ctx);
     }
     if (g_loop_images) image_cache_process_pending(g_loop_images);
+    {
+        extern void dom_fire_parsed_preloads(JSContextHandle ctx);
+        dom_fire_parsed_preloads(ctx);
+        pump_due_work(ctx);
+    }
     const char *load_js =
         "document.readyState = 'complete';"
         "if (window.__cyberPageReveal) __cyberPageReveal();"

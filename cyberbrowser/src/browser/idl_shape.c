@@ -126,27 +126,41 @@ static int brand_check(JSContextHandle ctx, GCValue v, int brand) {
 /* ---- The pass ---- */
 
 /* The functions given checks so far (a function on two prototypes, the
- * ChildNode methods say, gets the brand they share: none). */
-typedef struct Checked { GCValue fn; int brand; } Checked;
+ * ChildNode methods say, gets the brand they share: none), by object
+ * handle: an open-addressed table (*cap slots, a power of two, 0 empty). */
+typedef struct Checked { GCHandle h; int brand; } Checked;
 
 static void set_checks(JSContextHandle ctx, Checked **seen, int *n, int *cap, GCValue fn, int required, int brand) {
-    for (int i = 0; i < *n; i++) {
-        if (!JS_StrictEq(ctx, (*seen)[i].fn, fn)) continue;
-        if ((*seen)[i].brand != brand) {
+    (void)ctx;
+    GCHandle h = JS_VALUE_GET_HANDLE(fn);
+    if (!h) return;
+    if (2 * (*n + 1) > *cap) {
+        int nc = *cap ? *cap * 2 : 4096;
+        Checked *t = (Checked *)calloc((size_t)nc, sizeof(Checked));
+        for (int i = 0; i < *cap; i++) {
+            if (!(*seen)[i].h) continue;
+            uint32_t j = ((*seen)[i].h * 2654435761u) & (uint32_t)(nc - 1);
+            while (t[j].h) j = (j + 1) & (uint32_t)(nc - 1);
+            t[j] = (*seen)[i];
+        }
+        free(*seen);
+        *seen = t;
+        *cap = nc;
+    }
+    uint32_t j = (h * 2654435761u) & (uint32_t)(*cap - 1);
+    for (; (*seen)[j].h; j = (j + 1) & (uint32_t)(*cap - 1)) {
+        if ((*seen)[j].h != h) continue;
+        if ((*seen)[j].brand != brand) {
             /* (two node interfaces: Node's, else none) */
-            int a0 = (*seen)[i].brand;
+            int a0 = (*seen)[j].brand;
             int b = a0 != B_NONE && brand != B_NONE && a0 < B_PROTO && brand < B_PROTO ? B_NODE : B_NONE;
-            (*seen)[i].brand = b;
+            (*seen)[j].brand = b;
             JS_SetCFunctionChecks(fn, required, b);
         }
         return;
     }
-    if (*n == *cap) {
-        *cap = *cap ? *cap * 2 : 256;
-        *seen = (Checked *)realloc(*seen, (size_t)*cap * sizeof(Checked));
-    }
-    (*seen)[*n].fn = fn;
-    (*seen)[*n].brand = brand;
+    (*seen)[j].h = h;
+    (*seen)[j].brand = brand;
     (*n)++;
     JS_SetCFunctionChecks(fn, required, brand);
 }

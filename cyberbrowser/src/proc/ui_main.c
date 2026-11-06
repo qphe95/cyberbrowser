@@ -1266,6 +1266,17 @@ static void script_step(void) {
     }
 }
 
+/* (Windows 11 lets a process whose windows aren't seen keep its 1 ms timer only
+ * when it says power throttling of timer resolution is off) */
+static void keep_fine_timer(void) {
+    PROCESS_POWER_THROTTLING_STATE st;
+    memset(&st, 0, sizeof st);
+    st.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    st.ControlMask = PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION | PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+    st.StateMask = 0;
+    SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &st, sizeof st);
+}
+
 /* ---- main --------------------------------------------------------------------- */
 
 int main(int argc, char **argv) {
@@ -1310,7 +1321,7 @@ int main(int argc, char **argv) {
     g_reuse = getenv("CYBER_TAB_REUSE") != NULL;
     const char *script = getenv("CYBER_UI_SCRIPT");
     /* (a script waits in 1 ms steps, not the default 15.6 ms ticks) */
-    if (script && *script) timeBeginPeriod(1);
+    if (script && *script) { keep_fine_timer(); timeBeginPeriod(1); }
     /* (again for a while: a file just written may be held a moment, by a
      * virus scanner; a run that can't have its script ends rather than
      * waits as a browser nobody drives) */

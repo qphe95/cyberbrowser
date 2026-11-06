@@ -1549,6 +1549,37 @@ static void post_insert_collect(NodeId parent, NodeId child) {
     post_insert_subtree(dom_slot(child));
 }
 
+/* The parser's <link rel=preload>s (not inserted by script, so not seen by
+ * dom_maybe_load_stylesheet): their load, before the document's (a preload
+ * delays it).  page_engine.c, before the load event. */
+static void dom_maybe_load_stylesheet(JSContextHandle ctx, GCValue node);
+void dom_fire_parsed_preloads(JSContextHandle ctx) {
+    CssAtom link = css_atom_intern("link", 4);
+    uint32_t r = dom_slot(g_dom_document);
+    if (!r) return;
+    NodeId *ids = NULL;
+    uint32_t n = 0, cap = 0;
+    for (uint32_t s = r; s; s = dom_next_in_subtree(s, r)) {
+        if (g_dom.kind[s] != DOM_K_ELEMENT || g_dom.tag[s] != link) continue;
+        const char *rel = dom_attr(dom_id_of(s), "rel");
+        if (!rel) continue;
+        char low[128];
+        size_t k = 0;
+        for (; rel[k] && k + 1 < sizeof low; k++) low[k] = (char)tolower((unsigned char)rel[k]);
+        low[k] = 0;
+        /* (a stylesheet one has its sheet's load) */
+        if (!strstr(low, "preload") || strstr(low, "stylesheet")) continue;
+        if (n == cap) {
+            cap = cap ? cap * 2 : 8;
+            ids = (NodeId *)realloc(ids, cap * sizeof *ids);
+        }
+        ids[n++] = dom_id_of(s);
+    }
+    for (uint32_t i = 0; i < n; i++)
+        if (dom_valid(ids[i])) dom_maybe_load_stylesheet(ctx, dom_js(ctx, ids[i]));
+    free(ids);
+}
+
 /* (each run takes the queue: an insertion by one of them has its own) */
 static void dom_maybe_load_stylesheet(JSContextHandle ctx, GCValue node);
 
@@ -1630,13 +1661,29 @@ static void dom_maybe_load_stylesheet(JSContextHandle ctx, GCValue node) {
     const char *href = dom_attr(n, "href");
     if (!rel || !href || !href[0]) return;
     /* rel is a token list: "stylesheet", "preload stylesheet", ... */
-    bool sheet = false;
+    bool sheet = false, preload = false;
     for (const char *p = rel; *p; ) {
         while (*p == ' ' || *p == '\t') p++;
         const char *e = p;
         while (*e && *e != ' ' && *e != '\t') e++;
         if (e - p == 10 && strncasecmp(p, "stylesheet", 10) == 0) sheet = true;
+        if (e - p == 7 && strncasecmp(p, "preload", 7) == 0) preload = true;
         p = e;
+    }
+    /* (a preload: fetched for later, and load once it's asked for) */
+    if (!sheet && preload) {
+        GCValue pdone = JS_GetPropertyStr(ctx, node, "__cyber_sheet_loaded");
+        if (JS_ToBool(ctx, pdone)) return;
+        JS_SetPropertyStr(ctx, node, "__cyber_sheet_loaded", JS_TRUE);
+        GCValue powner = JS_GetPropertyStr(ctx, node, "ownerDocument");
+        GCValue hv = JS_IsObject(powner) ? JS_GetPropertyStr(ctx, powner, "baseURI") : JS_UNDEFINED;
+        const char *pbase = JS_IsString(hv) ? JS_ToCString(ctx, hv) : NULL;
+        char *purl = dom_resolve_url(pbase && pbase[0] ? pbase : (g_cyber_start_url ? g_cyber_start_url : ""), href);
+        if (pbase) JS_FreeCString(ctx, pbase);
+        if (purl && url_is_network_url(purl)) dom_fetch_prefetch_first(purl);
+        free(purl);
+        dom_dispatch_script_event(ctx, node, "load");
+        return;
     }
     if (!sheet) return;
     GCValue done = JS_GetPropertyStr(ctx, node, "__cyber_sheet_loaded");

@@ -1634,15 +1634,22 @@
             if (!tryAllowed(name) || priority) return;
             return DECL_PROTO.setProperty.call(this, name, value);
         } });
-        /* (what it may not have isn't there: no attribute, and setting one does nothing) */
+        /* (what it may not have isn't there: no attribute, and setting one does nothing; made with
+         * the first @position-try's descriptors, not with every realm, as it's every property) */
         var hyphen = function (n) { return n.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); }).replace(/^webkit-/, '-webkit-'); };
-        Object.getOwnPropertyNames(DECL_PROTO).forEach(function (n) {
-            var d = Object.getOwnPropertyDescriptor(DECL_PROTO, n);
-            if (!d || !d.get || /^(cssText|length|parentRule|cssFloat)$/.test(n)) return;
-            if (tryAllowed(n.indexOf('-') >= 0 ? n : hyphen(n))) return;
-            Object.defineProperty(CSSPositionTryDescriptors.prototype, n, { configurable: true, enumerable: false,
-                get: function () { return undefined; }, set: function () {} });
-        });
+        var tryShadowed = false;
+        var tryShadow = function () {
+            if (tryShadowed) return;
+            tryShadowed = true;
+            var none = { configurable: true, enumerable: false, get: function () { return undefined; }, set: function () {} };
+            Object.getOwnPropertyNames(DECL_PROTO).forEach(function (n) {
+                var d = Object.getOwnPropertyDescriptor(DECL_PROTO, n);
+                if (!d || !d.get || /^(cssText|length|parentRule|cssFloat)$/.test(n)) return;
+                if (tryAllowed(n.indexOf('-') >= 0 ? n : hyphen(n))) return;
+                if (!Object.prototype.hasOwnProperty.call(CSSPositionTryDescriptors.prototype, n))
+                    Object.defineProperty(CSSPositionTryDescriptors.prototype, n, none);
+            });
+        };
         var textDesc = Object.getOwnPropertyDescriptor(DECL_PROTO, 'cssText');
         if (textDesc && textDesc.set) Object.defineProperty(CSSPositionTryDescriptors.prototype, 'cssText', { configurable: true, enumerable: true,
             get: textDesc.get,
@@ -2439,7 +2446,7 @@
                         return c > 0 && tryAllowed(d.slice(0, c).trim()) && !/!\s*important\s*$/i.test(d);
                     }).join(';');
                     r.__style = decls(kept, r);
-                    if (DECL_PROTO) Object.setPrototypeOf(r.__style, CSSPositionTryDescriptors.prototype);
+                    if (DECL_PROTO) { tryShadow(); Object.setPrototypeOf(r.__style, CSSPositionTryDescriptors.prototype); }
                 }
                 break;
             case 'page':

@@ -210,9 +210,20 @@ const REFREADY = `<script style="display: none !important">//<![CDATA[
     var x = new XMLHttpRequest();
     x.open('POST', '/refready'); x.send(location.pathname + location.search);
   }
+  var rendered = false;
   function check() {
     var de = document.documentElement;
-    if (de && de.classList && de.classList.contains('reftest-wait')) { setTimeout(check, 50); return; }
+    if (de && de.classList && de.classList.contains('reftest-wait')) {
+      /* (as wptrunner: TestRendered once, after the first frames, for the page to make its change) */
+      if (!rendered) {
+        rendered = true;
+        requestAnimationFrame(function () { requestAnimationFrame(function () {
+          try { de.dispatchEvent(new Event('TestRendered', { bubbles: true })); } catch (e) {}
+        }); });
+      }
+      setTimeout(check, 50);
+      return;
+    }
     /* (two frames, as wptrunner waits: the second callback runs once the
      * first frame is with the GPU process, and an image that frame was
      * still waiting for is in the one built after it) */
@@ -250,7 +261,7 @@ const left = REFTEST ? [] : pages.map((p, i) => i).filter(i => !results[pages[i]
 if (REFTEST) {
     const todo = steps.filter(st => !fs.existsSync(st.shot));
     fs.writeFileSync(path.join(out, 'pages.txt'),
-        todo.map(st => `${st.k} ${origin}/${st.url} 4000 ${st.shot.split(path.sep).join('/')}\n`).join(''));
+        todo.map(st => `${st.k} ${origin}/${st.url} ${+process.env.REFTEST_MS || 2000} ${st.shot.split(path.sep).join('/')}\n`).join(''));
     console.log(`${todo.length} of ${steps.length} reftest steps to run (${Object.keys(refInfo).length} reftests)`);
 } else {
     fs.writeFileSync(path.join(out, 'pages.txt'),
@@ -392,6 +403,8 @@ const server = http.createServer((req, res) => {
     const id = (url.pathname + url.search).slice(1);
     const page = pageIndex.has(id) ? pageIndex.get(id) : -1;
     if (page >= 0) opened(page);
+    /* (STEP_TIMES=1: each request and when, for where a step's time goes) */
+    if (process.env.STEP_TIMES) console.log(`[st] ${Date.now()} ${lport} ${req.method} ${url.pathname}`);
     if (url.pathname === '/result' && req.method === 'POST') {
         let body = '';
         req.on('data', d => body += d);
@@ -574,6 +587,13 @@ const server = http.createServer((req, res) => {
         const text = data.toString('utf8'), ends = [...text.matchAll(/<\/html>/gi)];
         const end = ends.length ? ends[ends.length - 1].index : -1;
         data = Buffer.from(end < 0 ? text + REFREADY : text.slice(0, end) + REFREADY + text.slice(end), 'utf8');
+    } else if (REFTEST && /^(application|text)\/(xml|[\w.+-]*\+xml)/.test(headers['content-type']) &&
+               steps.some(st => '/' + st.url.split('?')[0] === url.pathname)) {
+        /* (other XML, SVG among it: an XHTML script before the root element's end tag says when it's ready) */
+        const text = data.toString('utf8'), ends = [...text.matchAll(/<\/[\w:.-]+\s*>/g)];
+        const end = ends.length ? ends[ends.length - 1].index : -1;
+        const tag = REFREADY.replace('<script ', '<script xmlns="http://www.w3.org/1999/xhtml" ');
+        if (end >= 0) data = Buffer.from(text.slice(0, end) + tag + text.slice(end), 'utf8');
     }
     res.writeHead(200, headers);
     res.end(data);

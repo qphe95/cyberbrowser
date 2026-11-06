@@ -1104,6 +1104,16 @@ static void *fetch_thread(void *arg)
     return NULL;
 }
 
+/* A web face is waiting to be fetched (asked for, not yet loaded). */
+bool font_registry_any_queued(void)
+{
+    pthread_mutex_lock(&g_mu);
+    bool any = false;
+    for (int i = 0; i < g_nweb && !any; i++) any = g_web[i].state == WEB_QUEUED;
+    pthread_mutex_unlock(&g_mu);
+    return any;
+}
+
 int font_registry_load_pending(void)
 {
     pthread_mutex_lock(&g_mu);
