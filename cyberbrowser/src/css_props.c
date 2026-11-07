@@ -5068,6 +5068,16 @@ static const char *strcasestr_simple(const char *h, const char *n)
 
 /* selector() in @supports: one complex selector, and nothing forgiven inside :is(),
  * :where(), :has() or an :nth-child()'s "of". */
+/* (a '!' that is part of a <!-- token, spaces or not around it) */
+static bool sup_cdo_bang(const char *b, const char *p)
+{
+    const char *q = p;
+    while (q > b && q[-1] == ' ') q--;
+    if (q > b && q[-1] == '<') return true;
+    q = p + 1;
+    while (*q == ' ') q++;
+    return q[0] == '-' && q[1] == '-';
+}
 static bool sup_selector_branches(const char *s, size_t n, bool relative);
 static bool sup_selector_one(const char *s, size_t n, bool relative)
 {
@@ -5213,7 +5223,20 @@ static int sup_in_parens(const Toks *ts, int i, const char *src) {
             for (size_t q = 0; q < sizeof known / sizeof known[0]; q++) if (!strcasecmp(ts->t[k].str, known[q])) return 1;
             return 0;
         }
-        return 0;   /* font-tech(), font-format(), unknown functions */
+        bool ftech = !strcasecmp(t->str, "font-tech"), ffmt = !strcasecmp(t->str, "font-format");
+        if (ftech || ffmt) {
+            /* (one keyword the font loader handles) */
+            int k = t->first;
+            if (k >= t->end || ts->t[k].type != T_IDENT || tok_next(ts, k) != t->end) return 0;
+            static const char *const tech[] = { "features-opentype", "features-aat", "features-graphite", "color-COLRv0",
+                "color-COLRv1", "color-SVG", "color-sbix", "color-CBDT", "variations", "palettes", "incremental" };
+            static const char *const fmt[] = { "opentype", "truetype", "woff", "woff2", "collection" };
+            const char *const *l = ftech ? tech : fmt;
+            size_t nl = ftech ? sizeof tech / sizeof tech[0] : sizeof fmt / sizeof fmt[0];
+            for (size_t q = 0; q < nl; q++) if (!strcasecmp(ts->t[k].str, l[q])) return 1;
+            return 0;
+        }
+        return 0;   /* unknown functions */
     }
     if (t->type != T_PAREN) return 0;
     if (t->first >= t->end) return 0;
@@ -5229,10 +5252,37 @@ static int sup_in_parens(const Toks *ts, int i, const char *src) {
         if (vb.s) {
             char *bang = strstr(vb.s, "! important");
             if (!bang) bang = strstr(vb.s, "!important");
-            if (bang) { *bang = '\0'; important = true; }
+            if (bang) {
+                /* (nothing but space after the priority) */
+                const char *q = bang + (bang[1] == ' ' ? 11 : 10);
+                while (*q == ' ') q++;
+                if (*q) { free(vb.s); return 0; }
+                *bang = '\0';
+                important = true;
+            }
         }
         (void)important;
-        bool ok = vb.s && css_supports_property(f->str, vb.s);
+        /* (a '!' or ';' at the value's top level, or a var() fallback's, makes it
+         * invalid; inside other blocks and strings it is fine; <!-- is a token) */
+        if (vb.s) {
+            char qc = 0, stk[64];
+            int sp = 0;
+            for (const char *p = vb.s; *p; p++) {
+                if (qc) { if (*p == '\\' && p[1]) p++; else if (*p == qc) qc = 0; continue; }
+                if (*p == '"' || *p == '\'') qc = *p;
+                else if (!strncmp(p, "<!--", 4)) p += 3;
+                else if (!strncmp(p, "-->", 3)) p += 2;
+                else if (*p == '(' || *p == '[' || *p == '{') {
+                    bool v = *p == '(' && p - vb.s >= 3 && !strncasecmp(p - 3, "var", 3);
+                    if (sp < 64) stk[sp] = v ? 'v' : 'b';
+                    sp++;
+                }
+                else if (*p == ')' || *p == ']' || *p == '}') { if (sp) sp--; }
+                else if (((*p == '!' && !sup_cdo_bang(vb.s, p)) || *p == ';') && (!sp || (sp <= 64 && stk[sp - 1] == 'v'))) { free(vb.s); return 0; }
+            }
+        }
+        /* (a custom property may be empty) */
+        bool ok = vb.s ? css_supports_property(f->str, vb.s) : css_supports_property(f->str, "");
         free(vb.s);
         return ok;
     }
@@ -7419,6 +7469,15 @@ static int canon_words(const char *v, char (*w)[160], int max)
 /* A display's keywords in their shortest form. */
 static char *canon_display(const char *v)
 {
+    while (isspace((unsigned char)*v)) v++;
+    if (!strncasecmp(v, "layout(", 7) || !strncasecmp(v, "inline-layout(", 14)) {
+        /* (a custom layout: the function as written, spaces dropped) */
+        char b[160];
+        size_t o = 0;
+        for (const char *p = v; *p && o + 1 < sizeof b; p++) if (!isspace((unsigned char)*p)) b[o++] = *p;
+        b[o] = 0;
+        return strdup(b);
+    }
     char w[4][160];
     int n = canon_words(v, w, 4);
     if (n < 1 || n > 3 || (n == 1 && strcasecmp(w[0], "flow"))) return NULL;

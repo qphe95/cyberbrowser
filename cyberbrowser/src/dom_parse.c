@@ -105,6 +105,9 @@ static int utf8_put(char *d, uint32_t cp) {
  * "&name;", so decoding can run in place. */
 static const struct { const char *name; uint32_t cp; } k_entities[] = {
     { "lt", '<' }, { "gt", '>' }, { "amp", '&' }, { "quot", '"' }, { "apos", '\'' },
+    { "Tab", 0x09 }, { "NewLine", 0x0A }, { "ZeroWidthSpace", 0x200B }, { "NoBreak", 0x2060 }, { "hairsp", 0x200A },
+    { "numsp", 0x2007 }, { "puncsp", 0x2008 }, { "MediumSpace", 0x205F }, { "ThinSpace", 0x2009 }, { "VeryThinSpace", 0x200A },
+    { "emsp13", 0x2004 }, { "emsp14", 0x2005 }, { "InvisibleTimes", 0x2062 }, { "af", 0x2061 }, { "ic", 0x2063 },
     { "nbsp", 0xA0 }, { "copy", 0xA9 }, { "reg", 0xAE }, { "trade", 0x2122 },
     { "mdash", 0x2014 }, { "ndash", 0x2013 }, { "hellip", 0x2026 }, { "middot", 0xB7 },
     { "bull", 0x2022 }, { "lsquo", 0x2018 }, { "rsquo", 0x2019 }, { "ldquo", 0x201C },
@@ -1319,6 +1322,8 @@ static void parse_into(const char *html, size_t len, uint32_t frag, uint32_t own
 }
 
 NodeId dom_parse_html(const char *html, size_t len, NodeId owner_doc) {
+    /* (a UTF-8 byte order mark first: the encoding's, not the document's text) */
+    if (html && len >= 3 && (unsigned char)html[0] == 0xEF && (unsigned char)html[1] == 0xBB && (unsigned char)html[2] == 0xBF) { html += 3; len -= 3; }
     NodeId frag = dom_create_fragment(owner_doc);
     if (html && len) parse_into(html, len, dom_slot(frag), dom_valid(owner_doc) ? dom_slot(owner_doc) : 0, false);
     return frag;

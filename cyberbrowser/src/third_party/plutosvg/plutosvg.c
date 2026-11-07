@@ -2278,6 +2278,9 @@ static void draw_shape(const element_t* element, render_context_t* context, rend
         }
 
         float delta = MAX(cap_limit, join_limit);
+        /* (cyberbrowser) a rect: right-angled corners reach half the width out, its stroke box's edge */
+        if(element->id == TAG_RECT)
+            delta = line_width / 2.f;
         state->extents.x -= delta;
         state->extents.y -= delta;
         state->extents.w += delta * 2.f;
@@ -2829,8 +2832,76 @@ static void render_image(const element_t* element, render_context_t* context, re
     render_state_end(&new_state);
 }
 
+/* (cyberbrowser: clip-path="url(#id)" of a <clipPath>: its circles, ellipses
+ * and rects, in the user space the element is drawn in, the canvas clipped to
+ * them; true when it was, and the canvas then saved) */
+static bool apply_clip_path(const element_t* element, render_context_t* context, render_state_t* state)
+{
+    if(state->mode != render_mode_painting)
+        return false;
+    const string_t* v = find_attribute(element, ATTR_CLIP_PATH, false);
+    if(!v || !v->length)
+        return false;
+    const char* it = v->data;
+    const char* end = it + v->length;
+    string_t id;
+    if(!parse_url_value(&it, end, &id))
+        return false;
+    const element_t* cp = find_element(context->document, &id);
+    if(!cp || cp->id != TAG_CLIP_PATH)
+        return false;
+    plutovg_path_t* path = plutovg_path_create();
+    for(const element_t* c = cp->first_child; c; c = c->next_sibling) {
+        length_t cx = {0, length_type_fixed}, cy = {0, length_type_fixed}, rx = {0, length_type_fixed}, ry = {0, length_type_fixed};
+        if(c->id == TAG_CIRCLE) {
+            parse_length(c, ATTR_CX, &cx, true, false);
+            parse_length(c, ATTR_CY, &cy, true, false);
+            parse_length(c, ATTR_R, &rx, false, false);
+            plutovg_path_add_circle(path, resolve_length(state, &cx, 'x'), resolve_length(state, &cy, 'y'), resolve_length(state, &rx, 'o'));
+        } else if(c->id == TAG_ELLIPSE) {
+            parse_length(c, ATTR_CX, &cx, true, false);
+            parse_length(c, ATTR_CY, &cy, true, false);
+            parse_length(c, ATTR_RX, &rx, false, false);
+            parse_length(c, ATTR_RY, &ry, false, false);
+            plutovg_path_add_ellipse(path, resolve_length(state, &cx, 'x'), resolve_length(state, &cy, 'y'),
+                                     resolve_length(state, &rx, 'x'), resolve_length(state, &ry, 'y'));
+        } else if(c->id == TAG_RECT) {
+            parse_length(c, ATTR_X, &cx, true, false);
+            parse_length(c, ATTR_Y, &cy, true, false);
+            parse_length(c, ATTR_WIDTH, &rx, false, false);
+            parse_length(c, ATTR_HEIGHT, &ry, false, false);
+            plutovg_path_add_rect(path, resolve_length(state, &cx, 'x'), resolve_length(state, &cy, 'y'),
+                                  resolve_length(state, &rx, 'x'), resolve_length(state, &ry, 'y'));
+        } else if(c->id == TAG_PATH || c->id == TAG_POLYGON) {
+            /* (its own transform onto its outline) */
+            plutovg_path_t* tmp = plutovg_path_create();
+            bool ok = c->id == TAG_PATH ? parse_path(c, ATTR_D, tmp) : parse_points(c, ATTR_POINTS, tmp);
+            plutovg_matrix_t cm;
+            plutovg_matrix_init_identity(&cm);
+            bool has_tf = parse_transform(c, ATTR_TRANSFORM, &cm);
+            if(ok)
+                plutovg_path_add_path(path, tmp, has_tf ? &cm : NULL);
+            plutovg_path_destroy(tmp);
+        }
+    }
+    /* (clip-rule, from its first shape) */
+    plutovg_fill_rule_t rule = PLUTOVG_FILL_RULE_NON_ZERO;
+    if(cp->first_child) {
+        const string_t* cr = find_attribute(cp->first_child, ATTR_CLIP_RULE, true);
+        if(cr && cr->length == 7 && !strncmp(cr->data, "evenodd", 7))
+            rule = PLUTOVG_FILL_RULE_EVEN_ODD;
+    }
+    plutovg_canvas_save(context->canvas);
+    plutovg_canvas_set_matrix(context->canvas, &state->matrix);
+    plutovg_canvas_set_fill_rule(context->canvas, rule);
+    plutovg_canvas_clip_path(context->canvas, path);
+    plutovg_path_destroy(path);
+    return true;
+}
+
 static void render_element(const element_t* element, render_context_t* context, render_state_t* state)
 {
+    bool clipped = apply_clip_path(element, context, state);
     switch(element->id) {
     case TAG_SVG:
         render_svg(element, context, state);
@@ -2864,6 +2935,8 @@ static void render_element(const element_t* element, render_context_t* context, 
         render_image(element, context, state);
         break;
     }
+    if(clipped)
+        plutovg_canvas_restore(context->canvas);
 }
 
 #define MAX_RENDER_DEPTH 256

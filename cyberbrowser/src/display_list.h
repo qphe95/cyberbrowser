@@ -109,6 +109,13 @@ typedef struct {
 void display_list_init(DisplayList *dl);
 void display_list_free(DisplayList *dl);
 bool display_list_reserve(DisplayList *dl, int extra);
+/* A 2D canvas's solid rectangles (canvas_api.js through __cyberCanvasRect),
+ * in its bitmap's pixels: clear removes those it covers. */
+void display_list_canvas_rect(uint32_t node, float x, float y, float w, float h, uint32_t rgba, int clear);
+/* (and an image drawn whole into [x, x + w) x [y, y + h)) */
+void display_list_canvas_image(uint32_t node, const char *url, float x, float y, float w, float h);
+/* (a new document: its node ids the last one's again, every canvas's drawing gone) */
+void display_list_canvas_reset(void);
 bool display_list_add_rect(DisplayList *dl, float x, float y, float w, float h,
                            float r, float g, float b, float a);
 bool display_list_add_border(DisplayList *dl, float x, float y, float w, float h,
@@ -135,6 +142,9 @@ struct HtmlNode;
  * data an image file): laid out and painted as an <img> of its data. */
 bool display_list_object_image(const struct HtmlNode *node);
 char *display_list_image_source(const char *base_url, struct HtmlNode *node, float css_width);
+/* (image-orientation: none: url as the cache's unturned variant, when the
+ * image is of the page's own origin; url freed or returned) */
+char *display_list_noexif(char *url, const char *base_url);
 
 /* The srcset candidate (malloc'd URL text) for a layout width; NULL if none. */
 char *display_list_pick_srcset(const char *srcset, float css_width);

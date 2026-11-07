@@ -888,6 +888,13 @@ void dom_unlink(NodeId child) {
     if (!p) return;
     if (g_dom_pre_remove) g_dom_pre_remove(child);
     dom_note_connected_change(p);
+    if (g_dom.state[c] & DOM_ST_FOCUS_WITHIN) {
+        /* (the focus in what goes: it and :focus-within off, from it out to the root) */
+        const uint16_t fb = DOM_ST_FOCUS | DOM_ST_FOCUS_VISIBLE | DOM_ST_FOCUS_WITHIN;
+        for (uint32_t x = c; x; x = dom_next_in_subtree(x, c)) if (g_dom.state[x] & fb) { g_dom.state[x] &= (uint16_t)~fb; dom_mark_dirty(dom_id_of(x), DOMF_DIRTY_ATTR); }
+        for (uint32_t a = p; a; a = g_dom.parent[a] ? g_dom.parent[a] : g_dom.host[a])
+            if (g_dom.state[a] & DOM_ST_FOCUS_WITHIN) { g_dom.state[a] &= (uint16_t)~DOM_ST_FOCUS_WITHIN; dom_mark_dirty(dom_id_of(a), DOMF_DIRTY_ATTR); }
+    }
     uint32_t index = 0;
     if (g_dom_ranges_live)
         for (uint32_t x = g_dom.prev[c]; x; x = g_dom.prev[x]) index++;

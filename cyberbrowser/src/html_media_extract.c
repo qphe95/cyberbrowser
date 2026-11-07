@@ -1292,6 +1292,7 @@ typedef struct QueuedScript {
 typedef struct ScriptQueue { QueuedScript *head, *tail; } ScriptQueue;
 
 struct HtmlPageStream {
+    bool fed;   /* (data came: a byte order mark only at the very start) */
     JSContextHandle ctx;        /* the document's realm */
     char base_url[SCRIPT_URL_MAX_LEN];  /* "" for the main page (g_cyber_start_url) */
     HtmlPageStream *prev;       /* the page being parsed when this one began */
@@ -1659,6 +1660,10 @@ void html_page_stream_set_xml(HtmlPageStream *ps, const char *mime) {
 
 void html_page_stream_feed(HtmlPageStream *ps, const char *data, size_t len) {
     if (!ps || !len || ps->doc_ended) return;
+    /* (a UTF-8 byte order mark first: the encoding's, not the document's text) */
+    if (!ps->fed && len >= 3 && (unsigned char)data[0] == 0xEF && (unsigned char)data[1] == 0xBB && (unsigned char)data[2] == 0xBF) { data += 3; len -= 3; }
+    ps->fed = true;
+    if (!len) return;
     if (ps->xml) {
         if (ps->xml_len + len + 1 > ps->xml_cap) {
             size_t cap = ps->xml_cap ? ps->xml_cap : 65536;

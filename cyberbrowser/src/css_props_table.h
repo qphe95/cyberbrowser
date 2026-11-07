@@ -38,7 +38,7 @@ static const CssTypeDef g_types[] = {
     { "hue-interpolation-method", "[ shorter | longer | increasing | decreasing ] hue" },
 
     /* images */
-    { "image", "<url> | <gradient> | <image-set> | <cross-fade> | light-dark( [ <image> | none ] , [ <image> | none ] ) | <image-fn>" },
+    { "image", "<url> | <gradient> | <image-set> | <cross-fade> | light-dark( [ <image> | none ] , [ <image> | none ] ) | <image-fn> | paint( <custom-ident> ) | paint( <custom-ident> , <any-value>+ )" },
     { "image-fn", "image( [ ltr | rtl ]? [ <url> | <string> ] , <color> ) | image( [ ltr | rtl ]? [ <url> | <string> | <color> ] )" },
     { "image-set", "image-set( <image-set-option># ) | -webkit-image-set( <image-set-option># )" },
     { "image-set-option", "[ <image> | <string> ] [ <resolution> || type( <string> ) ]?" },
@@ -540,7 +540,7 @@ static CssPropDef g_props[] = {
     L("cy", "<length-percentage>", "0px", 0),
     L("d", "none | path( <string> )", "none", 0),
     L("direction", "ltr | rtl", "ltr", 1),
-    L("display", "[ <display-outside> || <display-inside> ] | <display-listitem> | <display-internal> | <display-box> | <display-legacy> | grid-lanes | inline-grid-lanes | block grid-lanes | grid-lanes block | inline grid-lanes | grid-lanes inline", "inline", 0),
+    L("display", "[ <display-outside> || <display-inside> ] | <display-listitem> | <display-internal> | <display-box> | <display-legacy> | grid-lanes | inline-grid-lanes | block grid-lanes | grid-lanes block | inline grid-lanes | grid-lanes inline | layout( <custom-ident> ) | inline-layout( <custom-ident> )", "inline", 0),
     L("dominant-baseline", "auto | text-bottom | alphabetic | ideographic | middle | central | mathematical | hanging | text-top", "auto", 1),
     L("empty-cells", "show | hide", "show", 1),
     L("field-sizing", "fixed | content", "fixed", 0),

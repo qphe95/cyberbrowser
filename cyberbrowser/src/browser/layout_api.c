@@ -1086,6 +1086,9 @@ static bool lq_note_changes(HtmlDocument *doc, char *why, size_t cap)
         int anchor, from;
         int r = lq_change_reach(&ch[i], why, cap, &move, &anchor, &from, &has, &kept);
         if (r == -2) continue;
+        /* (in a vertical writing mode the sizes the bounds read are the other way round) */
+        for (int v = anchor >= 0 ? anchor : r; v >= 0; v = lq_parent(v))
+            if (lq_box(v)->s->writing_mode) { snprintf(why, cap, "vertical writing mode"); return false; }
         /* The lowest size boundary holding it (inside its region) bounds it
          * tighter: nothing outside one changes. */
         if (anchors && !has && !move && anchor >= 0 && r != -2) {

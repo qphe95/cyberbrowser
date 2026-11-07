@@ -738,6 +738,549 @@
     /* (a declaration block is a list of its property names) */
     /* (CSS Parser API: the namespace's operations, each a parse of its input; nothing is
      * built from them yet) */
+    /* ---- CSS Paint API, a small one: registerPaint classes run here; each
+     * element whose background-image is paint(name, args) has its class's
+     * paint() draw on a recording context (canvas_api.js), its solid
+     * rectangles painted as that background ---- */
+    if (global.CSS && !global.CSS.paintWorklet) (function () {
+        var defs = Object.create(null);
+        /* (registerPaint as CSS Painting API 1 has it: the name, then the class's
+         * inputProperties, inputArguments (syntax strings), contextOptions, that it
+         * constructs, its prototype and the prototype's paint, in that order) */
+        function seqOfStrings(v, what) {
+            if (v === undefined) return [];
+            if (v === null || typeof v !== 'object' || typeof v[Symbol.iterator] !== 'function')
+                throw new TypeError("Failed to execute 'registerPaint': The '" + what + "' property is not a sequence.");
+            return Array.from(v, String);
+        }
+        var TYPE = '(?:<(?:length|number|percentage|length-percentage|color|image|url|integer|angle|time|resolution|transform-function|custom-ident|transform-list|string)>|[-_a-zA-Z][-_a-zA-Z0-9]*)[+#]?';
+        var SYNTAX = new RegExp('^\\s*(?:\\*|' + TYPE + '(?:\\s*\\|\\s*' + TYPE + ')*)\\s*$');
+        function registerPaint(name, cls) {
+            name = String(name);
+            if (!name) throw new TypeError("Failed to execute 'registerPaint': The empty string is not a valid name.");
+            if (defs[name]) throw new global.DOMException("A class with name:'" + name + "' is already registered.", 'InvalidModificationError');
+            var c = cls !== null && (typeof cls === 'object' || typeof cls === 'function') ? cls : {};
+            var ip = seqOfStrings(c.inputProperties, 'inputProperties');
+            seqOfStrings(c.inputArguments, 'inputArguments').forEach(function (t) {
+                if (!SYNTAX.test(t)) throw new TypeError("Failed to execute 'registerPaint': Invalid argument types.");
+            });
+            void c.contextOptions;
+            if (typeof cls !== 'function') throw new TypeError("Failed to execute 'registerPaint': The provided callback is not a function.");
+            var proto = cls.prototype;
+            if (proto === null || typeof proto !== 'object') throw new TypeError("Failed to execute 'registerPaint': The 'prototype' object on the class does not exist.");
+            if (typeof proto.paint !== 'function') throw new TypeError("Failed to execute 'registerPaint': The 'paint' function on the prototype does not exist.");
+            defs[name] = cls;
+            inprops[name] = ip;
+        }
+        var inprops = Object.create(null);
+        /* (the paint's styleMap: its inputProperties' computed values, Typed OM's) */
+        function inputMap(tom, ip) {
+            function one(n) {
+                var v = null;
+                try { v = tom.get(n); } catch (e) { v = null; }
+                if (v == null && /^--/.test(n) && typeof global.CSSUnparsedValue === 'function') v = new global.CSSUnparsedValue([]);
+                return v;
+            }
+            return {
+                get: function (n) { return ip.indexOf(String(n)) >= 0 ? one(String(n)) : undefined; },
+                getAll: function (n) { n = String(n); if (ip.indexOf(n) < 0) return []; try { var a = tom.getAll(n); if (a && a.length) return a; } catch (e) { } var v = one(n); return v ? [v] : []; },
+                has: function (n) { return ip.indexOf(String(n)) >= 0; },
+                keys: function () { return ip.slice()[Symbol.iterator](); },
+                get size() { return ip.length; },
+                forEach: function (cb, t) { var self = this; ip.forEach(function (n) { cb.call(t, self.getAll(n), n, self); }); }
+            };
+        }
+        function splitArgs(s) {
+            var out = [], d = 0, st = 0;
+            for (var i = 0; i < s.length; i++) {
+                var c = s[i];
+                if (c === '(') d++;
+                else if (c === ')') d--;
+                else if (c === ',' && !d) { out.push(s.slice(st, i)); st = i + 1; }
+            }
+            out.push(s.slice(st));
+            return out;
+        }
+        /* (layer k's tile size and the origins of its tiles in a W x H area, as the
+         * background-size, -position and -repeat lists say; no natural size: auto, cover
+         * and contain the area) */
+        function listAt(v, k) { var l = splitArgs(String(v || '')); return (l[k % l.length] || '').trim(); }
+        function lenOf(t, ref) {
+            if (/%$/.test(t)) return parseFloat(t) / 100 * ref;
+            var n = parseFloat(t);
+            return isFinite(n) ? n : null;
+        }
+        function tileOf(cs, k, W, H) {
+            var sz = listAt(cs.backgroundSize, k).split(/\s+/), w = W, h = H;
+            if (sz[0] && sz[0] !== 'auto' && sz[0] !== 'cover' && sz[0] !== 'contain') { var lw = lenOf(sz[0], W); if (lw !== null) w = lw; }
+            if (sz[1] && sz[1] !== 'auto') { var lh = lenOf(sz[1], H); if (lh !== null) h = lh; }
+            if (!(w > 0) || !(h > 0)) return { w: 0, h: 0, origins: [] };
+            var pos = listAt(cs.backgroundPosition, k).split(/\s+/);
+            function off(t, free) {
+                if (!t || t === 'left' || t === 'top') return 0;
+                if (t === 'center') return free / 2;
+                if (t === 'right' || t === 'bottom') return free;
+                if (/%$/.test(t)) return parseFloat(t) / 100 * free;
+                var n = parseFloat(t); return isFinite(n) ? n : 0;
+            }
+            var ox = off(pos[0], W - w), oy = off(pos[1] || pos[0] === 'top' || pos[0] === 'bottom' ? pos[1] : '50%', H - h);
+            if (pos.length < 2 && (pos[0] === 'top' || pos[0] === 'bottom')) { oy = off(pos[0], H - h); ox = (W - w) / 2; }
+            var rep = listAt(cs.backgroundRepeat, k).split(/\s+/), rx = rep[0], ry = rep[1] || rep[0];
+            if (rx === 'repeat-x') { rx = 'repeat'; ry = 'no-repeat'; }
+            else if (rx === 'repeat-y') { rx = 'no-repeat'; ry = 'repeat'; }
+            function starts(o, t, len, on) {
+                if (!on) return [o];
+                var s = o - Math.ceil(o / t) * t, out = [];
+                for (var x = s; x < len && out.length < 400; x += t) out.push(x);
+                return out;
+            }
+            var xs = starts(ox, w, W, rx !== 'no-repeat'), ys = starts(oy, h, H, ry !== 'no-repeat'), origins = [];
+            for (var i = 0; i < ys.length; i++) for (var j = 0; j < xs.length; j++) origins.push([xs[j], ys[i]]);
+            return { w: w, h: h, origins: origins };
+        }
+        function paintAll() {
+            var doc = global.document;
+            if (!doc || typeof global.__cyberPaintContext !== 'function') return;
+            var els = doc.querySelectorAll('*');
+            for (var i = 0; i < els.length; i++) {
+                var el = els[i], cs = global.getComputedStyle(el), bi = cs.backgroundImage;
+                if (!bi || bi.indexOf('paint(') < 0) continue;
+                /* (each layer's paint(name, args): the last first, as layers stack) */
+                var re = /paint\(\s*([-\w]+)\s*(?:,((?:[^()]|\((?:[^()]|\([^()]*\))*\))*))?\)/g, layers = [], mm;
+                while ((mm = re.exec(bi))) layers.push(mm);
+                if (!layers.length || !global.__cyberPaintContext(el)) continue;
+                /* (the element's computed values as Typed OM has them, else as strings) */
+                var tom = null;
+                try { tom = typeof el.computedStyleMap === 'function' ? el.computedStyleMap() : null; } catch (e) { tom = null; }
+                var props = tom ? null : { get: function (n) { var v = String(cs.getPropertyValue(n)).trim(); return { toString: function () { return v; }, value: v }; },
+                                          getAll: function (n) { return [this.get(n)]; }, has: function () { return true; } };
+                var nat = global.__cyberCanvasRect;
+                for (var li = layers.length - 1; li >= 0; li--) {
+                    var m = layers[li];
+                    if (!defs[m[1]]) continue;
+                    var args = m[2] ? splitArgs(m[2]).map(function (a) { a = a.trim(); return { toString: function () { return a; } }; }) : [];
+                    var lp = tom ? inputMap(tom, inprops[m[1]] || []) : props;
+                    /* (its tile: background-size, -position and -repeat of this layer, in the padding box) */
+                    var W = el.clientWidth, H = el.clientHeight, tl = tileOf(cs, layers.length - 1 - li, W, H);
+                    /* (what it draws held back until paint() returns: one that throws is an invalid image, nothing) */
+                    var buf = [], ok = true;
+                    Object.defineProperty(global, '__cyberCanvasRect', { configurable: true, writable: true,
+                        value: function () { buf.push(Array.prototype.slice.call(arguments)); } });
+                    try {
+                        var ctx = global.__cyberPaintContext(el, true);
+                        new defs[m[1]]().paint(ctx, { width: tl.w, height: tl.h }, lp, args);
+                    } catch (e) { ok = false; }
+                    Object.defineProperty(global, '__cyberCanvasRect', { configurable: true, writable: true, value: nat });
+                    if (ok) tl.origins.forEach(function (o) {
+                        buf.forEach(function (a) {
+                            var b = a.slice();
+                            b[0] = el;
+                            if (!b[9]) {
+                                /* (clipped to the tile, then put at its place) */
+                                var x0 = Math.max(b[1], 0), y0 = Math.max(b[2], 0), x1 = Math.min(b[1] + b[3], tl.w), y1 = Math.min(b[2] + b[4], tl.h);
+                                if (x1 <= x0 || y1 <= y0) return;
+                                b[1] = x0 + o[0]; b[2] = y0 + o[1]; b[3] = x1 - x0; b[4] = y1 - y0;
+                            }
+                            nat.apply(null, b);
+                        });
+                    });
+                }
+            }
+        }
+        var worklet = { addModule: function addModule(url) {
+            url = String(url);
+            var reg = global.__blobRegistry, b = reg && reg[url];
+            var p = b && typeof b.text === 'function' ? b.text() : global.fetch(url).then(function (r) { return r.text(); });
+            return p.then(function (code) {
+                (new Function('registerPaint', code))(registerPaint);
+                paintAll();
+                /* (painted again each frame for a while: animations and later style changes) */
+                var left = 120;
+                function again() { paintAll(); if (--left > 0 && typeof global.requestAnimationFrame === 'function') global.requestAnimationFrame(again); }
+                if (typeof global.requestAnimationFrame === 'function') global.requestAnimationFrame(again);
+            });
+        } };
+        Object.defineProperty(global.CSS, 'paintWorklet', { configurable: true, enumerable: true, get: function () { return worklet; } });
+    })();
+    /* ---- CSS Layout API, emulated: registerLayout classes run here; an element
+     * whose display is layout(name) is laid out by the engine as flow-root, its
+     * children measured by the engine (layoutNextFragment), then placed where the
+     * class's layout() puts them, as absolutely positioned boxes of the sizes it
+     * got; its block size the autoBlockSize when its own is not fixed ---- */
+    if (global.CSS && !global.CSS.layoutWorklet) (function () {
+        var defs = Object.create(null);
+        function seqOf(v) { return v && typeof v[Symbol.iterator] === 'function' ? Array.from(v, String) : []; }
+        function registerLayout(name, cls) {
+            name = String(name);
+            if (!name) throw new TypeError("Failed to execute 'registerLayout': The empty string is not a valid name.");
+            if (defs[name]) throw new global.DOMException("A class with name:'" + name + "' is already registered.", 'InvalidModificationError');
+            if (typeof cls !== 'function') throw new TypeError("Failed to execute 'registerLayout': The provided callback is not a function.");
+            var proto = cls.prototype;
+            if (!proto || typeof proto.layout !== 'function') throw new TypeError("Failed to execute 'registerLayout': The 'layout' function on the prototype does not exist.");
+            defs[name] = { cls: cls, ip: seqOf(cls.inputProperties), cip: seqOf(cls.childInputProperties) };
+        }
+        /* (a styleMap of only these properties, Typed OM values, unparsed for custom ones) */
+        function mapOf(el, ip) {
+            var tom = null;
+            try { tom = typeof el.computedStyleMap === 'function' ? el.computedStyleMap() : null; } catch (e) { tom = null; }
+            var cs = global.getComputedStyle(el);
+            function one(n) {
+                var v = null;
+                try { v = tom ? tom.get(n) : null; } catch (e) { v = null; }
+                if (v == null) {
+                    var t = String(cs.getPropertyValue(n));
+                    v = typeof global.CSSUnparsedValue === 'function' && /^--/.test(n) ? new global.CSSUnparsedValue(t ? [t] : []) : { toString: function () { return t; } };
+                }
+                return v;
+            }
+            return {
+                get: function (n) { n = String(n); return ip.indexOf(n) >= 0 ? one(n) : undefined; },
+                getAll: function (n) { n = String(n); return ip.indexOf(n) >= 0 ? [one(n)] : []; },
+                has: function (n) { return ip.indexOf(String(n)) >= 0; },
+                keys: function () { return ip.slice()[Symbol.iterator](); },
+                get size() { return ip.length; },
+                forEach: function (cb, t) { var self = this; ip.forEach(function (n) { cb.call(t, self.getAll(n), n, self); }); }
+            };
+        }
+        /* (the inline style properties set here, each with what it was: put back
+         * before each pass, leaving the page's own changes alone) */
+        var touched = [];
+        function put(el, css) {
+            if (!el.__cbLay) { el.__cbLay = []; touched.push(el); }
+            for (var k in css) {
+                el.__cbLay.push([k, el.style.getPropertyValue(k), el.style.getPropertyPriority(k)]);
+                el.style.setProperty(k, css[k], 'important');
+            }
+        }
+        function restore(el) {
+            var rec = el.__cbLay;
+            if (!rec) return;
+            for (var i = rec.length - 1; i >= 0; i--) {
+                if (rec[i][1]) el.style.setProperty(rec[i][0], rec[i][1], rec[i][2]);
+                else el.style.removeProperty(rec[i][0]);
+            }
+            delete el.__cbLay;
+        }
+        function restoreAll() {
+            var dn = global.document ? global.document.querySelectorAll('*') : [];
+            for (var di = 0; di < dn.length; di++) if (dn[di].__cbLayDone) delete dn[di].__cbLayDone;
+            touched.forEach(restore);
+            touched = [];
+            var doc = global.document;
+            if (doc) Array.prototype.slice.call(doc.querySelectorAll('span[data-cyber-anon]')).forEach(function (sp) {
+                var p = sp.parentNode;
+                if (!p) return;
+                while (sp.firstChild) p.insertBefore(sp.firstChild, sp);
+                p.removeChild(sp);
+            });
+        }
+        /* (a size given as a border-box one, in the element's own box-sizing) */
+        function boxSize(cs, sz, edge) { return px(cs.boxSizing === 'border-box' ? sz : Math.max(0, sz - edge)); }
+        function px(n) { return n + 'px'; }
+        function num(v, d) { v = Number(v); return v === v && v !== undefined && isFinite(v) ? v : d; }
+        function modeOf(cs) {
+            var wm = String(cs.writingMode || 'horizontal-tb');
+            return { vert: /^(vertical|sideways)/.test(wm), lr: /-lr$/.test(wm), rtl: cs.direction === 'rtl' };
+        }
+        /* (the children: in-flow elements and text runs, a run wrapped in a span) */
+        function childrenOf(el) {
+            var out = [];
+            Array.prototype.slice.call(el.childNodes).forEach(function (n) {
+                if (n.nodeType === 3) {
+                    if (!/\S/.test(n.data)) return;
+                    var sp = el.ownerDocument.createElement('span');
+                    sp.setAttribute('data-cyber-anon', '');
+                    el.insertBefore(sp, n);
+                    sp.appendChild(n);
+                    out.push(sp);
+                } else if (n.nodeType === 1) {
+                    var ncs = global.getComputedStyle(n);
+                    /* (out-of-flow boxes are the containing block's, not children) */
+                    if (ncs.display === 'none' || ncs.position === 'absolute' || ncs.position === 'fixed') return;
+                    out.push(n);
+                }
+            });
+            return out;
+        }
+        function unwrap(el) {
+            Array.prototype.slice.call(el.querySelectorAll('span[data-cyber-anon]')).forEach(function (sp) {
+                while (sp.firstChild) sp.parentNode.insertBefore(sp.firstChild, sp);
+                sp.parentNode.removeChild(sp);
+            });
+        }
+        function edgesOf(el, cs, m) {
+            function f(p) { return parseFloat(cs.getPropertyValue(p)) || 0; }
+            var t = f('border-top-width') + f('padding-top'), b = f('border-bottom-width') + f('padding-bottom');
+            var l = f('border-left-width') + f('padding-left'), r = f('border-right-width') + f('padding-right');
+            var sbw = Math.max(0, el.offsetWidth - el.clientWidth - f('border-left-width') - f('border-right-width'));
+            var sbh = Math.max(0, el.offsetHeight - el.clientHeight - f('border-top-width') - f('border-bottom-width'));
+            /* (scrollbars only where it scrolls) */
+            if (!/scroll|auto/.test(cs.overflowY + cs.overflow)) sbw = 0;
+            if (!/scroll|auto/.test(cs.overflowX + cs.overflow)) sbh = 0;
+            r += sbw; b += sbh;
+            var is, ie, bs, be;
+            if (!m.vert) { is = m.rtl ? r : l; ie = m.rtl ? l : r; bs = t; be = b; }
+            else { is = m.rtl ? b : t; ie = m.rtl ? t : b; bs = m.lr ? l : r; be = m.lr ? r : l; }
+            return { inlineStart: is, inlineEnd: ie, blockStart: bs, blockEnd: be, inline: is + ie, block: bs + be };
+        }
+        /* (the inline and block size of a box, as its parent's writing mode has them) */
+        function sizes(el, m) { var w = el.offsetWidth, h = el.offsetHeight; return m.vert ? [h, w] : [w, h]; }
+        /* (what the box's sizes depend on: its children hidden, then a small box in it) */
+        function probe(el, kids, m, cs) {
+            kids.forEach(function (k) { put(k, { display: 'none' }); });
+            var doc = el.ownerDocument, p = doc.createElement('div');
+            p.style.cssText = 'display:block;margin:0;padding:0;border:0;width:0;height:0;float:none;position:static';
+            el.appendChild(p);
+            var a = sizes(el, m);
+            p.style.width = '7px'; p.style.height = '7px';
+            var b = sizes(el, m), fill = 0;
+            if (a[0] !== b[0]) {
+                /* (shrink-to-fit: the inline space it has, which many 1px pieces fill) */
+                p.style.cssText = 'display:block;margin:0;padding:0;border:0;font-size:0;line-height:0;position:static;float:none;' +
+                    (m.vert ? 'writing-mode:' + cs.writingMode : '');
+                p.innerHTML = new Array(1601).join('<i style="display:inline-block;width:1px;height:1px"></i> ');
+                fill = sizes(el, m)[0];
+            }
+            el.removeChild(p);
+            kids.forEach(restore);
+            touched = touched.filter(function (t) { return kids.indexOf(t) < 0; });
+            return { a: a, inlDep: a[0] !== b[0], blkDep: a[1] !== b[1], fill: fill };
+        }
+        /* (layoutNextFragment: the child absolutely positioned in its parent, made
+         * the percentage size; its inline size fitted to the available one) */
+        function measure(el, k, o, m) {
+            var ai = Math.max(0, num(o.availableInlineSize, 0)), ab = Math.max(0, num(o.availableBlockSize, 0));
+            var pi = num(o.percentageInlineSize, ai), pb = num(o.percentageBlockSize, ab);
+            if (pi < 0) pi = ai;
+            if (pb < 0) pb = ab;
+            var fi = o.fixedInlineSize != null ? num(o.fixedInlineSize, null) : null, fb = o.fixedBlockSize != null ? num(o.fixedBlockSize, null) : null;
+            var fw = m.vert ? fb : fi, fh = m.vert ? fi : fb, aw = m.vert ? ab : ai, ah = m.vert ? ai : ab;
+            var cw = m.vert ? pb : pi, ch = m.vert ? pi : pb;
+            var kept = el.getAttribute('style'), kk = k.getAttribute('style');
+            function box(w, h) {
+                el.style.setProperty('padding', '0', 'important');
+                el.style.setProperty('border-width', '0', 'important');
+                el.style.setProperty('box-sizing', 'content-box', 'important');
+                el.style.setProperty('min-width', '0', 'important'); el.style.setProperty('max-width', 'none', 'important');
+                el.style.setProperty('min-height', '0', 'important'); el.style.setProperty('max-height', 'none', 'important');
+                el.style.setProperty('width', px(w), 'important'); el.style.setProperty('height', px(h), 'important');
+                el.style.setProperty('overflow', 'visible', 'important');
+                if (global.getComputedStyle(el).position === 'static') el.style.setProperty('position', 'relative', 'important');
+            }
+            k.style.setProperty('position', 'absolute', 'important');
+            k.style.setProperty('left', '0', 'important'); k.style.setProperty('top', '0', 'important');
+            k.style.setProperty('right', 'auto', 'important'); k.style.setProperty('bottom', 'auto', 'important');
+            k.style.setProperty('float', 'none', 'important');
+            if (fw != null) { k.style.setProperty('width', px(fw), 'important'); k.style.setProperty('min-width', '0', 'important'); k.style.setProperty('max-width', 'none', 'important'); }
+            if (fh != null) { k.style.setProperty('height', px(fh), 'important'); k.style.setProperty('min-height', '0', 'important'); k.style.setProperty('max-height', 'none', 'important'); }
+            if (fw != null || fh != null) k.style.setProperty('box-sizing', 'border-box', 'important');
+            var kv = modeOf(global.getComputedStyle(k)).vert, ix = kv ? 1 : 0;
+            box(cw, ch);
+            var s1 = [k.offsetWidth, k.offsetHeight];
+            box(cw + 100, ch + 100);
+            var s2 = [k.offsetWidth, k.offsetHeight];
+            var r = s1;
+            if (s1[ix] === s2[ix] && (ix ? fh : fw) == null) {
+                /* (not a percentage: shrink-to-fit against the available size) */
+                box(aw, ah);
+                r = [k.offsetWidth, k.offsetHeight];
+                /* (the block size as the percentage size has it) */
+                box(cw, ch);
+                k.style.setProperty(ix ? 'height' : 'width', px(r[ix]), 'important');
+                k.style.setProperty('box-sizing', 'border-box', 'important');
+                r = [k.offsetWidth, k.offsetHeight];
+            }
+            if (kept === null) el.removeAttribute('style'); else el.setAttribute('style', kept);
+            if (kk === null) k.removeAttribute('style'); else k.setAttribute('style', kk);
+            return m.vert ? { inlineSize: r[1], blockSize: r[0] } : { inlineSize: r[0], blockSize: r[1] };
+        }
+        function Fragment(sz, data) {
+            this.inlineSize = sz.inlineSize; this.blockSize = sz.blockSize;
+            this.inlineOffset = 0; this.blockOffset = 0;
+            this.data = data; this.breakToken = null;
+        }
+        function cloneData(d) {
+            if (d === undefined) return undefined;
+            if (typeof d === 'function' || (typeof global.SharedArrayBuffer === 'function' && d instanceof global.SharedArrayBuffer))
+                throw new global.DOMException('The data could not be cloned.', 'DataCloneError');
+            return typeof global.structuredClone === 'function' ? global.structuredClone(d) : JSON.parse(JSON.stringify(d));
+        }
+        /* (a pass's children and fragments are good in that pass only) */
+        var passNo = 0;
+        function bad() { throw new TypeError('invalid custom layout'); }
+        /* (a promise that a callback must return; one still pending after the
+         * microtasks have run is a failure) */
+        function settle(p) {
+            if (!p || typeof p.then !== 'function') bad();
+            return Promise.race([p, new Promise(function (r, j) { global.setTimeout(function () { j(new TypeError('pending')); }, 0); })]);
+        }
+        /* (a custom layout's name, for an element whose display is layout(name)) */
+        function customOf(el) {
+            var mm = /^(?:inline-)?layout\(\s*([-\w]+)\s*\)$/.exec(String(global.getComputedStyle(el).display));
+            return mm && defs[mm[1]] ? defs[mm[1]] : null;
+        }
+        /* (outer: a parent custom layout's options for this one, when it lays it out) */
+        async function layoutOne(el, def, outer) {
+            var cs = global.getComputedStyle(el), m = modeOf(cs);
+            var kids = childrenOf(el);
+            var pr = probe(el, kids, m, cs);
+            var edges = edgesOf(el, cs, m);
+            var inst = def.inst || (def.inst = new def.cls());
+            function childrenFor(pass) {
+                return kids.map(function (k) {
+                    return {
+                        __el: k, __pass: pass,
+                        styleMap: mapOf(k, def.cip),
+                        intrinsicSizes: async function () {
+                            if (this.__pass !== passNo) bad();
+                            var cdef = customOf(k);
+                            if (cdef) {
+                                /* (a child with a custom layout: its class's intrinsic sizes, with its edges) */
+                                var kcs = global.getComputedStyle(k), ke = edgesOf(k, kcs, modeOf(kcs));
+                                var ci = cdef.inst || (cdef.inst = new cdef.cls());
+                                var cr = await settle(ci.intrinsicSizes([], ke, mapOf(k, cdef.ip)));
+                                return { minContentSize: Math.max(0, num(cr && cr.minContentSize, 0)) + ke.inline, maxContentSize: Math.max(0, num(cr && cr.maxContentSize, 0)) + ke.inline };
+                            }
+                            var w = measure(el, k, { availableInlineSize: 0 }, m), x = measure(el, k, { availableInlineSize: 1e6 }, m);
+                            return { minContentSize: w.inlineSize, maxContentSize: x.inlineSize };
+                        },
+                        layoutNextFragment: async function (o) {
+                            if (this.__pass !== passNo) bad();
+                            o = o || {};
+                            var d = cloneData(o.data);
+                            /* (a child with a custom layout of its own: laid out by it, its data the fragment's) */
+                            var cdef = customOf(k), inner = null;
+                            if (cdef) { k.__cbLayDone = true; inner = await layoutOne(k, cdef, { data: d, fixedInlineSize: o.fixedInlineSize, fixedBlockSize: o.fixedBlockSize }); }
+                            var f = new Fragment(measure(el, k, o, m), inner ? cloneData(inner.data) : undefined);
+                            if (inner && f.data && typeof f.data === 'object') Object.freeze(f.data);
+                            Object.defineProperty(f, '__el', { value: k });
+                            Object.defineProperty(f, '__pass', { value: passNo });
+                            return f;
+                        }
+                    };
+                });
+            }
+            var styleMap = mapOf(el, def.ip);
+            var fixedInline = pr.a[0];
+            if (pr.inlDep) {
+                /* (shrink-to-fit: the class's intrinsic sizes fitted to the space there is) */
+                var mn = 0, mx = 0;
+                passNo++;
+                var is = await settle(inst.intrinsicSizes(childrenFor(passNo), edges, styleMap));
+                if (is !== undefined && (!is || typeof is !== 'object')) bad();
+                if (is) { mn = Math.max(0, num(is.minContentSize, 0)); mx = Math.max(0, num(is.maxContentSize, 0)); }
+                var avail = Math.max(0, pr.fill - edges.inline);
+                fixedInline = Math.max(mn, Math.min(mx, avail)) + edges.inline;
+                var o = {};
+                o[m.vert ? 'height' : 'width'] = boxSize(cs, fixedInline, edges.inline);
+                put(el, o);
+                fixedInline = sizes(el, m)[0];
+            }
+            passNo++;
+            var children = childrenFor(passNo);
+            var fixedBlock = pr.blkDep ? null : pr.a[1];
+            if (outer && outer.fixedInlineSize != null) fixedInline = num(outer.fixedInlineSize, fixedInline);
+            if (outer && outer.fixedBlockSize != null) fixedBlock = num(outer.fixedBlockSize, fixedBlock);
+            var constraints = {
+                fixedInlineSize: fixedInline, fixedBlockSize: fixedBlock,
+                availableInlineSize: Math.max(0, fixedInline - edges.inline),
+                availableBlockSize: fixedBlock == null ? null : Math.max(0, fixedBlock - edges.block),
+                percentageInlineSize: Math.max(0, fixedInline - edges.inline),
+                percentageBlockSize: fixedBlock == null ? null : Math.max(0, fixedBlock - edges.block),
+                blockFragmentationOffset: null, blockFragmentationType: 'none', data: outer ? outer.data : undefined
+            };
+            var res = await settle(inst.layout(children, edges, constraints, styleMap, null));
+            if (res === undefined || res === null) res = {};
+            if (typeof res !== 'object') bad();
+            var frags = res.childFragments === undefined ? [] : Array.from(res.childFragments);
+            frags.forEach(function (f) { if (!f || f.__pass !== passNo || kids.indexOf(f.__el) < 0) bad(); });
+            cloneData(res.data);
+            /* (its block size, then its children where they go) */
+            if (fixedBlock == null) {
+                var ob = {};
+                ob[m.vert ? 'width' : 'height'] = boxSize(cs, Math.max(0, num(res.autoBlockSize, 0)), edges.block);
+                put(el, ob);
+            }
+            if (cs.position === 'static') put(el, { position: 'relative' });
+            var W = el.offsetWidth, H = el.offsetHeight;
+            var bl = parseFloat(cs.borderLeftWidth) || 0, bt = parseFloat(cs.borderTopWidth) || 0;
+            var placed = [];
+            frags.forEach(function (f) {
+                if (!f || !f.__el) return;
+                var k = f.__el, io = num(f.inlineOffset, 0), bo = num(f.blockOffset, 0), inl = f.inlineSize, blk = f.blockSize;
+                var x, y, w = m.vert ? blk : inl, h = m.vert ? inl : blk;
+                if (!m.vert) { x = m.rtl ? W - io - inl : io; y = bo; }
+                else { x = m.lr ? bo : W - bo - blk; y = m.rtl ? H - io - inl : io; }
+                placed.push(k);
+                put(k, { position: 'absolute', margin: '0', left: px(x - bl), top: px(y - bt), right: 'auto', bottom: 'auto',
+                         width: px(w), height: px(h), 'box-sizing': 'border-box', 'min-width': '0', 'max-width': 'none',
+                         'min-height': '0', 'max-height': 'none', float: 'none' });
+            });
+            kids.forEach(function (k) { if (placed.indexOf(k) < 0) put(k, { display: 'none' }); });
+            return res;
+        }
+        var busy = false, mo = null, queued = false;
+        async function layoutAll() {
+            var doc = global.document;
+            if (!doc || busy) return;
+            busy = true;
+            try { await layoutAll1(doc); } finally { if (mo) mo.takeRecords(); busy = false; }
+        }
+        async function layoutAll1(doc) {
+            restoreAll();
+            var els = doc.querySelectorAll('*');
+            for (var i = 0; i < els.length; i++) {
+                var el = els[i], d = String(global.getComputedStyle(el).display);
+                var mm = /^(?:inline-)?layout\(\s*([-\w]+)\s*\)$/.exec(d);
+                if (!mm || !defs[mm[1]] || el.__cbLayDone) continue;
+                var before = touched.length;
+                try { await layoutOne(el, defs[mm[1]]); }
+                catch (e) {
+                    /* (a layout that fails: the box as flow layout has it) */
+                    touched.slice(before).forEach(restore);
+                    touched = touched.slice(0, before);
+                    unwrap(el);
+                }
+            }
+        }
+        /* (module text: its imports' exports put before it) */
+        function fetchText(url) {
+            var reg = global.__blobRegistry, b = reg && reg[url];
+            return b && typeof b.text === 'function' ? b.text() : global.fetch(url).then(function (r) { return r.text(); });
+        }
+        async function moduleCode(code, url) {
+            var re = /^\s*import\s+(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s+['"]([^'"]+)['"]\s*;?/gm, mm, pre = '';
+            var deps = [];
+            while ((mm = re.exec(code))) deps.push(mm[1]);
+            for (var i = 0; i < deps.length; i++) {
+                var u = deps[i];
+                try { u = new global.URL(u, url || global.location.href).href; } catch (e) { }
+                var t = await fetchText(u);
+                pre += String(t).replace(/^\s*export\s+default\s+/gm, '').replace(/^\s*export\s+(?=function|const|let|var|class|async)/gm, '')
+                                .replace(/^\s*export\s*\{[^}]*\}\s*;?/gm, '') + '\n';
+            }
+            return pre + code.replace(re, '');
+        }
+        var worklet = { addModule: function addModule(url) {
+            url = String(url);
+            var abs = url;
+            try { abs = new global.URL(url, global.location.href).href; } catch (e) { }
+            return fetchText(url).then(function (code) { return moduleCode(String(code), abs); }).then(function (code) {
+                (new Function('registerLayout', code))(registerLayout);
+                /* (laid out again on the page's own DOM and style changes) */
+                if (!mo && typeof global.MutationObserver === 'function' && global.document) {
+                    mo = new global.MutationObserver(function () {
+                        if (busy || queued) return;
+                        queued = true;
+                        global.requestAnimationFrame(function () { queued = false; layoutAll(); });
+                    });
+                    mo.observe(global.document, { childList: true, subtree: true, attributes: true, characterData: true });
+                }
+                return layoutAll();
+            }).then(function () { return undefined; });
+        } };
+        Object.defineProperty(global.CSS, 'layoutWorklet', { configurable: true, enumerable: true, get: function () { return worklet; } });
+    })();
     if (global.CSS && !global.CSS.parseStylesheet) {
         [['parseStylesheet', true], ['parseRuleList', true], ['parseRule', true], ['parseDeclarationList', true],
          ['parseDeclaration', false], ['parseValue', false], ['parseValueList', false], ['parseCommaValueList', false]].forEach(function (p) {

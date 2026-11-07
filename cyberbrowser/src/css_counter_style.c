@@ -524,24 +524,24 @@ static const char k_predefined[] =
     " '\\30EA' '\\30CC' '\\30EB' '\\30F2' '\\30EF' '\\30AB' '\\30E8' '\\30BF' '\\30EC' '\\30BD' '\\30C4' '\\30CD' '\\30CA' '\\30E9' '\\30E0' '\\30A6' '\\30F0'"
     " '\\30CE' '\\30AA' '\\30AF' '\\30E4' '\\30DE' '\\30B1' '\\30D5' '\\30B3' '\\30A8' '\\30C6' '\\30A2' '\\30B5' '\\30AD' '\\30E6' '\\30E1' '\\30DF' '\\30B7'"
     " '\\30F1' '\\30D2' '\\30E2' '\\30BB' '\\30B9'; suffix: '\\3001'; }"
-    "@counter-style cjk-earthly-branch { system: alphabetic; symbols: '\\5B50' '\\4E11' '\\5BC5' '\\536F' '\\8FB0' '\\5DF3' '\\5348'"
+    "@counter-style cjk-earthly-branch { system: fixed; symbols: '\\5B50' '\\4E11' '\\5BC5' '\\536F' '\\8FB0' '\\5DF3' '\\5348'"
     " '\\672A' '\\7533' '\\9149' '\\620C' '\\4EA5'; suffix: '\\3001'; fallback: cjk-decimal; }"
-    "@counter-style cjk-heavenly-stem { system: alphabetic; symbols: '\\7532' '\\4E59' '\\4E19' '\\4E01' '\\620A' '\\5DF1' '\\5E9A'"
+    "@counter-style cjk-heavenly-stem { system: fixed; symbols: '\\7532' '\\4E59' '\\4E19' '\\4E01' '\\620A' '\\5DF1' '\\5E9A'"
     " '\\8F9B' '\\58EC' '\\7678'; suffix: '\\3001'; fallback: cjk-decimal; }"
     "@counter-style disc { system: cyclic; symbols: '\\2022'; suffix: ' '; }"
     "@counter-style circle { system: cyclic; symbols: '\\25E6'; suffix: ' '; }"
     "@counter-style square { system: cyclic; symbols: '\\25AA'; suffix: ' '; }"
     "@counter-style disclosure-open { system: cyclic; symbols: '\\25BE'; suffix: ' '; }"
     "@counter-style disclosure-closed { system: cyclic; symbols: '\\25B8'; suffix: ' '; }"
-    "@counter-style simp-chinese-informal { system: -cb-special; range: -9999 9999; negative: \\8D1F; suffix: '\\3001'; fallback: cjk-decimal; }"
-    "@counter-style simp-chinese-formal { system: -cb-special; range: -9999 9999; negative: \\8D1F; suffix: '\\3001'; fallback: cjk-decimal; }"
-    "@counter-style trad-chinese-informal { system: -cb-special; range: -9999 9999; negative: \\8CA0; suffix: '\\3001'; fallback: cjk-decimal; }"
-    "@counter-style trad-chinese-formal { system: -cb-special; range: -9999 9999; negative: \\8CA0; suffix: '\\3001'; fallback: cjk-decimal; }"
-    "@counter-style japanese-informal { system: -cb-special; range: -9999 9999; negative: '\\30DE\\30A4\\30CA\\30B9'; suffix: '\\3001'; fallback: cjk-decimal; }"
-    "@counter-style japanese-formal { system: -cb-special; range: -9999 9999; negative: '\\30DE\\30A4\\30CA\\30B9'; suffix: '\\3001'; fallback: cjk-decimal; }"
-    "@counter-style korean-hangul-formal { system: -cb-special; range: -9999 9999; negative: '\\B9C8\\C774\\B108\\C2A4  '; suffix: ', '; fallback: cjk-decimal; }"
-    "@counter-style korean-hanja-informal { system: -cb-special; range: -9999 9999; negative: '\\B9C8\\C774\\B108\\C2A4  '; suffix: ', '; fallback: cjk-decimal; }"
-    "@counter-style korean-hanja-formal { system: -cb-special; range: -9999 9999; negative: '\\B9C8\\C774\\B108\\C2A4  '; suffix: ', '; fallback: cjk-decimal; }"
+    "@counter-style simp-chinese-informal { system: -cb-special; range: -9999999999999999 9999999999999999; negative: \\8D1F; suffix: '\\3001'; fallback: cjk-decimal; }"
+    "@counter-style simp-chinese-formal { system: -cb-special; range: -9999999999999999 9999999999999999; negative: \\8D1F; suffix: '\\3001'; fallback: cjk-decimal; }"
+    "@counter-style trad-chinese-informal { system: -cb-special; range: -9999999999999999 9999999999999999; negative: \\8CA0; suffix: '\\3001'; fallback: cjk-decimal; }"
+    "@counter-style trad-chinese-formal { system: -cb-special; range: -9999999999999999 9999999999999999; negative: \\8CA0; suffix: '\\3001'; fallback: cjk-decimal; }"
+    "@counter-style japanese-informal { system: -cb-special; range: -9999999999999999 9999999999999999; negative: '\\30DE\\30A4\\30CA\\30B9'; suffix: '\\3001'; fallback: cjk-decimal; }"
+    "@counter-style japanese-formal { system: -cb-special; range: -9999999999999999 9999999999999999; negative: '\\30DE\\30A4\\30CA\\30B9'; suffix: '\\3001'; fallback: cjk-decimal; }"
+    "@counter-style korean-hangul-formal { system: -cb-special; range: -9999999999999999 9999999999999999; negative: '\\B9C8\\C774\\B108\\C2A4  '; suffix: ', '; fallback: cjk-decimal; }"
+    "@counter-style korean-hanja-informal { system: -cb-special; range: -9999999999999999 9999999999999999; negative: '\\B9C8\\C774\\B108\\C2A4  '; suffix: ', '; fallback: cjk-decimal; }"
+    "@counter-style korean-hanja-formal { system: -cb-special; range: -9999999999999999 9999999999999999; negative: '\\B9C8\\C774\\B108\\C2A4  '; suffix: ', '; fallback: cjk-decimal; }"
     "@counter-style ethiopic-numeric { system: -cb-special; range: 1 infinite; suffix: '/ '; }";
 
 /* @counter-style rules in css text (the predefined ones too). */
@@ -677,6 +677,49 @@ static void cjk(const CStyle *c, long long v, Out *o)
     }
 }
 
+/* CJK long forms past 9999: four-digit groups, each with its group marker
+ * (Chinese: one zero before a group with leading zeros or after empty
+ * ones; Korean: groups apart by a space; korean-hanja-informal: no one
+ * before the ten-thousands marker) */
+static void cjk_ext(const CStyle *c, long long v, Out *o)
+{
+    if (v <= 9999) { cjk(c, v, o); return; }
+    static const char *const g_simp[] = { "\xe4\xb8\x87", "\xe4\xba\xbf", "\xe4\xb8\x87\xe4\xba\xbf" };   /* (wan, yi, wan-yi) */
+    static const char *const g_trad[] = { "\xe8\x90\xac", "\xe5\x84\x84", "\xe5\x85\x86" };   /* (wan, yi, zhao) */
+    static const char *const g_ja_inf[] = { "\xe4\xb8\x87", "\xe5\x84\x84", "\xe5\x85\x86" };   /* (man, oku, cho) */
+    static const char *const g_ko[] = { "\xeb\xa7\x8c", "\xec\x96\xb5", "\xec\xa1\xb0" };   /* (man, eok, jo) */
+    const char *const *gm = g_trad;
+    bool chinese = false, korean = false;
+    switch (c->special) {
+    case SP_SIMP_INF: case SP_SIMP_FORM: gm = g_simp; chinese = true; break;
+    case SP_TRAD_INF: case SP_TRAD_FORM: gm = g_trad; chinese = true; break;
+    case SP_JA_INF: gm = g_ja_inf; break;
+    case SP_JA_FORM: gm = g_trad; break;
+    case SP_KO_HANGUL: gm = g_ko; korean = true; break;
+    case SP_KO_HANJA_INF: case SP_KO_HANJA_FORM: gm = g_trad; korean = true; break;
+    }
+    int g[4];
+    for (int i = 0; i < 4; i++) { g[i] = (int)(v % 10000); v /= 10000; }
+    int top = 3;
+    while (top > 0 && !g[top]) top--;
+    bool zero_pending = false, first = true;
+    char buf[128];
+    for (int i = top; i >= 0; i--) {
+        if (!g[i]) { if (chinese) zero_pending = true; continue; }
+        if (chinese && i < top && g[i] < 1000) zero_pending = true;
+        if (zero_pending) { out_add(o, "\xe9\x9b\xb6"); zero_pending = false; }
+        if (korean && !first) out_add(o, " ");
+        if (!(c->special == SP_KO_HANJA_INF && i == 1 && g[i] == 1)) {
+            Out t = { buf, sizeof buf, 0, true };
+            buf[0] = 0;
+            cjk(c, g[i], &t);
+            out_add(o, buf);
+        }
+        if (i > 0) out_add(o, gm[i - 1]);
+        first = false;
+    }
+}
+
 /* ethiopic-numeric (Counter Styles 3 7.1.3), v >= 1. */
 static void ethiopic(long long v, Out *o)
 {
@@ -772,7 +815,7 @@ static void cs_rep(int si, long long v, Out *o, int depth, int *used)
             break;
         case CS_SPECIAL:
             if (c->special == SP_ETHIOPIC) ethiopic(a, o);
-            else if (a <= 9999) cjk(c, a, o);
+            else if (a <= 9999999999999999LL) cjk_ext(c, a, o);
             else ok = false;
             break;
         }

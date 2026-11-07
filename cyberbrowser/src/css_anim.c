@@ -104,13 +104,14 @@ int anim_prop_of(const char *name)
 /* (a function: its name and arguments, each a number with its unit or a
  * word (word[k]), sep[k] what came before it; bare: a word alone, no
  * parentheses, as a clip-path's reference box) */
+#define TF_ARGS 48
 typedef struct {
     char name[24];
     int n;
-    double v[24];
-    char unit[24][16];
-    unsigned char word[24];
-    char sep[24];
+    double v[TF_ARGS];
+    char unit[TF_ARGS][16];
+    unsigned char word[TF_ARGS];
+    char sep[TF_ARGS];
     unsigned char bare;
 } TfFn;
 
@@ -139,7 +140,7 @@ static int tf_fns(const char *s, TfFn *out, int cap)
             char sep = ' ';
             while (*p && (isspace((unsigned char)*p) || *p == ',')) { if (*p == ',') sep = ','; p++; }
             if (*p == ')') break;
-            if (f->n >= 24) return -1;
+            if (f->n >= TF_ARGS) return -1;
             f->sep[f->n] = f->n ? sep : 0;
             char *e = NULL;
             double v = strtod(p, &e);
@@ -180,13 +181,122 @@ static void tf_identity(const TfFn *f, TfFn *o)
     }
 }
 
-static __thread char t_tf_ring[8][640];
+static __thread char t_tf_ring[8][1536];
 static __thread int t_tf_at;
+
+/* (path()s of the same commands: their numbers between; NULL when not) */
+static const char *path_mix_text(const char *a, const char *b, double t)
+{
+    const char *pa = strchr(a, '('), *pb = strchr(b, '(');
+    if (!pa || !pb) return NULL;
+    pa++; pb++;
+    while (isspace((unsigned char)*pa)) pa++;
+    while (isspace((unsigned char)*pb)) pb++;
+    /* (the fill rules the same) */
+    char ra[16] = "", rb[16] = "";
+    if (isalpha((unsigned char)*pa)) { int k = 0; while (isalpha((unsigned char)*pa) && k < 15) ra[k++] = *pa++; ra[k] = 0; while (*pa == ',' || isspace((unsigned char)*pa)) pa++; }
+    if (isalpha((unsigned char)*pb)) { int k = 0; while (isalpha((unsigned char)*pb) && k < 15) rb[k++] = *pb++; rb[k] = 0; while (*pb == ',' || isspace((unsigned char)*pb)) pb++; }
+    if (strcasecmp(ra[0] ? ra : "nonzero", rb[0] ? rb : "nonzero")) return NULL;
+    if ((*pa != '"' && *pa != '\'') || (*pb != '"' && *pb != '\'')) return NULL;
+    char qa = *pa++, qb = *pb++;
+    char *o = t_tf_ring[t_tf_at++ & 7];
+    size_t at = 0, cap = sizeof t_tf_ring[0];
+    at += (size_t)snprintf(o, cap, "path(%s%s\"", ra, ra[0] ? ", " : "");
+    for (;;) {
+        while (*pa && *pa != qa && (isspace((unsigned char)*pa) || *pa == ',')) pa++;
+        while (*pb && *pb != qb && (isspace((unsigned char)*pb) || *pb == ',')) pb++;
+        bool ea = !*pa || *pa == qa, eb = !*pb || *pb == qb;
+        if (ea || eb) { if (ea != eb) return NULL; break; }
+        if (isalpha((unsigned char)*pa) || isalpha((unsigned char)*pb)) {
+            if (*pa != *pb) return NULL;
+            at += (size_t)snprintf(o + at, at < cap ? cap - at : 0, "%c ", *pa);
+            pa++; pb++;
+            continue;
+        }
+        char *e1 = NULL, *e2 = NULL;
+        double x = strtod(pa, &e1), y = strtod(pb, &e2);
+        if (e1 == pa || e2 == pb) return NULL;
+        pa = e1; pb = e2;
+        at += (size_t)snprintf(o + at, at < cap ? cap - at : 0, "%.6g ", x + (y - x) * t);
+        if (at >= cap) return NULL;
+    }
+    at += (size_t)snprintf(o + at, at < cap ? cap - at : 0, "\")");
+    return at < cap ? o : NULL;
+}
+
+/* (a path() as the shape() it equals, to go between it and a shape(); false
+ * when it can't) */
+static bool path_as_shape(const char *s, char *o, size_t cap)
+{
+    const char *p = strchr(s, '(');
+    if (!p) return false;
+    p++;
+    while (isspace((unsigned char)*p)) p++;
+    char rule[16] = "nonzero";
+    if (isalpha((unsigned char)*p)) {
+        int k = 0;
+        while (isalpha((unsigned char)*p) && k < 15) rule[k++] = *p++;
+        rule[k] = 0;
+        while (*p == ',' || isspace((unsigned char)*p)) p++;
+    }
+    if (*p != '"' && *p != '\'') return false;
+    char qt = *p++;
+    size_t at = 0;
+    bool first = true;
+    char cmd = 0;
+#define PS(...) do { int r_ = snprintf(o + at, cap - at, __VA_ARGS__); if (r_ < 0 || (size_t)r_ >= cap - at) return false; at += (size_t)r_; } while (0)
+    PS("shape(%s ", rule);
+    for (;;) {
+        while (*p && *p != qt && (isspace((unsigned char)*p) || *p == ',')) p++;
+        if (!*p || *p == qt) break;
+        if (isalpha((unsigned char)*p)) cmd = *p++;
+        else if (!cmd) return false;
+        char C = (char)toupper((unsigned char)cmd);
+        bool rel = C != cmd;
+        int need = C == 'Z' ? 0 : C == 'H' || C == 'V' ? 1 : C == 'M' || C == 'L' || C == 'T' ? 2 : C == 'S' || C == 'Q' ? 4 : C == 'C' ? 6 : C == 'A' ? 7 : -1;
+        if (need < 0) return false;
+        double a[7];
+        for (int i = 0; i < need; i++) {
+            while (*p && (isspace((unsigned char)*p) || *p == ',')) p++;
+            char *e = NULL;
+            a[i] = strtod(p, &e);
+            if (e == p) return false;
+            p = e;
+        }
+        const char *tb = rel ? "by" : "to";
+        if (first) {
+            if (C != 'M') return false;
+            PS("from %.6gpx %.6gpx", a[0], a[1]);
+            first = false;
+            cmd = rel ? 'l' : 'L';
+            continue;
+        }
+        if (C == 'Z') { PS(", close"); cmd = 0; }
+        else if (C == 'M') { PS(", move %s %.6gpx %.6gpx", tb, a[0], a[1]); cmd = rel ? 'l' : 'L'; }
+        else if (C == 'L') PS(", line %s %.6gpx %.6gpx", tb, a[0], a[1]);
+        else if (C == 'H') PS(", hline %s %.6gpx", tb, a[0]);
+        else if (C == 'V') PS(", vline %s %.6gpx", tb, a[0]);
+        else if (C == 'C') PS(", curve %s %.6gpx %.6gpx with %.6gpx %.6gpx / %.6gpx %.6gpx", tb, a[4], a[5], a[0], a[1], a[2], a[3]);
+        else if (C == 'Q') PS(", curve %s %.6gpx %.6gpx with %.6gpx %.6gpx", tb, a[2], a[3], a[0], a[1]);
+        else if (C == 'S') PS(", smooth %s %.6gpx %.6gpx with %.6gpx %.6gpx", tb, a[2], a[3], a[0], a[1]);
+        else if (C == 'T') PS(", smooth %s %.6gpx %.6gpx", tb, a[0], a[1]);
+        else PS(", arc %s %.6gpx %.6gpx of %.6gpx %.6gpx%s%s rotate %.6gdeg", tb, a[5], a[6], a[0], a[1], a[4] != 0.0 ? " cw" : " ccw",
+                a[3] != 0.0 ? " large" : " small", a[2]);
+    }
+    PS(")");
+#undef PS
+    return !first;
+}
 
 /* a's and b's lists at t, or NULL when they don't go between */
 static const char *tf_mix_text(const char *a, const char *b, double t)
 {
-    TfFn A[12], B[12], I[12];
+    if (!strncasecmp(a, "path(", 5) && !strncasecmp(b, "path(", 5)) return path_mix_text(a, b, t);
+    /* (a path() and a shape(): the path as a shape) */
+    static __thread char sa[1024], sb[1024];
+    if (!strncasecmp(a, "path(", 5) && !strncasecmp(b, "shape(", 6)) { if (!path_as_shape(a, sa, sizeof sa)) return NULL; a = sa; }
+    if (!strncasecmp(b, "path(", 5) && !strncasecmp(a, "shape(", 6)) { if (!path_as_shape(b, sb, sizeof sb)) return NULL; b = sb; }
+    static __thread TfFn A[12], B[12], I[12];
     int na = tf_fns(a, A, 12), nb = tf_fns(b, B, 12);
     if (na < 0 || nb < 0) return NULL;
     if (na == 0 && nb == 0) return NULL;
@@ -210,7 +320,17 @@ static const char *tf_mix_text(const char *a, const char *b, double t)
             }
             /* (a bare 0 takes the other's unit) */
             const char *u = ua[0] ? ua : ub;
-            if (ua[0] && ub[0] && strcasecmp(ua, ub)) return NULL;
+            if (ua[0] && ub[0] && strcasecmp(ua, ub)) {
+                /* (a shape's px and %: as calc() between them) */
+                bool shape = !strcmp(A[i].name, "shape") || !strcmp(A[i].name, "polygon") || !strcmp(A[i].name, "inset") ||
+                             !strcmp(A[i].name, "xywh") || !strcmp(A[i].name, "circle") || !strcmp(A[i].name, "ellipse");
+                bool pa = ua[0] == '%', pb = ub[0] == '%';
+                if (!shape || pa == pb || (!pa && strcasecmp(ua, "px")) || (!pb && strcasecmp(ub, "px"))) return NULL;
+                double px = (pa ? 0.0 : A[i].v[k] * (1.0 - t)) + (pb ? 0.0 : B[i].v[k] * t);
+                double pc = (pa ? A[i].v[k] * (1.0 - t) : 0.0) + (pb ? B[i].v[k] * t : 0.0);
+                at += (size_t)snprintf(o + at, at < cap ? cap - at : 0, "%scalc(%.6gpx + %.6g%%)", sep, px, pc);
+                continue;
+            }
             double v = A[i].v[k] + (B[i].v[k] - A[i].v[k]) * t;
             at += (size_t)snprintf(o + at, at < cap ? cap - at : 0, "%s%.6g%s", sep, v, u);
         }
@@ -453,6 +573,8 @@ static double bezier(double a, double b, double t)
     return 3 * u * u * t * a + 3 * u * t * t * b + t * t * t;
 }
 
+static __thread bool t_anim_before;   /* (the animation in its before phase: CSS Easing's before flag) */
+
 static double ease_apply(uint8_t kind, const float p[4], double x)
 {
     if (kind == E_LINEAR) return x;
@@ -461,6 +583,8 @@ static double ease_apply(uint8_t kind, const float p[4], double x)
         /* (a step's edge reached through clock rounding counts as reached) */
         double cur = floor(x * steps + 1e-6);
         if (pos == 0 || pos == 3) cur += 1;
+        /* (before the start, at a step's edge: the step before it) */
+        if (t_anim_before && fabs(x * steps - floor(x * steps + 1e-6)) < 1e-6) cur -= 1;
         int jumps = pos == 3 ? steps + 1 : pos == 2 ? steps - 1 : steps;
         if (jumps < 1) jumps = 1;
         if (x >= 0 && cur < 0) cur = 0;
@@ -608,6 +732,7 @@ static AnimVal trans_value(int r, double now)
     double x = A.dur[r] > 0 ? t / A.dur[r] : 1;
     if (x < 0) x = 0;
     if (x > 1) x = 1;
+    t_anim_before = false;
     double ex = ease_apply(A.ease[r], A.ep[r], x);
     if (A.prop[r] == ANIM_FONT_STYLE && (A.a[r].y > 0.5f) != (A.b[r].y > 0.5f)) return ex < 0.5 ? A.a[r] : A.b[r];
     if (A.prop[r] == ANIM_COLOR || A.prop[r] == ANIM_BGCOLOR) return color_mix(&A.a[r], &A.b[r], ex);
@@ -619,12 +744,17 @@ static double row_time(int r, double now) { return bit(A.paused, r) ? A.pause_at
 
 /* The progress of animation row r at now (0 .. 1, eased), or false when it
  * has no effect then. */
-static bool anim_progress(int r, double now, double *out)
+static bool anim_progress_x(int r, double now, double *out, bool eased);
+static bool anim_progress(int r, double now, double *out) { return anim_progress_x(r, now, out, true); }
+
+/* (eased false: the progress itself, for keyframes to ease each interval) */
+static bool anim_progress_x(int r, double now, double *out, bool eased)
 {
     double t = row_time(r, now) - A.start[r] - A.delay[r];
     double dur = A.dur[r], iters = A.iters[r];
     double active = isinf(iters) ? INFINITY : dur * iters;
     double it, x;
+    t_anim_before = t < 0;
     if (t < 0) {
         if (!(A.fill[r] & F_BACKWARDS)) return false;
         it = 0;
@@ -644,7 +774,7 @@ static bool anim_progress(int r, double now, double *out)
     bool rev = A.dir[r] == D_REVERSE || (A.dir[r] == D_ALTERNATE && fmod(it, 2) == 1) ||
                (A.dir[r] == D_ALT_REVERSE && fmod(it, 2) == 0);
     if (rev) x = 1 - x;
-    *out = ease_apply(A.ease[r], A.ep[r], x);
+    *out = eased ? ease_apply(A.ease[r], A.ep[r], x) : x;
     return true;
 }
 
@@ -670,7 +800,7 @@ static bool track_value(int r, double now, AnimVal *out)
 {
     int o = A.owner[r];
     double p;
-    if (o < 0 || !bit(A.alive, o) || !anim_progress(o, now, &p)) return false;
+    if (o < 0 || !bit(A.alive, o) || !anim_progress_x(o, now, &p, false)) return false;
     /* (frames at 0% and 100% not given: the value without the animation) */
     float off[ANIM_KF + 2];
     AnimVal v[ANIM_KF + 2];
@@ -682,6 +812,9 @@ static bool track_value(int r, double now, AnimVal *out)
     while (i + 2 < n && off[i + 1] <= p) i++;
     double span = off[i + 1] - off[i];
     double local = span > 0 ? (p - off[i]) / span : 1;
+    /* (the timing function over each keyframe interval, CSS Animations 3.8) */
+    local = ease_apply(A.ease[o], A.ep[o], local);
+    t_anim_before = false;
     /* (italic doesn't go between) */
     if (A.prop[r] == ANIM_FONT_STYLE && (v[i].y > 0.5f) != (v[i + 1].y > 0.5f)) *out = local < 0.5 ? v[i] : v[i + 1];
     else *out = A.prop[r] == ANIM_COLOR || A.prop[r] == ANIM_BGCOLOR ? color_mix(&v[i], &v[i + 1], local) : val_mix(&v[i], &v[i + 1], local);

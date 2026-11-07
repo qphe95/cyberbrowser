@@ -70,6 +70,12 @@ float text_shaper_normal_line_height(const TextShaper *shaper, float font_size);
  * text drawn at scale) added to every advance this thread measures or draws
  * after the call, until it is set again (0, 0: none). */
 void text_shaper_set_spacing(float letter_px, float word_px, float scale);
+/* OpenType features (4-byte tags, as 'smcp' = 0x736d6370) the text measured
+ * and drawn next takes: their single and alternate substitutions; n = 0 none. */
+void text_shaper_set_features(const uint32_t *tags, int n);
+/* The other fonts of the element's font-family list, tried in order for a
+ * character the font lacks before the registry's fallbacks (n 0: none). */
+void text_shaper_set_chain(TextShaper *const *fonts, int n);
 /* text-autospace for what's measured and drawn next: 1 ideograph-alpha, 2 ideograph-numeric. */
 void text_shaper_set_autospace(int mode);
 

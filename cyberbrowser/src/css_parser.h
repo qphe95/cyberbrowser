@@ -24,7 +24,7 @@ extern "C" {
  * layout lists the elements that have any (css_layout_render_list): what the
  * tick costs goes by how many elements use them, not by the page's size. */
 enum { CSS_FEAT_SNAP = 1, CSS_FEAT_CONTENT_VIS = 2, CSS_FEAT_INITIAL_TARGET = 4, CSS_FEAT_MEDIA_LISTENERS = 8,
-       CSS_FEAT_SNAP_ALIGN = 16, CSS_FEAT_MARKER_GROUP = 32 };
+       CSS_FEAT_SNAP_ALIGN = 16, CSS_FEAT_MARKER_GROUP = 32, CSS_FEAT_TARGET_GROUP = 64 };
 extern volatile int g_css_render_features;
 /* The physical longhand of a logical one, in a box of that writing mode
  * (0 horizontal-tb, 1 vertical-rl, 2 vertical-lr, 3 sideways-rl, 4 sideways-lr)
@@ -62,6 +62,8 @@ typedef struct CssRule {
     char *layer_name;    /* its cascade layer: "a.b" (NULL: none); with no selector, only says it exists */
     char *container_query;  /* enclosing @container preludes, joined by \x01; held to the element */
     int specificity;
+    unsigned char shadow;   /* (a shadow tree's, scoped to its host: an inner context in the cascade) */
+    unsigned char scoped;   /* (one that reaches into shadow trees of plain hosts: their own sheets', ::part()s) */
     CssDeclaration *declarations;
     int declaration_count;
     int declaration_capacity;

@@ -698,6 +698,7 @@ unsigned char css_note_property(const char *p) {
         else if (!strcmp(p, "scroll-snap-align")) bit = CSS_FEAT_SNAP_ALIGN;
         else if (!strcmp(p, "scroll-initial-target")) bit = CSS_FEAT_INITIAL_TARGET;
         else if (!strcmp(p, "scroll-marker-group")) bit = CSS_FEAT_MARKER_GROUP;
+        else if (!strcmp(p, "scroll-target-group")) bit = CSS_FEAT_TARGET_GROUP;
     }
     if (bit) g_css_render_features |= bit;
     return bit;
@@ -825,7 +826,7 @@ static void css_strip_comments(char *s) {
 static bool css_pseudo_known(const char *n, size_t nl, bool elem)
 {
     static const char *const classes[] = {
-        "active", "any-link", "autofill", "blank", "buffering", "checked", "closed", "current", "default",
+        "active", "active-view-transition", "active-view-transition-type", "any-link", "autofill", "blank", "buffering", "checked", "closed", "current", "default",
         "defined", "dir", "disabled", "empty", "enabled", "first", "first-child", "first-of-type", "focus",
         "focus-visible", "focus-within", "fullscreen", "future", "has", "has-slotted", "heading", "host", "host-context", "hover",
         "in-range", "indeterminate", "invalid", "is", "lang", "last-child", "last-of-type", "left", "link",
@@ -863,6 +864,23 @@ static bool css_prelude_invalid(const char *sel)
     /* (view transition pseudo-elements: the whole selector's grammar) */
     extern bool dom_selector_valid(const char *s);
     if (strstr(sel, "::view-transition") && !dom_selector_valid(sel)) return true;
+    /* (case-insensitive substring search) */
+    #define css_ci_find(h_, n_) ({ const char *r_ = NULL; size_t nl_ = strlen(n_); for (const char *q_ = (h_); *q_ && !r_; q_++) if (!strncasecmp(q_, (n_), nl_)) r_ = q_; r_; })
+    /* (:not() empty, or with a pseudo-element in it: invalid) */
+    for (const char *nt = css_ci_find(sel, ":not("); nt; nt = css_ci_find(nt + 5, ":not(")) {
+        const char *a = nt + 5, *e = a;
+        int d = 1;
+        while (*e && d) { if (*e == '(') d++; else if (*e == ')') d--; if (d) e++; }
+        const char *t = a;
+        while (t < e && css_is_space(*t)) t++;
+        if (t == e) return true;
+        for (const char *c = a; c < e; c++) {
+            if (*c != ':') continue;
+            if (c[1] == ':') return true;
+            if (!strncasecmp(c + 1, "first-line", 10) || !strncasecmp(c + 1, "first-letter", 12) ||
+                !strncasecmp(c + 1, "before", 6) || !strncasecmp(c + 1, "after", 5)) return true;
+        }
+    }
     const char *p = sel;
     char q = 0;
     int br = 0;
@@ -891,6 +909,8 @@ static bool css_prelude_invalid(const char *sel)
             br--;
         } else if (br == 0 && (c == ';' || c == '@')) {
             return true;
+        } else if (br == 0 && strchr("%!$?=^`/{}<", c)) {
+            return true;   /* (no selector has these outside brackets) */
         } else if (c == ',' && br == 0) {
             first = true;
         } else if (c == ':' && br == 0) {
@@ -1585,6 +1605,24 @@ static size_t css_at_rule(const char *s, size_t len, size_t pos, bool nested, Cs
         css_tz_free(&tz);
         return end;
     }
+    if (nl == 8 && !strncasecmp(name, "supports", 8)) {
+        /* (@supports: its block only when the condition holds; an invalid one is false) */
+        extern bool css_supports_condition(const char *cond);
+        char *c = css_strndup_trim(s + pre, pre_end - pre);
+        if (c && strstr(c, "/*")) css_strip_comments(c);
+        bool on = c && c[0] && css_supports_condition(c);
+        free(c);
+        if (!on) {
+            free(layer_here);
+            size_t e;
+            if (css_block_skip_fast(s, len, end, &e)) return e;
+            CssTz tz;
+            css_tz_init(&tz, s, len, end);
+            end = css_tokens_skip_block(&tz);
+            css_tz_free(&tz);
+            return end;
+        }
+    }
     bool is_scope = nl == 5 && !strncasecmp(name, "scope", 5);
     char *sc_a = NULL, *sc_b = NULL;
     if (is_scope) {
@@ -2159,6 +2197,30 @@ static void css_parse_nth(const char *arg, size_t al, int *out_a, int *out_b)
     *out_b = atoi(np + 1);
 }
 
+/* (whether [arg, arg + al) is An+B: odd, even, an integer, or [+-]?[digits]n[+-digits]) */
+static bool css_nth_ok(const char *arg, size_t al)
+{
+    char b[64];
+    size_t w = 0;
+    for (size_t j = 0; j < al && w + 1 < sizeof b; j++) if (!css_is_space(arg[j])) b[w++] = (char)tolower((unsigned char)arg[j]);
+    b[w] = 0;
+    if (!w) return false;
+    if (!strcmp(b, "odd") || !strcmp(b, "even")) return true;
+    size_t i = 0;
+    if (b[i] == '+' || b[i] == '-') i++;
+    size_t d0 = i;
+    while (isdigit((unsigned char)b[i])) i++;
+    if (!b[i]) return i > d0;
+    if (b[i] != 'n') return false;
+    i++;
+    if (!b[i]) return true;
+    if (b[i] != '+' && b[i] != '-') return false;
+    i++;
+    d0 = i;
+    while (isdigit((unsigned char)b[i])) i++;
+    return !b[i] && i > d0;
+}
+
 uint32_t css_state_bit(const char *name, size_t nl)
 {
     static const struct { const char *n; uint32_t bit; } k[] = {
@@ -2170,6 +2232,7 @@ uint32_t css_state_bit(const char *name, size_t nl)
         { "disabled", DOM_ST_DISABLED }, { "read-write", DOM_ST_READ_WRITE }, { "read-only", DOM_ST_READ_ONLY },
         { "required", DOM_ST_REQUIRED }, { "optional", DOM_ST_OPTIONAL },
         { "modal", DOM_ST_MODAL }, { "popover-open", DOM_ST_POPOVER_OPEN },
+        { "target-current", DOM_ST_TARGET_CURRENT },   /* (an anchor of a scroll-target-group: its target the current one) */
         { "valid", DOM_ST_VALID }, { "invalid", DOM_ST_INVALID },
         { "placeholder-shown", DOM_ST_PLACEHOLDER_SHOWN }, { "default", DOM_ST_DEFAULT },
         { "in-range", DOM_ST_IN_RANGE }, { "out-of-range", DOM_ST_OUT_OF_RANGE },
@@ -2202,18 +2265,32 @@ static void css_apply_pseudo(CssSimpleSelector *out,
         out->is_pseudo_element = true;
         return;
     }
+    /* (the shadow host a scoped sheet's :host became: by its NodeId) */
+    if (css_pseudo_name_is(name, nl, "-webkit-cyber-host")) {
+        out->node_id = arg ? (uint32_t)strtoul(arg, NULL, 10) : 0;
+        if (!out->node_id) out->never_match = true;
+        out->has_substantive = true;
+        return;
+    }
     /* (:host outside of a shadow tree's own rewriting: there's no such element) */
     if (css_pseudo_name_is(name, nl, "host") || css_pseudo_name_is(name, nl, "host-context")) {
         out->never_match = true;
         return;
     }
-    if (css_pseudo_name_is(name, nl, "root")) {
+    /* (:scope outside @scope: the root) */
+    if (css_pseudo_name_is(name, nl, "root") || css_pseudo_name_is(name, nl, "scope")) {
         out->is_root = true;
         out->has_substantive = true;
         return;
     }
     if (css_pseudo_name_is(name, nl, "empty")) { out->requires_empty = true; return; }
-    if (css_pseudo_name_is(name, nl, "link") || css_pseudo_name_is(name, nl, "any-link")) { out->requires_link = true; return; }
+    if (css_pseudo_name_is(name, nl, "link") || css_pseudo_name_is(name, nl, "any-link")) {
+        out->requires_link = true;
+        out->link_kind = css_pseudo_name_is(name, nl, "link") ? 1 : 0;
+        return;
+    }
+    /* (:visited: a link to this document itself, the one page in its history) */
+    if (css_pseudo_name_is(name, nl, "visited")) { out->requires_link = true; out->link_kind = 2; return; }
     uint32_t state_bit = css_state_bit(name, nl);
     if (state_bit) {
         out->state_mask |= state_bit;
@@ -2221,8 +2298,7 @@ static void css_apply_pseudo(CssSimpleSelector *out,
         return;
     }
     /* (states nothing here has: no history, no autofill, no timeline) */
-    if (css_pseudo_name_is(name, nl, "visited") ||
-        css_pseudo_name_is(name, nl, "target-within") ||
+    if (css_pseudo_name_is(name, nl, "target-within") ||
         css_pseudo_name_is(name, nl, "autofill") ||
         css_pseudo_name_is(name, nl, "current") ||
         css_pseudo_name_is(name, nl, "past") ||
@@ -2243,11 +2319,39 @@ static void css_apply_pseudo(CssSimpleSelector *out,
     if (css_pseudo_name_is(name, nl, "first-of-type")) { out->type_pos = 1; return; }
     if (css_pseudo_name_is(name, nl, "last-of-type")) { out->type_pos = 2; return; }
     if (css_pseudo_name_is(name, nl, "only-of-type")) { out->type_pos = 3; return; }
-    if (css_pseudo_name_is(name, nl, "nth-child")) {
-        out->nth_kind = 1; css_parse_nth(arg, al, &out->nth_a, &out->nth_b); return;
-    }
-    if (css_pseudo_name_is(name, nl, "nth-last-child")) {
-        out->nth_kind = 2; css_parse_nth(arg, al, &out->nth_a, &out->nth_b); return;
+    if (css_pseudo_name_is(name, nl, "nth-child") || css_pseudo_name_is(name, nl, "nth-last-child")) {
+        out->nth_kind = css_pseudo_name_is(name, nl, "nth-child") ? 1 : 2;
+        /* (An+B of S: the selector list after " of ") */
+        size_t cut = al;
+        /* (the ident "of": what follows it no name character, a comment, '.', '[' as well as space) */
+        for (size_t j = 0; arg && j + 3 < al; j++) {
+            char nx = arg[j + 3];
+            if (css_is_space(arg[j]) && (arg[j + 1] == 'o' || arg[j + 1] == 'O') && (arg[j + 2] == 'f' || arg[j + 2] == 'F') &&
+                !(isalnum((unsigned char)nx) || nx == '-' || nx == '_' || (unsigned char)nx >= 0x80)) { cut = j; break; }
+        }
+        css_parse_nth(arg, cut, &out->nth_a, &out->nth_b);
+        if (!css_nth_ok(arg, cut)) out->never_match = true;
+        if (cut < al) {
+            size_t s0 = cut + 3;
+            for (;;) {
+                while (s0 < al && css_is_space(arg[s0])) s0++;
+                if (s0 + 1 < al && arg[s0] == '/' && arg[s0 + 1] == '*') {
+                    size_t e = s0 + 2;
+                    while (e + 1 < al && !(arg[e] == '*' && arg[e + 1] == '/')) e++;
+                    s0 = e + 2 <= al ? e + 2 : al;
+                    continue;
+                }
+                break;
+            }
+            size_t n = al - s0;
+            if (n == 0) out->never_match = true;   /* (of nothing: invalid) */
+            if (n > 0 && n < sizeof(out->nth_of_arg)) {
+                memcpy(out->nth_of_arg, arg + s0, n);
+                out->nth_of_arg[n] = '\0';
+                out->nth_of_active = true;
+            }
+        }
+        return;
     }
     if (css_pseudo_name_is(name, nl, "nth-of-type")) {
         out->nth_kind = 3; css_parse_nth(arg, al, &out->nth_a, &out->nth_b); return;
@@ -2264,6 +2368,18 @@ static void css_apply_pseudo(CssSimpleSelector *out,
         size_t pk = 0, pe = al;
         while (pk < pe && css_is_space(arg[pk])) pk++;
         while (pe > pk && css_is_space(arg[pe - 1])) pe--;
+        /* (a second :not() in the compound: into the list form, not A and not B being not (A, B)) */
+        if ((out->not_active || out->not_list_active) && pe > pk) {
+            size_t cur = out->not_list_active ? strlen(out->not_list_arg) : 0;
+            if (cur + (pe - pk) + 3 < sizeof(out->not_list_arg)) {
+                if (cur) { out->not_list_arg[cur++] = ','; out->not_list_arg[cur++] = ' '; }
+                memcpy(out->not_list_arg + cur, arg + pk, pe - pk);
+                out->not_list_arg[cur + (pe - pk)] = 0;
+                out->not_list_active = true;
+                out->has_substantive = true;
+            }
+            return;
+        }
         bool flat = pe > pk && pe - pk < sizeof(out->not_list_arg);
         for (size_t i = pk; flat && i < pe; i++)
             if (strchr(",>+~ \t\n()", arg[i])) flat = false;
@@ -2340,12 +2456,83 @@ static void css_apply_pseudo(CssSimpleSelector *out,
         out->has_substantive = true;
         return;
     }
+    /* (:active-view-transition, -type(a, b): the root while a view transition runs,
+     * its types in data-cyber-avt (platform_api.js), as :is() of attribute tests) */
+    if (css_pseudo_name_is(name, nl, "active-view-transition")) {
+        if (arg) { out->never_match = true; return; }
+        if (!out->where_active) {
+            snprintf(out->where_arg, sizeof(out->where_arg), "[data-cyber-avt]");
+            out->where_active = true;
+            out->is_weighted = true;
+        }
+        out->has_substantive = true;
+        return;
+    }
+    if (css_pseudo_name_is(name, nl, "active-view-transition-type")) {
+        char list[sizeof(out->where_arg)];
+        size_t used = 0, k = 0;
+        bool ok = arg && al > 0;
+        while (ok && k <= al) {
+            size_t e = k;
+            while (e < al && arg[e] != ',') e++;
+            size_t a0 = k, a1 = e;
+            while (a0 < a1 && css_is_space(arg[a0])) a0++;
+            while (a1 > a0 && css_is_space(arg[a1 - 1])) a1--;
+            if (a1 == a0 || a1 - a0 > 60) { ok = false; break; }
+            for (size_t q = a0; q < a1 && ok; q++) {
+                unsigned char ch = (unsigned char)arg[q];
+                ok = ch >= 0x80 || ch == '-' || ch == '_' || (ch >= '0' && ch <= '9' && q > a0) || ((ch | 32) >= 'a' && (ch | 32) <= 'z');
+            }
+            if (!ok) break;
+            used += (size_t)snprintf(list + used, used < sizeof list ? sizeof list - used : 0, "%s[data-cyber-avt~=\"%.*s\"]",
+                                     used ? ", " : "", (int)(a1 - a0), arg + a0);
+            k = e + 1;
+        }
+        if (!ok || used >= sizeof list) { out->never_match = true; return; }
+        snprintf(out->where_arg, sizeof(out->where_arg), "%s", list);
+        out->where_active = true;
+        out->is_weighted = true;
+        out->has_substantive = true;
+        return;
+    }
+    if (css_pseudo_name_is(name, nl, "dir")) {
+        /* (the element's directionality: its dir attribute's or the nearest ancestor's) */
+        size_t k = 0, e = al;
+        while (k < e && css_is_space(arg[k])) k++;
+        while (e > k && css_is_space(arg[e - 1])) e--;
+        out->dir_val = e - k == 3 && !strncasecmp(arg + k, "ltr", 3) ? 1 : e - k == 3 && !strncasecmp(arg + k, "rtl", 3) ? 2 : 3;
+        out->has_substantive = true;
+        return;
+    }
     if (css_pseudo_name_is(name, nl, "lang")) {
         /* The element's language, its lang attribute's or the nearest
          * ancestor's (else the document's, from a content-language meta),
          * is the range or starts with it and a '-' (case insensitive): as
          * a test of those attributes. */
         size_t k = 0, e = al;
+        /* (ranges the attribute tests can't say, RFC 4647 extended filtering:
+         * matched as they are) */
+        bool complex = false;
+        for (size_t i = 0; i < al; i++) if (arg[i] == ',' || arg[i] == '*' || arg[i] == '\\') complex = true;
+        /* (each item a string or an identifier, else nothing matches) */
+        for (size_t i = 0; i < al;) {
+            while (i < al && css_is_space(arg[i])) i++;
+            if (i < al && (isdigit((unsigned char)arg[i]) || ((arg[i] == '-' || arg[i] == '+') && i + 1 < al && isdigit((unsigned char)arg[i + 1])))) {
+                out->never_match = true;
+                return;
+            }
+            while (i < al && arg[i] != ',') i++;
+            if (i < al) i++;
+        }
+        if (complex) {
+            if (al > 0 && al < sizeof(out->lang_ranges) && !out->lang_ranges[0]) {
+                memcpy(out->lang_ranges, arg, al);
+                out->lang_ranges[al] = '\0';
+                out->has_substantive = true;
+                out->lang_count++;
+            } else out->never_match = true;
+            return;
+        }
         while (k < e && (css_is_space(arg[k]) || arg[k] == '"' || arg[k] == '\'')) k++;
         while (e > k && (css_is_space(arg[e - 1]) || arg[e - 1] == '"' || arg[e - 1] == '\'')) e--;
         if (e > k && e - k < 40 && !out->where_active) {
@@ -2367,6 +2554,11 @@ static void css_apply_pseudo(CssSimpleSelector *out,
         /* Relative selector: an optional leading combinator, then a selector
          * matched against descendants / children / following siblings. */
         out->has_substantive = true;
+        /* (:visited inside :has() never matches: no history leaks through it) */
+        if (arg && al > 0) {
+            for (size_t q = 0; q + 8 <= al; q++)
+                if (!strncasecmp(arg + q, ":visited", 8)) { out->never_match = true; return; }
+        }
         if (arg && al > 0) {
             size_t k = 0;
             while (k < al && css_is_space(arg[k])) k++;
@@ -2397,12 +2589,19 @@ static void css_simple_reset(CssSimpleSelector *out) {
     out->where_arg[0] = out->has_arg[0] = '\0';
     out->class_count = out->attr_count = 0;
     out->has_tag = out->has_id = out->is_root = out->universal = false;
+    out->tag_upper = false;
     out->has_substantive = out->is_pseudo_element = out->requires_empty = false;
     out->never_match = out->requires_link = false;
+    out->link_kind = 0;
     out->state_mask = out->not_state = 0;
     out->not_list_active = false;
     out->not_list_arg[0] = '\0';
     out->child_pos = out->type_pos = out->nth_kind = out->nth_a = out->nth_b = 0;
+    out->dir_val = 0;
+    out->node_id = 0;
+    out->lang_ranges[0] = '\0';
+    out->nth_of_active = false;
+    out->nth_of_arg[0] = '\0';
     out->not_active = out->not_has_tag = out->not_has_id = false;
     out->not_class_count = out->not_attr_count = 0;
     out->where_active = out->has_active = out->is_weighted = false;
@@ -2458,6 +2657,7 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
         size_t start = i;
         i = css_sel_name_end(s, n, i, ".#[:");
         css_sel_name_copy(out->tag, s + start, i - start, sizeof(out->tag));
+        for (size_t k = start; k < i; k++) if (s[k] >= 'A' && s[k] <= 'Z') out->tag_upper = true;
         out->has_tag = out->tag[0] != '\0';
         out->has_substantive = out->has_substantive || out->has_tag;
     }
@@ -2723,6 +2923,7 @@ static int css_specificity_from_simple(const CssSimpleSelector *simple) {
     int spec = a * 1000 + b * 10 + c;
     /* (:not() of a list: its most specific selector) */
     if (simple->not_list_active) spec += css_list_best_specificity(simple->not_list_arg);
+    if (simple->nth_of_active) spec += css_list_best_specificity(simple->nth_of_arg);
     if (simple->where_active && simple->is_weighted) spec += css_list_best_specificity(simple->where_arg);
     if (simple->has_active) spec += css_list_best_specificity(simple->has_arg);
     return spec;
@@ -2831,6 +3032,11 @@ static bool css_simple_matches_ex(const CssSimpleSelector *simple, HtmlDocument 
         bool link_tag = strcasecmp(node->tag_name, "a") == 0 ||
                         strcasecmp(node->tag_name, "area") == 0;
         if (!link_tag || !html_node_attr_value(node, "href")) return false;
+        /* (visited: a link to the document itself, an empty href) */
+        const char *hv = html_node_attr_value(node, "href");
+        while (*hv == ' ' || *hv == 9 || *hv == 10) hv++;
+        if (simple->link_kind == 1 && !*hv) return false;
+        if (simple->link_kind == 2 && *hv) return false;
     }
     if (simple->has_id) {
         const char *id = html_node_attr_value(node, "id");
@@ -3693,6 +3899,10 @@ static bool mq_query(const char *s, const char *e, double vw, double vh) {
     while (m.p < m.end && (isalnum((unsigned char)*m.p) || *m.p == '-')) m.p++;
     size_t tl = (size_t)(m.p - t);
     if (!tl) return false;
+    /* (a reserved word for the type: the query is invalid, not all, whatever not says) */
+    static const char *const reserved[] = { "and", "not", "or", "only", "layer" };
+    for (size_t k = 0; k < sizeof reserved / sizeof reserved[0]; k++)
+        if (tl == strlen(reserved[k]) && !strncasecmp(t, reserved[k], tl)) return false;
     bool type = (tl == 6 && strncasecmp(t, "screen", 6) == 0) || (tl == 3 && strncasecmp(t, "all", 3) == 0);
     int r = type ? 1 : 0;
     mq_ws(&m);
@@ -3805,6 +4015,69 @@ static void css_buf_append_cstr(char **buf, size_t *len, size_t *cap, const char
     css_buf_append(buf, len, cap, s, strlen(s));
 }
 
+static bool css_mem_has_host(const char *s, size_t n);
+/* (the compound around a :host at k in sel [0, len): only :host, :host()
+ * and :has() beside it, the host being featureless; false: it matches nothing) */
+static bool css_host_compound_ok(const char *sel, size_t len, size_t k)
+{
+    /* (its start: back to a combinator, space, '(' or ',' outside brackets) */
+    size_t a = k;
+    int depth = 0;
+    while (a > 0) {
+        char c = sel[a - 1];
+        if (c == ')') depth++;
+        else if (c == '(') { if (!depth) break; depth--; }
+        else if (!depth && (css_is_space(c) || c == ',' || c == '>' || c == '+' || c == '~')) break;
+        a--;
+    }
+    size_t e = k;
+    depth = 0;
+    while (e < len) {
+        char c = sel[e];
+        if (c == '(') depth++;
+        else if (c == ')') { if (!depth) break; depth--; }
+        else if (!depth && (css_is_space(c) || c == ',' || c == '>' || c == '+' || c == '~')) break;
+        e++;
+    }
+    for (size_t p = a; p < e;) {
+        if (sel[p] != ':') return false;
+        if (p + 1 < e && sel[p + 1] == ':') {
+            /* (a pseudo-element of the host: fine) */
+            size_t q = p + 2;
+            while (q < e && sel[q] != ':' && sel[q] != '(') q++;
+            if (q < e && sel[q] == '(') q = css_match_paren(sel, q, e) + 1;
+            p = q;
+            continue;
+        }
+        size_t q = p + 1;
+        while (q < e && sel[q] != ':' && sel[q] != '(') q++;
+        size_t nl = q - p - 1;
+        bool host = nl == 4 && !strncasecmp(sel + p + 1, "host", 4), has = nl == 3 && !strncasecmp(sel + p + 1, "has", 3);
+        /* (:not(), :is(), :where() of the host itself) */
+        bool logic = (nl == 3 && !strncasecmp(sel + p + 1, "not", 3)) ||
+                     (nl == 2 && !strncasecmp(sel + p + 1, "is", 2)) || (nl == 5 && !strncasecmp(sel + p + 1, "where", 5));
+        if (logic && q < e && sel[q] == '(') {
+            size_t c2 = css_match_paren(sel, q, e);
+            if (!css_mem_has_host(sel + q, c2 - q)) return false;
+            p = c2 + 1;
+            continue;
+        }
+        if (!host && !has) return false;
+        if (q < e && sel[q] == '(') q = css_match_paren(sel, q, e) + 1;
+        else if (has) return false;
+        p = q;
+    }
+    return true;
+}
+
+/* (whether [s, s + n) names :host, not :host-context) */
+static bool css_mem_has_host(const char *s, size_t n)
+{
+    for (size_t k = 0; k + 5 <= n; k++)
+        if (!strncasecmp(s + k, ":host", 5) && (k + 13 > n || strncasecmp(s + k, ":host-context", 13))) return true;
+    return false;
+}
+
 /* Transform a single selector string for a given shadow host tag. */
 static char* css_transform_one_selector(const char *sel, size_t len, const char *host_tag) {
     size_t i = 0;
@@ -3814,7 +4087,41 @@ static char* css_transform_one_selector(const char *sel, size_t len, const char 
     char *out = NULL;
     size_t out_len = 0, out_cap = 0;
 
-    if (i + 6 <= len && strncasecmp(sel + i, ":host(", 6) == 0) {
+    if (host_tag[0] == ':' && !strncasecmp(sel + i, ":host", 5) && strncasecmp(sel + i, ":host-context", 13) &&
+        (i + 5 >= len || sel[i + 5] == '(' || sel[i + 5] == ':' || sel[i + 5] == '.' || sel[i + 5] == '[' ||
+         sel[i + 5] == '#' || css_is_space(sel[i + 5]) || sel[i + 5] == '>' || sel[i + 5] == '+' || sel[i + 5] == '~')) {
+        /* (a host by its node: :host(x) is x then the host's pseudo, x may name a type) */
+        if (!css_host_compound_ok(sel, len, i)) return css_strdup("");
+        if (sel[i + 5] == '(') {
+            size_t open = i + 5;
+            size_t close = css_match_paren(sel, open, len);
+            if (close > open + 1) css_buf_append(&out, &out_len, &out_cap, sel + open + 1, close - open - 1);
+            css_buf_append_cstr(&out, &out_len, &out_cap, host_tag);
+            i = close + 1;
+        } else {
+            css_buf_append_cstr(&out, &out_len, &out_cap, host_tag);
+            i += 5;
+        }
+        /* (the rest, any further :host in it the host's pseudo too) */
+        for (size_t k = i; k < len;) {
+            if (k + 5 <= len && !strncasecmp(sel + k, ":host", 5) && (k + 13 > len || strncasecmp(sel + k, ":host-context", 13))) {
+                if (k + 5 < len && sel[k + 5] == '(') {
+                    size_t close = css_match_paren(sel, k + 5, len);
+                    css_buf_append_cstr(&out, &out_len, &out_cap, ":is(");
+                    if (close > k + 6) css_buf_append(&out, &out_len, &out_cap, sel + k + 6, close - k - 6);
+                    css_buf_append_cstr(&out, &out_len, &out_cap, ")");
+                    css_buf_append_cstr(&out, &out_len, &out_cap, host_tag);
+                    k = close + 1;
+                } else {
+                    css_buf_append_cstr(&out, &out_len, &out_cap, host_tag);
+                    k += 5;
+                }
+                continue;
+            }
+            css_buf_append(&out, &out_len, &out_cap, sel + k, 1);
+            k++;
+        }
+    } else if (i + 6 <= len && strncasecmp(sel + i, ":host(", 6) == 0) {
         /* :host(<qualifier>) ...  ->  host_tag<qualifier> ... */
         size_t open = i + 5;
         size_t close = css_match_paren(sel, open, len);
@@ -3843,10 +4150,45 @@ static char* css_transform_one_selector(const char *sel, size_t len, const char 
         }
         i = close + 1;
         css_buf_append(&out, &out_len, &out_cap, sel + i, len - i);
+    } else if (host_tag[0] == ':' && i + 14 <= len && strncasecmp(sel + i, ":host-context(", 14) == 0) {
+        /* (:host-context(x): the host when it or an ancestor is x) */
+        size_t open = i + 13, close = css_match_paren(sel, open, len);
+        css_buf_append_cstr(&out, &out_len, &out_cap, ":is(:is(");
+        css_buf_append(&out, &out_len, &out_cap, sel + open + 1, close > open ? close - open - 1 : 0);
+        css_buf_append_cstr(&out, &out_len, &out_cap, ") ");
+        css_buf_append_cstr(&out, &out_len, &out_cap, host_tag);
+        css_buf_append_cstr(&out, &out_len, &out_cap, ", :is(");
+        css_buf_append(&out, &out_len, &out_cap, sel + open + 1, close > open ? close - open - 1 : 0);
+        css_buf_append_cstr(&out, &out_len, &out_cap, ")");
+        css_buf_append_cstr(&out, &out_len, &out_cap, host_tag);
+        css_buf_append_cstr(&out, &out_len, &out_cap, ")");
+        i = close + 1;
+        css_buf_append(&out, &out_len, &out_cap, sel + i, len - i);
     } else if (i + 14 <= len && strncasecmp(sel + i, ":host-context(", 14) == 0) {
         /* Drop :host-context rules; we cannot model outer ancestors. */
         free(out);
         return css_strdup("");
+    } else if (host_tag[0] == ':' && css_mem_has_host(sel + i, len - i)) {
+        /* (:host inside :is(), :not() and the like: the host's pseudo put there, no scoping prefix) */
+        for (size_t k = i; k < len;) {
+            if (k + 5 <= len && !strncasecmp(sel + k, ":host", 5) && (k + 13 > len || strncasecmp(sel + k, ":host-context", 13))) {
+                if (!css_host_compound_ok(sel, len, k)) { free(out); return css_strdup(""); }
+                if (k + 5 < len && sel[k + 5] == '(') {
+                    size_t close = css_match_paren(sel, k + 5, len);
+                    css_buf_append_cstr(&out, &out_len, &out_cap, ":is(");
+                    if (close > k + 6) css_buf_append(&out, &out_len, &out_cap, sel + k + 6, close - k - 6);
+                    css_buf_append_cstr(&out, &out_len, &out_cap, ")");
+                    css_buf_append_cstr(&out, &out_len, &out_cap, host_tag);
+                    k = close + 1;
+                } else {
+                    css_buf_append_cstr(&out, &out_len, &out_cap, host_tag);
+                    k += 5;
+                }
+                continue;
+            }
+            css_buf_append(&out, &out_len, &out_cap, sel + k, 1);
+            k++;
+        }
     } else {
         /* Default: scope to host descendants. */
         size_t host_len = strlen(host_tag);
@@ -3945,8 +4287,37 @@ void css_rewrite_parts(CssStylesheet *sheet) {
         free(rule->selector_text);
         rule->selector_text = out;
         rule->specificity = 0;
+        rule->scoped = 1;
         css_rule_compiled_free(rule);
     }
+}
+
+/* (whether a selector of the list has the host as its subject: :host and
+ * nothing after its compound; an element in the tree is no outer-context rule) */
+static bool css_host_subject(const char *sel)
+{
+    for (const char *p = sel; *p;) {
+        while (css_is_space(*p) || *p == ',') p++;
+        int depth = 0;
+        const char *e = p;
+        while (*e && (depth || *e != ',')) { if (*e == '(') depth++; else if (*e == ')') depth--; e++; }
+        const char *t = e;
+        while (t > p && css_is_space(t[-1])) t--;
+        bool comb = false;
+        if (!strncasecmp(p, ":host", 5) && strncasecmp(p, ":host-context", 13)) {
+            depth = 0;
+            for (const char *q = p; q < t; q++) {
+                if (*q == '(') depth++;
+                else if (*q == ')') depth--;
+                else if (!depth && (css_is_space(*q) || *q == '>' || *q == '+' || *q == '~')) { comb = true; break; }
+            }
+            if (!comb) return true;
+        }
+        /* (::slotted(): light-tree elements, the outer context too) */
+        for (const char *q = p; q + 9 <= t; q++) if (!strncasecmp(q, "::slotted", 9)) return true;
+        p = e;
+    }
+    return false;
 }
 
 void css_scope_stylesheet(CssStylesheet *sheet, const char *host_tag) {
@@ -3954,6 +4325,10 @@ void css_scope_stylesheet(CssStylesheet *sheet, const char *host_tag) {
     for (int r = 0; r < sheet->rule_count; r++) {
         CssRule *rule = &sheet->rules[r];
         if (!rule->selector_text) continue;
+        /* (a rule for the host: the shadow tree's context in the cascade, the
+         * rest match only in the tree, the page's rules there as well) */
+        rule->shadow = css_host_subject(rule->selector_text);
+        rule->scoped = host_tag[0] == ':';
         char *new_sel = css_transform_selectors_for_host(rule->selector_text, host_tag);
         free(rule->selector_text);
         rule->selector_text = new_sel;

@@ -29,6 +29,7 @@
 #include <quickjs_gc_unified.h>
 #include "dom_js.h"
 #include "display_list.h"
+#include <math.h>
 void dom_request_layout(void);
 #include "css_style.h"
 
@@ -395,6 +396,43 @@ static GCValue js_options(JSContextHandle ctx, GCValue this_val, int argc, GCVal
     return arr;
 }
 
+/* __cyberCanvasRect(canvas, x, y, w, h, r, g, b, a, clear): a 2D context's solid
+ * rectangle (or clearRect), in the bitmap's pixels (display_list_canvas_rect). */
+static GCValue js_canvas_rect(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    NodeId el = argc > 0 ? dom_node_of(argv[0]) : 0;
+    if (!el || argc < 10) return JS_UNDEFINED;
+    double v[9];
+    for (int i = 0; i < 9; i++) if (JS_ToFloat64(ctx, &v[i], argv[i + 1])) return JS_UNDEFINED;
+    for (int i = 0; i < 8; i++) if (!isfinite(v[i])) return JS_UNDEFINED;
+    int ch[4];
+    for (int i = 0; i < 3; i++) ch[i] = (int)(v[4 + i] < 0 ? 0 : v[4 + i] > 255 ? 255 : v[4 + i] + 0.5);
+    ch[3] = (int)(v[7] < 0 ? 0 : v[7] > 1 ? 255 : v[7] * 255.0 + 0.5);
+    uint32_t rgba = (uint32_t)ch[0] << 24 | (uint32_t)ch[1] << 16 | (uint32_t)ch[2] << 8 | (uint32_t)ch[3];
+    display_list_canvas_rect(el, (float)v[0], (float)v[1], (float)v[2], (float)v[3], rgba, v[8] != 0.0);
+    dom_mark_dirty(el, DOMF_DIRTY_ATTR);
+    dom_request_layout();
+    return JS_UNDEFINED;
+}
+
+/* __cyberCanvasImage(canvas, url, x, y, w, h): an image drawn whole on a 2D context. */
+static GCValue js_canvas_image(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    NodeId el = argc > 0 ? dom_node_of(argv[0]) : 0;
+    if (!el || argc < 6) return JS_UNDEFINED;
+    const char *url = JS_ToCString(ctx, argv[1]);
+    double v[4];
+    for (int i = 0; i < 4; i++) if (JS_ToFloat64(ctx, &v[i], argv[i + 2]) || !isfinite(v[i])) return JS_UNDEFINED;
+    if (url) {
+        display_list_canvas_image(el, url, (float)v[0], (float)v[1], (float)v[2], (float)v[3]);
+    }
+    dom_mark_dirty(el, DOMF_DIRTY_ATTR);
+    dom_request_layout();
+    return JS_UNDEFINED;
+}
+
 /* __cyberElState(el, mask[, on]): whether el has the state; with on, sets it. */
 static GCValue js_el_state(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
 {
@@ -480,6 +518,8 @@ void html_element_api_install(JSContextHandle ctx, GCValue element_proto)
     JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberInnerText",
                               JS_NewCFunction(ctx, js_inner_text, "__cyberInnerText", 1), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberElState", JS_NewCFunction(ctx, js_el_state, "__cyberElState", 3), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberCanvasRect", JS_NewCFunction(ctx, js_canvas_rect, "__cyberCanvasRect", 10), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberCanvasImage", JS_NewCFunction(ctx, js_canvas_image, "__cyberCanvasImage", 6), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberOptions",
                               JS_NewCFunction(ctx, js_options, "__cyberOptions", 1), JS_PROP_CONFIGURABLE);
     run_installer(ctx, k_html_element_js, sizeof(k_html_element_js) - 1, "<html_element_api>", element_proto);

@@ -43,7 +43,7 @@ typedef struct GpuClientRes {
     predicate size_ok(integer v) = 0 <= v <= GPU_COORD_MAX;
 
     predicate mask_ok{L}(WireMask *m, GpuClientRes *res) =
-        m->kind <= 10 &&
+        m->kind <= 11 &&
         (m->kind == 1 ==> m->image == GPU_NO_IMAGE || (m->image < GPU_MAX_IMAGES && res->image[m->image] != 0)) &&
         1 <= m->nstops <= WIRE_MASK_STOPS &&
         coord_ok(m->x) && coord_ok(m->y) && size_ok(m->w) && size_ok(m->h) &&

@@ -331,7 +331,12 @@
     define(CP, 'beginPath', function beginPath() { define(this, PATH, new PathData()); });
     for (var pm in PATH_METHODS) define(CP, pm, PATH_METHODS[pm]);
     function inBounds(b, x, y) { return !!b && x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1; }
-    define(CP, 'fill', function fill() {});
+    /* (a path of rectangles only: each filled as fillRect would) */
+    define(CP, 'fill', function fill(a) {
+        var p = a instanceof Path2D ? a[PATH] : this[PATH], ops = p && p.ops;
+        if (!ops || !ops.length || !ops.every(function (o) { return o[0] === 'R'; })) return;
+        for (var i = 0; i < ops.length; i++) putRect(this, ops[i][1], ops[i][2], ops[i][3], ops[i][4], false);
+    });
     define(CP, 'stroke', function stroke() {});
     define(CP, 'clip', function clip() {});
     define(CP, 'isPointInPath', function isPointInPath(a, b, c) {
@@ -342,9 +347,38 @@
     define(CP, 'drawFocusIfNeeded', function () {});
     define(CP, 'scrollPathIntoView', function () {});
     /* rectangles */
-    define(CP, 'fillRect', function fillRect() {});
+    /* (solid rectangles while the transform keeps them upright: painted, through
+     * __cyberCanvasRect, in the bitmap's pixels; gradients, patterns, shadows,
+     * other composites not drawn) */
+    function rgbaOf(c) {
+        if (typeof c !== 'string') return null;
+        var m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(c);
+        if (m) return [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16), 1];
+        m = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/i.exec(c);
+        if (m) return [+m[1], +m[2], +m[3], m[4] === undefined ? 1 : +m[4]];
+        return null;
+    }
+    function putRect(ctx, x, y, w, h, clear) {
+        var f = global.__cyberCanvasRect, m = ctx._m, cv = ctx._canvas;
+        if (typeof f !== 'function' || !cv || m[1] !== 0 || m[2] !== 0) return;
+        x = num(x, NaN); y = num(y, NaN); w = num(w, NaN); h = num(h, NaN);
+        if (!isFinite(x + y + w + h)) return;
+        var X = m[0] * x + m[4], Y = m[3] * y + m[5], W = m[0] * w, H = m[3] * h;
+        if (clear) { f(cv, X, Y, W, H, 0, 0, 0, 0, 1); return; }
+        var s = ctx._s, c = rgbaOf(s.fillStyle);
+        if (!c || s.globalCompositeOperation !== 'source-over') return;
+        f(cv, X, Y, W, H, c[0], c[1], c[2], c[3] * s.globalAlpha, 0);
+    }
+    define(CP, 'fillRect', function fillRect(x, y, w, h) { putRect(this, x, y, w, h, false); });
+    /* (a paint worklet's context for element el: what it held before cleared) */
+    define(global, '__cyberPaintContext', function (el, keep) {
+        var f = global.__cyberCanvasRect;
+        if (typeof f !== 'function' || !el) return null;
+        if (!keep) f(el, -1e7, -1e7, 2e7, 2e7, 0, 0, 0, 0, 1);
+        return newContext(el);
+    });
     define(CP, 'strokeRect', function strokeRect() {});
-    define(CP, 'clearRect', function clearRect() {});
+    define(CP, 'clearRect', function clearRect(x, y, w, h) { putRect(this, x, y, w, h, true); });
     /* text */
     define(CP, 'fillText', function fillText() {});
     define(CP, 'strokeText', function strokeText() {});
@@ -374,6 +408,14 @@
             throw new TypeError("Failed to execute 'drawImage': Valid arities are: [3, 5, 9].");
         if (image === null || typeof image !== 'object')
             throw new TypeError("Failed to execute 'drawImage': The provided value is not of type '(CanvasImageSource)'.");
+        /* (an <img> drawn whole, upright: painted through __cyberCanvasImage) */
+        var f = global.__cyberCanvasImage, m = this._m, n = arguments.length;
+        if (typeof f !== 'function' || n === 9 || m[1] !== 0 || m[2] !== 0 || typeof image.src !== 'string' || !image.src) return;
+        var w = n === 5 ? num(arguments[3], NaN) : (image.naturalWidth || image.width || 0);
+        var h = n === 5 ? num(arguments[4], NaN) : (image.naturalHeight || image.height || 0);
+        var x = num(arguments[1], NaN), y = num(arguments[2], NaN);
+        if (!isFinite(x + y + w + h) || !w || !h) return;
+        f(this._canvas, image.src, m[0] * x + m[4], m[3] * y + m[5], m[0] * w, m[3] * h);
     });
     define(CP, 'createImageData', function createImageData(a, b) {
         if (a instanceof ImageData) return new ImageData(a.width, a.height);

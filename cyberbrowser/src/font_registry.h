@@ -61,6 +61,8 @@ int font_registry_load_pending(void);
 /* Fallback fonts for glyphs the chosen font lacks: entry k (loaded on first
  * use; NULL when it does not exist on this system). */
 int font_registry_fallback_count(void);
+/* The fonts of a font-family list that are there, in its order (slots), at most max. */
+int font_registry_resolve_chain(const char *family_list, int weight, bool italic, int *out, int max);
 struct TextShaper *font_registry_fallback(int k);
 
 /* Path (and collection index) of the regular face of a system family or

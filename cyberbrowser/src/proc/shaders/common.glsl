@@ -62,6 +62,50 @@ float rrect_alpha(vec4 r, vec4 rx, vec4 ry, vec2 p) {
     return clamp(0.5 - (d - 1.0) * rr, 0.0, 1.0);
 }
 
+// (corner-shape: raster_cpu.c's corner_din: the distance in from a corner's
+// curve, superellipse(K), at u, v in from its edges; g its normal)
+float corner_din(float u, float v, float rx, float ry, float K, out vec2 g) {
+    bool cv = K < 0.0;
+    float n = exp2(abs(K));
+    float p = cv ? u / rx : 1.0 - u / rx, q = cv ? v / ry : 1.0 - v / ry;
+    // (a bevel's line goes on past its ends; a curve's ends meet the sides square)
+    if (n == 1.0) {
+        vec2 g1 = vec2(1.0 / rx, 1.0 / ry);
+        g = normalize(g1);
+        return (1.0 - p - q) / length(g1);
+    }
+    p = max(p, 0.0);
+    q = max(q, 0.0);
+    float m = max(p, q), norm, dp, dq;
+    if (m <= 0.0) { g = vec2(0.7071); return cv ? -min(rx, ry) : min(rx, ry); }
+    if (n > 60.0) { norm = m; dp = p >= q ? 1.0 : 0.0; dq = 1.0 - dp; }
+    else if (n == 1.0) { norm = p + q; dp = 1.0; dq = 1.0; }
+    else {
+        norm = m * pow(pow(p / m, n) + pow(q / m, n), 1.0 / n);
+        dp = p > 0.0 ? pow(p / norm, n - 1.0) : 0.0;
+        dq = q > 0.0 ? pow(q / norm, n - 1.0) : 0.0;
+    }
+    vec2 gg = vec2(dp / rx, dq / ry);
+    float gl = max(length(gg), 1e-6);
+    g = gg / gl;
+    return (cv ? norm - 1.0 : 1.0 - norm) / gl;
+}
+
+// (raster_cpu.c's shaped_alpha: a rounded box with corner shapes K, its
+// contour moved in by ins (t r b l))
+float shaped_alpha(vec4 r, vec4 rx, vec4 ry, vec4 K, vec4 ins, vec2 p) {
+    float lx = p.x - r.x, ly = p.y - r.y, w = r.z, h = r.w;
+    if (w <= 0.0 || h <= 0.0 || lx < ins[3] || ly < ins[0] || lx > w - ins[1] || ly > h - ins[2]) return 0.0;
+    int c = lx < w * 0.5 ? (ly < h * 0.5 ? 0 : 3) : (ly < h * 0.5 ? 1 : 2);
+    float u = (c == 0 || c == 3) ? lx : w - lx, v = c < 2 ? ly : h - ly;
+    float iu = (c == 0 || c == 3) ? ins[3] : ins[1], iv = c < 2 ? ins[0] : ins[2];
+    if (rx[c] <= 0.0 || ry[c] <= 0.0 || K[c] >= 15.0) return 1.0;
+    vec2 g;
+    float d = corner_din(u, v, rx[c], ry[c], K[c], g);
+    if (g.x + g.y > 0.0) d -= (g.x * iu + g.y * iv) / (g.x + g.y);
+    return clamp(d + 0.5, 0.0, 1.0);
+}
+
 // erfc, with a fractional error under 1.2e-7 (Numerical Recipes' erfcc).
 float erfc_(float x) {
     float z = abs(x);

@@ -576,6 +576,41 @@ static int resolve_name_locked(const char *name, int weight, bool italic, bool *
     return -1;
 }
 
+int font_registry_resolve_chain(const char *family_list, int weight, bool italic, int *out, int max)
+{
+    font_registry_init();
+    if (weight <= 0) weight = 400;
+    int n = 0;
+    bool pending = false;
+    pthread_mutex_lock(&g_mu);
+    for (const char *p = family_list ? family_list : ""; *p && n < max;) {
+        while (*p == ',' || isspace((unsigned char)*p)) p++;
+        if (!*p) break;
+        const char *st = p, *en;
+        bool quoted = *p == '"' || *p == '\'';
+        if (quoted) {
+            char q = *p++;
+            st = p;
+            while (*p && *p != q) { if (*p == '\\' && p[1]) p++; p++; }
+            en = p;
+            if (*p) p++;
+        } else {
+            while (*p && *p != ',') p++;
+            en = p;
+            while (en > st && isspace((unsigned char)en[-1])) en--;
+        }
+        char name[FAMILY_MAX];
+        lower_copy(name, sizeof(name), st, (size_t)(en - st));
+        int s = name[0] ? resolve_name_locked(name, weight, italic, &pending) : -1;
+        bool dup = false;
+        for (int k = 0; k < n; k++) dup |= out[k] == s;
+        if (s >= 0 && !dup) out[n++] = s;
+        while (*p && *p != ',') p++;
+    }
+    pthread_mutex_unlock(&g_mu);
+    return n;
+}
+
 int font_registry_resolve(const char *family_list, int weight, bool italic)
 {
     return font_registry_resolve_style(family_list, weight, italic, false, 0.0f, 100.0f);
@@ -643,6 +678,7 @@ int font_registry_resolve_style(const char *family_list, int weight, bool italic
         if (name[0]) slot = resolve_name_locked(name, weight, italic, &pending);
         while (*p && *p != ',') p++;
     }
+    if (slot < 0) slot = resolve_name_locked("serif", weight, italic, &pending);   /* (none of them: the default standard font, a serif one) */
     if (slot < 0) slot = resolve_name_locked("sans-serif", weight, italic, &pending);
     if (slot < 0) {
         /* Last resort: any font at all. */

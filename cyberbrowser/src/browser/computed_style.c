@@ -483,7 +483,8 @@ static void env_of(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p, 
         const char *fam = computed_of(ctx, is_fs && par ? par : cs, "font-family");
         TextShaper *f = fam && fam[0] ? font_registry_slot(font_registry_resolve(fam, 400, false)) : NULL;
         if (f) {
-            env->ch_ratio = text_shaper_zero_advance(f);
+            float za = text_shaper_zero_advance(f);
+            env->ch_ratio = za >= 0.0f ? za : 0.0f;
             env->ex_ratio = text_shaper_x_height(f);
         }
     }
@@ -1189,6 +1190,74 @@ static void grid_tracks_walk(const char *s, const char *e, const double *tr, int
     #undef GT_PUT
 }
 
+/* A subgrid's resolved template: "subgrid" and a line-name list for each of
+ * its nl lines, the given lists first, repeat(auto-fill, ...) filling what
+ * the lists after it leave, the lists past the last line dropped. */
+static char *subgrid_resolved(const char *spec, int nl)
+{
+    enum { NMAX = 512 };
+    const char *ps[NMAX], *qs[NMAX], *rs[NMAX];
+    size_t pl[NMAX], ql[NMAX], rl[NMAX];
+    int npre = 0, npost = 0, nrep = 0;
+    bool fill = false;
+    const char *q = spec + 7;
+    while (*q) {
+        while (isspace((unsigned char)*q)) q++;
+        if (*q == '[') {
+            const char *e = strchr(q, ']');
+            if (!e) break;
+            if (!fill && npre < NMAX) { ps[npre] = q; pl[npre++] = (size_t)(e - q + 1); }
+            else if (fill && npost < NMAX) { qs[npost] = q; ql[npost++] = (size_t)(e - q + 1); }
+            q = e + 1;
+        } else if (!strncasecmp(q, "repeat(", 7)) {
+            const char *a = q + 7;
+            while (isspace((unsigned char)*a)) a++;
+            bool af = !strncasecmp(a, "auto-fill", 9);
+            int count = af ? 0 : atoi(a);
+            const char *c = strchr(a, ',');
+            const char *close = c ? strchr(c, ')') : NULL;
+            if (!c || !close) break;
+            const char *g[NMAX];
+            size_t gl[NMAX];
+            int ng = 0;
+            for (const char *b = c + 1; b < close && ng < NMAX;) {
+                const char *o = memchr(b, '[', (size_t)(close - b));
+                if (!o) break;
+                const char *e = memchr(o, ']', (size_t)(close - o));
+                if (!e) break;
+                g[ng] = o;
+                gl[ng++] = (size_t)(e - o + 1);
+                b = e + 1;
+            }
+            if (af && !fill) {
+                fill = true;
+                for (int k = 0; k < ng && nrep < NMAX; k++) { rs[nrep] = g[k]; rl[nrep++] = gl[k]; }
+            } else {
+                for (int t = 0; t < count && t < NMAX; t++)
+                    for (int k = 0; k < ng; k++) {
+                        if (!fill && npre < NMAX) { ps[npre] = g[k]; pl[npre++] = gl[k]; }
+                        else if (fill && npost < NMAX) { qs[npost] = g[k]; ql[npost++] = gl[k]; }
+                    }
+            }
+            q = close + 1;
+        } else break;
+    }
+    char out[8192];
+    size_t o = (size_t)snprintf(out, sizeof out, "subgrid");
+    int n = 0;
+    for (int k = 0; k < npre && n < nl && o + 64 < sizeof out; k++, n++) o += (size_t)snprintf(out + o, sizeof out - o, " %.*s", (int)pl[k], ps[k]);
+    if (fill && nrep > 0) {
+        int room = nl - n - npost;
+        int reps = room > 0 ? room / nrep : 0;
+        for (int t = 0; t < reps; t++)
+            for (int k = 0; k < nrep && n < nl && o + 64 < sizeof out; k++, n++) o += (size_t)snprintf(out + o, sizeof out - o, " %.*s", (int)rl[k], rs[k]);
+    }
+    for (int k = 0; k < npost && n < nl && o + 64 < sizeof out; k++, n++) o += (size_t)snprintf(out + o, sizeof out - o, " %.*s", (int)ql[k], qs[k]);
+    for (; n < nl && o + 8 < sizeof out; n++) o += (size_t)snprintf(out + o, sizeof out - o, " []");
+    out[o] = 0;
+    return strdup(out);
+}
+
 static char *grid_tracks_resolved(const char *spec, const double *tr, int nt, int lead)
 {
     char out[4096];
@@ -1495,6 +1564,21 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
                 }
             }
             if (intrinsic) { free(r); r = strdup("none"); gt_none = true; }
+        }
+    }
+    /* (a subgrid: a name list per line of the tracks it spans) */
+    if (cs->used.rendered && !cs->pseudo && r && (!strcmp(n, "grid-template-columns") || !strcmp(n, "grid-template-rows")) &&
+        !strncasecmp(r, "subgrid", 7) && (!r[7] || isspace((unsigned char)r[7]))) {
+        const char *dsp = computed_of(ctx, cs, "display");
+        if (!strcmp(dsp, "grid") || !strcmp(dsp, "inline-grid")) {
+            static double sgt[2000];
+            bool rows_asked = n[14] == 'r';
+            if (cs->used.writing_mode != 0) rows_asked = !rows_asked;
+            int nt = layout_query_grid_tracks(cs->el, rows_asked, sgt, 2000);
+            if (nt >= 0) {
+                char *g = subgrid_resolved(r, nt + 1);
+                if (g) { free(r); r = g; }
+            }
         }
     }
     /* (a grid's tracks: as they came out) */

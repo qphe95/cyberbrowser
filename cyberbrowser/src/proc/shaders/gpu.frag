@@ -25,8 +25,11 @@ void main() {
         vec4 e = it.info.x == 0 ? vec4(it.rect.xy, it.rect.xy + it.rect.zw) : vec4(it.lquad);
         float sx = max(length(vec2(it.xf0.x, it.xf0.z)), 1e-6), sy = max(length(vec2(it.xf0.y, it.xf0.w)), 1e-6);
         float dx = min(p.x - e.x, e.z - p.x) / sx, dy = min(p.y - e.y, e.w - p.y) / sy;
-        // (hard edges: the antialiased ones matched fewer references)
-        edge_cov = dx >= 0.0 && dy >= 0.0 ? 1.0 : 0.0;
+        // (hard edges where the transform keeps them axis-aligned: antialiased
+        // ones matched fewer references; rotated or skewed ones antialiased,
+        // as borders' diagonal joins and polygons are)
+        bool axis = abs(it.xf0.y) < 1e-4 && abs(it.xf0.z) < 1e-4;
+        edge_cov = axis ? (dx >= 0.0 && dy >= 0.0 ? 1.0 : 0.0) : clamp(dx + 0.5, 0.0, 1.0) * clamp(dy + 0.5, 0.0, 1.0);
         if (edge_cov <= 0.0) discard;
         p = clamp(p, vec2(it.lquad.xy) + 0.001, vec2(it.lquad.zw) - 0.001);
         pix = ivec2(floor(p));

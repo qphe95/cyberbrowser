@@ -93,6 +93,7 @@ typedef struct ImageEntry {
     uint8_t *bytes;
     size_t nbytes;
     ImageFormat fmt;
+    unsigned char orient;               /* (its EXIF orientation, 1..8; 0 none) */
 
     /* Main-thread notification state (guarded by the cache mutex). */
     ImageLoadCallback callback;
@@ -489,9 +490,92 @@ static ImagePixels *decode_stb(const uint8_t *d, size_t n)
     return px;
 }
 
+/* (EXIF orientation from a TIFF block: tag 0x0112 of IFD0; 0 none) */
+static int tiff_orientation(const uint8_t *t, size_t n)
+{
+    if (n < 8) return 0;
+    bool le = t[0] == 'I' && t[1] == 'I';
+    if (!le && !(t[0] == 'M' && t[1] == 'M')) return 0;
+#define RD16(p) (le ? (unsigned)((p)[0] | ((p)[1] << 8)) : (unsigned)(((p)[0] << 8) | (p)[1]))
+#define RD32(p) (le ? ((uint32_t)(p)[0] | ((uint32_t)(p)[1] << 8) | ((uint32_t)(p)[2] << 16) | ((uint32_t)(p)[3] << 24)) \
+                    : (((uint32_t)(p)[0] << 24) | ((uint32_t)(p)[1] << 16) | ((uint32_t)(p)[2] << 8) | (uint32_t)(p)[3]))
+    uint32_t off = RD32(t + 4);
+    if (off + 2 > n) return 0;
+    unsigned cnt = RD16(t + off);
+    for (unsigned i = 0; i < cnt; i++) {
+        size_t e = off + 2 + (size_t)i * 12;
+        if (e + 12 > n) break;
+        if (RD16(t + e) == 0x0112) {
+            unsigned v = RD16(t + e + 8);
+            return v >= 1 && v <= 8 ? (int)v : 0;
+        }
+    }
+#undef RD16
+#undef RD32
+    return 0;
+}
+
+/* (an image's EXIF orientation: a JPEG's APP1 Exif, a PNG's eXIf chunk) */
+static int image_orientation(const uint8_t *d, size_t n, ImageFormat fmt)
+{
+    if (fmt == FMT_JPEG && n > 4) {
+        size_t p = 2;
+        while (p + 4 <= n && d[p] == 0xFF) {
+            uint8_t m = d[p + 1];
+            if (m == 0xDA || m == 0xD9) break;
+            size_t len = ((size_t)d[p + 2] << 8) | d[p + 3];
+            if (m == 0xE1 && len >= 8 && p + 2 + len <= n && !memcmp(d + p + 4, "Exif\0\0", 6))
+                return tiff_orientation(d + p + 10, len - 8);
+            p += 2 + len;
+        }
+        return 0;
+    }
+    if (n > 8 && d[0] == 0x89 && d[1] == 'P') {
+        size_t p = 8;
+        while (p + 12 <= n) {
+            size_t len = ((size_t)d[p] << 24) | ((size_t)d[p + 1] << 16) | ((size_t)d[p + 2] << 8) | d[p + 3];
+            if (!memcmp(d + p + 4, "eXIf", 4) && p + 8 + len <= n) return tiff_orientation(d + p + 8, len);
+            if (!memcmp(d + p + 4, "IDAT", 4)) break;
+            p += 12 + len;
+        }
+    }
+    return 0;
+}
+
+/* (pixels turned and flipped upright by an EXIF orientation) */
+static ImagePixels *pixels_orient(ImagePixels *px, int o)
+{
+    if (!px || o <= 1 || o > 8) return px;
+    int W = px->width, H = px->height;
+    bool sw = o >= 5;
+    int ow = sw ? H : W, oh = sw ? W : H;
+    ImagePixels *q = pixels_new(ow, oh);
+    if (!q) return px;
+    const uint32_t *src = (const uint32_t *)px->data;
+    uint32_t *dst = (uint32_t *)q->data;
+    for (int y = 0; y < oh; y++)
+        for (int x = 0; x < ow; x++) {
+            int sx, sy;
+            switch (o) {
+            case 2: sx = W - 1 - x; sy = y; break;
+            case 3: sx = W - 1 - x; sy = H - 1 - y; break;
+            case 4: sx = x; sy = H - 1 - y; break;
+            case 5: sx = y; sy = x; break;
+            case 6: sx = y; sy = H - 1 - x; break;
+            case 7: sx = W - 1 - y; sy = H - 1 - x; break;
+            default: sx = W - 1 - y; sy = x; break;
+            }
+            dst[(size_t)y * ow + x] = src[(size_t)sy * W + sx];
+        }
+    pixels_free(px);
+    return q;
+}
+
 static ImagePixels *decode_bytes(ImageEntry *e, int ww, int wh)
 {
     ImagePixels *px = NULL;
+    /* (an image turned on its side decodes to the other way round) */
+    if (e->orient >= 5) { int t = ww; ww = wh; wh = t; }
     switch (e->fmt) {
     case FMT_JPEG: px = decode_jpeg(e->bytes, e->nbytes, ww, wh); break;
     case FMT_WEBP: px = decode_webp(e->bytes, e->nbytes, ww, wh); break;
@@ -500,6 +584,7 @@ static ImagePixels *decode_bytes(ImageEntry *e, int ww, int wh)
     default: break;
     }
     if (!px && e->fmt != FMT_SVG && e->fmt != FMT_WEBP) px = decode_stb(e->bytes, e->nbytes);
+    if (px && e->orient > 1) px = pixels_orient(px, e->orient);
     return px;
 }
 
@@ -570,6 +655,7 @@ void image_cache_allow_local_files(bool allow)
 static bool fetch_entry(ImageEntry *e)
 {
     const char *src = e->source;
+    if (!strncmp(src, "noexif:", 7)) src += 7;   /* (image-orientation: none: the same bytes, unturned) */
     if (url_is_data_url(src)) {
         e->bytes = data_url_decode(src, &e->nbytes);
         return e->bytes != NULL;
@@ -628,6 +714,9 @@ static void work_entry(ImageCache *c, ImageEntry *e)
             pthread_mutex_unlock(&c->mu);
             return;
         }
+        /* (image-orientation: from-image: an EXIF orientation applied; 5-8 swap the sides) */
+        e->orient = strncmp(e->source, "noexif:", 7) ? (unsigned char)image_orientation(e->bytes, e->nbytes, e->fmt) : 0;
+        if (e->orient >= 5) { int t = w; w = h; h = t; }
         atomic_store(&e->nat_w, w);
         atomic_store(&e->nat_h, h);
         if (atomic_exchange(&e->asked_unsized, 0)) g_size_generation++;

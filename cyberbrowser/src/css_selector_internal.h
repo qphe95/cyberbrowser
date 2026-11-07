@@ -116,19 +116,26 @@ typedef struct CssSimpleSelector {
     bool has_id;
     bool is_root;    /* :root pseudo-class */
     bool universal;
+    bool tag_upper;          /* (its type selector has capitals: in an XML document, where names are case-sensitive, no lowercase element) */
     bool has_substantive;    /* a tag/id/class/attr/universal was matched */
     bool is_pseudo_element;  /* a ::pseudo-element (::before, ::-webkit-...) is present */
     bool requires_empty;     /* :empty — element must have no element/text children */
     bool never_match;        /* dynamic pseudo-class (:visited, :hover, ...) — never true in a static render */
-    bool requires_link;      /* :link — must be <a>/<area> with an href attribute */
+    bool requires_link;
+    unsigned char link_kind; /* (with requires_link: 1 :link (not visited), 0 :any-link; 2 :visited) */      /* :link — must be <a>/<area> with an href attribute */
     uint32_t state_mask;     /* :hover, :checked, ...: the DOM_ST_* the element must have */
     uint32_t not_state;      /* (of the flattened :not()) */
     bool not_list_active;    /* :not() of anything else: not_list_arg, evaluated as a list */
     char not_list_arg[400];
     int  child_pos;          /* 0=none, 1=:first-child, 2=:last-child, 3=:only-child */
+    int  dir_val;            /* :dir(): 1 ltr, 2 rtl, 3 neither (matches nothing) */
+    uint32_t node_id;        /* (:-webkit-cyber-host(N), a shadow host's scoping: the element with NodeId N) */
+    char lang_ranges[96];    /* (:lang() with a list, wildcards or several subtags: its ranges, extended filtering) */
     int  type_pos;           /* 0=none, 1=:first-of-type, 2=:last-of-type, 3=:only-of-type */
     int  nth_kind;           /* 0=none, 1=nth-child, 2=nth-last-child, 3=nth-of-type, 4=nth-last-of-type */
     int  nth_a, nth_b;       /* an+b coefficients */
+    bool nth_of_active;      /* :nth-child(An+B of S): only siblings matching S counted */
+    char nth_of_arg[300];
     /* Flattened :not(<simple-selector>) argument (first compound only). */
     bool not_active;
     bool not_has_tag;
@@ -192,7 +199,7 @@ int css_sel_chain_specificity(const CssSelectorPart *parts, int count);
 /* True for the parser's whitespace set (space, tab, CR, LF, FF). */
 /* (a compound of nothing but pseudo-classes tests something too; a pseudo-element alone doesn't) */
 static inline bool css_simple_substantive(const CssSimpleSelector *s) {
-    return s->has_substantive || s->child_pos || s->type_pos || s->nth_kind || s->state_mask || s->requires_empty ||
+    return s->has_substantive || s->child_pos || s->dir_val || s->node_id || s->lang_ranges[0] || s->type_pos || s->nth_kind || s->state_mask || s->requires_empty ||
            s->requires_link || s->not_active || s->not_list_active || s->lang_count;
 }
 

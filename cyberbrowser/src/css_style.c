@@ -167,7 +167,7 @@ typedef VEC(int32_t) I32Vec;
  * Per-document element features
  * ============================================================================ */
 
-enum { DF_LINK = 1, DF_HAS_CHILD = 2 };
+enum { DF_LINK = 1, DF_HAS_CHILD = 2, DF_SHADOW = 4, DF_VISITED = 8 };   /* (DF_VISITED: a link to the document itself) */   /* (DF_SHADOW: in the shadow tree of a host that is no custom element) */
 
 struct CssStyleDoc {
     int count;
@@ -227,10 +227,21 @@ static void sd_element_features(CssStyleDoc *d, HtmlNode *node, int i)
     const char *id = node_attr(node, "id");
     d->id[i] = id ? atom_cstr(id) : CSS_ATOM_NONE;
     d->state[i] = dom_element_state(node->store_id);
-    d->flags[i] &= (uint8_t)~DF_LINK;
+    d->flags[i] &= (uint8_t)~(DF_LINK | DF_SHADOW | DF_VISITED);
+    if (node->store_id) {
+        NodeId r = node->store_id;
+        while (dom_parent(r)) r = dom_parent(r);
+        uint32_t h = r != node->store_id && (dom_flags(r) & DOMF_SHADOW_ROOT) ? g_dom.host[dom_slot(r)] : 0;
+        const char *tn = h ? dom_local_name(dom_id_of(h)) : NULL;
+        if (h && (!tn || !strchr(tn, '-'))) d->flags[i] |= DF_SHADOW;
+    }
     if ((strcasecmp(node->tag_name, "a") == 0 || strcasecmp(node->tag_name, "area") == 0) &&
-        node_attr(node, "href"))
+        node_attr(node, "href")) {
         d->flags[i] |= DF_LINK;
+        const char *hv = node_attr(node, "href");
+        while (*hv == ' ' || *hv == '\t' || *hv == '\n') hv++;
+        if (!*hv) d->flags[i] |= DF_VISITED;
+    }
     /* Class tokens of the first class attribute (the legacy lookup). */
     d->cls_off[i] = d->pool_n;
     const char *cls = node_attr(node, "class");
@@ -377,7 +388,7 @@ static CssStyleDoc *styledoc_build(HtmlDocument *doc, CssStyleDoc *old, uint32_t
         if (j >= 0) {
             d->tag[i] = old->tag[j];
             d->id[i] = old->id[j];
-            d->flags[i] |= old->flags[j] & DF_LINK;
+            d->flags[i] |= old->flags[j] & (DF_LINK | DF_VISITED);
             d->state[i] = old->state[j];
             if (take) {
                 d->cls_off[i] = old->cls_off[j];
@@ -576,7 +587,10 @@ typedef struct CComp {
     uint32_t atest_off, natest_off;   /* into CssStyleSet.atests, parallel to attrs */
     uint8_t cls_n, attr_n, ncls_n, nattr_n;
     uint8_t attr_vals, nattr_vals;    /* any value test present */
-    uint8_t root, link, empty, child_pos, type_pos, nth_kind;
+    uint8_t root, link, empty, child_pos, type_pos, nth_kind, dir_val;
+    uint32_t node_id;          /* (a shadow host by NodeId; 0 none) */
+    uint8_t tag_upper;         /* (a type selector with capitals: none in an XML document) */
+    const char *lang_ranges;   /* (:lang() by extended filtering; NULL none) */
     uint8_t not_active, not_has_tag, not_has_id;
     uint8_t comb;
     uint8_t never;
@@ -584,6 +598,7 @@ typedef struct CComp {
     uint32_t state, not_state;
     CssAtom not_tag, not_id;
     int32_t not_list; /* list index, -1 = none */
+    int32_t nth_of;   /* :nth-child(... of S): S's list index, -1 = none */
     int32_t where;   /* list index, -1 = none */
     int32_t has;     /* :has() list index, -1 = none */
     uint8_t has_comb;
@@ -607,6 +622,7 @@ typedef struct CRule {
     int sheet, index;
     int32_t aspect;         /* list index, -1 = none */
     bool ua;                /* from the user agent's sheet */
+    bool shadow;            /* from a shadow tree's sheet */
     int layer_bias;         /* how far below no layer at all its layer is */
     int32_t scope;          /* its @scope root's list, -1 = none */
 } CRule;
@@ -751,6 +767,7 @@ static void compile_comp(Builder *b, const CssSimpleSelector *s, int comb, CComp
     c->where = -1;
     c->has = -1;
     c->not_list = -1;
+    c->nth_of = -1;
     c->state = s->state_mask;
     c->not_state = s->not_state;
     c->comb = (uint8_t)comb;
@@ -764,9 +781,14 @@ static void compile_comp(Builder *b, const CssSimpleSelector *s, int comb, CComp
     c->atest_off = push_atests(b, s->attr_ops, s->attr_ci, (char (*)[96])s->attr_vals,
                                s->attr_count, &c->attr_vals);
     c->root = s->is_root;
-    c->link = s->requires_link;
+    c->link = s->requires_link ? (uint8_t)(1 + s->link_kind) : 0;   /* (1 any, 2 unvisited, 3 visited) */
     c->empty = s->requires_empty;
     c->child_pos = (uint8_t)s->child_pos;
+    c->dir_val = (uint8_t)s->dir_val;
+    c->node_id = s->node_id;
+    c->tag_upper = s->tag_upper;
+    /* (the ranges interned: the selector it came from may not outlive the set) */
+    c->lang_ranges = s->lang_ranges[0] ? css_atom_str(css_atom_intern(s->lang_ranges, strlen(s->lang_ranges))) : NULL;
     c->type_pos = (uint8_t)s->type_pos;
     c->nth_kind = (uint8_t)s->nth_kind;
     c->nth_a = s->nth_a;
@@ -802,14 +824,16 @@ static int32_t compile_chain(Builder *b, const char *text, int32_t owner)
      * :has() arguments compile after, and compiling them reuses the
      * scratch: only their text is kept (not a copy of every part). */
     CComp tmp[CSS_MAX_SIMPLE_PARTS];
-    struct { int i; bool w, h, n; char comb; char where[400], has[160], nl[400]; } sub[CSS_MAX_SIMPLE_PARTS];
+    struct { int i; bool w, h, n, o; char comb; char where[400], has[160], nl[400], of[300]; } sub[CSS_MAX_SIMPLE_PARTS];
     int nsub = 0;
     for (int i = 0; i < count; i++) {
         const CssSimpleSelector *sp = &b->parts[i].simple;
         compile_comp(b, sp, b->parts[i].combinator, &tmp[i]);
         if (tmp[i].never) ch.never = 1;
-        if (sp->where_active || sp->has_active || sp->not_list_active) {
+        if (sp->where_active || sp->has_active || sp->not_list_active || sp->nth_of_active) {
             sub[nsub].i = i;
+            sub[nsub].o = sp->nth_of_active;
+            if (sp->nth_of_active) memcpy(sub[nsub].of, sp->nth_of_arg, sizeof(sub[nsub].of));
             sub[nsub].n = sp->not_list_active;
             if (sp->not_list_active) memcpy(sub[nsub].nl, sp->not_list_arg, sizeof(sub[nsub].nl));
             sub[nsub].w = sp->where_active;
@@ -827,6 +851,7 @@ static int32_t compile_chain(Builder *b, const char *text, int32_t owner)
         int i = sub[k].i;
         if (sub[k].w) tmp[i].where = compile_list(b, sub[k].where);
         if (sub[k].n) tmp[i].not_list = compile_list(b, sub[k].nl);
+        if (sub[k].o) { tmp[i].nth_of = compile_list(b, sub[k].of); if (tmp[i].nth_of < 0) ch.never = 1; }
         if (sub[k].h) {
             tmp[i].has = compile_list(b, sub[k].has);
             tmp[i].has_comb = (uint8_t)sub[k].comb;
@@ -944,6 +969,89 @@ static inline bool nth_matches(int a, int b, int pos)
 
 /* Attribute test against element n: the first attribute with this name
  * (atoms are case-folded) must satisfy the operator. */
+/* (element n's directionality, 1 ltr or 2 rtl: the nearest dir="ltr" or "rtl" up from it, else ltr) */
+/* (element n's language: the nearest lang attribute up from it; NULL none) */
+static const char *lang_of(const CssStyleDoc *D, int n)
+{
+    static CssAtom a_lang;
+    if (!a_lang) a_lang = css_atom_intern("lang", 4);
+    for (int k = n, guard = 0; k >= 0 && guard < 4096; k = D->parent[k], guard++) {
+        const CssAtom *attrs = D->pool + D->attr_off[k];
+        for (uint32_t j = 0; j < D->attr_n[k]; j++)
+            if (attrs[j] == a_lang) return D->pool_val[D->attr_off[k] + j];
+    }
+    return NULL;
+}
+
+/* (a language tag against one range, RFC 4647 3.3.2: the first subtags
+ * equal (or *), each later one of the range found in order, skipping the
+ * tag's own but not past a singleton) */
+static bool lang_range_ok(const char *tag, const char *range)
+{
+    char rs[12][16], ts[16][16];
+    int rn = 0, tn = 0;
+    for (const char *p = range; *p && rn < 12;) {
+        size_t l = 0;
+        while (*p && *p != '-') { if (l < 15) rs[rn][l++] = (char)tolower((unsigned char)*p); p++; }
+        rs[rn++][l] = 0;
+        if (*p == '-') p++;
+    }
+    for (const char *p = tag; *p && tn < 16;) {
+        size_t l = 0;
+        while (*p && *p != '-') { if (l < 15) ts[tn][l++] = (char)tolower((unsigned char)*p); p++; }
+        ts[tn++][l] = 0;
+        if (*p == '-') p++;
+    }
+    if (!rn || !tn || !ts[0][0]) return false;
+    if (strcmp(rs[0], "*") && strcmp(rs[0], ts[0])) return false;
+    int i = 1, j = 1;
+    while (i < rn) {
+        if (!strcmp(rs[i], "*")) { i++; continue; }
+        if (j >= tn) return false;
+        if (!strcmp(rs[i], ts[j])) { i++; j++; continue; }
+        if (strlen(ts[j]) == 1) return false;
+        j++;
+    }
+    return true;
+}
+
+/* (any of :lang()'s ranges, quoted or not, a \ escape dropped) */
+static bool lang_match(const CssStyleDoc *D, int n, const char *ranges)
+{
+    const char *tag = lang_of(D, n);
+    if (!tag) return false;
+    for (const char *p = ranges; *p;) {
+        char r[64];
+        size_t l = 0;
+        while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+        while (*p && *p != ',') {
+            if (*p != '"' && *p != '\'' && *p != '\\' && *p != ' ' && l < sizeof r - 1) r[l++] = *p;
+            p++;
+        }
+        r[l] = 0;
+        if (*p == ',') p++;
+        if (l && lang_range_ok(tag, r)) return true;
+    }
+    return false;
+}
+
+static int dir_of(const CssStyleDoc *D, int n)
+{
+    static CssAtom a_dir;
+    if (!a_dir) a_dir = css_atom_intern("dir", 3);
+    for (int k = n, guard = 0; k >= 0 && guard < 4096; k = D->parent[k], guard++) {
+        const CssAtom *attrs = D->pool + D->attr_off[k];
+        for (uint32_t j = 0; j < D->attr_n[k]; j++) {
+            if (attrs[j] != a_dir) continue;
+            const char *v = D->pool_val[D->attr_off[k] + j];
+            if (v && !strcasecmp(v, "rtl")) return 2;
+            if (v && !strcasecmp(v, "ltr")) return 1;
+            break;
+        }
+    }
+    return 1;
+}
+
 static bool attr_test(const CssStyleSet *S, const CssStyleDoc *D, int n, CssAtom name,
                       const AttrTest *t)
 {
@@ -1074,7 +1182,17 @@ static bool comp_match(const CssStyleSet *S, const CssStyleDoc *D, const CComp *
     if (c->never) return false;
     if (c->state && (D->state[n] & c->state) != c->state) return false;
     if (c->root && D->tag[n] != S->atom_html) return false;
+    if (c->node_id && (!D->store_id || D->store_id[n] != c->node_id)) return false;
+    if (c->tag_upper && D->store_id && D->store_id[n] && !dom_is_html_document(dom_owner(D->store_id[n]))) {
+        /* (XML names are case-sensitive: capitals in the selector, none in the name) */
+        const char *ln = dom_local_name(D->store_id[n]);
+        bool up = false;
+        for (const char *q = ln; q && *q && !up; q++) up = *q >= 'A' && *q <= 'Z';
+        if (!up) return false;
+    }
     if (c->link && !(D->flags[n] & DF_LINK)) return false;
+    if (c->link == 2 && (D->flags[n] & DF_VISITED)) return false;
+    if (c->link == 3 && !(D->flags[n] & DF_VISITED)) return false;
     if (c->id && D->id[n] != c->id) return false;
     const CssAtom *cls = D->pool + D->cls_off[n];
     for (uint32_t i = 0; i < c->cls_n; i++)
@@ -1089,6 +1207,8 @@ static bool comp_match(const CssStyleSet *S, const CssStyleDoc *D, const CComp *
             if (!has_atom(attrs, D->attr_n[n], S->atoms[c->attr_off + i])) return false;
     }
     if (c->empty && (D->flags[n] & DF_HAS_CHILD)) return false;
+    if (c->dir_val && (c->dir_val == 3 || dir_of(D, n) != c->dir_val)) return false;
+    if (c->lang_ranges && !lang_match(D, n, c->lang_ranges)) return false;
     if (c->child_pos) {
         if (c->child_pos == 3) {
             if (D->pos_first[n] != 1 || D->pos_last[n] != 1) return false;
@@ -1104,6 +1224,13 @@ static bool comp_match(const CssStyleSet *S, const CssStyleDoc *D, const CComp *
         bool from_end = (c->nth_kind % 2) == 0;
         int pos = same_type ? (from_end ? D->type_last[n] : D->type_first[n])
                             : (from_end ? D->pos_last[n] : D->pos_first[n]);
+        if (c->nth_of >= 0) {
+            /* (of S: it matching S, its place among the siblings that do) */
+            if (!list_match(S, D, c->nth_of, n)) return false;
+            pos = 1;
+            for (int32_t k = from_end ? D->next_elem[n] : D->prev_elem[n]; k >= 0; k = from_end ? D->next_elem[k] : D->prev_elem[k])
+                if (list_match(S, D, c->nth_of, k)) pos++;
+        }
         if (!nth_matches(c->nth_a, c->nth_b, pos)) return false;
     }
     if (c->not_active) {
@@ -1276,7 +1403,7 @@ static bool chain_positional(const CssStyleSet *S, uint32_t ci, uint8_t *memo)
     if (!ch->never) {
         for (uint32_t i = 0; i < ch->n && !pos; i++) {
             const CComp *c = &S->comps[ch->first + i];
-            if (c->child_pos || c->type_pos || c->nth_kind || c->empty ||
+            if (c->child_pos || c->dir_val || c->lang_ranges || c->type_pos || c->nth_kind || c->empty ||
                 c->comb == CSS_COMB_ADJACENT || c->comb == CSS_COMB_SIBLING || c->has >= 0) pos = true;
             else if (c->where >= 0 && list_positional(S, c->where, memo)) pos = true;
             else if (c->not_list >= 0 && list_positional(S, c->not_list, memo)) pos = true;   /* (:not(:first-child) too) */
@@ -1422,6 +1549,9 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
             cr->sheet = s;
             cr->index = r;
             cr->ua = sheet->user_agent;
+            cr->shadow = rule->shadow != 0;
+            /* (a shadow root's adopted sheet, scoped by its host's class: it reaches into the tree) */
+            if (rule->selector_text && strstr(rule->selector_text, "cyber-scope-")) rule->scoped = 1;
             cr->aspect = -1;
             cr->scope = -1;
             if (!rule->selector_text || !rule->selector_text[0]) continue;
@@ -1881,6 +2011,8 @@ int css_style_match(const CssStyleSet *S, const CssStyleDoc *D, int dom,
         const CRule *cr = &S->rules[g];
         const CssRule *rule = cr->rule;
         if (rule->container_query && g_css_rule_gate && !g_css_rule_gate(rule->container_query, dom)) continue;
+        /* (the page's rules stop at a shadow tree: only its own, the UA's and ::part()s in it) */
+        if ((D->flags[dom] & DF_SHADOW) && !cr->ua && !rule->scoped) continue;
         /* (the fewer steps up to the scope's root, the nearer) */
         int prox = 1 << 20;
         if (cr->scope >= 0) {
@@ -1895,6 +2027,8 @@ int css_style_match(const CssStyleSet *S, const CssStyleDoc *D, int dom,
             a.specificity = t->rule_spec[g] - (cr->ua ? (1 << 28) : 0);
             /* (layers ahead of specificity; the earlier win when important) */
             if (cr->layer_bias) a.specificity += (rule->declarations[d].important ? cr->layer_bias : -cr->layer_bias) * (1 << 22);
+            /* (a shadow tree's context: below the page's when normal, above it when important) */
+            if (rule->shadow) a.specificity += (rule->declarations[d].important ? 1 : -1) * (1 << 27);
             a.order = (int)((uint32_t)cr->sheet * 1000000u + (uint32_t)cr->index * 1000u + (uint32_t)d);
             a.proximity = prox;
             a.important = rule->declarations[d].important;
@@ -1978,7 +2112,7 @@ bool css_style_shareable(const CssStyleDoc *D, int dom)
 bool css_style_features_equal(const CssStyleDoc *D, int a, int b)
 {
     if (D->tag[a] != D->tag[b] || D->id[a] != D->id[b]) return false;
-    if ((D->flags[a] & DF_LINK) != (D->flags[b] & DF_LINK) || D->state[a] != D->state[b]) return false;
+    if ((D->flags[a] & (DF_LINK | DF_VISITED)) != (D->flags[b] & (DF_LINK | DF_VISITED)) || D->state[a] != D->state[b]) return false;
     if (D->cls_n[a] != D->cls_n[b] || D->attr_n[a] != D->attr_n[b]) return false;
     if (memcmp(D->pool + D->cls_off[a], D->pool + D->cls_off[b], D->cls_n[a] * sizeof(CssAtom))) return false;
     if (memcmp(D->pool + D->attr_off[a], D->pool + D->attr_off[b], D->attr_n[a] * sizeof(CssAtom))) return false;

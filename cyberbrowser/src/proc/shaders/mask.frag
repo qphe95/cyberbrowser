@@ -13,7 +13,20 @@ layout(set = 2, binding = 1) uniform sampler2D current;
 layout(location = 0) flat in int v_item;
 layout(location = 0) out vec4 out_color;
 
-float mask_alpha(Mask m, vec2 p) {
+// (a polygon's corner k: in mask mi's twenty slots, ten corners a mask, the
+// ones past ten in the kind 11 masks after it)
+vec2 poly_pt(int mi, int k) {
+    Mask c = masks[mi + k / 10];
+    int f = 2 * (k % 10);
+    float v[20];
+    for (int j = 0; j < 4; j++) {
+        v[j] = c.rx[j]; v[4 + j] = c.ry[j]; v[8 + j] = c.border[j]; v[12 + j] = c.ex_rx[j]; v[16 + j] = c.ex_ry[j];
+    }
+    return vec2(v[f], v[f + 1]);
+}
+
+float mask_alpha(int mi, vec2 p) {
+    Mask m = masks[mi];
     int kind = m.kind.x;
     if (kind == 2) {
         float rad = m.misc.x * 3.14159265 / 180.0;
@@ -32,28 +45,53 @@ float mask_alpha(Mask m, vec2 p) {
         }
         return stop_alpha(m, n - 1);
     }
+    if ((kind == 3 || kind == 4) && (m.stop_pos1.x > 0.0 || m.stop_pos1.y > 0.0 || m.stop_pos1.z > 0.0 || m.stop_pos1.w > 0.0)) {
+        // (corner-shape: K per corner, (K + 16.5) / 33, 0 round)
+        vec4 K = vec4(1.0);
+        for (int c = 0; c < 4; c++) {
+            float s = m.stop_pos1[c];
+            if (s > 0.0) K[c] = floor((s * 33.0 - 16.5) * 256.0 + 0.5) / 256.0;   // (to 1/256, as raster_cpu.c)
+        }
+        float outer = shaped_alpha(m.box, m.rx, m.ry, K, vec4(0.0), p);
+        if (kind == 3) return outer;
+        return outer * (1.0 - shaped_alpha(m.box, m.rx, m.ry, K, m.border, p));
+    }
     if (kind == 3) return rrect_alpha(m.box, m.rx, m.ry, p);
     if (kind == 7) {
         // A polygon (clip-path): up to ten corners from the box's corner,
         // x y pairs through rx, ry, border, ex_rx, ex_ry; misc.y their
         // count; misc.x 1 for evenodd, else nonzero.
-        float v[20];
-        for (int k = 0; k < 4; k++) {
-            v[k] = m.rx[k]; v[4 + k] = m.ry[k]; v[8 + k] = m.border[k]; v[12 + k] = m.ex_rx[k]; v[16 + k] = m.ex_ry[k];
-        }
-        int n = min(int(m.misc.y + 0.5), 10);
+        int n = min(int(m.misc.y + 0.5), 128);
+        // (as many as there are kind 11 masks for)
+        int total = masks.length();
+        for (int k = 10; k < n; k += 10)
+            if (mi + k / 10 >= total || masks[mi + k / 10].kind.x != 11) { n = k; break; }
         vec2 q = p - m.box.xy;
         int wind = 0;
         bool odd = false;
+        float dmin = 1e9;   // (the nearest edge: about a pixel of anti-aliasing)
         for (int i = 0; i < n; i++) {
             int j = i + 1 < n ? i + 1 : 0;
-            vec2 a = vec2(v[2 * i], v[2 * i + 1]), b = vec2(v[2 * j], v[2 * j + 1]);
+            vec2 a = poly_pt(mi, i), b = poly_pt(mi, j);
+            vec2 e = b - a, w = q - a;
+            float ee = dot(e, e);
+            vec2 nearest = ee > 0.0 ? a + e * clamp(dot(w, e) / ee, 0.0, 1.0) : a;
+            float dd = length(q - nearest);
+            // (subpaths, misc.z: a join gone over both ways is no edge)
+            if (m.misc.z > 0.5 && dd < 1.0 && dd < dmin)
+                for (int k2 = 0; k2 < n; k2++) {
+                    int j2 = k2 + 1 < n ? k2 + 1 : 0;
+                    if (poly_pt(mi, k2) == b && poly_pt(mi, j2) == a) { dd = 1e9; break; }
+                }
+            dmin = min(dmin, dd);
             if ((a.y <= q.y) != (b.y <= q.y)) {
-                float x = a.x + (q.y - a.y) / (b.y - a.y) * (b.x - a.x);
-                if (q.x < x) { odd = !odd; wind += b.y > a.y ? 1 : -1; }
+                // (q left of the edge's crossing, by the cross product: exact on it)
+                float cr = w.x * e.y - w.y * e.x;
+                if (e.y > 0.0 ? cr < 0.0 : cr > 0.0) { odd = !odd; wind += b.y > a.y ? 1 : -1; }
             }
         }
-        return (m.misc.x > 0.5 ? odd : wind != 0) ? 1.0 : 0.0;
+        bool in_ = m.misc.x > 0.5 ? odd : wind != 0;
+        return clamp(0.5 + (in_ ? dmin : -dmin), 0.0, 1.0);
     }
     if (kind == 6) {
         // A border side, as raster_cpu.c's kind 6: turned to be the top one.
@@ -233,7 +271,7 @@ void main() {
         out_color = vec4(ao > 0.0 ? co / ao : vec3(0.0), ao);
         return;
     }
-    float a = mask_alpha(masks[it.info.y], item_point(it, vec2(pix) + 0.5));
+    float a = mask_alpha(it.info.y, item_point(it, vec2(pix) + 0.5));
     if (a >= 0.999) { out_color = cur; return; }
     vec4 old = texelFetch(saved, pix, 0);
     out_color = old + (cur - old) * max(a, 0.0);

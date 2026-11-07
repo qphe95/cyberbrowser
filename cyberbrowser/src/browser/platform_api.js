@@ -1825,6 +1825,27 @@
         }
         for (var k = 0; k < list.length; k++) global.__cyberElState(list[k], ST_TARGET_CURRENT, list[k] === best);
     }
+    /* (scroll-target-group: auto: its anchors to elements, the one whose target
+     * is nearest where its scroller is scrolled to :target-current) */
+    function targetGroupUpdate(g) {
+        if (global.getComputedStyle(g).scrollTargetGroup !== 'auto') return;
+        var d = g.ownerDocument, as = g.querySelectorAll('a[href]'), pairs = [];
+        for (var i = 0; i < as.length; i++) {
+            var h = as[i].getAttribute('href'), k = h.indexOf('#');
+            if (k < 0 || k === h.length - 1) continue;
+            var id = h.slice(k + 1), t = d.getElementById(id);
+            if (!t) { try { t = d.getElementById(decodeURIComponent(id)); } catch (e) { t = null; } }
+            if (t) pairs.push(as[i], t);
+        }
+        var best = null, bestD = Infinity;
+        for (var p = 0; p < pairs.length; p += 2) {
+            var sc = scrollerSubject(scrollerAround(pairs[p + 1])), o = scrollOffsetOf(sc, pairs[p + 1]);
+            var maxX = sc.scrollWidth - sc.clientWidth, maxY = sc.scrollHeight - sc.clientHeight;
+            var dd = Math.abs(Math.max(0, Math.min(maxX, o.x)) - sc.scrollLeft) + Math.abs(Math.max(0, Math.min(maxY, o.y)) - sc.scrollTop);
+            if (dd < bestD) { bestD = dd; best = pairs[p]; }
+        }
+        for (var q = 0; q < as.length; q++) global.__cyberElState(as[q], ST_TARGET_CURRENT, as[q] === best);
+    }
     function scrollerAround(el) {
         var d = el.ownerDocument;
         for (var a = flatParent(el); a && a !== d; a = flatParent(a))
@@ -1889,6 +1910,10 @@
         if (features & 32) {
             var groups = global.__cyberRenderElements(32);
             for (var g = 0; g < groups.length; g++) markersUpdate(groups[g]);
+        }
+        if (features & 64) {
+            var tgs = global.__cyberRenderElements(64);
+            for (var t = 0; t < tgs.length; t++) targetGroupUpdate(tgs[t]);
         }
         for (var k = 0; k < changed.length; k += 2)
             global.__cyberDispatchTrusted(changed[k], new global.ContentVisibilityAutoStateChangeEvent('contentvisibilityautostatechange', { skipped: changed[k + 1] }));
@@ -1967,6 +1992,307 @@
             });
         });
     };
+    /* ---- View transitions, painted: the old state's named elements cloned
+     * (computed styles inlined) before the update, the new state's after it,
+     * and the ::view-transition pseudo tree built as a fixed overlay of
+     * those clones, styled by the page's ::view-transition-* rules.  The
+     * default animations are taken at their first frame while they run long
+     * (or paused); a transition whose animations end soon shows nothing ---- */
+    /* (auto and match-element: a name of the element's own; auto its id when it has one) */
+    var VT_AUTO = new WeakMap(), vtAutoN = 0;
+    var vtName = function (el) {
+        var n = '';
+        try { n = String(global.getComputedStyle(el).getPropertyValue('view-transition-name') || '').trim(); }
+        catch (e) { return ''; }
+        if (!n || n === 'none') return '';
+        if (n === 'auto' || n === 'match-element') {
+            if (n === 'auto' && el.id) return el.id;
+            if (!VT_AUTO.has(el)) VT_AUTO.set(el, '-cyber-vt-' + (++vtAutoN));
+            return VT_AUTO.get(el);
+        }
+        return n;
+    };
+    var vtClasses = function (el) {
+        try { var v = String(global.getComputedStyle(el).getPropertyValue('view-transition-class') || '').trim(); return v && v !== 'none' ? v.split(/\s+/) : []; }
+        catch (e) { return []; }
+    };
+    var vtInline = function (from, to) {
+        var cs = global.getComputedStyle(from), parts = [];
+        for (var i = 0; i < cs.length; i++) {
+            var p = cs[i];
+            /* (physical properties only: logical ones and prefixed aliases say the same) */
+            if (!p || p.indexOf('view-transition') >= 0 || /^(animation|transition|-webkit-|inset|contain-intrinsic)/.test(p) ||
+                /(^|-)(block|inline)(-|$)/.test(p)) continue;
+            var v = cs.getPropertyValue(p);
+            if (v !== '' && v != null) parts.push(p + ':' + v);
+        }
+        /* (the used sizes last: nothing before them resets them) */
+        ['width', 'height'].forEach(function (p) { var v = cs.getPropertyValue(p); if (v && v !== 'auto') parts.push(p + ':' + v); });
+        to.setAttribute('style', parts.join(';'));
+        to.removeAttribute('id');
+    };
+    /* (a deep clone of el as it looks now, named descendants left out) */
+    var vtSnap = function (el) {
+        var c = el.cloneNode(true);
+        var walk = function (a, b, top) {
+            if (a.nodeType !== 1 || b.nodeType !== 1) return;
+            vtInline(a, b);
+            if (!top && vtName(a)) { b.style.setProperty('visibility', 'hidden'); }
+            var ak = a.childNodes, bk = b.childNodes;
+            for (var i = 0; i < ak.length && i < bk.length; i++) walk(ak[i], bk[i], false);
+        };
+        walk(el, c, true);
+        ['position:absolute', 'left:0', 'top:0', 'right:auto', 'bottom:auto', 'margin:0', 'transform:none', 'translate:none',
+         'rotate:none', 'scale:none', 'float:none', 'visibility:visible'].forEach(function (d) {
+            var k = d.indexOf(':');
+            c.style.setProperty(d.slice(0, k), d.slice(k + 1));
+        });
+        return c;
+    };
+    /* (the page as the root's image: the canvas color and a clone of the body where it is) */
+    var vtRootSnap = function (doc) {
+        var b = doc.body;
+        if (!b) return null;
+        var bg = global.getComputedStyle(doc.documentElement).backgroundColor;
+        if (!bg || /rgba\(0, 0, 0, 0\)|transparent/.test(bg)) bg = global.getComputedStyle(b).backgroundColor;
+        var r = b.getBoundingClientRect();
+        var bcs = global.getComputedStyle(b);
+        return { bg: bg, x: r.left, y: r.top, snap: vtSnap(b), margin: [bcs.marginTop, bcs.marginRight, bcs.marginBottom, bcs.marginLeft].join(' ') };
+    };
+    var vtCaptureState = function (doc, scope) {
+        scope = scope || doc.documentElement;
+        var out = [], seen = {};
+        /* (its descendants in tree order, into shadow trees too) */
+        var els = [];
+        (function walk(n) {
+            for (var c = n.firstElementChild; c; c = c.nextElementSibling) {
+                els.push(c);
+                if (c.shadowRoot) walk(c.shadowRoot);
+                walk(c);
+            }
+        })(scope);
+        for (var i = 0; i < els.length; i++) {
+            var el = els[i];
+            if (el === scope || el.__cyberVtOverlay) continue;
+            var n = vtName(el);
+            if (!n || seen[n]) continue;
+            var cs = global.getComputedStyle(el);
+            if (cs.display === 'none' || cs.display === 'contents') continue;
+            seen[n] = true;
+            var r = el.getBoundingClientRect();
+            out.push({ name: n, el: el, cls: vtClasses(el), x: r.left, y: r.top, w: r.width, h: r.height, snap: vtSnap(el) });
+        }
+        return out;
+    };
+    /* (the page's declarations for one pseudo: the * rules first, then the named) */
+    var vtRules = function (doc, scope) {
+        scope = scope || doc.documentElement;
+        var list = [];
+        var walk = function (rules) {
+            for (var i = 0; i < rules.length; i++) {
+                var r = rules[i];
+                if (r.cssRules && !r.selectorText) {
+                    var k = r.__kind;
+                    if (k === 'media' && !(r.media && global.matchMedia(r.media.mediaText).matches)) continue;
+                    if (k === 'supports' && !(global.CSS && global.CSS.supports(r.conditionText))) continue;
+                    walk(r.cssRules);
+                    continue;
+                }
+                var sel = String(r.selectorText || '');
+                if (sel.indexOf('::view-transition') < 0 || !r.style) continue;
+                sel.split(',').forEach(function (one) {
+                    var m = /::view-transition(?:-(group|image-pair|old|new))?(?:\(\s*([^)]*)\s*\))?\s*$/.exec(one.trim());
+                    if (!m) return;
+                    var pre = one.trim().slice(0, m.index).trim();
+                    if (pre) { var okp = false; try { okp = scope.matches(pre); } catch (e) { okp = false; } if (!okp) return; }
+                    list.push({ kind: m[1] || 'root', name: (m[2] || '*').trim(), style: r.style });
+                });
+            }
+        };
+        var sheets = doc.styleSheets;
+        for (var i = 0; i < sheets.length; i++) { try { walk(sheets[i].cssRules); } catch (e) { } }
+        return list;
+    };
+    var vtDecls = function (rules, kind, name, cls) {
+        var d = {};
+        var take = function (r) {
+            for (var i = 0; i < r.style.length; i++) {
+                var p = r.style[i];
+                d[p] = r.style.getPropertyValue(p);
+            }
+        };
+        /* (the argument: a name or *, then .classes; * first, then classes, then names) */
+        var parse = function (a) {
+            var m = /^([^.]*)((?:\.[^.]+)*)$/.exec(a) || ['', a, ''];
+            return { n: m[1] || '*', c: m[2] ? m[2].slice(1).split('.') : [] };
+        };
+        var hit = function (r, level) {
+            if (r.kind !== kind) return false;
+            var p = parse(r.name);
+            if (p.n !== '*' && p.n !== name) return false;
+            for (var i = 0; i < p.c.length; i++) if (!cls || cls.indexOf(p.c[i]) < 0) return false;
+            var lv = p.n !== '*' ? 2 : p.c.length ? 1 : 0;
+            return lv === level;
+        };
+        [0, 1, 2].forEach(function (lv) { rules.forEach(function (r) { if (hit(r, lv)) take(r); }); });
+        return d;
+    };
+    var vtSecs = function (v) {
+        v = String(v || '').trim().split(/[\s,]+/)[0];
+        var n = parseFloat(v);
+        if (!isFinite(n)) return null;
+        return /ms$/.test(v) ? n / 1000 : n;
+    };
+    /* (its animation: 'none' (none or unset), else its duration and play state) */
+    var vtAnim = function (d, inheritDur) {
+        var a = String(d['animation'] || '').trim(), nm = String(d['animation-name'] || '').trim();
+        if (/^(unset|none|initial|revert|revert-layer)$/.test(a) || /^(unset|none|initial)$/.test(nm)) return { none: true };
+        var dur = d['animation-duration'] != null ? vtSecs(d['animation-duration']) : null;
+        if (dur == null && a) { var mm = /(-?[\d.]+m?s)/.exec(a); if (mm) dur = vtSecs(mm[1]); }
+        if (dur == null) dur = inheritDur;
+        var paused = /paused/.test(String(d['animation-play-state'] || '') + ' ' + a);
+        /* (where it is at its start: steps(n, start) has jumped once) */
+        var tf = String(d['animation-timing-function'] || '') + ' ' + a, p0 = 0;
+        var st = /steps\(\s*(\d+)\s*,\s*(start|jump-start|jump-both)\s*\)/.exec(tf);
+        if (st) p0 = (1 / (+st[1] + (st[2] === 'jump-both' ? 1 : 0)));
+        else if (/step-start/.test(tf)) p0 = 1;
+        return { none: false, dur: dur, long: paused || dur >= 2, custom: !!nm && nm !== 'none', p0: p0 };
+    };
+    var VT_SKIP = /^(animation|transition)/;
+    var vtApply = function (div, d) {
+        for (var p in d) if (!VT_SKIP.test(p)) { try { div.style.setProperty(p, d[p]); } catch (e) { } }
+    };
+    /* (the root's view-transition-name: root unless a rule or its style says none) */
+    var vtRootNamed = function (doc) {
+        var n = vtName(doc.documentElement);
+        if (n) return true;
+        var none = false;
+        var walk = function (rules) {
+            for (var i = 0; i < rules.length; i++) {
+                var r = rules[i];
+                if (r.cssRules && !r.selectorText) { walk(r.cssRules); continue; }
+                var sel = String(r.selectorText || '').trim();
+                if (!/^(:root|html)$/i.test(sel) || !r.style) continue;
+                var v = String(r.style.getPropertyValue('view-transition-name') || '').trim();
+                if (v) none = v === 'none';
+            }
+        };
+        var sh = doc.styleSheets;
+        for (var i = 0; i < sh.length; i++) { try { walk(sh[i].cssRules); } catch (e) { } }
+        var inl = doc.documentElement.style.getPropertyValue('view-transition-name');
+        if (inl) none = String(inl).trim() === 'none';
+        return !none;
+    };
+    var vtShow = function (doc, old, onDone, scope) {
+        scope = scope || doc.documentElement;
+        var scoped = scope !== doc.documentElement;
+        var nu = vtCaptureState(doc, scope), rules = vtRules(doc, scope);
+        var byName = {}, order = [];
+        nu.forEach(function (n) { byName[n.name] = { nu: n, old: null }; order.push(n.name); });
+        old.forEach(function (o) { if (!byName[o.name]) { byName[o.name] = { nu: null, old: o }; order.push(o.name); } else byName[o.name].old = o; });
+        /* (the animations: the group's duration the others inherit) */
+        var hold = false, info = {};
+        /* (the root takes part unless its view-transition-name is none) */
+        var rootIn = scoped ? !!vtName(scope) : vtRootNamed(doc);
+        /* (::view-transition itself: an animation of its own keeps it up) */
+        var va = vtAnim(vtDecls(rules, 'root', '*'), 0.25);
+        if (!va.none && va.long && (va.custom || va.dur >= 2)) hold = true;
+        if (!rootIn && !order.length && !hold) { onDone(); return null; }
+        order.concat(['root']).forEach(function (n) {
+            var e = byName[n] || { nu: null, old: null };
+            var cl = (e.nu || e.old || {}).cls || [];
+            var g = vtDecls(rules, 'group', n, cl), ip = vtDecls(rules, 'image-pair', n, cl), od = vtDecls(rules, 'old', n, cl), nd = vtDecls(rules, 'new', n, cl);
+            var ga = vtAnim(g, 0.25), gd = ga.none ? 0.25 : ga.dur;
+            var oa = vtAnim(od, gd), na = vtAnim(nd, gd);
+            var both = (n === 'root' && rootIn) || (e.nu && e.old);
+            if (!both) ga = { none: true };
+            if ((n !== 'root' || !rootIn) && !e.old) oa = { none: true };
+            if ((n !== 'root' || !rootIn) && !e.nu) na = { none: true };
+            [ga, oa, na].forEach(function (a) { if (!a.none && a.long) hold = true; });
+            info[n] = { g: g, ip: ip, od: od, nd: nd, ga: ga, oa: oa, na: na };
+        });
+        if (!hold) { onDone(); return null; }
+        var root = doc.documentElement;
+        var ov = doc.createElement('div');
+        Object.defineProperty(ov, '__cyberVtOverlay', { value: true });
+        /* (a scoped one over its element's border box; its groups placed from there) */
+        var sr = scoped ? scope.getBoundingClientRect() : { left: 0, top: 0 };
+        ov.setAttribute('style', 'position:fixed;z-index:2147483647;pointer-events:none;' +
+                                 (scoped ? 'left:' + sr.left + 'px;top:' + sr.top + 'px;width:' + sr.width + 'px;height:' + sr.height + 'px;'
+                                         : 'left:0;top:0;width:100vw;height:100vh;') +
+                                 'margin:0;padding:0;border:0;visibility:visible;display:block;overflow:visible');
+        vtApply(ov, vtDecls(rules, 'root', '*'));
+        /* (the root's new image: the live page under the overlay; hidden when its group or new is) */
+        var ri = info.root, hidden = [];
+        var rootOp = function (d, a, start) {
+            if (d.display === 'none') return 0;
+            var o = d.opacity != null && d.opacity !== '' ? parseFloat(d.opacity) : 1;
+            if (!a.none && a.long && !a.custom && start !== undefined) o = start;
+            return o;
+        };
+        var gOp = rootOp(ri.g, ri.ga), oOp = rootOp(ri.od, ri.oa, 1), nOp = rootOp(ri.nd, ri.na, 0);
+        /* (the old page drawn only when the page's rules set the root's images still; mid crossfade the live page stands in) */
+        var oldRoot = rootIn && old.root && ri.oa.none && ri.na.none && gOp * oOp > 0.01 && ri.ip.visibility !== 'hidden';
+        var rootShown = !rootIn || gOp * nOp > 0.01 || (!oldRoot && gOp * oOp > 0.01);
+        if (oldRoot) {
+            /* (the old page, as captured, under the groups) */
+            var rg = doc.createElement('div');
+            rg.setAttribute('style', 'position:absolute;left:0;top:0;width:100vw;height:100vh;overflow:hidden;background:' + old.root.bg + ';opacity:' + (gOp * oOp));
+            var bs = old.root.snap.cloneNode(true);
+            /* (in flow, with its margins: they collapse as on the page) */
+            bs.style.setProperty('position', 'static');
+            bs.style.setProperty('margin', old.root.margin);
+            rg.appendChild(bs);
+            ov.appendChild(rg);
+        }
+        if (!rootShown) {
+            for (var c = scoped ? scope.firstChild : doc.body ? doc.body.firstChild : null; c; c = c.nextSibling)
+                if (c.nodeType === 1) { hidden.push([c, c.style.getPropertyValue('visibility'), c.style.getPropertyPriority('visibility')]); c.style.setProperty('visibility', 'hidden', 'important'); }
+        }
+        order.forEach(function (n) {
+            var e = byName[n], f = info[n];
+            /* (the live element: painted in its group instead) */
+            if (e.nu && rootShown) { hidden.push([e.nu.el, e.nu.el.style.getPropertyValue('visibility'), e.nu.el.style.getPropertyPriority('visibility')]); e.nu.el.style.setProperty('visibility', 'hidden', 'important'); }
+            var start = !f.ga.none && f.ga.long && !f.ga.custom;
+            var geo = start && e.old ? e.old : (e.nu || e.old);
+            if (start && e.old && e.nu && f.ga.p0 > 0) {
+                /* (its first frame part of the way: the geometry between the old and the new) */
+                var q = f.ga.p0, mix = function (a, b) { return a + (b - a) * q; };
+                geo = { x: mix(e.old.x, e.nu.x), y: mix(e.old.y, e.nu.y), w: mix(e.old.w, e.nu.w), h: mix(e.old.h, e.nu.h) };
+            }
+            var g = doc.createElement('div');
+            g.setAttribute('style', 'position:absolute;left:0;top:0;margin:0;padding:0;border:0;box-sizing:border-box;width:' + geo.w + 'px;height:' + geo.h +
+                                    'px;transform:translate(' + (geo.x - sr.left) + 'px,' + (geo.y - sr.top) + 'px);transform-origin:0 0');
+            vtApply(g, f.g);
+            var ip = doc.createElement('div');
+            ip.setAttribute('style', 'position:absolute;left:0;top:0;width:100%;height:100%;isolation:isolate');
+            vtApply(ip, f.ip);
+            g.appendChild(ip);
+            var put = function (s, d, a, op0) {
+                if (!s) return;
+                var w = doc.createElement('div');
+                w.setAttribute('style', 'position:absolute;left:0;top:0;width:100%;height:100%;overflow:visible');
+                var o = d.opacity != null && d.opacity !== '' ? parseFloat(d.opacity) : 1;
+                if (!a.none && a.long && !a.custom) o = op0;
+                vtApply(w, d);
+                w.style.setProperty('opacity', String(o));
+                var snap = s.snap.cloneNode(true), sc = s.w > 0 ? geo.w / s.w : 1;
+                if (Math.abs(sc - 1) > 0.001) { snap.style.setProperty('transform', 'scale(' + sc + ')'); snap.style.setProperty('transform-origin', '0 0'); }
+                w.appendChild(snap);
+                ip.appendChild(w);
+            };
+            put(e.old, f.od, f.oa, 1);
+            put(e.nu, f.nd, f.na, 0);
+            ov.appendChild(g);
+        });
+        root.appendChild(ov);
+        return function () {
+            if (ov.parentNode) ov.parentNode.removeChild(ov);
+            hidden.forEach(function (h) { if (h[1]) h[0].style.setProperty('visibility', h[1], h[2]); else h[0].style.removeProperty('visibility'); });
+            hidden = [];
+        };
+    };
+    var VT_ACTIVE = { cur: null };
     var newViewTransition = function (update, types, doc, root) {
         var vt = Object.create(ViewTransition.prototype), resolveReady, rejectReady, resolveFinished, rejectFinished,
             resolveDone, rejectDone, skipped = false, timedOut = false;
@@ -1979,6 +2305,16 @@
             timedOut = true;
             rejectReady(new global.DOMException('Transition update callback timed out', 'TimeoutError'));
         }, 4000);
+        /* (the old state, captured now: painted once the update is done) */
+        var vtOld = null, vtUndo = null;
+        /* (the root matches :active-view-transition(-type) while it runs: its types in an attribute) */
+        var avtSet = function (list) { if (doc && doc.documentElement) doc.documentElement.setAttribute('data-cyber-avt', list.join(' ')); };
+        if (doc) { var tl = []; try { if (types) for (var ti of types) tl.push(String(ti)); } catch (e) { } avtSet(tl); }
+        var vdoc = root && root.ownerDocument;
+        if (vdoc && (!doc || root === doc.documentElement)) {
+            try { vtOld = vtCaptureState(vdoc, root); } catch (e) { vtOld = null; }
+            if (vtOld && doc) { try { vtOld.root = vtRootSnap(doc); } catch (e) { vtOld.root = null; } }
+        }
         Promise.resolve().then(update).then(function (v) {
             global.clearTimeout(timer);
             if (timedOut) return;
@@ -1988,7 +2324,10 @@
                 resolveReady();
                 if (doc) global.setTimeout(function () { if (!skipped) viewTransitionEvents(doc); }, 0);
             }
-            resolveFinished();
+            if (!skipped && vtOld) {
+                var fin = false, finish = function () { if (!fin) { fin = true; resolveFinished(); } };
+                try { vtUndo = vtShow(vdoc, vtOld, finish, root); } catch (e) { finish(); }
+            } else resolveFinished();
         }, function (reason) {
             global.clearTimeout(timer);
             if (timedOut) return;
@@ -1998,8 +2337,19 @@
         });
         VT_STATE.set(vt, { done: done, ready: ready, finished: finished, types: newTypeSet(types),
                            root: root || (doc && doc.documentElement) || null,
-                           skip: function () { skipped = true; } });
+                           skip: function () { skipped = true; if (vtUndo) { vtUndo(); vtUndo = null; resolveFinished(); } } });
         Object.defineProperty(vt, '__skipped', { get: function () { return skipped; } });
+        if (doc) {
+            var ts = VT_STATE.get(vt).types;
+            try {
+                Object.defineProperty(ts, '__onChange', { configurable: true, value: function () {
+                    var a = []; ts.forEach(function (t) { a.push(t); }); if (VT_ACTIVE.cur === vt) avtSet(a);
+                } });
+            } catch (e) { }
+            VT_ACTIVE.cur = vt;
+            var off = function () { if (VT_ACTIVE.cur === vt) { VT_ACTIVE.cur = null; if (doc.documentElement) doc.documentElement.removeAttribute('data-cyber-avt'); } };
+            finished.then(off, off);
+        }
         return vt;
     };
     /* (ViewTransition's attributes and operations, on its prototype) */
@@ -2039,9 +2389,9 @@
         };
         Object.defineProperty(P, 'size', { configurable: true, enumerable: true, get: function size() { return ttsOf(this).size; } });
         m('has', 1, function (v) { return ttsOf(this).has(String(v)); });
-        m('add', 1, function (v) { ttsOf(this).add(String(v)); return this; });
-        m('delete', 1, function (v) { return ttsOf(this).delete(String(v)); });
-        m('clear', 0, function () { ttsOf(this).clear(); });
+        m('add', 1, function (v) { ttsOf(this).add(String(v)); if (this.__onChange) this.__onChange(); return this; });
+        m('delete', 1, function (v) { var r = ttsOf(this).delete(String(v)); if (this.__onChange) this.__onChange(); return r; });
+        m('clear', 0, function () { ttsOf(this).clear(); if (this.__onChange) this.__onChange(); });
         m('forEach', 1, function (cb, thisArg) { var self = this; ttsOf(this).forEach(function (v) { cb.call(thisArg, v, v, self); }); });
         m('entries', 0, function () { return ttsOf(this).entries(); });
         m('values', 0, function () { return ttsOf(this).values(); });
@@ -2368,6 +2718,11 @@
     var scrollWith, scrollLast;
     function scrollIntoViewOf(el, block, inline, inner) {
         var d = el.ownerDocument, root = d.documentElement;
+        /* (inside a content-visibility: hidden subtree: nothing to scroll to) */
+        try {
+            for (var a0 = el.parentElement; a0; a0 = a0.parentElement)
+                if (global.getComputedStyle(a0).contentVisibility === "hidden") return;
+        } catch (e) {}
         /* (what smooth scrolls begun here will still take off it) */
         var pendX = 0, pendY = 0;
         var pend = function (a) {
@@ -2648,9 +3003,10 @@
     };
     var hlFlush = function () {
         hlDirty = false;
-        if (typeof global.__cyberHighlightSet !== 'function' || !theRegistry) return;
+        if (typeof global.__cyberHighlightSet !== 'function') return;
         var names = [], prios = [], flat = [];
-        HL.get(theRegistry).forEach(function (h, name) {
+        /* (no registry yet: the text fragment and the selection still) */
+        if (theRegistry) HL.get(theRegistry).forEach(function (h, name) {
             var hi = names.length;
             names.push(name);
             prios.push(hlState.get(h).priority);
@@ -2665,6 +3021,24 @@
             names.push('\u0001selection');
             prios.push(0x3fffffff);
             try { hlRange(sr, si, flat); } catch (e) {}
+        }
+        /* (one highlight's ranges over the same text: painted once, as their union) */
+        var segs = [];
+        for (var q = 0; q + 3 < flat.length; q += 4) segs.push([flat[q], flat[q + 1], flat[q + 2], flat[q + 3], q]);
+        var merged = [];
+        segs.forEach(function (g) {
+            for (var m = 0; m < merged.length; m++) {
+                var o = merged[m];
+                if (o[0] === g[0] && o[1] === g[1] && g[2] <= o[3] && g[3] >= o[2]) {
+                    o[2] = Math.min(o[2], g[2]); o[3] = Math.max(o[3], g[3]);
+                    return;
+                }
+            }
+            merged.push(g.slice());
+        });
+        if (merged.length !== segs.length) {
+            flat = [];
+            merged.forEach(function (o) { flat.push(o[0], o[1], o[2], o[3]); });
         }
         global.__cyberHighlightSet(names, prios, flat);
     };

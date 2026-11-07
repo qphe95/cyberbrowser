@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <math.h>
 
+#include <pthread.h>
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
 #include "font_registry.h"
@@ -254,8 +255,18 @@ static bool strike_place(Strike *k, StrikeGlyph *g, GaRect *r)
 
 /* The font that draws a glyph: owner 0 is the shaper itself, owner k + 1 is
  * fallback k of the font registry. */
+static __thread TextShaper *t_chain[6];
+static __thread int t_chain_n;
+void text_shaper_set_chain(TextShaper *const *fonts, int n)
+{
+    if (n < 0 || !fonts) n = 0;
+    if (n > 6) n = 6;
+    for (int i = 0; i < n; i++) t_chain[i] = fonts[i];
+    t_chain_n = n;
+}
 static TextShaper *ts_owner_shaper(const TextShaper *s, int owner)
 {
+    if (owner >= 240) return owner - 240 < t_chain_n ? t_chain[owner - 240] : (TextShaper *)s;   /* (the font-family list's) */
     return owner == 0 ? (TextShaper *)s : font_registry_fallback(owner - 1);
 }
 
@@ -299,12 +310,296 @@ static void ts_metric_owned(const TextShaper *s, uint32_t cp, int *glyph_index, 
         uint32_t bits;
         memcpy(&bits, &xa, sizeof(bits));
         v = ((uint64_t)owner << 56) | ((uint64_t)((uint32_t)(gi + 1) & 0xFFFFFF) << 32) | bits;
+        /* (bit 55: the font itself lacks it) */
+        if (owner != 0 || stbtt_FindGlyphIndex(&s->font, (int)cp) == 0) v |= (uint64_t)1 << 55;
         atomic_store_explicit(&page[cp & 255], v, memory_order_relaxed);
     }
-    *glyph_index = (int)((v >> 32) & 0xFFFFFF) - 1;
-    if (owner_out) *owner_out = (int)(v >> 56);
+    if (t_chain_n > 0 && (v >> 55 & 1) && cp > ' ') {
+        /* (the element's other fonts first: not cached, the list being the element's) */
+        for (int k = 0; k < t_chain_n; k++) {
+            const TextShaper *cf = t_chain[k];
+            if (!cf || cf == s) continue;
+            int g2 = stbtt_FindGlyphIndex(&cf->font, (int)cp);
+            if (!g2) continue;
+            int adv2, lsb2;
+            stbtt_GetGlyphHMetrics(&cf->font, g2, &adv2, &lsb2);
+            *glyph_index = g2;
+            if (owner_out) *owner_out = 240 + k;
+            *xadvance = (float)adv2 * cf->scale + (float)cf->embolden;
+            return;
+        }
+    }
+    *glyph_index = (int)((v >> 32) & 0x7FFFFF) - 1;
+    if (owner_out) *owner_out = (int)(v >> 56) & 0xFF;
     uint32_t bits = (uint32_t)v;
     memcpy(xadvance, &bits, sizeof(*xadvance));
+}
+
+/* ---- OpenType GSUB: the features asked for, as one glyph map per font
+ * (single substitutions, an alternate set's first, through extensions) ---- */
+static __thread uint32_t t_ot_tags[24];
+static __thread int t_ot_n;
+static __thread uint64_t t_ot_key;   /* (the tags' hash) */
+
+void text_shaper_set_features(const uint32_t *tags, int n)
+{
+    if (n < 0) n = 0;
+    if (n > 24) n = 24;
+    uint64_t key = 1469598103934665603ull;
+    for (int i = 0; i < n; i++) { t_ot_tags[i] = tags[i]; key = (key ^ tags[i]) * 1099511628211ull; }
+    t_ot_n = n;
+    t_ot_key = key;
+}
+
+/* (a ligature: its first glyph, the others, the glyph they make) */
+typedef struct { uint16_t first, n, comp[4], lig; uint32_t ord; } OtLig;
+static int ot_lig_cmp(const void *a, const void *b)
+{
+    const OtLig *x = (const OtLig *)a, *y = (const OtLig *)b;
+    if (x->first != y->first) return x->first < y->first ? -1 : 1;
+    return x->ord < y->ord ? -1 : x->ord > y->ord;
+}
+/* (keyed by the font file, not the size: s is the font's data) */
+typedef struct { const void *s; uint64_t key; uint16_t *map; int n; OtLig *ligs; int nlig; } OtMap;
+/* (this thread's last lookup) */
+static __thread const void *t_last_s;
+static __thread uint64_t t_last_key;
+static __thread const OtMap *t_last;
+static __thread OtLig *t_build_ligs;
+static __thread int t_build_nlig, t_build_cap;
+static OtMap g_otmaps[1024];
+static int g_otmaps_n;
+static pthread_mutex_t g_ot_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static inline uint32_t ot_rd16(const uint8_t *d, size_t sz, size_t o) { return o + 2 <= sz ? (uint32_t)((d[o] << 8) | d[o + 1]) : 0; }
+static inline uint32_t ot_rd32(const uint8_t *d, size_t sz, size_t o) { return o + 4 <= sz ? ((uint32_t)d[o] << 24) | ((uint32_t)d[o + 1] << 16) | ((uint32_t)d[o + 2] << 8) | d[o + 3] : 0; }
+
+/* (glyph g's index in a coverage table, -1 when not covered) */
+static int ot_coverage(const uint8_t *d, size_t sz, size_t cov, uint32_t g)
+{
+    uint32_t fmt = ot_rd16(d, sz, cov), n = ot_rd16(d, sz, cov + 2);
+    if (fmt == 1) {
+        int lo = 0, hi = (int)n - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) / 2;
+            uint32_t v = ot_rd16(d, sz, cov + 4 + 2 * (size_t)mid);
+            if (v == g) return mid;
+            if (v < g) lo = mid + 1; else hi = mid - 1;
+        }
+    } else if (fmt == 2) {
+        int lo = 0, hi = (int)n - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) / 2;
+            size_t r = cov + 4 + 6 * (size_t)mid;
+            uint32_t a = ot_rd16(d, sz, r), b = ot_rd16(d, sz, r + 2);
+            if (g < a) hi = mid - 1;
+            else if (g > b) lo = mid + 1;
+            else return (int)(ot_rd16(d, sz, r + 4) + (g - a));
+        }
+    }
+    return -1;
+}
+
+static uint16_t *ot_build(const TextShaper *s, const uint32_t *tags, int ntags)
+{
+    const uint8_t *d = s->font.data;
+    size_t sz = s->ttf_size;
+    uint32_t gsub = stbtt__find_table((stbtt_uint8 *)d, (stbtt_uint32)s->font.fontstart, "GSUB");
+    int N = s->font.numGlyphs;
+    if (!gsub || N <= 0 || N > 65536 || gsub >= sz) return NULL;
+    size_t fl = gsub + ot_rd16(d, sz, gsub + 6), ll = gsub + ot_rd16(d, sz, gsub + 8);
+    uint32_t nl = ot_rd16(d, sz, ll);
+    if (!nl || nl > 4096) return NULL;
+    uint8_t *use = (uint8_t *)calloc(nl, 1);
+    if (!use) return NULL;
+    uint32_t nf = ot_rd16(d, sz, fl);
+    for (uint32_t i = 0; i < nf && i < 4096; i++) {
+        size_t fr = fl + 2 + 6 * (size_t)i;
+        uint32_t tag = ot_rd32(d, sz, fr);
+        bool want = false;
+        for (int k = 0; k < ntags && !want; k++) want = tags[k] == tag;
+        if (!want) continue;
+        size_t ft = fl + ot_rd16(d, sz, fr + 4);
+        uint32_t cnt = ot_rd16(d, sz, ft + 2);
+        for (uint32_t k = 0; k < cnt && k < 1024; k++) {
+            uint32_t li = ot_rd16(d, sz, ft + 4 + 2 * (size_t)k);
+            if (li < nl) use[li] = 1;
+        }
+    }
+    uint16_t *map = (uint16_t *)malloc((size_t)N * sizeof(uint16_t));
+    if (!map) { free(use); return NULL; }
+    for (int g = 0; g < N; g++) map[g] = (uint16_t)g;
+    bool any = false;
+    for (uint32_t li = 0; li < nl; li++) {
+        if (!use[li]) continue;
+        size_t lk = ll + ot_rd16(d, sz, ll + 2 + 2 * (size_t)li);
+        uint32_t type = ot_rd16(d, sz, lk), nsub = ot_rd16(d, sz, lk + 4);
+        for (uint32_t k = 0; k < nsub && k < 256; k++) {
+            size_t st = lk + ot_rd16(d, sz, lk + 6 + 2 * (size_t)k);
+            uint32_t t = type;
+            if (t == 7) { t = ot_rd16(d, sz, st + 2); st = st + ot_rd32(d, sz, st + 4); }
+            if (t == 4) {
+                /* (ligatures: each covered first glyph's sets) */
+                size_t cov4 = st + ot_rd16(d, sz, st + 2);
+                uint32_t nset = ot_rd16(d, sz, st + 4);
+                uint32_t cf = ot_rd16(d, sz, cov4), cn = ot_rd16(d, sz, cov4 + 2);
+                for (uint32_t ci = 0, idx = 0; ci < cn && ci < 65536; ci++) {
+                    uint32_t ga = 0, gb = 0;
+                    if (cf == 1) { ga = gb = ot_rd16(d, sz, cov4 + 4 + 2 * (size_t)ci); }
+                    else if (cf == 2) { size_t r = cov4 + 4 + 6 * (size_t)ci; ga = ot_rd16(d, sz, r); gb = ot_rd16(d, sz, r + 2); idx = ot_rd16(d, sz, r + 4); }
+                    else break;
+                    for (uint32_t g = ga; g <= gb && g < 65536; g++, idx++) {
+                        if (idx >= nset) break;
+                        size_t ls = st + ot_rd16(d, sz, st + 6 + 2 * (size_t)idx);
+                        uint32_t nl2 = ot_rd16(d, sz, ls);
+                        for (uint32_t li2 = 0; li2 < nl2 && li2 < 256; li2++) {
+                            size_t lg = ls + ot_rd16(d, sz, ls + 2 + 2 * (size_t)li2);
+                            uint32_t lgl = ot_rd16(d, sz, lg), cc = ot_rd16(d, sz, lg + 2);
+                            if (cc < 2 || cc > 5) continue;
+                            if (t_build_nlig == t_build_cap) {
+                                int nc = t_build_cap ? t_build_cap * 2 : 64;
+                                OtLig *nlp = (OtLig *)realloc(t_build_ligs, (size_t)nc * sizeof(OtLig));
+                                if (!nlp) continue;
+                                t_build_ligs = nlp;
+                                t_build_cap = nc;
+                            }
+                            OtLig *L = &t_build_ligs[t_build_nlig++];
+                            L->first = (uint16_t)g;
+                            L->n = (uint16_t)(cc - 1);
+                            for (uint32_t q = 0; q + 1 < cc; q++) L->comp[q] = (uint16_t)ot_rd16(d, sz, lg + 4 + 2 * (size_t)q);
+                            L->lig = (uint16_t)lgl;
+                            L->ord = (uint32_t)(t_build_nlig - 1);
+                        }
+                    }
+                    if (cf == 1) idx = ci + 1;
+                }
+                continue;
+            }
+            if (t != 1 && t != 3) continue;
+            uint32_t fmt = ot_rd16(d, sz, st);
+            size_t cov = st + ot_rd16(d, sz, st + 2);
+            for (int g = 0; g < N; g++) {
+                int c = ot_coverage(d, sz, cov, map[g]);
+                if (c < 0) continue;
+                uint32_t to = map[g];
+                if (t == 1 && fmt == 1) to = (map[g] + ot_rd16(d, sz, st + 4)) & 0xFFFF;
+                else if (t == 1 && fmt == 2) { if ((uint32_t)c < ot_rd16(d, sz, st + 4)) to = ot_rd16(d, sz, st + 6 + 2 * (size_t)c); }
+                else if (t == 3) {
+                    if ((uint32_t)c < ot_rd16(d, sz, st + 4)) {
+                        size_t as = st + ot_rd16(d, sz, st + 6 + 2 * (size_t)c);
+                        if (ot_rd16(d, sz, as) > 0) to = ot_rd16(d, sz, as + 2);
+                    }
+                }
+                if ((int)to < N && to != map[g]) { map[g] = (uint16_t)to; any = true; }
+            }
+        }
+    }
+    free(use);
+    if (!any && !t_build_nlig) { free(map); return NULL; }
+    return map;
+}
+
+/* (the map for font s and the features set now; NULL: none changes a glyph) */
+static const uint16_t *ot_map_for(const TextShaper *s, int *n)
+{
+    if (t_ot_n <= 0) return NULL;
+    uint64_t key = t_ot_key;
+    const void *fk = s->font.data + s->font.fontstart;
+    if (t_last && t_last_s == fk && t_last_key == key) { *n = t_last->n; return t_last->map; }
+    const uint16_t *m = NULL;
+    pthread_mutex_lock(&g_ot_mu);
+    for (int i = 0; i < g_otmaps_n; i++)
+        if (g_otmaps[i].s == fk && g_otmaps[i].key == key) {
+            m = g_otmaps[i].map; *n = g_otmaps[i].n;
+            t_last = &g_otmaps[i]; t_last_s = fk; t_last_key = key;
+            pthread_mutex_unlock(&g_ot_mu);
+            return m;
+        }
+    pthread_mutex_unlock(&g_ot_mu);
+    t_build_ligs = NULL;
+    t_build_nlig = t_build_cap = 0;
+    uint16_t *built = ot_build(s, t_ot_tags, t_ot_n);
+    pthread_mutex_lock(&g_ot_mu);
+    if (g_otmaps_n < (int)(sizeof g_otmaps / sizeof g_otmaps[0])) {
+        g_otmaps[g_otmaps_n].s = fk;
+        g_otmaps[g_otmaps_n].key = key;
+        if (t_build_nlig > 1) qsort(t_build_ligs, (size_t)t_build_nlig, sizeof(OtLig), ot_lig_cmp);
+        t_last = &g_otmaps[g_otmaps_n]; t_last_s = fk; t_last_key = key;
+        g_otmaps[g_otmaps_n].map = built;
+        g_otmaps[g_otmaps_n].n = s->font.numGlyphs;
+        g_otmaps[g_otmaps_n].ligs = t_build_ligs;
+        g_otmaps[g_otmaps_n].nlig = t_build_nlig;
+        g_otmaps_n++;
+    } else free(t_build_ligs);
+    t_build_ligs = NULL;
+    pthread_mutex_unlock(&g_ot_mu);
+    *n = s->font.numGlyphs;
+    return built;
+}
+
+/* (the ligatures for font s and the features now, by first glyph) */
+static const OtLig *ot_ligs_for(const TextShaper *s, int *n)
+{
+    *n = 0;
+    if (t_ot_n <= 0) return NULL;
+    int nm = 0;
+    (void)ot_map_for(s, &nm);
+    const void *fk = s->font.data + s->font.fontstart;
+    if (t_last && t_last_s == fk && t_last_key == t_ot_key) { *n = t_last->nlig; return t_last->ligs; }
+    return NULL;
+}
+
+static void ts_metric(const TextShaper *s, uint32_t cp, int *glyph_index, float *xadvance, int *owner_out);
+/* (a ligature starting with glyph gi at p (the next code points to end):
+ * its glyph and advance, *p moved past the others; false when none) */
+static bool ts_ligature(const TextShaper *s, int gi, const char **p, const char *end, int *lig, float *xa)
+{
+    int nl = 0;
+    const OtLig *L = ot_ligs_for(s, &nl);
+    if (!L || nl <= 0) return false;
+    /* (the first with this first glyph: the sort kept each glyph's order) */
+    int lo = 0, hi = nl;
+    while (lo < hi) { int md = (lo + hi) / 2; if (L[md].first < gi) lo = md + 1; else hi = md; }
+    for (int i = lo; i < nl && L[i].first == gi; i++) {
+        const char *q = *p;
+        bool ok = true;
+        for (int c = 0; c < L[i].n && ok; c++) {
+            if (q >= end) { ok = false; break; }
+            uint32_t cp = utf8_decode(&q);
+            int g2, o2;
+            float x2;
+            ts_metric(s, cp, &g2, &x2, &o2);
+            ok = o2 == 0 && g2 == L[i].comp[c];
+        }
+        if (!ok || q > end) continue;
+        *p = q;
+        *lig = L[i].lig;
+        int advance, lsb;
+        stbtt_GetGlyphHMetrics(&s->font, *lig, &advance, &lsb);
+        *xa = (float)advance * s->scale + (float)s->embolden;
+        return true;
+    }
+    return false;
+}
+
+static __thread int t_force_gi = -1;   /* (the glyph ts_emit_glyph draws next, a ligature's) */
+static __thread float t_force_xa;
+
+/* (a code point's glyph and advance, the features' substitutions applied) */
+static void ts_metric(const TextShaper *s, uint32_t cp, int *glyph_index, float *xadvance, int *owner_out)
+{
+    int owner = 0;
+    if (t_force_gi >= 0) { *glyph_index = t_force_gi; *xadvance = t_force_xa; if (owner_out) *owner_out = 0; t_force_gi = -1; return; }
+    ts_metric_owned(s, cp, glyph_index, xadvance, &owner);
+    if (owner_out) *owner_out = owner;
+    if (t_ot_n <= 0 || owner != 0 || *glyph_index < 0) return;
+    int n = 0;
+    const uint16_t *m = ot_map_for(s, &n);
+    if (!m || *glyph_index >= n || m[*glyph_index] == *glyph_index) return;
+    *glyph_index = m[*glyph_index];
+    int advance, lsb;
+    stbtt_GetGlyphHMetrics(&s->font, *glyph_index, &advance, &lsb);
+    *xadvance = (float)advance * s->scale + (float)s->embolden;
 }
 
 /* Kerning between two glyphs in font units, cached.  Safe from any thread. */
@@ -425,11 +720,11 @@ static inline float ts_autospace(const TextShaper *s, uint32_t cp)
     return 0.0f;
 }
 
-/* The bidi controls (ALM, LRM, RLM, the embeddings, overrides and
+/* The soft hyphen and the bidi controls (ALM, LRM, RLM, the embeddings, overrides and
  * isolates): no glyph, no advance, invisible to kerning. */
 static inline bool ts_invisible(uint32_t cp)
 {
-    return cp == 0x061C || cp == 0x200E || cp == 0x200F || (cp >= 0x202A && cp <= 0x202E) ||
+    return cp == 0x00AD || cp == 0x061C || cp == 0x200E || cp == 0x200F || (cp >= 0x202A && cp <= 0x202E) ||
            (cp >= 0x2066 && cp <= 0x2069);
 }
 
@@ -450,7 +745,7 @@ static bool ts_emit_glyph(const TextShaper *s, uint32_t cp, float *pen_x, float 
     if (ts_invisible(cp)) return true;
     int gi, owner;
     float xa;
-    ts_metric_owned(s, cp, &gi, &xa, &owner);
+    ts_metric(s, cp, &gi, &xa, &owner);
     const TextShaper *gs = ts_owner_shaper(s, owner);
     if (!gs) gs = s;
     if (*prev_glyph >= 0 && owner == 0) *pen_x += (float)ts_kern(s, *prev_glyph, gi) * s->scale * scale;
@@ -471,7 +766,7 @@ bool text_shaper_glyph_rect(const TextShaper *s, float size_px, uint32_t codepoi
     if (!s || !out) return false;
     int gi, owner;
     float xa;
-    ts_metric_owned(s, codepoint, &gi, &xa, &owner);
+    ts_metric(s, codepoint, &gi, &xa, &owner);
     const TextShaper *o = ts_owner_shaper(s, owner);
     Strike *k = o ? ts_strike(o, ts_size_q(size_px)) : NULL;
     StrikeGlyph *g = k ? strike_glyph(k, gi) : NULL;
@@ -642,7 +937,8 @@ bool text_shaper_deco_metrics(const TextShaper *s, float *ul_pos, float *ul_th, 
 float text_shaper_zero_advance(const TextShaper *s)
 {
     int adv, lsb;
-    if (!s || !stbtt_FindGlyphIndex(&s->font, '0')) return 0.0f;
+    /* (-1: no '0' glyph; its advance may be zero) */
+    if (!s || !stbtt_FindGlyphIndex(&s->font, '0')) return -1.0f;
     stbtt_GetCodepointHMetrics(&s->font, '0', &adv, &lsb);
     return (float)adv * s->scale / s->size_pixels;
 }
@@ -678,7 +974,12 @@ bool text_shaper_measure(const TextShaper *s, const char *utf8,
         if (ts_invisible(cp)) continue;
         int gi, owner;
         float xa;
-        ts_metric_owned(s, cp, &gi, &xa, &owner);
+        ts_metric(s, cp, &gi, &xa, &owner);
+        if (t_ot_n > 0 && owner == 0) {
+            int lg;
+            float lx;
+            if (ts_ligature(s, gi, &p, p + strlen(p), &lg, &lx)) { gi = lg; xa = lx; }
+        }
         if (prev_glyph >= 0 && owner == 0) {
             x += (float)ts_kern(s, prev_glyph, gi) * s->scale;
         }
@@ -785,7 +1086,12 @@ static float ts_measure_span(const TextShaper *s, const char *start, const char 
         if (ts_invisible(cp)) continue;
         int gi, owner;
         float xa;
-        ts_metric_owned(s, cp, &gi, &xa, &owner);
+        ts_metric(s, cp, &gi, &xa, &owner);
+        if (t_ot_n > 0 && owner == 0) {
+            int lg;
+            float lx;
+            if (ts_ligature(s, gi, &p, end, &lg, &lx)) { gi = lg; xa = lx; }
+        }
         if (prev_glyph >= 0 && owner == 0) {
             x += (float)ts_kern(s, prev_glyph, gi) * s->scale;
         }
@@ -861,12 +1167,19 @@ static bool ts_emit_span_glyphs(const TextShaper *s, const char *gp,
         if (t_trim_text && ts_cjk_punct(gc)) {
             int gi, owner;
             float xa;
-            ts_metric_owned(s, gc, &gi, &xa, &owner);
+            ts_metric(s, gc, &gi, &xa, &owner);
             trim = ts_trim_of(gc, at, gp, xa, &shift) * scale;
         }
         if (shift) *pen_x -= trim;
+        if (t_ot_n > 0) {
+            int gi0, ow0, lg;
+            float xa0, lx;
+            ts_metric(s, gc, &gi0, &xa0, &ow0);
+            if (ow0 == 0 && ts_ligature(s, gi0, &gp, gend, &lg, &lx)) { t_force_gi = lg; t_force_xa = lx; }
+        }
         if (!ts_emit_glyph(s, gc, pen_x, gy, scale, prev_glyph, r, g, b, a, dl))
             return false;
+        t_force_gi = -1;
         if (trim > 0.0f && !shift) *pen_x -= trim;
     }
     return true;

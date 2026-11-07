@@ -197,6 +197,64 @@ static float rrect_alpha(float x, float y, float w, float h, const float *rx, co
     return a < 0.0f ? 0.0f : a > 1.0f ? 1.0f : a;
 }
 
+/* (corner-shape: the distance in from a corner's curve, superellipse(K), at
+ * u, v in from its two edges; gu, gv its normal) */
+static float corner_din(float u, float v, float rx, float ry, float K, float *gu, float *gv)
+{
+    bool cv = K < 0.0f;
+    float n = exp2f(fabsf(K));
+    float p = cv ? u / rx : 1.0f - u / rx, q = cv ? v / ry : 1.0f - v / ry;
+    /* (a bevel's line goes on past its ends; a curve's ends meet the sides square) */
+    if (n == 1.0f) {
+        float g1 = 1.0f / rx, g2 = 1.0f / ry, gl = sqrtf(g1 * g1 + g2 * g2);
+        *gu = g1 / gl; *gv = g2 / gl;
+        return (1.0f - p - q) / gl;
+    }
+    if (p < 0.0f) p = 0.0f;
+    if (q < 0.0f) q = 0.0f;
+    float m = fmaxf(p, q), norm, dp, dq;
+    if (m <= 0.0f) { *gu = *gv = 0.7071f; return cv ? -fminf(rx, ry) : fminf(rx, ry); }
+    if (n > 60.0f) { norm = m; dp = p >= q ? 1.0f : 0.0f; dq = 1.0f - dp; }
+    else if (n == 1.0f) { norm = p + q; dp = dq = 1.0f; }
+    else {
+        norm = m * powf(powf(p / m, n) + powf(q / m, n), 1.0f / n);
+        dp = powf(p / norm, n - 1.0f); dq = powf(q / norm, n - 1.0f);
+    }
+    float g1 = dp / rx, g2 = dq / ry, gl = sqrtf(g1 * g1 + g2 * g2);
+    if (gl <= 1e-6f) gl = 1e-6f;
+    *gu = g1 / gl; *gv = g2 / gl;
+    return (cv ? norm - 1.0f : 1.0f - norm) / gl;
+}
+
+/* (a rounded box with corner shapes, K per corner from stop_pos[4..7]: covered
+ * inside its contour moved in by ins (t r b l), sharp edges but round corners') */
+static float shaped_alpha(float x, float y, float w, float h, const float *rx, const float *ry, const float *K,
+                          const float *ins, float px, float py)
+{
+    float lx = px - x, ly = py - y;
+    if (w <= 0.0f || h <= 0.0f || lx < ins[3] || ly < ins[0] || lx > w - ins[1] || ly > h - ins[2]) return 0.0f;
+    int c = lx < w * 0.5f ? (ly < h * 0.5f ? 0 : 3) : (ly < h * 0.5f ? 1 : 2);
+    float u = (c == 0 || c == 3) ? lx : w - lx, v = c < 2 ? ly : h - ly;
+    float iu = (c == 0 || c == 3) ? ins[3] : ins[1], iv = c < 2 ? ins[0] : ins[2];
+    if (rx[c] <= 0.0f || ry[c] <= 0.0f || K[c] >= 15.0f) return 1.0f;
+    float gu, gv, d = corner_din(u, v, rx[c], ry[c], K[c], &gu, &gv);
+    if (gu + gv > 0.0f) d -= (gu * iu + gv * iv) / (gu + gv);
+    return d < -0.5f ? 0.0f : d > 0.5f ? 1.0f : d + 0.5f;
+}
+
+/* (its corner shapes, false when all round) */
+static bool mask_shapes(const DisplayMask *m, float *K)
+{
+    bool any = false;
+    for (int c = 0; c < 4; c++) {
+        float s = m->stop_pos[4 + c];
+        /* (to 1/256: the wire's 16 bits blur it; bevel 0 and round 1 exactly) */
+        K[c] = s > 0.0f ? roundf((s * 33.0f - 16.5f) * 256.0f) / 256.0f : 1.0f;
+        if (s > 0.0f) any = true;
+    }
+    return any;
+}
+
 /* How much of a pixel a half-plane covers, its centre at signed distance
  * d inside it. */
 static float border_cov(float d)
@@ -227,6 +285,13 @@ static float mask_alpha_at(const DisplayMask *m, float px, float py,
             }
         }
         return m->stop_alpha[m->nstops - 1];
+    }
+    float K[4];
+    if ((m->kind == 3 || m->kind == 4) && mask_shapes(m, K)) {
+        static const float zero[4] = { 0, 0, 0, 0 };
+        float outer = shaped_alpha(m->x, m->y, m->w, m->h, m->rx, m->ry, K, zero, px, py);
+        if (m->kind == 3) return outer;
+        return outer * (1.0f - shaped_alpha(m->x, m->y, m->w, m->h, m->rx, m->ry, K, m->border, px, py));
     }
     if (m->kind == 3)
         return rrect_alpha(m->x, m->y, m->w, m->h, m->rx, m->ry, px, py);

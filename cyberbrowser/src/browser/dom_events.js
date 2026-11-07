@@ -1291,6 +1291,8 @@
             index++;
             setHref(newURL);
             scrollToFragment(global, new global.URL(newURL).hash);
+            /* (a text directive in it: ::target-text over its text now) */
+            if (newURL.indexOf(':~:') >= 0 && typeof global.__cyberSelectionChanged === 'function') global.__cyberSelectionChanged();
             fireHistoryEvents(oldURL, newURL, null, true);
         };
         /* (the URL's fragment as the document finishes loading) */

@@ -67,7 +67,7 @@ static uint32_t rd_uv(const uint8_t *p) {
  */
 static void decode_mask(const uint8_t *p, const GpuClientRes *res, WireMask *m) {
     uint32_t kind = rd32(p);
-    m->kind = kind >= 1 && kind <= 10 ? kind : 0;   /* (8: a blend, 9: a filter) */
+    m->kind = kind >= 1 && kind <= 11 ? kind : 0;   /* (8: a blend, 9: a filter, 11: a polygon's further corners) */
     uint32_t image = rd32(p + 4);
     m->image = m->kind == 1 && image < GPU_MAX_IMAGES && res->image[image] ? image : GPU_NO_IMAGE;
     m->x = rd_coord(p + 8);

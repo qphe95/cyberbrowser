@@ -1324,6 +1324,7 @@ bool page_engine_reset(void) {
     gc_cleanup();
     uint64_t t2 = gc_os_now_ns();
     dom_store_reset();
+    display_list_canvas_reset();
     /* (the next document's store ids are the last one's again) */
     css_layout_forget_document();
     layout_api_invalidate();
