@@ -1652,6 +1652,11 @@ static void lq_sticky_one(int a, double *ox, double *oy)
     vy0 += sy;
     int par = g_lq_layout.tree.nodes[a].parent_idx;
     if (par < 0) return;
+    /* (a table part's containing block is the table: past its rows and groups) */
+    if (b->s->table_role >= 2 && b->s->table_role <= 4)
+        while (par >= 0 && g_lq_layout.boxes[par].s->table_role >= 2 && g_lq_layout.boxes[par].s->table_role <= 4 &&
+               g_lq_layout.tree.nodes[par].parent_idx >= 0)
+            par = g_lq_layout.tree.nodes[par].parent_idx;
     const LayoutBox *C = &g_lq_layout.boxes[par];
     double cx0 = C->x + C->s->border_left + C->padding_left, cy0 = C->y + C->s->border_top + C->padding_top;
     double cx1 = cx0 + C->content_width, cy1 = cy0 + C->content_height;

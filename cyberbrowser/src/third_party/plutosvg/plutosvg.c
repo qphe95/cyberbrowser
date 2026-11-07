@@ -28,6 +28,7 @@ enum {
     TAG_LINE,
     TAG_LINEAR_GRADIENT,
     TAG_PATH,
+    TAG_PATTERN,
     TAG_POLYGON,
     TAG_POLYLINE,
     TAG_RADIAL_GRADIENT,
@@ -44,6 +45,7 @@ enum {
     ATTR_CLIP_PATH_UNITS,
     ATTR_CLIP_RULE,
     ATTR_COLOR,
+    ATTR_CSS_TRANSFORM,
     ATTR_CX,
     ATTR_CY,
     ATTR_D,
@@ -60,6 +62,9 @@ enum {
     ATTR_ID,
     ATTR_OFFSET,
     ATTR_OPACITY,
+    ATTR_PATTERN_CONTENT_UNITS,
+    ATTR_PATTERN_TRANSFORM,
+    ATTR_PATTERN_UNITS,
     ATTR_POINTS,
     ATTR_PRESERVE_ASPECT_RATIO,
     ATTR_R,
@@ -78,6 +83,8 @@ enum {
     ATTR_STROKE_WIDTH,
     ATTR_STYLE,
     ATTR_TRANSFORM,
+    ATTR_TRANSFORM_BOX,
+    ATTR_TRANSFORM_ORIGIN,
     ATTR_VIEW_BOX,
     ATTR_VISIBILITY,
     ATTR_WIDTH,
@@ -130,6 +137,7 @@ static int elementid(const char* data, size_t length)
         {"line", TAG_LINE},
         {"linearGradient", TAG_LINEAR_GRADIENT},
         {"path", TAG_PATH},
+        {"pattern", TAG_PATTERN},
         {"polygon", TAG_POLYGON},
         {"polyline", TAG_POLYLINE},
         {"radialGradient", TAG_RADIAL_GRADIENT},
@@ -150,6 +158,7 @@ static int attributeid(const char* data, size_t length)
         {"clip-rule", ATTR_CLIP_RULE},
         {"clipPathUnits", ATTR_CLIP_PATH_UNITS},
         {"color", ATTR_COLOR},
+        {"css-transform", ATTR_CSS_TRANSFORM},
         {"cx", ATTR_CX},
         {"cy", ATTR_CY},
         {"d", ATTR_D},
@@ -166,6 +175,9 @@ static int attributeid(const char* data, size_t length)
         {"id", ATTR_ID},
         {"offset", ATTR_OFFSET},
         {"opacity", ATTR_OPACITY},
+        {"patternContentUnits", ATTR_PATTERN_CONTENT_UNITS},
+        {"patternTransform", ATTR_PATTERN_TRANSFORM},
+        {"patternUnits", ATTR_PATTERN_UNITS},
         {"points", ATTR_POINTS},
         {"preserveAspectRatio", ATTR_PRESERVE_ASPECT_RATIO},
         {"r", ATTR_R},
@@ -184,6 +196,8 @@ static int attributeid(const char* data, size_t length)
         {"stroke-width", ATTR_STROKE_WIDTH},
         {"style", ATTR_STYLE},
         {"transform", ATTR_TRANSFORM},
+        {"transform-box", ATTR_TRANSFORM_BOX},
+        {"transform-origin", ATTR_TRANSFORM_ORIGIN},
         {"viewBox", ATTR_VIEW_BOX},
         {"visibility", ATTR_VISIBILITY},
         {"width", ATTR_WIDTH},
@@ -220,6 +234,8 @@ static int cssattributeid(const char* data, size_t length)
         {"stroke-miterlimit", ATTR_STROKE_MITERLIMIT},
         {"stroke-opacity", ATTR_STROKE_OPACITY},
         {"stroke-width", ATTR_STROKE_WIDTH},
+        {"transform-box", ATTR_TRANSFORM_BOX},
+        {"transform-origin", ATTR_TRANSFORM_ORIGIN},
         {"visibility", ATTR_VISIBILITY}
     };
 
@@ -1550,6 +1566,164 @@ typedef struct render_state {
 #define IS_INVALID_RECT(rect) ((rect).w < 0 || (rect).h < 0)
 #define IS_EMPTY_RECT(rect) ((rect).w <= 0 || (rect).h <= 0)
 
+/* (cyberbrowser) the element's own bounding box, its transform left out:
+ * the fill box, or with its stroke the stroke box; while measuring,
+ * t_bbox_of's transform is not applied and t_bbox_fill leaves strokes out */
+static const element_t* t_bbox_of;
+static bool t_bbox_fill;
+static bool element_box(const element_t* element, const render_state_t* parent, bool fill, plutovg_rect_t* out);
+
+/* (cyberbrowser) transform-origin: one or two keywords or lengths, a
+ * percentage of the reference box (transform-box: the view box, else the
+ * element's fill or stroke box), into *ox, *oy */
+static bool parse_transform_origin(const element_t* element, const render_state_t* state, float* ox, float* oy)
+{
+    const string_t* value = find_attribute(element, ATTR_TRANSFORM_ORIGIN, false);
+    const string_t* tbox = find_attribute(element, ATTR_TRANSFORM_BOX, false);
+    if(value == NULL && tbox == NULL)
+        return false;
+    float bx = 0.f, by = 0.f, bw = state->view_width, bh = state->view_height;
+    bool fill_box = tbox && ((tbox->length == 8 && !strncmp(tbox->data, "fill-box", 8)) ||
+                             (tbox->length == 11 && !strncmp(tbox->data, "content-box", 11)));
+    bool stroke_box = tbox && tbox->length == 10 && (!strncmp(tbox->data, "stroke-box", 10) || !strncmp(tbox->data, "border-box", 10));
+    if(fill_box || stroke_box) {
+        bool fill = fill_box;
+        plutovg_rect_t r;
+        if(element_box(element, state, fill, &r)) { bx = r.x; by = r.y; bw = r.w; bh = r.h; }
+    }
+    /* (an SVG element's origin is 0 0 unless given: the box's corner) */
+    if(value == NULL) {
+        *ox = bx;
+        *oy = by;
+        return bx != 0.f || by != 0.f;
+    }
+    const char* it = value->data;
+    const char* end = it + value->length;
+    float v[2];
+    int axis[2];   /* (-1 either, 0 across, 1 down) */
+    int n = 0;
+    while(it < end && n < 2) {
+        while(it < end && (*it == ' ' || *it == ',')) ++it;
+        if(it >= end)
+            break;
+        const char* w = it;
+        while(it < end && *it != ' ' && *it != ',') ++it;
+        size_t l = (size_t)(it - w);
+        if(l == 4 && !strncmp(w, "left", 4)) { v[n] = 0.f; axis[n++] = 0; continue; }
+        if(l == 5 && !strncmp(w, "right", 5)) { v[n] = 1.f; axis[n++] = 0; continue; }
+        if(l == 3 && !strncmp(w, "top", 3)) { v[n] = 0.f; axis[n++] = 1; continue; }
+        if(l == 6 && !strncmp(w, "bottom", 6)) { v[n] = 1.f; axis[n++] = 1; continue; }
+        if(l == 6 && !strncmp(w, "center", 6)) { v[n] = 0.5f; axis[n++] = -1; continue; }
+        length_t len = {0, length_type_fixed};
+        const char* q = w;
+        if(!parse_length_value(&q, it, &len, true))
+            return false;
+        /* (a length: as the box's, kept apart from the fractions by a flag) */
+        v[n] = len.type == length_type_percent ? len.value / 100.f : len.value;
+        axis[n++] = len.type == length_type_percent ? -3 : -2;   /* (-3 a percentage, -2 a length) */
+    }
+    /* (a vertical keyword then a length, a length then a horizontal one, or
+     * two of one axis: invalid, as if not given) */
+    if(n == 2 && ((axis[0] == 1 && axis[1] <= -2) || (axis[0] <= -2 && axis[1] == 0) ||
+                  (axis[0] >= 0 && axis[0] == axis[1])))
+        n = 0;
+    if(n == 0) {
+        *ox = bx;
+        *oy = by;
+        return bx != 0.f || by != 0.f;
+    }
+    float fx = 0.5f, fy = 0.5f, px = 0.f, py = 0.f;
+    bool x_len = false, y_len = false;
+    int first_axis = axis[0];
+    bool swap = n == 2 && (first_axis == 1 || axis[1] == 0);
+    for(int i = 0; i < n; ++i) {
+        int k = swap ? n - 1 - i : i;
+        bool is_y = (axis[k] == 1) || (axis[k] < 0 && i == 1) || (n == 1 && axis[k] == 1);
+        if(axis[k] == 0) is_y = false;
+        if(is_y) { if(axis[k] == -2) { py = v[k]; y_len = true; } else fy = v[k]; }
+        else { if(axis[k] == -2) { px = v[k]; x_len = true; } else fx = v[k]; }
+    }
+    *ox = bx + (x_len ? px : fx * bw);
+    *oy = by + (y_len ? py : fy * bh);
+    return true;
+}
+
+/* (cyberbrowser) a CSS transform list (the css-transform attribute the
+ * browser passes on: units, degrees, percentages of the reference box bw x
+ * bh) into *m; false when it can't be read */
+static bool parse_css_transform(const string_t* value, float bw, float bh, plutovg_matrix_t* m)
+{
+    plutovg_matrix_init_identity(m);
+    const char* it = value->data;
+    const char* end = it + value->length;
+    while(it < end) {
+        while(it < end && (*it == ' ' || *it == ',')) ++it;
+        if(it >= end)
+            break;
+        const char* name = it;
+        while(it < end && *it != '(') ++it;
+        if(it >= end)
+            return false;
+        size_t nl = (size_t)(it - name);
+        ++it;
+        float a[6];
+        char u[6][5];
+        int n = 0;
+        while(it < end && *it != ')') {
+            while(it < end && (*it == ' ' || *it == ',')) ++it;
+            if(it < end && *it == ')')
+                break;
+            if(n >= 6)
+                return false;
+            float v;
+            if(!parse_float(&it, end, &v))
+                return false;
+            int k = 0;
+            while(it < end && ((*it >= 'a' && *it <= 'z') || *it == '%') && k < 4) u[n][k++] = *it++;
+            u[n][k] = 0;
+            a[n++] = v;
+        }
+        if(it < end)
+            ++it;
+        #define TF_IS(s) (nl == sizeof(s) - 1 && !strncmp(name, s, nl))
+        #define TF_LEN(i, base) (!strcmp(u[i], "%") ? a[i] * (base) / 100.f : a[i])
+        #define TF_ANG(i) (!strcmp(u[i], "rad") ? a[i] * 180.f / PLUTOVG_PI : !strcmp(u[i], "turn") ? a[i] * 360.f : \
+                           !strcmp(u[i], "grad") ? a[i] * 0.9f : a[i])
+        plutovg_matrix_t f;
+        plutovg_matrix_init_identity(&f);
+        if(TF_IS("translate") && n >= 1)
+            plutovg_matrix_init_translate(&f, TF_LEN(0, bw), n > 1 ? TF_LEN(1, bh) : 0.f);
+        else if(TF_IS("translateX") && n == 1)
+            plutovg_matrix_init_translate(&f, TF_LEN(0, bw), 0.f);
+        else if(TF_IS("translateY") && n == 1)
+            plutovg_matrix_init_translate(&f, 0.f, TF_LEN(0, bh));
+        else if((TF_IS("rotate") || TF_IS("rotateZ")) && n == 1)
+            plutovg_matrix_init_rotate(&f, TF_ANG(0) * PLUTOVG_PI / 180.f);
+        else if(TF_IS("scale") && n >= 1)
+            plutovg_matrix_init_scale(&f, a[0], n > 1 ? a[1] : a[0]);
+        else if(TF_IS("scaleX") && n == 1)
+            plutovg_matrix_init_scale(&f, a[0], 1.f);
+        else if(TF_IS("scaleY") && n == 1)
+            plutovg_matrix_init_scale(&f, 1.f, a[0]);
+        else if(TF_IS("skewX") && n == 1)
+            plutovg_matrix_init_shear(&f, TF_ANG(0) * PLUTOVG_PI / 180.f, 0.f);
+        else if(TF_IS("skewY") && n == 1)
+            plutovg_matrix_init_shear(&f, 0.f, TF_ANG(0) * PLUTOVG_PI / 180.f);
+        else if(TF_IS("skew") && n >= 1)
+            plutovg_matrix_init_shear(&f, TF_ANG(0) * PLUTOVG_PI / 180.f, n > 1 ? TF_ANG(1) * PLUTOVG_PI / 180.f : 0.f);
+        else if(TF_IS("matrix") && n == 6)
+            plutovg_matrix_init(&f, a[0], a[1], a[2], a[3], a[4], a[5]);
+        else
+            return false;
+        #undef TF_IS
+        #undef TF_LEN
+        #undef TF_ANG
+        /* (each function inside the ones before it) */
+        plutovg_matrix_multiply(m, &f, m);
+    }
+    return true;
+}
+
 static void render_state_begin(const element_t* element, render_state_t* state, render_state_t* parent)
 {
     state->parent = parent;
@@ -1562,8 +1736,36 @@ static void render_state_begin(const element_t* element, render_state_t* state, 
     state->view_width = parent->view_width;
     state->view_height = parent->view_height;
 
-    if(element->parent && parse_transform(element, ATTR_TRANSFORM, &state->matrix))
+    /* (a CSS transform the page gave it over its transform attribute: its
+     * percentages of the reference box transform-box names) */
+    const string_t* css_tf = element->parent && element != t_bbox_of ? find_attribute(element, ATTR_CSS_TRANSFORM, false) : NULL;
+    bool css_ok = false;
+    if(css_tf) {
+        float bw = parent->view_width, bh = parent->view_height;
+        const string_t* tbox = find_attribute(element, ATTR_TRANSFORM_BOX, false);
+        if(tbox && !(tbox->length == 8 && !strncmp(tbox->data, "view-box", 8))) {
+            plutovg_rect_t r;
+            bool fill = (tbox->length == 8 && tbox->data[0] == 'f') || tbox->data[0] == 'c';
+            if(element_box(element, parent, fill, &r)) { bw = r.w; bh = r.h; }
+        }
+        css_ok = parse_css_transform(css_tf, bw, bh, &state->matrix);
+        if(!css_ok)
+            state->matrix = parent->matrix;
+    }
+    if(element->parent && element != t_bbox_of && (css_ok || parse_transform(element, ATTR_TRANSFORM, &state->matrix))) {
+        float ox, oy;
+        if(parse_transform_origin(element, parent, &ox, &oy)) {
+            /* (about the origin: there, the transform, back) */
+            plutovg_matrix_t m;
+            plutovg_matrix_init_translate(&m, -ox, -oy);
+            plutovg_matrix_multiply(&m, &m, &state->matrix);
+            plutovg_matrix_translate(&m, 0, 0);
+            plutovg_matrix_t back;
+            plutovg_matrix_init_translate(&back, ox, oy);
+            plutovg_matrix_multiply(&state->matrix, &m, &back);
+        }
         plutovg_matrix_multiply(&state->matrix, &state->matrix, &parent->matrix);
+    }
     if(state->mode == render_mode_painting) {
         if(parse_number(element, ATTR_OPACITY, &state->opacity, true, false)) {
             state->opacity *= parent->opacity;
@@ -1918,6 +2120,100 @@ static bool apply_radial_gradient(render_state_t* state, render_context_t* conte
     return true;
 }
 
+/* <pattern> (cyberbrowser): its tile drawn once into a surface at the
+ * paint's scale, the shape filled with it tiled.  Attributes from the
+ * pattern itself, the content from the first in its href chain that has
+ * any. */
+static void render_children(const element_t* element, render_context_t* context, render_state_t* state);
+
+static bool apply_pattern(render_state_t* state, render_context_t* context, const element_t* element)
+{
+    const element_t* content = element;
+    for(int i = 0; i < 16 && content && content->first_child == NULL; ++i) {
+        const element_t* ref = resolve_href(context->document, content);
+        if(ref == NULL || ref->id != TAG_PATTERN)
+            break;
+        content = ref;
+    }
+    if(content == NULL || content->first_child == NULL)
+        return false;
+
+    units_type_t units = units_type_object_bounding_box;
+    units_type_t content_units = units_type_user_space_on_use;
+    parse_units_type(element, ATTR_PATTERN_UNITS, &units);
+    parse_units_type(element, ATTR_PATTERN_CONTENT_UNITS, &content_units);
+    plutovg_matrix_t pattern_transform = PLUTOVG_IDENTITY_MATRIX;
+    parse_transform(element, ATTR_PATTERN_TRANSFORM, &pattern_transform);
+
+    length_t x = {0, length_type_fixed};
+    length_t y = {0, length_type_fixed};
+    length_t w = {0, length_type_fixed};
+    length_t h = {0, length_type_fixed};
+    parse_length(element, ATTR_X, &x, true, false);
+    parse_length(element, ATTR_Y, &y, true, false);
+    parse_length(element, ATTR_WIDTH, &w, false, false);
+    parse_length(element, ATTR_HEIGHT, &h, false, false);
+
+    float px, py, pw, ph;
+    if(units == units_type_user_space_on_use) {
+        px = resolve_length(state, &x, 'x');
+        py = resolve_length(state, &y, 'y');
+        pw = resolve_length(state, &w, 'x');
+        ph = resolve_length(state, &h, 'y');
+    } else {
+        px = state->extents.x + convert_length(&x, 1.f) * state->extents.w;
+        py = state->extents.y + convert_length(&y, 1.f) * state->extents.h;
+        pw = convert_length(&w, 1.f) * state->extents.w;
+        ph = convert_length(&h, 1.f) * state->extents.h;
+    }
+    if(pw <= 0.f || ph <= 0.f)
+        return false;
+
+    /* (the tile at the scale the shape is drawn: the matrices' own) */
+    plutovg_matrix_t full;
+    plutovg_matrix_multiply(&full, &pattern_transform, &state->matrix);
+    float sx = sqrtf(full.a * full.a + full.b * full.b), sy = sqrtf(full.c * full.c + full.d * full.d);
+    if(sx <= 0.f) sx = 1.f;
+    if(sy <= 0.f) sy = 1.f;
+    int tw = (int)ceilf(pw * sx), th = (int)ceilf(ph * sy);
+    if(tw <= 0 || th <= 0 || tw > 4096 || th > 4096)
+        return false;
+    plutovg_surface_t* surface = plutovg_surface_create(tw, th);
+    if(surface == NULL)
+        return false;
+    plutovg_canvas_t* canvas = plutovg_canvas_create(surface);
+
+    render_context_t tile_context = *context;
+    tile_context.canvas = canvas;
+    render_state_t tile_state;
+    tile_state.parent = NULL;
+    tile_state.element = content;
+    tile_state.mode = render_mode_painting;
+    tile_state.opacity = 1.f;
+    tile_state.extents = INVALID_RECT;
+    tile_state.view_width = state->view_width;
+    tile_state.view_height = state->view_height;
+    plutovg_matrix_init_scale(&tile_state.matrix, (float)tw / pw, (float)th / ph);
+    if(content_units == units_type_object_bounding_box)
+        plutovg_matrix_scale(&tile_state.matrix, state->extents.w, state->extents.h);
+    /* (the shape being painted keeps its path in the document's: kept aside meanwhile) */
+    plutovg_path_t* held = plutovg_path_clone(context->document->path);
+    render_children(content, &tile_context, &tile_state);
+    plutovg_canvas_destroy(canvas);
+    plutovg_path_reset(context->document->path);
+    plutovg_path_add_path(context->document->path, held, NULL);
+    plutovg_path_destroy(held);
+
+    /* (texture pixels to the user space: the tile's corner and size, then the pattern's transform) */
+    plutovg_matrix_t matrix;
+    plutovg_matrix_init_translate(&matrix, px, py);
+    plutovg_matrix_scale(&matrix, pw / (float)tw, ph / (float)th);
+    plutovg_matrix_multiply(&matrix, &matrix, &pattern_transform);
+    plutovg_canvas_set_texture(context->canvas, surface, PLUTOVG_TEXTURE_TYPE_TILED, 1.f, &matrix);
+    plutovg_surface_destroy(surface);
+    return true;
+}
+
 static bool apply_paint(render_state_t* state, render_context_t* context, const paint_t* paint)
 {
     if(paint->type == paint_type_none)
@@ -1947,6 +2243,8 @@ static bool apply_paint(render_state_t* state, render_context_t* context, const 
         return apply_linear_gradient(state, context, ref);
     if(ref->id == TAG_RADIAL_GRADIENT)
         return apply_radial_gradient(state, context, ref);
+    if(ref->id == TAG_PATTERN)
+        return apply_pattern(state, context, ref);
     return false;
 }
 
@@ -1968,7 +2266,7 @@ static void draw_shape(const element_t* element, render_context_t* context, rend
     }
 
     if(state->mode == render_mode_bounding) {
-        if(stroke.type == paint_type_none)
+        if(stroke.type == paint_type_none || t_bbox_fill)
             return;
         float line_width = resolve_length(state, &stroke_width, 'o');
         float cap_limit = line_width / 2.f;
@@ -2583,6 +2881,34 @@ static void render_children(const element_t* element, render_context_t* context,
     }
 }
 
+static render_context_t* t_render_ctx;   /* (cyberbrowser: the render going on, for element_box) */
+
+static bool element_box(const element_t* element, const render_state_t* parent, bool fill, plutovg_rect_t* out)
+{
+    if(t_render_ctx == NULL)
+        return false;
+    render_state_t tmp;
+    tmp.parent = NULL;
+    tmp.element = element->parent ? element->parent : element;
+    tmp.mode = render_mode_bounding;
+    tmp.opacity = 1.f;
+    tmp.extents = INVALID_RECT;
+    tmp.view_width = parent->view_width;
+    tmp.view_height = parent->view_height;
+    plutovg_matrix_init_identity(&tmp.matrix);
+    const element_t* held_of = t_bbox_of;
+    bool held_fill = t_bbox_fill;
+    t_bbox_of = element;
+    t_bbox_fill = fill;
+    render_element(element, t_render_ctx, &tmp);
+    t_bbox_of = held_of;
+    t_bbox_fill = held_fill;
+    if(IS_INVALID_RECT(tmp.extents))
+        return false;
+    *out = tmp.extents;
+    return true;
+}
+
 bool plutosvg_document_render(const plutosvg_document_t* document, const char* id, plutovg_canvas_t* canvas, const plutovg_color_t* current_color, plutosvg_palette_func_t palette_func, void* closure)
 {
     render_state_t state;
@@ -2604,7 +2930,10 @@ bool plutosvg_document_render(const plutosvg_document_t* document, const char* i
     }
 
     render_context_t context = {document, canvas, current_color, palette_func, closure, 0};
+    render_context_t* held = t_render_ctx;
+    t_render_ctx = &context;
     render_element(state.element, &context, &state);
+    t_render_ctx = held;
     return true;
 }
 

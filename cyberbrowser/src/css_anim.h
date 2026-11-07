@@ -27,7 +27,8 @@ enum { ANIM_LEFT, ANIM_TOP, ANIM_RIGHT, ANIM_BOTTOM, ANIM_OPACITY, ANIM_TRANSFOR
        ANIM_PADDING_TOP, ANIM_PADDING_RIGHT, ANIM_PADDING_BOTTOM, ANIM_PADDING_LEFT,
        ANIM_MARGIN_TOP, ANIM_MARGIN_RIGHT, ANIM_MARGIN_BOTTOM, ANIM_MARGIN_LEFT,
        ANIM_BORDER_TOP, ANIM_BORDER_RIGHT, ANIM_BORDER_BOTTOM, ANIM_BORDER_LEFT,
-       ANIM_FONT_SIZE, ANIM_LETTER_SPACING, ANIM_WORD_SPACING, ANIM_FONT_WEIGHT, ANIM_FONT_STYLE, ANIM_NPROP };
+       ANIM_FONT_SIZE, ANIM_LETTER_SPACING, ANIM_WORD_SPACING, ANIM_FONT_WEIGHT, ANIM_FONT_STYLE,
+       ANIM_ROTATE, ANIM_SCALE, ANIM_CLIP_PATH, ANIM_NPROP };   /* (rotate: x degrees about z; scale: x, y) */
 
 /* A value: px (or a number: opacity; a translation: x, y).  ok 0: one
  * that does not interpolate (auto, a percentage): it changes at once. */
@@ -35,6 +36,7 @@ typedef struct AnimVal {
     float x, y;
     uint8_t ok;
     float z, w;     /* (a color: x, y, z, w are r, g, b, a) */
+    const char *tf; /* (a transform beyond a translation: its list, as text) */
 } AnimVal;
 
 /* ---- The specification: the transition-* and animation-* longhands as

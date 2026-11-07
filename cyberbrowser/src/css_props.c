@@ -9337,15 +9337,29 @@ static char *css_prop_canon_in(const CssPropDef *p, const char *v)
         return NULL;
     }
     if (!strcmp(n, "content") && (strstr(v, "attr()") || strstr(v, "attr( )"))) return strdup("");
-    if (!strcmp(n, "content") && strcasestr_simple(v, "symbols(")) {
-        /* (numeric and alphabetic symbols: two at least) */
+    if ((!strcmp(n, "content") || !strcmp(n, "list-style-type") || !strcmp(n, "list-style")) && strcasestr_simple(v, "symbols(")) {
+        /* (symbols( [cyclic | numeric | alphabetic | symbolic | fixed]? <string>+ ): numeric and alphabetic
+         * two at least; no other system, no identifiers for symbols) */
         for (const char *p = v; (p = strcasestr_simple(p, "symbols(")); p += 8) {
             const char *a = p + 8, *e = strchr(a, ')');
             if (!e) break;
+            while (a < e && isspace((unsigned char)*a)) a++;
+            static const char *const sys[] = { "cyclic", "numeric", "alphabetic", "symbolic", "fixed" };
+            int si = -1;
+            if (a < e && isalpha((unsigned char)*a)) {
+                const char *w = a;
+                while (a < e && (isalnum((unsigned char)*a) || *a == '-')) a++;
+                for (int k = 0; k < 5; k++)
+                    if ((size_t)(a - w) == strlen(sys[k]) && !strncasecmp(w, sys[k], (size_t)(a - w))) si = k;
+                if (si < 0) return strdup("");
+            }
             int strings = 0;
-            for (const char *k = a; k < e; k++) if (*k == '"' || *k == '\'') { char q = *k; strings++; for (k++; k < e && *k != q; k++) ; }
-            while (isspace((unsigned char)*a)) a++;
-            if ((!strncasecmp(a, "numeric", 7) || !strncasecmp(a, "alphabetic", 10)) && strings < 2) return strdup("");
+            for (const char *k = a; k < e; k++) {
+                if (isspace((unsigned char)*k)) continue;
+                if (*k == '"' || *k == '\'') { char q = *k; strings++; for (k++; k < e && *k != q; k++) if (*k == '\\' && k + 1 < e) k++; continue; }
+                return strdup("");
+            }
+            if (!strings || ((si == 1 || si == 2) && strings < 2)) return strdup("");
         }
     }
     if (!strcmp(n, "content") && strcasestr_simple(v, "counter")) {

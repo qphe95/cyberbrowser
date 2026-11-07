@@ -220,8 +220,32 @@ static void shift_frame(const DisplayList *dl, float dy, uint32_t h) {
         g_shifted.masks = (DisplayMask *)realloc(g_shifted.masks, (size_t)g_shifted_mask_cap * sizeof(DisplayMask));
     }
     int n = 0;
+    /* (under a transform: the transform moved instead, its commands kept as
+     * they are, and their masks; xf_keep marks those masks) */
+    static unsigned char *xf_keep;
+    static int xf_keep_cap;
+    bool xf_on = false;
+    if (xf_keep_cap < dl->mask_count) {
+        xf_keep_cap = dl->mask_count;
+        xf_keep = (unsigned char *)realloc(xf_keep, (size_t)xf_keep_cap);
+    }
+    if (xf_keep && dl->mask_count) memset(xf_keep, 0, (size_t)dl->mask_count);
     for (int i = 0; i < dl->count; i++) {
         DisplayListCmd c = dl->cmds[i];
+        if (c.type == DL_XFORM) {
+            const float *f = c.u.xf;
+            xf_on = !(f[0] == 1.0f && f[1] == 0.0f && f[2] == 0.0f && f[3] == 1.0f && f[4] == 0.0f && f[5] == 0.0f);
+            if (xf_on) c.u.xf[5] -= dy;
+            g_shifted.cmds[n++] = c;
+            continue;
+        }
+        if (xf_on) {
+            if ((c.type == DL_MASK_BEGIN || c.type == DL_SHADOW) && xf_keep && c.u.mask_index >= 0 &&
+                c.u.mask_index < dl->mask_count)
+                xf_keep[c.u.mask_index] = 1;
+            g_shifted.cmds[n++] = c;
+            continue;
+        }
         c.y -= dy;
         bool bracket = c.type == DL_MASK_BEGIN || c.type == DL_MASK_END;
         if (!bracket && (c.y + c.h < 0 || c.y > (float)h)) continue;
@@ -230,8 +254,10 @@ static void shift_frame(const DisplayList *dl, float dy, uint32_t h) {
     }
     for (int i = 0; i < dl->mask_count; i++) {
         DisplayMask m = dl->masks[i];
-        m.y -= dy;
-        m.iy -= dy;
+        if (!(xf_keep && xf_keep[i])) {
+            m.y -= dy;
+            m.iy -= dy;
+        }
         g_shifted.masks[i] = m;
     }
     g_shifted.count = n;

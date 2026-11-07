@@ -17,6 +17,7 @@
 #include "dom_store.h"
 #include "css_parser.h"
 
+#include <ctype.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -70,7 +71,8 @@ static const char *const k_props[ANIM_NPROP] = { "left", "top", "right", "bottom
                                                   "padding-top", "padding-right", "padding-bottom", "padding-left",
                                                   "margin-top", "margin-right", "margin-bottom", "margin-left",
                                                   "border-top-width", "border-right-width", "border-bottom-width",
-                                                  "border-left-width", "font-size", "letter-spacing", "word-spacing", "font-weight", "font-style" };
+                                                  "border-left-width", "font-size", "letter-spacing", "word-spacing", "font-weight", "font-style",
+                                                  "rotate", "scale", "clip-path" };
 
 const char *anim_prop_name(int p) { return p >= 0 && p < ANIM_NPROP ? k_props[p] : ""; }
 
@@ -96,8 +98,153 @@ int anim_prop_of(const char *name)
     return -1;
 }
 
+/* ---- transform lists: interpolated function by function (CSS Transforms 1
+ * 9: lists of the same functions, each argument between; none as each
+ * function's identity), else at once at the middle ---- */
+/* (a function: its name and arguments, each a number with its unit or a
+ * word (word[k]), sep[k] what came before it; bare: a word alone, no
+ * parentheses, as a clip-path's reference box) */
+typedef struct {
+    char name[24];
+    int n;
+    double v[24];
+    char unit[24][16];
+    unsigned char word[24];
+    char sep[24];
+    unsigned char bare;
+} TfFn;
+
+static int tf_fns(const char *s, TfFn *out, int cap)
+{
+    int n = 0;
+    if (!s || !strcasecmp(s, "none")) return 0;
+    const char *p = s;
+    while (*p) {
+        while (*p && (isspace((unsigned char)*p) || *p == ',')) p++;
+        if (!*p) break;
+        if (n >= cap) return -1;
+        TfFn *f = &out[n];
+        memset(f, 0, sizeof *f);
+        int k = 0;
+        while (*p && *p != '(' && !isspace((unsigned char)*p) && k < 23) f->name[k++] = (char)tolower((unsigned char)*p++);
+        if (*p != '(') {
+            if (!k) return -1;
+            while (*p && !isspace((unsigned char)*p) && *p != '(') p++;
+            f->bare = 1;
+            n++;
+            continue;
+        }
+        p++;
+        while (*p && *p != ')') {
+            char sep = ' ';
+            while (*p && (isspace((unsigned char)*p) || *p == ',')) { if (*p == ',') sep = ','; p++; }
+            if (*p == ')') break;
+            if (f->n >= 24) return -1;
+            f->sep[f->n] = f->n ? sep : 0;
+            char *e = NULL;
+            double v = strtod(p, &e);
+            if (e == p) {
+                /* (a word: kept as it is, the same on both sides to go between) */
+                int u = 0;
+                while (*p && !isspace((unsigned char)*p) && *p != ',' && *p != ')' && *p != '(' && u < 15)
+                    f->unit[f->n][u++] = *p++;
+                if (!u) return -1;
+                f->word[f->n] = 1;
+                f->n++;
+                continue;
+            }
+            f->v[f->n] = v;
+            int u = 0;
+            while (*e && (isalpha((unsigned char)*e) || *e == '%') && u < 15) f->unit[f->n][u++] = *e++;
+            f->n++;
+            p = e;
+        }
+        if (*p == ')') p++;
+        n++;
+    }
+    return n;
+}
+
+/* (the identity of function f's kind, its shape kept) */
+static void tf_identity(const TfFn *f, TfFn *o)
+{
+    *o = *f;
+    bool sc = !strncmp(f->name, "scale", 5);
+    for (int i = 0; i < f->n; i++) {
+        o->v[i] = sc ? 1.0 : 0.0;
+        if (!strcmp(f->name, "matrix")) o->v[i] = i == 0 || i == 3 ? 1.0 : 0.0;
+        if (!strcmp(f->name, "matrix3d")) o->v[i] = i % 5 == 0 ? 1.0 : 0.0;
+        if (!strcmp(f->name, "rotate3d") && i < 3) o->v[i] = f->v[i];
+    }
+}
+
+static __thread char t_tf_ring[8][640];
+static __thread int t_tf_at;
+
+/* a's and b's lists at t, or NULL when they don't go between */
+static const char *tf_mix_text(const char *a, const char *b, double t)
+{
+    TfFn A[12], B[12], I[12];
+    int na = tf_fns(a, A, 12), nb = tf_fns(b, B, 12);
+    if (na < 0 || nb < 0) return NULL;
+    if (na == 0 && nb == 0) return NULL;
+    if (na == 0) { for (int i = 0; i < nb; i++) tf_identity(&B[i], &I[i]); memcpy(A, I, sizeof(TfFn) * (size_t)nb); na = nb; }
+    if (nb == 0) { for (int i = 0; i < na; i++) tf_identity(&A[i], &I[i]); memcpy(B, I, sizeof(TfFn) * (size_t)na); nb = na; }
+    if (na != nb) return NULL;
+    char *o = t_tf_ring[t_tf_at++ & 7];
+    size_t at = 0, cap = sizeof t_tf_ring[0];
+    o[0] = 0;
+    for (int i = 0; i < na; i++) {
+        if (strcmp(A[i].name, B[i].name) || A[i].n != B[i].n || A[i].bare != B[i].bare) return NULL;
+        if (A[i].bare) { at += (size_t)snprintf(o + at, at < cap ? cap - at : 0, "%s%s", i ? " " : "", A[i].name); continue; }
+        at += (size_t)snprintf(o + at, at < cap ? cap - at : 0, "%s%s(", i ? " " : "", A[i].name);
+        for (int k = 0; k < A[i].n; k++) {
+            const char *ua = A[i].unit[k], *ub = B[i].unit[k];
+            const char *sep = !k ? "" : A[i].sep[k] == ',' ? ", " : " ";
+            if (A[i].word[k] || B[i].word[k]) {
+                if (!A[i].word[k] || !B[i].word[k] || strcasecmp(ua, ub)) return NULL;
+                at += (size_t)snprintf(o + at, at < cap ? cap - at : 0, "%s%s", sep, ua);
+                continue;
+            }
+            /* (a bare 0 takes the other's unit) */
+            const char *u = ua[0] ? ua : ub;
+            if (ua[0] && ub[0] && strcasecmp(ua, ub)) return NULL;
+            double v = A[i].v[k] + (B[i].v[k] - A[i].v[k]) * t;
+            at += (size_t)snprintf(o + at, at < cap ? cap - at : 0, "%s%.6g%s", sep, v, u);
+        }
+        at += (size_t)snprintf(o + at, at < cap ? cap - at : 0, ")");
+        if (at >= cap) return NULL;
+    }
+    return o;
+}
+
+/* (a transform value's list: its text, or its translation as one) */
+static const char *tf_text_of(const AnimVal *v, char *buf, size_t cap)
+{
+    if (v->tf) return v->tf;
+    if (v->x == 0.0f && v->y == 0.0f) return "none";
+    snprintf(buf, cap, "translate(%.6gpx, %.6gpx)", v->x, v->y);
+    return buf;
+}
+
+static AnimVal tf_mix(const AnimVal *x, const AnimVal *y, double t)
+{
+    /* (a clip-path, z 2: none and a shape don't go between) */
+    if ((x->z == 2.0f || y->z == 2.0f) && (!x->tf || !y->tf)) return t < 0.5 ? *x : *y;
+    char ba[96], bb[96];
+    const char *ta = tf_text_of(x, ba, sizeof ba), *tb = tf_text_of(y, bb, sizeof bb);
+    const char *m = tf_mix_text(ta, tb, t);
+    if (!m) {
+        AnimVal r = t < 0.5 ? *x : *y;
+        return r;
+    }
+    AnimVal r = { (float)(x->x + (y->x - x->x) * t), (float)(x->y + (y->y - x->y) * t), 1, 0, 0, m };
+    return r;
+}
+
 static bool val_same(const AnimVal *x, const AnimVal *y)
 {
+    if ((x->tf || y->tf) && (!x->tf || !y->tf || strcmp(x->tf, y->tf))) return false;
     return x->ok == y->ok && (!x->ok || (fabsf(x->x - y->x) < 1e-4f && fabsf(x->y - y->y) < 1e-4f &&
                                          fabsf(x->z - y->z) < 1e-4f && fabsf(x->w - y->w) < 1e-4f));
 }
@@ -121,6 +268,7 @@ static AnimVal color_mix(const AnimVal *x, const AnimVal *y, double t)
 
 static AnimVal val_mix(const AnimVal *x, const AnimVal *y, double t)
 {
+    if (x->tf || y->tf) return tf_mix(x, y, t);
     if (!x->ok || !y->ok) return t < 0.5 ? *x : *y;
     AnimVal r = { (float)(x->x + (y->x - x->x) * t), (float)(x->y + (y->y - x->y) * t), 1,
                   (float)(x->z + (y->z - x->z) * t), (float)(x->w + (y->w - x->w) * t) };
@@ -147,7 +295,11 @@ void anim_val_css(int prop, const AnimVal *v, char *buf, size_t cap)
     /* (what can't be below nothing) */
     bool floor0 = prop == ANIM_WIDTH || prop == ANIM_HEIGHT || prop == ANIM_FONT_SIZE ||
                   (prop >= ANIM_PADDING_TOP && prop <= ANIM_PADDING_LEFT) || (prop >= ANIM_BORDER_TOP && prop <= ANIM_BORDER_LEFT);
-    if (prop == ANIM_TRANSFORM) snprintf(buf, cap, "matrix(1, 0, 0, 1, %.6g, %.6g)", v->x, v->y);
+    if (prop == ANIM_CLIP_PATH) snprintf(buf, cap, "%s", v->tf ? v->tf : "none");
+    else if (prop == ANIM_TRANSFORM && v->tf) snprintf(buf, cap, "%s", v->tf);
+    else if (prop == ANIM_TRANSFORM) snprintf(buf, cap, "matrix(1, 0, 0, 1, %.6g, %.6g)", v->x, v->y);
+    else if (prop == ANIM_ROTATE) snprintf(buf, cap, "%.6gdeg", v->x);
+    else if (prop == ANIM_SCALE) snprintf(buf, cap, "%.6g %.6g", v->x, v->y);
     else if (floor0 && v->x < 0) snprintf(buf, cap, "0px");
     else if (prop == ANIM_FONT_WEIGHT) snprintf(buf, cap, "%.6g", v->x < 1 ? 1.0 : v->x > 1000 ? 1000.0 : (double)v->x);
     else if (prop == ANIM_OPACITY || prop == ANIM_FONT_WEIGHT) snprintf(buf, cap, "%.6g", v->x);

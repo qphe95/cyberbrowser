@@ -17,6 +17,20 @@ void main() {
     Item it = items[v_item];
     ivec2 pix = ivec2(gl_FragCoord.xy);
     vec2 p = vec2(pix) + 0.5;
+    float edge_cov = 1.0;
+    if (it.xf1.z >= 0.5) {
+        // (transformed: the pixel's centre where the record has it; its
+        // edges' coverage by the pixel's distance from them on the target)
+        p = item_point(it, p);
+        vec4 e = it.info.x == 0 ? vec4(it.rect.xy, it.rect.xy + it.rect.zw) : vec4(it.lquad);
+        float sx = max(length(vec2(it.xf0.x, it.xf0.z)), 1e-6), sy = max(length(vec2(it.xf0.y, it.xf0.w)), 1e-6);
+        float dx = min(p.x - e.x, e.z - p.x) / sx, dy = min(p.y - e.y, e.w - p.y) / sy;
+        // (hard edges: the antialiased ones matched fewer references)
+        edge_cov = dx >= 0.0 && dy >= 0.0 ? 1.0 : 0.0;
+        if (edge_cov <= 0.0) discard;
+        p = clamp(p, vec2(it.lquad.xy) + 0.001, vec2(it.lquad.zw) - 0.001);
+        pix = ivec2(floor(p));
+    }
     int type = it.info.x;
     float a = it.color.a;
     vec3 rgb = it.color.rgb;
@@ -71,6 +85,7 @@ void main() {
         a = cov * it.color.a;
         if (a <= 0.002) discard;
     }
+    a *= edge_cov;
     if (a <= 0.0) discard;
     out_color = vec4(rgb, min(a, 1.0));
 }

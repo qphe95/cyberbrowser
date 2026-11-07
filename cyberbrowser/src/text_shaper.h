@@ -51,6 +51,7 @@ void text_shaper_frame_sent(const DisplayList *dl);
 /* The height of "x" and the advance of "0" as fractions of the em (CSS's
  * ex and ch units); 0 when the font has no such glyph. */
 float text_shaper_x_height(const TextShaper *shaper);
+float text_shaper_cap_height(const TextShaper *shaper);
 float text_shaper_zero_advance(const TextShaper *shaper);
 
 /* Vertical metrics as fractions of the em (descent positive). */

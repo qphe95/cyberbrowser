@@ -447,10 +447,10 @@ static ImagePixels *decode_webp(const uint8_t *d, size_t n, int ww, int wh)
     return px;
 }
 
-static ImagePixels *decode_svg(const uint8_t *d, size_t n, int nw, int nh, int ww, int wh)
+static ImagePixels *decode_svg(const uint8_t *d, size_t n, int nw, int nh, int ww, int wh, unsigned dims)
 {
     float sw = 0.0f, sh = 0.0f;
-    if (!svg_intrinsic_size((const char *)d, n, &sw, &sh)) return NULL;
+    if (!svg_intrinsic_size((const char *)d, n, &sw, &sh)) sw = sh = 0.0f;
     if (sw <= 0.0f) sw = (float)nw;
     if (sh <= 0.0f) sh = (float)nh;
     if (sw <= 0.0f || sh <= 0.0f) { sw = 300.0f; sh = 150.0f; }
@@ -461,6 +461,8 @@ static ImagePixels *decode_svg(const uint8_t *d, size_t n, int nw, int nh, int w
     if (ww > 0 && wh > 0) scale = fmaxf((float)ww / sw, (float)wh / sh);
     if (sw * scale > 4096.0f || sh * scale > 4096.0f) scale = 4096.0f / fmaxf(sw, sh);
     int iw = (int)(sw * scale + 0.5f), ih = (int)(sh * scale + 0.5f);
+    /* (no ratio of its own: drawn into the size asked for, its viewport that) */
+    if ((dims & 8u) && !(dims & 4u) && ww > 0 && wh > 0 && ww <= 4096 && wh <= 4096) { iw = ww; ih = wh; }
     uint8_t *rgba = NULL;
     int ow = 0, oh = 0;
     /* An <img> has no color context: currentColor is black. */
@@ -494,7 +496,7 @@ static ImagePixels *decode_bytes(ImageEntry *e, int ww, int wh)
     case FMT_JPEG: px = decode_jpeg(e->bytes, e->nbytes, ww, wh); break;
     case FMT_WEBP: px = decode_webp(e->bytes, e->nbytes, ww, wh); break;
     case FMT_SVG:  px = decode_svg(e->bytes, e->nbytes, atomic_load(&e->nat_w),
-                                   atomic_load(&e->nat_h), ww, wh); break;
+                                   atomic_load(&e->nat_h), ww, wh, atomic_load(&e->dims)); break;
     default: break;
     }
     if (!px && e->fmt != FMT_SVG && e->fmt != FMT_WEBP) px = decode_stb(e->bytes, e->nbytes);

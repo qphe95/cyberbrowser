@@ -126,6 +126,7 @@ set(BE_SOURCES
     src/import_map.c
     src/css_props.c
     src/css_layout.c
+    src/css_counter_style.c
     src/css_anim.c
     src/display_list.c
     src/text_shaper.c

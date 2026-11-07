@@ -8,13 +8,16 @@
 /* PlutoSVG keeps pointers into the source, so documents parse a copy.  The
  * document owns it from here: a failed parse destroys the document, which
  * frees the copy. */
-static plutosvg_document_t *load(const char *data, size_t len)
+/* (cw, ch: the size its percentages are of; -1: none) */
+static plutosvg_document_t *load_in(const char *data, size_t len, float cw, float ch);
+static plutosvg_document_t *load(const char *data, size_t len) { return load_in(data, len, -1.0f, -1.0f); }
+static plutosvg_document_t *load_in(const char *data, size_t len, float cw, float ch)
 {
     if (!data || !len || len > 0x7fffffff) return NULL;
     char *copy = (char *)malloc(len);
     if (!copy) return NULL;
     memcpy(copy, data, len);
-    return plutosvg_document_load_from_data(copy, (int)len, -1.0f, -1.0f, free, copy);
+    return plutosvg_document_load_from_data(copy, (int)len, cw, ch, free, copy);
 }
 
 bool svg_intrinsic_size(const char *data, size_t len, float *w, float *h)
@@ -33,7 +36,8 @@ bool svg_render_rgba(const char *data, size_t len, int w, int h, uint32_t curren
 {
     *out = NULL;
     *out_w = *out_h = 0;
-    plutosvg_document_t *doc = load(data, len);
+    /* (drawn at a size: its root's percentages of that) */
+    plutosvg_document_t *doc = w > 0 && h > 0 ? load_in(data, len, (float)w, (float)h) : load(data, len);
     if (!doc) return false;
     plutovg_color_t cc;
     plutovg_color_init_rgba8(&cc, (int)(current_color >> 24), (int)(current_color >> 16 & 0xFF),

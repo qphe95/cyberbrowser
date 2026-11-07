@@ -10,6 +10,9 @@ struct Item {
     ivec4 quad;     // x0, y0, x1, y1: the pixels to cover (x1, y1 excluded)
     ivec4 info;     // type, mask index, border rings, level
     vec4 extra;     // a mask blend's box
+    vec4 xf0;
+    vec4 xf1;
+    ivec4 lquad;
 };
 
 layout(std430, set = 0, binding = 0) readonly buffer Items { Item items[]; };

@@ -33,6 +33,28 @@ float mask_alpha(Mask m, vec2 p) {
         return stop_alpha(m, n - 1);
     }
     if (kind == 3) return rrect_alpha(m.box, m.rx, m.ry, p);
+    if (kind == 7) {
+        // A polygon (clip-path): up to ten corners from the box's corner,
+        // x y pairs through rx, ry, border, ex_rx, ex_ry; misc.y their
+        // count; misc.x 1 for evenodd, else nonzero.
+        float v[20];
+        for (int k = 0; k < 4; k++) {
+            v[k] = m.rx[k]; v[4 + k] = m.ry[k]; v[8 + k] = m.border[k]; v[12 + k] = m.ex_rx[k]; v[16 + k] = m.ex_ry[k];
+        }
+        int n = min(int(m.misc.y + 0.5), 10);
+        vec2 q = p - m.box.xy;
+        int wind = 0;
+        bool odd = false;
+        for (int i = 0; i < n; i++) {
+            int j = i + 1 < n ? i + 1 : 0;
+            vec2 a = vec2(v[2 * i], v[2 * i + 1]), b = vec2(v[2 * j], v[2 * j + 1]);
+            if ((a.y <= q.y) != (b.y <= q.y)) {
+                float x = a.x + (q.y - a.y) / (b.y - a.y) * (b.x - a.x);
+                if (q.x < x) { odd = !odd; wind += b.y > a.y ? 1 : -1; }
+            }
+        }
+        return (m.misc.x > 0.5 ? odd : wind != 0) ? 1.0 : 0.0;
+    }
     if (kind == 6) {
         // A border side, as raster_cpu.c's kind 6: turned to be the top one.
         vec4 b = m.border;      // top, right, bottom, left
@@ -63,8 +85,12 @@ float mask_alpha(Mask m, vec2 p) {
     if (m.kind.y == 0 || m.img.z <= 0.0 || m.img.w <= 0.0) return 0.0;
     ivec2 ts = textureSize(mask_image, 0);
     float u = div_(p.x - m.img.x, m.img.z), v = div_(p.y - m.img.y, m.img.w);
-    if (m.misc.z != 0.0) { u -= floor(u); v -= floor(v); }
-    else if (u < 0.0 || u >= 1.0 || v < 0.0 || v >= 1.0) return 0.0;
+    // (repeat: bit 1 across, bit 2 down)
+    int rep = int(m.misc.z + 0.5);
+    if ((rep & 1) != 0) u -= floor(u);
+    else if (u < 0.0 || u >= 1.0) return 0.0;
+    if ((rep & 2) != 0) v -= floor(v);
+    else if (v < 0.0 || v >= 1.0) return 0.0;
     int sx = min(int(u * float(ts.x)), ts.x - 1), sy = min(int(v * float(ts.y)), ts.y - 1);
     return texelFetch(mask_image, ivec2(sx, sy), 0).a;
 }
@@ -73,7 +99,7 @@ void main() {
     Item it = items[v_item];
     ivec2 pix = ivec2(gl_FragCoord.xy);
     vec4 cur = texelFetch(current, pix, 0);
-    float a = mask_alpha(masks[it.info.y], vec2(pix) + 0.5);
+    float a = mask_alpha(masks[it.info.y], item_point(it, vec2(pix) + 0.5));
     if (a >= 0.999) { out_color = cur; return; }
     vec4 old = texelFetch(saved, pix, 0);
     out_color = old + (cur - old) * max(a, 0.0);

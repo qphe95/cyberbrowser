@@ -9,7 +9,17 @@ struct Item {
     ivec4 quad;     // x0, y0, x1, y1: the pixels to cover (x1, y1 excluded)
     ivec4 info;     // type, mask index, border rings, level
     vec4 extra;
+    vec4 xf0;       // under a transform: its inverse's a b c d
+    vec4 xf1;       // e, f, 1 (0: none)
+    ivec4 lquad;    // the pixels to cover before the transform
 };
+
+// The point the record is drawn at for the target's pixel p: p itself, or
+// under a transform where it came from.
+vec2 item_point(Item it, vec2 p) {
+    if (it.xf1.z < 0.5) return p;
+    return vec2(it.xf0.x * p.x + it.xf0.z * p.y + it.xf1.x, it.xf0.y * p.x + it.xf0.w * p.y + it.xf1.y);
+}
 
 struct Mask {
     vec4 box;       // x, y, w, h

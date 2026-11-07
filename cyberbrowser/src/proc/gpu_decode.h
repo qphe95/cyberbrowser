@@ -43,7 +43,7 @@ typedef struct GpuClientRes {
     predicate size_ok(integer v) = 0 <= v <= GPU_COORD_MAX;
 
     predicate mask_ok{L}(WireMask *m, GpuClientRes *res) =
-        m->kind <= 6 &&
+        m->kind <= 7 &&
         (m->kind == 1 ==> m->image == GPU_NO_IMAGE || (m->image < GPU_MAX_IMAGES && res->image[m->image] != 0)) &&
         1 <= m->nstops <= WIRE_MASK_STOPS &&
         coord_ok(m->x) && coord_ok(m->y) && size_ok(m->w) && size_ok(m->h) &&
@@ -60,7 +60,7 @@ typedef struct GpuClientRes {
         c->u0 <= WIRE_UV_ONE && c->v0 <= WIRE_UV_ONE && c->u1 <= WIRE_UV_ONE && c->v1 <= WIRE_UV_ONE &&
         (c->type == WIRE_GLYPH ==> c->ref < GPU_FONT_SLOTS && res->font[c->ref] != 0) &&
         (c->type == WIRE_IMAGE ==> c->ref < GPU_MAX_IMAGES && res->image[c->ref] != 0) &&
-        (c->type == WIRE_MASK_BEGIN ==> c->ref < nmasks && (1 <= masks[c->ref].kind <= 4 || masks[c->ref].kind == 6)) &&
+        (c->type == WIRE_MASK_BEGIN ==> c->ref < nmasks && (1 <= masks[c->ref].kind <= 4 || masks[c->ref].kind == 6 || masks[c->ref].kind == 7)) &&
         (c->type == WIRE_SHADOW ==> c->ref < nmasks && masks[c->ref].kind == 5);
 
     // What a record does to the mask nesting.

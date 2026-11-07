@@ -26,6 +26,7 @@ enum {
     WIRE_MASK_BEGIN,
     WIRE_MASK_END,
     WIRE_SHADOW,
+    WIRE_XFORM,                     /* x, y: e, f; u0 v0 u1 v1: a b c d as (v + 128) / 256 of WIRE_UV_ONE */
     WIRE_NTYPES
 };
 

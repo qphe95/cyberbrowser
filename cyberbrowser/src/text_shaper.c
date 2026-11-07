@@ -82,6 +82,9 @@ static uint32_t utf8_decode(const char **ptr)
     uint32_t c = *p++;
     if (c < 0x80) {
         *ptr = (const char *)p;
+        /* (a control character other than tab and line feed: visible, as a
+         * box, CSS Text 3 4.1.1) */
+        if ((c > 0 && c < 0x20 && c != 0x09 && c != 0x0A) || c == 0x7F) return 0x25A1;
         return c;
     }
     if ((c & 0xE0) == 0xC0) {
@@ -571,6 +574,15 @@ float text_shaper_x_height(const TextShaper *s)
 {
     int x0, y0, x1, y1;
     if (!s || !stbtt_FindGlyphIndex(&s->font, 'x') || !stbtt_GetCodepointBox(&s->font, 'x', &x0, &y0, &x1, &y1))
+        return 0.0f;
+    return (float)y1 * s->scale / s->size_pixels;
+}
+
+/* The height of "H" as a fraction of the em (the cap height); 0 when none. */
+float text_shaper_cap_height(const TextShaper *s)
+{
+    int x0, y0, x1, y1;
+    if (!s || !stbtt_FindGlyphIndex(&s->font, 'H') || !stbtt_GetCodepointBox(&s->font, 'H', &x0, &y0, &x1, &y1))
         return 0.0f;
     return (float)y1 * s->scale / s->size_pixels;
 }

@@ -304,6 +304,10 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     /* list-style-image (inherited): its absolute URL, "" none */
     const char *list_image;
     unsigned char list_image_set;
+    /* list-style-type when not one of those (list_style_type 5): a counter
+     * style's name, a symbols() function or a "string"; inherited */
+    const char *list_style;
+    unsigned char list_inside, list_inside_set;   /* list-style-position: inside */
     /* letter-spacing / word-spacing in px (0: normal) and text-transform
      * (0 none, 1 uppercase, 2 lowercase, 3 capitalize); inherited. */
     float letter_spacing, word_spacing;
@@ -322,6 +326,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     /* Background image URL, interned (lives for the process; "" none). */
     const char *background_image_url;
     const char *shape_image_url;    /* shape-outside: url() */
+    const char *shape_outside;      /* shape-outside: a basic shape or a box, as written (NULL none) */
+    double shape_margin;
     /* Its placement: no-repeat per axis (repeat otherwise); position as a
      * fraction of the free room plus a length per axis; size kind 0 auto,
      * 1 cover, 2 contain, 3 given (bg_size_w/h: px, or a fraction of the
@@ -340,6 +346,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * mask-position: x / y in px, or fractions when mask_pos_pct bits are set.
      * mask_no_repeat: mask-repeat: no-repeat. */
     const char *mask_image;
+    const char *clip_path;     /* (clip-path as written; NULL none) */
     unsigned char mask_kind;
     unsigned char mask_size_kind;
     unsigned char mask_size_pct;
@@ -347,6 +354,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char mask_no_repeat;
     double mask_size_w, mask_size_h;
     double mask_pos_x, mask_pos_y;
+    double mask_pos_xpx, mask_pos_ypx;   /* (an offset from an edge: px added to the fraction) */
 
     /* border-radius per corner (top-left, top-right, bottom-right,
      * bottom-left): px, or a fraction of the box when the corner's bit in
@@ -403,7 +411,35 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     double width_percent, width_pct_px;
     double height_percent, height_pct_px;
     double gap_row, gap_col;
-    float gap_row_pct, gap_col_pct;    /* gaps of a percentage (fractions): of the container's own content box, at layout */
+    unsigned char gap_col_given;      /* column-gap other than normal (multicol's normal is 1em) */
+    /* Multi-column layout (CSS Multicol 1): column-count (0 auto), column-width
+     * (column_width_set: not auto), column-fill (0 balance, 1 auto) */
+    int column_count;
+    double column_width;
+    unsigned char column_width_set, column_fill, column_span_all;
+    double column_height;              /* (column-height; 0 auto) */
+    unsigned char column_wrap;         /* (0 auto, 1 nowrap, 2 wrap) */
+    /* column-rule (column_rule_style a CssBorderStyle; color currentColor
+     * unless column_rule_color_set) */
+    float column_rule_width;
+    unsigned char column_rule_style, column_rule_width_set, column_rule_color_set;
+    uint32_t column_rule_rgba;
+    /* Gap decorations (CSS Gaps 1), [0] the column rules, [1] the row rules:
+     * each list's values (n 0: the initial one) with its repeat(auto, ...)
+     * run at [as, as + an); break (0 normal, 1 none, 2 intersection);
+     * visibility (0 normal, 1 all, 2 around, 3 between); insets cap-start,
+     * cap-end, junction-start, junction-end (px plus a fraction of the
+     * crossing gap; oj overlap-join); gr_any: some rule has a style. */
+    struct {
+        uint32_t rgba[6];
+        unsigned char cset[6], style[6];
+        float w[6];
+        unsigned char nc, cas, can, ns, sas, san, nw, was, wan;
+        unsigned char brk, vis;
+        struct { float px, pct; unsigned char oj; } inset[4];
+    } gr[2];
+    unsigned char gr_overlap, gr_any;  /* (overlap 1: column-over-row) */
+    float gap_row_pct, gap_col_pct;   /* gaps of a percentage (fractions): of the container's own content box, at layout */
 
     /* Preferred aspect ratio as height / width: from the aspect-ratio
      * property (aspect_ratio_prop set; it sizes the box box-sizing names),
@@ -465,8 +501,15 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     double translate_x, translate_y;
     double translate_xpct, translate_ypct;
     unsigned char has_translate;
+    /* (of that, the transform's own and the translate property's: the two add up) */
+    double tft_x, tft_y, tft_xpct, tft_ypct, tpr_x, tpr_y, tpr_xpct, tpr_ypct;
     /* (more than a translation: as written; the box itself stays where it's laid out) */
     const char *tf_text, *tf_origin, *tf_rotate, *tf_scale;
+    const char *tf_raw;     /* (transform as written, translations too: for SVG elements) */
+    unsigned char tb_trim, tb_over, tb_under;
+    float h_lh;             /* (height in lh: of the line height the element comes to; 0 none) */
+    unsigned char brk_before, brk_after, brk_inside;   /* (break-*: 0 auto, 1 a forced break, 2 avoid) */   /* (text-box-trim: 1 start, 2 end; text-box-edge over 0 text 1 cap 2 ex, under 0 text 1 alphabetic) */
+    unsigned char tf_box;   /* (transform-box: 0 view-box, 1 fill-box, 2 stroke-box, 3 content-box, 4 border-box) */
     /* width: min-content (1) / max-content (2) / fit-content (3). */
     unsigned char width_keyword;
     /* Percentage insets (top, right, bottom, left): bit set => the
@@ -476,6 +519,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     /* white-space: 0 normal, 1 nowrap, 2 pre, 3 pre-wrap, 4 pre-line. */
     unsigned char white_space;
     unsigned char white_space_set;
+    unsigned char break_spaces;   /* white-space: break-spaces (white_space 3, and spaces that take room and wrap) */
     /* opacity (when opacity_set) and the effective opacity including all
      * ancestors, computed after layout for painting. */
     double opacity;
@@ -492,10 +536,23 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char webkit_box;
     unsigned char box_orient_vertical;
     unsigned char line_clamp;
+    /* line-clamp (CSS Overflow 4) given, which clamps any block container
+     * (-webkit-line-clamp only a -webkit-box); line_clamp_auto: as many
+     * lines as its height or max-height has room for */
+    unsigned char line_clamp_std, line_clamp_auto;
+    float max_h_lh;                   /* max-height as <n>lh (0: not): line-clamp: auto counts by it */
     /* text-overflow: ellipsis (for clipped single-line text). */
     unsigned char text_overflow_ellipsis;
     /* object-fit: 0 fill, 1 contain, 2 cover, 3 none, 4 scale-down. */
     unsigned char object_fit;
+    /* display: grid-lanes (CSS Grid 3): lanes_dir 0 column lanes (items
+     * stack down), 1 row lanes; lanes_fill_rev, lanes_track_rev */
+    unsigned char grid_lanes, lanes_dir, lanes_dir_set, lanes_fill_rev, lanes_track_rev, fit_tol_set;
+    double fit_tol;                   /* fit-tolerance in px (fit_tol_set: not normal, 1em) */
+    /* object-position (obj_pos_set: given, else 50% 50%): fractions of the
+     * room left and pixels, by axis, as background-position's */
+    float obj_xf, obj_xpx, obj_yf, obj_ypx;
+    unsigned char obj_pos_set;
 
     /* CSS Grid container: the track lists and areas as specified
      * (interned, NULL = none), parsed at layout time against the final
@@ -526,6 +583,7 @@ struct LayoutContext;
 /* Does caption box idx go below its table (caption-side, inherited)? */
 bool css_layout_caption_bottom(const struct LayoutContext *ctx, int idx);
 /* A list item's marker baseline (its first line's, else its strut's). */
+const char *css_layout_marker_text(const struct LayoutContext *ctx, int idx);
 double css_layout_marker_baseline(struct LayoutContext *ctx, int idx);
 
 /* A box of the layout tree: its computed style (shared, read-only once the
@@ -536,6 +594,17 @@ typedef struct LayoutBox {
     LayoutStyle *s;
     double x, y;
     double width, height;
+    /* A multi-column container's columns (mc_n 0: not one): its content laid
+     * out as one column mc_w wide, painted in columns mc_h high, mc_gap apart */
+    int mc_n, mc_used;          /* (mc_used: the columns its content takes) */
+    float mc_w, mc_gap, mc_h;
+    float mc_rgap;              /* (column-wrap: rows of mc_n columns, this far apart; < 0 none) */
+    /* A multi-column container's child: its run of columns (between spanners)
+     * starts at mc_src in the one column it was laid out in and is painted from
+     * mc_dst, columns mc_seg_h high (mc_seg_h 0: not set); mc_span: a spanner,
+     * laid out across the container and painted where it is */
+    float mc_src, mc_dst, mc_seg_h;
+    unsigned char mc_span, mc_seg_last;
     double margin_top, margin_right, margin_bottom, margin_left;
     double padding_top, padding_right, padding_bottom, padding_left;
     double content_width, content_height;
@@ -620,6 +689,13 @@ typedef struct CssCustomProps CssCustomProps;
 typedef struct {
     double left, right, top, bottom;   /* (margin box) */
     unsigned char side;
+    /* shape-outside (CSS Shapes 1), what lines wrap around: 0 none (the
+     * margin box), 1 an ellipse (s[0..3]: cx, cy, rx, ry), 2 a rounded
+     * rectangle (s[0..3]: x0, y0, x1, y1; rad: tl, tr, br, bl, x and y), 3 a
+     * polygon (npts points); shape-margin already in */
+    unsigned char shape, npts;
+    float s[4], rad[4][2], margin;
+    float pts[32][2];
 } FloatRec;
 
 typedef struct LayoutContext {
@@ -783,6 +859,9 @@ typedef struct LayoutContext {
      * their slots and nodes, by element and side) for the next to take back
      * when nothing they depend on changed (style set parked_gen). */
     struct LayoutPseudoPair *pseudo_pairs;
+    /* An outside marker's text, by box (layout_counters; NULL: none) */
+    char **marker_text;
+    int marker_text_n;
     struct LayoutParkedPseudo *parked;
     int parked_n;
     uint64_t parked_gen;
@@ -904,6 +983,17 @@ void css_layout_map_bounds(const double m[6], double *x, double *y, double *w, d
 void css_layout_anim_seed(const LayoutContext *ctx, int idx, uint32_t el);
 
 /* The rectangles of the bytes [a, b) of text box idx's data, one per line. */
+/* Gap decorations' geometry (CSS Gaps 1), from the content box's corner: a
+ * container's gaps (axis 0 between columns, its rules down; 1 between rows),
+ * gi the gap's place in its axis' value lists, pos and w its middle and
+ * width across, its gap segments along it [at, at + n) and at its two ends
+ * the crossing gap's width (0: a cap) and index; each segment where it runs,
+ * occ its sides with items (bit 0 start, 1 end), disc an item over the gap,
+ * and the junction after it: jt the crossing gaps there (0 none, 1 one
+ * side, 2 both), jw its width, ci its index.  kind 0 grid, 1 flex. */
+typedef struct { float s, e, jw; int ci; unsigned char occ, disc, jt; } CssGapSeg;
+typedef struct { unsigned char axis; int gi, nn; float pos, w, jw0, jw1; int ci0, ci1, at, n; } CssGapLine;   /* (nn: the gaps its lists run over, 0 its axis' all) */
+int css_layout_gap_lines(int idx, unsigned char *kind, const CssGapLine **lines, const CssGapSeg **segs);
 int css_layout_text_rects(const LayoutContext *ctx, int idx, size_t a, size_t b, double (*out)[4], int max);
 
 /* The text a text box lays out and paints (white space processed). */

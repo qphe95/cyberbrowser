@@ -261,8 +261,11 @@ static float mask_alpha_at(const DisplayMask *m, float px, float py,
     }
     if (!src || sw <= 0 || sh <= 0 || m->iw <= 0.0f || m->ih <= 0.0f) return 0.0f;
     float u = (px - m->ix) / m->iw, v = (py - m->iy) / m->ih;
-    if (m->repeat) { u -= floorf(u); v -= floorf(v); }
-    else if (u < 0.0f || u >= 1.0f || v < 0.0f || v >= 1.0f) return 0.0f;
+    /* (repeat: bit 1 across, bit 2 down) */
+    if (m->repeat & 1) u -= floorf(u);
+    else if (u < 0.0f || u >= 1.0f) return 0.0f;
+    if (m->repeat & 2) v -= floorf(v);
+    else if (v < 0.0f || v >= 1.0f) return 0.0f;
     int sx = (int)(u * (float)sw), sy = (int)(v * (float)sh);
     if (sx >= sw) sx = sw - 1;
     if (sy >= sh) sy = sh - 1;

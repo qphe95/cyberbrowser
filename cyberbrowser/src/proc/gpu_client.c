@@ -107,6 +107,15 @@ uint32_t gpu_encode_frame(const DisplayList *dl, const GpuFrame *hdr, uint8_t **
         case DL_SHADOW:
             w.ref = (uint32_t)c->u.mask_index;
             break;
+        case DL_XFORM:
+            w.x = fx(c->u.xf[4]);
+            w.y = fx(c->u.xf[5]);
+            w.w = w.h = 0;
+            w.u0 = uv((c->u.xf[0] + 128.0f) / 256.0f);
+            w.v0 = uv((c->u.xf[1] + 128.0f) / 256.0f);
+            w.u1 = uv((c->u.xf[2] + 128.0f) / 256.0f);
+            w.v1 = uv((c->u.xf[3] + 128.0f) / 256.0f);
+            break;
         default:
             break;
         }
@@ -127,7 +136,7 @@ uint32_t gpu_encode_frame(const DisplayList *dl, const GpuFrame *hdr, uint8_t **
         w.iy = fx(m->iy);
         w.iw = fx(m->iw);
         w.ih = fx(m->ih);
-        w.repeat = m->repeat ? 1 : 0;
+        w.repeat = (uint32_t)(m->repeat & 3);
         w.angle = fx(m->angle_deg);
         w.nstops = (uint32_t)(m->nstops < 0 ? 0 : m->nstops);
         for (int k = 0; k < WIRE_MASK_STOPS && k < DL_MASK_STOPS; k++) {

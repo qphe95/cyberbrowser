@@ -29,6 +29,10 @@ typedef enum {
     /* box-shadow: a blurred rounded rectangle (DisplayList.masks[u.mask_index],
      * kind 5) in the command's color, not drawn under the box itself. */
     DL_SHADOW,
+    /* A 2D transform for the commands after it (to the next one): u.xf, an
+     * affine a b c d e f taking their coordinates to the page's; the
+     * identity ends it.  x, y, w, h unused (0). */
+    DL_XFORM,
 } DisplayListCmdType;
 
 #define DL_MASK_STOPS 8
@@ -85,6 +89,7 @@ typedef struct {
         DisplayGlyph glyph;
         DisplayImage image;
         int mask_index;
+        float xf[6];
     } u;
 } DisplayListCmd;
 

@@ -67,7 +67,7 @@ static uint32_t rd_uv(const uint8_t *p) {
  */
 static void decode_mask(const uint8_t *p, const GpuClientRes *res, WireMask *m) {
     uint32_t kind = rd32(p);
-    m->kind = kind >= 1 && kind <= 6 ? kind : 0;
+    m->kind = kind >= 1 && kind <= 7 ? kind : 0;
     uint32_t image = rd32(p + 4);
     m->image = m->kind == 1 && image < GPU_MAX_IMAGES && res->image[image] ? image : GPU_NO_IMAGE;
     m->x = rd_coord(p + 8);
@@ -78,7 +78,7 @@ static void decode_mask(const uint8_t *p, const GpuClientRes *res, WireMask *m) 
     m->iy = rd_coord(p + 28);
     m->iw = rd_size(p + 32);
     m->ih = rd_size(p + 36);
-    m->repeat = rd32(p + 40) ? 1 : 0;
+    m->repeat = rd32(p + 40) & 3u;
     m->angle = rd_coord(p + 44);
     uint32_t nstops = rd32(p + 48);
     m->nstops = nstops < 1 ? 1 : nstops > WIRE_MASK_STOPS ? WIRE_MASK_STOPS : nstops;
@@ -150,13 +150,14 @@ static bool resolves(uint32_t type, uint32_t ref, const GpuClientRes *res, const
     case WIRE_RECT:
     case WIRE_BORDER:
     case WIRE_MASK_END:
+    case WIRE_XFORM:
         return true;
     case WIRE_GLYPH:
         return ref < GPU_FONT_SLOTS && res->font[ref];
     case WIRE_IMAGE:
         return ref < GPU_MAX_IMAGES && res->image[ref];
     case WIRE_MASK_BEGIN:
-        return ref < nmasks && ((masks[ref].kind >= 1 && masks[ref].kind <= 4) || masks[ref].kind == 6);
+        return ref < nmasks && ((masks[ref].kind >= 1 && masks[ref].kind <= 4) || masks[ref].kind == 6 || masks[ref].kind == 7);
     case WIRE_SHADOW:
         return ref < nmasks && masks[ref].kind == 5;
     default:

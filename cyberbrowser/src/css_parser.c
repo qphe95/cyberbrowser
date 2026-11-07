@@ -1495,6 +1495,13 @@ static size_t css_at_rule(const char *s, size_t len, size_t pos, bool nested, Cs
         size_t ul = 0;
         while (*u && (q ? *u != q : (*u != ')' && !css_is_space(*u))) && ul + 1 < sizeof uri) uri[ul++] = *u++;
         if (ul) uri[ul] = 0;
+        /* (a prefix seen before: its URI now, moved last so a lookup finds it; the table never fills with repeats) */
+        int at = -1;
+        for (int i = 0; pfx[0] && i < g_css_nns; i++) if (!strcmp(g_css_ns[i].p, pfx)) at = i;
+        if (at >= 0) {
+            for (int i = at; i + 1 < g_css_nns; i++) g_css_ns[i] = g_css_ns[i + 1];
+            g_css_nns--;
+        }
         if (pfx[0] && g_css_nns < 16) {
             snprintf(g_css_ns[g_css_nns].p, sizeof g_css_ns[0].p, "%s", pfx);
             snprintf(g_css_ns[g_css_nns].uri, sizeof g_css_ns[0].uri, "%s", uri);

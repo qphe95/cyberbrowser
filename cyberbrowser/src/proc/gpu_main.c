@@ -292,6 +292,15 @@ static void to_display_list(const WireCmd *cmds, uint32_t n, const WireMask *mas
         case WIRE_SHADOW:
             c->u.mask_index = (int)w->ref;
             break;
+        case WIRE_XFORM:
+            c->u.xf[0] = uvf(w->u0) * 256.0f - 128.0f;
+            c->u.xf[1] = uvf(w->v0) * 256.0f - 128.0f;
+            c->u.xf[2] = uvf(w->u1) * 256.0f - 128.0f;
+            c->u.xf[3] = uvf(w->v1) * 256.0f - 128.0f;
+            c->u.xf[4] = c->x;
+            c->u.xf[5] = c->y;
+            c->x = c->y = c->w = c->h = 0.0f;
+            break;
         default:
             break;
         }

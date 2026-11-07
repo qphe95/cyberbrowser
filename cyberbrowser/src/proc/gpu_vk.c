@@ -339,7 +339,35 @@ typedef struct Item {
     int32_t quad[4];
     int32_t info[4];
     float extra[4];
+    float xf0[4], xf1[4];           /* under a transform: its inverse (a b c d, e f), xf1[2] 1 */
+    int32_t lquad[4];               /* (and the pixels before it) */
 } Item;
+
+/* (an affine's inverse; false when it has none) */
+static bool xf_invert(const float m[6], float r[6]) {
+    double det = (double)m[0] * m[3] - (double)m[1] * m[2];
+    if (fabs(det) < 1e-12) return false;
+    r[0] = (float)(m[3] / det); r[1] = (float)(-m[1] / det);
+    r[2] = (float)(-m[2] / det); r[3] = (float)(m[0] / det);
+    r[4] = (float)(-(r[0] * m[4] + r[2] * m[5]));
+    r[5] = (float)(-(r[1] * m[4] + r[3] * m[5]));
+    return true;
+}
+
+/* (box x0 y0 x1 y1 under m: the pixels its corners span) */
+static void xf_bounds(const float m[6], double x0, double y0, double x1, double y1, double out[4]) {
+    double xs[2] = { x0, x1 }, ys[2] = { y0, y1 };
+    out[0] = out[1] = 1e30; out[2] = out[3] = -1e30;
+    for (int i = 0; i < 2; i++)
+        for (int j = 0; j < 2; j++) {
+            double X = m[0] * xs[i] + m[2] * ys[j] + m[4], Y = m[1] * xs[i] + m[3] * ys[j] + m[5];
+            if (X < out[0]) out[0] = X;
+            if (Y < out[1]) out[1] = Y;
+            if (X > out[2]) out[2] = X;
+            if (Y > out[3]) out[3] = Y;
+        }
+    out[0] = floor(out[0]); out[1] = floor(out[1]); out[2] = ceil(out[2]); out[3] = ceil(out[3]);
+}
 
 typedef struct Mask {
     float box[4], img[4], rx[4], ry[4], border[4], ex_rx[4], ex_ry[4];
@@ -421,7 +449,7 @@ static bool vk_render(GpuTarget **tp, uint32_t w, uint32_t h, const DisplayList 
             o->ex_rx[k] = m->ex_rx[k]; o->ex_ry[k] = m->ex_ry[k];
         }
         for (int k = 0; k < 8; k++) { o->stop_pos[k] = m->stop_pos[k]; o->stop_alpha[k] = m->stop_alpha[k]; }
-        o->misc[0] = m->angle_deg; o->misc[1] = m->blur; o->misc[2] = m->repeat ? 1.0f : 0.0f;
+        o->misc[0] = m->angle_deg; o->misc[1] = m->blur; o->misc[2] = (float)(m->repeat & 3);
         o->misc[3] = (float)m->nstops;
         o->kind[0] = m->kind;
         o->kind[1] = m->kind == 1 && m->image_handle >= 0 && m->image_handle < GPU_MAX_IMAGES &&
@@ -430,13 +458,28 @@ static bool vk_render(GpuTarget **tp, uint32_t w, uint32_t h, const DisplayList 
     Item *it = (Item *)g_items.map;
     int level = 0;
     int32_t W = (int32_t)w, H = (int32_t)h;
+    /* (the transform in force: its matrix and inverse; xf_on when not the identity) */
+    float xfm[6] = { 1, 0, 0, 1, 0, 0 }, xfi[6] = { 1, 0, 0, 1, 0, 0 };
+    bool xf_on = false, xf_flat = false;   /* (flat: a transform with no inverse, nothing drawn under it) */
     for (int i = 0; i < dl->count; i++) {
         const DisplayListCmd *c = &dl->cmds[i];
+        if (c->type == DL_XFORM) {
+            memcpy(xfm, c->u.xf, sizeof xfm);
+            bool ident = xfm[0] == 1.0f && xfm[1] == 0.0f && xfm[2] == 0.0f && xfm[3] == 1.0f && xfm[4] == 0.0f && xfm[5] == 0.0f;
+            xf_on = !ident && xf_invert(xfm, xfi);
+            xf_flat = !ident && !xf_on;
+            continue;
+        }
         if (c->type == DL_MASK_BEGIN) {
             const DisplayMask *m = &dl->masks[c->u.mask_index];
+            double mb[4] = { floor(m->x), floor(m->y), ceil(m->x + m->w), ceil(m->y + m->h) };
+            /* (a rounded rectangle with a region of its own: what it clips is all of that) */
+            if ((m->kind == 3 || m->kind == 7) && m->iw > 0.0f && m->ih > 0.0f) {
+                mb[0] = floor(m->ix); mb[1] = floor(m->iy); mb[2] = ceil(m->ix + m->iw); mb[3] = ceil(m->iy + m->ih);
+            }
+            if (xf_on) xf_bounds(xfm, m->x, m->y, m->x + m->w, m->y + m->h, mb);
             Op op = { OP_SAVE, 0, 0, NULL, level,
-                      { clampi(floor(m->x), 0, W), clampi(floor(m->y), 0, H), clampi(ceil(m->x + m->w), 0, W),
-                        clampi(ceil(m->y + m->h), 0, H) } };
+                      { clampi(mb[0], 0, W), clampi(mb[1], 0, H), clampi(mb[2], 0, W), clampi(mb[3], 0, H) } };
             if (level >= GPU_MAX_DEPTH || !op_push(&nops, op)) return false;
             level++;
             continue;
@@ -462,6 +505,10 @@ static bool vk_render(GpuTarget **tp, uint32_t w, uint32_t h, const DisplayList 
             if (mi < 0) continue;
             o->info[1] = mi;
             o->info[3] = level;
+            if (xf_on) {
+                memcpy(o->xf0, xfi, 4 * sizeof(float));
+                o->xf1[0] = xfi[4]; o->xf1[1] = xfi[5]; o->xf1[2] = 1.0f;
+            }
             const DisplayMask *m = &dl->masks[mi];
             GpuTexture *mt = m->kind == 1 && m->image_handle >= 0 && m->image_handle < GPU_MAX_IMAGES
                                  ? images[m->image_handle] : NULL;
@@ -470,6 +517,7 @@ static bool vk_render(GpuTarget **tp, uint32_t w, uint32_t h, const DisplayList 
             nitems++;
             continue;
         }
+        if (xf_flat) continue;
         Item *o = &it[nitems];
         memset(o, 0, sizeof(*o));
         o->rect[0] = c->x; o->rect[1] = c->y; o->rect[2] = c->w; o->rect[3] = c->h;
@@ -513,6 +561,16 @@ static bool vk_render(GpuTarget **tp, uint32_t w, uint32_t h, const DisplayList 
             continue;
         }
         if ((c->type == DL_GLYPH || c->type == DL_IMAGE) && !tex) continue;
+        if (xf_on) {
+            /* (its pixels as they were, those they land on after the transform) */
+            o->lquad[0] = clampi(x0, -GPU_COORD_MAX, GPU_COORD_MAX); o->lquad[1] = clampi(y0, -GPU_COORD_MAX, GPU_COORD_MAX);
+            o->lquad[2] = clampi(x1, -GPU_COORD_MAX, GPU_COORD_MAX); o->lquad[3] = clampi(y1, -GPU_COORD_MAX, GPU_COORD_MAX);
+            memcpy(o->xf0, xfi, 4 * sizeof(float));
+            o->xf1[0] = xfi[4]; o->xf1[1] = xfi[5]; o->xf1[2] = 1.0f;
+            double bb[4];
+            xf_bounds(xfm, x0, y0, x1, y1, bb);
+            x0 = bb[0]; y0 = bb[1]; x1 = bb[2]; y1 = bb[3];
+        }
         o->quad[0] = clampi(x0, 0, W); o->quad[1] = clampi(y0, 0, H);
         o->quad[2] = clampi(x1, 0, W); o->quad[3] = clampi(y1, 0, H);
         if (o->quad[2] <= o->quad[0] || o->quad[3] <= o->quad[1]) continue;
