@@ -1279,6 +1279,7 @@ static bool chain_positional(const CssStyleSet *S, uint32_t ci, uint8_t *memo)
             if (c->child_pos || c->type_pos || c->nth_kind || c->empty ||
                 c->comb == CSS_COMB_ADJACENT || c->comb == CSS_COMB_SIBLING || c->has >= 0) pos = true;
             else if (c->where >= 0 && list_positional(S, c->where, memo)) pos = true;
+            else if (c->not_list >= 0 && list_positional(S, c->not_list, memo)) pos = true;   /* (:not(:first-child) too) */
         }
     }
     memo[ci] = pos ? 2 : 1;

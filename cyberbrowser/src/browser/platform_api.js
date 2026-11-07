@@ -2589,8 +2589,95 @@
             scrollIntoViewOf(this, 'nearest', 'nearest');
         } });
     }
-    /* ---- CSS Custom Highlight API: the sets and their registry (nothing's painted) ---- */
+    /* ---- CSS Custom Highlight API: the sets and their registry, sent to be
+     * painted (__cyberHighlightSet) after each change ---- */
     var HL = new WeakMap();
+    var hlDirty = false, theRegistry = null;
+    var hlRange = function (r, hi, flat) {
+        var sc = r.startContainer, ec = r.endContainer, so = r.startOffset, eo = r.endOffset;
+        if (!sc || !ec) return;
+        if (sc === ec && sc.nodeType === 3) { if (eo > so) flat.push(hi, sc, so, eo); return; }
+        var doc = sc.nodeType === 9 ? sc : sc.ownerDocument;
+        if (!doc || !doc.createRange) return;
+        var lr = doc.createRange();
+        try { lr.setStart(sc, so); lr.setEnd(ec, eo); } catch (e) { return; }
+        if (lr.collapsed) return;
+        var root = lr.commonAncestorContainer;
+        if (root.nodeType === 3) { flat.push(hi, root, so, eo); return; }
+        var w = doc.createTreeWalker(root, 4);
+        for (var t = w.nextNode(); t; t = w.nextNode()) {
+            if (!lr.intersectsNode(t)) continue;
+            var s = t === sc ? so : 0, e = t === ec ? eo : t.length;
+            if (e > s) flat.push(hi, t, s, e);
+        }
+    };
+    /* (text directives, #:~:text=[prefix-,]start[,end][,-suffix]: the first
+     * match of each in the document's text, case-insensitively) */
+    var hlTargetText = function (names, prios, flat) {
+        var href = String(global.location && global.location.href || ''), at = href.indexOf(':~:');
+        if (at < 0 || !global.document || !global.document.body) return;
+        var dirs = href.slice(at + 3).split('&'), nodes = [], starts = [], text = '';
+        var w = global.document.createTreeWalker(global.document.body, 4);
+        for (var t = w.nextNode(); t; t = w.nextNode()) {
+            var p = t.parentNode && t.parentNode.localName;
+            if (p === 'script' || p === 'style') continue;
+            nodes.push(t); starts.push(text.length); text += t.data;
+        }
+        var low = text.toLowerCase(), ti = -1;
+        for (var d = 0; d < dirs.length; d++) {
+            if (dirs[d].slice(0, 5) !== 'text=') continue;
+            var parts = dirs[d].slice(5).split(',').map(function (x) { try { return decodeURIComponent(x); } catch (e) { return x; } });
+            if (parts.length && /-$/.test(parts[0])) parts.shift();
+            if (parts.length && /^-/.test(parts[parts.length - 1])) parts.pop();
+            if (!parts.length || !parts[0]) continue;
+            var a = low.indexOf(parts[0].toLowerCase());
+            if (a < 0) continue;
+            var b = a + parts[0].length;
+            if (parts.length > 1 && parts[1]) {
+                var eb = low.indexOf(parts[1].toLowerCase(), b);
+                if (eb < 0) continue;
+                b = eb + parts[1].length;
+            }
+            if (ti < 0) { ti = names.length; names.push('\u0001target-text'); prios.push(0x3ffffff0); }
+            for (var k = 0; k < nodes.length; k++) {
+                var ns = starts[k], ne = ns + nodes[k].data.length;
+                if (ne <= a || ns >= b) continue;
+                flat.push(ti, nodes[k], Math.max(a, ns) - ns, Math.min(b, ne) - ns);
+            }
+        }
+    };
+    var hlFlush = function () {
+        hlDirty = false;
+        if (typeof global.__cyberHighlightSet !== 'function' || !theRegistry) return;
+        var names = [], prios = [], flat = [];
+        HL.get(theRegistry).forEach(function (h, name) {
+            var hi = names.length;
+            names.push(name);
+            prios.push(hlState.get(h).priority);
+            HL.get(h).forEach(function (r) { try { hlRange(r, hi, flat); } catch (e) {} });
+        });
+        /* (the URL's text fragment: ::target-text, under the selection) */
+        try { hlTargetText(names, prios, flat); } catch (e) {}
+        /* (the selection: last, over all of them, its name marked) */
+        var sel = global.__cyberSelection, sr = sel && sel.__range;
+        if (sr && !sr.collapsed) {
+            var si = names.length;
+            names.push('\u0001selection');
+            prios.push(0x3fffffff);
+            try { hlRange(sr, si, flat); } catch (e) {}
+        }
+        global.__cyberHighlightSet(names, prios, flat);
+    };
+    if (global.addEventListener) {
+        global.addEventListener('hashchange', function () { hlTouch(); });
+        global.addEventListener('load', function () { if (String(global.location && global.location.href).indexOf(':~:') >= 0) hlTouch(); });
+    }
+    Object.defineProperty(global, '__cyberSelectionChanged', { configurable: true, value: function () { hlTouch(); } });
+    var hlTouch = function () {
+        if (hlDirty) return;
+        hlDirty = true;
+        Promise.resolve().then(hlFlush);
+    };
     var hlOf = function (h) {
         var s = HL.get(h);
         if (!s) throw new TypeError('Illegal invocation');
@@ -2613,8 +2700,8 @@
                 hlOf(this).forEach(function (v, k) { cb.call(that, v, k, self); });
             },
             has: function (k) { if (!arguments.length) throw new TypeError('1 argument required'); return hlOf(this).has(k); },
-            delete: function (k) { if (!arguments.length) throw new TypeError('1 argument required'); return hlOf(this).delete(k); },
-            clear: function () { hlOf(this).clear(); } });
+            delete: function (k) { if (!arguments.length) throw new TypeError('1 argument required'); hlTouch(); return hlOf(this).delete(k); },
+            clear: function () { hlOf(this).clear(); hlTouch(); } });
         /* (keys: its own function, named so, a set's being its values) */
         var keysFn = kind === 'set' ? function () { return hlOf(this).values(); } : keys;
         Object.defineProperty(keysFn, 'name', { configurable: true, value: 'keys' });
@@ -2634,6 +2721,7 @@
         }
         HL.set(this, s);
         hlState.set(this, { priority: 0, type: 'highlight' });
+        hlTouch();
     };
     var hlState = new WeakMap();
     Object.defineProperty(Highlight, 'length', { configurable: true, value: 0 });
@@ -2643,11 +2731,12 @@
         if (!arguments.length) throw new TypeError('1 argument required');
         if (!(r instanceof global.AbstractRange)) throw new TypeError("Failed to execute 'add' on 'Highlight': not an AbstractRange");
         hlOf(this).add(r);
+        hlTouch();
         return this;
     } });
     Object.defineProperty(Highlight.prototype, 'priority', { configurable: true, enumerable: true,
         get: function () { hlOf(this); return hlState.get(this).priority; },
-        set: function (v) { hlOf(this); hlState.get(this).priority = (Number(v) | 0); } });
+        set: function (v) { hlOf(this); hlState.get(this).priority = (Number(v) | 0); hlTouch(); } });
     Object.defineProperty(Highlight.prototype, 'type', { configurable: true, enumerable: true,
         get: function () { hlOf(this); return hlState.get(this).type; },
         set: function (v) { hlOf(this); v = String(v); if (HIGHLIGHT_TYPES.indexOf(v) >= 0) hlState.get(this).type = v; } });
@@ -2663,6 +2752,7 @@
         if (arguments.length < 2) throw new TypeError('2 arguments required');
         if (!(v instanceof Highlight)) throw new TypeError("Failed to execute 'set' on 'HighlightRegistry': not a Highlight");
         hlOf(this).set(String(k), v);
+        hlTouch();
         return this;
     } });
     Object.defineProperty(HighlightRegistry.prototype, 'highlightsFromPoint', { configurable: true, enumerable: true, writable: true,
@@ -2672,7 +2762,9 @@
             return [];
         } });
     Object.defineProperty(global, 'HighlightRegistry', { configurable: true, writable: true, value: HighlightRegistry });
-    var theRegistry = Object.create(HighlightRegistry.prototype);
+    theRegistry = Object.create(HighlightRegistry.prototype);
+    /* (a new page: nothing painted from the last one's) */
+    if (typeof global.__cyberHighlightSet === 'function') global.__cyberHighlightSet([], [], []);
     HL.set(theRegistry, new Map());
     Object.defineProperty(global, '__cyberHighlights', { configurable: true, value: theRegistry });
     if (global.CSS) Object.defineProperty(global.CSS, 'highlights', { configurable: true, enumerable: true, get: function () { return theRegistry; } });

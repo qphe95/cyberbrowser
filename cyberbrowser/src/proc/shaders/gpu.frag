@@ -61,9 +61,12 @@ void main() {
         a *= c;
     } else if (type == IMAGE) {
         ivec2 ts = textureSize(tex, 0);
+        // (at the pixel's center, in the image's part uv names)
         int dx0 = int(floor(it.rect.x)), dy0 = int(floor(it.rect.y));
-        float v = it.rect.w > 0.0 ? div_(float(pix.y - dy0), it.rect.w) : 0.0;
-        float u = it.rect.z > 0.0 ? div_(float(pix.x - dx0), it.rect.z) : 0.0;
+        float v = it.rect.w > 0.0 ? div_(float(pix.y - dy0) + 0.5, it.rect.w) : 0.0;
+        float u = it.rect.z > 0.0 ? div_(float(pix.x - dx0) + 0.5, it.rect.z) : 0.0;
+        v = it.uv.y + v * (it.uv.w - it.uv.y);
+        u = it.uv.x + u * (it.uv.z - it.uv.x);
         int sy = clamp(int(floor(v * float(ts.y))), 0, ts.y - 1);
         int sx = clamp(int(floor(u * float(ts.x))), 0, ts.x - 1);
         vec4 s = texelFetch(tex, ivec2(sx, sy), 0);

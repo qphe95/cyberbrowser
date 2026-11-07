@@ -28,7 +28,7 @@ enum { ANIM_LEFT, ANIM_TOP, ANIM_RIGHT, ANIM_BOTTOM, ANIM_OPACITY, ANIM_TRANSFOR
        ANIM_MARGIN_TOP, ANIM_MARGIN_RIGHT, ANIM_MARGIN_BOTTOM, ANIM_MARGIN_LEFT,
        ANIM_BORDER_TOP, ANIM_BORDER_RIGHT, ANIM_BORDER_BOTTOM, ANIM_BORDER_LEFT,
        ANIM_FONT_SIZE, ANIM_LETTER_SPACING, ANIM_WORD_SPACING, ANIM_FONT_WEIGHT, ANIM_FONT_STYLE,
-       ANIM_ROTATE, ANIM_SCALE, ANIM_CLIP_PATH, ANIM_NPROP };   /* (rotate: x degrees about z; scale: x, y) */
+       ANIM_ROTATE, ANIM_SCALE, ANIM_CLIP_PATH, ANIM_FILTER, ANIM_BACKDROP, ANIM_NPROP };   /* (rotate: x degrees about z; scale: x, y) */
 
 /* A value: px (or a number: opacity; a translation: x, y).  ok 0: one
  * that does not interpolate (auto, a percentage): it changes at once. */

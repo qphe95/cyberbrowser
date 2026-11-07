@@ -211,6 +211,7 @@ static float border_cov(float d)
 static float mask_alpha_at(const DisplayMask *m, float px, float py,
                            const uint8_t *src, int sw, int sh, int sch)
 {
+    if (m->kind == 8 || m->kind == 9 || m->kind == 10) return 1.0f;   /* (a blend, a filter: painted as normal here) */
     if (m->kind == 2) {
         float rad = m->angle_deg * 3.14159265f / 180.0f;
         float dx = sinf(rad), dy = -cosf(rad);

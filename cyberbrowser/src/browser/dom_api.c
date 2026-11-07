@@ -3771,6 +3771,14 @@ GCValue js_node_set_data(JSContextHandle ctx, GCValue this_val, int argc, GCValu
 
 // Selection helper: update Selection properties from its stored Range.
 static void selection_update_from_range(JSContextHandle ctx, GCValue selection) {
+    {
+        /* (painted: the highlights' flush picks the selection up) */
+        GCValue f = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberSelectionChanged");
+        if (JS_IsFunction(ctx, f)) {
+            GCValue r = JS_Call(ctx, f, JS_UNDEFINED, 0, NULL);
+            if (JS_IsException(r)) JS_GetException(ctx);
+        }
+    }
     GCValue range = JS_GetPropertyStr(ctx, selection, "__range");
     if (JS_IsNull(range) || JS_IsUndefined(range)) {
         JS_SetPropertyStr(ctx, selection, "anchorNode", JS_NULL);

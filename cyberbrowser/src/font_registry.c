@@ -1072,7 +1072,14 @@ static bool fetch_bytes(const char *url, uint8_t **out, size_t *len)
     HttpBuffer buf = { 0 };
     char err[256] = { 0 };
     http_mark_cors_url(url);
-    if (!dom_fetch_script(url, &buf, err, sizeof(err)) || !buf.data || buf.size == 0) {
+    bool got = dom_fetch_script(url, &buf, err, sizeof(err)) && buf.data && buf.size > 0;
+    /* (a failure with no HTTP status is transient: fetched once more, directly) */
+    if (!got && !err[0]) {
+        http_free_buffer(&buf);
+        memset(&buf, 0, sizeof buf);
+        got = dom_fetch_script(url, &buf, err, sizeof(err)) && buf.data && buf.size > 0;
+    }
+    if (!got) {
         fprintf(stderr, "[fonts] fetch failed %.120s: %s\n", url, err);
         http_free_buffer(&buf);
         return false;

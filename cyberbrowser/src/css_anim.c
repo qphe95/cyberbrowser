@@ -72,7 +72,7 @@ static const char *const k_props[ANIM_NPROP] = { "left", "top", "right", "bottom
                                                   "margin-top", "margin-right", "margin-bottom", "margin-left",
                                                   "border-top-width", "border-right-width", "border-bottom-width",
                                                   "border-left-width", "font-size", "letter-spacing", "word-spacing", "font-weight", "font-style",
-                                                  "rotate", "scale", "clip-path" };
+                                                  "rotate", "scale", "clip-path", "filter", "backdrop-filter" };
 
 const char *anim_prop_name(int p) { return p >= 0 && p < ANIM_NPROP ? k_props[p] : ""; }
 
@@ -169,9 +169,11 @@ static int tf_fns(const char *s, TfFn *out, int cap)
 static void tf_identity(const TfFn *f, TfFn *o)
 {
     *o = *f;
-    bool sc = !strncmp(f->name, "scale", 5);
+    /* (a filter's: 1 for those that scale, as 100% when a percent) */
+    bool sc = !strncmp(f->name, "scale", 5) || !strcmp(f->name, "brightness") || !strcmp(f->name, "contrast") ||
+              !strcmp(f->name, "opacity") || !strcmp(f->name, "saturate");
     for (int i = 0; i < f->n; i++) {
-        o->v[i] = sc ? 1.0 : 0.0;
+        o->v[i] = sc ? (f->unit[i][0] == '%' ? 100.0 : 1.0) : 0.0;
         if (!strcmp(f->name, "matrix")) o->v[i] = i == 0 || i == 3 ? 1.0 : 0.0;
         if (!strcmp(f->name, "matrix3d")) o->v[i] = i % 5 == 0 ? 1.0 : 0.0;
         if (!strcmp(f->name, "rotate3d") && i < 3) o->v[i] = f->v[i];
@@ -295,7 +297,7 @@ void anim_val_css(int prop, const AnimVal *v, char *buf, size_t cap)
     /* (what can't be below nothing) */
     bool floor0 = prop == ANIM_WIDTH || prop == ANIM_HEIGHT || prop == ANIM_FONT_SIZE ||
                   (prop >= ANIM_PADDING_TOP && prop <= ANIM_PADDING_LEFT) || (prop >= ANIM_BORDER_TOP && prop <= ANIM_BORDER_LEFT);
-    if (prop == ANIM_CLIP_PATH) snprintf(buf, cap, "%s", v->tf ? v->tf : "none");
+    if (prop == ANIM_CLIP_PATH || prop == ANIM_FILTER || prop == ANIM_BACKDROP) snprintf(buf, cap, "%s", v->tf ? v->tf : "none");
     else if (prop == ANIM_TRANSFORM && v->tf) snprintf(buf, cap, "%s", v->tf);
     else if (prop == ANIM_TRANSFORM) snprintf(buf, cap, "matrix(1, 0, 0, 1, %.6g, %.6g)", v->x, v->y);
     else if (prop == ANIM_ROTATE) snprintf(buf, cap, "%.6gdeg", v->x);

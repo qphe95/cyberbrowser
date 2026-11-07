@@ -67,7 +67,7 @@ static uint32_t rd_uv(const uint8_t *p) {
  */
 static void decode_mask(const uint8_t *p, const GpuClientRes *res, WireMask *m) {
     uint32_t kind = rd32(p);
-    m->kind = kind >= 1 && kind <= 7 ? kind : 0;
+    m->kind = kind >= 1 && kind <= 10 ? kind : 0;   /* (8: a blend, 9: a filter) */
     uint32_t image = rd32(p + 4);
     m->image = m->kind == 1 && image < GPU_MAX_IMAGES && res->image[image] ? image : GPU_NO_IMAGE;
     m->x = rd_coord(p + 8);
@@ -157,7 +157,7 @@ static bool resolves(uint32_t type, uint32_t ref, const GpuClientRes *res, const
     case WIRE_IMAGE:
         return ref < GPU_MAX_IMAGES && res->image[ref];
     case WIRE_MASK_BEGIN:
-        return ref < nmasks && ((masks[ref].kind >= 1 && masks[ref].kind <= 4) || masks[ref].kind == 6 || masks[ref].kind == 7);
+        return ref < nmasks && ((masks[ref].kind >= 1 && masks[ref].kind <= 4) || masks[ref].kind == 6 || masks[ref].kind == 7 || masks[ref].kind == 8 || masks[ref].kind == 9 || masks[ref].kind == 10);
     case WIRE_SHADOW:
         return ref < nmasks && masks[ref].kind == 5;
     default:

@@ -3115,6 +3115,14 @@ static const struct { const char *n; double c[3]; } g_system_colors[] = {
     { "graytext", {109,109,109} }, { "highlight", {181,213,255} }, { "mark", {255,255,0} },
     { "buttonborder", {118,118,118} }, { "accentcolor", {0,117,255} }, { "selecteditem", {0,117,255} },
     { "accentcolortext", {255,255,255} }, { "selecteditemtext", {255,255,255} },
+    /* (deprecated ones, as CSS Color 4 maps them) */
+    { "activeborder", {118,118,118} }, { "inactiveborder", {118,118,118} }, { "threeddarkshadow", {118,118,118} },
+    { "threedhighlight", {118,118,118} }, { "threedlightshadow", {118,118,118} }, { "threedshadow", {118,118,118} },
+    { "windowframe", {118,118,118} }, { "buttonhighlight", {239,239,239} }, { "buttonshadow", {239,239,239} },
+    { "threedface", {239,239,239} }, { "activecaption", {255,255,255} }, { "appworkspace", {255,255,255} },
+    { "background", {255,255,255} }, { "inactivecaption", {255,255,255} }, { "infobackground", {255,255,255} },
+    { "menu", {255,255,255} }, { "scrollbar", {255,255,255} }, { "window", {255,255,255} },
+    { "inactivecaptiontext", {109,109,109} },
 };
 
 /* Where a color-layers()'s colors start, past its blend mode; -1 if it has only that. */

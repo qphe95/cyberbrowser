@@ -53,6 +53,9 @@ void text_shaper_frame_sent(const DisplayList *dl);
 float text_shaper_x_height(const TextShaper *shaper);
 float text_shaper_cap_height(const TextShaper *shaper);
 float text_shaper_zero_advance(const TextShaper *shaper);
+/* The underline's top below the baseline and its thickness, the strikeout's
+ * top above it and its thickness, as fractions of the em (post, OS/2). */
+bool text_shaper_deco_metrics(const TextShaper *shaper, float *ul_pos, float *ul_th, float *st_pos, float *st_th);
 
 /* Vertical metrics as fractions of the em (descent positive). */
 bool text_shaper_vmetrics(const TextShaper *shaper, float *ascent, float *descent,
@@ -67,6 +70,8 @@ float text_shaper_normal_line_height(const TextShaper *shaper, float font_size);
  * text drawn at scale) added to every advance this thread measures or draws
  * after the call, until it is set again (0, 0: none). */
 void text_shaper_set_spacing(float letter_px, float word_px, float scale);
+/* text-autospace for what's measured and drawn next: 1 ideograph-alpha, 2 ideograph-numeric. */
+void text_shaper_set_autospace(int mode);
 
 bool text_shaper_measure(const TextShaper *shaper, const char *utf8,
                          float *out_width, float *out_height);

@@ -48,7 +48,7 @@ static const uint32_t g_mask_spv[] =
     X(vkCreateSampler) X(vkCreateDescriptorSetLayout) X(vkCreatePipelineLayout) X(vkCreateDescriptorPool) \
     X(vkResetDescriptorPool) X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) X(vkCreateRenderPass) \
     X(vkCreateFramebuffer) X(vkDestroyFramebuffer) X(vkCreateShaderModule) X(vkCreateGraphicsPipelines) \
-    X(vkCmdPipelineBarrier) X(vkCmdCopyBufferToImage) X(vkCmdCopyImage) X(vkCmdCopyImageToBuffer) \
+    X(vkCmdPipelineBarrier) X(vkCmdCopyBufferToImage) X(vkCmdCopyImage) X(vkCmdCopyImageToBuffer) X(vkCmdClearAttachments) \
     X(vkCmdClearColorImage) X(vkCmdBeginRenderPass) X(vkCmdEndRenderPass) X(vkCmdBindPipeline) \
     X(vkCmdBindDescriptorSets) X(vkCmdPushConstants) X(vkCmdDraw) X(vkCmdSetViewport) X(vkCmdSetScissor) \
     X(vkDeviceWaitIdle)
@@ -384,6 +384,7 @@ typedef struct Op {
     GpuTexture *tex;                /* OP_DRAW, OP_BLEND: the texture (NULL: the stand-in) */
     int level;                      /* OP_SAVE, OP_BLEND */
     int32_t box[4];                 /* OP_SAVE, OP_BLEND: x0, y0, x1, y1 */
+    int clear;                      /* OP_SAVE: the region then cleared (a blend's: its subtree apart) */
 } Op;
 
 static Buf g_items, g_masks;
@@ -477,9 +478,14 @@ static bool vk_render(GpuTarget **tp, uint32_t w, uint32_t h, const DisplayList 
             if ((m->kind == 3 || m->kind == 7) && m->iw > 0.0f && m->ih > 0.0f) {
                 mb[0] = floor(m->ix); mb[1] = floor(m->iy); mb[2] = ceil(m->ix + m->iw); mb[3] = ceil(m->iy + m->ih);
             }
+            if (m->kind == 9) {
+                /* (a filter's drop-shadow reaches past the box) */
+                double g = fabs(m->ix) + fabs(m->iy) + 3.0 * m->blur + 2.0;
+                mb[0] -= g; mb[1] -= g; mb[2] += g; mb[3] += g;
+            }
             if (xf_on) xf_bounds(xfm, m->x, m->y, m->x + m->w, m->y + m->h, mb);
             Op op = { OP_SAVE, 0, 0, NULL, level,
-                      { clampi(mb[0], 0, W), clampi(mb[1], 0, H), clampi(mb[2], 0, W), clampi(mb[3], 0, H) } };
+                      { clampi(mb[0], 0, W), clampi(mb[1], 0, H), clampi(mb[2], 0, W), clampi(mb[3], 0, H) }, m->kind == 8 || m->kind == 9 || m->kind == 10 };
             if (level >= GPU_MAX_DEPTH || !op_push(&nops, op)) return false;
             level++;
             continue;
@@ -512,7 +518,7 @@ static bool vk_render(GpuTarget **tp, uint32_t w, uint32_t h, const DisplayList 
             const DisplayMask *m = &dl->masks[mi];
             GpuTexture *mt = m->kind == 1 && m->image_handle >= 0 && m->image_handle < GPU_MAX_IMAGES
                                  ? images[m->image_handle] : NULL;
-            Op op = { OP_BLEND, nitems, 1, mt, level, { box[0], box[1], box[2], box[3] } };
+            Op op = { OP_BLEND, nitems, 1, mt, level, { box[0], box[1], box[2], box[3] }, 0 };
             if (!op_push(&nops, op)) return false;
             nitems++;
             continue;
@@ -551,6 +557,7 @@ static bool vk_render(GpuTarget **tp, uint32_t w, uint32_t h, const DisplayList 
             y1 = floor(c->y + c->h);
             tex = c->u.image.image_handle >= 0 && c->u.image.image_handle < GPU_MAX_IMAGES
                       ? images[c->u.image.image_handle] : NULL;
+            o->uv[0] = c->u.image.u0; o->uv[1] = c->u.image.v0; o->uv[2] = c->u.image.u1; o->uv[3] = c->u.image.v1;
             break;
         case DL_SHADOW:
             x1 = ceil(c->x + c->w);
@@ -649,6 +656,22 @@ static bool vk_render(GpuTarget **tp, uint32_t w, uint32_t h, const DisplayList 
                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
                 barrier(g_cb, dst->img, &dst->layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 barrier(g_cb, t->img.img, &tl, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+            }
+            if (op->kind == OP_SAVE && op->clear && bw > 0 && bh > 0) {
+                /* (a blend's: cleared, its subtree drawn there apart) */
+                vkCmdBeginRenderPass(g_cb, &rb, VK_SUBPASS_CONTENTS_INLINE);
+                in_pass = true;
+                VkClearAttachment ca;
+                memset(&ca, 0, sizeof ca);
+                ca.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                ca.colorAttachment = 0;
+                VkClearRect cr;
+                memset(&cr, 0, sizeof cr);
+                cr.rect.offset.x = op->box[0]; cr.rect.offset.y = op->box[1];
+                cr.rect.extent.width = (uint32_t)bw; cr.rect.extent.height = (uint32_t)bh;
+                cr.layerCount = 1;
+                vkCmdClearAttachments(g_cb, 1, &ca, 1, &cr);
+                continue;
             }
             if (op->kind == OP_SAVE || bw <= 0 || bh <= 0) continue;
             /* The blend: saved and current mixed by the mask. */

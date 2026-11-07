@@ -50,7 +50,12 @@ typedef struct {
                                   stop_pos[1] of its width (from the outer edge) and cut at
                                   the corners by the diagonals to the inner corners: at its
                                   first end (going clockwise) when stop_alpha[0] is 1, its
-                                  second when stop_alpha[1] is (else it fills the corner) */
+                                  second when stop_alpha[1] is (else it fills the corner);
+                                  8 mix-blend-mode: what the subtree paints, apart, blended over
+                                  what was there by mode angle_deg (the region ix..ih);
+                                  9 filter: what the subtree paints, apart, through filter
+                                  functions (kinds stop_pos * 32, amounts rx then ry; a
+                                  drop-shadow's offsets ix, iy, blur, color border 0..255) */
     int image_handle;
     float ix, iy, iw, ih;
     int repeat;
@@ -154,6 +159,11 @@ struct TextShaper *display_list_get_font(int slot);
 /* Resolve a CSS font stack + weight + style to a font-table slot. */
 int display_list_resolve_font_slot(const char *font_family, int font_weight,
                                    int font_italic);
+
+/* Custom highlights (CSS.highlights) from script: nh highlights, each its
+ * name and priority, in registry order; nseg segments of 4 words each:
+ * highlight index, text node (NodeId), UTF-16 start and end. */
+void display_list_highlights_set(const char *const *names, const int *prios, int nh, const uint32_t *seg, int nseg);
 
 /* Build a display list from a resolved LayoutContext. */
 bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl);

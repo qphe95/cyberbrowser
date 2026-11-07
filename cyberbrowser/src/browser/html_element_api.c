@@ -28,6 +28,7 @@
 #include <quickjs.h>
 #include <quickjs_gc_unified.h>
 #include "dom_js.h"
+#include "display_list.h"
 void dom_request_layout(void);
 #include "css_style.h"
 
@@ -429,8 +430,52 @@ static GCValue js_el_state(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     return JS_NewBool(ctx, (g_dom.state[s] & mask) != 0);
 }
 
+/* __cyberHighlightSet(names, priorities, flat): the custom highlights to
+ * paint; flat holds 4 per segment: highlight index, text node, UTF-16 start, end. */
+static GCValue js_highlight_set(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    if (argc < 3) return JS_UNDEFINED;
+    uint32_t nh = 0, nf = 0;
+    GCValue v = JS_GetPropertyStr(ctx, argv[0], "length");
+    JS_ToUint32(ctx, &nh, v);
+    v = JS_GetPropertyStr(ctx, argv[2], "length");
+    JS_ToUint32(ctx, &nf, v);
+    if (nh > 4096) nh = 4096;
+    if (nf > 4 * 65536) nf = 4 * 65536;
+    const char **names = (const char **)calloc(nh + 1, sizeof(char *));
+    int *prios = (int *)calloc(nh + 1, sizeof(int));
+    uint32_t *seg = (uint32_t *)calloc(nf + 4, sizeof(uint32_t));
+    if (names && prios && seg) {
+        for (uint32_t k = 0; k < nh; k++) {
+            GCValue s = JS_GetPropertyUint32(ctx, argv[0], k);
+            names[k] = JS_ToCString(ctx, s);
+            GCValue p = JS_GetPropertyUint32(ctx, argv[1], k);
+            int32_t pv = 0;
+            JS_ToInt32(ctx, &pv, p);
+            prios[k] = pv;
+        }
+        for (uint32_t k = 0; k + 3 < nf; k += 4) {
+            int32_t h = 0, s = 0, e = 0;
+            JS_ToInt32(ctx, &h, JS_GetPropertyUint32(ctx, argv[2], k));
+            seg[k] = (uint32_t)h;
+            seg[k + 1] = dom_node_of(JS_GetPropertyUint32(ctx, argv[2], k + 1));
+            JS_ToInt32(ctx, &s, JS_GetPropertyUint32(ctx, argv[2], k + 2));
+            JS_ToInt32(ctx, &e, JS_GetPropertyUint32(ctx, argv[2], k + 3));
+            seg[k + 2] = (uint32_t)(s < 0 ? 0 : s);
+            seg[k + 3] = (uint32_t)(e < 0 ? 0 : e);
+        }
+        display_list_highlights_set(names, prios, (int)nh, seg, (int)(nf / 4));
+        dom_request_layout();
+    }
+    free(names); free(prios); free(seg);
+    return JS_UNDEFINED;
+}
+
 void html_element_api_install(JSContextHandle ctx, GCValue element_proto)
 {
+    JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberHighlightSet",
+                              JS_NewCFunction(ctx, js_highlight_set, "__cyberHighlightSet", 3), JS_PROP_CONFIGURABLE);
     if (!JS_IsObject(element_proto)) return;
     JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberInnerText",
                               JS_NewCFunction(ctx, js_inner_text, "__cyberInnerText", 1), JS_PROP_CONFIGURABLE);

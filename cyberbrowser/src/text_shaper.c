@@ -394,6 +394,37 @@ void text_shaper_set_spacing(float letter_px, float word_px, float scale)
     t_word_sp = word_px / scale;
 }
 
+/* (text-autospace: the mode, and the code point before) */
+static __thread int t_autospace;
+static __thread uint32_t t_as_prev;
+
+void text_shaper_set_autospace(int mode) { t_autospace = mode; t_as_prev = 0; }
+
+/* (1 an ideograph (Han, kana), 2 a letter of another script, 3 a digit, 0 else) */
+static inline int ts_as_class(uint32_t cp)
+{
+    if ((cp >= 0x4E00 && cp <= 0x9FFF) || (cp >= 0x3400 && cp <= 0x4DBF) || (cp >= 0xF900 && cp <= 0xFAFF) ||
+        (cp >= 0x20000 && cp <= 0x3FFFF) || (cp >= 0x3041 && cp <= 0x3096) || (cp >= 0x30A1 && cp <= 0x30FA) ||
+        cp == 0x3005 || cp == 0x3007 || (cp >= 0x31F0 && cp <= 0x31FF))
+        return 1;
+    if (cp >= '0' && cp <= '9') return 3;
+    if ((cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z') || (cp >= 0xC0 && cp <= 0x24F && cp != 0xD7 && cp != 0xF7) ||
+        (cp >= 0x370 && cp <= 0x3FF) || (cp >= 0x400 && cp <= 0x4FF))
+        return 2;
+    return 0;
+}
+
+/* (the space text-autospace puts before cp, at the loaded size) */
+static inline float ts_autospace(const TextShaper *s, uint32_t cp)
+{
+    if (!t_autospace) return 0.0f;
+    int p = ts_as_class(t_as_prev), c = ts_as_class(cp);
+    t_as_prev = cp;
+    if ((p == 1 && c == 2) || (p == 2 && c == 1)) return (t_autospace & 1) ? 0.125f * s->size_pixels : 0.0f;
+    if ((p == 1 && c == 3) || (p == 3 && c == 1)) return (t_autospace & 2) ? 0.125f * s->size_pixels : 0.0f;
+    return 0.0f;
+}
+
 /* The bidi controls (ALM, LRM, RLM, the embeddings, overrides and
  * isolates): no glyph, no advance, invisible to kerning. */
 static inline bool ts_invisible(uint32_t cp)
@@ -423,6 +454,7 @@ static bool ts_emit_glyph(const TextShaper *s, uint32_t cp, float *pen_x, float 
     const TextShaper *gs = ts_owner_shaper(s, owner);
     if (!gs) gs = s;
     if (*prev_glyph >= 0 && owner == 0) *pen_x += (float)ts_kern(s, *prev_glyph, gi) * s->scale * scale;
+    *pen_x += ts_autospace(s, cp) * scale;
     if (!ts_draw_glyph(dl, gs, gi, *pen_x, base_y, scale, r, g, b, a)) return false;
     *pen_x += (xa + ts_spacing(cp)) * scale;
     *prev_glyph = owner == 0 ? gi : -1;
@@ -587,6 +619,26 @@ float text_shaper_cap_height(const TextShaper *s)
     return (float)y1 * s->scale / s->size_pixels;
 }
 
+bool text_shaper_deco_metrics(const TextShaper *s, float *ul_pos, float *ul_th, float *st_pos, float *st_th)
+{
+    if (!s) return false;
+    const stbtt_uint8 *d = s->font.data;
+    stbtt_uint32 at = (stbtt_uint32)s->font.fontstart;
+    float k = s->scale / s->size_pixels;
+    bool any = false;
+    stbtt_uint32 post = stbtt__find_table((stbtt_uint8 *)d, at, "post");
+    if (post) {
+        int pos = ttSHORT(d + post + 8), th = ttSHORT(d + post + 10);
+        if (th > 0) { *ul_pos = (float)-pos * k; *ul_th = (float)th * k; any = true; }
+    }
+    stbtt_uint32 os2 = stbtt__find_table((stbtt_uint8 *)d, at, "OS/2");
+    if (os2) {
+        int sz = ttSHORT(d + os2 + 26), pos = ttSHORT(d + os2 + 28);
+        if (sz > 0) { *st_pos = (float)pos * k; *st_th = (float)sz * k; }
+    }
+    return any;
+}
+
 float text_shaper_zero_advance(const TextShaper *s)
 {
     int adv, lsb;
@@ -618,6 +670,7 @@ bool text_shaper_measure(const TextShaper *s, const char *utf8,
     if (!s || !utf8) return false;
     float x = 0.0f;
     int prev_glyph = -1;
+    t_as_prev = 0;
     const char *p = utf8;
     uint32_t cp;
     while ((cp = utf8_decode(&p)) != 0) {
@@ -629,7 +682,7 @@ bool text_shaper_measure(const TextShaper *s, const char *utf8,
         if (prev_glyph >= 0 && owner == 0) {
             x += (float)ts_kern(s, prev_glyph, gi) * s->scale;
         }
-        x += xa + ts_spacing(cp);
+        x += xa + ts_spacing(cp) + ts_autospace(s, cp);
         prev_glyph = owner == 0 ? gi : -1;
     }
     if (out_width)  *out_width  = x;
@@ -722,6 +775,7 @@ static float ts_trim_of(uint32_t cp, const char *at, const char *after, float xa
 static float ts_measure_span(const TextShaper *s, const char *start, const char *end)
 {
     float x = 0.0f;
+    t_as_prev = 0;
     int prev_glyph = -1;
     const char *p = start;
     while (p < end) {
@@ -737,7 +791,7 @@ static float ts_measure_span(const TextShaper *s, const char *start, const char 
         }
         bool trim_shift;
         x -= ts_trim_of(cp, save, p, xa, &trim_shift);
-        x += xa + ts_spacing(cp);
+        x += xa + ts_spacing(cp) + ts_autospace(s, cp);
         prev_glyph = owner == 0 ? gi : -1;
     }
     return x;
@@ -1199,6 +1253,7 @@ bool text_shaper_shape_span(const TextShaper *s, const char *utf8, size_t start,
     if (scale <= 0.0f) scale = 1.0f;
     float pen_x = x, gy = y + s->baseline * scale;
     int prev_glyph = -1;
+    t_as_prev = 0;
     if (!rtl) {
         t_trim_text = utf8;
         bool drew = ts_emit_span_glyphs(s, utf8 + start, utf8 + end, &pen_x, gy, scale, &prev_glyph, r, g, b, a, dl);
