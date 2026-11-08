@@ -214,6 +214,12 @@ void dom_cls_note(uint32_t s, const char *v, size_t n);
 /* ---- life cycle ---- */
 void dom_store_init(void);
 void dom_store_reset(void);              /* free every node (tests, shutdown) */
+/* The engine snapshot's part (page_engine.c): take, after an engine setup, the
+ * nodes it made (false: one holds text, attributes or class lists, which are
+ * not kept); restore them into a store dom_store_reset emptied, with their
+ * ids, every other slot staying free under its own (newer) generation. */
+bool dom_store_snap_take(void);
+void dom_store_snap_restore(void);
 /* Make room for `extra` more slots (so jobs can fill reserved slots). */
 void dom_store_reserve(uint32_t extra);
 /* Allocate a slot (engine thread).  The node is detached, has no children. */

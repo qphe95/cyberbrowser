@@ -1311,10 +1311,12 @@ static bool script_command(void) {
         drain_all();
         if (t && (!t->has_frame || !t->frames) && now - g_cmd_start < 3000) return false;
         /* (again until the content has a frame to read, for up to 3 s: the
-         * first tab's may not be shown yet; a go next starts once the
-         * frame is asked for: the tab's next frame is a reset and a load away) */
+         * first tab's may not be shown yet.  CYBER_UI_FUSE=1: a go next starts
+         * once the frame is asked for, not read: off, as a load can be quicker
+         * than the GPU process getting to the shot (an engine snapshot's is),
+         * and the shot is then of the next page) */
         if (!g_have_ahead && script_read_line(g_ahead, sizeof g_ahead)) g_have_ahead = true;
-        bool fuse = g_have_ahead && t && !strncmp(g_ahead, "go ", 3) && !getenv("CYBER_UI_NOFUSE");
+        bool fuse = g_have_ahead && t && !strncmp(g_ahead, "go ", 3) && getenv("CYBER_UI_FUSE");
         g_ahead_tab = t;
         bool ok = save_content_shot_then(w, arg, fuse ? go_ahead : NULL);
         if (!ok && g_have_ahead && now - g_cmd_start < 3000) return false;

@@ -239,6 +239,11 @@ void cyber_sampler_start(void) {
     const char *max_ms = getenv("CYBER_SAMPLE_MAX_MS");
     if (max_ms && atoi(max_ms) > 0) g_max_ms = (unsigned)atoi(max_ms);
     g_path = strdup(p);
+    if (getenv("CYBER_SAMPLE_ALL") && g_path) {
+        /* (every process of a run samples: each to its own file, <path>.<pid>) */
+        char *q = (char *)malloc(strlen(p) + 16);
+        if (q) { sprintf(q, "%s.%lu", p, (unsigned long)GetCurrentProcessId()); free(g_path); g_path = q; }
+    }
     HMODULE mod = GetModuleHandleA(NULL);
     g_base = (uint64_t)(uintptr_t)mod;
     IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)mod;

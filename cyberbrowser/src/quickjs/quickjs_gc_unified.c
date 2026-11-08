@@ -1763,6 +1763,27 @@ void gc_set_runtime(JSRuntimeHandle rt) {
 void gc_background_stop(void) { gc_core_stop_thread(); }
 JSRuntimeHandle gc_get_runtime(void) { return (JSRuntimeHandle)g_gc.rt; }
 
+/* (diagnostic) a word of an object in the heap pointing into [lo, hi): "type T off O" */
+int gc_snap_find_pointer(uintptr_t lo, uintptr_t hi, char *out, size_t cap) {
+    uint32_t hwm = atomic_load(&g_core.region_hwm);
+    for (uint32_t i = 1; i < hwm; i++) {
+        GCRegion *r = &g_core.regions[i];
+        uint32_t st = atomic_load(&r->state);
+        if (st == GC_RS_FREE || st == GC_RS_UNUSED || r->decommitted) continue;
+        uint8_t *base = gc_core_region_start(r);
+        uintptr_t top = atomic_load(&r->top);
+        for (uintptr_t p = (uintptr_t)base; p + 8 <= top; p += 8) {
+            uintptr_t v = *(const uintptr_t *)p;
+            if (v < lo || v >= hi) continue;
+            GCHeader *h = gc_core_object_containing((void *)p);
+            snprintf(out, cap, "type %d off %ld size %zu", h ? (int)gc_header_type(h) : -1,
+                     h ? (long)(p - (uintptr_t)gc_header_payload(h)) : -1L, h ? gc_header_payload_size(h) : (size_t)0);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 size_t gc_used_bytes(void) {
     GCStats s;
     gc_get_stats(&s);
@@ -1937,5 +1958,315 @@ bool gc_data_array_push(GCDataArray *arr, size_t elem_size, const void *elem)
     if (!slot) return false;
     memcpy(slot, elem, elem_size);
     gc_dirty_range(slot, elem_size);
+    return true;
+}
+
+/* ============================================================================
+ * Heap snapshot (gc_snap_take / gc_snap_restore)
+ * ============================================================================ */
+
+typedef struct {
+    GCRegion r;            /* its fields; the arrays it points to are the live region's */
+    uint8_t *line_first;   /* GC_LINES, or NULL */
+    uint64_t *mark[2];     /* BITMAP_WORDS each, or NULL */
+    uint64_t *free_lines, *new_lines;   /* GC_LINE_WORDS, or NULL */
+    uint8_t *mem;          /* the region's bytes [0, mem_n) */
+    size_t mem_n;
+} GCSnapRegion;
+
+static struct {
+    bool have;
+    uint32_t hwm;
+    GCSnapRegion *reg;
+    uint64_t *alive;       /* hwm regions' words */
+    uint8_t *cards;        /* hwm regions' cards */
+    GCState gc;
+    GCCore core;
+    GCHandle *arr[5];
+    uint32_t arr_n[5];
+    GCRegistryEntry *regs[3];
+    uint32_t regs_n[3];
+    uint32_t *recyc;
+    uint32_t recyc_n;
+} g_snap;
+
+static JSHandleArray *snap_arrays(GCState *g, int k) {
+    JSHandleArray *a[5] = { &g->atom_handles, &g->weakmap_handles, &g->weakref_handles, &g->finrec_handles, &g->viewed_buffers };
+    return a[k];
+}
+static GCRegistry *snap_registry(GCCore *c, int k) {
+    GCRegistry *a[3] = { &c->contexts, &c->finalizers, &c->roots };
+    return a[k];
+}
+
+static void *snap_dup(const void *p, size_t n) {
+    if (!p || !n) return NULL;
+    void *q = malloc(n);
+    if (q) memcpy(q, p, n);
+    return q;
+}
+
+static void snap_free(void) {
+    if (g_snap.reg) {
+        for (uint32_t i = 0; i < g_snap.hwm; i++) {
+            GCSnapRegion *x = &g_snap.reg[i];
+            free(x->line_first); free(x->mark[0]); free(x->mark[1]);
+            free(x->free_lines); free(x->new_lines); free(x->mem);
+        }
+        free(g_snap.reg);
+    }
+    free(g_snap.alive);
+    free(g_snap.cards);
+    for (int k = 0; k < 5; k++) free(g_snap.arr[k]);
+    for (int k = 0; k < 3; k++) free(g_snap.regs[k]);
+    free(g_snap.recyc);
+    memset(&g_snap, 0, sizeof g_snap);
+}
+
+bool gc_snap_have(void) { return g_snap.have; }
+
+bool gc_snap_take(void) {
+    snap_free();
+    if (g_handle_history || g_core.poison || g_core.trace_handle || g_retired_n) {
+        fprintf(stderr, "[snapshot] heap: history %d poison %d trace %u retired %u" "\n", g_handle_history != NULL, g_core.poison, g_core.trace_handle, g_retired_n);
+        return false;
+    }
+    uint32_t hwm = atomic_load(&g_core.region_hwm);
+    g_snap.reg = (GCSnapRegion *)calloc(hwm, sizeof(GCSnapRegion));
+    if (!g_snap.reg) return false;
+    g_snap.hwm = hwm;
+    bool ok = true;
+    for (uint32_t i = 1; i < hwm && ok; i++) {
+        GCRegion *r = &g_core.regions[i];
+        GCSnapRegion *x = &g_snap.reg[i];
+        uint32_t st = atomic_load(&r->state);
+        if (st != GC_RS_FREE && st != GC_RS_UNUSED) {
+            if (r->decommitted) { ok = false; break; }
+            /* (hole pages it gave back: there again, zero as free space is) */
+            if (r->pages_off_n) {
+                if (!gc_os_commit(gc_core_region_start(r), GC_REGION_SIZE)) { ok = false; break; }
+                atomic_fetch_sub_explicit(&g_core.pages_decommitted, r->pages_off_n, memory_order_relaxed);
+                memset(r->pages_off, 0, sizeof r->pages_off);
+                r->pages_off_n = 0;
+            }
+        }
+        x->r = *r;
+        if (r->line_first) ok &= !!(x->line_first = (uint8_t *)snap_dup(r->line_first, GC_LINES));
+        for (int k = 0; k < 2; k++)
+            if (r->mark_bits[k]) ok &= !!(x->mark[k] = (uint64_t *)snap_dup(r->mark_bits[k], BITMAP_WORDS * sizeof(uint64_t)));
+        if (r->free_lines) ok &= !!(x->free_lines = (uint64_t *)snap_dup(r->free_lines, GC_LINE_WORDS * sizeof(uint64_t)));
+        if (r->new_lines) ok &= !!(x->new_lines = (uint64_t *)snap_dup(r->new_lines, GC_LINE_WORDS * sizeof(uint64_t)));
+        if (st == GC_RS_FREE || st == GC_RS_UNUSED) continue;
+        uint8_t *rb = gc_core_region_start(r);
+        uintptr_t top = atomic_load(&r->top);
+        /* (a humongous run's regions: whole; the others: up to their top) */
+        size_t n = st == GC_RS_HUMONGOUS || st == GC_RS_HUMONGOUS_CONT || top <= (uintptr_t)rb ? GC_REGION_SIZE
+                 : (size_t)(top - (uintptr_t)rb);
+        if (n > GC_REGION_SIZE) n = GC_REGION_SIZE;
+        x->mem_n = n;
+        ok &= !!(x->mem = (uint8_t *)snap_dup(rb, n));
+    }
+    size_t aw = (size_t)hwm * ALIVE_REGION_WORDS;
+    ok = ok && (g_snap.alive = (uint64_t *)snap_dup(g_gc.alive, aw * sizeof(uint64_t)));
+#if GC_SOFTWARE_DIRTY
+    size_t cn = ((size_t)hwm * GC_REGION_SIZE) >> GC_CARD_SHIFT;
+    ok = ok && (g_snap.cards = (uint8_t *)snap_dup(g_gc.cards, cn));
+#endif
+    g_snap.gc = g_gc;
+    g_snap.core = g_core;
+    for (int k = 0; k < 5 && ok; k++) {
+        JSHandleArray *a = snap_arrays(&g_gc, k);
+        g_snap.arr_n[k] = a->count;
+        if (a->count) ok &= !!(g_snap.arr[k] = (GCHandle *)snap_dup(a->handles, a->count * sizeof(GCHandle)));
+    }
+    for (int k = 0; k < 3 && ok; k++) {
+        GCRegistry *g = snap_registry(&g_core, k);
+        g_snap.regs_n[k] = g->count;
+        if (g->count) ok &= !!(g_snap.regs[k] = (GCRegistryEntry *)snap_dup(g->items, g->count * sizeof(GCRegistryEntry)));
+    }
+    g_snap.recyc_n = g_core.recyclable_n;
+    if (ok && g_core.recyclable_n) ok &= !!(g_snap.recyc = (uint32_t *)snap_dup(g_core.recyclable, g_core.recyclable_n * sizeof(uint32_t)));
+    if (!ok) { snap_free(); return false; }
+    g_snap.have = true;
+    return true;
+}
+
+/* Copy n bytes (or zeros when src is NULL) into *dst, made when missing. */
+static bool snap_put(void **dst, const void *src, size_t n) {
+    if (!*dst) {
+        if (!src) return true;
+        if (!(*dst = calloc(1, n))) return false;
+    }
+    if (src) memcpy(*dst, src, n);
+    else memset(*dst, 0, n);
+    return true;
+}
+
+static bool snap_put_handles(JSHandleArray *a, const GCHandle *src, uint32_t n) {
+    if (a->capacity < n) {
+        GCHandle *h = (GCHandle *)realloc(a->handles, n * sizeof(GCHandle));
+        if (!h) return false;
+        a->handles = h;
+        a->capacity = n;
+    }
+    if (n) memcpy(a->handles, src, n * sizeof(GCHandle));
+    a->count = n;
+    return true;
+}
+
+static bool snap_put_registry(GCRegistry *g, const GCRegistryEntry *src, uint32_t n) {
+    if (g->cap < n) {
+        GCRegistryEntry *e = (GCRegistryEntry *)realloc(g->items, n * sizeof(GCRegistryEntry));
+        if (!e) return false;
+        g->items = e;
+        g->cap = n;
+    }
+    if (n) memcpy(g->items, src, n * sizeof(GCRegistryEntry));
+    g->count = n;
+    return true;
+}
+
+bool gc_snap_restore(void) {
+    if (!g_snap.have || !g_gc.initialized || g_kept.on) return false;
+    uint32_t hwm = atomic_load(&g_core.region_hwm);
+    /* (the regions it names were committed in this heap: the high-water mark only rises) */
+    if (hwm < g_snap.hwm || g_core.regions != g_snap.core.regions || g_gc.heap_base != g_snap.gc.heap_base) return false;
+    /* Room for the bookkeeping first: from here on nothing fails. */
+    for (int k = 0; k < 5; k++)
+        if (!snap_put_handles(snap_arrays(&g_gc, k), g_snap.arr[k], g_snap.arr_n[k])) return false;
+    GCRegistry live_regs[3];
+    for (int k = 0; k < 3; k++) {
+        live_regs[k] = *snap_registry(&g_core, k);
+        if (!snap_put_registry(&live_regs[k], g_snap.regs[k], g_snap.regs_n[k])) return false;
+    }
+    uint32_t *recyc = g_core.recyclable, recyc_cap = g_core.recyclable_cap;
+    if (recyc_cap < g_snap.recyc_n) {
+        uint32_t *n = (uint32_t *)realloc(recyc, g_snap.recyc_n * sizeof(uint32_t));
+        if (!n) return false;
+        recyc = n;
+        recyc_cap = g_snap.recyc_n;
+    }
+    if (g_snap.recyc_n) memcpy(recyc, g_snap.recyc, g_snap.recyc_n * sizeof(uint32_t));
+    for (uint32_t i = 1; i < hwm; i++) {
+        GCRegion *r = &g_core.regions[i];
+        uint8_t *rb = gc_core_region_start(r);
+        if (i < g_snap.hwm) {
+            const GCSnapRegion *x = &g_snap.reg[i];
+            uint32_t st = atomic_load(&x->r.state);
+            bool in_use = st != GC_RS_FREE && st != GC_RS_UNUSED;
+            /* (its memory there again, every page of it, when the snapshot has bytes in it) */
+            if (in_use && (r->decommitted || r->pages_off_n) && !gc_os_commit(rb, GC_REGION_SIZE)) abort();
+            if (in_use) {
+                memcpy(rb, x->mem, x->mem_n);
+                if (x->mem_n < GC_REGION_SIZE) memset(rb + x->mem_n, 0, GC_REGION_SIZE - x->mem_n);
+            }
+            GCRegion keep = *r;
+            *r = x->r;
+            r->line_first = keep.line_first;
+            r->mark_bits[0] = keep.mark_bits[0];
+            r->mark_bits[1] = keep.mark_bits[1];
+            r->free_lines = keep.free_lines;
+            r->new_lines = keep.new_lines;
+            if (!snap_put((void **)&r->line_first, x->line_first, GC_LINES) ||
+                !snap_put((void **)&r->mark_bits[0], x->mark[0], BITMAP_WORDS * sizeof(uint64_t)) ||
+                !snap_put((void **)&r->mark_bits[1], x->mark[1], BITMAP_WORDS * sizeof(uint64_t)) ||
+                !snap_put((void **)&r->free_lines, x->free_lines, GC_LINE_WORDS * sizeof(uint64_t)) ||
+                !snap_put((void **)&r->new_lines, x->new_lines, GC_LINE_WORDS * sizeof(uint64_t)))
+                abort();
+            if (!in_use) {
+                /* (free: as the page left its memory; zeroed when claimed, which
+                 * wants every page there: hole pages given back come back) */
+                r->decommitted = keep.decommitted;
+                if (!keep.decommitted && keep.pages_off_n && !gc_os_commit(rb, GC_REGION_SIZE)) abort();
+                memset(r->pages_off, 0, sizeof r->pages_off);
+                r->pages_off_n = 0;
+                bool live_free = atomic_load(&keep.state) == GC_RS_FREE;
+                r->zeroed = live_free && keep.zeroed;
+                r->used_before = true;
+            } else {
+                memset(r->pages_off, 0, sizeof r->pages_off);
+                r->pages_off_n = 0;
+                r->decommitted = false;
+            }
+        } else {
+            /* (a region only the page used: free, as gc_take_kept_heap makes one) */
+            r->space = 0;
+            r->alloc_owner = GC_OWNER_NONE;
+            r->humongous_head = r->humongous_count = 0;
+            r->collecting = r->permanent = r->pinned = r->has_young = false;
+            atomic_store(&r->top, 0);
+            r->tams = r->safe_top = r->scan_top = 0;
+            r->live_bytes = 0;
+            atomic_store(&r->recycle_state, GC_RECYCLE_IDLE);
+            atomic_store(&r->has_new_lines, false);
+            r->in_recyclable = false;
+            if (atomic_load(&r->state) != GC_RS_UNUSED) {
+                atomic_store(&r->state, GC_RS_FREE);
+                r->used_before = true;
+                r->zeroed = false;
+                if (!r->decommitted && r->pages_off_n) {
+                    if (!gc_os_commit(rb, GC_REGION_SIZE)) abort();
+                    memset(r->pages_off, 0, sizeof r->pages_off);
+                    r->pages_off_n = 0;
+                }
+            }
+        }
+    }
+    /* The liveness bits and cards: the snapshot's regions', zero above. */
+    memcpy(g_gc.alive, g_snap.alive, (size_t)g_snap.hwm * ALIVE_REGION_WORDS * sizeof(uint64_t));
+    memset(g_gc.alive + (size_t)g_snap.hwm * ALIVE_REGION_WORDS, 0, (size_t)(hwm - g_snap.hwm) * ALIVE_REGION_WORDS * sizeof(uint64_t));
+#if GC_SOFTWARE_DIRTY
+    size_t cs = ((size_t)g_snap.hwm * GC_REGION_SIZE) >> GC_CARD_SHIFT, ch = ((size_t)hwm * GC_REGION_SIZE) >> GC_CARD_SHIFT;
+    memcpy(g_gc.cards, g_snap.cards, cs);
+    memset(g_gc.cards + cs, 0, ch - cs);
+#endif
+    /* GCState: the snapshot's, over the live arrays. */
+    {
+        GCState live = g_gc;
+        g_gc = g_snap.gc;
+        g_gc.alive = live.alive;
+        g_gc.heap_base = live.heap_base;
+        g_gc.heap_reserved = live.heap_reserved;
+        g_gc.cards = live.cards;
+        for (int k = 0; k < 5; k++) *snap_arrays(&g_gc, k) = *snap_arrays(&live, k);
+        g_gc.weak_step_active = false;
+        g_gc.initialized = true;
+        atomic_store(&g_gc.handle_limit, hwm * GC_REGION_HANDLES);
+    }
+    /* GCCore: the snapshot's, with what is the process's kept. */
+    {
+        GCCore live;
+        memcpy(&live, &g_core, sizeof live);
+        memcpy(&g_core, &g_snap.core, sizeof g_core);
+        g_core.regions = live.regions;
+        g_core.heap_reservation = live.heap_reservation;
+        g_core.log_level = live.log_level;
+        g_core.trace_handle = live.trace_handle;
+        g_core.poison = live.poison;
+        g_core.js_thread_id = live.js_thread_id;
+        g_core.holes = live.holes;
+        g_core.config = live.config;
+        g_core.nursery_enabled = false;     /* (the GC thread sets it when it starts) */
+        for (int k = 0; k < 3; k++) *snap_registry(&g_core, k) = live_regs[k];
+        g_core.recyclable = recyc;
+        g_core.recyclable_cap = recyc_cap;
+        g_core.recyclable_n = g_snap.recyc_n;
+        atomic_flag_clear(&g_core.recyclable_lock);
+        atomic_store(&g_core.cycle_active, false);
+        uint32_t in_use = 0, free_committed = 0, pages_off = 0;
+        for (uint32_t i = 1; i < hwm; i++) {
+            GCRegion *r = &g_core.regions[i];
+            uint32_t st = atomic_load(&r->state);
+            if (gc_core_region_in_use(st)) in_use++;
+            if (st == GC_RS_FREE && !r->decommitted) free_committed++;
+            pages_off += r->pages_off_n;
+        }
+        atomic_store(&g_core.region_hwm, hwm);
+        atomic_store(&g_core.regions_in_use, in_use);
+        atomic_store(&g_core.regions_committed, hwm - 1);
+        atomic_store(&g_core.free_committed, free_committed);
+        atomic_store(&g_core.pages_decommitted, pages_off);
+    }
+    g_gc_epoch++;
     return true;
 }

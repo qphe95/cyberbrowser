@@ -217,6 +217,9 @@ HtmlDocument *html_document_from_js_dom_incremental(JSContextHandle ctx, GCValue
 HtmlDocument *html_mirror_document(JSContextHandle ctx, GCValue js_doc, bool full,
                                    uint64_t *version, bool *changed);
 void html_mirror_stats(uint64_t *updates, uint64_t *rebuilds, uint64_t *nodes_built);
+/* A new document whose root may have the last one's id (the engine snapshot
+ * puts the same nodes back): the next update rebuilds. */
+void html_mirror_forget(void);
 /* Test hook: differences between the mirror and serialize + parse now
  * (-1: no mirror). */
 /* What the mirror changed, for consumers that keep results between updates

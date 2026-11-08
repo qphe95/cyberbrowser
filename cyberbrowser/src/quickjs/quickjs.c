@@ -2110,6 +2110,7 @@ static void js_c_frame_pool_clear(BOOL heap_live)
 /* JS_FreeRuntimeBeforeWipe: the heap is wiped next (gc_cleanup), so the
  * last collection would only free what goes anyway. */
 static BOOL g_free_rt_before_wipe;
+static uint32_t g_ctx_serial;   /* the last context's (JS_GetContextSerial) */
 
 void JS_FreeRuntimeBeforeWipe(JSRuntimeHandle rt)
 {
@@ -2402,10 +2403,7 @@ JSContextHandle JS_NewContextRaw(JSRuntimeHandle rt)
     
     /* Zero the entire struct - ctx is user_ptr (after header), no offset needed */
     js_ctx_zero_memory(ctx);
-    {
-        static uint32_t s_serial;
-        SAFE_SET(ctx, JSContextHandle, serial, ++s_serial);
-    }
+    SAFE_SET(ctx, JSContextHandle, serial, ++g_ctx_serial);
     QJS_LOGI("STEP1: loaded_modules GCHandleArray initialized");
     QJS_LOGI("STEP2-done");
 
@@ -48209,10 +48207,11 @@ static void lazy_units_spawn(JSContextHandle ctx, JSFunctionBytecodeHandle b, in
 }
 
 /* lazy_units_spawn of a script or a body just made, then wake the workers. */
+static BOOL g_lazy_units_off;   /* JS_SnapshotPrepare: none made */
 static void lazy_units_spawn_root(JSContextHandle ctx, JSFunctionBytecodeHandle b)
 {
     uint64_t t0;
-    if (lq_threads() <= 0)
+    if (g_lazy_units_off || lq_threads() <= 0)
         return;
     t0 = gc_os_now_ns();
     lazy_units_reap();
@@ -73133,4 +73132,162 @@ void js_ctx_class_proto_set(JSContextHandle ctx, JSClassID class_id, GCValue val
     }
     js_ctx_class_proto_version_fetch_add(ctx, 1); /* even */
     js_ctx_class_proto_lock_release(ctx);
+}
+
+/* ============================================================================
+ * Engine snapshot (JS_SnapshotPrepare / Take / Restore)
+ * ============================================================================ */
+
+static struct {
+    BOOL have;
+    JSRuntimeHandle rt;
+    JSContextHandle ctx, ss_ctx;
+    LFHashTable *atom_hash, *shape_hash;
+    GCHandle *feedback;
+    uint32_t feedback_n;
+} g_jsnap;
+
+static LFHashTable *lf_hash_dup(const LFHashTable *t)
+{
+    if (!t)
+        return NULL;
+    size_t n = offsetof(LFHashTable, buckets) + (size_t)t->bucket_count * sizeof(LFHashBucket);
+    LFHashTable *c = (LFHashTable *)js_plain_realloc(NULL, n);
+    if (c) {
+        memcpy(c, t, n);
+        c->next_retired = NULL;
+    }
+    return c;
+}
+
+static void lf_hash_destroy_chain(LFHashTable *t, LFHashTable *retired)
+{
+    while (retired) {
+        LFHashTable *next = retired->next_retired;
+        lf_hash_destroy(retired);
+        retired = next;
+    }
+    if (t)
+        lf_hash_destroy(t);
+}
+
+void JS_SnapshotPrepare(int on)
+{
+    g_lazy_units_off = on != 0;
+}
+
+int JS_SnapshotHave(void)
+{
+    return g_jsnap.have;
+}
+
+int JS_SnapshotTake(JSRuntimeHandle rt, JSContextHandle ctx)
+{
+    extern void gc_core_free_retired(void);
+    js_plain_free(g_jsnap.atom_hash);
+    js_plain_free(g_jsnap.shape_hash);
+    js_plain_free(g_jsnap.feedback);
+    memset(&g_jsnap, 0, sizeof g_jsnap);
+    /* (compiled code and compile units are plain memory, kept elsewhere) */
+    if (js_jit_mode() != JS_JIT_OFF || js_t2_mode() != JS_T2_OFF || g_lu_all || g_lazy_srcs.count) {
+        fprintf(stderr, "[snapshot] not taken: jit %d t2 %d units %d sources %d\n", js_jit_mode(), js_t2_mode(), g_lu_all != NULL, g_lazy_srcs.count);
+        return 0;
+    }
+    lazy_units_quiesce();               /* (no worker reads the heap) */
+    gc_background_stop();
+    js_c_frame_pool_clear(TRUE);
+    JS_RunGC(rt);
+    /* (no reader of the retired tables is left: they go now) */
+    lf_hash_destroy_chain(NULL, js_rt_atom_hash_retired(rt));
+    js_rt_set_atom_hash_retired(rt, NULL);
+    lf_hash_destroy_chain(NULL, js_rt_shape_hash_retired(rt));
+    js_rt_set_shape_hash_retired(rt, NULL);
+    gc_core_free_retired();
+    int ok = 1;
+    g_jsnap.atom_hash = lf_hash_dup(js_rt_atom_hash(rt));
+    g_jsnap.shape_hash = lf_hash_dup(js_rt_shape_hash(rt));
+    ok = g_jsnap.atom_hash && g_jsnap.shape_hash;
+    if (ok && g_feedback_all_epoch == g_gc_epoch && g_feedback_all_n) {
+        g_jsnap.feedback = (GCHandle *)js_plain_realloc(NULL, g_feedback_all_n * sizeof(GCHandle));
+        ok = g_jsnap.feedback != NULL;
+        if (ok) {
+            memcpy(g_jsnap.feedback, g_feedback_all, g_feedback_all_n * sizeof(GCHandle));
+            g_jsnap.feedback_n = g_feedback_all_n;
+        }
+    }
+    if (ok && !gc_snap_take()) { fprintf(stderr, "[snapshot] not taken: heap\n"); ok = 0; }
+    if (ok && !gc_conc_snap_take()) { fprintf(stderr, "[snapshot] not taken: collector\n"); ok = 0; }
+    if (ok) {
+        g_jsnap.rt = rt;
+        g_jsnap.ctx = ctx;
+        g_jsnap.ss_ctx = g_ss_ctx;
+        g_jsnap.have = TRUE;
+    }
+    gc_set_runtime(rt);
+    return ok;
+}
+
+int JS_SnapshotRestore(JSRuntimeHandle *prt, JSContextHandle *pctx)
+{
+    extern void gc_core_free_retired(void);
+    if (!g_jsnap.have || !gc_snap_have())
+        return 0;
+    JSRuntimeHandle live = gc_get_runtime();
+    LFHashTable *la = live ? js_rt_atom_hash(live) : NULL, *lar = live ? js_rt_atom_hash_retired(live) : NULL;
+    LFHashTable *ls = live ? js_rt_shape_hash(live) : NULL, *lsr = live ? js_rt_shape_hash_retired(live) : NULL;
+    LFHashTable *na = lf_hash_dup(g_jsnap.atom_hash), *ns = lf_hash_dup(g_jsnap.shape_hash);
+    if (!na || !ns) {
+        js_plain_free(na);
+        js_plain_free(ns);
+        return 0;
+    }
+    /* The last document's units go, as at a wipe; no worker or collector runs. */
+    g_free_rt_before_wipe = TRUE;
+    lazy_units_quiesce();
+    g_free_rt_before_wipe = FALSE;
+    gc_background_stop();
+    gc_core_free_retired();
+    if (!gc_snap_restore()) {
+        js_plain_free(na);
+        js_plain_free(ns);
+        gc_set_runtime(live);
+        return 0;
+    }
+    gc_conc_snap_restore();
+    JSRuntimeHandle rt = g_jsnap.rt;
+    JSContextHandle ctx = g_jsnap.ctx;
+    js_rt_set_atom_hash(rt, na);
+    js_rt_set_atom_hash_retired(rt, NULL);
+    js_rt_set_shape_hash(rt, ns);
+    js_rt_set_shape_hash_retired(rt, NULL);
+    lf_hash_destroy_chain(la, lar);
+    lf_hash_destroy_chain(ls, lsr);
+    /* (a context of its own: caches keyed by the serial start over) */
+    SAFE_SET(ctx, JSContextHandle, serial, ++g_ctx_serial);
+    js_random_init(ctx);
+    g_ss_ctx = g_jsnap.ss_ctx;
+    js_c_frame_pool_clear(FALSE);
+    g_feedback_all_n = 0;
+    g_feedback_all_epoch = g_gc_epoch;
+    if (g_jsnap.feedback_n) {
+        if (g_feedback_all_cap < g_jsnap.feedback_n) {
+            GCHandle *a = (GCHandle *)js_plain_realloc(g_feedback_all, g_jsnap.feedback_n * sizeof(GCHandle));
+            if (!a)
+                abort();
+            g_feedback_all = a;
+            g_feedback_all_cap = g_jsnap.feedback_n;
+        }
+        memcpy(g_feedback_all, g_jsnap.feedback, g_jsnap.feedback_n * sizeof(GCHandle));
+        g_feedback_all_n = g_jsnap.feedback_n;
+    }
+    if (getenv("CYBER_SNAPSHOT_CHECK")) {
+        /* (debugging: every object of the restored heap where its handle says) */
+        extern uint32_t gc_test_heap_check(void);
+        uint32_t p = gc_test_heap_check();
+        if (p) fprintf(stderr, "[snapshot] restored heap: %u problems\n", p);
+    }
+    gc_set_runtime(rt);
+    *prt = rt;
+    *pctx = ctx;
+    return 1;
 }

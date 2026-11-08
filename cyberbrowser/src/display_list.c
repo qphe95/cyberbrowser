@@ -4289,10 +4289,14 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
 static int canvas_background(LayoutContext *ctx, DisplayList *dl)
 {
     int root = ctx->tree.root_idx;
-    if (root < 0 || root >= ctx->tree.count || !ctx->doc) return -1;
+    if (root < 0 || root >= ctx->tree.count || !ctx->doc || !ctx->boxes[root].s) return -1;
     int src = -1;
     if (ctx->boxes[root].s->background_color_a > 0.0f || ctx->boxes[root].s->background_image_url[0] || ctx->boxes[root].s->bg_grad) {
         src = root;
+    } else if (ctx->boxes[root].s->display == CSS_DISPLAY_NONE) {
+        /* (a root not rendered: no body's to propagate, its boxes not laid out
+         * and their styles not to be read) */
+        return -1;
     } else {
         HtmlNode *rn = css_layout_box_node(ctx, root);
         if (!rn || rn->type != HTML_NODE_ELEMENT || !rn->tag_name || strcasecmp(rn->tag_name, "html") != 0) return -1;

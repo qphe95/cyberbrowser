@@ -3108,6 +3108,8 @@ HtmlDocument *html_mirror_document(JSContextHandle ctx, GCValue js_doc, bool ful
     return d;
 }
 
+void html_mirror_forget(void) { mir_drop(); }
+
 void html_mirror_stats(uint64_t *updates, uint64_t *rebuilds, uint64_t *nodes_built) {
     if (updates) *updates = g_mir.updates;
     if (rebuilds) *rebuilds = g_mir.rebuilds;

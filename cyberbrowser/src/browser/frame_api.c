@@ -459,6 +459,10 @@ static void message_free(Message *m) {
 /* A new document in this process (page_engine_reset, the JS heap gone with
  * the last one's realms): no frames, no messages. */
 static bool g_tab_nav_pending;
+/* (the engine snapshot's: the page's document as a setup left it) */
+NodeId frame_api_main_doc(void) { return g_main_doc; }
+void frame_api_set_main_doc(NodeId doc) { g_main_doc = doc; }
+
 void frame_api_reset(void) {
     g_tab_nav_pending = false;
     while (g_frames) {

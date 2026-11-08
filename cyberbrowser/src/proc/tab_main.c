@@ -557,7 +557,7 @@ static bool drain(void) {
         handle(&m);
         any = true;
     }
-    if (r < 0) ExitProcess(2);          /* the UI broke the channel */
+    if (r < 0) { fflush(stderr); ExitProcess(2); }          /* the UI broke the channel */
     while (g_have_ctl && (r = chan_recv(&g_ctl, &m)) > 0) {
         ctl_message(&m);
         any = true;
@@ -582,7 +582,8 @@ static void wait_input(DWORD ms) {
     bool ready = !chan_arm(&g_chan) | !gpu_client_arm();
     if (g_have_ctl && !chan_arm(&g_ctl)) ready = true;
     HANDLE w[3] = { chan_event(&g_chan), gpu_client_event(), g_have_ctl ? chan_event(&g_ctl) : NULL };
-    if (!ready) WaitForMultipleObjects(g_have_ctl ? 3 : 2, w, FALSE, ms);
+    /* (the log out before sleeping: buffered, it is written a batch at a time, and nothing waits in it while idle) */
+    if (!ready) { fflush(stderr); WaitForMultipleObjects(g_have_ctl ? 3 : 2, w, FALSE, ms); }
     chan_disarm(&g_chan);
     gpu_client_disarm();
     if (g_have_ctl) chan_disarm(&g_ctl);
@@ -1081,6 +1082,8 @@ static LONG WINAPI tab_crash_filter(EXCEPTION_POINTERS *ep) {
 int main(int argc, char **argv) {
     g_tab_navigate_hook = tab_navigate;
     SetUnhandledExceptionFilter(tab_crash_filter);
+    /* (stderr buffered: unbuffered, each piece of a formatted line was its own write; flushed at each wait for input and on a crash) */
+    setvbuf(stderr, NULL, _IOFBF, 1 << 16);
     g_start_tick = GetTickCount64();
     fine_timer();
     det_clock_set_js_thread();
@@ -1206,7 +1209,8 @@ load:
     unsigned frames;
     double frames_wall, frames_cpu;
     page_frame_stats(&frames, &frames_wall, &frames_cpu);
-    cyber_sampler_stop();
+    /* (CYBER_SAMPLE_ALL: on past it, over every page this process loads, to CYBER_SAMPLE_MAX_MS) */
+    if (!getenv("CYBER_SAMPLE_ALL")) cyber_sampler_stop();
     fprintf(stderr, "[tab %u] load event at %llu ms (cpu: main thread %.0f ms, process %.0f ms; "
             "%u frames built, %.0f ms, %.0f ms cpu)\n",
             g_tab, loaded_at - g_start_tick, cpu_t, cpu_p, frames, frames_wall, frames_cpu);
@@ -1337,6 +1341,7 @@ next:
         url = next_url;
     }
     sampler_report(url);
+    page_engine_set_next_url(url);
     if (!page_engine_reset()) {
         send_state(TAB_LOAD_FAILED);
         return 1;

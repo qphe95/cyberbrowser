@@ -231,7 +231,98 @@ static int upgrade_timeout_handler(JSRuntimeHandle rt, void *opaque) {
 }
 
 static bool page_quiet(void);
+uint64_t gc_os_now_ns(void);
+
+/* ---- Engine snapshot ----
+ * The runtime and context a setup makes (init_browser_api_impl: the browser
+ * APIs, about 7 ms) are the same for every document of an origin: the third
+ * setup in a process is kept (JS_SnapshotTake, with the DOM store's nodes it
+ * made and the few statics it sets), and each later reset for the same origin
+ * puts it back (JS_SnapshotRestore) in place of freeing the runtime and
+ * making another.  CYBER_SNAPSHOT=0: off. */
+NodeId frame_api_main_doc(void);
+void frame_api_set_main_doc(NodeId doc);
+extern NodeId g_dom_document;
+extern NodeId g_dom_index_root;
+extern uint64_t g_dom_layout_requests;
+static unsigned g_inits;            /* init_browser_context calls */
+static bool g_snap_taking, g_snap_failed;
+static char g_next_origin[256], g_snap_origin[256];
+static struct {
+    bool have;
+    GCValue global;
+    NodeId doc, index_root, main_doc;
+    int needs_layout;
+} g_esnap;
+
+static bool snap_enabled(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("CYBER_SNAPSHOT");
+        on = !(e && e[0] == '0');
+    }
+    return on;
+}
+
+void page_engine_set_next_url(const char *url) {
+    /* (the origin: scheme://host:port, or the scheme alone) */
+    size_t n = 0;
+    const char *p = url ? strstr(url, "://") : NULL;
+    if (p) {
+        const char *e = strchr(p + 3, '/');
+        n = e ? (size_t)(e - url) : strlen(url);
+    } else if (url && (p = strchr(url, ':'))) {
+        n = (size_t)(p - url) + 1;
+    }
+    if (n >= sizeof g_next_origin) n = sizeof g_next_origin - 1;
+    memcpy(g_next_origin, url ? url : "", n);
+    g_next_origin[n] = 0;
+}
+
+static void engine_snap_take(void) {
+    if (!JS_SnapshotTake(g_rt, g_ctx) || (!dom_store_snap_take() && (fprintf(stderr, "[snapshot] not taken: DOM nodes\n"), 1))) {
+        g_snap_failed = true;
+        fprintf(stderr, "[engine] snapshot not kept\n");
+        return;
+    }
+    g_esnap.global = g_global;
+    g_esnap.doc = g_dom_document;
+    g_esnap.index_root = g_dom_index_root;
+    g_esnap.main_doc = frame_api_main_doc();
+    g_esnap.needs_layout = g_dom_needs_layout;
+    snprintf(g_snap_origin, sizeof g_snap_origin, "%s", g_next_origin);
+    g_esnap.have = true;
+    if (getenv("CYBER_TAB_CPU")) fprintf(stderr, "[engine] snapshot kept for %s\n", g_snap_origin);
+}
+
+/* After JS_SnapshotRestore: what a setup leaves outside the heap. */
+static void engine_snap_restored(JSRuntimeHandle rt, JSContextHandle ctx) {
+    extern JSRuntimeHandle g_js_runtime;
+    extern JSContextHandle g_js_context;
+    extern void anim_api_init(void);
+    g_rt = rt;
+    g_ctx = ctx;
+    g_global = g_esnap.global;
+    g_js_runtime = rt;
+    g_js_context = ctx;
+    dom_store_snap_restore();
+    g_dom_document = g_esnap.doc;
+    g_dom_index_root = g_esnap.index_root;
+    frame_api_set_main_doc(g_esnap.main_doc);
+    g_dom_needs_layout = g_esnap.needs_layout;
+    g_dom_layout_requests++;
+    display_list_highlights_set(NULL, NULL, 0, NULL, 0);
+    html_mirror_forget();   /* (its root's id may be the last document's) */
+    anim_api_init();
+    g_inits++;
+}
+
 static bool init_browser_context(void) {
+    g_inits++;
+    if (snap_enabled() && !g_esnap.have && !g_snap_failed && g_inits >= 3) {
+        g_snap_taking = true;
+        JS_SnapshotPrepare(1);
+    }
     if (!gc_init()) {
         printf("FATAL: gc_init() failed\n");
         return false;
@@ -281,6 +372,11 @@ static bool init_browser_context(void) {
     JS_EnableScriptPrecompile(g_ctx);
 
     init_browser_api_impl(g_ctx, g_global);
+    if (g_snap_taking) {
+        JS_SnapshotPrepare(0);
+        g_snap_taking = false;
+        engine_snap_take();
+    }
     js_quickjs_setup_initial_dom();
     return true;
 }
@@ -1289,6 +1385,143 @@ void gc_cleanup(void);
  * fetches, the import map, frames, media, the DOM), its JS runtime, and then
  * the whole JS heap at once (the runtime keeps its shapes, and so what they
  * reach, as roots): a new runtime holds nothing the last page made. */
+#ifdef _WIN32
+#include <windows.h>
+/* CYBER_STATIC_DIFF=<file> (diagnostic): the image's writable sections before
+ * and after a reset's init_browser_context, and the words it changed, as
+ * "<rva hex> <before hex> <after hex>" lines appended to the file. */
+typedef struct { uint8_t *at; size_t n; uint8_t *copy; } StaticSect;
+static int static_sections(StaticSect *out, int max) {
+    HMODULE mod = GetModuleHandleA(NULL);
+    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)mod;
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((char *)mod + dos->e_lfanew);
+    IMAGE_SECTION_HEADER *sh = IMAGE_FIRST_SECTION(nt);
+    int n = 0;
+    for (int i = 0; i < nt->FileHeader.NumberOfSections && n < max; i++) {
+        if (!(sh[i].Characteristics & IMAGE_SCN_MEM_WRITE)) continue;
+        out[n].at = (uint8_t *)mod + sh[i].VirtualAddress;
+        out[n].n = sh[i].Misc.VirtualSize & ~(size_t)7;
+        out[n].copy = NULL;
+        n++;
+    }
+    return n;
+}
+static uint8_t *g_sd_after[8];   /* (each section after the last init) */
+static void static_diff_write(StaticSect *ss, int n, const char *path0) {
+    char path[600];
+    snprintf(path, sizeof path, "%s.%lu", path0, (unsigned long)GetCurrentProcessId());   /* (a file per process) */
+    FILE *f = fopen(path, "a");
+    if (!f) return;
+    uint8_t *base = (uint8_t *)GetModuleHandleA(NULL);
+    fprintf(f, "# reset\n");
+    for (int k = 0; k < n; k++) {
+        if (!ss[k].copy) continue;
+        for (size_t i = 0; g_sd_after[k] && i < ss[k].n; i += 8) {
+            uint64_t pre, post, last;
+            memcpy(&pre, ss[k].copy + i, 8);
+            memcpy(&post, ss[k].at + i, 8);
+            memcpy(&last, g_sd_after[k] + i, 8);
+            unsigned long long rva = (unsigned long long)(ss[k].at + i - base);
+            if (pre != last && post == last) fprintf(f, "R %llx %llx %llx\n", rva, (unsigned long long)pre, (unsigned long long)last);
+            else if (post != last && post != pre) fprintf(f, "V %llx %llx %llx\n", rva, (unsigned long long)last, (unsigned long long)post);
+        }
+        free(ss[k].copy);
+        if (!g_sd_after[k]) g_sd_after[k] = (uint8_t *)malloc(ss[k].n);
+        if (g_sd_after[k]) memcpy(g_sd_after[k], ss[k].at, ss[k].n);
+    }
+    fclose(f);
+}
+#endif
+
+/* CYBER_HEAP_DIFF=<file> (diagnostic): the process heaps' busy blocks before
+ * and after a reset's init: those init changed (same place and size, other
+ * bytes) or made, each with the image's words that point into it. */
+typedef struct { uintptr_t a; size_t n; uint64_t h; } HBlk;
+static int hblk_cmp(const void *x, const void *y) {
+    uintptr_t a = ((const HBlk *)x)->a, b = ((const HBlk *)y)->a;
+    return a < b ? -1 : a > b;
+}
+static HBlk *heap_blocks(size_t *pn) {
+    HANDLE heaps[64];
+    DWORD nh = GetProcessHeaps(64, heaps);
+    size_t n = 0, cap = 1 << 16;
+    HBlk *v = (HBlk *)VirtualAlloc(NULL, cap * sizeof(HBlk) * 64, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!v) return NULL;
+    for (DWORD k = 0; k < nh && k < 64; k++) {
+        if (!HeapLock(heaps[k])) continue;
+        PROCESS_HEAP_ENTRY e;
+        e.lpData = NULL;
+        while (HeapWalk(heaps[k], &e)) {
+            if (!(e.wFlags & PROCESS_HEAP_ENTRY_BUSY)) continue;
+            if (n >= cap * 64) break;
+            uint64_t h = 1469598103934665603ull;
+            const uint8_t *p = (const uint8_t *)e.lpData;
+            for (size_t i = 0; i < e.cbData; i++) { h ^= p[i]; h *= 1099511628211ull; }
+            v[n].a = (uintptr_t)e.lpData; v[n].n = e.cbData; v[n].h = h; n++;
+        }
+        HeapUnlock(heaps[k]);
+    }
+    qsort(v, n, sizeof(HBlk), hblk_cmp);
+    *pn = n;
+    return v;
+}
+static void heap_diff_write(HBlk *b, size_t nb, HBlk *a, size_t na, const char *path) {
+    FILE *f = fopen(path, "a");
+    if (!f) return;
+    fprintf(f, "# reset\n");
+    StaticSect ss[8];
+    int nss = static_sections(ss, 8);
+    uint8_t *base = (uint8_t *)GetModuleHandleA(NULL);
+    size_t j = 0;
+    for (size_t i = 0; i < na; i++) {
+        while (j < nb && b[j].a < a[i].a) j++;
+        const char *what = NULL;
+        if (j < nb && b[j].a == a[i].a && b[j].n == a[i].n) { if (b[j].h != a[i].h) what = "changed"; }
+        else what = "new";
+        if (!what) continue;
+        fprintf(f, "%s %zu", what, a[i].n);
+        int refs = 0;
+        for (int k = 0; k < nss && refs < 4; k++)
+            for (size_t w = 0; w + 8 <= ss[k].n && refs < 4; w += 8) {
+                uintptr_t v;
+                memcpy(&v, ss[k].at + w, 8);
+                if (v >= a[i].a && v < a[i].a + a[i].n) { fprintf(f, " %llx", (unsigned long long)(ss[k].at + w - base)); refs++; }
+            }
+        if (!refs) {
+            /* (the GC heap's words, then the other blocks') */
+            extern int gc_snap_find_pointer(uintptr_t lo, uintptr_t hi, char *out, size_t cap);
+            char where[160];
+            if (gc_snap_find_pointer(a[i].a, a[i].a + a[i].n, where, sizeof where)) fprintf(f, " gc:%s", where);
+            else
+                for (size_t q = 0; q < na && !refs; q++) {
+                    if (a[q].n > (1u << 22)) continue;
+                    const uintptr_t *w = (const uintptr_t *)a[q].a;
+                    for (size_t t = 0; t < a[q].n / 8; t++)
+                        if (w[t] >= a[i].a && w[t] < a[i].a + a[i].n) { fprintf(f, " blk:%zu+%zu", a[q].n, t * 8); refs++; break; }
+                }
+        }
+        fputc('\n', f);
+    }
+    fclose(f);
+}
+
+/* The last document's runtime freed and its heap wiped (kept for the next). */
+static void engine_teardown(void) {
+    extern JSRuntimeHandle g_js_runtime;
+    extern JSContextHandle g_js_context;
+    g_js_runtime = GC_HANDLE_NULL;
+    g_js_context = GC_HANDLE_NULL;
+    if (SAFE_VALID(g_rt)) JS_FreeRuntimeBeforeWipe(g_rt);
+    g_rt = GC_HANDLE_NULL;
+    g_ctx = GC_HANDLE_NULL;
+    g_global = JS_UNDEFINED;
+    {
+        extern void gc_keep_heap_once(void);
+        if (!getenv("CYBER_GC_NOKEEP")) gc_keep_heap_once();    /* (the next heap takes this one's memory: no page faults) */
+    }
+    gc_cleanup();
+}
+
 bool page_engine_reset(void) {
     uint64_t t0 = gc_os_now_ns();
     page_close();
@@ -1306,23 +1539,18 @@ bool page_engine_reset(void) {
     import_map_reset();
     extern JSRuntimeHandle g_js_runtime;
     css_document_state_destroy(g_js_runtime);
-    {
-        extern JSRuntimeHandle g_js_runtime;
+    /* (the snapshot back, for this origin: the runtime stays until then, the
+     * native side's resets below seeing the last heap as they would its wipe) */
+    bool restore = g_esnap.have && JS_SnapshotHave() && !strcmp(g_snap_origin, g_next_origin) && !getenv("CYBER_GC_NOKEEP");
+    if (!restore) engine_teardown();
+    else {
+        /* (the resets below see no runtime, as after a teardown) */
         extern JSContextHandle g_js_context;
         g_js_runtime = GC_HANDLE_NULL;
         g_js_context = GC_HANDLE_NULL;
-        if (SAFE_VALID(g_rt)) JS_FreeRuntimeBeforeWipe(g_rt);
     }
-    g_rt = GC_HANDLE_NULL;
-    g_ctx = GC_HANDLE_NULL;
-    g_global = JS_UNDEFINED;
     uint64_t t1 = gc_os_now_ns();
-    {
-        extern void gc_keep_heap_once(void);
-        if (!getenv("CYBER_GC_NOKEEP")) gc_keep_heap_once();    /* (the next heap takes this one's memory: no page faults) */
-    }
-    gc_cleanup();
-    uint64_t t2 = gc_os_now_ns();
+    uint64_t t2 = t1;
     dom_store_reset();
     display_list_canvas_reset();
     /* (the next document's store ids are the last one's again) */
@@ -1342,7 +1570,41 @@ bool page_engine_reset(void) {
     g_css_render_features = 0;
     css_media_set_color_scheme(NULL);
     g_dom_needs_layout = 0;
+    if (restore) {
+        JSRuntimeHandle rt;
+        JSContextHandle ctx;
+        if (JS_SnapshotRestore(&rt, &ctx)) {
+            engine_snap_restored(rt, ctx);
+            js_quickjs_setup_initial_dom();
+            if (getenv("CYBER_TAB_CPU"))
+                fprintf(stderr, "[engine] reset: restored, %.1f ms\n", (gc_os_now_ns() - t0) / 1e6);
+            return true;
+        }
+        /* (it could not be: the last runtime goes, and a setup makes another) */
+        engine_teardown();
+        (void)0;
+    }
+#ifdef _WIN32
+    StaticSect ss[8];
+    int nss = 0;
+    const char *sd = getenv("CYBER_STATIC_DIFF");
+    if (sd) {
+        nss = static_sections(ss, 8);
+        for (int k = 0; k < nss; k++) { ss[k].copy = (uint8_t *)malloc(ss[k].n); if (ss[k].copy) memcpy(ss[k].copy, ss[k].at, ss[k].n); }
+    }
+#endif
+    const char *hd = getenv("CYBER_HEAP_DIFF");
+    size_t hb_n = 0, ha_n = 0;
+    HBlk *hb = hd ? heap_blocks(&hb_n) : NULL;
     bool ok = init_browser_context();
+    if (hb) {
+        HBlk *ha = heap_blocks(&ha_n);
+        if (ha) { heap_diff_write(hb, hb_n, ha, ha_n, hd); VirtualFree(ha, 0, MEM_RELEASE); }
+        VirtualFree(hb, 0, MEM_RELEASE);
+    }
+#ifdef _WIN32
+    if (sd) static_diff_write(ss, nss, sd);
+#endif
     if (getenv("CYBER_TAB_CPU"))
         fprintf(stderr, "[engine] reset: free %.1f ms, heap %.1f ms, new %.1f ms\n", (t1 - t0) / 1e6, (t2 - t1) / 1e6,
                 (gc_os_now_ns() - t2) / 1e6);

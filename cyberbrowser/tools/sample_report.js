@@ -231,3 +231,17 @@ if (process.env.FOCUS) {
     show(`${focus}, called from`, up1, 30);
     show(`${focus}, called from (two levels)`, up2, 30);
 }
+
+// CALLEES=<fn>: that function's inclusive time split by what it called (its own time as "(self)").
+if (process.env.CALLEES) {
+    const focus = process.env.CALLEES, down = new Map();
+    for (const s of samples) {
+        const all = [];
+        s.forEach((rva, d) => { for (const f of frames(rva, d)) all.push(f); });
+        const i = all.findIndex(f => f.fn === focus);   /* (leaf first: the innermost call of it) */
+        if (i < 0) continue;
+        const c = all[i - 1];
+        add(down, c ? c.fn : '(self)');
+    }
+    show(`${focus}, calling`, down, +process.env.CALLEES_N || 30);
+}

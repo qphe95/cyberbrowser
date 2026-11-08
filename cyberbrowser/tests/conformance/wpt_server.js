@@ -229,8 +229,10 @@ const REFREADY = `<script style="display: none !important">//<![CDATA[
      * still waiting for is in the one built after it) */
     /* (and, when what was laid out since has not gone to the GPU process yet (a web
      * font's relayout, say), a frame more: __cyberFramePending, the tab's in a reftest run) */
+    /* (at most 8 frames more: a running animation lays out every frame, and would keep it pending to the time limit) */
+    var extra = 0;
     var settled = function () {
-      if (window.__cyberFramePending && window.__cyberFramePending()) requestAnimationFrame(function () { setTimeout(settled, 0); });
+      if (window.__cyberFramePending && window.__cyberFramePending() && extra++ < 8) requestAnimationFrame(function () { setTimeout(settled, 0); });
       else ready();
     };
     var go = function () { requestAnimationFrame(function () { requestAnimationFrame(function () { setTimeout(settled, 0); }); }); };

@@ -319,6 +319,20 @@ extern GCState g_gc;
  * heap are stale when it differs. */
 extern uint32_t g_gc_epoch;
 
+/* Heap snapshot (the engine snapshot, JS_SnapshotTake / JS_SnapshotRestore):
+ * the heap and its bookkeeping as they are, taken and put back whole.  Both
+ * want the GC thread stopped and no cycle running.  Take fails (and keeps
+ * nothing) when the heap is not in a state it keeps (a debugging mode, pages
+ * given back to the OS); restore fails, having changed nothing, when there is
+ * no snapshot or the heap cannot hold it.  Restore moves g_gc_epoch on, as a
+ * new heap does: what the last heap's caches hold is stale. */
+bool gc_snap_take(void);
+bool gc_snap_restore(void);
+bool gc_snap_have(void);
+/* The collector's part (gc_concurrent.c). */
+bool gc_conc_snap_take(void);
+void gc_conc_snap_restore(void);
+
 /* Debug build option: report dereferences of dead handles (with
  * QJS_GC_NO_REUSE=1, which keeps freed handles dead). */
 #ifndef GC_STALE_CHECK

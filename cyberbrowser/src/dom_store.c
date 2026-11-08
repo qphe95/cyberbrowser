@@ -323,6 +323,11 @@ void dom_store_reset(void) {
     g_dom.ntrees = 1;
     g_dom.tree_free = 0;
     g_dom.structure_version++;
+    /* (the scroll offsets were the freed nodes': a node made in the same slot,
+     * or the document an engine snapshot puts back, starts unscrolled) */
+    g_dom_scrolls.n = 0;
+    g_dom_scrolls.fixed = false;
+    g_dom_scrolls.paint = true;
 }
 
 /* ============================================================================
@@ -1101,4 +1106,116 @@ void dom_note_mutation(uint32_t s, uint16_t bits) {
     if (s && g_dom.kind[s] != DOM_K_FREE) dom_mark_dirty(dom_id_of(s), bits);
     if (!s || !g_dom_document || !dom_valid(g_dom_document)) return;
     if (dom_tree_root_slot(s) == dom_slot(g_dom_document)) g_dom.connected_version++;
+}
+
+/* ============================================================================
+ * Engine snapshot (dom_store_snap_take / _restore)
+ * ============================================================================ */
+
+typedef struct {
+    uint32_t s;
+    uint8_t kind, gen, ncls, top;
+    uint16_t flags, state, realm;
+    CssAtom tag, id_atom;
+    uint32_t parent, first, last, next, prev, host, shadow, content, owner, tree, wrapper, wrap_idx;
+    uint32_t ns, prefix, lname, order;
+    DomCls4 cls;
+    uint64_t cls_bloom;
+} DomSnapNode;
+
+static struct {
+    bool have;
+    DomSnapNode *node;
+    uint32_t n;
+    DomTreeRec *trees;
+    uint32_t ntrees, tree_free;
+} g_dsnap;
+
+bool dom_store_snap_take(void) {
+    free(g_dsnap.node);
+    free(g_dsnap.trees);
+    memset(&g_dsnap, 0, sizeof g_dsnap);
+    uint32_t n = 0;
+    for (uint32_t s = 1; s < g_dom.count; s++) {
+        if (g_dom.kind[s] == DOM_K_FREE) continue;
+        /* (what lives outside the arrays is not kept) */
+        if (g_dom.text[s].s || g_dom.attrs[s].a || g_dom.attrs[s].n || g_dom.cls_more[s]) return false;
+        n++;
+    }
+    g_dsnap.node = (DomSnapNode *)calloc(n ? n : 1, sizeof(DomSnapNode));
+    g_dsnap.trees = (DomTreeRec *)malloc((g_dom.ntrees ? g_dom.ntrees : 1) * sizeof(DomTreeRec));
+    if (!g_dsnap.node || !g_dsnap.trees) return false;
+    for (uint32_t s = 1; s < g_dom.count; s++) {
+        if (g_dom.kind[s] == DOM_K_FREE) continue;
+        DomSnapNode *d = &g_dsnap.node[g_dsnap.n++];
+        d->s = s;
+        d->kind = g_dom.kind[s]; d->gen = g_dom.gen[s]; d->ncls = g_dom.ncls[s];
+        d->top = s < g_dom_top_cap ? g_dom_top[s] : 0;
+        d->flags = g_dom.flags[s]; d->state = g_dom.state[s]; d->realm = g_dom.realm[s];
+        d->tag = g_dom.tag[s]; d->id_atom = g_dom.id_atom[s];
+        d->parent = g_dom.parent[s]; d->first = g_dom.first[s]; d->last = g_dom.last[s];
+        d->next = g_dom.next[s]; d->prev = g_dom.prev[s];
+        d->host = g_dom.host[s]; d->shadow = g_dom.shadow[s]; d->content = g_dom.content[s];
+        d->owner = g_dom.owner[s]; d->tree = g_dom.tree[s];
+        d->wrapper = g_dom.wrapper[s]; d->wrap_idx = g_dom.wrap_idx[s];
+        d->ns = g_dom.ns[s]; d->prefix = g_dom.prefix[s]; d->lname = g_dom.lname[s]; d->order = g_dom.order[s];
+        d->cls = g_dom.cls[s]; d->cls_bloom = g_dom.cls_bloom[s];
+    }
+    memcpy(g_dsnap.trees, g_dom.trees, g_dom.ntrees * sizeof(DomTreeRec));
+    g_dsnap.ntrees = g_dom.ntrees;
+    g_dsnap.tree_free = g_dom.tree_free;
+    g_dsnap.have = true;
+    return true;
+}
+
+void dom_store_snap_restore(void) {
+    if (!g_dsnap.have) return;
+    for (uint32_t k = 0; k < g_dsnap.n; k++) {
+        const DomSnapNode *d = &g_dsnap.node[k];
+        uint32_t s = d->s;
+        /* (a slot of the snapshot's is below the count: the count never falls) */
+        if (s >= g_dom.count) { store_grow(s + 1); while (g_dom.count <= s) { g_dom.kind[g_dom.count] = DOM_K_FREE; g_dom.count++; } }
+        g_dom.kind[s] = d->kind; g_dom.gen[s] = d->gen; g_dom.ncls[s] = d->ncls;
+        if (s < g_dom_top_cap) g_dom_top[s] = d->top;
+        else if (d->top) dom_top_state_set(s, d->top, true);
+        g_dom.flags[s] = d->flags; g_dom.state[s] = d->state; g_dom.realm[s] = d->realm;
+        g_dom.tag[s] = d->tag; g_dom.id_atom[s] = d->id_atom;
+        g_dom.parent[s] = d->parent; g_dom.first[s] = d->first; g_dom.last[s] = d->last;
+        g_dom.next[s] = d->next; g_dom.prev[s] = d->prev;
+        g_dom.host[s] = d->host; g_dom.shadow[s] = d->shadow; g_dom.content[s] = d->content;
+        g_dom.owner[s] = d->owner; g_dom.tree[s] = d->tree;
+        g_dom.wrapper[s] = d->wrapper; g_dom.wrap_idx[s] = d->wrap_idx;
+        g_dom.ns[s] = d->ns; g_dom.prefix[s] = d->prefix; g_dom.lname[s] = d->lname; g_dom.order[s] = d->order;
+        g_dom.cls[s] = d->cls; g_dom.cls_bloom[s] = d->cls_bloom;
+        g_dom.text[s] = (DomStr){ NULL, 0, 0 };
+        g_dom.attrs[s] = (DomAttrList){ NULL, 0, 0, 0 };
+        g_dom.cls_more[s] = NULL;
+    }
+    if (g_dom.trees_cap < g_dsnap.ntrees) {
+        uint32_t cap = g_dom.trees_cap ? g_dom.trees_cap : 64;
+        while (cap < g_dsnap.ntrees) cap *= 2;
+        DomTreeRec *t = (DomTreeRec *)realloc(g_dom.trees, cap * sizeof(DomTreeRec));
+        if (!t) abort();
+        memset(t + g_dom.trees_cap, 0, (cap - g_dom.trees_cap) * sizeof(DomTreeRec));
+        g_dom.trees = t;
+        g_dom.trees_cap = cap;
+    }
+    memcpy(g_dom.trees, g_dsnap.trees, g_dsnap.ntrees * sizeof(DomTreeRec));
+    g_dom.ntrees = g_dsnap.ntrees;
+    g_dom.tree_free = g_dsnap.tree_free;
+    /* (the free list again, as dom_store_reset leaves it: the highest slot first) */
+    g_dom.free_head = 0;
+    g_dom.live = 0;
+    for (uint32_t s = 1; s < g_dom.count; s++) {
+        if (g_dom.kind[s] != DOM_K_FREE) { g_dom.live++; continue; }
+        g_dom.next[s] = g_dom.free_head;
+        g_dom.free_head = s;
+    }
+    /* (versions only go up: what keys on them sees a change) */
+    g_dom.structure_version++;
+    g_dom.dirty_version++;
+    g_dom.attr_version++;
+    g_dom.text_version++;
+    g_dom.class_version++;
+    g_dom.connected_version++;
 }

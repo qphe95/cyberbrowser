@@ -1606,3 +1606,90 @@ uint32_t gc_test_heap_check(void) {
     }
     return g_check_problems;
 }
+
+/* ============================================================================
+ * Snapshot (gc_conc_snap_take / _restore): the collector between cycles
+ * ============================================================================ */
+
+static struct {
+    bool have;
+    GCCollector col;
+    GCConc conc;
+    uint32_t *ref_log;
+    uint32_t ref_log_n, ref_log_major_start;
+    uint64_t *remset_acc, *remset_cur;
+    uint32_t next_kind;
+    size_t live_after_major, committed_after_major, swept_live, promoted_since_major;
+} g_csnap;
+
+bool gc_conc_snap_take(void) {
+    free(g_csnap.ref_log);
+    free(g_csnap.remset_acc);
+    free(g_csnap.remset_cur);
+    memset(&g_csnap, 0, sizeof g_csnap);
+    /* (between cycles, with nothing handed over pending) */
+    if (g_conc.running || g_col.work.n || g_conc.pending_cards.n || g_conc.weak_dead[0].n || g_conc.weak_dead[1].n ||
+        g_conc.weak_dead[2].n)
+        return false;
+    g_csnap.col = g_col;
+    g_csnap.conc = g_conc;
+    size_t words = ((size_t)g_conc.card_count + 63) / 64;
+    if (g_ref_log.n && !(g_csnap.ref_log = (uint32_t *)malloc(g_ref_log.n * sizeof(uint32_t)))) return false;
+    if (g_ref_log.n) memcpy(g_csnap.ref_log, g_ref_log.items, g_ref_log.n * sizeof(uint32_t));
+    g_csnap.ref_log_n = g_ref_log.n;
+    g_csnap.ref_log_major_start = g_ref_log_major_start;
+    if (g_conc.remset_acc && words && (g_csnap.remset_acc = (uint64_t *)malloc(words * 8))) memcpy(g_csnap.remset_acc, g_conc.remset_acc, words * 8);
+    if (g_conc.remset_cur && words && (g_csnap.remset_cur = (uint64_t *)malloc(words * 8))) memcpy(g_csnap.remset_cur, g_conc.remset_cur, words * 8);
+    g_csnap.next_kind = g_next_kind;
+    g_csnap.live_after_major = g_live_after_major;
+    g_csnap.committed_after_major = g_committed_after_major;
+    g_csnap.swept_live = g_swept_live;
+    g_csnap.promoted_since_major = g_promoted_since_major;
+    g_csnap.have = true;
+    return true;
+}
+
+void gc_conc_snap_restore(void) {
+    if (!g_csnap.have || g_conc.running) return;
+    /* GCCollector: the snapshot's numbers, the live buffers (empty). */
+    {
+        GCWorklist work = g_col.work;
+        uintptr_t *pins = g_col.pins;
+        uint32_t pins_cap = g_col.pins_cap;
+        g_col = g_csnap.col;
+        g_col.work = work;
+        g_col.work.n = 0;
+        g_col.pins = pins;
+        g_col.pins_cap = pins_cap;
+        g_col.pins_n = 0;
+    }
+    /* GCConc: likewise. */
+    {
+        GCConc live;
+        memcpy(&live, &g_conc, sizeof live);
+        memcpy(&g_conc, &g_csnap.conc, sizeof g_conc);
+        g_conc.running = false;
+        g_conc.in_boundary = false;
+        g_conc.thread = live.thread;
+        g_conc.pending_cards = live.pending_cards;
+        g_conc.pending_cards.n = 0;
+        for (int k = 0; k < 3; k++) { g_conc.weak_dead[k] = live.weak_dead[k]; g_conc.weak_dead[k].n = 0; }
+        g_conc.weak_shapes = NULL;
+        g_conc.weak_finalizers = false;
+        g_conc.remset_acc = live.remset_acc;
+        g_conc.remset_cur = live.remset_cur;
+        g_conc.card_count = live.card_count;
+        size_t words = ((size_t)g_conc.card_count + 63) / 64;
+        if (g_conc.remset_acc) { if (g_csnap.remset_acc) memcpy(g_conc.remset_acc, g_csnap.remset_acc, words * 8); else memset(g_conc.remset_acc, 0, words * 8); }
+        if (g_conc.remset_cur) { if (g_csnap.remset_cur) memcpy(g_conc.remset_cur, g_csnap.remset_cur, words * 8); else memset(g_conc.remset_cur, 0, words * 8); }
+    }
+    g_ref_log.n = 0;
+    for (uint32_t i = 0; i < g_csnap.ref_log_n; i++) u32_push(&g_ref_log, g_csnap.ref_log[i]);
+    g_ref_log_major_start = g_csnap.ref_log_major_start;
+    g_next_kind = g_csnap.next_kind;
+    g_live_after_major = g_csnap.live_after_major;
+    g_committed_after_major = g_csnap.committed_after_major;
+    g_swept_live = g_csnap.swept_live;
+    g_promoted_since_major = g_csnap.promoted_since_major;
+    atomic_store(&g_gc_poll_flag, 0);
+}

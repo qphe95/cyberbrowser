@@ -112,6 +112,9 @@ void page_set_rendering(bool on);
 /* Ready the engine for another document in this process (after
  * page_engine_init and a page_load): page_prepare and page_load follow. */
 bool page_engine_reset(void);
+/* The URL the next page_engine_reset is for (the engine snapshot is kept for
+ * one origin: CYBER_SNAPSHOT=0 turns it off). */
+void page_engine_set_next_url(const char *url);
 /* Nothing in flight that time passing would overtake (so an idle wait can be skipped). */
 bool page_virtual_time_idle(void);
 /* Changes with every DOM mutation. */

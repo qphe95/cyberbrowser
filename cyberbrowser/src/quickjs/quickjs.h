@@ -1020,6 +1020,20 @@ void JS_UpdateStackTop(JSRuntimeHandle rt);
 void JS_FreeRuntime(JSRuntimeHandle rt);
 /* The same, the GC heap about to be wiped (gc_cleanup): no last collection. */
 void JS_FreeRuntimeBeforeWipe(JSRuntimeHandle rt);
+/* Engine snapshot (page_engine.c): a runtime and context made and set up
+ * once, kept, and put back for each later document in place of making them
+ * again.  JS_SnapshotPrepare(1) before the setup to be kept: no background
+ * compile units are made for its functions (they are plain memory a snapshot
+ * cannot hold); (0) after.  JS_SnapshotTake after it, with no JS running:
+ * it runs a full collection and keeps the heap (0: not kept).
+ * JS_SnapshotRestore in place of JS_FreeRuntime + a new setup: the last
+ * document's runtime goes and the kept one is back, with a context serial
+ * and Math.random state of its own (0, having freed nothing of the heap:
+ * no snapshot, or the heap cannot take it). */
+void JS_SnapshotPrepare(int on);
+int JS_SnapshotTake(JSRuntimeHandle rt, JSContextHandle ctx);
+int JS_SnapshotRestore(JSRuntimeHandle *rt, JSContextHandle *ctx);
+int JS_SnapshotHave(void);
 void *JS_GetRuntimeOpaque(JSRuntimeHandle rt);
 void JS_SetRuntimeOpaque(JSRuntimeHandle rt, void *opaque);
 typedef void JS_MarkFunc(JSRuntimeHandle rt, GCHandle handle);
