@@ -36,6 +36,24 @@ export CYBER_ALLOW_POPUPS=1
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 rm -f "$out"/step-*.flag "$out"/end-*.flag "$out"/pages.txt
+# Old runs beside this one go, past the newest WPT_KEEP_RUNS (default 20; 0
+# keeps all): a full reftest run is ~0.7 GB.  Only folders a run made (with
+# its server.log), and the <name>.log beside each; in the background.
+keep=${WPT_KEEP_RUNS:-20}
+[ "$keep" -gt 0 ] && node -e '
+    const fs = require("fs"), path = require("path"), [out, keep] = process.argv.slice(1);
+    const parent = path.dirname(out), self = path.basename(out);
+    const runs = [];
+    for (const e of fs.readdirSync(parent, { withFileTypes: true })) {
+        if (!e.isDirectory() || e.name === self) continue;
+        const log = path.join(parent, e.name, "server.log");
+        try { runs.push({ name: e.name, t: fs.statSync(log).mtimeMs }); } catch (x) { /* (not a run) */ }
+    }
+    runs.sort((a, b) => b.t - a.t);
+    for (const r of runs.slice(+keep - 1)) {   // (this run is one of the kept)
+        try { fs.rmSync(path.join(parent, r.name), { recursive: true, force: true, maxRetries: 2 }); } catch (x) { /* (a file held open: next time) */ }
+        fs.rmSync(path.join(parent, r.name + ".log"), { force: true });
+    }' "$out" "$keep" > /dev/null 2>&1 &
 
 # (each phase's time, printed at the end)
 t0=$EPOCHREALTIME; times=
