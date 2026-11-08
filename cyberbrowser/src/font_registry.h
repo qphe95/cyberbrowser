@@ -81,4 +81,9 @@ bool font_registry_set_default_file(const char *path);
 }
 #endif
 
+/* @font-feature-values: the numbers `name` stands for in family's `kind` block
+ * (styleset, stylistic, ...); the count, 0 when not defined. */
+int font_feature_values_get(const char *family, const char *kind, const char *name, int *vals, int cap);
+void font_feature_values_reset(void);
+
 #endif /* FONT_REGISTRY_H */

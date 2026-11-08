@@ -971,6 +971,23 @@ static void frame_load(Frame *f) {
         if (js_out) html_page_stream_feed(ps, js_out, js_out_n);
         else if (!strncasecmp(url, "javascript:", 11)) { /* (nothing to show) */ }
         else if (srcdoc && srcdoc[0]) html_page_stream_feed(ps, srcdoc, strlen(srcdoc));
+        else if (fetched && !strncasecmp(mime, "image/", 6) && strcasecmp(mime, "image/svg+xml")) {
+            /* (an image document) */
+            char hb[2300];
+            int hn = snprintf(hb, sizeof hb, "<!doctype html><html><head><style>html,body{margin:0}img{display:block}</style></head><body><img src=\"%s\"></body></html>", url);
+            if (hn > 0 && hn < (int)sizeof hb) html_page_stream_feed(ps, hb, (size_t)hn);
+        }
+        else if (fetched && buf.data && buf.size && !strncasecmp(mime, "text/plain", 10)) {
+            /* (a text document: its text in a pre) */
+            static const char *const pre = "<!doctype html><html><body><pre>";
+            html_page_stream_feed(ps, pre, strlen(pre));
+            for (size_t i = 0; i < buf.size; i++) {
+                char c = buf.data[i];
+                if (c == '<') html_page_stream_feed(ps, "&lt;", 4);
+                else if (c == '&') html_page_stream_feed(ps, "&amp;", 5);
+                else html_page_stream_feed(ps, &c, 1);
+            }
+        }
         else if (fetched && buf.data && buf.size) html_page_stream_feed(ps, buf.data, buf.size);
         else if (!blank) platform_log(LOG_LEVEL_WARN, "frame", "could not fetch frame %s: %s", url, err);
         html_page_stream_finish(ps, NULL);
@@ -1106,6 +1123,38 @@ static bool parent_scripts_pending(const Frame *f) {
  * out of the tree meanwhile aren't gone) */
 static bool g_frames_held;
 void frame_api_hold(bool hold) { g_frames_held = hold; }
+
+/* The frame's content box and whether it's rendered, as a layout has found them. */
+void frame_api_note_box(NodeId iframe, double w, double h)
+{
+    Frame *f = frame_of_iframe(iframe);
+    if (f) { f->box_w = w; f->box_h = h; f->hidden = false; }
+}
+
+/* The frames to paint, deepest first (a parent's list holds its children's): their
+ * elements, documents, realms and content boxes. */
+int frame_api_paint_list(NodeId *iframes, NodeId *docs, JSContextHandle *ctxs, double *ws, double *hs, int cap)
+{
+    int n = 0, maxd = 0;
+    for (int pass = 16; pass >= 0 && n < cap; pass--) {
+        for (Frame *f = g_frames; f && n < cap; f = f->next) {
+            if (f->dead || f->popup || f->state != FRAME_LOADED || f->hidden || !SAFE_VALID(f->ctx) || !dom_valid(f->iframe) || !dom_valid(f->doc)) continue;
+            int d = 0;
+            for (Frame *p = f; p && d < 16; d++) {
+                Frame *up = NULL;
+                for (Frame *q = g_frames; q; q = q->next) if (q->ctx == p->parent) { up = q; break; }
+                p = up;
+            }
+            if (d - 1 != pass) continue;
+            double w = f->box_w, h = f->box_h;
+            if (w <= 0.0 || h <= 0.0) continue;
+            iframes[n] = f->iframe; docs[n] = f->doc; ctxs[n] = f->ctx; ws[n] = w; hs[n] = h;
+            n++;
+        }
+    }
+    (void)maxd;
+    return n;
+}
 
 /* A frame realm's size as its parent has it now (a class or sheet may have just
  * changed it), before its style is asked after; once per change to the page. */
@@ -1324,11 +1373,13 @@ bool g_frame_blank_now;
  * each iframe in it without a browsing context yet navigates to its src, or
  * to about:blank (at once when g_frame_blank_now; srcdoc aside). */
 void frame_api_on_connect(JSContextHandle ctx, NodeId subtree) {
-    static CssAtom iframe_tag, frame_tag;
+    static CssAtom iframe_tag, frame_tag, object_tag, embed_tag;
     if (!iframe_tag) {
-        css_atom_reserve(2);
+        css_atom_reserve(4);
         iframe_tag = css_atom_intern("iframe", 6);
         frame_tag = css_atom_intern("frame", 5);
+        object_tag = css_atom_intern("object", 6);
+        embed_tag = css_atom_intern("embed", 5);
     }
     if (!dom_valid(subtree)) return;
     /* (only in a document with a browsing context: the realm's own, not one
@@ -1336,6 +1387,23 @@ void frame_api_on_connect(JSContextHandle ctx, NodeId subtree) {
     NodeId realm_doc = dom_node_of(JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document"));
     if (!realm_doc || dom_id_of(dom_tree_root_slot(dom_slot(subtree))) != realm_doc) return;
     for (NodeId n = subtree; n; ) {
+        /* (an object or embed of an HTML document is a frame too) */
+        if (dom_kind(n) == DOM_K_ELEMENT && (dom_tag(n) == object_tag || dom_tag(n) == embed_tag) && !frame_of_iframe(n)) {
+            const char *src = dom_get_attr_str(n, dom_tag(n) == object_tag ? "data" : "src");
+            const char *ty = dom_get_attr_str(n, "type");
+            size_t sl = src ? strlen(src) : 0;
+            const char *q = src ? strpbrk(src, "?#") : NULL;
+            if (q) sl = (size_t)(q - src);
+            bool html = (ty && (!strncasecmp(ty, "text/html", 9) || !strncasecmp(ty, "application/xhtml", 17))) ||
+                        (!ty && sl > 4 && (!strncasecmp(src + sl - 5, ".html", 5) || !strncasecmp(src + sl - 4, ".htm", 4) || !strncasecmp(src + sl - 4, ".xht", 4) || (sl > 6 && !strncasecmp(src + sl - 6, ".xhtml", 6))));
+            if (src && src[0] && html) {
+                char *base = realm_url(ctx);
+                char *abs = wurl_resolve(base, src);
+                free(base);
+                frame_navigate(ctx, n, abs ? abs : src);
+                free(abs);
+            }
+        }
         if (dom_kind(n) == DOM_K_ELEMENT && (dom_tag(n) == iframe_tag || dom_tag(n) == frame_tag) && !frame_of_iframe(n)) {
             const char *src = dom_get_attr_str(n, "src");
             if (dom_get_attr_str(n, "srcdoc")) {

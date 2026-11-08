@@ -183,6 +183,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * pv_anchor its anchor box + 1 (0 none); pv_hidden: it overflowed, no-overflow hides it) */
     unsigned char pos_vis, pv_hidden;
     int pv_anchor;
+    int anc_used;   /* (an anchor it was placed against + 1: it moves with that anchor's scrolling) */
     const char *bg_cc_expr;   /* (background-color with currentColor inside a function: worked out with the box's color) */   /* (an HTML th: centred while the text-align it inherits is start) */
     /* How text_align was given: 0 start (as initially), 1 left / right /
      * center (as it is), 2 end; start and end follow direction (1: rtl,
@@ -207,6 +208,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * 3 saturate, 4 hue-rotate (deg), 5 invert, 6 opacity, 7 brightness,
      * 8 contrast, 9 blur (px), 10 drop-shadow (one: its offsets, blur,
      * color in filt_ds)) */
+    unsigned char filt_url;   /* (filter has a url(): the whole list goes through svg_filter.c) */
     unsigned char filt_n, filt_t[8];
     const char *filt_text;          /* (the filter as written, for animations; NULL none) */
     unsigned char bf_n, bf_t[8];    /* backdrop-filter: as filter's (no drop-shadow) */
@@ -473,6 +475,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * mask-position: x / y in px, or fractions when mask_pos_pct bits are set.
      * mask_no_repeat: mask-repeat: no-repeat. */
     const char *mask_image;
+    /* (the declared text, each layer's: image, mode, repeat, position, clip, origin, size, composite; [8] the shorthand) */
+    const char *mk_text[9];
     const char *clip_path;     /* (clip-path as written; NULL none) */
     unsigned char mask_kind;
     unsigned char mask_size_kind;
@@ -1239,6 +1243,7 @@ const char *css_layout_element_custom(LayoutContext *ctx, int idx, const char *n
  * styled box (inside a display:none subtree): var() resolves against the
  * custom properties of box holder (its nearest styled ancestor). */
 bool css_layout_dom_cascade(LayoutContext *ctx, int dom, int holder, CssCascadeFn fn, void *ud);
+bool css_layout_parse_color_text(const char *text, double *rgba);
 /* The user agent's display of an element with tag (lower case). */
 const char *css_layout_tag_display(const char *tag);
 /* Layouts on kept trees reuse clean subtrees from the last layout's calls:

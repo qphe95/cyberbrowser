@@ -183,6 +183,11 @@ void display_list_highlights_set(const char *const *names, const int *prios, int
 /* Build a display list from a resolved LayoutContext. */
 bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl);
 
+/* The display list of the frame in an <iframe> (its node store id), kept (a copy) for
+ * the parent's list to splice in; NULL drops it.  display_list_frames_clear drops all. */
+void display_list_frame_set(uint32_t node, const DisplayList *dl);
+void display_list_frames_clear(void);
+
 #ifdef __cplusplus
 }
 #endif

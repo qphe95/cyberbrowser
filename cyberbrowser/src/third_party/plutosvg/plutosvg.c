@@ -42,6 +42,7 @@ enum {
 enum {
     ATTR_UNKNOWN = 0,
     ATTR_CLIP_PATH,
+    ATTR_FILTER,
     ATTR_CLIP_PATH_UNITS,
     ATTR_CLIP_RULE,
     ATTR_COLOR,
@@ -166,6 +167,7 @@ static int attributeid(const char* data, size_t length)
         {"fill", ATTR_FILL},
         {"fill-opacity", ATTR_FILL_OPACITY},
         {"fill-rule", ATTR_FILL_RULE},
+        {"filter", ATTR_FILTER},
         {"fx", ATTR_FX},
         {"fy", ATTR_FY},
         {"gradientTransform", ATTR_GRADIENT_TRANSFORM},
@@ -223,6 +225,7 @@ static int cssattributeid(const char* data, size_t length)
         {"fill", ATTR_FILL},
         {"fill-opacity", ATTR_FILL_OPACITY},
         {"fill-rule", ATTR_FILL_RULE},
+        {"filter", ATTR_FILTER},
         {"opacity", ATTR_OPACITY},
         {"stop-color", ATTR_STOP_COLOR},
         {"stop-opacity", ATTR_STOP_OPACITY},
@@ -2490,7 +2493,7 @@ static void render_g(const element_t* element, render_context_t* context, render
 
 static void render_line(const element_t* element, render_context_t* context, render_state_t* state)
 {
-    if(is_display_none(element) || is_visibility_hidden(element))
+    if(is_display_none(element) || (state->mode == render_mode_painting && is_visibility_hidden(element)))
         return;
     length_t x1 = {0, length_type_fixed};
     length_t y1 = {0, length_type_fixed};
@@ -2524,7 +2527,7 @@ static void render_line(const element_t* element, render_context_t* context, ren
 
 static void render_ellipse(const element_t* element, render_context_t* context, render_state_t* state)
 {
-    if(is_display_none(element) || is_visibility_hidden(element))
+    if(is_display_none(element) || (state->mode == render_mode_painting && is_visibility_hidden(element)))
         return;
     length_t rx = {0, length_type_fixed};
     length_t ry = {0, length_type_fixed};
@@ -2560,7 +2563,7 @@ static void render_ellipse(const element_t* element, render_context_t* context, 
 
 static void render_circle(const element_t* element, render_context_t* context, render_state_t* state)
 {
-    if(is_display_none(element) || is_visibility_hidden(element))
+    if(is_display_none(element) || (state->mode == render_mode_painting && is_visibility_hidden(element)))
         return;
     length_t r = {0, length_type_fixed};
     parse_length(element, ATTR_R, &r, false, false);
@@ -2592,7 +2595,7 @@ static void render_circle(const element_t* element, render_context_t* context, r
 
 static void render_rect(const element_t* element, render_context_t* context, render_state_t* state)
 {
-    if(is_display_none(element) || is_visibility_hidden(element))
+    if(is_display_none(element) || (state->mode == render_mode_painting && is_visibility_hidden(element)))
         return;
     length_t w = {0, length_type_fixed};
     length_t h = {0, length_type_fixed};
@@ -2640,7 +2643,7 @@ static void render_rect(const element_t* element, render_context_t* context, ren
 
 static void render_poly(const element_t* element, render_context_t* context, render_state_t* state)
 {
-    if(is_display_none(element) || is_visibility_hidden(element))
+    if(is_display_none(element) || (state->mode == render_mode_painting && is_visibility_hidden(element)))
         return;
     render_state_t new_state;
     render_state_begin(element, &new_state, state);
@@ -2654,7 +2657,7 @@ static void render_poly(const element_t* element, render_context_t* context, ren
 
 static void render_path(const element_t* element, render_context_t* context, render_state_t* state)
 {
-    if(is_display_none(element) || is_visibility_hidden(element))
+    if(is_display_none(element) || (state->mode == render_mode_painting && is_visibility_hidden(element)))
         return;
     render_state_t new_state;
     render_state_begin(element, &new_state, state);
@@ -2801,7 +2804,7 @@ static void draw_image(const element_t* element, render_context_t* context, rend
 
 static void render_image(const element_t* element, render_context_t* context, render_state_t* state)
 {
-    if(is_display_none(element) || is_visibility_hidden(element))
+    if(is_display_none(element) || (state->mode == render_mode_painting && is_visibility_hidden(element)))
         return;
     length_t w = {0, length_type_fixed};
     length_t h = {0, length_type_fixed};
@@ -2899,9 +2902,99 @@ static bool apply_clip_path(const element_t* element, render_context_t* context,
     return true;
 }
 
+/* (cyberbrowser: a filter on an element: it painted on a surface of its own, the hook
+ * filtering that, then the surface drawn) */
+__thread plutosvg_filter_hook_t plutosvg_filter_hook;
+static __thread const element_t* t_filter_noclip;
+static void render_element0(const element_t* element, render_context_t* context, render_state_t* state);
 static void render_element(const element_t* element, render_context_t* context, render_state_t* state)
 {
-    bool clipped = apply_clip_path(element, context, state);
+    const string_t* fv = state->mode == render_mode_painting && plutosvg_filter_hook && element->id != TAG_SVG ? find_attribute(element, ATTR_FILTER, false) : NULL;
+    if(!fv || !fv->length || (fv->length == 4 && !strncmp(fv->data, "none", 4))) {
+        render_element0(element, context, state);
+        return;
+    }
+    /* (no box, an empty element: nothing, filter or not) */
+    {
+        plutovg_rect_t eb = {0, 0, 0, 0};
+        if(element->id != TAG_G && element->id != TAG_USE && element_box(element, state, true, &eb) && (eb.w <= 0.f || eb.h <= 0.f))
+            return;
+    }
+    plutovg_surface_t* target = plutovg_canvas_get_surface(context->canvas);
+    int w = plutovg_surface_get_width(target), h = plutovg_surface_get_height(target);
+    plutovg_surface_t* layer = plutovg_surface_create(w, h);
+    plutovg_canvas_t* lc = layer ? plutovg_canvas_create(layer) : NULL;
+    if(!lc) {
+        if(layer) plutovg_surface_destroy(layer);
+        render_element0(element, context, state);
+        return;
+    }
+    plutovg_matrix_t m;
+    plutovg_canvas_get_matrix(context->canvas, &m);
+    plutovg_canvas_set_matrix(lc, &m);
+    plutovg_canvas_t* keep = context->canvas;
+    context->canvas = lc;
+    t_filter_noclip = element;
+    render_element0(element, context, state);
+    t_filter_noclip = NULL;
+    context->canvas = keep;
+    /* the reference box: its fill box, where it is on the surface */
+    plutovg_rect_t bb = {0, 0, 0, 0}, dev;
+    float box[4] = {0, 0, 0, 0};
+    if(element_box(element, state, true, &bb)) {
+        plutovg_matrix_map_rect(&m, &bb, &dev);
+        box[0] = dev.x; box[1] = dev.y; box[2] = dev.w; box[3] = dev.h;
+    }
+    unsigned char* data = plutovg_surface_get_data(layer);
+    int stride = plutovg_surface_get_stride(layer);
+    unsigned char* rgba = (unsigned char*)malloc((size_t)w * h * 4);
+    if(rgba) {
+        /* (the surface: premultiplied B G R A in a 32 bit word; straight R G B A for the hook) */
+        for(int y = 0; y < h; y++) {
+            const uint32_t* row = (const uint32_t*)(data + (size_t)y * stride);
+            for(int x = 0; x < w; x++) {
+                uint32_t p = row[x];
+                unsigned a = p >> 24, r = (p >> 16) & 255, g = (p >> 8) & 255, b = p & 255;
+                unsigned char* o = rgba + ((size_t)y * w + x) * 4;
+                o[0] = a ? (unsigned char)((r * 255 + a / 2) / a) : 0;
+                o[1] = a ? (unsigned char)((g * 255 + a / 2) / a) : 0;
+                o[2] = a ? (unsigned char)((b * 255 + a / 2) / a) : 0;
+                o[3] = (unsigned char)a;
+            }
+        }
+        char* text = (char*)malloc(fv->length + 1);
+        if(text) {
+            memcpy(text, fv->data, fv->length);
+            text[fv->length] = 0;
+            plutosvg_filter_hook(text, box, rgba, w, h);
+            free(text);
+        }
+        for(int y = 0; y < h; y++) {
+            uint32_t* row = (uint32_t*)(data + (size_t)y * stride);
+            for(int x = 0; x < w; x++) {
+                const unsigned char* o = rgba + ((size_t)y * w + x) * 4;
+                unsigned a = o[3];
+                row[x] = ((uint32_t)a << 24) | (((o[0] * a + 127) / 255) << 16) | (((o[1] * a + 127) / 255) << 8) | ((o[2] * a + 127) / 255);
+            }
+        }
+        free(rgba);
+    }
+    plutovg_canvas_destroy(lc);
+    /* (the clip after the filter) */
+    bool fclip = apply_clip_path(element, context, state);
+    plutovg_canvas_save(keep);
+    plutovg_canvas_reset_matrix(keep);
+    plutovg_canvas_set_texture(keep, layer, PLUTOVG_TEXTURE_TYPE_PLAIN, 1.0f, NULL);
+    plutovg_canvas_fill_rect(keep, 0.0f, 0.0f, (float)w, (float)h);
+    plutovg_canvas_restore(keep);
+    if(fclip)
+        plutovg_canvas_restore(keep);
+    plutovg_surface_destroy(layer);
+}
+
+static void render_element0(const element_t* element, render_context_t* context, render_state_t* state)
+{
+    bool clipped = element != t_filter_noclip && apply_clip_path(element, context, state);
     switch(element->id) {
     case TAG_SVG:
         render_svg(element, context, state);

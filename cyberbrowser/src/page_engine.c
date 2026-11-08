@@ -35,6 +35,7 @@
 #include "cyber_profile.h"
 #include "cyber_sampler.h"
 #include "dom_store.h"
+#include "dom_snapshot.h"
 #include "dom_js.h"
 
 
@@ -841,9 +842,59 @@ static bool frame_images_in_same_frame(void) {
 
 uint64_t g_frame_layouts;
 
+/* (whether a frame's size differs from what its list was made at, remembering it) */
+static bool page_frame_size_changed(uint32_t node, double w, double h)
+{
+    static struct { uint32_t node; double w, h; } seen[64];
+    static int n;
+    for (int k = 0; k < n; k++)
+        if (seen[k].node == node) {
+            if (seen[k].w == w && seen[k].h == h) return false;
+            seen[k].w = w; seen[k].h = h;
+            return true;
+        }
+    if (n == 64) n = 0;
+    seen[n].node = node; seen[n].w = w; seen[n].h = h; n++;
+    return true;
+}
+
+/* The frames' documents, each laid out and listed on its own, for the page's list to
+ * take in at their <iframe>s.  Before the page's layout: a layout's tables are for the
+ * display list built right after it. */
+static void page_frames_build(void) {
+    extern int frame_api_paint_list(NodeId *iframes, NodeId *docs, JSContextHandle *ctxs, double *ws, double *hs, int cap);
+    enum { MAXF = 32 };
+    static NodeId iframes[MAXF], docs[MAXF];
+    static JSContextHandle ctxs[MAXF];
+    static double ws[MAXF], hs[MAXF];
+    display_list_frames_clear();
+    /* (CYBER_PAINT_FRAMES=0: frames not painted, to compare) */
+    { const char *pf = cyber_getenv("CYBER_PAINT_FRAMES"); if (pf && pf[0] == '0') return; }
+    int n = frame_api_paint_list(iframes, docs, ctxs, ws, hs, MAXF);
+    for (int k = 0; k < n; k++) {
+        HtmlDocument *fd = dom_snapshot_parsed(docs[k]);
+        if (!fd) continue;
+        html_document_find_roots(fd);
+        LayoutContext *lc = (LayoutContext *)calloc(1, sizeof(LayoutContext));
+        if (lc) {
+            lc->js_ctx = ctxs[k];
+            if (css_layout_run(lc, fd, NULL, ws[k], hs[k])) {
+                DisplayList dl;
+                display_list_init(&dl);
+                if (css_layout_build_display_list(lc, &dl)) display_list_frame_set((uint32_t)iframes[k], &dl);
+                display_list_free(&dl);
+            }
+            css_layout_tree_free(lc);
+            free(lc);
+        }
+        html_document_free(fd);
+    }
+}
+
 void page_frame_build(PageFrame *f, HtmlDocument *doc, ImageCache *images, int width, int height) {
     extern void dom_validity_refresh(void);
     dom_validity_refresh();
+    page_frames_build();
     /* The same document again (the layout mirror, updated in place): the
      * layout keeps its tree, restyles what changed and reuses the subtrees
      * that did not (css_layout_run); only the display list starts over. */
@@ -871,6 +922,31 @@ void page_frame_build(PageFrame *f, HtmlDocument *doc, ImageCache *images, int w
         return;
     }
     if (!page_quiet()) printf("Layout boxes: %d\n", f->layout.tree.count);
+    /* (the frames at the sizes this layout gives their elements: once more if that's new) */
+    {
+        extern int frame_api_paint_list(NodeId *iframes, NodeId *docs, JSContextHandle *ctxs, double *ws, double *hs, int cap);
+        extern void frame_api_note_box(NodeId iframe, double w, double h);
+        static int depth;
+        bool moved = false;
+        for (int i = 0; i < f->layout.tree.count && depth == 0; i++) {
+            HtmlNode *n = css_layout_box_node(&f->layout, i);
+            if (!n || n->type != HTML_NODE_ELEMENT || !n->store_id || !n->tag_name) continue;
+            if (strcasecmp(n->tag_name, "iframe") && strcasecmp(n->tag_name, "object") && strcasecmp(n->tag_name, "embed") && strcasecmp(n->tag_name, "frame")) continue;
+            const LayoutBox *b = &f->layout.boxes[i];
+            if (b->s->display == CSS_DISPLAY_NONE) continue;
+            if (page_frame_size_changed((uint32_t)n->store_id, b->content_width, b->content_height)) {
+                frame_api_note_box((NodeId)n->store_id, b->content_width, b->content_height);
+                moved = true;
+            }
+        }
+        if (moved) {
+            depth++;
+            page_frames_build();
+            ok = css_layout_run(&f->layout, doc, NULL, (double)width, (double)height);
+            depth--;
+            if (!ok) { css_layout_tree_free(&f->layout); return; }
+        }
+    }
     display_list_init(&f->dl);
     {
         CP_SCOPE("build-display-list");
@@ -899,7 +975,7 @@ void page_frame_build(PageFrame *f, HtmlDocument *doc, ImageCache *images, int w
         printf("Images still loading; painting without them for now\n");
     } else if (pending && frame_images_in_same_frame()) {
         static int depth;
-        if (depth < 2) {
+        if (depth < 5) {
             depth++;
             page_frame_build(f, doc, images, width, height);
             depth--;
@@ -1553,6 +1629,7 @@ bool page_engine_reset(void) {
     uint64_t t2 = t1;
     dom_store_reset();
     display_list_canvas_reset();
+    font_feature_values_reset();
     /* (the next document's store ids are the last one's again) */
     css_layout_forget_document();
     layout_api_invalidate();

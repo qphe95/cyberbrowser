@@ -10,6 +10,9 @@
 #include "font_registry.h"
 #include "url_whatwg.h"
 #include "image_cache.h"
+#include "raster_cpu.h"
+#include "svg_filter.h"
+#include "third_party/plutosvg/plutosvg.h"
 #include "svg_render.h"
 #include "browser_api_impl_types.h"
 #include "dom_store.h"
@@ -808,6 +811,222 @@ static bool grad_image_key(const char *g, int w, int h, char *key, size_t kn)
 
 static void on_async_image_loaded(const char *url, void *user_data);
 
+/* ---- reference filters ---- */
+/* (a filter run on the CPU: with a url(), or a blur on a box that isn't huge, no transforms about) */
+/* (CYBER_CPU_LAYERS=0: blur and masks on the GPU path only, to compare) */
+static bool dl_cpu_layers_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("CYBER_CPU_LAYERS"); on = !(e && e[0] == '0'); }
+    return on != 0;
+}
+static bool dl_box_filter_cpu(const LayoutBox *box, bool any_tf)
+{
+    if (!dl_cpu_layers_on() && !box->s->filt_url) return false;
+    if (box->s->filt_url) return box->s->filt_text != NULL;
+    if (any_tf || !box->s->filt_n || !box->s->filt_text || box->width * box->height > 1000000.0) return false;
+    for (int k = 0; k < box->s->filt_n && k < 8; k++)
+        if (box->s->filt_t[k] == 9 || (box->s->filt_t[k] == 10 && box->s->filt_ds[2] > 0.0f)) return true;
+    return false;
+}
+/* (what clips a CPU filtered box's output, per box; its subtree painted free of that) */
+static __thread float (*t_flt_clip)[4];
+typedef struct { LayoutContext *ctx; const char *want; char *buf; size_t bufn; bool got; } DlFltCasc;
+static const char *node_attribute_value(HtmlNode *node, const char *name);
+static void dl_flt_casc(void *ud, const char *prop, const char *value, bool important)
+{
+    DlFltCasc *c = (DlFltCasc *)ud;
+    (void)important;
+    if (!strcasecmp(prop, c->want)) { snprintf(c->buf, c->bufn, "%s", value); c->got = true; }
+}
+static const char *dl_flt_prop(void *ud, HtmlNode *n, const char *name, char *buf, size_t bufn)
+{
+    LayoutContext *ctx = (LayoutContext *)ud;
+    const char *v = node_attribute_value(n, name);
+    /* (a presentation attribute may go by style: its declarations, then the sheets') */
+    if (!strcmp(name, "flood-color") || !strcmp(name, "flood-opacity") || !strcmp(name, "lighting-color") || !strcmp(name, "color-interpolation-filters")) {
+        const char *st = node_attribute_value(n, "style");
+        size_t nl = strlen(name);
+        for (const char *q = st; q && (q = strcasestr_dl(q, name)) != NULL; q += nl) {
+            const char *r = q + nl;
+            while (*r == ' ') r++;
+            if (*r != ':') continue;
+            r++;
+            while (*r == ' ') r++;
+            size_t l = strcspn(r, ";");
+            while (l > 0 && r[l - 1] == ' ') l--;
+            if (l >= bufn) l = bufn - 1;
+            memcpy(buf, r, l);
+            buf[l] = 0;
+            return buf;
+        }
+        if (ctx && ctx->doc) {
+            DlFltCasc c = { ctx, name, buf, bufn, false };
+            int di = po_array_index_from_payload(&ctx->doc->array, n);
+            if (di >= 0) css_layout_dom_cascade(ctx, di, -1, dl_flt_casc, &c);
+            if (c.got) return buf;
+        }
+    }
+    return v;
+}
+static bool dl_flt_color(void *ud, const char *text, double *rgba) { (void)ud; return css_layout_parse_color_text(text, rgba); }
+static bool dl_flt_image(void *ud, const char *href, const uint8_t **px, int *w, int *h, int *ch)
+{
+    (void)ud;
+    if (!g_image_cache || !href || href[0] == '#') return false;
+    int hd = image_cache_request(g_image_cache, href, 0, 0);
+    return hd >= 0 && image_cache_get(g_image_cache, hd, w, h, ch, (uint8_t **)px);
+}
+/* (feImage of an element: it serialized into an svg of its own) */
+static bool dl_flt_element(void *ud, const char *id, int w, int h, const uint8_t **px, int *ch);
+static __thread LayoutContext *t_flt_ctx;
+static __thread double t_flt_color[4];
+static void dl_svg_filter_hook(const char *value, const float box[4], unsigned char *rgba, int w, int h)
+{
+    LayoutContext *ctx = t_flt_ctx;
+    if (!ctx || !ctx->doc) return;
+    SvgFilterEnv env = { ctx->doc, dl_flt_prop, dl_flt_color, dl_flt_image, dl_flt_element, (void *)ctx, { t_flt_color[0], t_flt_color[1], t_flt_color[2], t_flt_color[3] }, true };
+    svg_filter_apply(&env, value, box, 16.0f, rgba, w, h);
+}
+/* The commands since `from` (the box and its subtree) become an image of them filtered. */
+static void dl_ref_filter_end(LayoutContext *ctx, DisplayList *dl, int box_i, int from)
+{
+    const LayoutBox *box = &ctx->boxes[box_i];
+    int W = (int)ctx->viewport_width, H = (int)ctx->viewport_height, ncmd = dl->count - from;
+    if (W < 1 || H < 1 || W > 8192 || H > 8192 || from < 0 || ncmd < 0 || !g_image_cache) return;
+    /* a key: the commands, the list, the filter elements' attributes, the box */
+    uint64_t hs = 1469598103934665603ull;
+#define DLF_MIX(ptr, len) do { const unsigned char *hp = (const unsigned char *)(ptr); for (size_t hi = 0; hi < (size_t)(len); hi++) { hs ^= hp[hi]; hs *= 1099511628211ull; } } while (0)
+    if (ncmd) DLF_MIX(dl->cmds + from, (size_t)ncmd * sizeof(DisplayListCmd));
+    DLF_MIX(box->s->filt_text, strlen(box->s->filt_text));
+    {
+        float bx[4] = { (float)box->x, (float)box->y, (float)box->width, (float)box->height };
+        DLF_MIX(bx, sizeof bx);
+        int stack[64], sp = 0;
+        const char *p = box->s->filt_text;
+        while (ctx->doc && (p = strstr(p, "url(")) != NULL) {
+            p += 4;
+            const char *h = strchr(p, '#');
+            const char *e = strchr(p, ')');
+            if (!h || !e || h > e) continue;
+            char id[128];
+            size_t l = (size_t)(e - h - 1);
+            if (l >= sizeof id) l = sizeof id - 1;
+            memcpy(id, h + 1, l);
+            id[l] = 0;
+            while (l > 0 && (id[l - 1] == '"' || id[l - 1] == '\'' || id[l - 1] == ' ')) id[--l] = 0;
+            HtmlNode *f = html_document_get_element_by_id(ctx->doc, id);
+            /* (its descendants' attributes) */
+            HtmlNode *walk[64];
+            int w = 0;
+            if (f) walk[w++] = f;
+            while (w > 0) {
+                HtmlNode *n = walk[--w];
+                for (HtmlAttribute *a = n->attributes; a; a = a->next) { DLF_MIX(a->name, strlen(a->name)); DLF_MIX(a->value, strlen(a->value)); }
+                for (HtmlNode *k = html_node_first_child(ctx->doc, n); k; k = html_node_next_sibling(ctx->doc, k))
+                    if (k->type == HTML_NODE_ELEMENT && w < 64) walk[w++] = k;
+            }
+        }
+        (void)stack; (void)sp;
+    }
+#undef DLF_MIX
+    /* (with a margin past the viewport: a blur draws in what's beyond it) */
+    int M = 64;
+    if (!box->s->filt_url || strstr(box->s->filt_text, "blur(")) {
+        M = 8;
+        for (int k = 0; k < box->s->filt_n && k < 8; k++) if (box->s->filt_t[k] == 9) { int q = (int)ceil(box->s->filt_v[k] * 3.0) + 2; if (q > M) M = q; }
+        { int q = (int)ceil(box->s->filt_ds[2] * 3.0 + fabs(box->s->filt_ds[0]) + fabs(box->s->filt_ds[1])) + 2; if (q > M) M = q; }
+        if (box->s->filt_url && M < 64) M = 64;
+    }
+    if (M > 512) M = 512;
+    /* the area: all of it for a filter element (its regions go anywhere); else what the
+     * box and its subtree paint, as far as the filter reaches */
+    int ax = -M, ay = -M, WM = W + 2 * M, HM = H + 2 * M;
+    if (!box->s->filt_url) {
+        double x0 = box->x, y0 = box->y, x1 = box->x + box->width, y1 = box->y + box->height;
+        for (int k = from; k < dl->count; k++) {
+            const DisplayListCmd *c = &dl->cmds[k];
+            if (c->type == DL_XFORM || c->type == DL_MASK_BEGIN || c->type == DL_MASK_END || c->w <= 0.0f || c->h <= 0.0f) continue;
+            if (c->x < x0) x0 = c->x;
+            if (c->y < y0) y0 = c->y;
+            if (c->x + c->w > x1) x1 = c->x + c->w;
+            if (c->y + c->h > y1) y1 = c->y + c->h;
+        }
+        int ix0 = (int)floor(x0) - M, iy0 = (int)floor(y0) - M, ix1 = (int)ceil(x1) + M, iy1 = (int)ceil(y1) + M;
+        if (ix0 < -M) ix0 = -M;
+        if (iy0 < -M) iy0 = -M;
+        if (ix1 > W + M) ix1 = W + M;
+        if (iy1 > H + M) iy1 = H + M;
+        if (ix1 <= ix0 || iy1 <= iy0) { dl->count = from; return; }
+        ax = ix0; ay = iy0; WM = ix1 - ix0; HM = iy1 - iy0;
+    }
+    /* (what of it shows) */
+    int vx0 = ax > 0 ? ax : 0, vy0 = ay > 0 ? ay : 0, vx1 = ax + WM < W ? ax + WM : W, vy1 = ay + HM < H ? ay + HM : H;
+    if (vx1 <= vx0 || vy1 <= vy0) { dl->count = from; return; }
+    int VW = vx1 - vx0, VH = vy1 - vy0;
+    char key[64];
+    snprintf(key, sizeof key, "cyber-filt:%016llx:%dx%d", (unsigned long long)hs, VW, VH);
+    if (image_cache_status(g_image_cache, key) != 1) {
+        uint8_t *rgb_w = (uint8_t *)malloc((size_t)WM * HM * 3), *rgb_b = (uint8_t *)malloc((size_t)WM * HM * 3), *rgba = (uint8_t *)malloc((size_t)WM * HM * 4);
+        DisplayListCmd *cmds = (DisplayListCmd *)malloc((size_t)(ncmd + 1) * sizeof(DisplayListCmd));
+        DisplayMask *mcopy = dl->mask_count > 0 ? (DisplayMask *)malloc((size_t)dl->mask_count * sizeof(DisplayMask)) : NULL;
+        if (rgb_w && rgb_b && rgba && cmds && (mcopy || !dl->mask_count)) {
+            /* on white and on black: the difference is its alpha */
+            memset(&cmds[0], 0, sizeof cmds[0]);
+            cmds[0].type = DL_RECT;
+            cmds[0].x = 0; cmds[0].y = 0; cmds[0].w = (float)WM; cmds[0].h = (float)HM;
+            cmds[0].r = cmds[0].g = cmds[0].b = 0; cmds[0].a = 255;
+            if (ncmd) memcpy(cmds + 1, dl->cmds + from, (size_t)ncmd * sizeof(DisplayListCmd));
+            for (int k = 1; k <= ncmd; k++) {
+                cmds[k].x -= (float)ax; cmds[k].y -= (float)ay;
+                if (cmds[k].type == DL_BORDER) { cmds[k].u.border.x -= (float)ax; cmds[k].u.border.y -= (float)ay; }
+            }
+            if (dl->mask_count) {
+                memcpy(mcopy, dl->masks, (size_t)dl->mask_count * sizeof(DisplayMask));
+                for (int k = 0; k < dl->mask_count; k++) {
+                    mcopy[k].x -= (float)ax; mcopy[k].y -= (float)ay;
+                    if (mcopy[k].kind == 1 || mcopy[k].iw > 0.0f) { mcopy[k].ix -= (float)ax; mcopy[k].iy -= (float)ay; }
+                }
+            }
+            DisplayList tmp = *dl;
+            tmp.masks = mcopy;
+            tmp.cmds = cmds + 1; tmp.count = ncmd; tmp.capacity = ncmd;
+            raster_display_list(&tmp, rgb_w, WM, HM);
+            tmp.cmds = cmds; tmp.count = ncmd + 1; tmp.capacity = ncmd + 1;
+            raster_display_list(&tmp, rgb_b, WM, HM);
+            size_t N = (size_t)WM * HM;
+            for (size_t k = 0; k < N; k++) {
+                int a = 255;
+                for (int c = 0; c < 3; c++) { int v = 255 - (int)rgb_w[k * 3 + c] + (int)rgb_b[k * 3 + c]; if (v < a) a = v; }
+                if (a < 0) a = 0;
+                rgba[k * 4 + 3] = (uint8_t)a;
+                for (int c = 0; c < 3; c++) {
+                    int v = a > 0 ? ((int)rgb_b[k * 3 + c] * 255 + a / 2) / a : 0;
+                    rgba[k * 4 + c] = (uint8_t)(v > 255 ? 255 : v);
+                }
+            }
+            float bx[4] = { (float)box->x - ax, (float)box->y - ay, (float)box->width, (float)box->height };
+            SvgFilterEnv env = { ctx->doc, dl_flt_prop, dl_flt_color, dl_flt_image, dl_flt_element, (void *)ctx, { box->s->color_r, box->s->color_g, box->s->color_b, box->s->color_a }, false };
+            svg_filter_apply(&env, box->s->filt_text, bx, (float)box->s->font_size, rgba, WM, HM);
+            /* (the viewport's part) */
+            for (int y = 0; y < VH; y++) memmove(rgba + ((size_t)y * VW) * 4, rgba + ((size_t)(y + vy0 - ay) * WM + (vx0 - ax)) * 4, (size_t)VW * 4);
+            image_cache_put_rgba(g_image_cache, key, VW, VH, rgba);
+        }
+        free(rgb_w); free(rgb_b); free(rgba); free(cmds); free(mcopy);
+    }
+    /* the last transform set in there stays in force for what follows */
+    DisplayListCmd lastx;
+    bool has_x = false;
+    for (int k = from; k < dl->count; k++) if (dl->cmds[k].type == DL_XFORM) { lastx = dl->cmds[k]; has_x = true; }
+    dl->count = from;
+    int handle = image_cache_request(g_image_cache, key, VW, VH);
+    if (handle >= 0) {
+        display_list_add_image(dl, (float)vx0, (float)vy0, (float)VW, (float)VH, handle, 0.0f, 0.0f, 1.0f, 1.0f);
+        if (t_flt_clip && t_flt_clip[box_i][2] > t_flt_clip[box_i][0]) dl_clip_range(dl, from, t_flt_clip[box_i]);
+    }
+    if (has_x && display_list_reserve(dl, 1)) dl->cmds[dl->count++] = lastx;
+}
+
 void display_list_set_image_cache(ImageCache *cache)
 {
     g_image_cache = cache;
@@ -1472,7 +1691,7 @@ typedef struct { char *t; size_t n, cap; bool inh_only; int ng; char gname[10][8
 static void svg_casc_decl(void *ud, const char *prop, const char *value, bool important)
 {
     (void)important;
-    static const char *const keep[] = { "fill", "fill-opacity", "fill-rule", "stroke", "stroke-width", "stroke-opacity",
+    static const char *const keep[] = { "filter", "fill", "fill-opacity", "fill-rule", "stroke", "stroke-width", "stroke-opacity",
         "stroke-dasharray", "stroke-dashoffset", "stroke-linecap", "stroke-linejoin", "stroke-miterlimit", "opacity",
         "stop-color", "stop-opacity", "visibility", "color", "font-family", "font-size", "font-weight", "font-style",
         "text-anchor", "clip-rule", "paint-order", "vector-effect", "x", "y", "width", "height", "r", "cx", "cy", "rx",
@@ -1685,7 +1904,13 @@ static void emit_inline_svg(LayoutContext *ctx, DisplayList *dl, const LayoutBox
     if (image_cache_status(g_image_cache, key) != 1) {
         uint8_t *px = NULL;
         int pw = 0, ph = 0;
-        if (svg_render_rgba(b.s, b.n, cw, ch, color, &px, &pw, &ph)) {
+        t_flt_ctx = ctx;
+        t_flt_color[0] = box->s->color_r; t_flt_color[1] = box->s->color_g; t_flt_color[2] = box->s->color_b; t_flt_color[3] = box->s->color_a;
+        plutosvg_filter_hook = dl_svg_filter_hook;
+        bool svg_ok = svg_render_rgba(b.s, b.n, cw, ch, color, &px, &pw, &ph);
+        plutosvg_filter_hook = NULL;
+        t_flt_ctx = NULL;
+        if (svg_ok) {
             image_cache_put_rgba(g_image_cache, key, pw, ph, px);
             free(px);
         }
@@ -1696,6 +1921,614 @@ static void emit_inline_svg(LayoutContext *ctx, DisplayList *dl, const LayoutBox
     fill_box.s = &fill_style;
     fill_style.object_fit = 0;
     emit_image_async(dl, &fill_box, key, op);
+}
+
+static bool dl_flt_element(void *ud, const char *id, int w, int h, const uint8_t **px, int *ch)
+{
+    LayoutContext *ctx = (LayoutContext *)ud;
+    HtmlNode *n = ctx && ctx->doc ? html_document_get_element_by_id(ctx->doc, id) : NULL;
+    if (!n) return false;
+    int di = po_array_index_from_payload(&ctx->doc->array, n);
+    if (di < 0) return false;
+    SvgBuf b = { 0 };
+    char head[160];
+    snprintf(head, sizeof head, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%d\" height=\"%d\">", w, h);
+    sb_puts(&b, head);
+    LayoutContext *keep = t_svg_ctx;
+    t_svg_ctx = ctx;
+    svg_serialize(&ctx->doc->array, di, &b, false, (double)w, (double)h, NULL);
+    t_svg_ctx = keep;
+    sb_puts(&b, "</svg>");
+    if (!b.s) return false;
+    uint8_t *out = NULL;
+    int pw = 0, ph = 0;
+    plutosvg_filter_hook_t hk = plutosvg_filter_hook;
+    plutosvg_filter_hook = NULL;
+    bool ok = svg_render_rgba(b.s, b.n, w, h, 0x000000ff, &out, &pw, &ph);
+    plutosvg_filter_hook = hk;
+    free(b.s);
+    if (!ok) return false;
+    if (pw != w || ph != h) { free(out); return false; }
+    *px = out;
+    *ch = 4;
+    return true;
+}
+
+/* ---- CSS masks on the CPU ---- */
+#define MK_LAYERS 8
+typedef struct {
+    char image[1024], mode[24], repeat[32], position[96], clip[24], origin[24], size[64], composite[16];
+} MkLayer;
+/* (the top level pieces of a comma list) */
+static int mk_split(const char *v, char out[][1024], int cap)
+{
+    int n = 0, d = 0;
+    size_t l = 0;
+    char q = 0;
+    for (const char *p = v; p && n < cap; p++) {
+        char c = *p;
+        if (q) { if (c == q) q = 0; }
+        else if (c == '"' || c == '\'') q = c;
+        else if (c == '(') d++;
+        else if (c == ')') d--;
+        if (c == 0 || (c == ',' && d == 0 && !q)) {
+            out[n][l] = 0;
+            n++;
+            l = 0;
+            if (!c) break;
+            continue;
+        }
+        if (l + 1 < 1024) out[n][l++] = c;
+    }
+    return n;
+}
+static bool mk_is_box(const char *w)
+{
+    static const char *const b[] = { "border-box", "padding-box", "content-box", "fill-box", "stroke-box", "view-box", "margin-box", "border", "padding", "content" };
+    for (size_t k = 0; k < sizeof b / sizeof b[0]; k++) if (!strcasecmp(w, b[k])) return true;
+    return false;
+}
+/* (a layer's piece of the shorthand) */
+static void mk_shorthand(const char *t, MkLayer *L)
+{
+    char word[1024];
+    bool slash = false;
+    int nbox = 0;
+    for (const char *p = t; *p;) {
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (!*p) break;
+        size_t l = 0;
+        int d = 0;
+        if (*p == '/') { slash = true; p++; continue; }
+        while (*p && (d > 0 || (!isspace((unsigned char)*p) && *p != '/'))) {
+            if (*p == '(') d++;
+            else if (*p == ')') d--;
+            if (l + 1 < sizeof word) word[l++] = *p;
+            p++;
+        }
+        word[l] = 0;
+        if (!strcasecmp(word, "none") || strchr(word, '(')) {
+            /* (a position's calc() is rare in this shorthand: a function is the image) */
+            snprintf(L->image, sizeof L->image, "%s", word);
+        }
+        else if (!strcasecmp(word, "alpha") || !strcasecmp(word, "luminance") || !strcasecmp(word, "match-source")) snprintf(L->mode, sizeof L->mode, "%s", word);
+        else if (!strcasecmp(word, "add") || !strcasecmp(word, "subtract") || !strcasecmp(word, "intersect") || !strcasecmp(word, "exclude")) snprintf(L->composite, sizeof L->composite, "%s", word);
+        else if (!strcasecmp(word, "repeat") || !strcasecmp(word, "no-repeat") || !strcasecmp(word, "repeat-x") || !strcasecmp(word, "repeat-y") || !strcasecmp(word, "space") || !strcasecmp(word, "round")) {
+            size_t rl = strlen(L->repeat);
+            snprintf(L->repeat + rl, sizeof L->repeat - rl, "%s%s", rl ? " " : "", word);
+        }
+        else if (!strcasecmp(word, "no-clip")) snprintf(L->clip, sizeof L->clip, "no-clip");
+        else if (mk_is_box(word)) {
+            if (nbox == 0) { snprintf(L->origin, sizeof L->origin, "%s", word); if (!L->clip[0]) snprintf(L->clip, sizeof L->clip, "%s", word); }
+            else snprintf(L->clip, sizeof L->clip, "%s", word);
+            nbox++;
+        }
+        else if (slash) { size_t rl = strlen(L->size); snprintf(L->size + rl, sizeof L->size - rl, "%s%s", rl ? " " : "", word); }
+        else { size_t rl = strlen(L->position); snprintf(L->position + rl, sizeof L->position - rl, "%s%s", rl ? " " : "", word); }
+    }
+}
+static int mk_layers(const LayoutStyle *s, MkLayer *out)
+{
+    static __thread char parts[MK_LAYERS][1024];
+    memset(out, 0, sizeof(MkLayer) * MK_LAYERS);
+    int n = 0;
+    if (s->mk_text[8]) {
+        n = mk_split(s->mk_text[8], parts, MK_LAYERS);
+        for (int k = 0; k < n; k++) mk_shorthand(parts[k], &out[k]);
+    }
+    if (s->mk_text[0]) {
+        int ni = mk_split(s->mk_text[0], parts, MK_LAYERS);
+        n = ni;
+        for (int k = 0; k < ni; k++) { char *q = parts[k]; while (isspace((unsigned char)*q)) q++; snprintf(out[k].image, sizeof out[k].image, "%s", q); }
+    }
+    /* the longhands, cycled over the images */
+#define MK_LONG(idx, field)                                                                                 \
+    if (s->mk_text[idx]) {                                                                                  \
+        int nv = mk_split(s->mk_text[idx], parts, MK_LAYERS);                                               \
+        for (int k = 0; nv > 0 && k < n; k++) { char *q = parts[k % nv]; while (isspace((unsigned char)*q)) q++; snprintf(out[k].field, sizeof out[k].field, "%s", q); } \
+    }
+    MK_LONG(1, mode) MK_LONG(2, repeat) MK_LONG(3, position) MK_LONG(4, clip) MK_LONG(5, origin) MK_LONG(6, size) MK_LONG(7, composite)
+#undef MK_LONG
+    return n;
+}
+/* (a CPU mask for this box: an image of its own that isn't none) */
+static bool dl_mask_is_cpu(const LayoutBox *box)
+{
+    const LayoutStyle *s = box->s;
+    if (!dl_cpu_layers_on()) return false;
+    /* (one plain layer is the GPU mask's, far cheaper on real pages: YouTube has them
+     * in numbers.  Several layers, a composite or mode, a mask element: only here) */
+    {
+        const char *im = s->mk_text[0] ? s->mk_text[0] : s->mk_text[8];
+        bool hard = !im || strchr(im, ',') != NULL || strstr(im, "url(#") != NULL || s->mk_text[7] || s->mk_text[1] || s->mk_text[4] || s->mk_text[5];
+        if (im && !s->mk_text[0] && (strstr(im, "luminance") || strstr(im, "subtract") || strstr(im, "intersect") || strstr(im, "exclude"))) hard = true;
+        /* (a gradient's own commas are not layers) */
+        if (im && strstr(im, "gradient(") && !strstr(im, "), ") && !strstr(im, "),") && !s->mk_text[7] && !s->mk_text[1] && !s->mk_text[4] && !s->mk_text[5]) hard = false;
+        if (!hard) return false;
+    }
+    return (s->mk_text[0] || s->mk_text[8]) && (s->mask_kind || (s->mk_text[0] && strchr(s->mk_text[0], '(')) || (s->mk_text[8] && strchr(s->mk_text[8], '(')));
+}
+static void mk_box_rect(const LayoutBox *b, const char *name, double dflt_border, double r[4])
+{
+    (void)dflt_border;
+    double bl = b->s->border_left, bt = b->s->border_top, br = b->s->border_right, bb = b->s->border_bottom;
+    r[0] = b->x; r[1] = b->y; r[2] = b->width; r[3] = b->height;
+    if (!name || !name[0] || !strcasecmp(name, "border-box") || !strcasecmp(name, "stroke-box") || !strcasecmp(name, "view-box") || !strcasecmp(name, "border")) return;
+    if (!strcasecmp(name, "margin-box")) { r[0] -= b->margin_left; r[1] -= b->margin_top; r[2] += b->margin_left + b->margin_right; r[3] += b->margin_top + b->margin_bottom; return; }
+    r[0] += bl; r[1] += bt; r[2] -= bl + br; r[3] -= bt + bb;
+    if (!strcasecmp(name, "padding-box") || !strcasecmp(name, "padding")) return;
+    r[0] += b->padding_left; r[1] += b->padding_top; r[2] -= b->padding_left + b->padding_right; r[3] -= b->padding_top + b->padding_bottom;
+}
+static double mk_len(const char *w, double base, double fs)
+{
+    char *e;
+    double d = strtod(w, &e);
+    if (e == w) return 0.0;
+    if (*e == '%') return d / 100.0 * base;
+    if (!strncasecmp(e, "em", 2)) return d * fs;
+    return d;
+}
+/* (background-position's grammar: one to four words: where the image's corner goes) */
+static void mk_position(const char *t, double aw, double ah, double tw, double th, double fs, double *ox, double *oy)
+{
+    char w[4][32];
+    int n = 0;
+    const char *p = t;
+    while (n < 4) {
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (!*p) break;
+        size_t l = 0;
+        while (*p && !isspace((unsigned char)*p)) { if (l < 31) w[n][l++] = *p; p++; }
+        w[n++][l] = 0;
+    }
+    double x = 0.0, y = 0.0;
+    double fx = aw - tw, fy = ah - th;
+    #define ISX(s) (!strcasecmp(s, "left") || !strcasecmp(s, "right"))
+    #define ISY(s) (!strcasecmp(s, "top") || !strcasecmp(s, "bottom"))
+    #define ISC(s) (!strcasecmp(s, "center"))
+    #define KWV(s, f) (!strcasecmp(s, "left") || !strcasecmp(s, "top") ? 0.0 : !strcasecmp(s, "right") || !strcasecmp(s, "bottom") ? (f) : (f) / 2.0)
+    #define LENV(s, f) (s[strlen(s) - 1] == '%' ? strtod(s, NULL) / 100.0 * (f) : mk_len(s, 0.0, fs))
+    if (n == 1) {
+        if (ISY(w[0])) { y = KWV(w[0], fy); x = fx / 2.0; }
+        else if (ISX(w[0]) || ISC(w[0])) { x = KWV(w[0], fx); y = fy / 2.0; }
+        else { x = LENV(w[0], fx); y = fy / 2.0; }
+    } else if (n == 2) {
+        const char *a = w[0], *b = w[1];
+        if (ISY(a) || ISX(b)) { const char *t2 = a; a = b; b = t2; }
+        x = ISX(a) || ISC(a) ? KWV(a, fx) : LENV(a, fx);
+        y = ISY(b) || ISC(b) ? KWV(b, fy) : LENV(b, fy);
+    } else if (n >= 3) {
+        /* (edge offset pairs) */
+        int k = 0;
+        for (int side = 0; side < 2 && k < n; side++) {
+            const char *kw = w[k++];
+            const char *off = k < n && !ISX(w[k]) && !ISY(w[k]) && !ISC(w[k]) ? w[k++] : NULL;
+            bool horiz = ISX(kw) || (ISC(kw) && side == 0);
+            double f = horiz ? fx : fy, v = KWV(kw, f);
+            if (off) {
+                double o = LENV(off, f);
+                v += !strcasecmp(kw, "right") || !strcasecmp(kw, "bottom") ? -o : o;
+            }
+            if (horiz) x = v; else y = v;
+        }
+    }
+    *ox = x; *oy = y;
+}
+/* A mask element's content over w x h (user space from the box's corner), straight RGBA. */
+static uint8_t *mk_mask_element(LayoutContext *ctx, HtmlNode *mn, const LayoutBox *box, int w, int h)
+{
+    SvgBuf b = { 0 };
+    char head[256];
+    const char *cu = node_attribute_value(mn, "maskContentUnits");
+    bool obb = cu && !strcasecmp(cu, "objectBoundingBox");
+    {
+        double kx = obb ? 1.0 / (box->width > 0 ? box->width : 1.0) : 1.0, ky = obb ? 1.0 / (box->height > 0 ? box->height : 1.0) : 1.0;
+        snprintf(head, sizeof head, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%d\" height=\"%d\" viewBox=\"%f %f %f %f\">", w, h, -256.0 * kx, -256.0 * ky, w * kx, h * ky);
+    }
+    sb_puts(&b, head);
+    LayoutContext *keep = t_svg_ctx;
+    t_svg_ctx = ctx;
+    for (HtmlNode *k = html_node_first_child(ctx->doc, mn); k; k = html_node_next_sibling(ctx->doc, k)) {
+        if (k->type != HTML_NODE_ELEMENT) continue;
+        svg_serialize(&ctx->doc->array, po_array_index_from_payload(&ctx->doc->array, k), &b, false, w, h, NULL);
+    }
+    t_svg_ctx = keep;
+    sb_puts(&b, "</svg>");
+    if (!b.s) return NULL;
+    uint8_t *out = NULL;
+    int pw = 0, ph = 0;
+    plutosvg_filter_hook_t hk = plutosvg_filter_hook;
+    plutosvg_filter_hook = NULL;
+    bool ok = svg_render_rgba(b.s, b.n, w, h, 0x000000ff, &out, &pw, &ph);
+    plutosvg_filter_hook = hk;
+    free(b.s);
+    if (!ok || pw != w || ph != h) { free(out); return NULL; }
+    return out;
+}
+static __thread bool t_mk_incomplete;   /* (a layer's image wasn't there) */
+/* One layer's alpha over the area ax ay aw ah (floats 0..1). */
+static void mk_layer_alpha(LayoutContext *ctx, const LayoutBox *box, const MkLayer *L, int ax, int ay, int aw, int ah, float *o)
+{
+    const char *img = L->image;
+    while (isspace((unsigned char)*img)) img++;
+    size_t n = (size_t)aw * ah;
+    if (!*img || !strcasecmp(img, "none")) return;   /* (transparent) */
+    double org[4], clp[4];
+    mk_box_rect(box, L->origin, 1, org);
+    bool no_clip = !strcasecmp(L->clip, "no-clip");
+    mk_box_rect(box, L->clip[0] && !no_clip ? L->clip : "border-box", 1, clp);
+    double fs = box->s->font_size > 0 ? box->s->font_size : 16.0;
+    /* url(#id): a mask element */
+    if (!strncasecmp(img, "url(", 4)) {
+        const char *q = img + 4;
+        while (*q == ' ' || *q == '"' || *q == '\'') q++;
+        if (*q == '#') {
+            char id[128];
+            size_t l = 0;
+            q++;
+            while (*q && *q != ')' && *q != '"' && *q != '\'' && *q != ' ' && l + 1 < sizeof id) id[l++] = *q++;
+            id[l] = 0;
+            HtmlNode *mn = ctx->doc ? html_document_get_element_by_id(ctx->doc, id) : NULL;
+            if (!mn || !mn->tag_name || strcasecmp(mn->tag_name, "mask")) return;
+            int bw = (int)ceil(box->width), bh = (int)ceil(box->height);
+            /* (its region: -10%, 120% of the box unless it says, in the box's terms or user space) */
+            const char *mu = node_attribute_value(mn, "maskUnits");
+            bool user = mu && !strcasecmp(mu, "userSpaceOnUse");
+            double rx = -0.1 * box->width, ry = -0.1 * box->height, rw = 1.2 * box->width, rh = 1.2 * box->height;
+            const char *v;
+            #define MKR(name, var, base2) if ((v = node_attribute_value(mn, name)) != NULL) { char *e; double d = strtod(v, &e); if (e != v) var = *e == '%' ? d / 100.0 * (base2) : user ? d : d * (base2); }
+            MKR("x", rx, box->width) MKR("y", ry, box->height) MKR("width", rw, box->width) MKR("height", rh, box->height)
+            #undef MKR
+            int mw = bw + 512, mh = bh + 512;
+            uint8_t *px = mk_mask_element(ctx, mn, box, mw, mh);
+            if (!px) return;
+            const char *mt = node_attribute_value(mn, "mask-type");
+            bool alpha = (mt && !strcasecmp(mt, "alpha")) || !strcasecmp(L->mode, "alpha");
+            if (!strcasecmp(L->mode, "luminance")) alpha = false;
+            for (int y = 0; y < ah; y++)
+                for (int x = 0; x < aw; x++) {
+                    double ux = ax + x + 0.5 - box->x, uy = ay + y + 0.5 - box->y;
+                    if (ux < rx || uy < ry || ux >= rx + rw || uy >= ry + rh) continue;
+                    ux += 256.0; uy += 256.0;
+                    if (ux < 0 || uy < 0 || ux >= mw || uy >= mh) continue;
+                    const uint8_t *s = px + ((size_t)(int)uy * mw + (int)ux) * 4;
+                    float a = s[3] / 255.0f;
+                    o[(size_t)y * aw + x] = alpha ? a : a * (0.2125f * s[0] + 0.7154f * s[1] + 0.0721f * s[2]) / 255.0f;
+                }
+            free(px);
+            return;
+        }
+    }
+    /* the size: natural, or by mask-size */
+    double aw0 = org[2], ah0 = org[3];
+    double nw = 0.0, nh = 0.0, ratio = 0.0;
+    bool is_grad = !strncasecmp(img, "linear-gradient", 15) || !strncasecmp(img, "radial-gradient", 15) || !strncasecmp(img, "conic-gradient", 14) || !strncasecmp(img, "repeating-", 10);
+    char url[1024] = "";
+    if (!is_grad) {
+        if (strncasecmp(img, "url(", 4)) return;
+        const char *q = img + 4;
+        while (*q == ' ' || *q == '"' || *q == '\'') q++;
+        size_t l = 0;
+        while (*q && *q != ')' && *q != '"' && *q != '\'' && l + 1 < sizeof url) url[l++] = *q++;
+        url[l] = 0;
+        unsigned dims = 0;
+        float rt = 0.0f;
+        int iw = 0, ih = 0;
+        if (image_cache_natural_size(g_image_cache, url, &iw, &ih) && iw > 0 && ih > 0) { nw = iw; nh = ih; }
+        if (image_cache_intrinsic(g_image_cache, url, &dims, &rt)) {
+            if ((dims & 4) && rt > 0.0f) ratio = rt;
+            if (!(dims & 1)) nw = 0.0;
+            if (!(dims & 2)) nh = 0.0;
+        }
+        if (ratio <= 0.0 && nw > 0.0 && nh > 0.0) ratio = nw / nh;
+    }
+    /* mask-size */
+    double tw = -1.0, th = -1.0;
+    {
+        char a[32] = "", b[32] = "";
+        sscanf(L->size, "%31s %31s", a, b);
+        if (!strcasecmp(a, "cover") || !strcasecmp(a, "contain")) {
+            bool cover = !strcasecmp(a, "cover");
+            if (ratio <= 0.0) { tw = aw0; th = ah0; }
+            else if ((aw0 / ratio > ah0) == cover) { tw = aw0; th = aw0 / ratio; }
+            else { th = ah0; tw = ah0 * ratio; }
+        } else {
+            if (a[0] && strcasecmp(a, "auto")) tw = mk_len(a, aw0, fs);
+            if (b[0] && strcasecmp(b, "auto")) th = mk_len(b, ah0, fs);
+            if (tw < 0.0 && th < 0.0) {
+                tw = nw > 0.0 ? nw : (nh > 0.0 && ratio > 0.0 ? nh * ratio : -1.0);
+                th = nh > 0.0 ? nh : (nw > 0.0 && ratio > 0.0 ? nw / ratio : -1.0);
+                if (tw < 0.0 && th < 0.0) {
+                    if (ratio > 0.0) { if (aw0 / ratio > ah0) { th = ah0; tw = ah0 * ratio; } else { tw = aw0; th = aw0 / ratio; } }
+                    else { tw = aw0; th = ah0; }
+                }
+            } else if (tw < 0.0) tw = ratio > 0.0 ? th * ratio : nw > 0.0 ? nw : aw0;
+            else if (th < 0.0) th = ratio > 0.0 ? tw / ratio : nh > 0.0 ? nh : ah0;
+        }
+    }
+    if (tw <= 0.0 || th <= 0.0) return;
+    /* mask-repeat */
+    int rx = 1, ry = 1;   /* 0 no, 1 repeat, 2 space, 3 round */
+    {
+        char a[16] = "", b[16] = "";
+        sscanf(L->repeat, "%15s %15s", a, b);
+        if (!strcasecmp(a, "repeat-x")) { rx = 1; ry = 0; }
+        else if (!strcasecmp(a, "repeat-y")) { rx = 0; ry = 1; }
+        else if (a[0]) {
+            rx = !strcasecmp(a, "no-repeat") ? 0 : !strcasecmp(a, "space") ? 2 : !strcasecmp(a, "round") ? 3 : 1;
+            const char *bb = b[0] ? b : a;
+            ry = !strcasecmp(bb, "no-repeat") ? 0 : !strcasecmp(bb, "space") ? 2 : !strcasecmp(bb, "round") ? 3 : 1;
+        }
+    }
+    if (rx == 3) { double c = fmax(1.0, round(aw0 / tw)); double was = tw; tw = aw0 / c; if (ry != 3 && !L->size[0] && ratio > 0.0) th = th * tw / was; }
+    if (ry == 3) { double c = fmax(1.0, round(ah0 / th)); th = ah0 / c; }
+    double ox = 0.0, oy = 0.0;
+    mk_position(L->position[0] ? L->position : "0 0", aw0, ah0, tw, th, fs, &ox, &oy);
+    double sx = tw, sy = th;
+    if (rx == 2) { int c = (int)floor(aw0 / tw); if (c >= 2) { sx = (aw0 - c * tw) / (c - 1) + tw; ox = 0.0; } else rx = 0; }
+    if (ry == 2) { int c = (int)floor(ah0 / th); if (c >= 2) { sy = (ah0 - c * th) / (c - 1) + th; oy = 0.0; } else ry = 0; }
+    ox += org[0]; oy += org[1];
+    int pw = (int)ceil(tw), ph = (int)ceil(th);
+    if (pw < 1) pw = 1;
+    if (ph < 1) ph = 1;
+    if (pw > 8192 || ph > 8192) return;
+    const uint8_t *px = NULL;
+    uint8_t *grad = NULL;
+    int iw = 0, ih = 0, ich = 4;
+    if (is_grad) {
+        grad = grad_raster(img, pw, ph);
+        px = grad; iw = pw; ih = ph;
+    } else {
+        int hd = image_cache_request(g_image_cache, url, pw, ph);
+        if (hd < 0 || !image_cache_get(g_image_cache, hd, &iw, &ih, &ich, (uint8_t **)&px)) {
+            if (image_cache_status(g_image_cache, url) >= 0) t_mk_incomplete = true;
+            return;
+        }
+    }
+    if (!px || iw < 1 || ih < 1) { free(grad); return; }
+    bool lum = !strcasecmp(L->mode, "luminance");
+    for (int y = 0; y < ah; y++) {
+        double cy = ay + y + 0.5;
+        if (!no_clip && (cy < clp[1] || cy >= clp[1] + clp[3])) continue;
+        for (int x = 0; x < aw; x++) {
+            double cx = ax + x + 0.5;
+            if (!no_clip && (cx < clp[0] || cx >= clp[0] + clp[2])) continue;
+            double ux = cx - ox, uy = cy - oy;
+            if (rx) { ux -= floor(ux / sx) * sx; }
+            if (ry) { uy -= floor(uy / sy) * sy; }
+            if (ux < 0 || uy < 0 || ux >= tw || uy >= th) continue;
+            int ix = (int)(ux / tw * iw), iy = (int)(uy / th * ih);
+            if (ix >= iw) ix = iw - 1;
+            if (iy >= ih) iy = ih - 1;
+            const uint8_t *s = px + ((size_t)iy * iw + ix) * ich;
+            float a = ich >= 4 ? s[3] / 255.0f : 1.0f;
+            float v = a;
+            if (lum) v = a * ((ich >= 3 ? 0.2125f * s[0] + 0.7154f * s[1] + 0.0721f * s[2] : (float)s[0]) / 255.0f);
+            o[(size_t)y * aw + x] = v;
+        }
+    }
+    free(grad);
+    (void)n;
+}
+/* The commands since `from` become an image of them through the box's mask. */
+static void dl_cpu_mask_end(LayoutContext *ctx, DisplayList *dl, int box_i, int from)
+{
+    const LayoutBox *box = &ctx->boxes[box_i];
+    int W = (int)ctx->viewport_width, H = (int)ctx->viewport_height, ncmd = dl->count - from;
+    if (W < 1 || H < 1 || W > 8192 || H > 8192 || from < 0 || ncmd <= 0 || !g_image_cache) return;
+    static __thread MkLayer L[MK_LAYERS];
+    int nl = mk_layers(box->s, L);
+    if (nl <= 0) return;
+    /* the area: the box, or all when a layer doesn't clip */
+    int ax = 0, ay = 0, aw = W, ah = H;
+    bool all = false;
+    for (int k = 0; k < nl; k++) all = all || !strcasecmp(L[k].clip, "no-clip");
+    if (!all) {
+        int x0 = (int)floor(box->x), y0 = (int)floor(box->y), x1 = (int)ceil(box->x + box->width), y1 = (int)ceil(box->y + box->height);
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 > W) x1 = W;
+        if (y1 > H) y1 = H;
+        if (x1 <= x0 || y1 <= y0) { dl->count = from; return; }
+        ax = x0; ay = y0; aw = x1 - x0; ah = y1 - y0;
+    }
+    uint64_t hs = 1469598103934665603ull;
+#define DLF_MIX(ptr, len) do { const unsigned char *hp = (const unsigned char *)(ptr); for (size_t hi = 0; hi < (size_t)(len); hi++) { hs ^= hp[hi]; hs *= 1099511628211ull; } } while (0)
+    DLF_MIX(dl->cmds + from, (size_t)ncmd * sizeof(DisplayListCmd));
+    for (int k = 0; k < 9; k++) if (box->s->mk_text[k]) DLF_MIX(box->s->mk_text[k], strlen(box->s->mk_text[k]));
+    {
+        float bx[4] = { (float)box->x, (float)box->y, (float)box->width, (float)box->height };
+        DLF_MIX(bx, sizeof bx);
+        for (int k = 0; k < nl; k++) {
+            /* (whether its image has loaded) */
+            if (!strncasecmp(L[k].image, "url(", 4)) {
+                char lu[1024];
+                const char *q = L[k].image + 4;
+                while (*q == ' ' || *q == '"' || *q == '\'') q++;
+                size_t l = 0;
+                while (*q && *q != ')' && *q != '"' && *q != '\'' && l + 1 < sizeof lu) lu[l++] = *q++;
+                lu[l] = 0;
+                if (lu[0] && lu[0] != '#') {
+                    int st = image_cache_status(g_image_cache, lu) < 0;
+                    DLF_MIX(&st, sizeof st);
+                }
+            }
+            const char *hash = strchr(L[k].image, '#');
+            HtmlNode *mn = hash && ctx->doc ? NULL : NULL;
+            if (hash && ctx->doc) {
+                char id[128];
+                size_t l = 0;
+                for (const char *q = hash + 1; *q && *q != ')' && *q != '"' && *q != '\'' && l + 1 < sizeof id; q++) id[l++] = *q;
+                id[l] = 0;
+                mn = html_document_get_element_by_id(ctx->doc, id);
+            }
+            HtmlNode *walk[64];
+            int w = 0;
+            if (mn) walk[w++] = mn;
+            while (w > 0) {
+                HtmlNode *q = walk[--w];
+                for (HtmlAttribute *a = q->attributes; a; a = a->next) { DLF_MIX(a->name, strlen(a->name)); DLF_MIX(a->value, strlen(a->value)); }
+                for (HtmlNode *c = html_node_first_child(ctx->doc, q); c; c = html_node_next_sibling(ctx->doc, c))
+                    if (c->type == HTML_NODE_ELEMENT && w < 64) walk[w++] = c;
+            }
+        }
+    }
+#undef DLF_MIX
+    char key[64];
+    snprintf(key, sizeof key, "cyber-mask:%016llx:%dx%d", (unsigned long long)hs, aw, ah);
+    /* (images on their way: this frame's, not to be kept; the build after they're in keeps it) */
+    bool mk_busy = image_cache_has_pending(g_image_cache);
+    if (mk_busy || image_cache_status(g_image_cache, key) != 1) {
+        size_t N = (size_t)aw * ah;
+        uint8_t *rgb_w = (uint8_t *)malloc(N * 3), *rgb_b = (uint8_t *)malloc(N * 3), *rgba = (uint8_t *)malloc(N * 4);
+        DisplayListCmd *cmds = (DisplayListCmd *)malloc((size_t)(ncmd + 1) * sizeof(DisplayListCmd));
+        DisplayMask *mcopy = dl->mask_count > 0 ? (DisplayMask *)malloc((size_t)dl->mask_count * sizeof(DisplayMask)) : NULL;
+        float *acc = (float *)calloc(N, sizeof(float)), *lay = (float *)malloc(N * sizeof(float));
+        t_mk_incomplete = false;
+        if (rgb_w && rgb_b && rgba && cmds && acc && lay && (mcopy || !dl->mask_count)) {
+            memset(&cmds[0], 0, sizeof cmds[0]);
+            cmds[0].type = DL_RECT;
+            cmds[0].w = (float)aw; cmds[0].h = (float)ah;
+            cmds[0].a = 255;
+            memcpy(cmds + 1, dl->cmds + from, (size_t)ncmd * sizeof(DisplayListCmd));
+            for (int k = 1; k <= ncmd; k++) {
+                cmds[k].x -= (float)ax; cmds[k].y -= (float)ay;
+                if (cmds[k].type == DL_BORDER) { cmds[k].u.border.x -= (float)ax; cmds[k].u.border.y -= (float)ay; }
+            }
+            if (dl->mask_count) {
+                memcpy(mcopy, dl->masks, (size_t)dl->mask_count * sizeof(DisplayMask));
+                for (int k = 0; k < dl->mask_count; k++) {
+                    mcopy[k].x -= (float)ax; mcopy[k].y -= (float)ay;
+                    if (mcopy[k].kind == 1 || mcopy[k].iw > 0.0f) { mcopy[k].ix -= (float)ax; mcopy[k].iy -= (float)ay; }
+                }
+            }
+            DisplayList tmp = *dl;
+            tmp.masks = mcopy;
+            tmp.cmds = cmds + 1; tmp.count = ncmd; tmp.capacity = ncmd;
+            raster_display_list(&tmp, rgb_w, aw, ah);
+            tmp.cmds = cmds; tmp.count = ncmd + 1; tmp.capacity = ncmd + 1;
+            raster_display_list(&tmp, rgb_b, aw, ah);
+            /* the layers, the last at the bottom; each composited over those below by its operator */
+            /* (an image that came in while going through them, with no word of it left to
+             * come: through them again) */
+            for (int round = 0; round < 2; round++) {
+            t_mk_incomplete = false;
+            memset(acc, 0, N * sizeof(float));
+            for (int k = nl - 1; k >= 0; k--) {
+                memset(lay, 0, N * sizeof(float));
+                mk_layer_alpha(ctx, box, &L[k], ax, ay, aw, ah, lay);
+                const char *op = L[k].composite;
+                int o = !strcasecmp(op, "subtract") ? 1 : !strcasecmp(op, "intersect") ? 2 : !strcasecmp(op, "exclude") ? 3 : 0;
+                if (k == nl - 1) o = 0;
+                for (size_t i = 0; i < N; i++) {
+                    float s = lay[i], d = acc[i];
+                    acc[i] = o == 1 ? s * (1 - d) : o == 2 ? s * d : o == 3 ? s * (1 - d) + d * (1 - s) : s + d * (1 - s);
+                }
+            }
+            if (!t_mk_incomplete) break;
+            }
+            for (size_t k = 0; k < N; k++) {
+                int a = 255;
+                for (int c = 0; c < 3; c++) { int v = 255 - (int)rgb_w[k * 3 + c] + (int)rgb_b[k * 3 + c]; if (v < a) a = v; }
+                if (a < 0) a = 0;
+                for (int c = 0; c < 3; c++) {
+                    int v = a > 0 ? ((int)rgb_b[k * 3 + c] * 255 + a / 2) / a : 0;
+                    rgba[k * 4 + c] = (uint8_t)(v > 255 ? 255 : v);
+                }
+                rgba[k * 4 + 3] = (uint8_t)lround(a * acc[k]);
+            }
+            /* (not all there: for now, under a name of its own) */
+            if (t_mk_incomplete || mk_busy) { static unsigned mk_seq; size_t kl = strlen(key); snprintf(key + kl, sizeof key - kl, "p%u", ++mk_seq); }
+            image_cache_put_rgba(g_image_cache, key, aw, ah, rgba);
+        }
+        free(rgb_w); free(rgb_b); free(rgba); free(cmds); free(mcopy); free(acc); free(lay);
+    }
+    DisplayListCmd lastx;
+    bool has_x = false;
+    for (int k = from; k < dl->count; k++) if (dl->cmds[k].type == DL_XFORM) { lastx = dl->cmds[k]; has_x = true; }
+    dl->count = from;
+    int handle = image_cache_request(g_image_cache, key, aw, ah);
+    if (handle >= 0) display_list_add_image(dl, (float)ax, (float)ay, (float)aw, (float)ah, handle, 0.0f, 0.0f, 1.0f, 1.0f);
+    if (has_x && display_list_reserve(dl, 1)) dl->cmds[dl->count++] = lastx;
+}
+
+/* ---- frames' display lists, by their <iframe> ---- */
+typedef struct { uint32_t node; DisplayList dl; } DlFrameEntry;
+static DlFrameEntry g_dl_frames[64];
+static int g_dl_nframes;
+void display_list_frames_clear(void)
+{
+    for (int k = 0; k < g_dl_nframes; k++) display_list_free(&g_dl_frames[k].dl);
+    g_dl_nframes = 0;
+}
+void display_list_frame_set(uint32_t node, const DisplayList *src)
+{
+    if (!src || g_dl_nframes >= 64) return;
+    DlFrameEntry *e = &g_dl_frames[g_dl_nframes];
+    display_list_init(&e->dl);
+    e->node = node;
+    if (src->count > 0 && !display_list_reserve(&e->dl, src->count)) return;
+    if (src->count > 0) memcpy(e->dl.cmds, src->cmds, (size_t)src->count * sizeof(DisplayListCmd));
+    e->dl.count = src->count;
+    for (int k = 0; k < src->mask_count; k++) dl_add_mask(&e->dl, &src->masks[k]);
+    g_dl_nframes++;
+}
+static bool dl_frame_has(uint32_t node)
+{
+    for (int k = 0; k < g_dl_nframes; k++) if (g_dl_frames[k].node == node) return true;
+    return false;
+}
+/* (the frame's commands at the iframe's content box, within it) */
+static void dl_emit_frame(DisplayList *dl, const LayoutBox *box, uint32_t node)
+{
+    const DlFrameEntry *e = NULL;
+    for (int k = 0; k < g_dl_nframes && !e; k++) if (g_dl_frames[k].node == node) e = &g_dl_frames[k];
+    if (!e || !e->dl.count) return;
+    float ox = (float)(box->x + box->s->border_left + box->padding_left), oy = (float)(box->y + box->s->border_top + box->padding_top);
+    int from = dl->count, mbase = dl->mask_count;
+    for (int k = 0; k < e->dl.mask_count; k++) {
+        DisplayMask m = e->dl.masks[k];
+        m.x += ox; m.y += oy;
+        if (m.kind == 1 || m.iw > 0.0f) { m.ix += ox; m.iy += oy; }
+        dl_add_mask(dl, &m);
+    }
+    if (!display_list_reserve(dl, e->dl.count)) return;
+    for (int k = 0; k < e->dl.count; k++) {
+        DisplayListCmd c = e->dl.cmds[k];
+        if (c.type == DL_MASK_BEGIN || c.type == DL_MASK_END) c.u.mask_index += mbase;
+        if (c.type == DL_XFORM) {
+            /* (about the frame's origin: p -> M(p - o) + o) */
+            float *m = c.u.xf;
+            m[4] += ox - (m[0] * ox + m[2] * oy);
+            m[5] += oy - (m[1] * ox + m[3] * oy);
+        } else {
+            c.x += ox; c.y += oy;
+            if (c.type == DL_BORDER) { c.u.border.x += ox; c.u.border.y += oy; }
+        }
+        dl->cmds[dl->count++] = c;
+    }
+    float clip[4] = { ox, oy, ox + (float)box->content_width, oy + (float)box->content_height };
+    dl_clip_range(dl, from, clip);
 }
 
 static bool dl_cv_applies(const LayoutContext *ctx, int i);
@@ -2041,6 +2874,21 @@ static void dl_clip_range(DisplayList *dl, int from, const float c[4])
 {
     for (int k = from; k < dl->count; k++) {
         DisplayListCmd *cmd = &dl->cmds[k];
+        /* (a filter's output is clipped too, not only what goes into it: in ex_rx) */
+        if (cmd->type == DL_MASK_BEGIN) {
+            DisplayMask *fm = &dl->masks[cmd->u.mask_index];
+            if (fm->kind == 9 || fm->kind == 10) {
+                bool had = fm->ex_rx[2] > fm->ex_rx[0] || fm->ex_rx[3] > fm->ex_rx[1];
+                fm->ex_rx[0] = had && fm->ex_rx[0] > c[0] ? fm->ex_rx[0] : c[0];
+                fm->ex_rx[1] = had && fm->ex_rx[1] > c[1] ? fm->ex_rx[1] : c[1];
+                fm->ex_rx[2] = had && fm->ex_rx[2] < c[2] ? fm->ex_rx[2] : c[2];
+                fm->ex_rx[3] = had && fm->ex_rx[3] < c[3] ? fm->ex_rx[3] : c[3];
+                if (fm->ex_rx[2] <= fm->ex_rx[0]) fm->ex_rx[2] = fm->ex_rx[0] + 0.001f;
+                if (fm->ex_rx[3] <= fm->ex_rx[1]) fm->ex_rx[3] = fm->ex_rx[1] + 0.001f;
+            }
+            continue;
+        }
+        if (cmd->type == DL_MASK_END) continue;
         float x0 = cmd->x, y0 = cmd->y, x1 = cmd->x + cmd->w, y1 = cmd->y + cmd->h;
         if (x0 >= c[0] && y0 >= c[1] && x1 <= c[2] && y1 <= c[3]) continue;
         float nx0 = x0 > c[0] ? x0 : c[0], ny0 = y0 > c[1] ? y0 : c[1];
@@ -2293,7 +3141,7 @@ static void paint_gap_rules(DisplayList *dl, const LayoutBox *box, int idx, floa
 /* A multi-column container's column rules (CSS Multicol 1 4): in the middle
  * of each gap between columns with content, as high as the columns, in the
  * rule's style (a left border of that width, painted as one). */
-static void paint_column_rules(DisplayList *dl, const LayoutBox *mb, float op)
+static void paint_column_rules(const LayoutContext *ctx, int idx, DisplayList *dl, const LayoutBox *mb, float op)
 {
     const LayoutStyle *s = mb->s;
     if (mb->mc_n <= 0 || mb->mc_used < 1) return;
@@ -2302,6 +3150,44 @@ static void paint_column_rules(DisplayList *dl, const LayoutBox *mb, float op)
     bool rtl = s->direction == 1;
     float U = (float)mb->content_width, W = mb->mc_w, G = mb->mc_gap, H = mb->mc_h;
     bool wrap = mb->mc_rgap >= 0.0f;
+    /* (spanners: each run of columns between them its rules, as tall as it is,
+     * between the columns it has content in) */
+    if (!wrap) {
+        bool any_span = false;
+        for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0 && !any_span; c = ctx->tree.nodes[c].next_sibling_idx)
+            any_span = ctx->boxes[c].mc_span && ctx->boxes[c].s->display != CSS_DISPLAY_NONE;
+        if (any_span) {
+            int k = ctx->tree.nodes[idx].first_child_idx;
+            while (k >= 0) {
+                if (ctx->boxes[k].mc_span) { k = ctx->tree.nodes[k].next_sibling_idx; continue; }
+                float dst = ctx->boxes[k].mc_dst, src = ctx->boxes[k].mc_src, h = ctx->boxes[k].mc_seg_h, most = src;
+                for (; k >= 0 && !ctx->boxes[k].mc_span; k = ctx->tree.nodes[k].next_sibling_idx) {
+                    const LayoutBox *kb = &ctx->boxes[k];
+                    if (kb->s->display == CSS_DISPLAY_NONE || kb->s->position == CSS_POSITION_ABSOLUTE || kb->s->position == CSS_POSITION_FIXED) continue;
+                    float e = (float)(kb->y + kb->height);
+                    if (e > most) most = e;
+                }
+                if (h <= 0.5f || most <= src + 0.01f) continue;
+                int used = (int)ceilf((most - src - 0.01f) / h);
+                /* (the last run of a container of a height, balanced: its columns to the content edge, every one) */
+                if (k < 0 && s->height_set && s->column_fill == 0) used = mb->mc_n;
+                if (used > mb->mc_n) used = mb->mc_n;
+                int Nr = mb->mc_n - 1 > 0 ? mb->mc_n - 1 : 0;
+                for (int g = 0; g + 1 < used; g++) {
+                    int style;
+                    float rw, c[4];
+                    if (!gap_rule_of(s, 0, g, Nr, op, &style, &rw, c)) continue;
+                    float mid = (g + 1) * (W + G) - G * 0.5f;
+                    if (rtl) mid = U - mid;
+                    float st = dst, en = dst + h;
+                    if (!s->gr[0].inset[0].oj) st += s->gr[0].inset[0].px;
+                    if (!s->gr[0].inset[1].oj) en -= s->gr[0].inset[1].px;
+                    if (en > st) gap_rule_piece(dl, mb, 0, style, left + mid - rw * 0.5f, st, rw, en - st, c);
+                }
+            }
+            return;
+        }
+    }
     int per = wrap ? mb->mc_n : mb->mc_used;      /* (columns in a row) */
     int used = mb->mc_used, rows = wrap ? (used + per - 1) / per : 1;
     float RG = wrap ? mb->mc_rgap : 0.0f;
@@ -4149,12 +5035,20 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
     float (*clip)[4] = (float (*)[4])malloc(((size_t)n + 1) * sizeof(*clip));
     /* (offsets: while something is scrolled, or a sticky box is there to place) */
     bool any_sticky = false;
-    for (int k = 0; k < n && !any_sticky; k++) any_sticky = ctx->boxes[k].s && ctx->boxes[k].s->position == CSS_POSITION_STICKY;
+    for (int k = 0; k < n && !any_sticky; k++) any_sticky = ctx->boxes[k].s && (ctx->boxes[k].s->position == CSS_POSITION_STICKY || ctx->boxes[k].s->anc_used);
     float (*off)[2] = g_dom_scrolls.n || any_sticky ? (float (*)[2])calloc((size_t)n + 1, sizeof(*off)) : NULL;
     float view_x = 0.0f, view_y = 0.0f;
     if (off) dl_viewport_scroll(ctx, &view_x, &view_y);
     bool fixed = false;
     g_dom_scrolls.paint = false;
+    bool flt_tf = false, any_flt = false;
+    for (int k = 0; k < n; k++) {
+        const LayoutStyle *ks = ctx->boxes[k].s;
+        if (!ks) continue;
+        flt_tf = flt_tf || ks->tf_text || ks->tf_rotate || ks->tf_scale || ks->op_kind;
+        any_flt = any_flt || ks->filt_url || ks->filt_n;
+    }
+    t_flt_clip = any_flt ? (float (*)[4])calloc((size_t)n + 1, sizeof(*t_flt_clip)) : NULL;
     if (clip) {
         for (int i = 0; i < n; i++) {
             int p = ctx->tree.nodes[i].parent_idx;
@@ -4235,6 +5129,31 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                 off[i][0] -= dx;
                 off[i][1] -= dy;
             }
+            /* (placed against an anchor before the scrolling: where the anchor's scrolling takes it) */
+            if (off && b->s->anc_used > 0 && b->s->anc_used - 1 < i) {
+                int an = b->s->anc_used - 1;
+                /* (layout has an anchor's element scrollers in its rect, not these) */
+                if (b->s->position == CSS_POSITION_FIXED) {
+                    bool an_fixed = false;
+                    for (int q = an; q >= 0 && !an_fixed; q = ctx->tree.nodes[q].parent_idx) an_fixed = ctx->boxes[q].s->position == CSS_POSITION_FIXED;
+                    if (!an_fixed) { off[i][0] += view_x; off[i][1] += view_y; }
+                }
+                if (ctx->boxes[an].s->position == CSS_POSITION_STICKY) {
+                    float dx, dy;
+                    dl_sticky_shift(ctx, an, view_x, view_y, &dx, &dy);
+                    off[i][0] -= dx;
+                    off[i][1] -= dy;
+                }
+            }
+            /* (an object or embed showing a frame: its fallback content not) */
+            {
+                int op = ctx->tree.nodes[i].parent_idx;
+                HtmlNode *on = op >= 0 && ctx->doc ? css_layout_box_node(ctx, op) : NULL;
+                if (on && on->type == HTML_NODE_ELEMENT && on->tag_name && on->store_id && !strcasecmp(on->tag_name, "object") && dl_frame_has(on->store_id)) {
+                    c[0] = c[1] = 1e30f;
+                    c[2] = c[3] = -1e30f;
+                }
+            }
             /* (a line-clamp container that clamped: its content box's end, for what is in it) */
             {
                 int cp = ctx->tree.nodes[i].parent_idx;
@@ -4272,11 +5191,19 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                     c[2] = c[3] = -1e30f;
                 }
             }
+            /* (a CPU filter: what clips it clips its result; into it, nothing yet) */
+            if (t_flt_clip && dl_box_filter_cpu(b, flt_tf) && !(c[0] > c[2])) {
+                memcpy(t_flt_clip[i], c, sizeof(c));
+                c[0] = c[1] = -1e30f;
+                c[2] = c[3] = 1e30f;
+            }
             memcpy(clip[i], c, sizeof(c));
         }
     }
     g_dom_scrolls.fixed = fixed;
     bool ok = build_display_list_impl(ctx, dl, clip, off);
+    free(t_flt_clip);
+    t_flt_clip = NULL;
     free(clip);
     free(off);
     return ok;
@@ -4517,7 +5444,7 @@ static bool paint_is_context(const LayoutContext *ctx, int i)
         if (p >= 0 && (ctx->boxes[p].s->display == CSS_DISPLAY_FLEX || ctx->boxes[p].s->display == CSS_DISPLAY_GRID))
             return true;
     }
-    if (b->s->blend || b->s->filt_n || b->s->bf_n || dl_paint_contained(b)) return true;   /* (mix-blend-mode, filter: a stacking context, painted as z-index 0) */
+    if (b->s->blend || b->s->filt_n || b->s->filt_url || b->s->bf_n || dl_paint_contained(b)) return true;   /* (mix-blend-mode, filter: a stacking context, painted as z-index 0) */
     return b->s->opacity_set && b->s->opacity < 1.0;
 }
 
@@ -4723,6 +5650,8 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         int cbr_from = -1;
         while (nmask > 0 && !mask_covers(ctx, i, mask_start[nmask - 1], mask_end[nmask - 1])) {
             nmask--;
+            if (mask_idx[nmask] <= -100000000) { dl_cpu_mask_end(ctx, dl, mask_start[nmask], -100000000 - mask_idx[nmask]); continue; }
+            if (mask_idx[nmask] <= -1000) { dl_ref_filter_end(ctx, dl, mask_start[nmask], -1000 - mask_idx[nmask]); continue; }
             dl_add_mask_cmd(dl, DL_MASK_END, mask_idx[nmask], &dl->masks[mask_idx[nmask]]);
         }
         for (int r = 0; r < nreg && nmask < 64; r++) {
@@ -4792,6 +5721,12 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             m.image_handle = -1;
             m.x = (float)box->x; m.y = (float)box->y; m.w = (float)box->width; m.h = (float)box->height;
             m.nstops = box->s->bf_n;
+            /* (its corners: horizontal in border, vertical in ex_ry) */
+            for (int c = 0; c < 4; c++) {
+                bool pct = (box->s->radius_pct >> c) & 1;
+                m.border[c] = (float)(pct ? box->s->radius[c] * box->width : box->s->radius[c]);
+                m.ex_ry[c] = (float)LAYOUT_RADIUS_Y(box->s, c, box->height);
+            }
             for (int k = 0; k < box->s->bf_n && k < 8; k++) {
                 m.stop_pos[k] = box->s->bf_t[k] / 32.0f;
                 float v = box->s->bf_v[k];
@@ -4806,11 +5741,28 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                 nmask++;
             }
         }
+        /* filter with a url(): the box and its subtree rasterized here, filtered
+         * on the CPU, drawn as an image (mask_idx: where its commands begin) */
+        /* (a mask: outside the filter; on the CPU) */
+        bool mask_cpu = !any_tf && dl_mask_is_cpu(box) && box->width * box->height <= 1000000.0;
+        if (mask_cpu && nmask < 64) {
+            mask_start[nmask] = i;
+            mask_end[nmask] = subtree_end(ctx, i);
+            mask_idx[nmask] = -100000000 - dl->count;
+            nmask++;
+        }
+        bool filt_cpu = dl_box_filter_cpu(box, any_tf);
+        if (filt_cpu && nmask < 64) {
+            mask_start[nmask] = i;
+            mask_end[nmask] = subtree_end(ctx, i);
+            mask_idx[nmask] = -1000 - dl->count;
+            nmask++;
+        }
         /* filter: the box and its subtree painted apart, then filtered over
          * what is under them (a mask of kind 9: the functions' kinds in
          * stop_pos (as kind / 32), amounts in rx / ry, a drop-shadow's
          * offsets in ix / iy, its blur in blur and color in border) */
-        if (box->s->filt_n && nmask < 64) {
+        if (box->s->filt_n && !filt_cpu && nmask < 64) {
             DisplayMask m;
             memset(&m, 0, sizeof m);
             m.kind = 9;
@@ -4854,7 +5806,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         }
         /* mask-image: everything the box and its subtree paint goes through
          * the mask (closed above once the subtree is done). */
-        if (box->s->mask_kind && nmask < 64) {
+        if (box->s->mask_kind && !mask_cpu && nmask < 64) {
             DisplayMask m;
             if (box_mask(box, &m)) {
                 int mi = dl_add_mask(dl, &m);
@@ -5106,6 +6058,11 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             continue;
         }
 
+        /* (an iframe: its frame's document) */
+        if (node && node->type == HTML_NODE_ELEMENT && node->store_id && node->tag_name && !box->s->cv_hidden && box->s->visibility != CSS_VISIBILITY_HIDDEN &&
+            (!clip || clip[i][0] <= clip[i][2]) &&
+            (!strcasecmp(node->tag_name, "iframe") || !strcasecmp(node->tag_name, "object") || !strcasecmp(node->tag_name, "embed") || !strcasecmp(node->tag_name, "frame")))
+            dl_emit_frame(dl, box, node->store_id);
         /* (a 2D canvas: its solid rectangles, from its bitmap's pixels to its content box;
          * an element a paint worklet drew for: from its padding box's corner) */
         if (node && node->type == HTML_NODE_ELEMENT && node->store_id) {
@@ -5589,7 +6546,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     mc[0], mc[1], mc[2], mc[3] * op, dl);
         }
 
-        if (box->mc_n > 0) paint_column_rules(dl, box, op);
+        if (box->mc_n > 0) paint_column_rules(ctx, i, dl, box, op);
     replaced_border:
         cbr_from = dl->count;
         /* Borders, painted as four filled edge rects so per-side widths work.
@@ -5800,6 +6757,8 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
     if (ncb) dl_cb_flush(ctx, dl, cbt, cba, cbb, &ncb, -1);
     while (nmask > 0) {
         nmask--;
+        if (mask_idx[nmask] <= -100000000) { dl_cpu_mask_end(ctx, dl, mask_start[nmask], -100000000 - mask_idx[nmask]); continue; }
+        if (mask_idx[nmask] <= -1000) { dl_ref_filter_end(ctx, dl, mask_start[nmask], -1000 - mask_idx[nmask]); continue; }
         dl_add_mask_cmd(dl, DL_MASK_END, mask_idx[nmask], &dl->masks[mask_idx[nmask]]);
     }
     /* (back to none, for what is drawn after) */

@@ -1171,8 +1171,122 @@ void font_registry_forget_faces(void)
     pthread_mutex_unlock(&g_mu);
 }
 
+/* ---- @font-feature-values ---- */
+typedef struct { char family[64], kind[24], name[48]; int vals[4], n; } FfvEntry;
+static FfvEntry *g_ffv;
+static int g_ffv_n, g_ffv_cap;
+static pthread_mutex_t g_ffv_mu = PTHREAD_MUTEX_INITIALIZER;
+void font_feature_values_reset(void)
+{
+    pthread_mutex_lock(&g_ffv_mu);
+    g_ffv_n = 0;
+    pthread_mutex_unlock(&g_ffv_mu);
+}
+int font_feature_values_get(const char *family, const char *kind, const char *name, int *vals, int cap)
+{
+    int got = 0;
+    pthread_mutex_lock(&g_ffv_mu);
+    for (int i = g_ffv_n - 1; i >= 0 && !got; i--) {
+        FfvEntry *e = &g_ffv[i];
+        if (strcasecmp(e->family, family) || strcasecmp(e->kind, kind) || strcmp(e->name, name)) continue;
+        got = e->n < cap ? e->n : cap;
+        for (int k = 0; k < got; k++) vals[k] = e->vals[k];
+    }
+    pthread_mutex_unlock(&g_ffv_mu);
+    return got;
+}
+static void ffv_scan(const char *css, size_t len)
+{
+    const char *end = css + len;
+    for (const char *p = css; p < end; p++) {
+        if (*p != '@' || (size_t)(end - p) < 19 || strncasecmp(p, "@font-feature-values", 20)) continue;
+        const char *q = p + 20, *ob = q;
+        while (ob < end && *ob != '{') ob++;
+        if (ob >= end) return;
+        /* the families, comma separated */
+        char fams[8][64];
+        int nf = 0;
+        for (const char *f = q; f < ob && nf < 8;) {
+            while (f < ob && (isspace((unsigned char)*f) || *f == ',' || *f == '"' || *f == '\'')) f++;
+            if (f >= ob) break;
+            const char *fe = f;
+            while (fe < ob && *fe != ',' && *fe != '"' && *fe != '\'') fe++;
+            const char *ft = fe;
+            while (ft > f && isspace((unsigned char)ft[-1])) ft--;
+            size_t l = (size_t)(ft - f);
+            if (l >= 64) l = 63;
+            memcpy(fams[nf], f, l);
+            fams[nf][l] = 0;
+            nf++;
+            f = fe;
+        }
+        int depth = 1;
+        const char *b = ob + 1;
+        while (b < end && depth > 0) {
+            while (b < end && isspace((unsigned char)*b)) b++;
+            if (b >= end) break;
+            if (*b == '}') { depth--; b++; continue; }
+            if (*b == '/' && b + 1 < end && b[1] == '*') { const char *c = strstr(b + 2, "*/"); b = c ? c + 2 : end; continue; }
+            if (*b != '@') { while (b < end && *b != ';' && *b != '}') b++; if (b < end && *b == ';') b++; continue; }
+            b++;
+            char kind[24];
+            size_t kl = 0;
+            while (b < end && !isspace((unsigned char)*b) && *b != '{' && kl + 1 < sizeof kind) kind[kl++] = *b++;
+            kind[kl] = 0;
+            while (b < end && *b != '{') b++;
+            if (b >= end) break;
+            b++;
+            /* name : n n n ; */
+            while (b < end && *b != '}') {
+                while (b < end && (isspace((unsigned char)*b) || *b == ';')) b++;
+                if (b >= end || *b == '}') break;
+                char name[48];
+                size_t nl = 0;
+                while (b < end && *b != ':' && *b != '}' && !isspace((unsigned char)*b) && nl + 1 < sizeof name) name[nl++] = *b++;
+                name[nl] = 0;
+                while (b < end && isspace((unsigned char)*b)) b++;
+                if (b >= end || *b != ':') { while (b < end && *b != ';' && *b != '}') b++; continue; }
+                b++;
+                int vals[4], nv = 0;
+                bool bad = false;
+                while (b < end && *b != ';' && *b != '}') {
+                    while (b < end && isspace((unsigned char)*b)) b++;
+                    if (b >= end || *b == ';' || *b == '}') break;
+                    char *e2;
+                    long v = strtol(b, &e2, 10);
+                    if (e2 == b || v < 0) { bad = true; while (b < end && *b != ';' && *b != '}') b++; break; }
+                    if (nv < 4) vals[nv++] = (int)v;
+                    b = e2;
+                }
+                if (bad || !nv) continue;
+                pthread_mutex_lock(&g_ffv_mu);
+                for (int k = 0; k < nf; k++) {
+                    if (g_ffv_n == g_ffv_cap) {
+                        int nc = g_ffv_cap ? g_ffv_cap * 2 : 32;
+                        FfvEntry *ne = (FfvEntry *)realloc(g_ffv, (size_t)nc * sizeof(FfvEntry));
+                        if (!ne) break;
+                        g_ffv = ne;
+                        g_ffv_cap = nc;
+                    }
+                    FfvEntry *e = &g_ffv[g_ffv_n++];
+                    memset(e, 0, sizeof *e);
+                    snprintf(e->family, sizeof e->family, "%s", fams[k]);
+                    snprintf(e->kind, sizeof e->kind, "%s", kind);
+                    snprintf(e->name, sizeof e->name, "%s", name);
+                    e->n = nv;
+                    memcpy(e->vals, vals, sizeof(int) * (size_t)nv);
+                }
+                pthread_mutex_unlock(&g_ffv_mu);
+            }
+            if (b < end) b++;
+        }
+        p = b - 1;
+    }
+}
+
 void font_registry_scan_css(const char *css, size_t len, const char *base_url)
 {
+    ffv_scan(css, len);
     if (!css || len < 10) return;
     /* Layouts hand the same sheets over again and again: a text seen before
      * (same length and bytes, and base) is not rescanned.  (Sheets a script

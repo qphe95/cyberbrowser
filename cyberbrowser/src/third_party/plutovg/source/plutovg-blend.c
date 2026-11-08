@@ -1048,8 +1048,11 @@ static void plutovg_blend_gradient(plutovg_canvas_t* canvas, const plutovg_gradi
     for(i = 0; i < nstops - 1; i++) {
         curr = (start + i);
         next = (start + i + 1);
-        if(curr->offset == next->offset)
+        if(curr->offset == next->offset) {
+            /* (cyberbrowser: a hard stop: on from the later color) */
+            curr_color = premultiply_color_with_opacity(&next->color, opacity);
             continue;
+        }
         delta = 1.f / (next->offset - curr->offset);
         next_color = premultiply_color_with_opacity(&next->color, opacity);
         while(fpos < next->offset && pos < COLOR_TABLE_SIZE) {

@@ -481,6 +481,9 @@ static bool vk_render(GpuTarget **tp, uint32_t w, uint32_t h, const DisplayList 
             if (m->kind == 9) {
                 /* (a filter's drop-shadow reaches past the box) */
                 double g = fabs(m->ix) + fabs(m->iy) + 3.0 * m->blur + 2.0;
+                /* (and a blur() by three deviations) */
+                for (int k = 0; k < m->nstops && k < 8; k++)
+                    if ((int)(m->stop_pos[k] * 32.0f + 0.5f) == 9) g += 3.0 * (k < 4 ? m->rx[k] : m->ry[k - 4]);
                 mb[0] -= g; mb[1] -= g; mb[2] += g; mb[3] += g;
             }
             if (xf_on) xf_bounds(xfm, m->x, m->y, m->x + m->w, m->y + m->h, mb);

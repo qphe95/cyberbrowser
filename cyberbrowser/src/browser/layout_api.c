@@ -2296,7 +2296,8 @@ bool layout_query_box_size(uint32_t id, double *w, double *h)
 void layout_query_anim_seed(uint32_t id)
 {
     int idx = g_lq_valid ? lq_box_index(id) : -1;
-    if (idx >= 0) css_layout_anim_seed(&g_lq_layout, idx, id);
+    /* (under display: none a box may never have been styled: its style is not yet anything) */
+    if (idx >= 0 && lq_hidden(id) != 2) css_layout_anim_seed(&g_lq_layout, idx, id);
 }
 
 /* ---- scroll and scrollend (CSSOM View "run the scroll steps") ---- */

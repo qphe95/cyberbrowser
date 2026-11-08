@@ -174,6 +174,42 @@ vec3 blend3(int mode, vec3 b, vec3 s) {
     return vec3(blend1(mode, b.r, s.r), blend1(mode, b.g, s.g), blend1(mode, b.b, s.b));
 }
 
+// A Gaussian of deviation sigma around pix, of the layer (or what was under it): every
+// pixel while that's few, else a coarser grid of at most 17 x 17.
+vec4 blur_at(bool from_saved, ivec2 pix, float sigma, vec4 box) {
+    int r = int(ceil(sigma * 3.0));
+    int step = max(1, (2 * r + 1) / 17);
+    vec4 sum = vec4(0.0);
+    float tot = 0.0;
+    ivec2 sz = textureSize(current, 0);
+    // (coarse: the grid shifted per pixel, noise rather than a lattice)
+    ivec2 jit = ivec2(0);
+    if (step > 1) {
+        float n = fract(52.9829189 * fract(dot(vec2(pix), vec2(0.06711056, 0.00583715))));
+        jit = ivec2(int(n * float(step)), int(fract(n * 7.0) * float(step)));
+    }
+    for (int j = -r; j <= r; j += step)
+        for (int i = -r; i <= r; i += step) {
+            ivec2 d = ivec2(i, j) + jit;
+            ivec2 q = pix + d;
+            float w = exp(-0.5 * float(d.x * d.x + d.y * d.y) / (sigma * sigma));
+            tot += w;
+            // (a backdrop's edges mirror, what's past them being no part of it)
+            if (from_saved) {
+                int x0 = int(box.x), y0 = int(box.y), x1 = int(box.x + box.z) - 1, y1 = int(box.y + box.w) - 1;
+                if (q.x < x0) q.x = min(2 * x0 - q.x, x1);
+                if (q.x > x1) q.x = max(2 * x1 - q.x, x0);
+                if (q.y < y0) q.y = min(2 * y0 - q.y, y1);
+                if (q.y > y1) q.y = max(2 * y1 - q.y, y0);
+            }
+            if (q.x < 0 || q.y < 0 || q.x >= sz.x || q.y >= sz.y) continue;
+            vec4 c = from_saved ? texelFetch(saved, q, 0) : texelFetch(current, q, 0);
+            if (from_saved) c = vec4(c.rgb * c.a, c.a);
+            sum += c * w;
+        }
+    return tot > 0.0 ? sum / tot : vec4(0.0);
+}
+
 void main() {
     Item it = items[v_item];
     ivec2 pix = ivec2(gl_FragCoord.xy);
@@ -184,6 +220,11 @@ void main() {
         // backdrop-filter (10): the functions on old within the box instead, cur over that.
         vec4 old0 = texelFetch(saved, pix, 0);
         bool back = bm.kind.x == 10;
+        // (a clip outside the filter: past it, what was there)
+        if (bm.ex_rx[2] > bm.ex_rx[0] || bm.ex_rx[3] > bm.ex_rx[1]) {
+            vec2 cp = vec2(pix) + 0.5;
+            if (cp.x < bm.ex_rx[0] || cp.y < bm.ex_rx[1] || cp.x >= bm.ex_rx[2] || cp.y >= bm.ex_rx[3]) { out_color = old0; return; }
+        }
         vec2 pp = vec2(pix) + 0.5;
         bool inbox = pp.x >= bm.box.x && pp.y >= bm.box.y && pp.x < bm.box.x + bm.box.z && pp.y < bm.box.y + bm.box.w;
         vec4 fg = cur;
@@ -230,11 +271,17 @@ void main() {
             } else if (t == 7) {
                 c = c * a;
             } else if (t == 8) {
-                c = (c - 0.5) * a + 0.5;
+                c = (c - 0.5) * a + 0.5 + 0.0005;   // (0.5 lands on 128, as 0.5 in an sRGB color does)
+            } else if (t == 9) {
+                // blur: of what the layer holds (functions before it in the list not seen)
+                if (a > 0.0) {
+                    src = blur_at(back, pix, a, bm.box);
+                }
+                continue;
             } else if (t == 10) {
                 // drop-shadow: the alpha moved by the offsets, in its color, under it
                 ivec2 sp = ivec2(vec2(pix) - vec2(bm.img.x, bm.img.y) + 0.5);
-                float sa = texelFetch(current, sp, 0).a * bm.border.a / 255.0;
+                float sa = (bm.misc.y > 0.0 ? blur_at(false, sp, bm.misc.y, bm.box).a : texelFetch(current, sp, 0).a) * bm.border.a / 255.0;
                 vec4 sh = vec4(bm.border.rgb / 255.0 * sa, sa);
                 vec4 pre = vec4(clamp(c, 0.0, 1.0) * src.a, src.a);
                 vec4 o = pre + sh * (1.0 - pre.a);
@@ -245,6 +292,9 @@ void main() {
             src = vec4(c * src.a, src.a);
         }
         if (back) {
+            // (in its rounded corners only)
+            float ra = rrect_alpha(bm.box, bm.border, bm.ex_ry, vec2(pix) + 0.5);
+            if (ra < 1.0) src = mix(vec4(old0.rgb * old0.a, old0.a), src, ra);
             // the subtree over the filtered backdrop
             float ab = fg.a + src.a * (1.0 - fg.a);
             vec3 cb2 = fg.rgb + src.rgb * (1.0 - fg.a);

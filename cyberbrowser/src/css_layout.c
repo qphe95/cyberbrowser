@@ -1659,7 +1659,7 @@ static void layout_blockify(LayoutContext *ctx)
                 LayoutStyle *rs = layout_box(ctx, r)->s;
                 const LayoutStyle *bs = layout_box(ctx, c)->s;
                 /* (a left-to-right block flow only: a right-to-left root flow is not laid out from the right) */
-                if (rs != bs && (bs->writing_mode == 2 || bs->writing_mode == 4) && rs->writing_mode != bs->writing_mode) {
+                if (rs != bs && bs->writing_mode != 0 && rs->writing_mode != bs->writing_mode && !rs->contain_any && !bs->contain_any) {
                     rs->writing_mode = bs->writing_mode;
                 }
                 break;
@@ -1680,6 +1680,15 @@ static void layout_blockify(LayoutContext *ctx)
         HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
         if (!node || node->type != HTML_NODE_ELEMENT) continue;
         if (box->s->block_in_inline == 2) box->s->block_in_inline = 0;   /* (a kept style) */
+        /* (an object of an HTML document: a box of its own size, as an iframe) */
+        if (node->tag_name && !strcasecmp(node->tag_name, "object")) {
+            const char *od = layout_node_attribute(node, "data"), *oty = layout_node_attribute(node, "type");
+            size_t ol = od ? strcspn(od, "?#") : 0;
+            if (od && ((oty && !strncasecmp(oty, "text/html", 9)) || (!oty && ol > 4 && (!strncasecmp(od + ol - 5, ".html", 5) || !strncasecmp(od + ol - 4, ".htm", 4) || !strncasecmp(od + ol - 4, ".xht", 4))))) {
+                box->s->display = CSS_DISPLAY_INLINE_BLOCK;
+                continue;
+            }
+        }
         bool promote = box->s->position == CSS_POSITION_ABSOLUTE || box->s->position == CSS_POSITION_FIXED ||
                        box->s->float_side != 0;
         int p = ctx->tree.nodes[i].parent_idx;
@@ -1897,7 +1906,8 @@ static const char *align_past_overflow(const char *v)
 }
 
 enum { ALIGN_KW_NONE, ALIGN_KW_START, ALIGN_KW_END, ALIGN_KW_LEFT, ALIGN_KW_RIGHT, ALIGN_KW_SELF_START,
-       ALIGN_KW_SELF_END, ALIGN_KW_BASELINE, ALIGN_KW_LAST_BASELINE, ALIGN_KW_UNSAFE = 0x40, ALIGN_KW_SAFE = 0x80 };
+       ALIGN_KW_SELF_END, ALIGN_KW_BASELINE, ALIGN_KW_LAST_BASELINE, ALIGN_KW_FLOW_START, ALIGN_KW_FLOW_END,
+       ALIGN_KW_UNSAFE = 0x40, ALIGN_KW_SAFE = 0x80 };
 
 /* The keyword of an alignment value, past "safe", "unsafe", "first", "legacy". */
 static unsigned char css_align_kw(const char *v)
@@ -1920,6 +1930,8 @@ static unsigned char css_align_kw(const char *v)
     if (KW("right")) return safe | ALIGN_KW_RIGHT;
     if (KW("self-start")) return safe | ALIGN_KW_SELF_START;
     if (KW("self-end")) return safe | ALIGN_KW_SELF_END;
+    if (KW("flow-start")) return safe | ALIGN_KW_FLOW_START;
+    if (KW("flow-end")) return safe | ALIGN_KW_FLOW_END;
     if (KW("baseline") || KW("first")) return ALIGN_KW_BASELINE;
     if (KW("last")) return ALIGN_KW_LAST_BASELINE;
     #undef KW
@@ -3884,6 +3896,39 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     const char *prop = decl->property;
     const char *value = decl->value;
     if (!prop || !value) return;
+    if (prop[0] == 'm' || prop[0] == '-') {
+        const char *mp = !strncasecmp(prop, "-webkit-", 8) ? prop + 8 : prop;
+        if (!strncasecmp(mp, "mask", 4) && (mp[4] == 0 || mp[4] == '-')) {
+            static const char *const mk[] = { "-image", "-mode", "-repeat", "-position", "-clip", "-origin", "-size", "-composite" };
+            bool wide = !strcasecmp(value, "initial") || !strcasecmp(value, "unset") || !strcasecmp(value, "revert") || !strcasecmp(value, "inherit");
+            /* (url()s absolute as stored; a local reference stays) */
+            char mkv[4096];
+            size_t mo = 0;
+            for (const char *q = value; *q && mo + 1 < sizeof mkv;) {
+                if (!strncasecmp(q, "url(", 4)) {
+                    char mu[2048];
+                    const char *cl = strchr(q, ')');
+                    if (cl && css_parse_url_value(q, mu, sizeof mu) && mu[0] && mu[0] != '#') {
+                        char *abs = layout_resolve_url(base_url, mu);
+                        if (abs) {
+                            int wr = snprintf(mkv + mo, sizeof mkv - mo, "url(%s)", abs);
+                            if (wr > 0 && mo + (size_t)wr < sizeof mkv) mo += (size_t)wr;
+                            free(abs);
+                            q = cl + 1;
+                            continue;
+                        }
+                    }
+                }
+                mkv[mo++] = *q++;
+            }
+            mkv[mo] = 0;
+            if (!mp[4]) {
+                for (int k = 0; k < 8; k++) box->s->mk_text[k] = NULL;
+                box->s->mk_text[8] = wide ? NULL : layout_intern(mkv, strlen(mkv));
+            } else for (int k = 0; k < 8; k++)
+                if (!strcasecmp(mp + 4, mk[k])) box->s->mk_text[k] = wide ? NULL : layout_intern(mkv, strlen(mkv));
+        }
+    }
     /* (all: every longhand but the two that say how text runs) */
     if (prop[0] == 'a' && !strcasecmp(prop, "all")) {
         for (int i = 0; i < css_prop_count(); i++) {
@@ -4491,7 +4536,9 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     if (prop[0] == 'f' && !strcasecmp(prop, "filter")) {
         LayoutStyle *s = box->s;
         s->filt_n = 0;
+        s->filt_url = 0;
         s->filt_text = strncasecmp(value, "none", 4) ? layout_intern(value, strlen(value)) : NULL;
+        if (strcasestr_lite(value, "url(")) { s->filt_url = 1; return; }
         static const char *const fn[] = { "", "grayscale(", "sepia(", "saturate(", "hue-rotate(", "invert(", "opacity(",
                                           "brightness(", "contrast(", "blur(", "drop-shadow(" };
         const char *p = value;
@@ -4828,9 +4875,12 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         return;
     }
     if (prop[0] == 'p' && !strncasecmp(prop, "position-a", 10)) {
+        g_layout_anchor_any = 1;
         const char **slot = !strcasecmp(prop, "position-anchor") ? &box->s->position_anchor : !strcasecmp(prop, "position-area") ? &box->s->position_area : NULL;
         if (slot) {
-            *slot = strcasecmp(value, "none") && strcasecmp(value, "auto") ? layout_intern(value, strlen(value)) : NULL;
+            /* (position-anchor: none is a value of its own: no implicit anchor either) */
+            bool none = !strcasecmp(value, "none") && slot != &box->s->position_anchor;
+            *slot = !none && strcasecmp(value, "auto") ? layout_intern(value, strlen(value)) : NULL;
             return;
         }
     }
@@ -5919,6 +5969,19 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
              * with a non-visible value on the other computes to auto, but
              * tracking per-axis is overkill here. */
             if (PK(73)) { box->s->overflow = 0; box->s->overflow_clip = 0; box->s->ovf_visible_given = 1; }
+        }
+        /* (the shorthand with two values, x then y: the box scrolls if either does) */
+        else if (PK(73) && strchr(value, ' ')) {
+            char w1[16] = "", w2[16] = "";
+            sscanf(value, "%15s %15s", w1, w2);
+            bool sc = !strcasecmp(w1, "scroll") || !strcasecmp(w2, "scroll"), au = !strcasecmp(w1, "auto") || !strcasecmp(w2, "auto");
+            bool hi = !strcasecmp(w1, "hidden") || !strcasecmp(w2, "hidden");
+            bool c1 = !strcasecmp(w1, "clip"), c2 = !strcasecmp(w2, "clip"), v1 = !strcasecmp(w1, "visible"), v2 = !strcasecmp(w2, "visible");
+            if (sc || au || hi) { box->s->overflow = sc ? 3 : au ? 2 : 1; box->s->overflow_clip = 0; }
+            else if (c1 || c2) {
+                box->s->overflow = 1; box->s->overflow_clip = 1;
+                box->s->ovf_clip_axes = (unsigned char)((c1 ? 1 : 0) | (c2 ? 2 : 0));
+            } else if (v1 && v2) { box->s->overflow = 0; box->s->overflow_clip = 0; box->s->ovf_visible_given = 1; }
         }
         else if (strcasecmp(value, "hidden") == 0) { box->s->overflow = 1; box->s->overflow_clip = 0; }
         else if (strcasecmp(value, "auto") == 0) { box->s->overflow = 2; box->s->overflow_clip = 0; }
@@ -8235,9 +8298,11 @@ static bool cq_table_update(LayoutContext *ctx)
         if (!b->s->container_type && !b->s->container_name) continue;
         memset(&t[k], 0, sizeof t[k]);
         t[k].dom = ctx->tree.nodes[i].dom_node_idx;
-        t[k].w = b->content_width;
-        t[k].h = b->content_height;
-        t[k].fs = b->s->font_size;
+        /* (a query's lengths are the unzoomed ones) */
+        double cz = b->s->zoom > 0.0f ? (double)b->s->zoom : 1.0;
+        t[k].w = b->content_width / cz;
+        t[k].h = b->content_height / cz;
+        t[k].fs = b->s->font_size / cz;
         t[k].type = b->s->container_type;
         t[k].wm = b->s->writing_mode;
         t[k].unsized = b->s->display == CSS_DISPLAY_INLINE || b->s->table_role > 0;
@@ -15753,6 +15818,13 @@ static void layout_zoom_scale(LayoutStyle *s, double k)
     Z(outline_w); Z(outline_off); Z(td_t); Z(ul_v);
     for (int i = 0; i < 4; i++) if (!(s->radius_vpct >> i & 1)) Z(radius_v[i]);
     for (int i = 0; i < 4; i++) { Z(tsh_x[i]); Z(tsh_y[i]); Z(tsh_b[i]); }
+    Z(column_rule_width); Z(cis_w); Z(cis_h); Z(shape_margin);
+    if (s->column_width > 0.0) Z(column_width);
+    if (s->column_height > 0.0) Z(column_height);
+    /* (filter lengths: blur and drop-shadow) */
+    for (int i = 0; i < s->filt_n && i < 8; i++) if (s->filt_t[i] == 9) Z(filt_v[i]);
+    for (int i = 0; i < s->bf_n && i < 8; i++) if (s->bf_t[i] == 9) Z(bf_v[i]);
+    Z(filt_ds[0]); Z(filt_ds[1]); Z(filt_ds[2]);
 #undef Z
 }
 
@@ -16189,10 +16261,14 @@ static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
                     LayoutStyle *ls = ctx->boxes[pe].s;
                     if (ls->il_size >= 1.0f && ls->writing_mode == 0 && b->s->writing_mode == 0) {
                         double fsp = b->s->font_size > 0.0 ? b->s->font_size : 16.0;
-                        TextShaper *fp = display_list_get_font(layout_font_slot(b));
+                        /* (by their families: the styles are not finished, their font_slot not to be trusted yet) */
+                        TextShaper *fp = display_list_get_font(style_font_slot(b->s));
                         if (!fp) fp = display_list_get_default_font();
-                        TextShaper *fl = display_list_get_font(layout_font_slot(&ctx->boxes[pe]));
+                        if (!ls->font_family || !ls->font_family[0]) ls->font_family = b->s->font_family;
+                        TextShaper *fl = display_list_get_font(style_font_slot(ls));
                         if (!fl) fl = fp;
+                        /* (metrics of a stand-in while the face loads: styled again once it's in) */
+                        if (font_registry_any_queued()) g_unit_font_stale = 1;
                         float a = 0.8f, d = 0.2f, g = 0.0f, la = 0.8f, ld = 0.2f, lg = 0.0f;
                         if (fp) text_shaper_vmetrics(fp, &a, &d, &g);
                         if (fl) text_shaper_vmetrics(fl, &la, &ld, &lg);
@@ -18820,6 +18896,62 @@ static void layout_ot_tags(LayoutStyle *s)
             break;
         }
     }
+    /* (font-variant-alternates: its functions, by the names @font-feature-values gives the family) */
+    if (s->fv[4] && strchr(s->fv[4], '(') && s->font_family) {
+        static const struct { const char *fn; const char *kind; const char *tag; } alt[] = {
+            { "stylistic(", "stylistic", "salt" }, { "swash(", "swash", "swsh" }, { "ornaments(", "ornaments", "ornm" },
+            { "annotation(", "annotation", "nalt" }, { "styleset(", "styleset", NULL }, { "character-variant(", "character-variant", NULL } };
+        for (size_t a = 0; a < sizeof alt / sizeof alt[0]; a++) {
+            const char *p = strstr(s->fv[4], alt[a].fn);
+            if (!p) continue;
+            p += strlen(alt[a].fn);
+            /* (the names, comma separated) */
+            while (*p && *p != ')') {
+                while (*p == ' ' || *p == ',') p++;
+                char nm[48];
+                size_t nl = 0;
+                while (*p && *p != ',' && *p != ')' && *p != ' ' && nl + 1 < sizeof nm) nm[nl++] = *p++;
+                nm[nl] = 0;
+                if (!nl) break;
+                int vals[4], nv = 0;
+                /* (the first family that defines it) */
+                for (const char *fam = s->font_family; fam && *fam && !nv;) {
+                    while (*fam == ' ' || *fam == ',' || *fam == '"' || *fam == '\'') fam++;
+                    char fn[64];
+                    size_t fl = 0;
+                    while (*fam && *fam != ',' && *fam != '"' && *fam != '\'' && fl + 1 < sizeof fn) fn[fl++] = *fam++;
+                    while (fl > 0 && fn[fl - 1] == ' ') fl--;
+                    fn[fl] = 0;
+                    if (fl) nv = font_feature_values_get(fn, alt[a].kind, nm, vals, 4);
+                    while (*fam == '"' || *fam == '\'') fam++;
+                }
+                if (!nv) continue;
+                char tg[5];
+                if (alt[a].tag) {
+                    if (nv > 1) continue;   /* (one value only, these) */
+                    memcpy(tg, alt[a].tag, 5);
+                    if (s->ot_n < 14 && vals[0] > 0) {
+                        s->ot_tags[s->ot_n++] = OT_TAG(tg);
+                        s->ot_tags[s->ot_n++] = 0x01000000u | (uint32_t)(vals[0] & 0xFF);
+                    }
+                } else if (alt[a].fn[0] == 's') {
+                    for (int v = 0; v < nv; v++) {
+                        if (vals[v] < 1 || vals[v] > 99) continue;
+                        snprintf(tg, sizeof tg, "ss%02d", vals[v]);
+                        if (s->ot_n < 15) s->ot_tags[s->ot_n++] = OT_TAG(tg);
+                    }
+                } else {
+                    if (nv > 2 || vals[0] < 1 || vals[0] > 99) continue;
+                    snprintf(tg, sizeof tg, "cv%02d", vals[0]);
+                    int val = nv == 2 ? vals[1] : 1;
+                    if (s->ot_n < 14 && val > 0) {
+                        s->ot_tags[s->ot_n++] = OT_TAG(tg);
+                        s->ot_tags[s->ot_n++] = 0x01000000u | (uint32_t)(val & 0xFF);
+                    }
+                }
+            }
+        }
+    }
     /* (font-feature-settings: "tag" [on | off | n], after the rest) */
     const char *f = s->fv[6];
     for (const char *p = f; p && *p;) {
@@ -18831,13 +18963,23 @@ static void layout_ot_tags(LayoutStyle *s)
         p += 5;
         while (isspace((unsigned char)*p)) p++;
         bool on = true;
+        int fval = 1;
         if (!strncasecmp(p, "off", 3)) on = false;
-        else if (isdigit((unsigned char)*p)) on = atoi(p) != 0;
+        else if (isdigit((unsigned char)*p)) { fval = atoi(p); on = fval != 0; }
         uint32_t t = OT_TAG(tg);
         int at = -1;
         for (int k = 0; k < s->ot_n; k++) if (s->ot_tags[k] == t) at = k;
-        if (on && at < 0 && s->ot_n < 16) s->ot_tags[s->ot_n++] = t;
-        if (!on && at >= 0) { s->ot_tags[at] = s->ot_tags[s->ot_n - 1]; s->ot_n--; }
+        /* (off, or a new value: out with it and any value it had) */
+        if (at >= 0 && (!on || fval > 1 || (at + 1 < s->ot_n && (s->ot_tags[at + 1] >> 24) == 0x01))) {
+            int drop = at + 1 < s->ot_n && (s->ot_tags[at + 1] >> 24) == 0x01 ? 2 : 1;
+            for (int k = at; k + drop < s->ot_n; k++) s->ot_tags[k] = s->ot_tags[k + drop];
+            s->ot_n -= drop;
+            at = -1;
+        }
+        if (on && at < 0 && s->ot_n < 16) {
+            s->ot_tags[s->ot_n++] = t;
+            if (fval > 1 && s->ot_n < 16) s->ot_tags[s->ot_n++] = 0x01000000u | (uint32_t)(fval & 0xFF);
+        }
         while (*p && *p != ',') p++;
     }
 #undef OT_ADD
@@ -18851,6 +18993,8 @@ static void layout_font_size_adjust(LayoutStyle *s)
     if (!(s->fs_unadj > 0.0)) s->fs_unadj = s->font_size;
     TextShaper *f = font_registry_slot(s->font_slot);
     if (!f) return;
+    /* (a stand-in's aspect while the face loads: styled again once it's in) */
+    if (font_registry_any_queued()) g_unit_font_stale = 1;
     float r = s->fsa_metric == 0 ? text_shaper_x_height(f) : s->fsa_metric == 1 ? text_shaper_cap_height(f)
             : s->fsa_metric == 2 ? text_shaper_zero_advance(f) : 1.0f;
     if (r > 0.01f) s->font_size = s->fs_unadj * s->fsa / r;
@@ -19905,9 +20049,48 @@ static bool layout_cleared_by_sibling(LayoutContext *ctx, int c, double m)
         if (!pb->s->height_set) return true;
         double h = pb->s->css_height + pb->padding_top + pb->padding_bottom + pb->s->border_top + pb->s->border_bottom +
                    pb->margin_top + pb->margin_bottom;
-        if (h > m) return true;
+        /* (it starts where this box does, wherever the margin m would take them both) */
+        (void)m;
+        if (h > 0.0) return true;
     }
     return false;
+}
+
+/* Floats met with no in-flow content before them, on the way down to a box whose top
+ * margin may collapse with theirs (their widths added; 0: none).  A new formatting
+ * context that can't fit beside them can't take them along by its margin: it goes
+ * below them, the margin spent (as Blink separates them). */
+static __thread double t_adj_floats;
+static double layout_floats_in_empty(LayoutContext *ctx, int k, int depth)
+{
+    const LayoutBox *b = layout_box(ctx, k);
+    if (b->s->float_side) return b->width > 0.0 ? b->width : b->s->css_width > 0.0 ? b->s->css_width : 1.0;
+    double w = 0.0;
+    if (depth > 8) return w;
+    for (int c = ctx->tree.nodes[k].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) w += layout_floats_in_empty(ctx, c, depth + 1);
+    return w;
+}
+static bool layout_fc_past_adj_floats(LayoutContext *ctx, int idx)
+{
+    const LayoutBox *b = layout_box(ctx, idx);
+    if (t_adj_floats <= 0.0 || b->margin_top <= 0.0 || b->s->float_side) return false;
+    if (!(b->s->overflow != 0 || b->s->flow_root || table_is_table(b) || b->s->display == CSS_DISPLAY_FLEX || b->s->display == CSS_DISPLAY_GRID)) return false;
+    if (!b->s->width_set || b->s->width_percent > 0.0) return false;   /* (auto: narrows beside them) */
+    int p = ctx->tree.nodes[idx].parent_idx;
+    double room = p >= 0 ? layout_box(ctx, p)->content_width : 0.0;
+    return !(room > 0.0) || t_adj_floats + b->s->css_width > room + 0.01;
+}
+/* (the floats before c among its siblings, all before it empty) */
+static double layout_adj_floats_before(LayoutContext *ctx, int c)
+{
+    double w = 0.0;
+    for (int p = ctx->tree.nodes[c].prev_sibling_idx; p >= 0; p = ctx->tree.nodes[p].prev_sibling_idx) {
+        const LayoutBox *pb = layout_box(ctx, p);
+        if (pb->s->position == CSS_POSITION_ABSOLUTE || pb->s->position == CSS_POSITION_FIXED || pb->s->display == CSS_DISPLAY_NONE) continue;
+        if (!pb->s->float_side && !layout_empty_through(ctx, p)) return 0.0;
+        w += layout_floats_in_empty(ctx, p, 0);
+    }
+    return w;
 }
 
 static double layout_eff_margin_top(LayoutContext *ctx, int idx, int depth)
@@ -19915,9 +20098,15 @@ static double layout_eff_margin_top(LayoutContext *ctx, int idx, int depth)
     LayoutBox *box = layout_box(ctx, idx);
     double mt = box->margin_top, mb = box->margin_bottom;
     if (depth > 8) return mt;
+    /* (at the top of the walk: the floats before it) */
+    double adj_was = t_adj_floats;
+    if (depth == 0) adj_was = t_adj_floats = 0.0;
+    if (depth == 0 && ctx->tree.nodes[idx].parent_idx >= 0) t_adj_floats = layout_adj_floats_before(ctx, idx);
+    if (layout_fc_past_adj_floats(ctx, idx)) { t_adj_floats = adj_was; return 0.0; }
     int f, l;
     layout_sig_children(ctx, idx, &f, &l);
     if (f < 0) {
+        t_adj_floats = adj_was;
         /* Empty box: margins collapse through only when the box does NOT
          * establish a new block formatting context and has no height,
          * padding or border separating them (CSS 2.1 ยง8.3.1). */
@@ -19926,21 +20115,28 @@ static double layout_eff_margin_top(LayoutContext *ctx, int idx, int depth)
     }
     /* A box establishing a formatting context (overflow, flex, grid, a
      * table cell, ...): no collapse with its children. */
-    if (layout_establishes_bfc(ctx, idx) && idx != ctx->tree.root_idx) return mt;
-    if (box->padding_top > 0.0 || box->s->border_top > 0.0) return mt;
+    if (layout_establishes_bfc(ctx, idx) && idx != ctx->tree.root_idx) { t_adj_floats = adj_was; return mt; }
+    if (box->padding_top > 0.0 || box->s->border_top > 0.0) { t_adj_floats = adj_was; return mt; }
     /* (margin-trim: the first child's top margin trimmed away, nothing to collapse with) */
-    if (box->s->margin_trim & 1) return mt;
-    if (!layout_box_is_block_level(layout_box(ctx, f))) return mt;
+    if (box->s->margin_trim & 1) { t_adj_floats = adj_was; return mt; }
+    if (!layout_box_is_block_level(layout_box(ctx, f))) { t_adj_floats = adj_was; return mt; }
+    /* (floats before the first child in flow, here) */
+    for (int p = ctx->tree.nodes[f].prev_sibling_idx; p >= 0; p = ctx->tree.nodes[p].prev_sibling_idx)
+        t_adj_floats += layout_floats_in_empty(ctx, p, 0);
     double fm = layout_eff_margin_top(ctx, f, depth + 1);
-    if (layout_box(ctx, f)->s->clear && layout_cleared_by_sibling(ctx, f, fm)) return mt;   /* (clearance) */
+    if (layout_box(ctx, f)->s->clear && layout_cleared_by_sibling(ctx, f, fm)) { t_adj_floats = adj_was; return mt; }   /* (clearance) */
     double c = layout_margin_collapse(mt, fm);
     /* (an empty first child's margins collapse through it: the next
      * child's top margin adjoins this box's too, unless it has clearance) */
     for (int k = f; layout_empty_through(ctx, k);) {
+        t_adj_floats += layout_floats_in_empty(ctx, k, 0);
         k = layout_sig_sibling(ctx, k, 1);
         if (k < 0 || !layout_box_is_block_level(layout_box(ctx, k)) || layout_box(ctx, k)->s->clear) break;
+        for (int p = ctx->tree.nodes[k].prev_sibling_idx; p >= 0 && layout_box(ctx, p)->s->float_side; p = ctx->tree.nodes[p].prev_sibling_idx)
+            t_adj_floats += layout_floats_in_empty(ctx, p, 0);
         c = layout_margin_collapse(c, layout_eff_margin_top(ctx, k, depth + 1));
     }
+    t_adj_floats = adj_was;
     return c;
 }
 
@@ -19960,6 +20156,8 @@ static double layout_eff_margin_bottom(LayoutContext *ctx, int idx, int depth)
     if (box->s->margin_trim & 4) return mb;   /* (margin-trim: the last child's trimmed away) */
     /* (a height blocks it, or a min-height that made it taller than its content) */
     if (!layout_height_auto(box) || (box->min_height > 0.0 && box->content_height <= box->min_height + 0.01)) return mb;
+    /* (a max-height that cut it short too) */
+    if (box->max_height >= 0.0 && layout_box(ctx, l)->y + layout_box(ctx, l)->height > box->y + box->height + 0.01) return mb;
     if (!layout_box_is_block_level(layout_box(ctx, l))) return mb;
     double c = layout_margin_collapse(mb, layout_eff_margin_bottom(ctx, l, depth + 1));
     /* (an empty last child's margins collapse through it: the one before
@@ -20511,12 +20709,31 @@ static void layout_size_atomic_inline(LayoutContext *ctx, int c, double avail)
         layout_update_content_sizes(child);
         return;
     }
+    /* (percentage min and max heights, of a parent's definite height) */
+    if ((child->s->minmax_pct_bits & 12) && ctx->tree.nodes[c].parent_idx >= 0) {
+        double pb = pct_def_base(ctx, ctx->tree.nodes[c].parent_idx, 0);
+        if (pb > 0.0) layout_resolve_minmax_pcts(child, avail, pb);
+    }
+    bool ratio_h = child->s->aspect_ratio_prop && child->s->aspect_ratio > 0.0 && layout_height_auto(child);
     if (!(child->s->width_set || child->s->width_percent > 0.0 || child->s->width_keyword)) {
         double a = avail - child->margin_left - child->margin_right;
         if (a < 0.0) a = 0.0;
         child->width = layout_shrink_to_fit(ctx, c, a);
+        /* (a min-height through the ratio: a min-width) */
+        if (ratio_h && child->min_height > 0.0) {
+            double hbp = layout_horizontal_border_padding(child), vbp = layout_vertical_border_padding(child);
+            bool bs = child->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX;
+            double w = bs && child->s->aspect_ratio_prop != 2 ? child->min_height / child->s->aspect_ratio
+                     : (bs ? child->min_height - vbp : child->min_height) / child->s->aspect_ratio + hbp;
+            if (w > child->width && (child->max_width < 0.0 || w <= child->max_width)) child->width = w;
+        }
     }
-    if (layout_height_auto(child)) {
+    if (ratio_h) {
+        double hbp = layout_horizontal_border_padding(child), vbp = layout_vertical_border_padding(child);
+        bool bb = child->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX && child->s->aspect_ratio_prop != 2;
+        child->height = bb ? child->width * child->s->aspect_ratio : (child->width - hbp) * child->s->aspect_ratio + vbp;
+        if (child->height < child->min_height) child->height = child->min_height;
+    } else if (layout_height_auto(child)) {
         child->height = 0.0;
         /* Text-entry controls have no content boxes to size them: one line
          * (two for textarea) plus their padding and border. */
@@ -20560,7 +20777,7 @@ static double layout_floats_bottom(LayoutContext *ctx, int idx, double bottom)
 static bool layout_establishes_bfc(LayoutContext *ctx, int idx)
 {
     LayoutBox *b = layout_box(ctx, idx);
-    if (idx == ctx->tree.root_idx || b->s->float_side != 0 || b->s->overflow != 0 ||
+    if (idx == ctx->tree.root_idx || b->s->float_side != 0 || (b->s->overflow != 0 && !b->s->overflow_clip) ||
         b->s->position == CSS_POSITION_ABSOLUTE || b->s->position == CSS_POSITION_FIXED ||
         layout_box_is_atomic_inline(b))
         return true;
@@ -20841,7 +21058,7 @@ static void mc_spans_walk(LayoutContext *ctx, int idx, McSpans *S, int depth)
                       (n && n->type == HTML_NODE_ELEMENT && n->tag_name &&
                        (!strcasecmp(n->tag_name, "img") || !strcasecmp(n->tag_name, "canvas") || !strcasecmp(n->tag_name, "svg") ||
                         !strcasecmp(n->tag_name, "video") || !strcasecmp(n->tag_name, "iframe") || !strcasecmp(n->tag_name, "input")));
-        if (atomic) { mc_span_add(S, b->y, b->y + b->height); continue; }
+        if (atomic || (b->s->brk_inside == 2 && ctx->tree.nodes[c].first_child_idx < 0)) { mc_span_add(S, b->y, b->y + b->height); continue; }
         mc_spans_walk(ctx, c, S, depth + 1);
     }
 }
@@ -20928,6 +21145,8 @@ static double mc_balance(LayoutContext *ctx, int idx, int first, int stop, doubl
             int lines = lh > 0.0 ? (int)floor(b->height / lh + 0.5) : 1;
             if (lines < 1) lines = 1;
             for (int k = 0; k < lines && k < 500; k++) mc_span_add(&S, b->y + k * b->height / lines, b->y + (k + 1) * b->height / lines);
+        } else if (b->s->brk_inside == 2 && ctx->tree.nodes[c].first_child_idx < 0) {
+            mc_span_add(&S, b->y, b->y + b->height);
         } else {
             mc_spans_walk(ctx, c, &S, 0);
         }
@@ -21271,6 +21490,7 @@ static double mc_push_walk(LayoutContext *ctx, int idx, double top, double H, in
         if ((cb->s->display == CSS_DISPLAY_FLEX || cb->s->display == CSS_DISPLAY_GRID || cb->s->table_role == 3) && cb->mc_n <= 0) {
             double acc = 0.0, most = 0.0, ltop = -1e30, lbot = -1e30, pbot = -1e30, pltop = 1e30;
             int l0 = -1;   /* (the line's first item) */
+            bool line_after = false;   /* (an item of the line before: a forced break after it) */
             for (int k = ctx->tree.nodes[c].first_child_idx;; k = ctx->tree.nodes[k].next_sibling_idx) {
                 LayoutBox *kb = k >= 0 ? layout_box(ctx, k) : NULL;
                 if (kb && (kb->s->display == CSS_DISPLAY_NONE || kb->s->position == CSS_POSITION_ABSOLUTE || kb->s->position == CSS_POSITION_FIXED)) continue;
@@ -21301,6 +21521,20 @@ static double mc_push_walk(LayoutContext *ctx, int idx, double top, double H, in
                     if (pbot > -1e29 && nc > 0.0 && ny > nc * H + 0.01 && pbot - top <= nc * H + 0.01 && cb->s->display == CSS_DISPLAY_GRID &&
                         !cb->s->grid_lanes && kb->y > pltop + 0.01 && css_layout_box_node(ctx, k) && css_layout_box_node(ctx, k)->type == HTML_NODE_ELEMENT)
                         acc -= ny - nc * H;
+                    /* (a forced break on an item of a row's line: before the line, the line at the next column's top) */
+                    if (cb->s->display == CSS_DISPLAY_FLEX && (cb->s->flex_direction == CSS_FLEX_DIRECTION_ROW || cb->s->flex_direction == CSS_FLEX_DIRECTION_ROW_REVERSE)) {
+                        bool fb = line_after;
+                        line_after = false;
+                        for (int q = k; q >= 0; q = ctx->tree.nodes[q].next_sibling_idx) {
+                            const LayoutBox *qb = layout_box(ctx, q);
+                            if (qb->s->display == CSS_DISPLAY_NONE || qb->s->position == CSS_POSITION_ABSOLUTE || qb->s->position == CSS_POSITION_FIXED) continue;
+                            if (q != k && qb->y >= kb->y + kb->height - 0.01) break;   /* (the next line) */
+                            if (mc_brk(ctx, q, false) == 1) fb = true;
+                            if (mc_brk(ctx, q, true) == 1) line_after = true;
+                        }
+                        double fy = kb->y + acc - top;
+                        if (fb && fy > 0.01 && fmod(fy + 0.01, H) > 0.02) acc += (floor((fy + 0.01) / H) + 1.0) * H - fy;
+                    }
                     l0 = k; ltop = kb->y; lbot = kb->y + kb->height;
                 }
                 else if (kb->y + kb->height > lbot) lbot = kb->y + kb->height;
@@ -21392,7 +21626,8 @@ static bool layout_multicol(LayoutContext *ctx, int idx)
     /* (in a multicol container's columns of a known height, its own height auto,
      * starting a column there: its columns that high, a row in each of those) */
     double nest_h = 0.0;
-    if (auto_h && s->column_height <= 0.0 && t_mc_outer_h > 1.0 && t_mc_depth > 0) {
+    /* (or a height of its own longer than the outer column: fragmented through it too) */
+    if ((auto_h || box->content_height > t_mc_outer_h + 0.5) && s->column_height <= 0.0 && t_mc_outer_h > 1.0 && t_mc_depth > 0) {
         double o = fmod(top - t_mc_outer_top, t_mc_outer_h);
         if (o < 0.5 || o > t_mc_outer_h - 0.5) nest_h = t_mc_outer_h;
     }
@@ -21518,6 +21753,7 @@ static bool layout_multicol(LayoutContext *ctx, int idx)
 static __thread int t_clamp_n, t_clamp_count, t_clamp_root = -1;
 static __thread double t_clamp_bottom;
 static __thread double t_clamp_lim = -1.0;   /* (line-clamp: auto: the room, from the root's content top) */
+
 
 static double layout_baseline_walk(LayoutContext *ctx, int i, int depth, bool first, bool atomic);
 static void layout_move_box(LayoutContext *ctx, int idx, double x, double y);
@@ -22235,6 +22471,11 @@ static bool ifc_is_replaced(const LayoutBox *b, HtmlNode *n)
     }
     size_t len = strlen(n->tag_name);
     if (len != 3 && len != 5 && len != 6 && len != 8) return false;   /* (svg; input audio video embed meter; ...) */
+    if (!strcasecmp(n->tag_name, "object")) {
+        const char *od = layout_node_attribute(n, "data"), *oty = layout_node_attribute(n, "type");
+        size_t ol = od ? strcspn(od, "?#") : 0;
+        if (od && ((oty && !strncasecmp(oty, "text/html", 9)) || (!oty && ol > 4 && (!strncasecmp(od + ol - 5, ".html", 5) || !strncasecmp(od + ol - 4, ".htm", 4) || !strncasecmp(od + ol - 4, ".xht", 4))))) return true;
+    }
     return (layout_is_replaced_form_element(n->tag_name) && strcasecmp(n->tag_name, "object") != 0 && strcasecmp(n->tag_name, "textarea") != 0) ||
            layout_is_svg_box(n) || !strcasecmp(n->tag_name, "meter") || !strcasecmp(n->tag_name, "progress");
 }
@@ -24514,6 +24755,23 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
             }
             int pc0 = B.npc;
             double end = ifc_bidi_line(ctx, &I, &B, t0, i, nlines, lx + (nlines == 0 && !rl ? indent0 : 0.0));
+            /* (white space at the line's logical end hangs: outside the line for
+             * alignment, at its left in a right to left paragraph; break-spaces' stays) */
+            {
+                double hw = 0.0;
+                for (int k = i - 1; k >= t0; k--) {
+                    const IfcTok *ht = &I.t[k];
+                    if (ht->kind == IFC_WORD || ht->kind == IFC_ATOM || ht->kind == IFC_BR) break;
+                    if (ht->kind == IFC_SPACE && !ht->drop && !layout_box(ctx, idx)->s->break_spaces) hw += ht->w;
+                }
+                if (hw > 0.0) {
+                    if (B.para & 1) {
+                        for (int k = t0; k < i; k++) I.t[k].x -= hw;
+                        for (int k = pc0; k < B.npc; k++) { B.pc[k].a -= hw; B.pc[k].z -= hw; }
+                    }
+                    end -= hw;
+                }
+            }
             double slack = lx + la - (nlines == 0 && rl ? indent0 : 0.0) - end;
             /* (a line too long: start-aligned, CSS Text 3 section 7.1,
              * overflowing on the left when right to left) */
@@ -25366,6 +25624,10 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                 absorbed = true;
             } else {
                 gap = layout_margin_collapse(pending_mb, eff_mt);
+                /* (a new formatting context past floats it adjoins: the margin spent) */
+                t_adj_floats = layout_adj_floats_before(ctx, c);
+                if (layout_fc_past_adj_floats(ctx, c)) { gap = pending_mb; if (gap < 0.0) gap = 0.0; }
+                t_adj_floats = 0.0;
             }
             if (cur.y + gap < clear_to - 0.001) {
                 /* (clear: its border edge where it would be without it is
@@ -27046,17 +27308,105 @@ static __thread double t_grid_rep_min;
 /* (intrinsic repetitions, grid lanes: the items' largest min-/max-content
  * contributions stand for the intrinsic tracks; t_grid_rep_intr off: none) */
 static __thread bool t_grid_rep_intr;
-static __thread double t_grid_rep_mnc, t_grid_rep_mxc;
+/* (grid lanes, auto-fit: the container being laid out twice; mode 1 collapses nothing and
+ * notes the lanes the placement used, mode 2 collapses the repeated ones it didn't) */
+static __thread int t_fit_idx = -1, t_fit_mode;
+static __thread unsigned char *t_fit_used;
+#define GRID_FIT_LANES (GRID_MAX_TRACKS * 4 + 8)
+typedef struct { int span; double mn, mx; } GridRepItem;
+static __thread const GridRepItem *t_grid_rep_it;
+static __thread int t_grid_rep_n;
 static double grid_track_rep_size(const GridTrackDef *t, double avail)
 {
-    if (!t_grid_rep_intr || t->kmax == GT_LEN || t->kmax == GT_FR) return grid_track_fixed(t, avail);
-    double mn = t->kmin == GT_LEN ? t->min_px + t->min_pct * (avail > 0.0 ? avail : 0.0) : 0.0;
-    double v = t->kmax == GT_MINC ? t_grid_rep_mnc : t_grid_rep_mxc;
+    return grid_track_fixed(t, avail);
+}
+/* (an item's contribution to an intrinsic track of the repetition) */
+static double grid_rep_contrib(const GridTrackDef *t, const GridRepItem *it, double avail)
+{
+    if (t->kmax == GT_MINC) return it->mn;
     if (t->kmax == GT_FIT) {
         double lim = t->max_px + t->max_pct * (avail > 0.0 ? avail : 0.0);
-        v = t_grid_rep_mxc < lim ? t_grid_rep_mxc : (lim > t_grid_rep_mnc ? lim : t_grid_rep_mnc);
+        return it->mx < lim ? it->mx : (lim > it->mn ? lim : it->mn);
     }
-    return v > mn ? v : mn;
+    return it->mx;
+}
+/* One intrinsic repetition's length, gaps not counted: the items' contributions
+ * by the track sizing rules, as if the pattern went on (a span crosses it
+ * cyclically, from each start), single spans first, each track at least 1px. */
+static double grid_rep_total(const GridTrackDef *rep, int nrep, double avail, double gap)
+{
+    double sz[64];
+    bool in[64];
+    int most = 1;
+    for (int i = 0; i < nrep; i++) {
+        const GridTrackDef *t = &rep[i];
+        in[i] = t->kmax != GT_LEN && t->kmax != GT_FR;
+        sz[i] = !in[i] ? grid_track_fixed(t, avail) : t->kmin == GT_LEN ? t->min_px + t->min_pct * (avail > 0.0 ? avail : 0.0) : 0.0;
+        for (int k = 0; in[i] && k < t_grid_rep_n; k++) {
+            if (t_grid_rep_it[k].span != 1) continue;
+            double c = grid_rep_contrib(t, &t_grid_rep_it[k], avail);
+            if (c > sz[i]) sz[i] = c;
+        }
+    }
+    for (int k = 0; k < t_grid_rep_n; k++) if (t_grid_rep_it[k].span > most) most = t_grid_rep_it[k].span;
+    if (most > 1024) most = 1024;
+    for (int sp = 2; sp <= most; sp++)
+        for (int k = 0; k < t_grid_rep_n; k++) {
+            if (t_grid_rep_it[k].span != sp) continue;
+            for (int st = 0; st < nrep; st++) {
+                double sum = gap * (sp - 1), c = 0.0;
+                int m = 0;
+                for (int q = 0; q < sp; q++) {
+                    int j = (st + q) % nrep;
+                    sum += sz[j];
+                    if (in[j]) {
+                        m++;
+                        double v = grid_rep_contrib(&rep[j], &t_grid_rep_it[k], avail);
+                        if (v > c) c = v;
+                    }
+                }
+                if (!m || c <= sum) continue;
+                double add = (c - sum) / m;
+                for (int q = 0; q < sp; q++) { int j = (st + q) % nrep; if (in[j]) sz[j] += add; }
+            }
+        }
+    double total = 0.0;
+    for (int i = 0; i < nrep; i++) total += in[i] && sz[i] < 1.0 ? 1.0 : sz[i];
+    return total;
+}
+/* (grid lanes: the lane axis' template in use; an intrinsic auto repetition beside
+ * another or beside an intrinsic track is invalid: none) */
+static const char *grid_lanes_template(const char *src, double fs)
+{
+    if (!src || !strstr(src, "auto-f")) return src;
+    bool intr_rep = false, other_rep = false, other_intr = false;
+    const char *p = src, *s;
+    size_t n;
+    while (grid_token(&p, &s, &n)) {
+        if (*s == '[') continue;
+        GridTrackDef t;
+        if (n > 8 && strncasecmp(s, "repeat(", 7) == 0 && s[n - 1] == ')') {
+            bool af = strncasecmp(s + 7, "auto-f", 6) == 0;
+            const char *in = s + 7;
+            while (in < s + n && *in != ',') in++;
+            char buf[1024];
+            size_t il = in < s + n - 1 ? (size_t)(s + n - 1 - in - 1) : 0;
+            if (il >= sizeof buf) il = sizeof buf - 1;
+            if (il) memcpy(buf, in + 1, il);
+            buf[il] = ' ';
+            bool any = false;
+            const char *ip = buf, *is;
+            size_t in_n;
+            while (grid_token(&ip, &is, &in_n))
+                if (*is != '[' && grid_track_size(is, in_n, fs, &t) && t.kmax != GT_LEN && t.kmax != GT_FR) any = true;
+            if (af && any) { if (intr_rep) other_rep = true; intr_rep = true; }
+            else if (af) other_rep = true;
+            else if (any) other_intr = true;
+            continue;
+        }
+        if (grid_track_size(s, n, fs, &t) && t.kmax != GT_LEN && t.kmax != GT_FR) other_intr = true;
+    }
+    return intr_rep && (other_rep || other_intr) ? NULL : src;
 }
 static void grid_parse_tracks(const char *src, double fs, double avail, double gap, GridTrackList *L)
 {
@@ -27127,7 +27477,8 @@ static void grid_parse_tracks(const char *src, double fs, double avail, double g
             bool fit = strcasecmp(cnt, "auto-fit") == 0;
             if (fit || strcasecmp(cnt, "auto-fill") == 0) {
                 double per = 0.0;
-                for (int i = 0; i < nrep; i++) per += grid_track_rep_size(&rep[i], avail);
+                if (t_grid_rep_intr) per = grid_rep_total(rep, nrep, avail, gap);
+                else for (int i = 0; i < nrep; i++) per += grid_track_rep_size(&rep[i], avail);
                 per += gap * nrep;
                 count = 1;
                 if (avail > 0.0 && per > 0.0) {
@@ -27306,9 +27657,14 @@ static int grid_look_ahead(const GridDefs *D, bool rows, const char *nm, size_t 
 
 static int grid_look_back0(const GridDefs *D, bool rows, const char *nm, size_t len, int from, int n, int last)
 {
-    int s = from < last ? from : last;
-    if (!grid_name_any(D, rows, nm, len, last)) { if (s > -1) s = -1; return s - n + 1; }
-    for (; n > 0; s--) if (s < 0 || grid_line_named(D, rows, nm, len, s)) n--;
+    /* (from may be past the explicit grid; searching back, only the implicit
+     * lines before it carry every name, ง8.3.1) */
+    int s = from;
+    if (!grid_name_any(D, rows, nm, len, last)) {
+        if (s > -1) s = -1;
+        return s - n + 1;
+    }
+    for (; n > 0; s--) if (s < 0 || (s <= last && grid_line_named(D, rows, nm, len, s))) n--;
     return s + 1;
 }
 static int grid_look_back(const GridDefs *D, bool rows, const char *nm, size_t len, int from, int n, int last)
@@ -27361,8 +27717,36 @@ static int grid_place_line(const GridDefs *D, bool rows, const GridPlace *g, boo
 }
 
 /* An item's start track and span on one axis; false when it is auto. */
+static bool grid_resolve_axis1(const GridDefs *D, bool rows, const char *sv, const char *ev, int explicit_tracks,
+                               int *start, int *span);
 static bool grid_resolve_axis(const GridDefs *D, bool rows, const char *sv, const char *ev, int explicit_tracks,
                               int *start, int *span)
+{
+    /* (a subgrid's axis: the lines as the implicit grid would have them, then
+     * the area clamped to its tracks, a span 1 at the edge when nothing is left) */
+    int bit = t_sg_clamp & (rows ? 2 : 1);
+    if (!bit) return grid_resolve_axis1(D, rows, sv, ev, explicit_tracks, start, span);
+    t_sg_clamp &= ~bit;
+    bool def = grid_resolve_axis1(D, rows, sv, ev, explicit_tracks, start, span);
+    t_sg_clamp |= bit;
+    if (!def) return false;
+    int last = explicit_tracks, s0 = *start, e0 = *start + *span;
+    if (s0 < 0) s0 = 0;
+    if (e0 > last) e0 = last;
+    if (s0 > last) s0 = last;
+    if (e0 < 0) e0 = 0;
+    if (e0 <= s0) {
+        if (s0 >= last) { s0 = last - 1; e0 = last; }
+        else e0 = s0 + 1;
+        if (s0 < 0) { s0 = 0; e0 = 1; }
+    }
+    *start = s0;
+    *span = e0 - s0;
+    return true;
+}
+
+static bool grid_resolve_axis1(const GridDefs *D, bool rows, const char *sv, const char *ev, int explicit_tracks,
+                               int *start, int *span)
 {
     int last = explicit_tracks;
     GridPlace gs, ge;
@@ -27438,6 +27822,8 @@ typedef struct {
     unsigned char base_c, base_r;      /* 1 first, 2 last baseline alignment */
     bool rl_c;                         /* blocks going right to left: a group of their own */
     bool auto_c, auto_r;               /* no size or min size of its own on the axis: its minimum automatic */
+    bool repl;                         /* a replaced element (its automatic minimum not clamped by fixed maxima) */
+    int rs_asked;                      /* (row lanes, auto lane: the span before the clamp to the rows known so far) */
     bool lane_auto;                    /* (grid lanes) its lane chosen by the masonry pass */
 } GridItem;
 
@@ -27651,7 +28037,10 @@ static void grid_size_tracks(GridSize *t, int n, double avail, double gap, const
         if (g->collapsed) continue;
         double cmin = rows ? it[k].h : it[k].min_w, cmax = rows ? it[k].h : it[k].max_w;
         if (mode == 1) cmax = cmin;
-        if (g->kmin == GT_AUTO || g->kmin == GT_MINC) { if (cmin > g->base) g->base = cmin; }
+        /* (an automatic minimum in a track of a fixed maximum: no more than that, CSS Grid 6.6) */
+        double amin = g->kmin == GT_AUTO && g->kmax == GT_LEN && (rows ? it[k].auto_r : it[k].auto_c) && !it[k].repl && cmin > g->limit ? g->limit : cmin;
+        if (g->kmin == GT_AUTO) { if (amin > g->base) g->base = amin; }
+        else if (g->kmin == GT_MINC) { if (cmin > g->base) g->base = cmin; }
         else if (g->kmin == GT_MAXC) { if (cmax > g->base) g->base = cmax; }
         if (g->kmax == GT_MINC) { if (cmin > g->growth) g->growth = cmin; }
         else if (g->kmax == GT_MAXC || g->kmax == GT_AUTO) { if (cmax > g->growth) g->growth = cmax; }
@@ -27903,6 +28292,8 @@ static bool grid_setup(LayoutContext *ctx, int idx, double cw, double ch, GridSt
     GridDefs *D = (GridDefs *)calloc(1, sizeof(GridDefs));
     if (!D) return false;
     G->D = D;
+    double rep_mw = 0.0;
+    const char *lane_cols = NULL, *lane_rows = NULL;
     {
         /* (no definite size on an axis: its min size, content box, for the repetitions) */
         bool bb = ct->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX;
@@ -27911,10 +28302,13 @@ static bool grid_setup(LayoutContext *ctx, int idx, double cw, double ch, GridSt
         /* (a min size on the other axis, through an aspect-ratio) */
         if (!(mw > 0.0) && mh > 0.0 && ct->s->aspect_ratio_prop && ct->s->aspect_ratio > 0.0) mw = mh / ct->s->aspect_ratio;
         if (!(mh > 0.0) && mw > 0.0 && ct->s->aspect_ratio_prop && ct->s->aspect_ratio > 0.0) mh = mw * ct->s->aspect_ratio;
-        t_grid_rep_min = cw > 0.0 ? 0.0 : mw;
-        grid_parse_tracks(t_sg_cols ? t_sg_cols : ct->s->grid_cols, fs, cw, ct->s->gap_col, &D->cols);
+        rep_mw = cw > 0.0 ? 0.0 : mw;
+        t_grid_rep_min = rep_mw;
+        lane_cols = grid_column_lanes(ct->s) && !t_sg_cols ? grid_lanes_template(ct->s->grid_cols, fs) : ct->s->grid_cols;
+        lane_rows = grid_row_lanes(ct->s) && !t_sg_rows ? grid_lanes_template(ct->s->grid_rows, fs) : ct->s->grid_rows;
+        grid_parse_tracks(t_sg_cols ? t_sg_cols : lane_cols, fs, cw, ct->s->gap_col, &D->cols);
         t_grid_rep_min = ch > 0.0 ? 0.0 : mh;
-        grid_parse_tracks(t_sg_rows ? t_sg_rows : ct->s->grid_rows, fs, ch, ct->s->gap_row, &D->rows);
+        grid_parse_tracks(t_sg_rows ? t_sg_rows : lane_rows, fs, ch, ct->s->gap_row, &D->rows);
         t_grid_rep_min = 0.0;
     }
     D->nareas = grid_parse_areas(ct->s->grid_areas, D->areas, GRID_MAX_AREAS, &D->area_rows, &D->area_cols);
@@ -27952,19 +28346,28 @@ static bool grid_setup(LayoutContext *ctx, int idx, double cw, double ch, GridSt
     }
     /* (grid lanes, intrinsic auto repetitions: counted from the single-lane
      * items' contributions, so the columns again) */
-    if (grid_column_lanes(ct->s) && ct->s->grid_cols && cw > 0.0 && strstr(ct->s->grid_cols, "auto-f") &&
-        (strstr(ct->s->grid_cols, "content") || strstr(ct->s->grid_cols, "auto)") || strstr(ct->s->grid_cols, "auto "))) {
-        t_grid_rep_mnc = t_grid_rep_mxc = 0.0;
-        for (int i = 0; i < n; i++) {
+    if (grid_column_lanes(ct->s) && !t_sg_cols && lane_cols && (cw > 0.0 || rep_mw > 0.0) && strstr(lane_cols, "auto-f") &&
+        (strstr(lane_cols, "content") || strstr(lane_cols, "auto)") || strstr(lane_cols, "auto "))) {
+        GridRepItem *ri = n > 0 ? (GridRepItem *)calloc((size_t)n, sizeof(GridRepItem)) : NULL;
+        int nri = 0;
+        for (int i = 0; ri && i < n; i++) {
             GridItem *it = &G->items[i];
-            if (it->is_text || it->cs > 1) continue;
-            double a = layout_intrinsic_contribution(ctx, it->idx, false), b = layout_intrinsic_contribution(ctx, it->idx, true);
-            if (a > t_grid_rep_mnc) t_grid_rep_mnc = a;
-            if (b > t_grid_rep_mxc) t_grid_rep_mxc = b;
+            if (it->is_text) continue;
+            ri[nri].span = it->cs < 1 ? 1 : it->cs;
+            ri[nri].mn = layout_intrinsic_contribution(ctx, it->idx, false);
+            ri[nri].mx = layout_intrinsic_contribution(ctx, it->idx, true);
+            nri++;
         }
+        t_grid_rep_it = ri;
+        t_grid_rep_n = nri;
         t_grid_rep_intr = true;
-        grid_parse_tracks(ct->s->grid_cols, fs, cw, ct->s->gap_col, &D->cols);
+        t_grid_rep_min = rep_mw;
+        grid_parse_tracks(lane_cols, fs, cw, ct->s->gap_col, &D->cols);
         t_grid_rep_intr = false;
+        t_grid_rep_min = 0.0;
+        t_grid_rep_it = NULL;
+        t_grid_rep_n = 0;
+        free(ri);
         ecols = D->cols.n > D->area_cols ? D->cols.n : D->area_cols;
         for (int i = 0; i < n; i++) {
             GridItem *it = &G->items[i];
@@ -27999,6 +28402,7 @@ static bool grid_setup(LayoutContext *ctx, int idx, double cw, double ch, GridSt
             it->lane_auto = !rdef[i];
             if (!rdef[i]) {
                 if (!it->rs) it->rs = 1;
+                it->rs_asked = it->rs;
                 if (erows > 0 && it->rs > erows) it->rs = erows;
                 it->r = 0;
                 rdef[i] = true;
@@ -28051,9 +28455,12 @@ static bool grid_setup(LayoutContext *ctx, int idx, double cw, double ch, GridSt
         const GridTrackList *L = axis ? &D->rows : &D->cols;
         GridSize *t = axis ? G->rows : G->cols;
         int lk = axis ? G->lead_r : G->lead_c;
+        bool lane_axis = axis ? grid_row_lanes(ct->s) : grid_column_lanes(ct->s);
+        if (lane_axis && t_fit_idx == idx && t_fit_mode == 1) continue;
         for (int k = L->fit_start + lk; k < L->fit_start + L->fit_count + lk; k++) {
             bool used = false;
-            for (int i = 0; i < n && !used; i++) {
+            if (lane_axis && t_fit_idx == idx) { if (k >= 0 && k < GRID_FIT_LANES && t_fit_used[k]) used = true; }
+            else for (int i = 0; i < n && !used; i++) {
                 int s = axis ? G->items[i].r : G->items[i].c, sp = axis ? G->items[i].rs : G->items[i].cs;
                 used = k >= s && k < s + sp;
             }
@@ -28080,6 +28487,10 @@ static void grid_column_contributions(GridState *G)
         it->auto_c = !it->is_text && !cb->s->width_set && !(cb->min_width > 0.0) && !(cb->s->min_width > 0.0) && !(cb->s->minmax_pct_bits & 1) &&
                      !cb->s->width_keyword && !cb->s->mm_kw_w[0];
         it->auto_r = !it->is_text && !cb->s->height_set && !(cb->min_height > 0.0) && !(cb->s->min_height > 0.0) && !(cb->s->minmax_pct_bits & 4) && !(cb->s->mm_kw_h & 1);
+        {
+            HtmlNode *dom = it->is_text ? NULL : css_layout_box_node(G->ctx, it->idx);
+            it->repl = dom && (layout_is_img(dom) || layout_is_svg_box(dom) || (dom->tag_name && layout_is_replaced_form_element(dom->tag_name)));
+        }
     }
     /* (first or last baseline in a column: a box's edge, each group's edges in line) */
     const LayoutBox *ct = layout_box(G->ctx, G->idx);
@@ -28129,6 +28540,28 @@ static bool grid_is_subgrid(const char *v)
 {
     while (v && isspace((unsigned char)*v)) v++;
     return v && !strncasecmp(v, "subgrid", 7);
+}
+
+static __thread const LayoutBox *t_abs_along_box;
+static __thread double t_abs_along;
+/* (a subgrid's own rows (its standalone axis), when they are lengths: the
+ * size of the one an item at row r spanning n is in; < 0 when not a length) */
+static double grid_subgrid_own_rows(const LayoutBox *b, int r, int n)
+{
+    if (!b->s->grid_rows || grid_is_subgrid(b->s->grid_rows)) return -1.0;
+    GridTrackList *L = (GridTrackList *)malloc(sizeof(GridTrackList));
+    if (!L) return -1.0;
+    double fs = b->s->font_size > 0.0 ? b->s->font_size : 16.0;
+    grid_parse_tracks(b->s->grid_rows, fs, -1.0, b->s->gap_row, L);
+    double sum = 0.0;
+    bool ok = r >= 0 && n >= 1 && r + n <= L->n;
+    for (int k = r; ok && k < r + n; k++) {
+        const GridTrackDef *t = &L->t[k];
+        if (t->kmin != GT_LEN || t->kmax != GT_LEN || t->min_pct > 0.0 || t->max_pct > 0.0 || t->min_px != t->max_px) ok = false;
+        else sum += t->min_px + (k > r ? b->s->gap_row : 0.0);
+    }
+    free(L);
+    return ok ? sum : -1.0;
 }
 
 static GridItem *grid_subgrid_items(const GridState *G, int *out_n)
@@ -28184,8 +28617,12 @@ static GridItem *grid_subgrid_items(const GridState *G, int *out_n)
             if (c0 < 0) c0 = 0;
             k.c = it->c + c0;
             k.cs = span;
+            /* (an item across the subgrid's flow: its inline size is the row it is in) */
+            double along = !k.is_text && (kb->s->writing_mode != 0) != (b->s->writing_mode != 0) ? grid_subgrid_own_rows(b, 0, 1) : -1.0;
+            if (along >= 0.0) { t_abs_along_box = kb; t_abs_along = along - kb->margin_top - kb->margin_bottom; if (t_abs_along < 0.0) t_abs_along = 0.0; }
             k.min_w = layout_intrinsic_contribution(ctx, c, false);
             k.max_w = layout_intrinsic_contribution(ctx, c, true);
+            if (along >= 0.0) t_abs_along_box = NULL;
             if (c0 == 0) { k.min_w += lead; k.max_w += lead; }
             if (c0 + span == it->cs) { k.min_w += trail; k.max_w += trail; }
             else { k.min_w += half; k.max_w += half; }
@@ -28573,7 +29010,25 @@ static const char *grid_subgrid_cols(LayoutContext *ctx, int idx, const LayoutBo
     for (int k = 0; k < npost && nn < nl; k++) { nm_s[nn] = post_s[k]; nm_l[nn++] = post_l[k]; }
     /* (and the parent's names of the lines it spans, after its own) */
     const char *pspec = rows ? pb->s->grid_rows : pb->s->grid_cols;
-    GridTrackList *PL = pspec && strncasecmp(pspec, "subgrid", 7) ? (GridTrackList *)malloc(sizeof(GridTrackList)) : NULL;
+    if (pb->s->grid_lanes && rows == grid_row_lanes(pb->s)) {
+        /* (auto-placed along a grid-lanes container's lanes: its lines are not
+         * known while names resolve, so it has none of the parent's) */
+        GridPlace g0, g1;
+        bool h0 = grid_place_parse(rows ? ct->s->grid_rs : ct->s->grid_cs, &g0);
+        bool h1 = grid_place_parse(rows ? ct->s->grid_re : ct->s->grid_ce, &g1);
+        if (!(h0 && !g0.span) && !(h1 && !g1.span)) pspec = NULL;
+    }
+    char *pbuf = NULL;
+    if (pspec && !strncasecmp(pspec, "subgrid", 7) &&
+        (pb->s->writing_mode != ct->s->writing_mode || pb->s->direction != ct->s->direction))
+        pspec = NULL;   /* (lines the other way round: not mapped yet) */
+    if (pspec && !strncasecmp(pspec, "subgrid", 7)) {
+        /* (a subgrid's parent: its tracks as it took them, with the names its own parent gave it) */
+        double pg = 0.0;
+        pbuf = (char *)malloc(cap);
+        pspec = pbuf ? grid_subgrid_cols(ctx, p, pb, pbuf, cap, &pg, rows) : NULL;
+    }
+    GridTrackList *PL = pspec ? (GridTrackList *)malloc(sizeof(GridTrackList)) : NULL;
     if (PL) {
         double pfs = pb->s->font_size > 0.0 ? pb->s->font_size : 16.0;
         grid_parse_tracks(pspec, pfs, rows ? pb->content_height : pb->content_width, rows ? pb->s->gap_row : pb->s->gap_col, PL);
@@ -28586,28 +29041,28 @@ static const char *grid_subgrid_cols(LayoutContext *ctx, int idx, const LayoutBo
         if (k < nn) {
             /* (its own list, its ']' left for the parent's names) */
             int n = snprintf(buf + o, cap - o, "%s%.*s", o ? " " : "", (int)(nm_l[k] - 1), nm_s[k]);
-            if (n < 0 || (size_t)n >= cap - o) { free(PL); return NULL; }
+            if (n < 0 || (size_t)n >= cap - o) { free(PL); free(pbuf); return NULL; }
             o += (size_t)n;
             open = true;
         }
         for (int i = 0; PL && pl >= 0 && i < PL->nnames; i++) {
             if (PL->names[i].line != pl) continue;
             int n = snprintf(buf + o, cap - o, "%s%.*s", open ? " " : o ? " [" : "[", (int)PL->names[i].len, PL->names[i].name);
-            if (n < 0 || (size_t)n >= cap - o) { free(PL); return NULL; }
+            if (n < 0 || (size_t)n >= cap - o) { free(PL); free(pbuf); return NULL; }
             o += (size_t)n;
             open = true;
         }
         if (open) {
-            if (o + 2 >= cap) { free(PL); return NULL; }
+            if (o + 2 >= cap) { free(PL); free(pbuf); return NULL; }
             buf[o++] = ']';
             buf[o] = 0;
         }
         if (k == nt) break;
         int n = snprintf(buf + o, cap - o, "%s%.3fpx", o ? " " : "", ws[k]);
-        if (n < 0 || (size_t)n >= cap - o) { free(PL); return NULL; }
+        if (n < 0 || (size_t)n >= cap - o) { free(PL); free(pbuf); return NULL; }
         o += (size_t)n;
     }
-    free(PL);
+    free(PL); free(pbuf);
     if (!rows && !ct->s->gap_col_given) *gap = pb->s->gap_col;
     if (rows && !ct->s->gap_row_given) *gap = pb->s->gap_row;
     return buf;
@@ -28750,6 +29205,12 @@ static int grid_self_mode(const LayoutBox *ct, const LayoutBox *child, bool inli
     }
     case ALIGN_KW_LAST_BASELINE: return 2;
     case ALIGN_KW_BASELINE: return 0;
+    case ALIGN_KW_FLOW_START: case ALIGN_KW_FLOW_END: {
+        /* (the way items stack: a grid-lanes container's stacking axis, filled in reverse from its end) */
+        bool stack_axis = ct->s->grid_lanes && inline_axis == grid_row_lanes(ct->s);
+        bool rev = stack_axis && ct->s->lanes_fill_rev;
+        return (k == ALIGN_KW_FLOW_END) != rev ? 2 : 0;
+    }
     default: return e == CSS_ALIGN_CENTER ? 1 : e == CSS_ALIGN_FLEX_END ? 2 : e == CSS_ALIGN_STRETCH ? -1 : 0;
     }
 }
@@ -28773,6 +29234,21 @@ static void layout_grid_container(LayoutContext *ctx, int idx)
     if (ct->s->gap_col_pct > 0.0f) ct->s->gap_col = held_gc + ct->s->gap_col_pct * (cw > 0.0 ? cw : 0.0);
     if (gpr > 0.0f) ct->s->gap_row = held_gr + (height_def ? gpr * (chh > 0.0 ? chh : 0.0) : 0.0);
     t_grid_gpr = !height_def ? gpr : 0.0f;
+    const char *lane_tpl = grid_column_lanes(ct->s) ? ct->s->grid_cols : grid_row_lanes(ct->s) ? ct->s->grid_rows : NULL;
+    unsigned char *fit_used = lane_tpl && strstr(lane_tpl, "auto-fit") && t_fit_idx != idx ? (unsigned char *)calloc(GRID_FIT_LANES, 1) : NULL;
+    if (fit_used) {
+        int was_idx = t_fit_idx, was_mode = t_fit_mode;
+        unsigned char *was_used = t_fit_used;
+        double was_h = ct->height;
+        t_fit_idx = idx; t_fit_used = fit_used; t_fit_mode = 1;
+        layout_grid_body(ctx, idx, ct, content_x, content_y, cw, height_def, chh);
+        t_fit_idx = idx; t_fit_used = fit_used; t_fit_mode = 2;
+        ct->height = was_h;
+        layout_update_content_sizes(ct);
+        layout_grid_body(ctx, idx, ct, content_x, content_y, cw, height_def, chh);
+        t_fit_idx = was_idx; t_fit_mode = was_mode; t_fit_used = was_used;
+        free(fit_used);
+    } else
     layout_grid_body(ctx, idx, ct, content_x, content_y, cw, height_def, chh);
     t_grid_gpr = 0.0f;
     ct->s->gap_col = held_gc;
@@ -29054,23 +29530,33 @@ static void layout_grid_body(LayoutContext *ctx, int idx, LayoutBox *ct, double 
 
     /* (row lanes, intrinsic auto repetitions: counted from the single-lane
      * items' heights, now known; the rows again) */
-    if (grid_row_lanes(ct->s) && ct->s->grid_rows && chh > 0.0 && strstr(ct->s->grid_rows, "auto-f") &&
-        (strstr(ct->s->grid_rows, "content") || strstr(ct->s->grid_rows, "auto)") || strstr(ct->s->grid_rows, "auto "))) {
+    const char *lane_rows = grid_row_lanes(ct->s) && !t_sg_rows ? grid_lanes_template(ct->s->grid_rows, ct->s->font_size > 0.0 ? ct->s->font_size : 16.0) : NULL;
+    if (lane_rows && chh > 0.0 && strstr(lane_rows, "auto-f") &&
+        (strstr(lane_rows, "content") || strstr(lane_rows, "auto)") || strstr(lane_rows, "auto "))) {
         double fs = ct->s->font_size > 0.0 ? ct->s->font_size : 16.0;
-        t_grid_rep_mnc = t_grid_rep_mxc = 0.0;
-        for (int i = 0; i < G.nitems; i++) {
+        GridRepItem *ri = G.nitems > 0 ? (GridRepItem *)calloc((size_t)G.nitems, sizeof(GridRepItem)) : NULL;
+        int nri = 0;
+        for (int i = 0; ri && i < G.nitems; i++) {
             const GridItem *it = &G.items[i];
-            if (it->is_text || it->rs > 1) continue;
-            if (it->h > t_grid_rep_mxc) t_grid_rep_mxc = it->h;
+            if (it->is_text) continue;
+            int sp = it->lane_auto && it->rs_asked > 0 ? it->rs_asked : it->rs;
+            ri[nri].span = sp < 1 ? 1 : sp;
+            ri[nri].mn = ri[nri].mx = it->h;
+            nri++;
         }
-        t_grid_rep_mnc = t_grid_rep_mxc;
+        t_grid_rep_it = ri;
+        t_grid_rep_n = nri;
         t_grid_rep_intr = true;
-        grid_parse_tracks(ct->s->grid_rows, fs, chh, gap_r, &G.D->rows);
+        grid_parse_tracks(lane_rows, fs, chh, gap_r, &G.D->rows);
         t_grid_rep_intr = false;
+        t_grid_rep_it = NULL;
+        t_grid_rep_n = 0;
+        free(ri);
         /* (the named rows again, against the new count) */
         int ern = G.D->rows.n > G.D->area_rows ? G.D->rows.n : G.D->area_rows;
         for (int i = 0; i < G.nitems; i++) {
             GridItem *it = &G.items[i];
+            if (it->lane_auto && it->rs_asked > 0) it->rs = it->rs_asked < ern ? it->rs_asked : ern < 1 ? 1 : ern;
             if (it->is_text || it->lane_auto) continue;
             const LayoutStyle *is = layout_box(ctx, it->idx)->s;
             int r, rs;
@@ -29090,8 +29576,9 @@ static void layout_grid_body(LayoutContext *ctx, int idx, LayoutBox *ct, double 
             /* (auto-fit: the repeated rows no item names collapse) */
             const GridTrackList *L = &G.D->rows;
             for (int k = L->fit_start + G.lead_r; k < L->fit_start + L->fit_count + G.lead_r && k < nr; k++) {
-                bool used = false;
-                for (int i = 0; i < G.nitems && !used; i++)
+                bool used = t_fit_idx == idx && t_fit_mode == 1;
+                if (t_fit_idx == idx && t_fit_mode == 2) used = k >= 0 && k < GRID_FIT_LANES && t_fit_used[k];
+                else for (int i = 0; i < G.nitems && !used; i++)
                     used = !G.items[i].lane_auto && k >= G.items[i].r && k < G.items[i].r + G.items[i].rs;
                 if (!used) nrw[k].collapsed = true;
             }
@@ -29156,9 +29643,11 @@ static void layout_grid_body(LayoutContext *ctx, int idx, LayoutBox *ct, double 
             lanes_w = any ? m - gap_c : 0.0;
             if (lanes_w < 0.0) lanes_w = 0.0;
         }
-        if (run && lane_l && !ct->s->lanes_fill_rev) {
+        bool rrev = ct->s->lanes_fill_rev;
+        if (run && lane_l) {
             /* (an item's area along its rows runs to the next item's there, less
-             * the gap, the last's to the content end; justify-self in it) */
+             * the gap, the last's to the content end; justify-self in it.
+             * fill-reverse: that area mirrored, from the content end) */
             double W = cw > 0.0 ? cw : lanes_w;
             int *nxt = (int *)run;   /* (reused: each row's next item) */
             for (int k = 0; k < G.nrows; k++) nxt[k] = -1;
@@ -29169,13 +29658,19 @@ static void layout_grid_body(LayoutContext *ctx, int idx, LayoutBox *ct, double 
                 for (int k = it->r; k < it->r + it->rs && k < G.nrows; k++)
                     if (nxt[k] >= 0 && lane_l[nxt[k]] - gap_c < ar) ar = lane_l[nxt[k]] - gap_c;
                 for (int k = it->r; k < it->r + it->rs && k < G.nrows; k++) nxt[k] = i;
-                if (it->is_text) continue;
+                if (it->is_text) {
+                    if (rrev) { LayoutBox *tb = layout_box(ctx, it->idx); tb->x = content_x + W - (lane_l[i] + tb->width); }
+                    continue;
+                }
                 LayoutBox *child = layout_box(ctx, it->idx);
                 unsigned char ma = child->s->margin_auto;
                 double ml = (ma & 8) ? 0.0 : child->margin_left, mr = (ma & 2) ? 0.0 : child->margin_right;
                 double room = ar - lane_l[i] - ml - mr;
                 int jm = grid_self_mode(ct, child, true);
+                double x0 = content_x + W - ar + ml;   /* (reversed: the mirrored area's start) */
                 if (jm < 0) {
+                    /* (normal, reversed: against the item before it, its margin box mirrored) */
+                    if (rrev) layout_move_box(ctx, it->idx, content_x + W - (lane_l[i] + ml + child->width + mr) + ml, child->y);
                     bool st = child->s->justify_self ? child->s->justify_self == CSS_ALIGN_STRETCH + 1 : ct->s->justify_items == CSS_ALIGN_STRETCH + 1;
                     bool w_auto = !child->s->width_set && !(child->s->width_percent > 0.0) && !child->s->width_keyword;
                     if (!st || !w_auto || (ma & 0xA) || room <= child->width + 0.01) continue;
@@ -29185,6 +29680,7 @@ static void layout_grid_body(LayoutContext *ctx, int idx, LayoutBox *ct, double 
                                   : child->max_width + layout_horizontal_border_padding(child);
                         if (w > mx) w = mx;
                     }
+                    if (rrev) layout_move_box(ctx, it->idx, x0, child->y);
                     child->width = w;
                     layout_update_content_sizes(child);
                     todo[nre3++] = it->idx;
@@ -29194,7 +29690,8 @@ static void layout_grid_body(LayoutContext *ctx, int idx, LayoutBox *ct, double 
                 if ((ma & 0xA) == 0xA) o = fr > 0.0 ? fr / 2.0 : 0.0;
                 else if (ma & 8) o = fr > 0.0 ? fr : 0.0;
                 else if (!(ma & 2)) o = jm == 1 ? fr / 2.0 : jm == 2 ? fr : 0.0;
-                if (o != 0.0) layout_move_box(ctx, it->idx, child->x + o, child->y);
+                if (rrev) layout_move_box(ctx, it->idx, x0 + o, child->y);
+                else if (o != 0.0) layout_move_box(ctx, it->idx, child->x + o, child->y);
             }
             if (nre3 > 0) {
                 layout_units(ctx, todo, nre3);
@@ -29208,7 +29705,7 @@ static void layout_grid_body(LayoutContext *ctx, int idx, LayoutBox *ct, double 
                 }
             }
         }
-        if (lane_l && ct->s->lanes_fill_rev) {
+        if (lane_l && !run && ct->s->lanes_fill_rev) {
             /* (fill-reverse: from the content end, each margin box mirrored) */
             double W = cw > 0.0 ? cw : lanes_w;
             for (int i = 0; i < G.nitems; i++) {
@@ -29446,9 +29943,11 @@ static void layout_grid_body(LayoutContext *ctx, int idx, LayoutBox *ct, double 
         ct->height = h + layout_vertical_border_padding(ct);
         layout_update_content_sizes(ct);
     }
-    if (lane_top && lane_last && !ct->s->lanes_fill_rev) {
+    bool lanes_rev = ct->s->lanes_fill_rev;
+    if (lane_top && lane_last) {
         /* (column lanes: an item's area, for its align-self, runs to the next
-         * item's in the lanes it spans, less the gap; the last's to the content end) */
+         * item's in the lanes it spans, less the gap; the last's to the content end.
+         * fill-reverse: that area mirrored, from the content end) */
         double H = ct->content_height;
         int nre2 = 0;
         for (int k = 0; k < G.ncols; k++) lane_last[k] = -1;
@@ -29458,7 +29957,10 @@ static void layout_grid_body(LayoutContext *ctx, int idx, LayoutBox *ct, double 
             for (int k = it->c; k < it->c + it->cs && k < G.ncols; k++)
                 if (lane_last[k] >= 0 && lane_top[lane_last[k]] - gap_r < abot) abot = lane_top[lane_last[k]] - gap_r;
             for (int k = it->c; k < it->c + it->cs && k < G.ncols; k++) lane_last[k] = i;
-            if (it->is_text) continue;
+            if (it->is_text) {
+                if (lanes_rev) { LayoutBox *tb = layout_box(ctx, it->idx); tb->y = content_y + H - (lane_top[i] + tb->height); }
+                continue;
+            }
             LayoutBox *child = layout_box(ctx, it->idx);
             unsigned char ma = child->s->margin_auto;
             double mt = (ma & 1) ? 0.0 : child->margin_top, mb = (ma & 4) ? 0.0 : child->margin_bottom;
@@ -29466,10 +29968,12 @@ static void layout_grid_body(LayoutContext *ctx, int idx, LayoutBox *ct, double 
             int as_mode = grid_self_mode(ct, child, false);
             HtmlNode *dom = layout_node_dom(ctx, ctx->tree.nodes[it->idx].dom_node_idx);
             bool h_auto = layout_height_auto(child) && !layout_is_img(dom);
-            double y0 = content_y + lane_top[i] + mt, off = 0.0;
+            double y0 = content_y + (lanes_rev ? H - abot : lane_top[i]) + mt, off = 0.0;
             if (as_mode < 0) {
                 /* (normal: start; only a stretch asked for) */
                 bool st = child->s->align_self ? child->s->align_self == CSS_ALIGN_STRETCH + 1 : ct->s->ai_stretch;
+                /* (normal, reversed: against the item before it, its own margin box mirrored) */
+                if (lanes_rev) layout_move_box(ctx, it->idx, child->x, content_y + H - (lane_top[i] + mt + child->height + mb) + mt);
                 if (!st || !h_auto || (ma & 5)) continue;
                 double h = room;
                 if (child->max_height >= 0.0 && h > child->max_height) h = child->max_height;
@@ -29484,7 +29988,7 @@ static void layout_grid_body(LayoutContext *ctx, int idx, LayoutBox *ct, double 
             if ((ma & 5) == 5) off = free_h > 0.0 ? free_h / 2.0 : 0.0;
             else if (ma & 1) off = free_h > 0.0 ? free_h : 0.0;
             else if (!(ma & 4)) off = as_mode == 1 ? free_h / 2.0 : as_mode == 2 ? free_h : 0.0;
-            if (off != 0.0) layout_move_box(ctx, it->idx, child->x, y0 + off);
+            if (off != 0.0 || lanes_rev) layout_move_box(ctx, it->idx, child->x, y0 + off);
         }
         if (nre2 > 0) {
             double *keep = (double *)malloc((size_t)nre2 * sizeof(double));
@@ -29498,7 +30002,7 @@ static void layout_grid_body(LayoutContext *ctx, int idx, LayoutBox *ct, double 
             free(keep);
         }
     }
-    if (lane_top && ct->s->lanes_fill_rev) {
+    if (lane_top && !lane_last && ct->s->lanes_fill_rev) {
         /* (fill-reverse: stacked from the content end, each margin box mirrored) */
         double H = ct->content_height;
         for (int i = 0; i < G.nitems; i++) {
@@ -29629,6 +30133,14 @@ static void layout_grid_body(LayoutContext *ctx, int idx, LayoutBox *ct, double 
         }
     }
     if (ct->s->direction == 1) layout_mirror_children(ctx, idx, content_x, ct->content_width);
+    /* (auto-fit lanes, first pass: the lanes the placement used) */
+    if (t_fit_idx == idx && t_fit_mode == 1) {
+        bool rl_f = grid_row_lanes(ct->s);
+        for (int i = 0; i < G.nitems; i++) {
+            int l = rl_f ? G.items[i].r : G.items[i].c, ls = rl_f ? G.items[i].rs : G.items[i].cs;
+            for (int k = l; k < l + ls && k < GRID_FIT_LANES; k++) if (k >= 0) t_fit_used[k] = 1;
+        }
+    }
     grid_state_free(&G);
 }
 
@@ -31975,9 +32487,6 @@ static __thread const LayoutBox *t_fit_along;
 /* (an out of flow box stretched between insets it was given by its position-area) */
 static __thread const LayoutBox *t_area_stretch_w, *t_area_stretch_h;
 /* (an out of flow box whose lines run down: the room its insets leave along them) */
-static __thread const LayoutBox *t_abs_along_box;
-static __thread double t_abs_along;
-
 static void layout_flow_across(LayoutContext *ctx, int idx)
 {
     LayoutBox *b = layout_box(ctx, idx);
@@ -32001,6 +32510,15 @@ static void layout_flow_across(LayoutContext *ctx, int idx)
     double pcw = P ? P->content_width : ctx->viewport_width, pch = P ? P->content_height : ctx->viewport_height;
     double along = h_given ? assigned_h : t_abs_along_box == b ? t_abs_along : P && !layout_height_auto(P) && !out_of_flow ? P->content_height : (t_wm_across ? ctx->viewport_width : ctx->viewport_height);   /* (the initial containing block along that axis) */
 
+    /* (a grid item of a grid of auto height, its row a length: that row's size) */
+    if (P && !h_given && t_abs_along_box != b && !out_of_flow && !t_wm_across && P->s->display == CSS_DISPLAY_GRID && layout_height_auto(P)) {
+        int r = b->s->grid_rs && isdigit((unsigned char)b->s->grid_rs[0]) ? atoi(b->s->grid_rs) - 1 : 0;
+        double rh = grid_subgrid_own_rows(P, r, 1);
+        if (rh >= 0.0) {
+            along = rh - b->margin_top - b->margin_bottom;
+            if (along < 0.0) along = 0.0;
+        }
+    }
     /* (its block size indefinite: no more than its max-height allows, CSS Writing Modes 3 7.3) */
     if (P && !h_given && t_abs_along_box != b && !out_of_flow && layout_height_auto(P) && P->max_height >= 0.0 && !t_wm_across) {
         double mx = P->max_height - (P->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX ? layout_vertical_border_padding(P) : 0.0);
@@ -32514,6 +33032,15 @@ static const char *layout_pos_anchor(LayoutContext *ctx, int idx)
     return NULL;
 }
 
+/* (the default anchor: position-anchor's name; auto or normal on a pseudo-element: its originating element) */
+static int layout_default_anchor(LayoutContext *ctx, int idx)
+{
+    const char *pa = ctx->boxes[idx].s->position_anchor ? layout_pos_anchor(ctx, idx) : NULL;
+    if (pa && strcasecmp(pa, "auto") && strcasecmp(pa, "normal")) return layout_anchor_find(ctx, idx, pa, strlen(pa));
+    if (ctx->tree.nodes[idx].dom_node_idx >= LAYOUT_PSEUDO_DOM0) return ctx->tree.nodes[idx].parent_idx;
+    return -1;
+}
+
 static __thread bool t_anchor_fixed;   /* (the box placed against it is fixed: on the viewport, past its scroll) */
 static void layout_anchor_rect(LayoutContext *ctx, int a, int cb, double cb_x, double cb_y, double r[4])
 {
@@ -32666,10 +33193,8 @@ static bool anchor_fn_value(const AnchorQuery *q, const char *a, const char *e, 
     const LayoutStyle *s = q->ctx->boxes[q->self].s;
     int an = -1;
     if (name) an = layout_anchor_find(q->ctx, q->self, name, nl);
-    else if (s->position_anchor) {
-        const char *pa = layout_pos_anchor(q->ctx, q->self);
-        if (pa) an = layout_anchor_find(q->ctx, q->self, pa, strlen(pa));
-    }
+    else an = layout_default_anchor(q->ctx, q->self);
+    if (an >= 0 && !layout_box(q->ctx, q->self)->s->anc_used) layout_box(q->ctx, q->self)->s->anc_used = an + 1;
     bool horizontal = side == 1 || side == 3 || side == 4;
     /* (start and end: of the containing block's flow, or with self-, its own; along this axis) */
     const LayoutStyle *cbs = q->cb >= 0 ? q->ctx->boxes[q->cb].s : q->ctx->boxes[q->ctx->tree.root_idx].s;
@@ -33091,13 +33616,14 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
     t_anchor_fixed = box->s->position == CSS_POSITION_FIXED;
     double ocb_x = cb_x, ocb_y = cb_y, ocb_w = cb_w, ocb_h = cb_h;   /* (the containing block before position-area: for no-overflow) */
     box->s->pv_anchor = 0;
+    box->s->anc_used = 0;
     box->s->pv_hidden = 0;
     bool has_center_x = false, has_center_y = false;
     if (g_layout_anchor_any) {
         const LayoutStyle *as = box->s;
-        const char *pa = as->position_anchor ? layout_pos_anchor(ctx, idx) : NULL;
-        int an = pa ? layout_anchor_find(ctx, idx, pa, strlen(pa)) : -1;
+        int an = layout_default_anchor(ctx, idx);
         box->s->pv_anchor = an + 1;
+        if (as->position_area && an >= 0) box->s->anc_used = an + 1;
         if (as->position_area && an >= 0) {
             double r[4];
             layout_anchor_rect(ctx, an, anc, cb_x, cb_y, r);
@@ -33332,7 +33858,16 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
         box->x = spb->x + spb->s->border_left + spb->padding_left + spb->content_width - mr - box->width;
     else box->x = static_x + ml;
     if (area_x >= 0 && !has_left && !has_right)
-        box->x = area_x == 0 ? cb_x + ml : area_x == 2 ? cb_x + cb_w - mr - box->width : cb_x + (cb_w - box->width) / 2.0;
+    {
+        box->x = area_x == 0 ? cb_x + ml : area_x == 2 ? cb_x + cb_w - mr - box->width : cb_x + ml + (cb_w - ml - mr - box->width) / 2.0;
+        /* (it can't overflow where nothing can be scrolled to: a fixed box, its containing block all round) */
+        if (box->s->position == CSS_POSITION_FIXED || anc < 0) {
+            bool fixed = box->s->position == CSS_POSITION_FIXED, rtl = cb_rtl;
+            double lo = ocb_x + ml, hi = ocb_x + ocb_w - mr - box->width;
+            if ((fixed || rtl) && box->x > hi) box->x = hi;
+            if ((fixed || !rtl) && box->x < lo) box->x = lo;
+        }
+    }
     /* (in its area with both insets: still toward the anchor, not by the flow's direction) */
     else if (area_x >= 0 && has_left && has_right && j_mode < 0 && !(box->s->margin_auto & 0xA)) {
         double lo = cb_x + box->left + ml, hi = cb_x + cb_w - box->right - mr - box->width;
@@ -33411,7 +33946,12 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
         else y = lo;
         layout_move_box(ctx, idx, box->x, y);
     } else if (area_y >= 0 && !has_top && !has_bottom) {
-        double y = area_y == 0 ? cb_y + mt : area_y == 2 ? cb_y + cb_h - mb - box->height : cb_y + (cb_h - box->height) / 2.0;
+        double y = area_y == 0 ? cb_y + mt : area_y == 2 ? cb_y + cb_h - mb - box->height : cb_y + mt + (cb_h - mt - mb - box->height) / 2.0;
+        if (box->s->position == CSS_POSITION_FIXED || anc < 0) {
+            double lo = ocb_y + mt, hi = ocb_y + ocb_h - mb - box->height;
+            if (box->s->position == CSS_POSITION_FIXED && y > hi) y = hi;
+            if (y < lo) y = lo;
+        }
         if (y != box->y) layout_move_box(ctx, idx, box->x, y);
     } else if (area_y >= 0 && has_top && has_bottom && !(box->s->margin_auto & 5)) {
         double lo = cb_y + box->top + mt, hi = cb_y + cb_h - box->bottom - mb - box->height;
@@ -33837,6 +34377,26 @@ static void layout_flow_job(Job *j)
  * takes it out of the flow), then put centered over its base, the content
  * since the ruby's start or the <rt> before, its bottom on the base's
  * content area's top. */
+/* (sideways-lr: a block child's start edge is its bottom: laid out from the top as any
+ * vertical flow, then mirrored in its container's content height) */
+static void layout_sideways_lr_pass(LayoutContext *ctx)
+{
+    for (int i = 0; i < ctx->tree.count; i++) {
+        const LayoutBox *b = &ctx->boxes[i];
+        if (b->s->writing_mode != 4 || b->s->direction == 1) continue;
+        if (b->s->display != CSS_DISPLAY_BLOCK && b->s->display != CSS_DISPLAY_LIST_ITEM && b->s->display != CSS_DISPLAY_INLINE_BLOCK) continue;
+        double top = b->y + b->s->border_top + b->padding_top, H = b->content_height;
+        for (int c = ctx->tree.nodes[i].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+            const LayoutBox *k = &ctx->boxes[c];
+            if (k->s->display == CSS_DISPLAY_NONE || k->s->position == CSS_POSITION_ABSOLUTE || k->s->position == CSS_POSITION_FIXED || k->s->float_side) continue;
+            if (!layout_box_is_block_level(k)) continue;
+            /* (a child of its own flow keeps its place only across: the mirror is along this one) */
+            double ny = top + H - (k->y - top) - k->height;
+            if (fabs(ny - k->y) > 0.001) layout_move_box(ctx, c, k->x, ny);
+        }
+    }
+}
+
 static void layout_ruby_pass(LayoutContext *ctx)
 {
     for (int i = 0; i < ctx->tree.count; i++) {
@@ -34082,6 +34642,7 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
         layout_offset_subtree(ctx, i, dx, dy);
     }
     layout_ruby_pass(ctx);
+    layout_sideways_lr_pass(ctx);
     /* (the principal writing mode, the body's when the root is horizontal:
      * right to left blocks put the body against the viewport's right edge,
      * CSS Writing Modes 3 section 8) */
@@ -35802,4 +36363,10 @@ double css_layout_marker_baseline(LayoutContext *ctx, int idx)
 double css_length_value(const char *value, double base, double viewport, double font_size)
 {
     return css_parse_length(value, base, viewport, font_size);
+}
+
+/* (a CSS color's rgba, for the filter graph) */
+bool css_layout_parse_color_text(const char *text, double *rgba)
+{
+    return css_parse_color(text, &rgba[0], &rgba[1], &rgba[2], &rgba[3]);
 }

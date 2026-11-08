@@ -417,13 +417,19 @@ static uint16_t *ot_build(const TextShaper *s, const uint32_t *tags, int ntags)
         size_t fr = fl + 2 + 6 * (size_t)i;
         uint32_t tag = ot_rd32(d, sz, fr);
         bool want = false;
-        for (int k = 0; k < ntags && !want; k++) want = tags[k] == tag;
+        int fval = 1;
+        for (int k = 0; k < ntags && !want; k++)
+            if (tags[k] == tag) {
+                want = true;
+                /* (a value of its own: the pseudo tag after it, 0x01 then the value) */
+                if (k + 1 < ntags && (tags[k + 1] >> 24) == 0x01) fval = (int)(tags[k + 1] & 0xFF);
+            }
         if (!want) continue;
         size_t ft = fl + ot_rd16(d, sz, fr + 4);
         uint32_t cnt = ot_rd16(d, sz, ft + 2);
         for (uint32_t k = 0; k < cnt && k < 1024; k++) {
             uint32_t li = ot_rd16(d, sz, ft + 4 + 2 * (size_t)k);
-            if (li < nl) use[li] = 1;
+            if (li < nl) use[li] = (uint8_t)(fval > 0 ? fval : 1);
         }
     }
     uint16_t *map = (uint16_t *)malloc((size_t)N * sizeof(uint16_t));
@@ -487,7 +493,9 @@ static uint16_t *ot_build(const TextShaper *s, const uint32_t *tags, int ntags)
                 else if (t == 3) {
                     if ((uint32_t)c < ot_rd16(d, sz, st + 4)) {
                         size_t as = st + ot_rd16(d, sz, st + 6 + 2 * (size_t)c);
-                        if (ot_rd16(d, sz, as) > 0) to = ot_rd16(d, sz, as + 2);
+                        /* (the feature's value: the alternate, from 1) */
+                        uint32_t alt = use[li] ? (uint32_t)use[li] - 1 : 0;
+                        if (alt < ot_rd16(d, sz, as)) to = ot_rd16(d, sz, as + 2 + 2 * (size_t)alt);
                     }
                 }
                 if ((int)to < N && to != map[g]) { map[g] = (uint16_t)to; any = true; }

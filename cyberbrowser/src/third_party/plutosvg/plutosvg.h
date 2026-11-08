@@ -188,6 +188,11 @@ PLUTOSVG_API void plutosvg_document_destroy(plutosvg_document_t* document);
  */
 PLUTOSVG_API const void* plutosvg_ft_svg_hooks(void);
 
+/* (cyberbrowser) A filter property on an element: `value` over the element's layer
+ * (w x h, straight RGBA), its fill box x y w h on the layer.  This thread's renders. */
+typedef void (*plutosvg_filter_hook_t)(const char* value, const float box[4], unsigned char* rgba, int w, int h);
+extern __thread plutosvg_filter_hook_t plutosvg_filter_hook;
+
 #ifdef __cplusplus
 }
 #endif
