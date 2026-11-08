@@ -26,6 +26,8 @@ export CYBER_TAB_REUSE=${CYBER_TAB_REUSE-1}
 export CYBER_QUIET=${CYBER_QUIET-1}
 # (a heavy page's script isn't cut off for what the other browsers are doing)
 export CYBER_SCRIPT_LIMIT_S=${CYBER_SCRIPT_LIMIT_S-30}
+# (the fonts a WPT runner installs: Ahem and the CSSTest ones)
+export CYBER_FONT_DIRS="${CYBER_FONT_DIRS-$(cygpath -w "$wpt/fonts/Ahem.ttf" 2>/dev/null || echo "$wpt/fonts/Ahem.ttf");$(cygpath -w "$wpt/fonts/CSSTest" 2>/dev/null || echo "$wpt/fonts/CSSTest")}"
 # (a page only waiting for a timer doesn't wait: it and its clock skip ahead)
 [ -z "$REFTEST" ] && export CYBER_VIRTUAL_TIME=${CYBER_VIRTUAL_TIME-1}
 # (a resource holding up script gives way: render-blocking tests hold one until script says)

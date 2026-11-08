@@ -2101,9 +2101,13 @@
                 var sel = String(r.selectorText || '');
                 if (sel.indexOf('::view-transition') < 0 || !r.style) continue;
                 sel.split(',').forEach(function (one) {
-                    var m = /::view-transition(?:-(group|image-pair|old|new))?(?:\(\s*([^)]*)\s*\))?\s*$/.exec(one.trim());
+                    var m = /::view-transition(?:-(group-children|group|image-pair|old|new))?(?:\(\s*([^)]*)\s*\))?\s*$/.exec(one.trim());
                     if (!m) return;
                     var pre = one.trim().slice(0, m.index).trim();
+                    /* (:active-view-transition(-type()) as the attribute that stands for them) */
+                    if (pre) pre = pre.replace(/:active-view-transition-type(([^)]*))/gi, function (m, args) {
+                        return ':is(' + args.split(',').map(function (t) { return '[data-cyber-avt~="' + t.trim() + '"]'; }).join(',') + ')';
+                    }).replace(/:active-view-transition(?![-w])/gi, '[data-cyber-avt]');
                     if (pre) { var okp = false; try { okp = scope.matches(pre); } catch (e) { okp = false; } if (!okp) return; }
                     list.push({ kind: m[1] || 'root', name: (m[2] || '*').trim(), style: r.style });
                 });
@@ -2160,7 +2164,12 @@
     };
     var VT_SKIP = /^(animation|transition)/;
     var vtApply = function (div, d) {
-        for (var p in d) if (!VT_SKIP.test(p)) { try { div.style.setProperty(p, d[p]); } catch (e) { } }
+        for (var p in d) if (!VT_SKIP.test(p)) {
+            try { div.style.setProperty(p, d[p]); } catch (e) { }
+            /* (a shorthand's CSS-wide keyword: its longhands too) */
+            if (p === 'background' && /^s*(inherit|initial|unset)s*$/.test(d[p]))
+                ['background-color', 'background-image'].forEach(function (q) { try { div.style.setProperty(q, d[p].trim()); } catch (e) { } });
+        }
     };
     /* (the root's view-transition-name: root unless a rule or its style says none) */
     var vtRootNamed = function (doc) {
@@ -2212,6 +2221,37 @@
             info[n] = { g: g, ip: ip, od: od, nd: nd, ga: ga, oa: oa, na: na };
         });
         if (!hold) { onDone(); return null; }
+        /* (nested groups, view-transition-group: each name's parent group, by its
+         * element's value: nearest (the closest named ancestor), a name (the
+         * closest ancestor of that name), normal (the closest named ancestor
+         * when that one contains: contain, or chosen by another) */
+        var parentOf = {}, elOf = {}, gval = {};
+        order.forEach(function (n) { var e = byName[n]; elOf[n] = (e.nu || e.old).el; });
+        var vtGroupVal = function (el) {
+            try { var v = String(global.getComputedStyle(el).getPropertyValue('view-transition-group') || '').trim(); return v || 'normal'; }
+            catch (e) { return 'normal'; }
+        };
+        var namedAnc = function (el) {
+            var out = [];
+            for (var a = el && (el.parentElement || (el.parentNode && el.parentNode.host)); a; a = a.parentElement || (a.parentNode && a.parentNode.host)) {
+                var an = vtName(a);
+                if (an && byName[an] && elOf[an] === a) out.push(an);
+            }
+            return out;
+        };
+        var contains = {};
+        order.forEach(function (n) { gval[n] = vtGroupVal(elOf[n]); if (gval[n] === 'contain') contains[n] = true; });
+        order.forEach(function (n) {
+            var anc = namedAnc(elOf[n]), v = gval[n];
+            if (v === 'nearest' && anc.length) { parentOf[n] = anc[0]; contains[anc[0]] = true; }
+            else if (v !== 'normal' && v !== 'contain' && v !== 'nearest') { if (anc.indexOf(v) >= 0) { parentOf[n] = v; contains[v] = true; } }
+        });
+        order.forEach(function (n) {
+            if (parentOf[n] || (gval[n] !== 'normal' && gval[n] !== 'contain')) return;
+            var anc = namedAnc(elOf[n]);
+            for (var i = 0; i < anc.length; i++) if (contains[anc[i]]) { parentOf[n] = anc[i]; break; }
+        });
+        var gdivs = {};
         var root = doc.documentElement;
         var ov = doc.createElement('div');
         Object.defineProperty(ov, '__cyberVtOverlay', { value: true });
@@ -2283,7 +2323,19 @@
             };
             put(e.old, f.od, f.oa, 1);
             put(e.nu, f.nd, f.na, 0);
-            ov.appendChild(g);
+            gdivs[n] = { g: g, geo: geo, kids: null };
+            var pn = parentOf[n], pg = pn ? gdivs[pn] : null;
+            if (pg) {
+                /* (inside its parent group's ::view-transition-group-children, placed from that group) */
+                if (!pg.kids) {
+                    pg.kids = doc.createElement('div');
+                    pg.kids.setAttribute('style', 'position:absolute;left:0;top:0;width:100%;height:100%');
+                    vtApply(pg.kids, vtDecls(rules, 'group-children', pn, (byName[pn].nu || byName[pn].old).cls || []));
+                    pg.g.appendChild(pg.kids);
+                }
+                g.style.setProperty('transform', 'translate(' + (geo.x - pg.geo.x) + 'px,' + (geo.y - pg.geo.y) + 'px)');
+                pg.kids.appendChild(g);
+            } else ov.appendChild(g);
         });
         root.appendChild(ov);
         return function () {

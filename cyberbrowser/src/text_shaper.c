@@ -724,7 +724,7 @@ static inline float ts_autospace(const TextShaper *s, uint32_t cp)
  * isolates): no glyph, no advance, invisible to kerning. */
 static inline bool ts_invisible(uint32_t cp)
 {
-    return cp == 0x00AD || cp == 0x061C || cp == 0x200E || cp == 0x200F || (cp >= 0x202A && cp <= 0x202E) ||
+    return cp == 0x00AD || cp == 0x061C || cp == 0x200C || cp == 0x200D || cp == 0x200E || cp == 0x200F || cp == 0x2060 || (cp >= 0x202A && cp <= 0x202E) ||
            (cp >= 0x2066 && cp <= 0x2069);
 }
 

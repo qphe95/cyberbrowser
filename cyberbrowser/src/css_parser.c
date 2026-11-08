@@ -841,7 +841,7 @@ static bool css_pseudo_known(const char *n, size_t nl, bool elem)
         "file-selector-button", "first-letter", "first-line", "grammar-error", "highlight", "marker", "part",
         "picker", "picker-icon", "placeholder", "scroll-button", "scroll-marker", "scroll-marker-group",
         "search-text", "selection", "slotted", "spelling-error", "target-text", "view-transition",
-        "view-transition-group", "view-transition-image-pair", "view-transition-new", "view-transition-old",
+        "view-transition-group", "view-transition-group-children", "view-transition-image-pair", "view-transition-new", "view-transition-old",
         NULL };
     if (nl > 8 && !strncasecmp(n, "-webkit-", 8)) return true;
     for (const char *const *k = elem ? elements : classes; *k; k++)

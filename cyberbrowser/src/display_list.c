@@ -837,6 +837,31 @@ struct TextShaper *display_list_get_font(int slot)
     return s ? s : display_list_get_default_font();
 }
 
+int display_list_set_font_chain(const char *font_family, int font_weight, int font_italic)
+{
+    /* (per thread, by the interned list, its weight and style; again when web fonts change) */
+    static __thread struct { const char *fam; char name[96]; int w, it; uint32_t gen; int n; TextShaper *f[6]; } cache[32];
+    if (!font_family || !strchr(font_family, ',')) { text_shaper_set_chain(NULL, 0); return 0; }
+    uint32_t gen = font_registry_face_generation();
+    unsigned h = (unsigned)(((uintptr_t)font_family >> 4) ^ (unsigned)font_weight * 7u ^ (unsigned)font_italic) & 31u;
+    /* (the pointer and the text both: a string freed with one page may be another's on the next) */
+    if (cache[h].fam != font_family || strncmp(cache[h].name, font_family, sizeof cache[h].name) || cache[h].w != font_weight ||
+        cache[h].it != font_italic || cache[h].gen != gen) {
+        int slots[6];
+        int n = font_registry_resolve_chain(font_family, font_weight, font_italic != 0, slots, 6);
+        cache[h].n = 0;
+        for (int k = 0; k < n; k++) {
+            TextShaper *f = font_registry_slot(slots[k]);
+            if (f) cache[h].f[cache[h].n++] = f;
+        }
+        cache[h].fam = font_family; cache[h].w = font_weight; cache[h].it = font_italic; cache[h].gen = gen;
+        snprintf(cache[h].name, sizeof cache[h].name, "%s", font_family);
+    }
+    int n = cache[h].n > 1 ? cache[h].n : 0;   /* (one font: the registry's fallbacks as before) */
+    text_shaper_set_chain(cache[h].f, n);
+    return n;
+}
+
 int display_list_resolve_font_slot(const char *font_family, int font_weight,
                                    int font_italic)
 {
@@ -2320,6 +2345,58 @@ static void paint_column_rules(DisplayList *dl, const LayoutBox *mb, float op)
     }
 }
 
+/* box-decoration-break: clone in columns: what [from, count) painted, of box
+ * i, its decorations again at each break when i is the box (a border band
+ * each side of it), its content moved into the fragments past them when i is
+ * in it. */
+static void dl_bdb_clone(const LayoutContext *ctx, DisplayList *dl, int from, int i, float op)
+{
+    int a = -1;
+    for (int p = i, d = 0; p >= 0 && d < 256; p = ctx->tree.nodes[p].parent_idx, d++) {
+        if (p != i && ctx->boxes[p].mc_n > 0) break;
+        if (ctx->boxes[p].bdb_n > 0 && ctx->boxes[p].s->bdb_clone) { a = p; break; }
+    }
+    if (a < 0 || dl->count <= from) return;
+    int mch = -1, mo = mc_owner(ctx, a, &mch);
+    if (mo < 0) return;
+    const LayoutBox *mb = &ctx->boxes[mo], *chb = &ctx->boxes[mch], *A = &ctx->boxes[a];
+    float top = (float)(mb->y + mb->padding_top + mb->s->border_top), H = mb->mc_h;
+    if (chb->mc_seg_h > 0.0f) { top = chb->mc_src; H = chb->mc_seg_h; }
+    if (H <= 1.0f) return;
+    float bt = (float)A->s->border_top, bb = (float)A->s->border_bottom;
+    float dt = bt + (float)A->padding_top, db = (float)A->padding_bottom + bb;
+    float B1 = top + (floorf(((float)A->y - top) / H + 1e-4f) + 1.0f) * H;
+    int n = A->bdb_n;
+    if (a == i) {
+        for (int j = 0; j < n; j++) {
+            float Bj = B1 + j * H, c[4];
+            if (bb > 0.0f && A->s->border_style[3]) { border_side_color(A, 3, op, c); display_list_add_rect(dl, (float)A->x, Bj - bb, (float)A->width, bb, c[0], c[1], c[2], c[3]); }
+            if (bt > 0.0f && A->s->border_style[2]) { border_side_color(A, 2, op, c); display_list_add_rect(dl, (float)A->x, Bj, (float)A->width, bt, c[0], c[1], c[2], c[3]); }
+        }
+        return;
+    }
+    float S0 = (float)A->y + dt, c1 = B1 - db - S0, ck = H - dt - db;
+    if (ck <= 0.5f) return;
+    int n0 = dl->count - from;
+    DisplayListCmd *src = (DisplayListCmd *)malloc((size_t)n0 * sizeof(DisplayListCmd));
+    if (!src) return;
+    memcpy(src, dl->cmds + from, (size_t)n0 * sizeof(DisplayListCmd));
+    dl->count = from;
+    for (int j = 0; j <= n; j++) {
+        float lo = j == 0 ? -1e9f : S0 + c1 + (j - 1) * ck, hi = j == n ? 1e9f : S0 + c1 + j * ck;
+        float clipr[4] = { -1e9f, lo, 1e9f, hi }, dy = j * (dt + db);
+        if (!display_list_reserve(dl, n0)) break;
+        for (int k = 0; k < n0; k++) {
+            DisplayListCmd cmd = src[k];
+            if (!dl_clip_cmd(&cmd, clipr)) continue;
+            cmd.y += dy;
+            if (cmd.type == DL_BORDER) cmd.u.border.y += dy;
+            dl->cmds[dl->count++] = cmd;
+        }
+    }
+    free(src);
+}
+
 /* What [from, count) painted, in container m's columns (the run of child's). */
 static void dl_columns_range(const LayoutContext *ctx, DisplayList *dl, int from, int m, int child)
 {
@@ -2361,6 +2438,8 @@ static void dl_columns_range(const LayoutContext *ctx, DisplayList *dl, int from
     memcpy(src, dl->cmds + from, (size_t)n0 * sizeof(DisplayListCmd));
     dl->count = from;
     bool wrap = mb->mc_rgap >= 0.0f && mb->mc_n > 0;
+    float pclip[4] = { (float)(mb->x + mb->s->border_left), (float)(mb->y + mb->s->border_top),
+                       (float)(mb->x + mb->width - mb->s->border_right), (float)(mb->y + mb->height - mb->s->border_bottom) };
     for (int c = 0; c < ncols; c++) {
         float clipr[4] = { c == 0 && !rtl ? -1e9f : left - G * 0.5f, c == 0 && first_run ? -1e9f : top + c * H,
                            c == ncols - 1 && !rtl ? 1e9f : left + W + G * 0.5f, c == ncols - 1 && last_run ? 1e9f : top + (c + 1) * H };
@@ -2380,6 +2459,8 @@ static void dl_columns_range(const LayoutContext *ctx, DisplayList *dl, int from
             cmd.x += dx;
             cmd.y += dy;
             if (cmd.type == DL_BORDER) { cmd.u.border.x += dx; cmd.u.border.y += dy; }
+            /* (overflow clipped: no overflow columns past its padding box) */
+            if (mb->s->overflow != 0 && !wrap && c >= mb->mc_n && !dl_clip_cmd(&cmd, pclip)) continue;
             dl->cmds[dl->count++] = cmd;
         }
     }
@@ -3563,6 +3644,8 @@ static void dl_sticky_shift(LayoutContext *ctx, int a, float vx, float vy, float
     *oy = (float)dy;
 }
 
+void display_list_sticky_shift(LayoutContext *ctx, int a, float *ox, float *oy) { dl_sticky_shift(ctx, a, 0.0f, 0.0f, ox, oy); }
+
 /* text-emphasis: its mark at half the size over (or under) each character
  * of [start, end) drawn from x, y (its em box's top), centered on the
  * character's advance; spaces and punctuation get none.  Where a ruby
@@ -4130,6 +4213,11 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                         py1 -= cbot;
                         if (b->s->table_caption || b->s->table_role == 5) { px0 = c[0]; py0 = c[1]; px1 = c[2]; py1 = c[3]; }
                     }
+                    /* (overflow-clip-margin: overflow: clip and paint containment clip that far out) */
+                    if (pb->s->overflow_clip_margin > 0.0f && (pb->s->overflow_clip || (pb->s->overflow == 0 && dl_paint_contained(pb)))) {
+                        float om = pb->s->overflow_clip_margin;
+                        px0 -= om; py0 -= om; px1 += om; py1 += om;
+                    }
                     /* (overflow: clip on one axis alone: the other not clipped) */
                     unsigned char cax = pb->s->overflow_clip && pb->s->ovf_clip_axes ? pb->s->ovf_clip_axes : 3;
                     if (!(cax & 1)) { px0 = -1e9f; px1 = 1e9f; }
@@ -4622,8 +4710,10 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         if (pending_box >= 0 && off) dl_scroll_range(dl, pending_from, pending_mask, off[pending_box]);
         if (pending_box >= 0 && clip) dl_clip_range(dl, pending_from, clip[pending_box]);
         if (pending_box >= 0 && any_mc) {
+            dl_bdb_clone(ctx, dl, pending_from, pending_box, 1.0f);
+            /* (in a multicol container in another's columns: its columns, then those) */
             int mch = -1, mo = mc_owner(ctx, pending_box, &mch);
-            if (mo >= 0) dl_columns_range(ctx, dl, pending_from, mo, mch);
+            for (int lv = 0; mo >= 0 && lv < 8; lv++) { dl_columns_range(ctx, dl, pending_from, mo, mch); mo = mc_owner(ctx, mo, &mch); }
         }
         if (ncb) dl_cb_flush(ctx, dl, cbt, cba, cbb, &ncb, i);
         int cbr_from = -1;
@@ -5124,6 +5214,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     text_shaper_set_spacing(box->s->letter_spacing, box->s->word_spacing, scale);
                     text_shaper_set_autospace(box->s->autospace);
                     text_shaper_set_features(box->s->ot_tags, box->s->ot_n);
+                    display_list_set_font_chain(box->s->font_family, box->s->font_weight, box->s->font_italic ? 1 : 0);
                     /* The white-space processed text the layout measured. */
                     const char *run_text = css_layout_box_text(ctx, i, css_layout_node_text(ctx, node));
                     /* The fragments its paragraph's layout placed, line by line
@@ -5347,6 +5438,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     if (!(tfl && tfl->n > 0))
                         emit_text_decorations(dl, from_cmd, fs, box->s->text_decoration, tr, tg, tb, ta);
                     text_shaper_set_features(NULL, 0);
+                    text_shaper_set_chain(NULL, 0);
                     if (vert_text) {
                         box->x = box_x0;
                         box->y = box_y0;
@@ -5697,8 +5789,9 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
     if (pending_box >= 0 && off) dl_scroll_range(dl, pending_from, pending_mask, off[pending_box]);
     if (pending_box >= 0 && clip) dl_clip_range(dl, pending_from, clip[pending_box]);
     if (pending_box >= 0 && any_mc) {
+        dl_bdb_clone(ctx, dl, pending_from, pending_box, 1.0f);
         int mch = -1, mo = mc_owner(ctx, pending_box, &mch);
-        if (mo >= 0) dl_columns_range(ctx, dl, pending_from, mo, mch);
+        for (int lv = 0; mo >= 0 && lv < 8; lv++) { dl_columns_range(ctx, dl, pending_from, mo, mch); mo = mc_owner(ctx, mo, &mch); }
     }
     if (ncb) dl_cb_flush(ctx, dl, cbt, cba, cbb, &ncb, -1);
     while (nmask > 0) {

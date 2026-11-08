@@ -213,7 +213,7 @@ static const char *const k_pseudo_elements[] = {
     "after", "backdrop", "before", "cue", "cue-region", "details-content", "file-selector-button", "first-letter",
     "first-line", "grammar-error", "highlight", "marker", "part", "picker", "placeholder", "scroll-marker",
     "scroll-marker-group", "selection", "slotted", "spelling-error", "target-text", "view-transition",
-    "view-transition-group", "view-transition-image-pair", "view-transition-new", "view-transition-old", NULL };
+    "view-transition-group", "view-transition-group-children", "view-transition-image-pair", "view-transition-new", "view-transition-old", NULL };
 
 static SelList *parse_list(SelParser *sp, bool nested);
 

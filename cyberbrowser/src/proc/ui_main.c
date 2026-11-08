@@ -77,6 +77,7 @@ typedef struct Tab {
     unsigned frames;
     bool vis_told, visible;     /* what its process was last told (UT_VISIBLE) */
     UiGesture gesture;          /* its process's last click, for opening a tab */
+    int reuses;   /* (pages its process has loaded since it started) */
 } Tab;
 
 typedef struct Win {
@@ -269,6 +270,7 @@ static void update_tab(Tab *t) { update_chrome(&g_wins[t->win]); }
  * that process (UT_NAVIGATE), as a browser's same-site navigations keep
  * their renderer; another site's gets a new one. */
 static bool g_reuse;
+static int g_reuse_max;   /* (CYBER_TAB_REUSE_MAX: a new process after that many pages; 0 none) */
 
 static void navigate(Tab *t, const char *url) {
     char site[SITE_MAX];
@@ -276,7 +278,9 @@ static void navigate(Tab *t, const char *url) {
     if (getenv("CYBER_REUSE_DEBUG"))
         ui_log("[ui] navigate: reuse %d id %u started %d state %d site %s", g_reuse, t->id, t->started, t->state, t->site);
     if (g_reuse && t->id && t->started && t->state != ST_CRASHED && t->site[0] && n <= PROTO_URL_MAX &&
+        !(g_reuse_max > 0 && t->reuses >= g_reuse_max) &&
         url_site(url, site) && !strcmp(site, t->site) && chan_send(&t->chan, UT_NAVIGATE, url, (uint32_t)n, 1000)) {
+        t->reuses++;
         snprintf(t->url, sizeof(t->url), "%s", url);
         t->start_ms = ui_now_ms();
         t->frame_ms = t->loaded_ms = t->last_frame_ms = 0;
@@ -288,6 +292,7 @@ static void navigate(Tab *t, const char *url) {
         return;
     }
     end_process(t);
+    t->reuses = 0;
     snprintf(t->url, sizeof(t->url), "%s", url);
     start_process(t);
     update_tab(t);
@@ -1402,6 +1407,7 @@ int main(int argc, char **argv) {
         open_tab_in(g_focus, url);
     }
     g_reuse = getenv("CYBER_TAB_REUSE") != NULL;
+    g_reuse_max = getenv("CYBER_TAB_REUSE_MAX") ? atoi(getenv("CYBER_TAB_REUSE_MAX")) : 0;
     const char *script = getenv("CYBER_UI_SCRIPT");
     /* (a script waits in 1 ms steps, not the default 15.6 ms ticks) */
     if (script && *script) { keep_fine_timer(); timeBeginPeriod(1); }

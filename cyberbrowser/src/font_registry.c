@@ -60,12 +60,15 @@ typedef struct {
     size_t var_len;
     struct { int weight, slot; } inst[16];
     int ninst;
+    size_t bytes;                 /* the file's decoded size (the cache's budget) */
+    uint32_t used_gen;            /* the face generation a page last asked for it in */
 } WebFace;
 
 /* The slot drawing a variable web face at `weight` (clamped to the face's
  * declared range and the font's wght axis): a static instance made on first
  * use; synthetic bold over the default instance if instancing fails. */
 static int add_slot_locked(TextShaper *s);
+static int add_web_slot_locked(TextShaper *s);
 static int web_instance_locked(WebFace *w, int weight)
 {
     if (weight < w->wmin) weight = w->wmin;
@@ -89,7 +92,7 @@ static int web_instance_locked(WebFace *w, int weight)
         s = text_shaper_create_from_memory_ex(copy, w->var_len, 0, FONT_PIXELS,
                                               weight >= 600 && adef < 600 ? 1 : 0);
     }
-    int slot = s ? add_slot_locked(s) : -1;
+    int slot = s ? add_web_slot_locked(s) : -1;
     if (slot >= 0 && w->ninst < (int)(sizeof(w->inst) / sizeof(w->inst[0]))) {
         w->inst[w->ninst].weight = weight;
         w->inst[w->ninst].slot = slot;
@@ -112,6 +115,31 @@ static bool g_inited;
 static TextShaper *_Atomic g_slots[FONT_SLOTS_MAX];
 static int g_nslots;
 static int g_override_slot = -1;
+
+/* Slot lifetimes.  The override font and the glyph fallbacks (held by
+ * pointer) live as long as the process; a web font's slot lives while the web
+ * font cache keeps its file; a system face's while slots are plentiful, then
+ * the least recently used go first (font_registry_forget_faces), to be
+ * loaded again when asked for.  A slot let go is emptied at once (a stale
+ * number finds no font, the default draws) and its shaper destroyed only
+ * SLOT_RETIRE_GENS documents later (a pointer taken before then is still
+ * good); then the number is free for another face. */
+#define SLOT_RETIRE_GENS 2u
+enum { SLOT_PINNED, SLOT_WEB, SLOT_SYS };
+static uint8_t g_slot_kind[FONT_SLOTS_MAX];
+static int g_slot_sys[FONT_SLOTS_MAX];               /* (SLOT_SYS: its g_sys index) */
+static uint32_t g_slot_used[FONT_SLOTS_MAX];         /* (SLOT_SYS: the face generation it was last asked for in) */
+static int g_free_slots[FONT_SLOTS_MAX], g_nfree;
+static struct { TextShaper *s; int slot; uint32_t gen; } g_retired[FONT_SLOTS_MAX];
+static int g_nretired;
+static int g_slot_cap = FONT_SLOTS_MAX;              /* (CYBER_FONT_SLOTS lowers it: tests of reuse) */
+static bool g_slot_full_said;
+static uint32_t g_face_generation;
+
+/* The web font cache: files kept across documents (one face each, by URL),
+ * the most recently used first, within both limits. */
+#define WEB_CACHE_FILES 256
+#define WEB_CACHE_BYTES ((size_t)64 << 20)
 
 static SysFace *g_sys;
 static int g_nsys, g_capsys;
@@ -195,13 +223,25 @@ static void lower_copy(char *dst, size_t cap, const char *src, size_t n)
     dst[k] = '\0';
 }
 
-static int add_slot_locked(TextShaper *s)
+static int add_slot_kind_locked(TextShaper *s, int kind)
 {
-    if (!s || g_nslots >= FONT_SLOTS_MAX) { text_shaper_destroy(s); return -1; }
-    int slot = g_nslots++;
+    if (!s) return -1;
+    int slot = g_nfree ? g_free_slots[--g_nfree] : g_nslots < g_slot_cap ? g_nslots++ : -1;
+    if (slot < 0) {
+        /* (every slot holds a face some document may use: this one is not drawn) */
+        if (!g_slot_full_said) fprintf(stderr, "[fonts] all %d font slots in use; a face is dropped\n", g_slot_cap);
+        g_slot_full_said = true;
+        text_shaper_destroy(s);
+        return -1;
+    }
+    g_slot_kind[slot] = (uint8_t)kind;
+    g_slot_used[slot] = g_face_generation;
     atomic_store(&g_slots[slot], s);
     return slot;
 }
+
+static int add_slot_locked(TextShaper *s) { return add_slot_kind_locked(s, SLOT_PINNED); }
+static int add_web_slot_locked(TextShaper *s) { return add_slot_kind_locked(s, SLOT_WEB); }
 
 static void cache_clear_locked(void)
 {
@@ -382,6 +422,11 @@ void font_registry_init(void)
     pthread_mutex_lock(&g_mu);
     if (g_inited) { pthread_mutex_unlock(&g_mu); return; }
     g_inited = true;
+    {
+        const char *cap = getenv("CYBER_FONT_SLOTS");
+        int c = cap ? atoi(cap) : 0;
+        if (c >= 8 && c < FONT_SLOTS_MAX) g_slot_cap = c;
+    }
 #ifdef _WIN32
     char win[MAX_PATH];
     UINT n = GetWindowsDirectoryA(win, sizeof(win));
@@ -397,6 +442,20 @@ void font_registry_init(void)
         index_dir(dir, 0);
     }
     (void)k_font_dirs;
+    /* (more fonts as if installed: CYBER_FONT_DIRS, folders or files split by ';', as a test runner installs its fonts) */
+    const char *extra = getenv("CYBER_FONT_DIRS");
+    while (extra && *extra) {
+        const char *e = strchr(extra, ';');
+        size_t l = e ? (size_t)(e - extra) : strlen(extra);
+        char dir[MAX_PATH];
+        if (l > 0 && l < sizeof(dir)) {
+            memcpy(dir, extra, l);
+            dir[l] = 0;
+            DWORD at = GetFileAttributesA(dir);
+            if (at != INVALID_FILE_ATTRIBUTES) { if (at & FILE_ATTRIBUTE_DIRECTORY) index_dir(dir, 0); else index_file(dir); }
+        }
+        extra = e ? e + 1 : NULL;
+    }
 #else
     const char *home = getenv("HOME");
     for (int i = 0; k_font_dirs[i]; i++) {
@@ -429,7 +488,7 @@ static int weight_distance(int want, int wmin, int wmax)
 
 static TextShaper *load_sys_locked(SysFace *f)
 {
-    if (f->slot >= 0) return atomic_load(&g_slots[f->slot]);
+    if (f->slot >= 0) { g_slot_used[f->slot] = g_face_generation; return atomic_load(&g_slots[f->slot]); }
     if (f->slot == -2) return NULL;
     TextShaper *s = NULL;
 #ifdef _WIN32
@@ -463,8 +522,9 @@ static TextShaper *load_sys_locked(SysFace *f)
         fclose(fp);
     }
 #endif
-    f->slot = s ? add_slot_locked(s) : -2;
-    if (f->slot < 0) f->slot = -2;
+    /* (no slot free is not the face failing: asked again, it loads once one is) */
+    f->slot = s ? add_slot_kind_locked(s, SLOT_SYS) : -2;
+    if (f->slot >= 0) g_slot_sys[f->slot] = (int)(f - g_sys);
     return f->slot >= 0 ? atomic_load(&g_slots[f->slot]) : NULL;
 }
 
@@ -550,7 +610,10 @@ static int match_web_locked(const char *family, int weight, bool italic)
     }
     if (best < 0) return -1;
     WebFace *w = &g_web[best];
-    if (w->state == WEB_READY) return w->var_sfnt ? web_instance_locked(w, weight) : w->slot;
+    if (w->state == WEB_READY) {
+        w->used_gen = g_face_generation;
+        return w->var_sfnt ? web_instance_locked(w, weight) : w->slot;
+    }
     if (w->state == WEB_IDLE) w->state = WEB_QUEUED;
     return -2;
 }
@@ -732,7 +795,10 @@ TextShaper *font_registry_fallback(int k)
     pthread_mutex_lock(&g_mu);
     if (!atomic_load(&g_fallback_tried[k])) {
         int slot = match_system_locked(k_fallbacks[k], 400, false);
-        if (slot >= 0) atomic_store(&g_fallback[k], atomic_load(&g_slots[slot]));
+        if (slot >= 0) {
+            g_slot_kind[slot] = SLOT_PINNED;   /* (held by pointer from here on) */
+            atomic_store(&g_fallback[k], atomic_load(&g_slots[slot]));
+        }
         atomic_store(&g_fallback_tried[k], 1);
     }
     s = atomic_load(&g_fallback[k]);
@@ -987,9 +1053,14 @@ static void add_face_rule(const char *body, const char *end, const char *base)
 /* Sheets scanned already (font_registry_scan_css). */
 static uint64_t g_scan_seen[1024];
 static int g_scan_nseen;
-static uint32_t g_face_generation;
-
 uint32_t font_registry_face_generation(void) { return g_face_generation; }
+
+/* (a's last use first) */
+static int web_used_desc(const void *a, const void *b)
+{
+    uint32_t x = ((const WebFace *)a)->used_gen, y = ((const WebFace *)b)->used_gen;
+    return x < y ? 1 : x > y ? -1 : 0;
+}
 
 void font_registry_forget_faces(void)
 {
@@ -1000,11 +1071,18 @@ void font_registry_forget_faces(void)
         bool keep = w->state == WEB_READY;
         for (int j = 0; keep && j < n; j++) {
             if (strcmp(g_web[j].url, w->url) != 0) continue;
-            /* (the same file: its instances, whichever face asked for them) */
+            /* (the same file: its instances, whichever face asked for them, and its last use) */
             if (w->ninst > g_web[j].ninst) {
                 memcpy(g_web[j].inst, w->inst, sizeof(w->inst));
                 g_web[j].ninst = w->ninst;
             }
+            if (w->used_gen > g_web[j].used_gen) g_web[j].used_gen = w->used_gen;
+            if (w->var_sfnt && w->var_sfnt != g_web[j].var_sfnt) {
+                /* (a second copy of the file; whoever else holds it holds nothing now) */
+                for (int k = i + 1; k < g_nweb; k++) if (g_web[k].var_sfnt == w->var_sfnt) g_web[k].var_sfnt = NULL;
+                free(w->var_sfnt);
+            }
+            w->var_sfnt = NULL;
             keep = false;
         }
         free(w->ranges);
@@ -1020,9 +1098,75 @@ void font_registry_forget_faces(void)
         w->family[0] = 0;
         g_web[n++] = *w;
     }
-    g_nweb = n;
-    g_scan_nseen = 0;
+    /* The cache's limits: the files used last stay. */
+    qsort(g_web, (size_t)n, sizeof(*g_web), web_used_desc);
+    size_t bytes = 0;
+    int kept = 0;
+    for (int i = 0; i < n; i++) {
+        WebFace *w = &g_web[i];
+        size_t b = w->var_sfnt ? w->var_len * (size_t)(1 + w->ninst) : w->bytes;
+        if (kept < WEB_CACHE_FILES && (kept == 0 || bytes + b <= WEB_CACHE_BYTES)) {
+            bytes += b;
+            g_web[kept++] = *w;
+            continue;
+        }
+        free(w->url);
+        free(w->var_sfnt);
+    }
+    g_nweb = kept;
+    /* Web slots no kept file draws with are let go; those let go long enough ago are free. */
+    static uint8_t live[FONT_SLOTS_MAX];
+    memset(live, 0, sizeof live);
+    for (int i = 0; i < g_nweb; i++) {
+        if (g_web[i].slot >= 0) live[g_web[i].slot] = 1;
+        for (int k = 0; k < g_web[i].ninst; k++) if (g_web[i].inst[k].slot >= 0) live[g_web[i].inst[k].slot] = 1;
+    }
     g_face_generation++;
+    for (int i = 0; i < g_nslots; i++) {
+        if (g_slot_kind[i] != SLOT_WEB || live[i]) continue;
+        TextShaper *sh = atomic_exchange(&g_slots[i], NULL);
+        if (!sh) continue;
+        g_retired[g_nretired].s = sh;
+        g_retired[g_nretired].slot = i;
+        g_retired[g_nretired].gen = g_face_generation;
+        g_nretired++;
+    }
+    /* System faces: past three quarters of the slots in use, the least
+     * recently used (none the last document asked for) go, down to half. */
+    int in_use = g_nslots - g_nfree;
+    if (in_use > g_slot_cap * 3 / 4) {
+        static int order[FONT_SLOTS_MAX];
+        int no = 0;
+        for (int i = 0; i < g_nslots; i++)
+            if (g_slot_kind[i] == SLOT_SYS && atomic_load(&g_slots[i]) && g_face_generation - g_slot_used[i] > 1)
+                order[no++] = i;
+        /* (oldest use first: insertion sort, a few hundred at most) */
+        for (int a = 1; a < no; a++) {
+            int v = order[a], b = a;
+            while (b > 0 && g_slot_used[order[b - 1]] > g_slot_used[v]) { order[b] = order[b - 1]; b--; }
+            order[b] = v;
+        }
+        for (int k = 0; k < no && in_use - g_nretired > g_slot_cap / 2; k++) {
+            int i = order[k];
+            g_sys[g_slot_sys[i]].slot = -1;
+            g_retired[g_nretired].s = atomic_exchange(&g_slots[i], NULL);
+            g_retired[g_nretired].slot = i;
+            g_retired[g_nretired].gen = g_face_generation;
+            g_nretired++;
+        }
+    }
+    int r = 0;
+    for (int i = 0; i < g_nretired; i++) {
+        if (g_face_generation - g_retired[i].gen < SLOT_RETIRE_GENS) { g_retired[r++] = g_retired[i]; continue; }
+        text_shaper_destroy(g_retired[i].s);
+        g_slot_kind[g_retired[i].slot] = SLOT_PINNED;
+        g_free_slots[g_nfree++] = g_retired[i].slot;
+    }
+    g_nretired = r;
+    if (getenv("CYBER_FONT_LOG"))
+        fprintf(stderr, "[fonts] new document: %d cached files (%zu KB), slots %d used, %d free, %d retiring\n", g_nweb,
+                bytes >> 10, g_nslots - g_nfree - g_nretired, g_nfree, g_nretired);
+    g_scan_nseen = 0;
     cache_clear_locked();
     pthread_mutex_unlock(&g_mu);
 }
@@ -1157,6 +1301,15 @@ bool font_registry_any_queued(void)
     return any;
 }
 
+int font_registry_queued_count(void)
+{
+    pthread_mutex_lock(&g_mu);
+    int n = 0;
+    for (int i = 0; i < g_nweb; i++) n += g_web[i].state == WEB_QUEUED;
+    pthread_mutex_unlock(&g_mu);
+    return n;
+}
+
 int font_registry_load_pending(void)
 {
     pthread_mutex_lock(&g_mu);
@@ -1171,6 +1324,8 @@ int font_registry_load_pending(void)
             g_web[i].var_len = g_web[j].var_len;
             memcpy(g_web[i].inst, g_web[j].inst, sizeof(g_web[i].inst));
             g_web[i].ninst = g_web[j].ninst;
+            g_web[i].bytes = g_web[j].bytes;
+            g_web[i].used_gen = g_face_generation;
             g_web[i].state = WEB_READY;
             shared++;
             break;
@@ -1218,7 +1373,17 @@ int font_registry_load_pending(void)
         WebFace *w = &g_web[which[t]];
         const FetchJob *j = src ? &jobs[src[t]] : &jobs[t];
         w->slot = -1;
-        if (j->sfnt && font_is_variable(j->sfnt, j->len)) {
+        w->used_gen = g_face_generation;
+        w->bytes = j->sfnt ? j->len : 0;
+        if (src && src[t] != t) {
+            /* (a file this batch loaded for an earlier face: that face's shaper) */
+            const WebFace *o = &g_web[which[src[t]]];
+            w->slot = o->slot;
+            w->var_sfnt = o->slot >= 0 ? o->var_sfnt : NULL;   /* (a failed one keeps its own, to free) */
+            w->var_len = o->var_len;
+            memcpy(w->inst, o->inst, sizeof(w->inst));
+            w->ninst = o->ninst;
+        } else if (j->sfnt && font_is_variable(j->sfnt, j->len)) {
             /* Keep the file; instances are cut per weight on demand. */
             w->var_sfnt = (uint8_t *)malloc(j->len);
             if (w->var_sfnt) {
@@ -1230,7 +1395,7 @@ int font_registry_load_pending(void)
             uint8_t *copy = (uint8_t *)malloc(j->len);
             if (copy) memcpy(copy, j->sfnt, j->len);
             TextShaper *s = text_shaper_create_from_memory(copy, j->len, 0, FONT_PIXELS);
-            w->slot = s ? add_slot_locked(s) : -1;
+            w->slot = s ? add_web_slot_locked(s) : -1;
         }
         w->state = w->slot >= 0 ? WEB_READY : WEB_FAILED;
         if (w->state == WEB_READY) ready++;

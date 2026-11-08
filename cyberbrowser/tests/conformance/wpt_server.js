@@ -267,7 +267,7 @@ const left = REFTEST ? [] : pages.map((p, i) => i).filter(i => !results[pages[i]
 if (REFTEST) {
     const todo = steps.filter(st => !fs.existsSync(st.shot));
     fs.writeFileSync(path.join(out, 'pages.txt'),
-        todo.map(st => `${st.k} ${origin}/${st.url} ${+process.env.REFTEST_MS || 2000} ${st.shot.split(path.sep).join('/')}\n`).join(''));
+        todo.map(st => `${st.k} ${origin}/${st.url} ${+process.env.REFTEST_MS || 4000} ${st.shot.split(path.sep).join('/')}\n`).join(''));
     console.log(`${todo.length} of ${steps.length} reftest steps to run (${Object.keys(refInfo).length} reftests)`);
 } else {
     fs.writeFileSync(path.join(out, 'pages.txt'),

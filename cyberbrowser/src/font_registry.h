@@ -13,7 +13,10 @@
  *
  * Every loaded typeface (a face, or a synthetic-bold face) gets a slot
  * (0..FONT_SLOTS_MAX-1); sizes are not slots: text draws at any size from
- * the text shaper's strikes and glyph atlas. */
+ * the text shaper's strikes and glyph atlas.  System faces keep their slots;
+ * a web font's slot lasts while the web font cache (by URL, most recently
+ * used first, bounded in files and bytes) keeps its file, and is reused for
+ * another face a few documents after it was let go. */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -23,7 +26,7 @@
 extern "C" {
 #endif
 
-#define FONT_SLOTS_MAX 255
+#define FONT_SLOTS_MAX 1023
 
 struct TextShaper;
 
@@ -57,6 +60,8 @@ uint32_t font_registry_face_generation(void);
 /* Fetch and decode the web fonts queued by font_registry_resolve (in
  * parallel).  Returns how many became usable. */
 int font_registry_load_pending(void);
+/* Web faces asked for and not loaded yet. */
+int font_registry_queued_count(void);
 
 /* Fallback fonts for glyphs the chosen font lacks: entry k (loaded on first
  * use; NULL when it does not exist on this system). */

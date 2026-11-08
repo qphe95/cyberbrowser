@@ -273,6 +273,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     /* scroll-marker-group: 1 before, 2 after. */
     unsigned char scroll_marker_group;
     float overflow_clip_margin;
+    unsigned char ocm_inh;   /* (overflow-clip-margin: inherit) */
+    unsigned char to_inh;    /* (text-overflow: inherit) */
 
     /* vertical-align: 0=baseline, 1=middle, 2=top, 3=bottom, 4=sub,
      * 5=super, 6=text-top, 7=text-bottom, 8=a length (va_len px) or
@@ -404,6 +406,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char ot_n;
     unsigned char letter_spacing_set, word_spacing_set;
     unsigned char text_transform, text_transform_set;
+    unsigned char wst, wst_set;   /* (word-space-transform: 1 space, 2 ideographic-space) */
     /* text-indent: px plus a fraction of the containing block's width;
      * inherited. */
     float text_indent, text_indent_pct;
@@ -661,10 +664,13 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     const char *tf_raw;     /* (transform as written, translations too: for SVG elements) */
     unsigned char tb_trim, tb_over, tb_under;
     float h_lh;             /* (height in lh: of the line height the element comes to; 0 none) */
+    unsigned char bdb_clone;   /* (box-decoration-break: clone) */
     unsigned char brk_before, brk_after, brk_inside;   /* (break-*: 0 auto, 1 a forced break, 2 avoid) */   /* (text-box-trim: 1 start, 2 end; text-box-edge over 0 text 1 cap 2 ex, under 0 text 1 alphabetic) */
     unsigned char tf_box;   /* (transform-box: 0 view-box, 1 fill-box, 2 stroke-box, 3 content-box, 4 border-box) */
     /* width: min-content (1) / max-content (2) / fit-content (3). */
     unsigned char width_keyword;
+    unsigned char fc_set;             /* (width: fit-content(<length-percentage>): its px and fraction of the containing block) */
+    float fc_px, fc_pct;
     /* Percentage insets (top, right, bottom, left): bit set => the
      * corresponding inset_pct ratio applies against the containing block. */
     double inset_pct[4];
@@ -766,6 +772,8 @@ typedef struct LayoutBox {
     int mc_n, mc_used;          /* (mc_used: the columns its content takes) */
     float mc_grow;              /* (how much the column push grew it, inside a flex line) */
     float mc_w, mc_gap, mc_h;
+    unsigned char mc_nested;
+    unsigned char bdb_n;        /* (box-decoration-break: clone, in columns: the breaks in it, each its decorations again) */    /* (its columns in rows, one in each column of the multicol container around it) */
     float mc_rgap;              /* (column-wrap: rows of mc_n columns, this far apart; < 0 none) */
     /* A multi-column container's child: its run of columns (between spanners)
      * starts at mc_src in the one column it was laid out in and is painted from

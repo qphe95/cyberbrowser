@@ -2255,10 +2255,24 @@ GCValue js_font_face_set_check(JSContextHandle ctx, GCValue this_val, int argc, 
     return JS_TRUE;
 }
 
-// FontFaceSet.ready getter
+/* (web faces still to load) */
+static GCValue js_fonts_queued(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    extern int font_registry_queued_count(void);
+    (void)this_val; (void)argc; (void)argv;
+    return JS_NewInt32(ctx, font_registry_queued_count());
+}
+
+// FontFaceSet.ready getter: settled once no web face asked for is still loading (at most 3 s)
 GCValue js_font_face_set_get_ready(JSContextHandle ctx, GCValue this_val) {
-    // Return a resolved promise
-    return js_create_empty_resolved_promise(ctx);
+    extern int font_registry_queued_count(void);
+    if (font_registry_queued_count() <= 0) return js_create_empty_resolved_promise(ctx);
+    GCValue global = JS_GetGlobalObject(ctx);
+    JS_SetPropertyStr(ctx, global, "__cyberFontsQueued", JS_NewCFunction(ctx, js_fonts_queued, "__cyberFontsQueued", 0));
+    static const char src[] = "new Promise(function (r) { var t0 = Date.now(); (function p() { "
+                              "if (!globalThis.__cyberFontsQueued() || Date.now() - t0 > 3000) r(); else setTimeout(p, 16); })(); })";
+    GCValue p = JS_Eval(ctx, src, sizeof src - 1, "<fonts.ready>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(p)) { JS_GetException(ctx); return js_create_empty_resolved_promise(ctx); }
+    return p;
 }
 
 // FontFaceSet.status getter

@@ -192,7 +192,7 @@
         '-webkit-scrollbar-track -webkit-scrollbar-button -webkit-scrollbar-corner -webkit-scrollbar-track-piece ' +
         '-webkit-resizer -webkit-input-placeholder -webkit-file-upload-button -webkit-inner-spin-button ' +
         '-webkit-outer-spin-button -webkit-search-cancel-button -webkit-details-marker').split(' ');
-    var PSEUDO_ELEMENT_FNS = 'part slotted highlight cue view-transition-group view-transition-image-pair view-transition-old view-transition-new picker scroll-button'.split(' ');
+    var PSEUDO_ELEMENT_FNS = 'part slotted highlight cue view-transition-group view-transition-group-children view-transition-image-pair view-transition-old view-transition-new picker scroll-button'.split(' ');
     var LEGACY_PSEUDO_ELEMENTS = ['before', 'after', 'first-line', 'first-letter'];
 
     /* What may follow a pseudo-element in a compound. */

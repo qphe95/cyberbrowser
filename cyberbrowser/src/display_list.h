@@ -167,6 +167,11 @@ struct TextShaper *display_list_get_default_font(void);
 struct TextShaper *display_list_get_font(int slot);
 
 /* Resolve a CSS font stack + weight + style to a font-table slot. */
+/* Sets the text shaper's font-family chain (the list's other fonts, for a
+ * character the first lacks) for a box's font-family; 0 when it has one font. */
+/* Where scrolling pushes sticky box a now (no page scroll). */
+void display_list_sticky_shift(struct LayoutContext *ctx, int a, float *ox, float *oy);
+int display_list_set_font_chain(const char *font_family, int font_weight, int font_italic);
 int display_list_resolve_font_slot(const char *font_family, int font_weight,
                                    int font_italic);
 

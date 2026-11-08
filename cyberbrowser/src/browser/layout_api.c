@@ -1299,6 +1299,14 @@ static bool lq_ensure(JSContextHandle ctx)
             }
             g_lq_change_pos = html_mirror_change_seq();
             if (bounded) {
+                /* (the kept boxes' nodes by their ids: the mirror's array may have moved under them) */
+                if (g_lq_pos_ok && g_lq_ids && g_lq_doc)
+                    for (int i = 0; i < g_lq_layout.tree.count && i < g_lq_pos_cap; i++) {
+                        int d = g_lq_layout.tree.nodes[i].dom_node_idx;
+                        if (!g_lq_ids[i] || d >= LAYOUT_PSEUDO_DOM0) continue;
+                        int ni = html_mirror_index_of(g_lq_doc, g_lq_ids[i]);
+                        if (ni >= 0 && ni != d) g_lq_layout.tree.nodes[i].dom_node_idx = ni;
+                    }
                 if (skip_verify) lq_verify_kept(doc, vw, vh);
                 g_lq_key = key;
                 if (full) lq_note_full_check(now);
@@ -1630,8 +1638,10 @@ static void lq_sticky_one(int a, double *ox, double *oy)
     int s = -1;
     for (int p = g_lq_layout.tree.nodes[a].parent_idx; p >= 0; p = g_lq_layout.tree.nodes[p].parent_idx) {
         if (!g_lq_layout.boxes[p].s->overflow) continue;
+        /* (the box's element by the ids kept with the layout: a box's node index
+         * may be stale after a bounded relayout) */
         const HtmlNode *hn = css_layout_box_node(&g_lq_layout, p);
-        NodeId pid = hn && hn->type == HTML_NODE_ELEMENT ? hn->store_id : DOM_NULL;
+        NodeId pid = g_lq_pos_ok && g_lq_ids[p] ? g_lq_ids[p] : hn && hn->type == HTML_NODE_ELEMENT ? hn->store_id : DOM_NULL;
         if (pid && (is_root_element(pid) || is_tag(pid, "body"))) break;
         s = p;
         break;
@@ -1641,7 +1651,8 @@ static void lq_sticky_one(int a, double *ox, double *oy)
     if (s >= 0) {
         const LayoutBox *S = &g_lq_layout.boxes[s];
         const HtmlNode *hn = css_layout_box_node(&g_lq_layout, s);
-        if (hn && g_dom_scrolls.n) dom_scroll_get(hn->store_id, &sx, &sy);
+        NodeId sid = g_lq_pos_ok && g_lq_ids[s] ? g_lq_ids[s] : hn ? hn->store_id : DOM_NULL;
+        if (sid && g_dom_scrolls.n) dom_scroll_get(sid, &sx, &sy);
         vx0 = S->x + S->s->border_left + S->padding_left;
         vy0 = S->y + S->s->border_top + S->padding_top;
         vw = S->width - S->s->border_left - S->s->border_right - S->padding_left - S->padding_right;
