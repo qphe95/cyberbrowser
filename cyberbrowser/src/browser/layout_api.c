@@ -2034,8 +2034,10 @@ static bool lq_quirks(JSContextHandle ctx, NodeId doc)
 /* What the element's scrollTop is of: a scroll container, the element; the
  * root (body in quirks mode), its document's viewport; else nothing.  Its
  * greatest offsets in *mx, *my. */
+static int g_lq_scroll_idx = -1;   /* (the box the last scroll subject was) */
 static NodeId lq_scroll_subject(JSContextHandle ctx, NodeId id, double *mx, double *my)
 {
+    g_lq_scroll_idx = -1;
     if (!id || dom_kind(id) != DOM_K_ELEMENT) return DOM_NULL;
     NodeId view = DOM_NULL, box = id;
     if (is_root_element(id)) {
@@ -2050,6 +2052,7 @@ static NodeId lq_scroll_subject(JSContextHandle ctx, NodeId id, double *mx, doub
     int idx = lq_query(ctx, dom_js(ctx, box));
     g_lq_scroll_read = false;
     g_lq_ask = LQ_ASK_POS;
+    g_lq_scroll_idx = idx;
     bool text_control = !view && (is_tag(id, "input") || is_tag(id, "textarea"));
     if (idx < 0 || (!view && !text_control && !css_layout_box_scrolls(&g_lq_layout, idx))) return DOM_NULL;
     double cw, ch, sw, sh;
@@ -2128,6 +2131,8 @@ static GCValue lq_scroll_write(JSContextHandle ctx, GCValue this_val, int argc, 
     if ((float)v == (top ? y : x)) return JS_UNDEFINED;
     dom_scroll_set(s, top ? x : (float)v, top ? (float)v : y);
     layout_scroll_queue(ctx, s);
+    /* (its lines cut by text-overflow: where they're cut moves with the scroll) */
+    if (g_lq_scroll_idx >= 0 && g_lq_scroll_idx < g_lq_layout.tree.count && g_lq_layout.boxes[g_lq_scroll_idx].ell_end > 0.0) dom_request_relayout();
     return JS_UNDEFINED;
 }
 

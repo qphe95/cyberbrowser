@@ -1803,13 +1803,13 @@ static bool calc_math_function(const Toks *ts, const Tok *f, CalcSum *out) {
         return calc_add(out, val, ul);
     }
     /* the comma-separated arguments; round()'s first may be a strategy */
-    CalcSum args[8];
+    CalcSum args[20];   /* (at least 20, css-values 4 10.1) */
     int na = 0, strategy = 0;   /* 0 nearest, 1 up, 2 down, 3 to-zero */
     int clamp_none = 0;
     int s = f->first;
     for (int j = f->first; ; j = j < f->end ? tok_next(ts, j) : j + 1) {
         if (j >= f->end || ts->t[j].type == T_COMMA) {
-            if (j == s || na == 8) return false;
+            if (j == s || na == 20) return false;
             if (!strcasecmp(name, "round") && na == 0 && tok_next(ts, s) == j && ts->t[s].type == T_IDENT &&
                 (tok_ident(&ts->t[s], "nearest") || tok_ident(&ts->t[s], "up") || tok_ident(&ts->t[s], "down") ||
                  tok_ident(&ts->t[s], "to-zero"))) {
@@ -1830,8 +1830,8 @@ static bool calc_math_function(const Toks *ts, const Tok *f, CalcSum *out) {
         }
     }
     if (!na) return false;
-    double v[8];
-    const char *u[8];
+    double v[20];
+    const char *u[20];
     for (int i = 0; i < na; i++) if (!calc_one(&args[i], &v[i], &u[i])) return false;
     if (clamp_none && na == 3) {
         if (clamp_none & 1) u[0] = u[1];
@@ -4876,7 +4876,7 @@ bool css_supports_property(const char *prop, const char *value) {
     size_t nl = strlen(name);
     if (css_prop_is_custom(name, nl)) {
         char *v = trim_dup(value);
-        ok = true;
+        ok = nl > 2;   /* ("--" alone is no custom property) */
         free(v);
     } else {
         const CssPropDef *p = css_prop_find(name, nl);
@@ -4903,8 +4903,11 @@ static ValueKind value_kind(const char *p)
     typedef struct { const char *name; ValueKind kind; } Named;
     static const Named k[] = {
         { "background", VK_GRAMMAR }, { "background-color", VK_COLOR }, { "background-image", VK_GRAMMAR },
-        { "border-bottom-color", VK_COLOR }, { "border-color", VK_GRAMMAR }, { "border-left-color", VK_COLOR },
-        { "border-right-color", VK_COLOR }, { "border-top-color", VK_COLOR }, { "bottom", VK_LEN1 },
+        { "border-bottom-color", VK_COLOR }, { "border-bottom-style", VK_GRAMMAR }, { "border-bottom-width", VK_LEN1 },
+        { "border-color", VK_GRAMMAR }, { "border-left-color", VK_COLOR }, { "border-left-style", VK_GRAMMAR },
+        { "border-left-width", VK_LEN1 }, { "border-right-color", VK_COLOR }, { "border-right-style", VK_GRAMMAR },
+        { "border-right-width", VK_LEN1 }, { "border-style", VK_GRAMMAR }, { "border-top-color", VK_COLOR },
+        { "border-top-style", VK_GRAMMAR }, { "border-top-width", VK_LEN1 }, { "border-width", VK_LEN4 }, { "bottom", VK_LEN1 },
         { "caret-color", VK_COLOR }, { "color", VK_COLOR },
         { "font-family", VK_GRAMMAR }, { "font-size", VK_LEN1 }, { "height", VK_LEN1 }, { "left", VK_LEN1 },
         { "letter-spacing", VK_LEN1 }, { "line-height", VK_LEN1 }, { "margin", VK_LEN4 },
@@ -5038,7 +5041,6 @@ bool css_value_invalid(const char *prop, const char *value)
 {
     if (!prop || !value || (prop[0] == '-' && prop[1] == '-')) return false;
     ValueKind k = value_kind(prop);
-    if (k == VK_NONE) return false;
     while (isspace((unsigned char)*value)) value++;
     if (css_is_wide_keyword(value, strlen(value)) || has_substitution(value)) return false;
     double rgba[4];

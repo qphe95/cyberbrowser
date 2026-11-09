@@ -117,6 +117,8 @@ enum {
     DOM_ST_MODAL = 1 << 29, DOM_ST_POPOVER_OPEN = 1 << 30,   /* (g_dom_top: what the page's script showed) */
 };
 
+#define DOM_ST_HAS_SLOTTED (1u << 31)   /* (a slot whose flattened assigned nodes aren't empty) */
+
 /* Per slot: a dialog shown modally (1), a popover showing (2).  Cleared when a
  * slot is given out again. */
 extern uint8_t *g_dom_top;

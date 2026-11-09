@@ -46,6 +46,8 @@ int font_registry_default_slot(void);
 int font_registry_resolve(const char *family_list, int weight, bool italic);
 /* The same with the rest of what picks a web face (CSS Fonts 4, 5.2): oblique
  * rather than italic, at an angle, and a stretch in percent. */
+/* (the first available font for metrics: a web face must cover U+0020) */
+int font_registry_resolve_first(const char *family_list, int weight, bool italic, bool oblique, float angle, float stretch);
 int font_registry_resolve_style(const char *family_list, int weight, bool italic, bool oblique, float angle,
                                 float stretch);
 

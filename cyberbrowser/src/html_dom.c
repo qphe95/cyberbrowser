@@ -2640,7 +2640,6 @@ static bool mir_compose_nested_slot(NodeId s, NodeList *out) {
     NodeId root = s;
     while (dom_parent(root)) root = dom_parent(root);
     if (root == s || !(g_dom.flags[dom_slot(root)] & DOMF_SHADOW_ROOT)) return false;
-    if (dom_parent(s) == root) return false;
     uint32_t host = g_dom.host[dom_slot(root)];
     if (!host) return false;
     const char *name = dom_attr(s, "name");
@@ -2665,9 +2664,44 @@ static bool mir_compose_nested_slot(NodeId s, NodeList *out) {
 static void mir_touch_nested_slots(NodeId sid) {
     uint32_t r = dom_slot(sid);
     for (uint32_t x = g_dom.first[r]; x; x = dom_next_in_subtree(x, r))
-        if (g_dom.parent[x] != r && g_dom.kind[x] == DOM_K_ELEMENT && mir_is_tag(dom_id_of(x), "slot"))
+        if (g_dom.kind[x] == DOM_K_ELEMENT && mir_is_tag(dom_id_of(x), "slot"))
             dom_mark_dirty(dom_id_of(x), DOMF_DIRTY_CHILDREN);
 }
+
+/* (a slot in a shadow tree: does anything flatten into it?) */
+bool slot_has_flattened(NodeId el, int depth)
+{
+    if (depth > 32) return false;
+    NodeId root = el;
+    while (dom_parent(root)) root = dom_parent(root);
+    if (root == el || !(g_dom.flags[dom_slot(root)] & DOMF_SHADOW_ROOT)) return false;
+    uint32_t host = g_dom.host[dom_slot(root)];
+    if (!host) return false;
+    const char *name = dom_attr(el, "name");
+    if (!name) name = "";
+    /* (only the first slot of a name is assigned to) */
+    {
+        uint32_t r = dom_slot(root), self = dom_slot(el);
+        for (uint32_t x = g_dom.first[r]; x; x = dom_next_in_subtree(x, r)) {
+            if (x == self) break;
+            if (g_dom.kind[x] != DOM_K_ELEMENT || strcmp(dom_tag_name(dom_id_of(x)), "slot")) continue;
+            const char *other = dom_attr(dom_id_of(x), "name");
+            if (!strcmp(other ? other : "", name)) return false;
+        }
+    }
+    for (NodeId c = dom_first_child(dom_id_of(host)); c; c = dom_next_sibling(c)) {
+        int k = dom_kind(c);
+        if (k != DOM_K_ELEMENT && k != DOM_K_TEXT && k != DOM_K_CDATA) continue;
+        const char *ls = k == DOM_K_ELEMENT ? dom_attr(c, "slot") : NULL;
+        if (strcmp(ls ? ls : "", name)) continue;
+        if (k == DOM_K_ELEMENT && !strcmp(dom_tag_name(c), "slot")) { if (slot_has_flattened(c, depth + 1)) return true; continue; }
+        return true;
+    }
+    return false;
+}
+
+extern bool (*g_dom_slot_flattened)(NodeId el, int depth);
+__attribute__((constructor)) static void slot_flattened_hook(void) { g_dom_slot_flattened = slot_has_flattened; }
 
 /* The nodes element s renders as children, in order (as the serializer
  * composes them); sets the host kind of mirror node m. */
@@ -2706,29 +2740,8 @@ static void mir_compose(NodeId s, int m, NodeList *out) {
         kind = 2;
         if (mir_has_content(sid)) {
             mir_touch_nested_slots(sid);
-            /* Light children distributed to the shadow tree's slots. */
-            NodeList light = {0};
-            for (NodeId c = dom_first_child(s); c; c = dom_next_sibling(c)) nl_push(&light, c);
-            unsigned char *used = (unsigned char *)calloc((size_t)light.n + 1, 1);
-            for (NodeId c = dom_first_child(sid); c; c = dom_next_sibling(c)) {
-                if (!mir_is_tag(c, "slot")) { nl_push(out, c); continue; }
-                const char *name = dom_attr(c, "name");
-                char slot_name[256];
-                snprintf(slot_name, sizeof(slot_name), "%s", name ? name : "");
-                bool any = false;
-                for (int i = 0; i < light.n; i++) {
-                    if (used && used[i]) continue;
-                    const char *ls = dom_kind(light.v[i]) == DOM_K_ELEMENT ? dom_attr(light.v[i], "slot") : NULL;
-                    if (strcmp(ls ? ls : "", slot_name) != 0) continue;
-                    nl_push(out, light.v[i]);
-                    if (used) used[i] = 1;
-                    any = true;
-                }
-                if (!any)
-                    for (NodeId g = dom_first_child(c); g; g = dom_next_sibling(g)) nl_push(out, g);
-            }
-            free(used);
-            free(light.v);
+            /* The shadow tree's children; a slot's assigned nodes are its own children when composed. */
+            for (NodeId c = dom_first_child(sid); c; c = dom_next_sibling(c)) nl_push(out, c);
             mir_set_host(s, kind);
             return;
         }

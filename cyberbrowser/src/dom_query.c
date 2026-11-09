@@ -198,7 +198,7 @@ static bool known_name(const char *n, const char *const *list) {
     return false;
 }
 static const char *const k_pseudo_classes[] = {
-    "active", "any-link", "autofill", "blank", "buffering", "checked", "closed", "current", "default", "defined",
+    "has-slotted", "active", "any-link", "autofill", "blank", "buffering", "checked", "closed", "current", "default", "defined",
     "dir", "disabled", "empty", "enabled", "first", "first-child", "first-of-type", "focus", "focus-visible",
     "focus-within", "fullscreen", "future", "has", "heading", "host", "host-context", "hover", "in-range", "indeterminate",
     "invalid", "is", "lang", "last-child", "last-of-type", "left", "link", "local-link", "matches", "modal", "muted",
@@ -212,7 +212,7 @@ static const char *const k_pseudo_classes[] = {
 static const char *const k_pseudo_elements[] = {
     "after", "backdrop", "before", "cue", "cue-region", "details-content", "file-selector-button", "first-letter",
     "first-line", "grammar-error", "highlight", "marker", "part", "picker", "placeholder", "scroll-marker",
-    "scroll-marker-group", "selection", "slotted", "spelling-error", "target-text", "view-transition",
+    "scroll-marker-group", "selection", "slider-fill", "slider-thumb", "slider-track", "slotted", "spelling-error", "target-text", "view-transition",
     "view-transition-group", "view-transition-group-children", "view-transition-image-pair", "view-transition-new", "view-transition-old", NULL };
 
 static SelList *parse_list(SelParser *sp, bool nested);
@@ -926,11 +926,15 @@ void dom_validity_refresh(void)
     }
 }
 
+/* (a slot: does anything flatten into it? html_dom.c, which knows attributes) */
+bool (*g_dom_slot_flattened)(NodeId el, int depth);
+
 uint32_t dom_element_state(NodeId el)
 {
     if (!dom_valid(el)) return 0;
     atoms_init();
     uint32_t s = dom_slot(el), st = g_dom.state[s], n;
+    if (g_dom.kind[s] == DOM_K_ELEMENT && g_dom_slot_flattened && !strcmp(dom_tag_name(el), "slot") && g_dom_slot_flattened(el, 0)) st |= DOM_ST_HAS_SLOTTED;
     if (s < g_dom_top_cap && g_dom_top[s]) {
         if (g_dom_top[s] & 1) st |= DOM_ST_MODAL;
         if (g_dom_top[s] & 2) st |= DOM_ST_POPOVER_OPEN;

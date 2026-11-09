@@ -189,6 +189,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * center (as it is), 2 end; start and end follow direction (1: rtl,
      * inherited). */
     unsigned char text_align_how, direction, direction_set;
+    unsigned char ta_match;   /* (text-align: match-parent: the parent's, start and end as the parent's direction has them) */
     /* text-align-last: 0 auto, 1 start, 2 end, 3 left, 4 right, 5 center, 6 justify (inherited) */
     unsigned char tal, tal_set;
     unsigned char tj_none, tj_set;   /* text-justify: none (inherited) */
@@ -276,6 +277,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char scroll_marker_group;
     float overflow_clip_margin;
     unsigned char ocm_inh;   /* (overflow-clip-margin: inherit) */
+    unsigned char ocm_box;   /* (its visual box: 0 padding-box, 1 border-box, 2 content-box) */
     unsigned char to_inh;    /* (text-overflow: inherit) */
 
     /* vertical-align: 0=baseline, 1=middle, 2=top, 3=bottom, 4=sub,
@@ -286,6 +288,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char vertical_align;
     float va_len, va_pct;
     float il_push;           /* (a raised initial letter: its block's content pushed down by this, as top padding) */
+    float il_push_l, il_push_r;   /* (the same across a vertical block: left or right padding) */
     float bs_len, bs_pct;     /* (baseline-shift: a length and a percentage of the line-height, raising it) */
     unsigned char bs_kw;      /* (baseline-shift sub 4, super 5; 0 a length) */
 
@@ -587,6 +590,11 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char column_width_set, column_fill, column_span_all;
     double column_height;              /* (column-height; 0 auto) */
     unsigned char column_wrap;         /* (0 auto, 1 nowrap, 2 wrap) */
+    char page_name[24];                /* (page: its name, "" auto) */
+    double block_step;                 /* (block-step-size) */
+    unsigned char appearance_none;     /* (appearance: none) */
+    unsigned char accent_set;          /* (accent-color: a color) */
+    float accent[3];
     /* column-rule (column_rule_style a CssBorderStyle; color currentColor
      * unless column_rule_color_set) */
     float column_rule_width;
@@ -628,6 +636,14 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * because the parallel pass cannot safely read the parent's computed
      * font-size. */
     double font_size_ratio;
+    /* (math-depth: md_kind 0 inherited, 1 a number, 2 add(), 3 auto-add; math_depth the computed one;
+     * math-style compact (mc_set: set here); fs_math: font-size: math) */
+    int md_val, math_depth;
+    /* (caret-shape: 0 auto, 1 bar, 2 block, 3 underscore; caret-color as written, NULL auto) */
+    unsigned char caret_shape, caret_shape_set, caret_color_set;
+    unsigned char inl_li;   /* (display: inline list-item: an inline box, a list item) */
+    const char *caret_color;
+    unsigned char md_kind, math_compact, mc_set, fs_math;
     double font_size_add;   /* (px, with the ratio: calc(1em + 2px)) */
 
     /* Outer display is inline but the box is laid out as an atomic inline
@@ -788,6 +804,8 @@ typedef struct LayoutBox {
     float mc_grow;              /* (how much the column push grew it, inside a flex line) */
     float mc_w, mc_gap, mc_h;
     unsigned char mc_nested;
+    double bs_added;            /* (block-step-size: what was added to the end margin) */
+    unsigned char mc_vert;      /* (its flow across: 1 block axis along +x, 2 along -x; its children's mc_src, mc_dst from its content start) */
     unsigned char bdb_n;        /* (box-decoration-break: clone, in columns: the breaks in it, each its decorations again) */    /* (its columns in rows, one in each column of the multicol container around it) */
     float mc_rgap;              /* (column-wrap: rows of mc_n columns, this far apart; < 0 none) */
     /* A multi-column container's child: its run of columns (between spanners)
@@ -796,6 +814,9 @@ typedef struct LayoutBox {
      * laid out across the container and painted where it is */
     float mc_src, mc_dst, mc_seg_h;
     unsigned char mc_span, mc_seg_last;
+    /* (a container with spanners deeper in it: its runs by where they are in the
+     * one column, ctx->mc_segs[mc_seg0 .. mc_seg0 + mc_nseg)) */
+    int mc_seg0, mc_nseg;
     double margin_top, margin_right, margin_bottom, margin_left;
     double padding_top, padding_right, padding_bottom, padding_left;
     double content_width, content_height;
@@ -817,8 +838,10 @@ typedef struct LayoutBox {
     int run_in_prev;            /* (a block a run-in goes into: its index + 1) */
     unsigned char clamp_clip;   /* (a line-clamp container that clamped: what is past clamp_y, its clamp point, not painted) */
     float clamp_y;
+    float marker_dx;   /* (an outside marker moved in by floats: its line's start past them) */
     double static_dx, static_dy;
     double opacity_eff;
+    double ell_end;             /* (text-overflow cut its lines: where the furthest would have ended, for its scroll range; 0 none) */
 } LayoutBox;
 
 /* A piece of an inline split around its block-level children
@@ -847,6 +870,7 @@ typedef struct LayoutTextFrag {
     double dx, dy, w;
     unsigned char level;
     unsigned char ellipsis;   /* an ellipsis after it (line-clamp, text-overflow) */
+    float ell_by;             /* (its line's baseline, the block's, below its own: where the ellipsis sits) */
     unsigned char fl;         /* on a ::first-line whose color it takes (fl_rgba) */
     uint32_t fl_rgba;
 } LayoutTextFrag;
@@ -858,9 +882,16 @@ typedef struct LayoutTextFragList {
 
 /* (a block's line boxes, top and height, as its inline layout placed them:
  * kept in a multi-column container for its breaks) */
+/* (a run of columns: the one column's [src, end) in columns h high from dst) */
+typedef struct LayoutMcSeg {
+    float src, end, h, dst;
+    int used;   /* (the columns with content) */
+} LayoutMcSeg;
+
 typedef struct LayoutLineList {
     float *t, *h;
     int n, cap;
+    double base;    /* (the block's y when they were recorded: it may have moved since) */
 } LayoutLineList;
 
 /* Flat node reference used by both passes. */
@@ -948,6 +979,8 @@ typedef struct LayoutContext {
     LayoutPieceList *pieces;
     int pieces_n;
     /* (per box, its line boxes, in a multi-column container only; NULL: none) */
+    LayoutMcSeg *mc_segs;
+    int mc_segs_n, mc_segs_cap;
     LayoutLineList *lines;
     int lines_n;
 
@@ -1166,6 +1199,12 @@ bool css_layout_box_clips(const LayoutContext *ctx, int idx);
 /* A pseudo-element's declarations (ps: 1 ::before, 2 ::after, 6 ::scroll-marker,
  * 7 its current ones, 8 ::scroll-marker-group), in cascade order; their count. */
 int css_layout_pseudo_decls(const LayoutContext *ctx, int idx, int ps, const CssDeclaration *const **decls);
+/* (::marker { content: none } on list item idx: no marker of any kind) */
+bool css_layout_marker_none(const LayoutContext *ctx, int idx);
+/* (the last character of the text before text box idx in its paragraph, through inline boxes; 0 none) */
+uint32_t css_layout_text_prev_cp(const LayoutContext *ctx, int idx);
+/* (the code point before byte a of t; 0 at its start) */
+uint32_t css_layout_cp_before(const char *t, uint32_t a);
 /* The scroll pseudo boxes (::scroll-marker and -group, ::scroll-button): how
  * many pair slots to look at, and for one its box, owner box and side. */
 int css_layout_pseudo_pair_count(const LayoutContext *ctx);

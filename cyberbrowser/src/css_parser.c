@@ -38,15 +38,170 @@ bool g_css_saw_composition;     /* (animation-composition: what the engine's tra
 int g_css_attr_any_ns;
 int g_css_type_ns;
 
-/* @namespace prefixes seen (all sheets alike; a later one of a prefix wins), and the default */
-static struct { char p[32]; char uri[200]; } g_css_ns[16];
-static int g_css_nns;
-static char g_css_ns_default[200];
-static bool g_css_ns_has_default;
+/* @namespace prefixes of the sheet being parsed (a later one of a prefix wins), and the default;
+ * a rule's selector gets them as "-cbns-<hex of the URI>|" (resolved when it's made) */
+static __thread struct { char p[32]; char uri[200]; } t_ns[16];
+static __thread int t_nns;
+static __thread char t_ns_default[200];
+static __thread bool t_ns_has_default;
+static __thread bool t_ns_closed;   /* (a rule seen: @namespace after it is invalid) */
+static __thread char t_ns_buf[200];
 static const char *css_ns_lookup(const char *p, size_t n)
 {
-    for (int i = g_css_nns - 1; i >= 0; i--) if (strlen(g_css_ns[i].p) == n && !strncmp(g_css_ns[i].p, p, n)) return g_css_ns[i].uri;
-    return NULL;
+    if (n < 6 || strncmp(p, "-cbns-", 6)) return NULL;   /* (a prefix the sheet never declared) */
+    size_t o = 0;
+    for (size_t i = 6; i + 1 < n && o + 1 < sizeof t_ns_buf; i += 2) {
+        int hi = p[i] <= '9' ? p[i] - '0' : p[i] - 'a' + 10, lo = p[i + 1] <= '9' ? p[i + 1] - '0' : p[i + 1] - 'a' + 10;
+        t_ns_buf[o++] = (char)(hi * 16 + lo);
+    }
+    t_ns_buf[o] = 0;
+    return t_ns_buf;
+}
+
+/* (an identifier at s[i], escapes read: decoded into out; returns its end) */
+static size_t css_ns_ident(const char *s, size_t n, size_t i, char *out, size_t cap)
+{
+    size_t o = 0;
+    while (i < n) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '\\' && i + 1 < n && s[i + 1] != '\n') {
+            i++;
+            uint32_t cp = 0;
+            int h = 0;
+            while (h < 6 && i < n && isxdigit((unsigned char)s[i])) {
+                cp = cp * 16 + (uint32_t)(isdigit((unsigned char)s[i]) ? s[i] - '0' : (tolower((unsigned char)s[i]) - 'a' + 10));
+                i++; h++;
+            }
+            if (h) {
+                if (i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r' || s[i] == '\f')) i++;
+                char u[4]; int k = 0;
+                if (cp < 0x80) u[k++] = (char)cp;
+                else if (cp < 0x800) { u[k++] = (char)(0xC0 | (cp >> 6)); u[k++] = (char)(0x80 | (cp & 0x3F)); }
+                else if (cp < 0x10000) { u[k++] = (char)(0xE0 | (cp >> 12)); u[k++] = (char)(0x80 | ((cp >> 6) & 0x3F)); u[k++] = (char)(0x80 | (cp & 0x3F)); }
+                else { u[k++] = (char)(0xF0 | (cp >> 18)); u[k++] = (char)(0x80 | ((cp >> 12) & 0x3F)); u[k++] = (char)(0x80 | ((cp >> 6) & 0x3F)); u[k++] = (char)(0x80 | (cp & 0x3F)); }
+                for (int q = 0; q < k && o + 1 < cap; q++) out[o++] = u[q];
+            } else {
+                if (o + 1 < cap) out[o++] = s[i];
+                i++;
+            }
+            continue;
+        }
+        if (!(isalnum(c) || c == '-' || c == '_' || c >= 0x80)) break;
+        if (o + 1 < cap) out[o++] = (char)c;
+        i++;
+    }
+    if (cap) out[o] = 0;
+    return i;
+}
+
+/* (sel with the sheet's prefixes as "-cbns-<hex>|", the default namespace before
+ * a compound's type, or its implied universal at the top level; NULL unchanged) */
+static void css_ns_put(char **o, size_t *on, size_t *ocap, const char *t, size_t tn)
+{
+    if (*on + tn + 1 > *ocap) { *ocap = (*on + tn + 1) * 2; *o = (char *)realloc(*o, *ocap); }
+    memcpy(*o + *on, t, tn);
+    *on += tn;
+    (*o)[*on] = 0;
+}
+static void css_ns_put_uri(char **o, size_t *on, size_t *ocap, const char *uri)
+{
+    char b[420];
+    size_t k = (size_t)snprintf(b, sizeof b, "-cbns-");
+    for (const unsigned char *u = (const unsigned char *)uri; *u && k + 3 < sizeof b; u++) k += (size_t)snprintf(b + k, sizeof b - k, "%02x", *u);
+    b[k++] = '|';
+    css_ns_put(o, on, ocap, b, k);
+}
+static char *css_ns_rewrite(const char *sel)
+{
+    if (!t_nns && !t_ns_has_default) return NULL;
+    size_t n = strlen(sel), on = 0, ocap = n * 2 + 64;
+    char *o = (char *)malloc(ocap);
+    o[0] = 0;
+    int depth = 0, sel_depth = 0;   /* (parens; how many of them hold selectors) */
+    bool start = true;              /* (a compound may start here) */
+    size_t i = 0;
+    while (i < n) {
+        char c = sel[i];
+        if (c == '"' || c == '\'') {
+            size_t j = i + 1;
+            while (j < n && sel[j] != c) { if (sel[j] == '\\' && j + 1 < n) j++; j++; }
+            if (j < n) j++;
+            css_ns_put(&o, &on, &ocap, sel + i, j - i);
+            i = j; start = false;
+            continue;
+        }
+        if (c == '[') {
+            size_t j = i;
+            while (j < n && sel[j] != ']') { if (sel[j] == '\\' && j + 1 < n) j++; j++; }
+            if (j < n) j++;
+            if (start && t_ns_has_default && depth == 0) { css_ns_put_uri(&o, &on, &ocap, t_ns_default); css_ns_put(&o, &on, &ocap, "*", 1); }
+            css_ns_put(&o, &on, &ocap, sel + i, j - i);
+            i = j; start = false;
+            continue;
+        }
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '>' || c == '+' || c == '~' || c == ',') {
+            css_ns_put(&o, &on, &ocap, sel + i, 1);
+            i++; start = true;
+            continue;
+        }
+        if (c == '(') {
+            /* (the pseudo-class before it: one whose argument is selectors?) */
+            size_t b = i;
+            while (b > 0 && (isalnum((unsigned char)sel[b - 1]) || sel[b - 1] == '-')) b--;
+            bool selp = (i - b == 3 && !strncasecmp(sel + b, "not", 3)) || (i - b == 2 && !strncasecmp(sel + b, "is", 2)) ||
+                        (i - b == 5 && !strncasecmp(sel + b, "where", 5)) || (i - b == 3 && !strncasecmp(sel + b, "has", 3)) ||
+                        (i - b == 7 && !strncasecmp(sel + b, "matches", 7)) || (i - b == 3 && !strncasecmp(sel + b, "any", 3));
+            depth++;
+            if (selp) sel_depth++;
+            css_ns_put(&o, &on, &ocap, sel + i, 1);
+            i++;
+            start = selp;
+            continue;
+        }
+        if (c == ')') {
+            if (depth > 0) { depth--; if (sel_depth > depth) sel_depth = depth; }
+            css_ns_put(&o, &on, &ocap, sel + i, 1);
+            i++; start = false;
+            continue;
+        }
+        bool in_sel = depth == sel_depth;
+        if (start && in_sel && c == '|') { start = false; css_ns_put(&o, &on, &ocap, sel + i, 1); i++; continue; }
+        if (start && in_sel && c == '*') {
+            if (i + 1 < n && sel[i + 1] == '|') { css_ns_put(&o, &on, &ocap, sel + i, 2); i += 2; start = false; continue; }
+            if (t_ns_has_default) css_ns_put_uri(&o, &on, &ocap, t_ns_default);
+            css_ns_put(&o, &on, &ocap, "*", 1);
+            i++; start = false;
+            continue;
+        }
+        if (start && in_sel && (isalpha((unsigned char)c) || c == '_' || c == '\\' || (unsigned char)c >= 0x80 ||
+                                (c == '-' && i + 1 < n && sel[i + 1] != '-' && !isdigit((unsigned char)sel[i + 1])))) {
+            char id[64];
+            size_t e = css_ns_ident(sel, n, i, id, sizeof id);
+            if (e < n && sel[e] == '|' && (e + 1 >= n || (sel[e + 1] != '=' && sel[e + 1] != '|'))) {
+                /* (a prefix: the sheet's URI for it, else left to be invalid) */
+                const char *uri = NULL;
+                for (int k = t_nns - 1; k >= 0 && !uri; k--) if (!strcmp(t_ns[k].p, id)) uri = t_ns[k].uri;
+                if (uri) css_ns_put_uri(&o, &on, &ocap, uri);
+                else css_ns_put(&o, &on, &ocap, sel + i, e + 1 - i);
+                i = e + 1;
+            } else {
+                if (t_ns_has_default) css_ns_put_uri(&o, &on, &ocap, t_ns_default);
+                css_ns_put(&o, &on, &ocap, sel + i, e - i);
+                i = e;
+            }
+            start = false;
+            continue;
+        }
+        if (start && in_sel && depth == 0 && t_ns_has_default && (c == '.' || c == '#' || c == ':') && strncasecmp(sel + i, ":host", 5)) {   /* (:host is featureless: no namespace) */
+            css_ns_put_uri(&o, &on, &ocap, t_ns_default);
+            css_ns_put(&o, &on, &ocap, "*", 1);
+        }
+        css_ns_put(&o, &on, &ocap, sel + i, 1);
+        if (c == '\\' && i + 1 < n) { css_ns_put(&o, &on, &ocap, sel + i + 1, 1); i++; }
+        i++;
+        start = false;
+    }
+    return o;
 }
 
 static bool css_is_space(char c) {
@@ -235,6 +390,13 @@ static const unsigned char k_name_char[256] = {
     ['a' ... 'z'] = 2, ['A' ... 'Z'] = 2, ['_'] = 2, ['-'] = 2, [0x80 ... 0xff] = 2, ['0' ... '9'] = 1,
 };
 
+/* (var( somewhere in the n bytes at s) */
+static bool decl_has_var(const char *s, size_t n)
+{
+    for (size_t i = 0; i + 4 <= n; i++) if (!strncasecmp(s + i, "var(", 4)) return true;
+    return false;
+}
+
 static bool css_decl_block_fast(const char *s, size_t len, size_t *pos, CssRule *rule) {
     size_t pos0 = *pos;
     int n0 = rule->declaration_count;
@@ -285,9 +447,14 @@ static bool css_decl_block_fast(const char *s, size_t len, size_t *pos, CssRule 
                 if (!k_decl_special[(unsigned char)c]) { (*pos)++; continue; }
                 if (!in_quote) {
                     if (c == '"' || c == '\'') { in_quote = true; quote_char = c; }
-                    else if (c == '(') { paren_depth++; }
-                    else if (c == ')') { if (paren_depth > 0) paren_depth--; }
+                    else if (c == '(') {
+                        /* (var( in another case: the token path writes it var() */
+                        if (*pos >= val_start + 3 && !strncasecmp(s + *pos - 3, "var", 3) && strncmp(s + *pos - 3, "var", 3)) goto bail;
+                        paren_depth++;
+                    }
+                    else if (c == ')') { if (paren_depth > 0) paren_depth--; else goto bail; }   /* (unmatched: invalid, the token path's) */
                     else if (paren_depth == 0 && (c == ';' || c == '}')) break;
+                    else if (c == ';' && decl_has_var(s + val_start, *pos - val_start)) goto bail;   /* (a ; in a var(): the token path's) */
                     else if (decl_complex_char(s, len, *pos) || (c == '!' && !decl_bang_important(s, len, *pos)))
                         goto bail;
                 } else {
@@ -476,6 +643,27 @@ static void decl_finish(const CssTz *tz, const TokBuf *b, DeclSink sink, void *c
     /* (a bad string or url fits no property's grammar) */
     for (int i = k; i < e; i++)
         if (t[i].type == CT_BAD_STRING || t[i].type == CT_BAD_URL) return;
+    /* (a '!' or ';' at the top level of a var()'s arguments: invalid) */
+    {
+        char stk[64];
+        int sp = 0;
+        for (int i = k; i < e; i++) {
+            if (t[i].type == CT_FUNCTION) {
+                size_t fl;
+                const char *fv = css_tok_val(&tz->arena, &t[i], &fl);
+                if (sp < 64) stk[sp] = fl == 3 && !strncasecmp(fv, "var", 3) ? 'v' : 'b';
+                sp++;
+            } else if (t[i].type == CT_LPAREN || t[i].type == CT_LBRACKET || t[i].type == CT_LBRACE) {
+                if (sp < 64) stk[sp] = 'b';
+                sp++;
+            } else if (t[i].type == CT_RPAREN || t[i].type == CT_RBRACKET || t[i].type == CT_RBRACE) {
+                if (!sp) return;   /* (a closer with nothing open) */
+                sp--;
+            } else if (sp == 0 && t[i].type == CT_DELIM && t[i].delim == '!') return;   /* (a second !important, a stray !) */
+            else if (sp > 0 && sp <= 64 && stk[sp - 1] == 'v' &&
+                       (t[i].type == CT_SEMICOLON || (t[i].type == CT_DELIM && t[i].delim == '!'))) return;
+        }
+    }
     size_t pl;
     const char *pv = css_tok_val(&tz->arena, &t[0], &pl);
     char *prop = (char *)malloc(pl + 1);
@@ -488,6 +676,10 @@ static void decl_finish(const CssTz *tz, const TokBuf *b, DeclSink sink, void *c
     memcpy(prop, pv, pl);
     prop[pl] = 0;
     if (!custom) css_str_tolower(prop);
+    /* (var() by any case: as var( for what substitutes it) */
+    for (char *q = value; (q = strchr(q, '(')) != NULL; q++)
+        if (q - value >= 3 && !strncasecmp(q - 3, "var", 3) && strncmp(q - 3, "var", 3) &&
+            (q - value == 3 || !(isalnum((unsigned char)q[-4]) || q[-4] == '-' || q[-4] == '_'))) memcpy(q - 3, "var", 3);
     sink(ctx, prop, value, important);
 }
 
@@ -827,7 +1019,7 @@ static bool css_pseudo_known(const char *n, size_t nl, bool elem)
 {
     static const char *const classes[] = {
         "active", "active-view-transition", "active-view-transition-type", "any-link", "autofill", "blank", "buffering", "checked", "closed", "current", "default",
-        "defined", "dir", "disabled", "empty", "enabled", "first", "first-child", "first-of-type", "focus",
+        "defined", "has-slotted", "dir", "disabled", "empty", "enabled", "first", "first-child", "first-of-type", "focus",
         "focus-visible", "focus-within", "fullscreen", "future", "has", "has-slotted", "heading", "host", "host-context", "hover",
         "in-range", "indeterminate", "invalid", "is", "lang", "last-child", "last-of-type", "left", "link",
         "local-link", "matches", "modal", "muted", "not", "nth-child", "nth-last-child", "nth-last-of-type",
@@ -840,7 +1032,7 @@ static bool css_pseudo_known(const char *n, size_t nl, bool elem)
         "after", "backdrop", "before", "checkmark", "column", "cue", "cue-region", "details-content",
         "file-selector-button", "first-letter", "first-line", "grammar-error", "highlight", "marker", "part",
         "picker", "picker-icon", "placeholder", "scroll-button", "scroll-marker", "scroll-marker-group",
-        "search-text", "selection", "slotted", "spelling-error", "target-text", "view-transition",
+        "search-text", "selection", "slider-fill", "slider-thumb", "slider-track", "slotted", "spelling-error", "target-text", "view-transition",
         "view-transition-group", "view-transition-group-children", "view-transition-image-pair", "view-transition-new", "view-transition-old",
         NULL };
     if (nl > 8 && !strncasecmp(n, "-webkit-", 8)) return true;
@@ -980,6 +1172,7 @@ static bool css_ident_starts(const char *s, size_t len, size_t i)
 static const unsigned char k_prelude_special[256] = {
     ['{'] = 1, ['}'] = 1, ['('] = 1, [')'] = 1, ['['] = 1, [']'] = 1, ['"'] = 1, ['\''] = 1,
     ['/'] = 1, ['\\'] = 1, [';'] = 1, ['@'] = 1, ['<'] = 1, ['>'] = 1, [','] = 1, ['.'] = 1, ['#'] = 1,
+    ['%'] = 2, ['!'] = 2, ['$'] = 2, ['?'] = 2, ['='] = 2, ['^'] = 2, ['`'] = 2,
 };
 
 /* A selector's start at s[i] (white space skipped) that no selector has:
@@ -1051,6 +1244,10 @@ static bool css_prelude_fast(const char *s, size_t len, size_t pos, bool at, siz
             return true;
         case ',':
             if (!at && !d && css_sel_start_bad(s, len, i + 1)) *bad = true;
+            break;
+        case '%': case '!': case '$': case '?': case '=': case '^': case '`':
+            /* (no selector has these outside brackets; a keyframe's 50% is no selector) */
+            if (!at && !d && !(c == '%' && i > pos && isdigit((unsigned char)s[i - 1]))) *bad = true;
             break;
         default:   /* \ } @ < */
             return false;
@@ -1499,37 +1696,64 @@ static size_t css_at_rule(const char *s, size_t len, size_t pos, bool nested, Cs
     /* (one that needs a block, @media; or @page;, is invalid: dropped, it
      * does not count; of the statements only @namespace does) */
     bool is_namespace = nl == 9 && !strncasecmp(name, "namespace", 9);
-    if (is_namespace && !block) {
-        /* (its prefix, if any, and URI: url(...) or a string) */
+    if (is_namespace && !block && !nested && !t_ns_closed) {
+        /* (its prefix, if any, and URI: url(...) or a string; anything else after it invalid) */
         char *c = css_strndup_trim(s + pre, pre_end - pre);
         const char *p = c ? c : "";
-        char pfx[32] = { 0 }, uri[200] = { 0 };
-        size_t k = 0;
-        while (*p && !css_is_space(*p) && strncasecmp(p, "url(", 4) && *p != '"' && *p != '\'' && k + 1 < sizeof pfx) pfx[k++] = *p++;
-        while (*p && css_is_space(*p)) p++;
-        if (!*p && k) { memcpy(uri, pfx, sizeof pfx); pfx[0] = 0; p = ""; }
-        const char *u = p;
-        if (!strncasecmp(u, "url(", 4)) u += 4;
-        while (*u && css_is_space(*u)) u++;
-        char q = (*u == '"' || *u == '\'') ? *u++ : 0;
-        size_t ul = 0;
-        while (*u && (q ? *u != q : (*u != ')' && !css_is_space(*u))) && ul + 1 < sizeof uri) uri[ul++] = *u++;
-        if (ul) uri[ul] = 0;
-        /* (a prefix seen before: its URI now, moved last so a lookup finds it; the table never fills with repeats) */
-        int at = -1;
-        for (int i = 0; pfx[0] && i < g_css_nns; i++) if (!strcmp(g_css_ns[i].p, pfx)) at = i;
-        if (at >= 0) {
-            for (int i = at; i + 1 < g_css_nns; i++) g_css_ns[i] = g_css_ns[i + 1];
-            g_css_nns--;
+        size_t pn = strlen(p), k = 0;
+        char pfx[32] = { 0 }, uri[200] = { 0 }, fn[16];
+        bool ok = true, has_uri = false;
+        if (pn && p[0] != '"' && p[0] != '\'') {
+            size_t e = css_ns_ident(p, pn, 0, pfx, sizeof pfx);
+            if (e < pn && p[e] == '(') pfx[0] = 0;   /* (url( itself) */
+            else {
+                k = e;
+                if (k == 0) ok = false;
+                while (k < pn && css_is_space(p[k])) k++;
+            }
         }
-        if (pfx[0] && g_css_nns < 16) {
-            snprintf(g_css_ns[g_css_nns].p, sizeof g_css_ns[0].p, "%s", pfx);
-            snprintf(g_css_ns[g_css_nns].uri, sizeof g_css_ns[0].uri, "%s", uri);
-            g_css_nns++;
-        } else if (!pfx[0]) { snprintf(g_css_ns_default, sizeof g_css_ns_default, "%s", uri); g_css_ns_has_default = true; }
+        if (ok && k < pn) {
+            const char *u = p + k;
+            size_t un = pn - k, e = 0;
+            if (u[0] != '"' && u[0] != '\'') {
+                e = css_ns_ident(u, un, 0, fn, sizeof fn);
+                if (e < un && u[e] == '(' && !strcasecmp(fn, "url")) {
+                    e++;
+                    while (e < un && css_is_space(u[e])) e++;
+                } else ok = false;
+            }
+            if (ok) {
+                char q = (e < un && (u[e] == '"' || u[e] == '\'')) ? u[e++] : 0;
+                size_t ul = 0;
+                while (e < un && (q ? u[e] != q && u[e] != '\n' : (u[e] != ')' && !css_is_space(u[e])))) {
+                    if (u[e] == '\\' && e + 1 < un) e++;
+                    if (ul + 1 < sizeof uri) uri[ul++] = u[e];
+                    e++;
+                }
+                uri[ul] = 0;
+                if (q && e < un && u[e] == '\n') ok = false;   /* (a bad string) */
+                has_uri = true;
+            }
+        }
+        if (ok && has_uri) {
+            /* (a prefix seen before: its URI now, moved last so a lookup finds it; the table never fills with repeats) */
+            int at = -1;
+            for (int i = 0; pfx[0] && i < t_nns; i++) if (!strcmp(t_ns[i].p, pfx)) at = i;
+            if (at >= 0) {
+                for (int i = at; i + 1 < t_nns; i++) t_ns[i] = t_ns[i + 1];
+                t_nns--;
+            }
+            if (pfx[0] && t_nns < 16) {
+                snprintf(t_ns[t_nns].p, sizeof t_ns[0].p, "%s", pfx);
+                snprintf(t_ns[t_nns].uri, sizeof t_ns[0].uri, "%s", uri);
+                t_nns++;
+            } else if (!pfx[0]) { snprintf(t_ns_default, sizeof t_ns_default, "%s", uri); t_ns_has_default = true; }
+        }
         free(c);
     }
-    if (counts) *counts = css_at_known(name, nl) && !is_charset && !is_import && (block ? true : is_namespace);
+    bool at_counts = css_at_known(name, nl) && !is_charset && !is_import && (block ? true : is_namespace);
+    if (counts) *counts = at_counts;
+    if (at_counts && !is_namespace) t_ns_closed = true;
     bool is_layer = nl == 5 && !strncasecmp(name, "layer", 5);
     char *layer_here = NULL;
     if (is_layer) {
@@ -1764,11 +1988,16 @@ static size_t css_rule_item(const char *s, size_t len, size_t pos, bool nested, 
         return pos;
     }
     if (counts) *counts = true;
+    if (!nested) t_ns_closed = true;
     CssRule *rule = sheet ? css_stylesheet_add_rule(sheet) : NULL;
     if (!rule) {
         free(sel);
         css_skip_rule_block(s, len, &pos);
         return pos;
+    }
+    {
+        char *nw = css_ns_rewrite(sel);
+        if (nw) { free(sel); sel = nw; }
     }
     if (t_scope_a) {
         char *sw = scope_apply(sel, t_scope_a, t_scope_b, true);
@@ -2098,6 +2327,7 @@ CssStylesheet* css_stylesheet_parse_range(const char *css, size_t len,
     CssStylesheet *sheet = (CssStylesheet*)calloc(1, sizeof(CssStylesheet));
     if (!sheet) return NULL;
     if (stop > len) stop = len;
+    if (start == 0) { t_nns = 0; t_ns_has_default = false; t_ns_closed = false; }   /* (a sheet's own namespaces) */
     size_t pos = css_rule_list(css, len, start, stop, false, sheet, "");
     if (end_pos) *end_pos = pos;
     return sheet;   /* possibly with zero rules */
@@ -2231,7 +2461,7 @@ uint32_t css_state_bit(const char *name, size_t nl)
         { "buffering", DOM_ST_BUFFERING }, { "stalled", DOM_ST_STALLED }, { "enabled", DOM_ST_ENABLED },
         { "disabled", DOM_ST_DISABLED }, { "read-write", DOM_ST_READ_WRITE }, { "read-only", DOM_ST_READ_ONLY },
         { "required", DOM_ST_REQUIRED }, { "optional", DOM_ST_OPTIONAL },
-        { "modal", DOM_ST_MODAL }, { "popover-open", DOM_ST_POPOVER_OPEN },
+        { "modal", DOM_ST_MODAL }, { "popover-open", DOM_ST_POPOVER_OPEN }, { "has-slotted", DOM_ST_HAS_SLOTTED },
         { "target-current", DOM_ST_TARGET_CURRENT },   /* (an anchor of a scroll-target-group: its target the current one) */
         { "valid", DOM_ST_VALID }, { "invalid", DOM_ST_INVALID },
         { "placeholder-shown", DOM_ST_PLACEHOLDER_SHOWN }, { "default", DOM_ST_DEFAULT },
@@ -2629,8 +2859,6 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
             }
             i = k + 1;
         }
-        /* (a default namespace isn't applied: the table outlives its sheet) */
-        (void)g_css_ns_default; (void)g_css_ns_has_default;
         if (want && out->attr_count < CSS_MAX_ATTRS) {
             int a = out->attr_count++;
             snprintf(out->attrs[a], sizeof out->attrs[0], "-cb-ns");
@@ -3602,6 +3830,9 @@ typedef struct MqFeature {
 /* The feature named name (lower case) on a vw x vh screen; false if unknown. */
 static const char *g_mq_color_scheme;
 
+/* (print mode: the page area, what lies between pages, the first page's margins) */
+__thread CssPrintMode g_css_print;
+
 bool css_media_set_color_scheme(const char *scheme) {
     if (scheme == g_mq_color_scheme) return false;
     g_mq_color_scheme = scheme;
@@ -3903,7 +4134,8 @@ static bool mq_query(const char *s, const char *e, double vw, double vh) {
     static const char *const reserved[] = { "and", "not", "or", "only", "layer" };
     for (size_t k = 0; k < sizeof reserved / sizeof reserved[0]; k++)
         if (tl == strlen(reserved[k]) && !strncasecmp(t, reserved[k], tl)) return false;
-    bool type = (tl == 6 && strncasecmp(t, "screen", 6) == 0) || (tl == 3 && strncasecmp(t, "all", 3) == 0);
+    bool type = (tl == 6 && strncasecmp(t, "screen", 6) == 0 && !g_css_print.on) || (tl == 3 && strncasecmp(t, "all", 3) == 0) ||
+                (tl == 5 && strncasecmp(t, "print", 5) == 0 && g_css_print.on);
     int r = type ? 1 : 0;
     mq_ws(&m);
     if (m.p < m.end) {

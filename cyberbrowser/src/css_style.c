@@ -380,6 +380,12 @@ static CssStyleDoc *styledoc_build(HtmlDocument *doc, CssStyleDoc *old, uint32_t
     for (int i = 0; i < n; i++) {
         HtmlNode *node = SD_NODE(i);
         d->parent[i] = node->array_node.parent;
+        /* (a node assigned to a slot is that slot's child only for rendering: for selectors, its host's) */
+        while (d->parent[i] >= 0 && node->store_id) {
+            HtmlNode *pn = SD_NODE(d->parent[i]);
+            if (pn->type != HTML_NODE_ELEMENT || !pn->tag_name || strcmp(pn->tag_name, "slot") || dom_parent(node->store_id) == pn->store_id) break;
+            d->parent[i] = d->parent[d->parent[i]];
+        }
         d->store_id[i] = node->store_id;
         if (node->type != HTML_NODE_ELEMENT) continue;
         d->is_elem[i] = 1;
@@ -1439,7 +1445,8 @@ static int32_t after_base_list(Builder *b, const char *branch, size_t blen, int 
         "::scroll-button(up)", "::scroll-button(down)", "::scroll-button(left)", "::scroll-button(right)",
         /* (these from here on are the kinds k_after_kind gives) */
         "::scroll-marker:checked", "::scroll-button(block-start)", "::scroll-button(block-end)",
-        "::scroll-button(inline-start)", "::scroll-button(inline-end)" };
+        "::scroll-button(inline-start)", "::scroll-button(inline-end)",
+        "::slider-track", "::slider-fill", "::slider-thumb" };
     char buf[512];
     if (blen == 0 || blen >= sizeof(buf)) return -1;
     memcpy(buf, branch, blen);
@@ -1593,7 +1600,8 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
 
             /* ::after branches (naive comma split, as the legacy code did). */
             if (ci_strstr((char *)sel, ":after") || ci_strstr((char *)sel, ":before") || ci_strstr((char *)sel, ":first-letter") ||
-                ci_strstr((char *)sel, ":first-line") || ci_strstr((char *)sel, ":marker") || ci_strstr((char *)sel, ":scroll-")) {
+                ci_strstr((char *)sel, ":first-line") || ci_strstr((char *)sel, ":marker") || ci_strstr((char *)sel, ":scroll-") ||
+                ci_strstr((char *)sel, ":slider-")) {
                 const char *bp = sel;
                 while (*bp) {
                     const char *comma = bp;
@@ -1605,11 +1613,12 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
                     while (blen > 0 && isspace((unsigned char)bp[blen - 1])) blen--;
                     if (blen > 0) {
                         /* (logical buttons as physical: horizontal flow, all layout has) */
-                        static const unsigned char k_after_kind[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 6, 9, 10, 11, 12 };
+                        static const unsigned char k_after_kind[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 6, 9, 10, 11, 12, 13, 14, 15 };
                         int32_t is_before = 0, li = -1;
                         for (int kk = 0; li < 0 && kk < (int)sizeof k_after_kind; kk++) {
                             /* (only those whose kind of name is in it) */
-                            if (kk >= 5 && !ci_strstr((char *)sel, ":scroll-")) break;
+                            if (kk >= 5 && kk < 18 && !ci_strstr((char *)sel, ":scroll-")) continue;
+                            if (kk >= 18 && !ci_strstr((char *)sel, ":slider-")) break;
                             li = after_base_list(&b, bp, blen, kk);
                             is_before = k_after_kind[kk];
                         }
@@ -2083,7 +2092,8 @@ int css_style_match_after(const CssStyleSet *S, const CssStyleDoc *D, int dom,
         last_rule = af->rule;
         if (kinds & (1u << af->is_before)) continue;
         kinds |= 1u << af->is_before;
-        CssAfterMatch m = { af->rule, af->spec, af->is_before };
+        /* (the user agent's sheet below every author rule, as for elements) */
+        CssAfterMatch m = { af->rule, af->spec - (S->rules[af->rule].ua ? (1 << 28) : 0), af->is_before };
         VEC_PUSH(t->after_out, m);
     }
     *out = t->after_out.v;

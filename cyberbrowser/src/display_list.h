@@ -78,6 +78,8 @@ typedef struct {
     float u0, v0, u1, v1;
     uint32_t glyph_index;
     uint8_t font_slot;   /* index into the display-list font table */
+    uint8_t vo_r;        /* (its character set sideways in vertical text, UAX 50's R) */
+    uint8_t rot;         /* (drawn turned: 1 clockwise, its top to the right; 2 counter-clockwise) */
 } DisplayGlyph;
 
 typedef struct {

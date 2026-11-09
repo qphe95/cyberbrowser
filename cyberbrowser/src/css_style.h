@@ -110,7 +110,7 @@ int css_style_match(const CssStyleSet *set, const CssStyleDoc *sd, int dom,
 
 /* ::after, ::before, ::first-letter, ::first-line, ::marker (is_before 0, 1, 2, 3, 4), and
  * ::scroll-marker, its :target-current, ::scroll-marker-group, ::scroll-button(*, up, down,
- * left, right) (5 to 12) rules whose branch matches `dom`: global rule index and the
+ * left, right) (5 to 12), ::slider-track, -fill, -thumb (13 to 15) rules whose branch matches `dom`: global rule index and the
  * specificity of the first matching branch (legacy semantics), in rule
  * order.  Valid until the next call. */
 typedef struct CssAfterMatch { int rule; int specificity; int is_before; } CssAfterMatch;

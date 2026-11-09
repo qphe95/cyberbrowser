@@ -90,7 +90,7 @@ uint32_t gpu_encode_frame(const DisplayList *dl, const GpuFrame *hdr, uint8_t **
             w.thickness = fx(c->u.border.thickness);
             break;
         case DL_GLYPH:
-            w.ref = c->u.glyph.font_slot;
+            w.ref = c->u.glyph.font_slot | (uint32_t)c->u.glyph.rot << 8;   /* (turned: above the slot) */
             w.u0 = uv(c->u.glyph.u0);
             w.v0 = uv(c->u.glyph.v0);
             w.u1 = uv(c->u.glyph.u1);

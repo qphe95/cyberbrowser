@@ -350,6 +350,8 @@ static ImageFormat sniff(const uint8_t *d, size_t n, int *w, int *h, unsigned *d
             if (fh <= 0.0f) fh = 150.0f;
             *w = (int)(fw + 0.5f);
             *h = (int)(fh + 0.5f);
+            if (*w < 1) *w = 1;   /* (an extreme viewBox: what is left of it, not nothing) */
+            if (*h < 1) *h = 1;
         }
         return FMT_SVG;
     }

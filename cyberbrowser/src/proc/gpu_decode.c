@@ -140,7 +140,7 @@ static WireCmd decode_cmd(const uint8_t *p) {
 /*@ requires \valid_read(res) && \valid_read(masks + (0 .. nmasks - 1));
     assigns \nothing;
     ensures \result ==> type < WIRE_NTYPES;
-    ensures \result && type == WIRE_GLYPH ==> ref < GPU_FONT_SLOTS && res->font[ref] != 0;
+    ensures \result && type == WIRE_GLYPH ==> (ref & 0xFF) < GPU_FONT_SLOTS && (ref >> 8) <= 2 && res->font[ref & 0xFF] != 0;
     ensures \result && type == WIRE_IMAGE ==> ref < GPU_MAX_IMAGES && res->image[ref] != 0;
     ensures \result && type == WIRE_MASK_BEGIN ==> ref < nmasks && (1 <= masks[ref].kind <= 4 || masks[ref].kind == 6);
     ensures \result && type == WIRE_SHADOW ==> ref < nmasks && masks[ref].kind == 5;
@@ -153,7 +153,7 @@ static bool resolves(uint32_t type, uint32_t ref, const GpuClientRes *res, const
     case WIRE_XFORM:
         return true;
     case WIRE_GLYPH:
-        return ref < GPU_FONT_SLOTS && res->font[ref];
+        return (ref & 0xFFu) < GPU_FONT_SLOTS && (ref >> 8) <= 2u && res->font[ref & 0xFFu];   /* (the slot; above it, a quarter turn) */
     case WIRE_IMAGE:
         return ref < GPU_MAX_IMAGES && res->image[ref];
     case WIRE_MASK_BEGIN:

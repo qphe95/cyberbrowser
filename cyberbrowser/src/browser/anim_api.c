@@ -242,6 +242,28 @@ static GCValue js_color_scheme(JSContextHandle ctx, GCValue this_val, int argc, 
     return JS_UNDEFINED;
 }
 
+/* __cyberPrintSet(page area width, height, gap between pages' areas, left and top margins): print mode */
+extern void page_set_viewport(int width, int height);
+static GCValue js_print_set(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    double v[6] = { 0 };
+    for (int i = 0; i < 6 && i < argc; i++) JS_ToFloat64(ctx, &v[i], argv[i]);
+    g_css_print.pw = v[5];
+    g_css_print.on = true;
+    g_css_print.w = v[0]; g_css_print.h = v[1]; g_css_print.gap = v[2]; g_css_print.ml = v[3]; g_css_print.mt = v[4];
+    page_set_viewport((int)v[0], (int)v[1]);
+    dom_request_relayout();
+    return JS_UNDEFINED;
+}
+
+/* __cyberPrintPages(): how many pages the last layout took */
+static GCValue js_print_pages(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val; (void)argc; (void)argv; (void)ctx;
+    return JS_NewInt32(ctx, g_css_print.pages);
+}
+
 /* __cyberMediaPref(feature, value | null) */
 static GCValue js_media_pref(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
 {
@@ -278,6 +300,8 @@ void anim_api_install(JSContextHandle ctx, GCValue global)
     JS_DefinePropertyValueStr(ctx, global, "__cyberAnimRow", JS_NewCFunction(ctx, js_anim_row, "__cyberAnimRow", 4), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberRenderFeature", JS_NewCFunction(ctx, js_render_feature, "__cyberRenderFeature", 1), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberColorScheme", JS_NewCFunction(ctx, js_color_scheme, "__cyberColorScheme", 1), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberPrintPages", JS_NewCFunction(ctx, js_print_pages, "__cyberPrintPages", 0), JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberPrintSet", JS_NewCFunction(ctx, js_print_set, "__cyberPrintSet", 5), JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberMediaPref", JS_NewCFunction(ctx, js_media_pref, "__cyberMediaPref", 2), JS_PROP_CONFIGURABLE);
 }
 

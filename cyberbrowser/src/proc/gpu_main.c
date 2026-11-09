@@ -276,6 +276,7 @@ static void to_display_list(const WireCmd *cmds, uint32_t n, const WireMask *mas
             break;
         case WIRE_GLYPH:
             c->u.glyph.font_slot = (uint8_t)w->ref;
+            c->u.glyph.rot = (uint8_t)(w->ref >> 8 & 3);
             c->u.glyph.u0 = uvf(w->u0);
             c->u.glyph.v0 = uvf(w->v0);
             c->u.glyph.u1 = uvf(w->u1);

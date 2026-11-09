@@ -554,6 +554,7 @@ static bool vk_render(GpuTarget **tp, uint32_t w, uint32_t h, const DisplayList 
             y1 = ceil(c->y + c->h);
             tex = atlases[c->u.glyph.font_slot];
             o->uv[0] = c->u.glyph.u0; o->uv[1] = c->u.glyph.v0; o->uv[2] = c->u.glyph.u1; o->uv[3] = c->u.glyph.v1;
+            o->info[3] = c->u.glyph.rot;   /* (turned a quarter: 1 clockwise, 2 the other way) */
             break;
         case DL_IMAGE:
             x1 = floor(c->x + c->w);

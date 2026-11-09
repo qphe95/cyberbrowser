@@ -57,6 +57,9 @@ void main() {
     } else if (type == GLYPH) {
         ivec2 ts = textureSize(tex, 0);
         float v = div_(p.y - it.rect.y, it.rect.w), u = div_(p.x - it.rect.x, it.rect.z);
+        // (turned a quarter: clockwise its top to the right, the other way to the left)
+        if (it.info.w == 1) { float t = u; u = v; v = 1.0 - t; }
+        else if (it.info.w == 2) { float t = u; u = 1.0 - v; v = t; }
         int sy = clamp(int(floor((it.uv.y + v * (it.uv.w - it.uv.y)) * float(ts.y))), 0, ts.y - 1);
         int sx = clamp(int(floor((it.uv.x + u * (it.uv.z - it.uv.x)) * float(ts.x))), 0, ts.x - 1);
         float c = texelFetch(tex, ivec2(sx, sy), 0).r;

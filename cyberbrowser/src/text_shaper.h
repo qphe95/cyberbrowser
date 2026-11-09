@@ -53,6 +53,12 @@ void text_shaper_frame_sent(const DisplayList *dl);
 float text_shaper_x_height(const TextShaper *shaper);
 float text_shaper_cap_height(const TextShaper *shaper);
 float text_shaper_zero_advance(const TextShaper *shaper);
+/* (the same glyph's vertical advance, upright in vertical text: of the em, 1 without vertical metrics) */
+float text_shaper_zero_vadvance(const TextShaper *shaper);
+/* (codepoint cp's advance, of the em, vertical or not; -1 without a glyph) */
+float text_shaper_cp_advance(const TextShaper *s, uint32_t cp, bool vert);
+/* (text-orientation: upright in vertical text, for what's measured and drawn next: 1 on) */
+void text_shaper_set_upright(int on);
 /* The underline's top below the baseline and its thickness, the strikeout's
  * top above it and its thickness, as fractions of the em (post, OS/2). */
 bool text_shaper_deco_metrics(const TextShaper *shaper, float *ul_pos, float *ul_th, float *st_pos, float *st_th);
@@ -80,6 +86,8 @@ void text_shaper_set_palette(int kind, int index, const int *over_index, const f
 void text_shaper_set_chain(TextShaper *const *fonts, int n);
 /* text-autospace for what's measured and drawn next: 1 ideograph-alpha, 2 ideograph-numeric. */
 void text_shaper_set_autospace(int mode);
+/* (the character before what's measured or drawn next, for text-autospace) */
+void text_shaper_set_autospace_prev(uint32_t cp);
 
 bool text_shaper_measure(const TextShaper *shaper, const char *utf8,
                          float *out_width, float *out_height);

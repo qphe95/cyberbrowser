@@ -188,6 +188,7 @@ function refsOf(f) {
 }
 const steps = [];                 /* { k, url, shot }, one per page */
 const refInfo = {};
+const PRINT_URLS = new Set();
 if (REFTEST) {
     fs.mkdirSync(path.join(out, 'shots'), { recursive: true });
     const seen = new Set();
@@ -195,6 +196,12 @@ if (REFTEST) {
         const info = refsOf(t);
         if (!info.refs.length) continue;
         refInfo[t] = info;
+        /* (wptrunner's print reftests: "-print" in the name's flags, or a print directory; their
+         * references printed too, as steps of their own: a reference can be shared with screen tests) */
+        if (/-print(\.[\w-]+)*\.[a-z]+$/.test(t.split('?')[0]) || /\/print\//.test(t)) {
+            PRINT_URLS.add('/' + t.split('?')[0]);
+            for (const r of info.refs) r.url += (r.url.includes('?') ? '&' : '?') + 'cyberprint=1';
+        }
         for (const u of [t, ...info.refs.map(r => r.url)]) {
             if (seen.has(u)) continue;
             seen.add(u);
@@ -206,6 +213,7 @@ if (REFTEST) {
 /* Says when a reftest page is ready to be compared (posted to /refready). */
 const REFREADY = `<script style="display: none !important">//<![CDATA[
 (function () {
+  /*PRINT*/
   function ready() {
     var x = new XMLHttpRequest();
     x.open('POST', '/refready'); x.send(location.pathname + location.search);
@@ -213,6 +221,8 @@ const REFREADY = `<script style="display: none !important">//<![CDATA[
   var rendered = false;
   function check() {
     var de = document.documentElement;
+    /* (print: its pages being set up) */
+    if (window.__cyberPrintPending) { setTimeout(check, 20); return; }
     if (de && de.classList && de.classList.contains('reftest-wait')) {
       /* (as wptrunner: TestRendered once, after the first frames, for the page to make its change) */
       if (!rendered) {
@@ -596,7 +606,9 @@ const server = http.createServer((req, res) => {
         /* (found in the text itself: lower-casing can change its length, 'İ' -> 'i̇') */
         const text = data.toString('utf8'), ends = [...text.matchAll(/<\/html>/gi)];
         const end = ends.length ? ends[ends.length - 1].index : -1;
-        data = Buffer.from(end < 0 ? text + REFREADY : text.slice(0, end) + REFREADY + text.slice(end), 'utf8');
+        /* (a print reftest and its references: laid out as pages) */
+        const rdy = PRINT_URLS.has(url.pathname) || url.searchParams.has('cyberprint') ? REFREADY.replace('/*PRINT*/', 'if (window.__cyberPrintBegin) window.__cyberPrintBegin();') : REFREADY;
+        data = Buffer.from(end < 0 ? text + rdy : text.slice(0, end) + rdy + text.slice(end), 'utf8');
     } else if (REFTEST && /^(application|text)\/(xml|[\w.+-]*\+xml)/.test(headers['content-type']) &&
                steps.some(st => '/' + st.url.split('?')[0] === url.pathname)) {
         /* (other XML, SVG among it: an XHTML script before the root element's end tag says when it's ready) */

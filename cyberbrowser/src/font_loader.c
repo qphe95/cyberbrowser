@@ -307,6 +307,7 @@ static bool woff2_rebuild_glyf(const uint8_t *src, size_t len, Buf *glyf, Buf *l
         int16_t nc = (int16_t)rd_u16(n_contour);
         bool has_bbox = (bbox_bitmap[g >> 3] & (0x80 >> (g & 7))) != 0;
         if (n_contour->err) { ok = false; break; }
+        if (nc == 0 && has_bbox) { ok = false; break; }   /* (an empty glyph has no bounding box) */
         if (nc == 0) continue;                    /* empty glyph */
         size_t start = glyf->len;
         if (nc > 0) {
@@ -472,6 +473,7 @@ static bool woff2_rebuild_hmtx(const uint8_t *src, size_t len, uint16_t num_glyp
 {
     Rd r = rd_make(src, len);
     uint8_t fl = rd_u8(&r);
+    if (fl & 0xFC) return false;   /* (reserved flag bits) */
     if (num_hmetrics == 0 || num_hmetrics > num_glyphs) return false;
     uint16_t *adv = (uint16_t *)calloc(num_hmetrics, sizeof(*adv));
     if (!adv) return false;
@@ -494,13 +496,18 @@ static bool woff2_decode(const uint8_t *data, size_t len, uint8_t **out, size_t 
     Rd r = rd_make(data, len);
     rd_u32(&r);                                   /* 'wOF2' */
     uint32_t flavor = rd_u32(&r);
-    rd_u32(&r);                                   /* length */
+    uint32_t hlen = rd_u32(&r);                   /* length */
     uint16_t ntables = rd_u16(&r);
     rd_u16(&r);                                   /* reserved */
     rd_u32(&r);                                   /* totalSfntSize */
     uint32_t comp_size = rd_u32(&r);
+    rd_u32(&r);                                   /* major, minor version */
+    uint32_t meta_off = rd_u32(&r), meta_len = rd_u32(&r);
+    rd_u32(&r);                                   /* metaOrigLength */
+    uint32_t priv_off = rd_u32(&r), priv_len = rd_u32(&r);
     r.pos = 48;
     if (r.err || ntables == 0 || ntables > 512 || flavor == TAG('t', 't', 'c', 'f')) return false;
+    if (hlen != len) return false;   /* (the length field: the file's) */
 
     W2Table *t = (W2Table *)calloc(ntables, sizeof(*t));
     if (!t) return false;
@@ -515,11 +522,19 @@ static bool woff2_decode(const uint8_t *data, size_t len, uint8_t **out, size_t 
         bool is_gl = tag == TAG('g', 'l', 'y', 'f') || tag == TAG('l', 'o', 'c', 'a');
         t[i].transformed = is_gl ? version == 0 : (tag == TAG('h', 'm', 't', 'x') && version == 1);
         t[i].stored_len = t[i].transformed ? rd_base128(&r) : t[i].orig_len;
+        if (t[i].transformed && tag == TAG('l', 'o', 'c', 'a') && t[i].stored_len != 0) ok = false;   /* (a transformed loca has no data) */
         if (r.err || t[i].stored_len > (64u << 20)) ok = false;
         total += t[i].stored_len;
     }
     uint8_t *stream = NULL;
     if (ok && (comp_size > len - r.pos || total > (128u << 20))) ok = false;
+    if (ok) {
+        /* (the blocks: font data, metadata, private data, each on a 4-byte boundary after the one before, nothing after) */
+        size_t end = r.pos + comp_size;
+        if (meta_len) { if (meta_off != ((end + 3) & ~(size_t)3) || meta_off > len || meta_len > len - meta_off) ok = false; else end = (size_t)meta_off + meta_len; }
+        if (ok && priv_len) { if (priv_off != ((end + 3) & ~(size_t)3) || priv_off > len || priv_len > len - priv_off) ok = false; else end = (size_t)priv_off + priv_len; }
+        if (ok && len != end && len != ((end + 3) & ~(size_t)3)) ok = false;
+    }
     if (ok) {
         stream = (uint8_t *)malloc(total ? total : 1);
         size_t dlen = total;
@@ -548,7 +563,9 @@ static bool woff2_decode(const uint8_t *data, size_t len, uint8_t **out, size_t 
     int loca_format = -1;
     if (ok && glyf && glyf->transformed) {
         uint16_t ng = 0;
+        uint32_t loca_orig = loca->orig_len;
         ok = woff2_rebuild_glyf(glyf->data, glyf->stored_len, &gbuf, &lbuf, &ng, &xmins);
+        if (ok && glyf->stored_len >= 8 && loca_orig != (uint32_t)(ng + 1) * (get_u16(glyf->data + 6) ? 4u : 2u)) ok = false;   /* (loca's origLength: its size by indexFormat) */
         if (ok) {
             glyf->data = gbuf.p; glyf->orig_len = glyf->stored_len = (uint32_t)gbuf.len;
             loca->data = lbuf.p; loca->orig_len = loca->stored_len = (uint32_t)lbuf.len;

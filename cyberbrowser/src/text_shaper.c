@@ -798,11 +798,13 @@ static bool ts_draw_glyph(DisplayList *dl, const TextShaper *o, int gi, float pe
 
 /* letter-spacing and word-spacing at the loaded size (text_shaper_set_spacing). */
 static __thread float t_letter_sp, t_word_sp;
+static __thread float t_emit_last_sp;   /* (the spacing the glyph just drawn was given) */
 
 void text_shaper_set_spacing(float letter_px, float word_px, float scale)
 {
     if (scale <= 0.0f) scale = 1.0f;
     t_letter_sp = letter_px / scale;
+    t_emit_last_sp = 0.0f;
     t_word_sp = word_px / scale;
 }
 
@@ -810,7 +812,9 @@ void text_shaper_set_spacing(float letter_px, float word_px, float scale)
 static __thread int t_autospace;
 static __thread uint32_t t_as_prev;
 
-void text_shaper_set_autospace(int mode) { t_autospace = mode; t_as_prev = 0; }
+static __thread uint32_t t_as_seed;   /* (the character before the next measure or draw: taken by it) */
+void text_shaper_set_autospace(int mode) { t_autospace = mode; t_as_prev = 0; t_as_seed = 0; }
+void text_shaper_set_autospace_prev(uint32_t cp) { t_as_seed = cp; }
 
 /* (1 an ideograph (Han, kana), 2 a letter of another script, 3 a digit, 0 else) */
 static inline int ts_as_class(uint32_t cp)
@@ -830,6 +834,9 @@ static inline int ts_as_class(uint32_t cp)
 static inline float ts_autospace(const TextShaper *s, uint32_t cp)
 {
     if (!t_autospace) return 0.0f;
+    /* (a combining mark: its base's class, as if not there) */
+    if ((cp >= 0x300 && cp <= 0x36F) || (cp >= 0x1AB0 && cp <= 0x1AFF) || (cp >= 0x1DC0 && cp <= 0x1DFF) ||
+        (cp >= 0x20D0 && cp <= 0x20FF) || (cp >= 0xFE20 && cp <= 0xFE2F) || (cp >= 0xFE00 && cp <= 0xFE0F)) return 0.0f;
     int p = ts_as_class(t_as_prev), c = ts_as_class(cp);
     t_as_prev = cp;
     if ((p == 1 && c == 2) || (p == 2 && c == 1)) return (t_autospace & 1) ? 0.125f * s->size_pixels : 0.0f;
@@ -841,8 +848,22 @@ static inline float ts_autospace(const TextShaper *s, uint32_t cp)
  * isolates): no glyph, no advance, invisible to kerning. */
 static inline bool ts_invisible(uint32_t cp)
 {
-    return cp == 0x00AD || cp == 0x061C || cp == 0x200C || cp == 0x200D || cp == 0x200E || cp == 0x200F || cp == 0x2060 || (cp >= 0x202A && cp <= 0x202E) ||
+    return cp == 0x00AD || cp == 0x061C || cp == 0x200B || cp == 0xFEFF || cp == 0x200C || cp == 0x200D || cp == 0x200E || cp == 0x200F || cp == 0x2060 || (cp >= 0x202A && cp <= 0x202E) ||
            (cp >= 0x2066 && cp <= 0x2069);
+}
+
+/* (a combining mark: in its base's cluster, no letter-spacing between them) */
+static inline bool ts_is_mark(uint32_t cp)
+{
+    if (cp < 0x300) return false;
+    return (cp <= 0x36F) || (cp >= 0x483 && cp <= 0x489) || (cp >= 0x591 && cp <= 0x5BD) || cp == 0x5BF || cp == 0x5C1 || cp == 0x5C2 ||
+           cp == 0x5C4 || cp == 0x5C5 || cp == 0x5C7 || (cp >= 0x610 && cp <= 0x61A) || (cp >= 0x64B && cp <= 0x65F) || cp == 0x670 ||
+           (cp >= 0x6D6 && cp <= 0x6DC) || (cp >= 0x6DF && cp <= 0x6E4) || cp == 0x6E7 || cp == 0x6E8 || (cp >= 0x6EA && cp <= 0x6ED) ||
+           (cp >= 0x900 && cp <= 0x903) || (cp >= 0x93A && cp <= 0x93C) || (cp >= 0x93E && cp <= 0x94F) || (cp >= 0x951 && cp <= 0x957) ||
+           cp == 0x962 || cp == 0x963 || (cp >= 0x981 && cp <= 0x983) || cp == 0x9BC || (cp >= 0x9BE && cp <= 0x9CD) || cp == 0x9D7 ||
+           cp == 0x9E2 || cp == 0x9E3 || cp == 0xE31 || (cp >= 0xE34 && cp <= 0xE3A) || (cp >= 0xE47 && cp <= 0xE4E) ||
+           (cp >= 0x1AB0 && cp <= 0x1AFF) || (cp >= 0x1DC0 && cp <= 0x1DFF) || (cp >= 0x20D0 && cp <= 0x20FF) ||
+           (cp >= 0x302A && cp <= 0x302F) || cp == 0x3099 || cp == 0x309A || (cp >= 0xFE00 && cp <= 0xFE0F) || (cp >= 0xFE20 && cp <= 0xFE2F);
 }
 
 /* The spacing after codepoint cp (at the loaded size). */
@@ -856,6 +877,71 @@ static inline float ts_spacing(uint32_t cp)
 
 /* Codepoint cp of s (or the fallback font that has it) drawn at the pen,
  * kerned against the glyph before; the pen moves past it. */
+/* (UAX 50 vertical orientation R, sideways in vertical text; the rest upright, roughly) */
+static bool ts_vo_rotated(uint32_t c)
+{
+    if (c < 0xA7) return true;
+    if (c == 0xA7 || c == 0xA9 || c == 0xAE || c == 0xB1 || (c >= 0xBC && c <= 0xBE) || c == 0xD7 || c == 0xF7) return false;
+    /* (UAX 50's upright ranges below the CJK blocks) */
+    static const uint32_t up[][2] = {
+        { 0x02EA, 0x02EB }, { 0x1100, 0x11FF }, { 0x1401, 0x167F }, { 0x18B0, 0x18FF }, { 0x2016, 0x2016 }, { 0x2020, 0x2021 },
+        { 0x2030, 0x2031 }, { 0x203B, 0x203C }, { 0x2042, 0x2042 }, { 0x2047, 0x2049 }, { 0x2051, 0x2051 }, { 0x2065, 0x2065 },
+        { 0x20DD, 0x20E0 }, { 0x20E2, 0x20E4 }, { 0x2100, 0x2101 }, { 0x2103, 0x2109 }, { 0x210F, 0x210F }, { 0x2113, 0x2114 },
+        { 0x2116, 0x2117 }, { 0x211E, 0x2123 }, { 0x2125, 0x2125 }, { 0x2127, 0x2127 }, { 0x2129, 0x2129 }, { 0x212E, 0x212E },
+        { 0x2135, 0x213F }, { 0x2145, 0x214A }, { 0x214C, 0x214D }, { 0x214F, 0x2189 }, { 0x218C, 0x218F }, { 0x221E, 0x221E },
+        { 0x2234, 0x2235 }, { 0x2300, 0x2307 }, { 0x230C, 0x231F }, { 0x2324, 0x232B }, { 0x237D, 0x239A }, { 0x23BE, 0x23CD },
+        { 0x23CF, 0x23CF }, { 0x23D1, 0x23DB }, { 0x23E2, 0x2422 }, { 0x2424, 0x24FF }, { 0x25A0, 0x2619 }, { 0x2620, 0x2767 },
+        { 0x2776, 0x2793 }, { 0x2B12, 0x2B2F }, { 0x2B50, 0x2B59 }, { 0x2BB8, 0x2BFF }, { 0x2E50, 0x2E51 },
+    };
+    if (c < 0x2E80) {
+        for (size_t i = 0; i < sizeof up / sizeof up[0]; i++) if (c >= up[i][0] && c <= up[i][1]) return false;
+        return true;
+    }
+    if (c >= 0x2E80 && c <= 0xA4CF) return false;        /* (CJK, kana, Yi) */
+    if (c >= 0xA960 && c <= 0xA97F) return false;
+    if (c >= 0xAC00 && c <= 0xD7FF) return false;        /* (Hangul) */
+    if (c >= 0xE000 && c <= 0xFAFF) return false;        /* (private use, compatibility ideographs) */
+    if (c >= 0xFE10 && c <= 0xFE1F) return false;
+    if (c >= 0xFE30 && c <= 0xFE4F) return false;
+    if (c >= 0xFF00 && c <= 0xFFEF) return c == 0xFF0D || (c >= 0xFF1C && c <= 0xFF1E);   /* (full and halfwidth forms: upright but for these) */
+    if (c >= 0x1F000 && c <= 0x1FAFF) return false;      /* (emoji and pictographs) */
+    if (c >= 0x20000) return false;
+    return true;
+}
+
+/* (text-orientation: upright in vertical text: what would lie on its side stands, advancing by its height) */
+static __thread int t_upright;
+void text_shaper_set_upright(int on) { t_upright = on; }
+
+/* (glyph gi's vertical advance at the loaded size: vmtx's, else the em; *has whether the font has vmtx) */
+static float ts_vadvance(const TextShaper *s, int gi, bool *has)
+{
+    const uint8_t *d = s->ttf_data;
+    stbtt_uint32 vhea = stbtt__find_table((stbtt_uint8 *)d, (stbtt_uint32)s->font_offset, "vhea");
+    stbtt_uint32 vmtx = vhea ? stbtt__find_table((stbtt_uint8 *)d, (stbtt_uint32)s->font_offset, "vmtx") : 0;
+    *has = vmtx != 0;
+    if (!vmtx || gi < 0) return s->size_pixels;
+    int nlong = ttUSHORT(d + vhea + 34);
+    if (nlong <= 0) return s->size_pixels;
+    int k = gi < nlong ? gi : nlong - 1;
+    return (float)ttUSHORT(d + vmtx + 4 * k) * s->scale;
+}
+
+/* (upright: cp's advance its height when it would otherwise lie on its side; *pre the room before its glyph) */
+static inline bool ts_upright_adv(const TextShaper *s, uint32_t cp, int gi, float *xa, float *pre)
+{
+    /* (1 vertical text, mixed: what stands advances by its vmtx height; 2 upright: all, the em without vmtx) */
+    if (!t_upright || (t_upright != 2 && (cp == ' ' || cp == 0xA0)) || (cp >= 0x1800 && cp <= 0x18AF) || (cp >= 0xA840 && cp <= 0xA877)) return false;
+    bool rot = ts_vo_rotated(cp);
+    if (rot && t_upright != 2) return false;
+    bool has = false;
+    float v = ts_vadvance(s, gi, &has);
+    if ((!rot || cp == ' ' || cp == 0xA0) && !has) return false;   /* (spaces too: by vmtx only) */
+    if (pre) *pre = (v - *xa) * 0.5f;
+    *xa = v;
+    return true;
+}
+
 static bool ts_emit_glyph(const TextShaper *s, uint32_t cp, float *pen_x, float base_y, float scale, int *prev_glyph,
                           float r, float g, float b, float a, DisplayList *dl)
 {
@@ -865,10 +951,20 @@ static bool ts_emit_glyph(const TextShaper *s, uint32_t cp, float *pen_x, float 
     ts_metric(s, cp, &gi, &xa, &owner);
     const TextShaper *gs = ts_owner_shaper(s, owner);
     if (!gs) gs = s;
-    if (*prev_glyph >= 0 && owner == 0) *pen_x += (float)ts_kern(s, *prev_glyph, gi) * s->scale * scale;
+    float pre = 0.0f, xh = xa;
+    bool upr = ts_upright_adv(gs, cp, gi, &xa, &pre);
+    if (*prev_glyph >= 0 && owner == 0 && !upr) *pen_x += (float)ts_kern(s, *prev_glyph, gi) * s->scale * scale;
+    if (ts_is_mark(cp)) *pen_x -= t_emit_last_sp * scale;   /* (on its base: the cluster's spacing after it instead) */
     *pen_x += ts_autospace(s, cp) * scale;
-    if (!ts_draw_glyph(dl, gs, gi, *pen_x, base_y, scale, r, g, b, a)) return false;
-    *pen_x += (xa + ts_spacing(cp)) * scale;
+    int c0 = dl->count;
+    (void)xh;
+    if (!ts_draw_glyph(dl, gs, gi, *pen_x + pre * scale, base_y, scale, r, g, b, a)) return false;
+    /* (Mongolian and Phags-pa, scripts written down the page: on their side even when upright is asked) */
+    uint8_t vr = (cp >= 0x1800 && cp <= 0x18AF) || (cp >= 0xA840 && cp <= 0xA877) ? 2 : ts_vo_rotated(cp) ? 1 : 0;
+    if (vr)
+        for (int k = c0; k < dl->count; k++) if (dl->cmds[k].type == DL_GLYPH) dl->cmds[k].u.glyph.vo_r = vr;
+    t_emit_last_sp = ts_spacing(cp);
+    *pen_x += (xa + t_emit_last_sp) * scale;
     *prev_glyph = owner == 0 ? gi : -1;
     return true;
 }
@@ -1061,6 +1157,43 @@ float text_shaper_zero_advance(const TextShaper *s)
     return (float)adv * s->scale / s->size_pixels;
 }
 
+float text_shaper_cp_advance(const TextShaper *s, uint32_t cp, bool vert)
+{
+    /* (-1: no glyph for it; of the em) */
+    if (!s || s->size_pixels <= 0.0f) return -1.0f;
+    int gi = stbtt_FindGlyphIndex(&s->font, (int)cp);
+    if (!gi) return -1.0f;
+    if (vert) {
+        const uint8_t *d = s->ttf_data;
+        stbtt_uint32 vhea = stbtt__find_table((stbtt_uint8 *)d, (stbtt_uint32)s->font_offset, "vhea");
+        stbtt_uint32 vmtx = stbtt__find_table((stbtt_uint8 *)d, (stbtt_uint32)s->font_offset, "vmtx");
+        if (!vhea || !vmtx) return 1.0f;
+        int nlong = ttUSHORT(d + vhea + 34);
+        if (nlong <= 0) return 1.0f;
+        int k = gi < nlong ? gi : nlong - 1;
+        return (float)ttUSHORT(d + vmtx + 4 * k) * s->scale / s->size_pixels;
+    }
+    int adv, lsb;
+    stbtt_GetGlyphHMetrics(&s->font, gi, &adv, &lsb);
+    return (float)adv * s->scale / s->size_pixels;
+}
+
+float text_shaper_zero_vadvance(const TextShaper *s)
+{
+    /* (its vmtx advance height, of the em; 1 without one) */
+    if (!s) return 1.0f;
+    int gi = stbtt_FindGlyphIndex(&s->font, '0');
+    const uint8_t *d = s->ttf_data;
+    stbtt_uint32 vhea = stbtt__find_table((stbtt_uint8 *)d, (stbtt_uint32)s->font_offset, "vhea");
+    stbtt_uint32 vmtx = stbtt__find_table((stbtt_uint8 *)d, (stbtt_uint32)s->font_offset, "vmtx");
+    if (!gi || !vhea || !vmtx || s->size_pixels <= 0.0f) return 1.0f;
+    int nlong = ttUSHORT(d + vhea + 34);
+    if (nlong <= 0) return 1.0f;
+    int k = gi < nlong ? gi : nlong - 1;
+    int adv = ttUSHORT(d + vmtx + 4 * k);
+    return (float)adv * s->scale / s->size_pixels;
+}
+
 bool text_shaper_vmetrics(const TextShaper *s, float *ascent, float *descent, float *line_gap)
 {
     if (!s || s->size_pixels <= 0.0f) return false;
@@ -1084,9 +1217,11 @@ bool text_shaper_measure(const TextShaper *s, const char *utf8,
     if (!s || !utf8) return false;
     float x = 0.0f;
     int prev_glyph = -1;
-    t_as_prev = 0;
+    t_as_prev = t_as_seed;
+    t_as_seed = 0;
     const char *p = utf8;
     uint32_t cp;
+    float last_sp = 0.0f;
     while ((cp = utf8_decode(&p)) != 0) {
         if (cp == '\n') { x = 0; prev_glyph = -1; continue; }
         if (ts_invisible(cp)) continue;
@@ -1098,10 +1233,13 @@ bool text_shaper_measure(const TextShaper *s, const char *utf8,
             float lx;
             if (ts_ligature(s, gi, &p, p + strlen(p), &lg, &lx)) { gi = lg; xa = lx; }
         }
-        if (prev_glyph >= 0 && owner == 0) {
+        bool upr = ts_upright_adv(ts_owner_shaper(s, owner) ? ts_owner_shaper(s, owner) : s, cp, gi, &xa, NULL);
+        if (prev_glyph >= 0 && owner == 0 && !upr) {
             x += (float)ts_kern(s, prev_glyph, gi) * s->scale;
         }
-        x += xa + ts_spacing(cp) + ts_autospace(s, cp);
+        if (ts_is_mark(cp)) x -= last_sp;
+        last_sp = ts_spacing(cp);
+        x += xa + last_sp + ts_autospace(s, cp);
         prev_glyph = owner == 0 ? gi : -1;
     }
     if (out_width)  *out_width  = x;
@@ -1193,8 +1331,9 @@ static float ts_trim_of(uint32_t cp, const char *at, const char *after, float xa
 
 static float ts_measure_span(const TextShaper *s, const char *start, const char *end)
 {
-    float x = 0.0f;
-    t_as_prev = 0;
+    float x = 0.0f, last_sp = 0.0f;
+    t_as_prev = t_as_seed;
+    t_as_seed = 0;
     int prev_glyph = -1;
     const char *p = start;
     while (p < end) {
@@ -1210,12 +1349,15 @@ static float ts_measure_span(const TextShaper *s, const char *start, const char 
             float lx;
             if (ts_ligature(s, gi, &p, end, &lg, &lx)) { gi = lg; xa = lx; }
         }
-        if (prev_glyph >= 0 && owner == 0) {
+        bool upr = ts_upright_adv(ts_owner_shaper(s, owner) ? ts_owner_shaper(s, owner) : s, cp, gi, &xa, NULL);
+        if (prev_glyph >= 0 && owner == 0 && !upr) {
             x += (float)ts_kern(s, prev_glyph, gi) * s->scale;
         }
         bool trim_shift;
         x -= ts_trim_of(cp, save, p, xa, &trim_shift);
-        x += xa + ts_spacing(cp) + ts_autospace(s, cp);
+        if (ts_is_mark(cp)) x -= last_sp;
+        last_sp = ts_spacing(cp);
+        x += xa + last_sp + ts_autospace(s, cp);
         prev_glyph = owner == 0 ? gi : -1;
     }
     return x;
@@ -1684,7 +1826,8 @@ bool text_shaper_shape_span(const TextShaper *s, const char *utf8, size_t start,
     if (scale <= 0.0f) scale = 1.0f;
     float pen_x = x, gy = y + s->baseline * scale;
     int prev_glyph = -1;
-    t_as_prev = 0;
+    t_as_prev = t_as_seed;
+    t_as_seed = 0;
     if (!rtl) {
         t_trim_text = utf8;
         bool drew = ts_emit_span_glyphs(s, utf8 + start, utf8 + end, &pen_x, gy, scale, &prev_glyph, r, g, b, a, dl);

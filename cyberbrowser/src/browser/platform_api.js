@@ -4028,6 +4028,363 @@
         axDepth++;
         try { return axRole(el); } finally { axDepth--; }
     }
+    /* ---- print mode (CSS Page 3): pages as a strip, one under the other: the
+     * engine paginates the root (__cyberPrintSet); here the @page rules, the page
+     * boxes and their margin boxes.  Default page: 5in x 3in, margins 0.5in, as
+     * WPT's print reftests expect. */
+    function printRules(list, out) {
+        for (var i = 0; list && i < list.length; i++) {
+            var r = list[i];
+            if (global.CSSPageRule && r instanceof global.CSSPageRule) out.push(r);
+            else if (r.cssRules) { try { printRules(r.cssRules, out); } catch (e) { /* (none) */ } }
+            else if (r.styleSheet) { try { printRules(r.styleSheet.cssRules, out); } catch (e) { /* (cross origin) */ } }
+        }
+    }
+    var PAGE_SIZES = { a5: [148, 210], a4: [210, 297], a3: [297, 420], b5: [176, 250], b4: [250, 353], 'jis-b5': [182, 257], 'jis-b4': [257, 364] };
+    var PAGE_IN = { letter: [8.5, 11], legal: [8.5, 14], ledger: [11, 17] };
+    function printLen(v, base) {
+        v = String(v).trim();
+        var m = /^(-?[\d.]+)%$/.exec(v);
+        if (m) return base * parseFloat(m[1]) / 100;
+        var e = document.createElement('div');
+        e.style.cssText = 'position:absolute;visibility:hidden;width:0';
+        e.style.width = v;
+        (document.documentElement || document).appendChild(e);
+        var w = parseFloat(getComputedStyle(e).width);
+        e.remove();
+        return isNaN(w) ? 0 : w;
+    }
+    function printSpec(sel, name, k) {
+        /* (specificity: (name, first/blank, left/right)); -1: doesn't match) */
+        var best = -1;
+        (sel || '').split(',').forEach(function (p) {
+            p = p.trim();
+            var m = /^([^:]*)((?::[a-z]+)*)$/i.exec(p);
+            if (!m) return;
+            var sp = 0, ok = true;
+            if (m[1]) { if (m[1] !== name) ok = false; sp += 65536; }
+            (m[2].match(/:[a-z]+/gi) || []).forEach(function (c) {
+                c = c.toLowerCase();
+                if (c === ':first') { if (k !== 0) ok = false; sp += 256; }
+                else if (c === ':blank') { ok = false; }
+                else if (c === ':left') { if (k % 2 === 0) ok = false; sp += 1; }
+                else if (c === ':right') { if (k % 2 === 1) ok = false; sp += 1; }
+                else ok = false;
+            });
+            if (ok && sp > best) best = sp;
+        });
+        return best;
+    }
+    /* (the rules of page k, least specific first; later of the same specificity after) */
+    function printPageRules(rules, name, k) {
+        var o = [];
+        rules.forEach(function (r, i) { var s = printSpec(r.selectorText, name, k); if (s >= 0) o.push([s, i, r]); });
+        o.sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });
+        return o.map(function (x) { return x[2]; });
+    }
+    function printDecl(rs, prop) {
+        var v = '';
+        rs.forEach(function (r) {
+            var w = r.style.getPropertyValue(prop);
+            if (!w && prop.indexOf('margin-') === 0) { var m = r.style.getPropertyValue('margin'); if (m) w = marginSide(m, prop); }
+            if (w) v = w;
+        });
+        return v;
+    }
+    function marginSide(m, prop) {
+        var p = m.trim().split(/\s+/), t = p[0], r = p[1] || t, b = p[2] || t, l = p[3] || r;
+        return prop === 'margin-top' ? t : prop === 'margin-right' ? r : prop === 'margin-bottom' ? b : l;
+    }
+    function printSize(rs) {
+        var w = 480, h = 288, v = (printDecl(rs, 'size') || '').toLowerCase().trim();
+        if (!v || v === 'auto') return [w, h];
+        var land = false, port = false, nums = [];
+        v.split(/\s+/).forEach(function (t) {
+            if (t === 'landscape') land = true;
+            else if (t === 'portrait') port = true;
+            else if (PAGE_SIZES[t]) nums = [PAGE_SIZES[t][0] * 96 / 25.4, PAGE_SIZES[t][1] * 96 / 25.4];
+            else if (PAGE_IN[t]) nums = [PAGE_IN[t][0] * 96, PAGE_IN[t][1] * 96];
+            else if (t !== 'auto') nums.push(printLen(t, 0));
+        });
+        if (nums.length === 1) { w = h = nums[0]; }
+        else if (nums.length >= 2) { w = nums[0]; h = nums[1]; }
+        if ((land && h > w) || (port && w > h)) { var q = w; w = h; h = q; }
+        return [w, h];
+    }
+    function printMetrics(rs, pw, ph) {
+        var side = function (p, base) { var v = printDecl(rs, p); return v === '' ? 48 : v === 'auto' ? 0 : printLen(v, base); };
+        return { top: side('margin-top', ph), right: side('margin-right', pw), bottom: side('margin-bottom', ph), left: side('margin-left', pw) };
+    }
+    var MB_ROWS = {
+        top: ['top-left', 'top-center', 'top-right'], bottom: ['bottom-left', 'bottom-center', 'bottom-right'],
+        left: ['left-top', 'left-middle', 'left-bottom'], right: ['right-top', 'right-middle', 'right-bottom'],
+    };
+    var MB_DEFAULT = {
+        'top-left-corner': ['right', 'middle'], 'top-left': ['left', 'middle'], 'top-center': ['center', 'middle'], 'top-right': ['right', 'middle'], 'top-right-corner': ['left', 'middle'],
+        'bottom-left-corner': ['right', 'middle'], 'bottom-left': ['left', 'middle'], 'bottom-center': ['center', 'middle'], 'bottom-right': ['right', 'middle'], 'bottom-right-corner': ['left', 'middle'],
+        'left-top': ['center', 'top'], 'left-middle': ['center', 'middle'], 'left-bottom': ['center', 'bottom'],
+        'right-top': ['center', 'top'], 'right-middle': ['center', 'middle'], 'right-bottom': ['center', 'bottom'],
+    };
+    /* (a margin box's declarations from page k's rules) */
+    function printMarginDecls(rs) {
+        var by = {};
+        rs.forEach(function (r) {
+            (r.__rules || []).forEach(function (m) {
+                var o = by[m.__name] = by[m.__name] || {};
+                var st = m.style;
+                for (var i = 0; i < st.length; i++) o[st[i]] = st.getPropertyValue(st[i]);
+            });
+        });
+        return by;
+    }
+    function printContent(c, k, n) {
+        /* (strings, counter(page), counter(pages), as text) */
+        var out = '', re = /"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|counter\(\s*(page|pages)\s*(?:,[^)]*)?\)/g, m;
+        while ((m = re.exec(c))) {
+            if (m[3]) out += m[3] === 'page' ? k + 1 : n;
+            else out += (m[1] !== undefined ? m[1] : m[2]).replace(/\\(.)/g, '$1');
+        }
+        return out;
+    }
+    function printHasBox(d) {
+        if (!d || d.content === undefined) return false;
+        var c = String(d.content).trim().toLowerCase();
+        return c !== 'none' && c !== 'normal';
+    }
+    /* (one margin box's element holding its text; for measuring and showing) */
+    var printSeq = 0, printSheet = null;
+    function printBoxEl(name, d, k, n) {
+        var cell = document.createElement('div'), def = MB_DEFAULT[name];
+        var skip = { content: 1, width: 1, height: 1, 'min-width': 1, 'max-width': 1, 'min-height': 1, 'max-height': 1 };
+        cell.style.cssText = 'display:table-cell;box-sizing:border-box;text-align:' + def[0] + ';vertical-align:' + def[1] + ';white-space:pre-wrap;';
+        for (var p in d) {
+            if (skip[p] || /^margin/.test(p)) continue;
+            try { cell.style.setProperty(p, d[p]); } catch (e) { /* (not for it) */ }
+        }
+        /* (its content as a generated box's; the page counters as counters) */
+        var cn = 'cyber-mb-' + (printSeq++);
+        cell.className = cn;
+        cell.style.counterReset = 'page ' + (k + 1) + ' pages ' + n;
+        if (!printSheet) { printSheet = document.createElement('style'); (document.head || document.documentElement).appendChild(printSheet); }
+        printSheet.appendChild(document.createTextNode('.' + cn + '::before{content:' + d.content + '}\n'));
+        return cell;
+    }
+    function printMeasure(host, name, d, k, n) {
+        /* (min and max content widths and heights of its border box) */
+        var mk = function (width) {
+            var c = printBoxEl(name, d, k, n);
+            c.style.display = 'block';
+            c.style.position = 'absolute';
+            c.style.visibility = 'hidden';
+            c.style.width = width;
+            host.appendChild(c);
+            var r = c.getBoundingClientRect();
+            c.remove();
+            return r;
+        };
+        var mn = mk('min-content'), mx = mk('max-content');
+        return { minW: mn.width, maxW: mx.width, minH: mn.height, maxH: mx.height };
+    }
+    function printMarginSum(d, a, b, base) {
+        var one = function (p, q) { var v = d[p]; if (v === undefined && d.margin !== undefined) v = marginSide(d.margin, p); return !v || v === 'auto' ? 0 : printLen(v, base); };
+        return one(a) + one(b);
+    }
+    function printAutos(d, a, b) {
+        var one = function (p) { var v = d[p]; if (v === undefined && d.margin !== undefined) v = marginSide(d.margin, p); return v === 'auto'; };
+        return [one(a), one(b)];
+    }
+    /* (CSS Page 3 5.3.1: sizes of two groups along the available length) */
+    function printDistribute(av, aMin, aMax, bMin, bMax) {
+        var sumMax = aMax + bMax, sumMin = aMin + bMin;
+        if (sumMax <= av) {
+            var fl = av - sumMax, t = sumMax > 0 ? aMax / sumMax : 0.5;
+            return aMax + fl * t;
+        }
+        if (sumMin < av) {
+            var room = av - sumMin, dA = aMax - aMin, dB = bMax - bMin, dT = dA + dB;
+            return aMin + (dT > 0 ? room * dA / dT : room / 2);
+        }
+        var over = sumMin - av, tm = sumMin > 0 ? aMin / sumMin : 0.5;
+        return aMin - over * tm;
+    }
+    function printRow(host, names, decl, avail, horizontal, k, n, base) {
+        /* (the used main size of each of the three, 0: no box) */
+        var sz = [0, 0, 0], fix = [null, null, null], ms = [], outer = [0, 0, 0];
+        for (var i = 0; i < 3; i++) {
+            var d = decl[names[i]];
+            if (!printHasBox(d)) { ms[i] = null; continue; }
+            var pr = horizontal ? 'width' : 'height';
+            var mar = horizontal ? printMarginSum(d, 'margin-left', 'margin-right', base) : printMarginSum(d, 'margin-top', 'margin-bottom', base);
+            outer[i] = mar;
+            var m = printMeasure(host, names[i], d, k, n);
+            ms[i] = horizontal ? { mn: m.minW + mar, mx: m.maxW + mar } : { mn: m.minH + mar, mx: m.maxH + mar };
+            if (!horizontal) ms[i].mn = ms[i].mx;   /* (heights: the content's) */
+            if (d[pr] !== undefined && d[pr] !== 'auto' && !/content/.test(d[pr])) {
+                var fv = printLen(d[pr], base);
+                var mnv = d['min-' + pr], mxv = d['max-' + pr];
+                if (mxv !== undefined && mxv !== 'none') fv = Math.min(fv, printLen(mxv, base));
+                if (mnv !== undefined) fv = Math.max(fv, printLen(mnv, base));
+                if (d['box-sizing'] !== 'border-box') fv += (horizontal ? m.maxW : m.maxH) - printContentSize(host, names[i], d, k, n, horizontal);
+                fix[i] = fv + mar;
+                ms[i].mn = ms[i].mx = fix[i];
+            }
+        }
+        var A = ms[0], C = ms[1], B = ms[2];
+        if (C) {
+            if (fix[1] !== null) sz[1] = fix[1];
+            else {
+                var sideMin = 2 * Math.max(A ? A.mn : 0, B ? B.mn : 0), sideMax = 2 * Math.max(A ? A.mx : 0, B ? B.mx : 0);
+                sz[1] = printDistribute(avail, C.mn, C.mx, sideMin, sideMax);
+            }
+            var rest = (avail - sz[1]) / 2;
+            if (A) sz[0] = fix[0] !== null ? fix[0] : rest;
+            if (B) sz[2] = fix[2] !== null ? fix[2] : rest;
+        } else if (A && B) {
+            if (fix[0] !== null && fix[2] !== null) { sz[0] = fix[0]; sz[2] = fix[2]; }
+            else if (fix[0] !== null) { sz[0] = fix[0]; sz[2] = avail - sz[0]; }
+            else if (fix[2] !== null) { sz[2] = fix[2]; sz[0] = avail - sz[2]; }
+            else { sz[0] = printDistribute(avail, A.mn, A.mx, B.mn, B.mx); sz[2] = avail - sz[0]; }
+        } else if (A) { sz[0] = fix[0] !== null ? fix[0] : avail; }
+        else if (B) { sz[2] = fix[2] !== null ? fix[2] : avail; }
+        return { sz: sz, has: [!!A, !!C, !!B] };
+    }
+    function printContentSize(host, name, d, k, n, horizontal) {
+        var c = printBoxEl(name, d, k, n);
+        c.style.display = 'block';
+        c.style.position = 'absolute';
+        c.style.visibility = 'hidden';
+        c.style.width = 'max-content';
+        host.appendChild(c);
+        var cs = getComputedStyle(c);
+        var v = horizontal ? parseFloat(cs.borderLeftWidth) + parseFloat(cs.borderRightWidth) + parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight)
+                           : parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth) + parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+        var r = horizontal ? c.getBoundingClientRect().width : c.getBoundingClientRect().height;
+        c.remove();
+        return r - v;
+    }
+    /* (a margin box placed in its slot (x, y, w, h of its margin box)) */
+    function printPlace(host, name, d, x, y, w, h, k, n, base) {
+        var ml = printMarginSum(d, 'margin-left', 'margin-left', base) / 2, mr = printMarginSum(d, 'margin-right', 'margin-right', base) / 2;
+        var mt = printMarginSum(d, 'margin-top', 'margin-top', base) / 2, mb = printMarginSum(d, 'margin-bottom', 'margin-bottom', base) / 2;
+        var aw = printAutos(d, 'margin-left', 'margin-right'), ah = printAutos(d, 'margin-top', 'margin-bottom');
+        var bw = w - ml - mr, bh = h - mt - mb;
+        var wrap = document.createElement('div'), cell = printBoxEl(name, d, k, n);
+        var kw = function (v) { return /content/.test(v); };
+        var cw = d.width !== undefined && d.width !== 'auto' && /corner|^left|^right/.test(name) ? (kw(d.width) ? printMeasure(host, name, d, k, n).maxW - printContentSize(host, name, d, k, n, true) : printLen(d.width, base)) : null;
+        var ch = d.height !== undefined && d.height !== 'auto' && /corner|^top|^bottom/.test(name) ? (kw(d.height) ? printMeasure(host, name, d, k, n).maxH - printContentSize(host, name, d, k, n, false) : printLen(d.height, base)) : null;
+        if (cw !== null && d['box-sizing'] !== 'border-box') cw += printMeasure(host, name, d, k, n).maxW - printContentSize(host, name, d, k, n, true);
+        if (ch !== null && d['box-sizing'] !== 'border-box') ch += printMeasure(host, name, d, k, n).maxH - printContentSize(host, name, d, k, n, false);
+        var bx = x + ml, by = y + mt;
+        if (cw !== null) {
+            var fw = w - ml - mr - cw;
+            if (aw[0] && aw[1]) bx = x + fw / 2;
+            else if (aw[0]) bx = x + fw + ml;
+            bw = cw;
+        }
+        if (ch !== null) {
+            var fh = h - mt - mb - ch;
+            if (ah[0] && ah[1]) by = y + fh / 2;
+            else if (ah[0]) by = y + fh + mt;
+            bh = ch;
+        }
+        wrap.style.cssText = 'position:absolute;display:table;table-layout:fixed;left:' + bx + 'px;top:' + by + 'px;width:' + bw + 'px;height:' + bh + 'px;';
+        cell.style.width = bw + 'px';
+        cell.style.height = bh + 'px';
+        wrap.appendChild(cell);
+        host.appendChild(wrap);
+    }
+    function printBuild() {
+        var rules = [];
+        for (var i = 0; i < document.styleSheets.length; i++) { try { printRules(document.styleSheets[i].cssRules, rules); } catch (e) { /* (cross origin) */ } }
+        var firstEl = document.body && document.body.firstElementChild, firstName = '';
+        for (var fe = firstEl; fe; fe = fe.firstElementChild) { var pn = getComputedStyle(fe).page; if (pn && pn !== 'auto') { firstName = pn; break; } }
+        var first = printPageRules(rules, firstName, 0), size = printSize(first), m0 = printMetrics(first, size[0], size[1]);
+        var pw = size[0], ph = size[1], de = document.documentElement;
+        /* (the page box's own border and padding take room from the content) */
+        var extra = function (p) { var o = 0; ['border-' + p + '-width', 'padding-' + p].forEach(function (q) { var v = printDecl(first, q); if (v) o += printLen(v, pw); }); return o; };
+        var probe = document.createElement('div');
+        var bt = 0, br = 0, bb = 0, bl = 0;
+        first.forEach(function (r) {
+            probe.style.cssText = r.style.cssText.replace(/\bsize\s*:[^;]*;?/g, '').replace(/\bmargin[^:]*:[^;]*;?/g, '');
+        });
+        probe.style.position = 'absolute';
+        probe.style.visibility = 'hidden';
+        de.appendChild(probe);
+        var pcs = getComputedStyle(probe);
+        bt = parseFloat(pcs.borderTopWidth) + parseFloat(pcs.paddingTop);
+        br = parseFloat(pcs.borderRightWidth) + parseFloat(pcs.paddingRight);
+        bb = parseFloat(pcs.borderBottomWidth) + parseFloat(pcs.paddingBottom);
+        bl = parseFloat(pcs.borderLeftWidth) + parseFloat(pcs.paddingLeft);
+        probe.remove();
+        var cw = Math.max(1, pw - m0.left - m0.right - bl - br), chh = Math.max(1, ph - m0.top - m0.bottom - bt - bb);
+        /* (a width or height of the page box: its area that big; the overconstrained margin gives) */
+        var wd = printDecl(first, 'width'), hd = printDecl(first, 'height');
+        if (wd && wd !== 'auto') { var wv = printLen(wd, pw); m0.right += cw - wv; cw = wv; }
+        if (hd && hd !== 'auto') { var hv = printLen(hd, ph); m0.bottom += chh - hv; chh = hv; }
+        __cyberPrintSet(cw, chh, m0.top + m0.bottom + bt + bb, m0.left + bl, m0.top + bt, pw);
+        var tries = 0;
+        function pages() {
+            /* (from the root's height, once laid out as pages) */
+            var n = Math.max(1, __cyberPrintPages());
+            if (n > 40) n = 40;
+            var hostOf = function (z) {
+                var hh = document.createElement('div');
+                hh.setAttribute('data-cyber-print', '');
+                hh.style.cssText = 'all:initial;position:fixed;left:0;top:0;width:0;height:0;z-index:' + z + ';';
+                var inh = {};
+                ['font', 'font-family', 'font-size', 'font-weight', 'font-style', 'line-height', 'color', 'white-space', 'text-align', 'direction', 'letter-spacing', 'word-spacing', 'quotes'].forEach(function (q) {
+                    var v = printDecl(first, q);
+                    if (v) hh.style.setProperty(q, v);
+                });
+                de.appendChild(hh);
+                return hh;
+            };
+            var host = hostOf(2147483000), under = hostOf(-2147483000);
+            for (var k = 0; k < n; k++) {
+                var rs = printPageRules(rules, '', k), m = printMetrics(rs, pw, ph);
+                var px = -(m0.left + bl), py = k * ph - (m0.top + bt);
+                var box = document.createElement('div');
+                /* (the page box's decorations, under nothing else of it) */
+                var deco = '';
+                rs.forEach(function (r) { deco += r.style.cssText.replace(/\bsize\s*:[^;]*;?/g, '').replace(/\bmargin[^:]*:[^;]*;?/g, '').replace(/\b(page-orientation|marks|bleed|width|height)\s*:[^;]*;?/g, '') + ';'; });
+                if (deco.replace(/;/g, '').trim()) {
+                    box.style.cssText = deco + ';position:absolute;box-sizing:border-box;left:' + (px + m.left) + 'px;top:' + (py + m.top) + 'px;width:' + (pw - m.left - m.right) + 'px;height:' + (ph - m.top - m.bottom) + 'px;';
+                    under.appendChild(box);
+                }
+                var d = printMarginDecls(rs);
+                var cwm = pw - m.left - m.right, chm = ph - m.top - m.bottom;
+                [['top-left-corner', 0, 0, m.left, m.top], ['top-right-corner', pw - m.right, 0, m.right, m.top],
+                 ['bottom-left-corner', 0, ph - m.bottom, m.left, m.bottom], ['bottom-right-corner', pw - m.right, ph - m.bottom, m.right, m.bottom]].forEach(function (c) {
+                    if (printHasBox(d[c[0]])) printPlace(host, c[0], d[c[0]], px + c[1], py + c[2], c[3], c[4], k, n, pw);
+                });
+                [['top', px + m.left, py, cwm, m.top, true], ['bottom', px + m.left, py + ph - m.bottom, cwm, m.bottom, true],
+                 ['left', px, py + m.top, m.left, chm, false], ['right', px + pw - m.right, py + m.top, m.right, chm, false]].forEach(function (e) {
+                    var names = MB_ROWS[e[0]], horiz = e[5];
+                    var res = printRow(host, names, d, horiz ? e[3] : e[4], horiz, k, n, horiz ? cwm : chm);
+                    var at = horiz ? e[1] : e[2];
+                    for (var q = 0; q < 3; q++) {
+                        if (!res.has[q]) continue;
+                        var s = res.sz[q], pos;
+                        if (q === 0) pos = at;
+                        else if (q === 2) pos = at + (horiz ? e[3] : e[4]) - s;
+                        else pos = at + ((horiz ? e[3] : e[4]) - s) / 2;
+                        if (horiz) printPlace(host, names[q], d[names[q]], pos, e[2], s, e[4], k, n, cwm);
+                        else printPlace(host, names[q], d[names[q]], e[1], pos, e[3], s, k, n, chm);
+                    }
+                });
+            }
+        }
+        requestAnimationFrame(function () { requestAnimationFrame(function () { requestAnimationFrame(function () {
+            try { pages(); } catch (e) { console.error('print: ' + e); }
+            global.__cyberPrintPending = false;
+        }); }); });
+    }
+    Object.defineProperty(global, '__cyberPrintBegin', { configurable: true, writable: true, value: function () {
+        global.__cyberPrintPending = true;
+        if (document.readyState === 'complete') printBuild();
+        else addEventListener('load', printBuild);
+    } });
+
     Object.defineProperty(global, '__cyberAccessibility', { configurable: true, value: Object.freeze({
         role: function (el) { return el && el.nodeType === 1 ? axRoleOnly(el) : ''; },
         label: function (el) { return el && el.nodeType === 1 ? axName(el) : ''; },

@@ -554,7 +554,7 @@ static bool range_has(const WebFace *w, uint32_t cp)
 }
 
 /* What resolving asks for besides weight and italic (under g_mu). */
-static struct { bool oblique; float angle, stretch; } g_ask = { false, 0.0f, 100.0f };
+static struct { bool oblique; float angle, stretch; bool space; } g_ask = { false, 0.0f, 100.0f, false };
 
 /* Stretch: within the range, else narrower first up to 100%, wider first above. */
 static double stretch_score(float want, float lo, float hi)
@@ -602,6 +602,7 @@ static int match_web_locked(const char *family, int weight, bool italic)
     for (int i = 0; i < g_nweb; i++) {
         WebFace *w = &g_web[i];
         if (w->state == WEB_FAILED || strcmp(w->family, family) != 0) continue;
+        if (g_ask.space && !range_has(w, ' ')) continue;   /* (the first available font has the space) */
         /* Text is mostly Latin: of faces split by unicode-range, the one
          * covering basic Latin wins; other subsets come from fallback. */
         double score = (range_has(w, 'a') ? 0.0 : 1e15) + stretch_score(g_ask.stretch, w->smin, w->smax) * 1e10 +
@@ -680,6 +681,19 @@ int font_registry_resolve(const char *family_list, int weight, bool italic)
 }
 
 int font_registry_resolve_style(const char *family_list, int weight, bool italic, bool oblique, float angle,
+                                float stretch);
+/* (the first available font: as resolve_style, but a face must cover U+0020) */
+int font_registry_resolve_first(const char *family_list, int weight, bool italic, bool oblique, float angle, float stretch)
+{
+    char fam[600];
+    snprintf(fam, sizeof fam, "%s", family_list ? family_list : "");
+    /* (a leading marker no family list has: its own cache key, and the ask) */
+    char key[620];
+    snprintf(key, sizeof key, "\x02,%s", fam);
+    return font_registry_resolve_style(key, weight, italic, oblique, angle, stretch);
+}
+
+int font_registry_resolve_style(const char *family_list, int weight, bool italic, bool oblique, float angle,
                                 float stretch)
 {
     font_registry_init();
@@ -702,6 +716,7 @@ int font_registry_resolve_style(const char *family_list, int weight, bool italic
     g_ask.oblique = oblique;
     g_ask.angle = angle;
     g_ask.stretch = stretch;
+    g_ask.space = family_list && family_list[0] == '\x02';
     bool pending = false;
     int slot = -1;
     const char *p = family_list ? family_list : "";
@@ -754,6 +769,7 @@ int font_registry_resolve_style(const char *family_list, int weight, bool italic
             if (!e->key) { e->key = strdup(key); e->slot = slot; break; }
         }
     }
+    g_ask.space = false;
     pthread_mutex_unlock(&g_mu);
     return slot;
 }

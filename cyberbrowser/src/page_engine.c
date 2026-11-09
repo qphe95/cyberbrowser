@@ -878,7 +878,12 @@ static void page_frames_build(void) {
         LayoutContext *lc = (LayoutContext *)calloc(1, sizeof(LayoutContext));
         if (lc) {
             lc->js_ctx = ctxs[k];
-            if (css_layout_run(lc, fd, NULL, ws[k], hs[k])) {
+            /* (print mode is the page's, not its frames') */
+            bool held_print = g_css_print.on;
+            g_css_print.on = false;
+            bool frame_laid = css_layout_run(lc, fd, NULL, ws[k], hs[k]);
+            g_css_print.on = held_print;
+            if (frame_laid) {
                 DisplayList dl;
                 display_list_init(&dl);
                 if (css_layout_build_display_list(lc, &dl)) display_list_frame_set((uint32_t)iframes[k], &dl);
@@ -1646,6 +1651,7 @@ bool page_engine_reset(void) {
     }
     g_css_render_features = 0;
     css_media_set_color_scheme(NULL);
+    g_css_print.on = false;   /* (print mode is one document's) */
     g_dom_needs_layout = 0;
     if (restore) {
         JSRuntimeHandle rt;
