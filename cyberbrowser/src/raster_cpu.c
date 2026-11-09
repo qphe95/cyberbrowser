@@ -263,6 +263,38 @@ static float border_cov(float d)
     return d < 0.0f ? 0.0f : d > 1.0f ? 1.0f : d;
 }
 
+/* A layered mask (kind 12): its layers the kind 13 masks after it, the top one
+ * first, each over those below by its operator (mask-composite). */
+typedef struct { const uint8_t *src; int w, h, ch; } MaskTex;
+static float layer_alpha_at(const DisplayMask *m, const MaskTex *t, float px, float py)
+{
+    if (!t->src || t->w <= 0 || t->h <= 0 || m->iw <= 0.0f || m->ih <= 0.0f) return 0.0f;
+    if (px < m->x || py < m->y || px >= m->x + m->w || py >= m->y + m->h) return 0.0f;   /* (its clip) */
+    float ux = px - m->ix, uy = py - m->iy;
+    /* (repeat: bit 1 across, bit 2 down; the step from tile to tile in rx[0], rx[1]) */
+    if ((m->repeat & 1) && m->rx[0] > 0.0f) ux -= floorf(ux / m->rx[0]) * m->rx[0];
+    if ((m->repeat & 2) && m->rx[1] > 0.0f) uy -= floorf(uy / m->rx[1]) * m->rx[1];
+    if (ux < 0.0f || uy < 0.0f || ux >= m->iw || uy >= m->ih) return 0.0f;
+    int sx = (int)(ux / m->iw * (float)t->w), sy = (int)(uy / m->ih * (float)t->h);
+    if (sx >= t->w) sx = t->w - 1;
+    if (sy >= t->h) sy = t->h - 1;
+    const uint8_t *s = t->src + ((size_t)sy * t->w + sx) * t->ch;
+    float a = t->ch >= 4 ? s[3] / 255.0f : 1.0f;
+    if (m->angle_deg > 0.5f)   /* (luminance) */
+        a *= (t->ch >= 3 ? 0.2125f * s[0] + 0.7154f * s[1] + 0.0721f * s[2] : (float)s[0]) / 255.0f;
+    return a;
+}
+static float layered_alpha_at(const DisplayMask *layers, const MaskTex *tex, int n, float px, float py)
+{
+    float acc = 0.0f;
+    for (int k = n - 1; k >= 0; k--) {
+        float s = layer_alpha_at(&layers[k], &tex[k], px, py), d = acc;
+        int op = k == n - 1 ? 1 : layers[k].nstops;   /* (1 add, 2 subtract, 3 intersect, 4 exclude) */
+        acc = op == 2 ? s * (1.0f - d) : op == 3 ? s * d : op == 4 ? s * (1.0f - d) + d * (1.0f - s) : s + d * (1.0f - s);
+    }
+    return acc;
+}
+
 /* Mask alpha at pixel centre (px, py): a linear gradient along the CSS
  * angle through the box, or an image's alpha (src: w x h x ch, NULL while
  * not decoded = transparent). */
@@ -474,10 +506,26 @@ void raster_display_list_with(const DisplayList *dl, const RasterResources *res,
             const uint8_t *src = NULL;
             if (m->kind == 1 && (!res->image || !res->image(res->user, m->image_handle, &src, &sw, &sh, &sch)))
                 src = NULL;
+            /* (a layered mask: its layers' images) */
+            MaskTex lt[8];
+            int nl = 0;
+            if (m->kind == 12) {
+                nl = m->nstops < 8 ? m->nstops : 8;
+                if (L->mask + 1 + nl > dl->mask_count) nl = dl->mask_count - L->mask - 1;
+                for (int k = 0; k < nl; k++) {
+                    const DisplayMask *lm = &m[1 + k];
+                    memset(&lt[k], 0, sizeof lt[k]);
+                    if (lm->kind != 13) { nl = k; break; }
+                    if (lm->image_handle < 0 || !res->image ||
+                        !res->image(res->user, lm->image_handle, &lt[k].src, &lt[k].w, &lt[k].h, &lt[k].ch))
+                        lt[k].src = NULL;
+                }
+            }
             int w = L->x1 - L->x0;
             for (int y = L->y0; L->saved && y < L->y1; y++) {
                 for (int x = L->x0; x < L->x1; x++) {
-                    float a = mask_alpha_at(m, (float)x + 0.5f, (float)y + 0.5f, src, sw, sh, sch);
+                    float a = m->kind == 12 ? layered_alpha_at(m + 1, lt, nl, (float)x + 0.5f, (float)y + 0.5f)
+                                            : mask_alpha_at(m, (float)x + 0.5f, (float)y + 0.5f, src, sw, sh, sch);
                     if (a >= 0.999f) continue;
                     RGB *cur = &pixels[(size_t)y * img_width + x];
                     const RGB *old = &L->saved[(size_t)(y - L->y0) * w + (x - L->x0)];

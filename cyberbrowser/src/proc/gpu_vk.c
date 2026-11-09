@@ -71,7 +71,7 @@ static VkCommandBuffer g_cb;
 static VkFence g_fence;
 static VkSemaphore g_acquired;
 static VkSampler g_sampler;
-static VkDescriptorSetLayout g_l0, g_l1, g_l2;
+static VkDescriptorSetLayout g_l0, g_l1, g_l2, g_l3;   /* (g_l3: a layered mask's eight layers) */
 static VkPipelineLayout g_draw_layout, g_mask_layout;
 static VkRenderPass g_rp_clear, g_rp_load;
 static VkPipeline g_draw_pipe, g_mask_pipe;
@@ -385,6 +385,7 @@ typedef struct Op {
     int level;                      /* OP_SAVE, OP_BLEND */
     int32_t box[4];                 /* OP_SAVE, OP_BLEND: x0, y0, x1, y1 */
     int clear;                      /* OP_SAVE: the region then cleared (a blend's: its subtree apart) */
+    int mask;                       /* OP_BLEND: its mask */
 } Op;
 
 static Buf g_items, g_masks;
@@ -424,6 +425,32 @@ static VkDescriptorSet tex_set(GpuTexture *t) {
     return s;
 }
 
+/* A layered mask's textures (kind 12 at mi: the kind 13 masks after it), eight
+ * of them, the stand-in where there's none; mi < 0: all the stand-in. */
+static VkDescriptorSet layer_set(const DisplayList *dl, int mi, GpuTexture *const *images) {
+    VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+    ai.descriptorPool = g_dpool;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &g_l3;
+    VkDescriptorSet s = VK_NULL_HANDLE;
+    if (vkAllocateDescriptorSets(g_dev, &ai, &s) != VK_SUCCESS) return VK_NULL_HANDLE;
+    VkDescriptorImageInfo ii[8];
+    int n = mi >= 0 && dl->masks[mi].kind == 12 ? dl->masks[mi].nstops : 0;
+    for (int k = 0; k < 8; k++) {
+        const DisplayMask *m = k < n && mi + 1 + k < dl->mask_count ? &dl->masks[mi + 1 + k] : NULL;
+        GpuTexture *t = m && m->kind == 13 && m->image_handle >= 0 && m->image_handle < GPU_MAX_IMAGES
+                            ? images[m->image_handle] : NULL;
+        ii[k] = (VkDescriptorImageInfo){ g_sampler, t ? t->img.view : g_dummy_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    }
+    VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    w.dstSet = s;
+    w.descriptorCount = 8;   /* (bindings 0 .. 7, one each: a write runs on into the next) */
+    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.pImageInfo = ii;
+    vkUpdateDescriptorSets(g_dev, 1, &w, 0, NULL);
+    return s;
+}
+
 static bool vk_render(GpuTarget **tp, uint32_t w, uint32_t h, const DisplayList *dl, GpuTexture *const *atlases,
                       GpuTexture *const *images, const RasterResources *res) {
     (void)res;
@@ -453,7 +480,7 @@ static bool vk_render(GpuTarget **tp, uint32_t w, uint32_t h, const DisplayList 
         o->misc[0] = m->angle_deg; o->misc[1] = m->blur; o->misc[2] = (float)(m->repeat & 3);
         o->misc[3] = (float)m->nstops;
         o->kind[0] = m->kind;
-        o->kind[1] = m->kind == 1 && m->image_handle >= 0 && m->image_handle < GPU_MAX_IMAGES &&
+        o->kind[1] = (m->kind == 1 || m->kind == 13) && m->image_handle >= 0 && m->image_handle < GPU_MAX_IMAGES &&
                      images[m->image_handle] ? 1 : 0;
     }
     Item *it = (Item *)g_items.map;
@@ -521,7 +548,7 @@ static bool vk_render(GpuTarget **tp, uint32_t w, uint32_t h, const DisplayList 
             const DisplayMask *m = &dl->masks[mi];
             GpuTexture *mt = m->kind == 1 && m->image_handle >= 0 && m->image_handle < GPU_MAX_IMAGES
                                  ? images[m->image_handle] : NULL;
-            Op op = { OP_BLEND, nitems, 1, mt, level, { box[0], box[1], box[2], box[3] }, 0 };
+            Op op = { OP_BLEND, nitems, 1, mt, level, { box[0], box[1], box[2], box[3] }, 0, mi };
             if (!op_push(&nops, op)) return false;
             nitems++;
             continue;
@@ -603,6 +630,7 @@ static bool vk_render(GpuTarget **tp, uint32_t w, uint32_t h, const DisplayList 
     ai.descriptorSetCount = 1;
     ai.pSetLayouts = &g_l0;
     VkDescriptorSet s0;
+    VkDescriptorSet s3_none = VK_NULL_HANDLE;   /* (set 3 of a blend that isn't a layered mask's: one a frame) */
     if (vkAllocateDescriptorSets(g_dev, &ai, &s0) != VK_SUCCESS) return false;
     VkDescriptorBufferInfo bis[2] = { { g_items.buf, 0, VK_WHOLE_SIZE }, { g_masks.buf, 0, VK_WHOLE_SIZE } };
     VkWriteDescriptorSet wr[2];
@@ -694,14 +722,21 @@ static bool vk_render(GpuTarget **tp, uint32_t w, uint32_t h, const DisplayList 
             vkUpdateDescriptorSets(g_dev, 1, &w2, 0, NULL);
             VkDescriptorSet s1 = tex_set(op->tex);
             if (!s1) return false;
+            VkDescriptorSet s3;
+            if (op->mask >= 0 && op->mask < dl->mask_count && dl->masks[op->mask].kind == 12) s3 = layer_set(dl, op->mask, images);
+            else {
+                if (!s3_none) s3_none = layer_set(dl, -1, images);
+                s3 = s3_none;
+            }
+            if (!s3) return false;
             vkCmdBeginRenderPass(g_cb, &rb, VK_SUBPASS_CONTENTS_INLINE);
             in_pass = true;
             vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_mask_pipe);
             bound = g_mask_pipe;
             vkCmdSetViewport(g_cb, 0, 1, &vp);
             vkCmdSetScissor(g_cb, 0, 1, &sc);
-            VkDescriptorSet sets[3] = { s0, s1, s2 };
-            vkCmdBindDescriptorSets(g_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_mask_layout, 0, 3, sets, 0, NULL);
+            VkDescriptorSet sets[4] = { s0, s1, s2, s3 };
+            vkCmdBindDescriptorSets(g_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_mask_layout, 0, 4, sets, 0, NULL);
             vkCmdPushConstants(g_cb, g_mask_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(size), size);
             vkCmdDraw(g_cb, 6, 1, 0, op->first);
             continue;
@@ -984,7 +1019,7 @@ static VkPipeline pipeline(VkPipelineLayout layout, VkShaderModule vs, VkShaderM
 }
 
 static VkDescriptorSetLayout set_layout(VkDescriptorType type, uint32_t n, VkShaderStageFlags stages) {
-    VkDescriptorSetLayoutBinding b[2];
+    VkDescriptorSetLayoutBinding b[8];
     memset(b, 0, sizeof(b));
     for (uint32_t i = 0; i < n; i++) {
         b[i].binding = i;
@@ -1100,14 +1135,15 @@ static bool pipelines(void) {
     g_l0 = set_layout(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
     g_l1 = set_layout(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
     g_l2 = set_layout(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2, VK_SHADER_STAGE_FRAGMENT_BIT);
-    VkDescriptorSetLayout draw_sets[2] = { g_l0, g_l1 }, mask_sets[3] = { g_l0, g_l1, g_l2 };
+    g_l3 = set_layout(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8, VK_SHADER_STAGE_FRAGMENT_BIT);
+    VkDescriptorSetLayout draw_sets[2] = { g_l0, g_l1 }, mask_sets[4] = { g_l0, g_l1, g_l2, g_l3 };
     g_draw_layout = pipeline_layout(draw_sets, 2);
-    g_mask_layout = pipeline_layout(mask_sets, 3);
+    g_mask_layout = pipeline_layout(mask_sets, 4);
     g_rp_clear = render_pass(true);
     g_rp_load = render_pass(false);
     VkShaderModule vs = shader(g_vert_spv, sizeof(g_vert_spv)), fs = shader(g_frag_spv, sizeof(g_frag_spv)),
                    ms = shader(g_mask_spv, sizeof(g_mask_spv));
-    if (!g_l0 || !g_l1 || !g_l2 || !g_draw_layout || !g_mask_layout || !g_rp_clear || !g_rp_load || !vs || !fs || !ms)
+    if (!g_l0 || !g_l1 || !g_l2 || !g_l3 || !g_draw_layout || !g_mask_layout || !g_rp_clear || !g_rp_load || !vs || !fs || !ms)
         return false;
     g_draw_pipe = pipeline(g_draw_layout, vs, fs, true);
     g_mask_pipe = pipeline(g_mask_layout, vs, ms, false);

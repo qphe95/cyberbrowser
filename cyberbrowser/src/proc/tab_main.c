@@ -242,7 +242,13 @@ static void shift_frame(const DisplayList *dl, float dy, uint32_t h) {
         if (xf_on) {
             if ((c.type == DL_MASK_BEGIN || c.type == DL_SHADOW) && xf_keep && c.u.mask_index >= 0 &&
                 c.u.mask_index < dl->mask_count)
+            {
                 xf_keep[c.u.mask_index] = 1;
+                /* (a layered mask's layers with it) */
+                const DisplayMask *hm = &dl->masks[c.u.mask_index];
+                for (int k = 1; hm->kind == 12 && k <= hm->nstops && c.u.mask_index + k < dl->mask_count; k++)
+                    xf_keep[c.u.mask_index + k] = 1;
+            }
             g_shifted.cmds[n++] = c;
             continue;
         }

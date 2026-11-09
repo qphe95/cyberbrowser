@@ -2020,7 +2020,9 @@ static bool dl_flt_element(void *ud, const char *id, int w, int h, const uint8_t
     return true;
 }
 
-/* ---- CSS masks on the CPU ---- */
+/* ---- CSS masks of several layers (composites, modes, mask elements) ----
+ * A mask of kind 12 heads them: nstops its layers, each a mask of kind 13 right
+ * after it, the top one first.  The rasterizers fold them per pixel. */
 #define MK_LAYERS 8
 typedef struct {
     char image[1024], mode[24], repeat[32], position[96], clip[24], origin[24], size[64], composite[16];
@@ -2117,13 +2119,12 @@ static int mk_layers(const LayoutStyle *s, MkLayer *out)
 #undef MK_LONG
     return n;
 }
-/* (a CPU mask for this box: an image of its own that isn't none) */
-static bool dl_mask_is_cpu(const LayoutBox *box)
+/* (a layered mask for this box: an image of its own that isn't none) */
+static bool dl_mask_is_layered(const LayoutBox *box)
 {
     const LayoutStyle *s = box->s;
-    if (!dl_cpu_layers_on()) return false;
-    /* (one plain layer is the GPU mask's, far cheaper on real pages: YouTube has them
-     * in numbers.  Several layers, a composite or mode, a mask element: only here) */
+    /* (one plain layer is a mask of kind 1 or 2, far cheaper on real pages: YouTube has
+     * them in numbers.  Several layers, a composite or mode, a mask element: only here) */
     {
         const char *im = s->mk_text[0] ? s->mk_text[0] : s->mk_text[8];
         bool hard = !im || strchr(im, ',') != NULL || strstr(im, "url(#") != NULL || s->mk_text[7] || s->mk_text[1] || s->mk_text[4] || s->mk_text[5];
@@ -2231,20 +2232,40 @@ static uint8_t *mk_mask_element(LayoutContext *ctx, HtmlNode *mn, const LayoutBo
     if (!ok || pw != w || ph != h) { free(out); return NULL; }
     return out;
 }
-static __thread bool t_mk_incomplete;   /* (a layer's image wasn't there) */
-/* One layer's alpha over the area ax ay aw ah (floats 0..1). */
-static void mk_layer_alpha(LayoutContext *ctx, const LayoutBox *box, const MkLayer *L, int ax, int ay, int aw, int ah, float *o)
+#define MK_FAR 400000.0f
+static uint64_t mk_mix(uint64_t h, const void *p, size_t n)
 {
+    const unsigned char *b = (const unsigned char *)p;
+    for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 1099511628211ull; }
+    return h;
+}
+/* (the image cache's pixels under key: their handle, -1 while there are none) */
+static int mk_texture(const char *key, int w, int h)
+{
+    int iw = 0, ih = 0, ich = 0;
+    uint8_t *px = NULL;
+    int hd = image_cache_request(g_image_cache, key, w, h);
+    return hd >= 0 && image_cache_get(g_image_cache, hd, &iw, &ih, &ich, &px) && px ? hd : -1;
+}
+/* One layer as a mask of kind 13: its image's handle (-1: transparent), the first
+ * tile's place in ix.., the step from tile to tile in rx[0], rx[1] (repeat: bit 1
+ * across, bit 2 down), what it is clipped to in x.., angle_deg 1 for luminance,
+ * nstops its operator (1 add, 2 subtract, 3 intersect, 4 exclude). */
+static void mk_layer_mask(LayoutContext *ctx, const LayoutBox *box, const MkLayer *L, DisplayMask *m)
+{
+    memset(m, 0, sizeof *m);
+    m->kind = 13;
+    m->image_handle = -1;
+    m->nstops = !strcasecmp(L->composite, "subtract") ? 2 : !strcasecmp(L->composite, "intersect") ? 3 : !strcasecmp(L->composite, "exclude") ? 4 : 1;
     const char *img = L->image;
     while (isspace((unsigned char)*img)) img++;
-    size_t n = (size_t)aw * ah;
     if (!*img || !strcasecmp(img, "none")) return;   /* (transparent) */
     double org[4], clp[4];
     mk_box_rect(box, L->origin, 1, org);
     bool no_clip = !strcasecmp(L->clip, "no-clip");
     mk_box_rect(box, L->clip[0] && !no_clip ? L->clip : "border-box", 1, clp);
     double fs = box->s->font_size > 0 ? box->s->font_size : 16.0;
-    /* url(#id): a mask element */
+    /* url(#id): a mask element, drawn once to a texture over the box and 256 px around */
     if (!strncasecmp(img, "url(", 4)) {
         const char *q = img + 4;
         while (*q == ' ' || *q == '"' || *q == '\'') q++;
@@ -2266,22 +2287,44 @@ static void mk_layer_alpha(LayoutContext *ctx, const LayoutBox *box, const MkLay
             MKR("x", rx, box->width) MKR("y", ry, box->height) MKR("width", rw, box->width) MKR("height", rh, box->height)
             #undef MKR
             int mw = bw + 512, mh = bh + 512;
-            uint8_t *px = mk_mask_element(ctx, mn, box, mw, mh);
-            if (!px) return;
+            if (mw > 8192 || mh > 8192 || rw <= 0.0 || rh <= 0.0) return;
+            /* (the texture's name: the element's subtree and the box's size) */
+            uint64_t hs = 1469598103934665603ull;
+            {
+                float bx[2] = { (float)box->width, (float)box->height };
+                hs = mk_mix(hs, bx, sizeof bx);
+                HtmlNode *walk[64];
+                int w = 0;
+                walk[w++] = mn;
+                while (w > 0) {
+                    HtmlNode *e = walk[--w];
+                    if (e->tag_name) hs = mk_mix(hs, e->tag_name, strlen(e->tag_name));
+                    for (HtmlAttribute *a = e->attributes; a; a = a->next) {
+                        if (a->name) hs = mk_mix(hs, a->name, strlen(a->name));
+                        if (a->value) hs = mk_mix(hs, a->value, strlen(a->value));
+                    }
+                    for (HtmlNode *c = html_node_first_child(ctx->doc, e); c; c = html_node_next_sibling(ctx->doc, c))
+                        if (c->type == HTML_NODE_ELEMENT && w < 64) walk[w++] = c;
+                }
+            }
+            char key[80];
+            snprintf(key, sizeof key, "cyber-mke:%016llx:%dx%d", (unsigned long long)hs, mw, mh);
+            /* (images on their way: this frame's, not to be kept; the build after they're in keeps it) */
+            bool busy = image_cache_has_pending(g_image_cache);
+            if (busy) { static unsigned mk_seq; size_t kl = strlen(key); snprintf(key + kl, sizeof key - kl, "p%u", ++mk_seq); }
+            if (busy || image_cache_status(g_image_cache, key) != 1) {
+                uint8_t *px = mk_mask_element(ctx, mn, box, mw, mh);
+                if (!px) return;
+                image_cache_put_rgba(g_image_cache, key, mw, mh, px);
+                free(px);
+            }
             const char *mt = node_attribute_value(mn, "mask-type");
             bool alpha = (mt && !strcasecmp(mt, "alpha")) || !strcasecmp(L->mode, "alpha");
             if (!strcasecmp(L->mode, "luminance")) alpha = false;
-            for (int y = 0; y < ah; y++)
-                for (int x = 0; x < aw; x++) {
-                    double ux = ax + x + 0.5 - box->x, uy = ay + y + 0.5 - box->y;
-                    if (ux < rx || uy < ry || ux >= rx + rw || uy >= ry + rh) continue;
-                    ux += 256.0; uy += 256.0;
-                    if (ux < 0 || uy < 0 || ux >= mw || uy >= mh) continue;
-                    const uint8_t *s = px + ((size_t)(int)uy * mw + (int)ux) * 4;
-                    float a = s[3] / 255.0f;
-                    o[(size_t)y * aw + x] = alpha ? a : a * (0.2125f * s[0] + 0.7154f * s[1] + 0.0721f * s[2]) / 255.0f;
-                }
-            free(px);
+            m->image_handle = mk_texture(key, mw, mh);
+            m->ix = (float)(box->x - 256.0); m->iy = (float)(box->y - 256.0); m->iw = (float)mw; m->ih = (float)mh;
+            m->x = (float)(box->x + rx); m->y = (float)(box->y + ry); m->w = (float)rw; m->h = (float)rh;
+            m->angle_deg = alpha ? 0.0f : 1.0f;
             return;
         }
     }
@@ -2358,184 +2401,48 @@ static void mk_layer_alpha(LayoutContext *ctx, const LayoutBox *box, const MkLay
     if (pw < 1) pw = 1;
     if (ph < 1) ph = 1;
     if (pw > 8192 || ph > 8192) return;
-    const uint8_t *px = NULL;
-    uint8_t *grad = NULL;
-    int iw = 0, ih = 0, ich = 4;
     if (is_grad) {
-        grad = grad_raster(img, pw, ph);
-        px = grad; iw = pw; ih = ph;
+        /* (a gradient: drawn once at the tile's size, kept under its text's name) */
+        char key[80];
+        snprintf(key, sizeof key, "cyber-mkg:%016llx:%dx%d", (unsigned long long)mk_mix(1469598103934665603ull, img, strlen(img)), pw, ph);
+        if (image_cache_status(g_image_cache, key) != 1) {
+            uint8_t *grad = grad_raster(img, pw, ph);
+            if (!grad) return;
+            image_cache_put_rgba(g_image_cache, key, pw, ph, grad);
+            free(grad);
+        }
+        m->image_handle = mk_texture(key, pw, ph);
     } else {
-        int hd = image_cache_request(g_image_cache, url, pw, ph);
-        if (hd < 0 || !image_cache_get(g_image_cache, hd, &iw, &ih, &ich, (uint8_t **)&px)) {
-            if (image_cache_status(g_image_cache, url) >= 0) t_mk_incomplete = true;
-            return;
-        }
+        m->image_handle = mk_texture(url, pw, ph);
     }
-    if (!px || iw < 1 || ih < 1) { free(grad); return; }
-    bool lum = !strcasecmp(L->mode, "luminance");
-    for (int y = 0; y < ah; y++) {
-        double cy = ay + y + 0.5;
-        if (!no_clip && (cy < clp[1] || cy >= clp[1] + clp[3])) continue;
-        for (int x = 0; x < aw; x++) {
-            double cx = ax + x + 0.5;
-            if (!no_clip && (cx < clp[0] || cx >= clp[0] + clp[2])) continue;
-            double ux = cx - ox, uy = cy - oy;
-            if (rx) { ux -= floor(ux / sx) * sx; }
-            if (ry) { uy -= floor(uy / sy) * sy; }
-            if (ux < 0 || uy < 0 || ux >= tw || uy >= th) continue;
-            int ix = (int)(ux / tw * iw), iy = (int)(uy / th * ih);
-            if (ix >= iw) ix = iw - 1;
-            if (iy >= ih) iy = ih - 1;
-            const uint8_t *s = px + ((size_t)iy * iw + ix) * ich;
-            float a = ich >= 4 ? s[3] / 255.0f : 1.0f;
-            float v = a;
-            if (lum) v = a * ((ich >= 3 ? 0.2125f * s[0] + 0.7154f * s[1] + 0.0721f * s[2] : (float)s[0]) / 255.0f);
-            o[(size_t)y * aw + x] = v;
-        }
-    }
-    free(grad);
-    (void)n;
+    m->ix = (float)ox; m->iy = (float)oy; m->iw = (float)tw; m->ih = (float)th;
+    m->repeat = (rx ? 1 : 0) | (ry ? 2 : 0);
+    m->rx[0] = (float)sx; m->rx[1] = (float)sy;
+    if (no_clip) { m->x = -MK_FAR; m->y = -MK_FAR; m->w = 2.0f * MK_FAR; m->h = 2.0f * MK_FAR; }
+    else { m->x = (float)clp[0]; m->y = (float)clp[1]; m->w = (float)(clp[2] > 0.0 ? clp[2] : 0.0); m->h = (float)(clp[3] > 0.0 ? clp[3] : 0.0); }
+    m->angle_deg = !strcasecmp(L->mode, "luminance") ? 1.0f : 0.0f;
 }
-/* The commands since `from` become an image of them through the box's mask. */
-static void dl_cpu_mask_end(LayoutContext *ctx, DisplayList *dl, int box_i, int from)
+/* The box's mask as a header and its layers: the header's index, -1 none.  (Its
+ * region is everything: what the subtree paints outside every layer's clip is gone.) */
+static int dl_layered_mask(LayoutContext *ctx, DisplayList *dl, const LayoutBox *box)
 {
-    const LayoutBox *box = &ctx->boxes[box_i];
-    int W = (int)ctx->viewport_width, H = (int)ctx->viewport_height, ncmd = dl->count - from;
-    if (W < 1 || H < 1 || W > 8192 || H > 8192 || from < 0 || ncmd <= 0 || !g_image_cache) return;
     static __thread MkLayer L[MK_LAYERS];
+    if (!g_image_cache) return -1;
     int nl = mk_layers(box->s, L);
-    if (nl <= 0) return;
-    /* the area: the box, or all when a layer doesn't clip */
-    int ax = 0, ay = 0, aw = W, ah = H;
-    bool all = false;
-    for (int k = 0; k < nl; k++) all = all || !strcasecmp(L[k].clip, "no-clip");
-    if (!all) {
-        int x0 = (int)floor(box->x), y0 = (int)floor(box->y), x1 = (int)ceil(box->x + box->width), y1 = (int)ceil(box->y + box->height);
-        if (x0 < 0) x0 = 0;
-        if (y0 < 0) y0 = 0;
-        if (x1 > W) x1 = W;
-        if (y1 > H) y1 = H;
-        if (x1 <= x0 || y1 <= y0) { dl->count = from; return; }
-        ax = x0; ay = y0; aw = x1 - x0; ah = y1 - y0;
+    if (nl <= 0) return -1;
+    DisplayMask h;
+    memset(&h, 0, sizeof h);
+    h.kind = 12;
+    h.image_handle = -1;
+    h.x = -MK_FAR; h.y = -MK_FAR; h.w = 2.0f * MK_FAR; h.h = 2.0f * MK_FAR;
+    h.nstops = nl;
+    int hi = dl_add_mask(dl, &h);
+    for (int k = 0; hi >= 0 && k < nl; k++) {
+        DisplayMask m;
+        mk_layer_mask(ctx, box, &L[k], &m);
+        if (dl_add_mask(dl, &m) < 0) { dl->mask_count = hi; hi = -1; }
     }
-    uint64_t hs = 1469598103934665603ull;
-#define DLF_MIX(ptr, len) do { const unsigned char *hp = (const unsigned char *)(ptr); for (size_t hi = 0; hi < (size_t)(len); hi++) { hs ^= hp[hi]; hs *= 1099511628211ull; } } while (0)
-    DLF_MIX(dl->cmds + from, (size_t)ncmd * sizeof(DisplayListCmd));
-    for (int k = 0; k < 9; k++) if (box->s->mk_text[k]) DLF_MIX(box->s->mk_text[k], strlen(box->s->mk_text[k]));
-    {
-        float bx[4] = { (float)box->x, (float)box->y, (float)box->width, (float)box->height };
-        DLF_MIX(bx, sizeof bx);
-        for (int k = 0; k < nl; k++) {
-            /* (whether its image has loaded) */
-            if (!strncasecmp(L[k].image, "url(", 4)) {
-                char lu[1024];
-                const char *q = L[k].image + 4;
-                while (*q == ' ' || *q == '"' || *q == '\'') q++;
-                size_t l = 0;
-                while (*q && *q != ')' && *q != '"' && *q != '\'' && l + 1 < sizeof lu) lu[l++] = *q++;
-                lu[l] = 0;
-                if (lu[0] && lu[0] != '#') {
-                    int st = image_cache_status(g_image_cache, lu) < 0;
-                    DLF_MIX(&st, sizeof st);
-                }
-            }
-            const char *hash = strchr(L[k].image, '#');
-            HtmlNode *mn = hash && ctx->doc ? NULL : NULL;
-            if (hash && ctx->doc) {
-                char id[128];
-                size_t l = 0;
-                for (const char *q = hash + 1; *q && *q != ')' && *q != '"' && *q != '\'' && l + 1 < sizeof id; q++) id[l++] = *q;
-                id[l] = 0;
-                mn = html_document_get_element_by_id(ctx->doc, id);
-            }
-            HtmlNode *walk[64];
-            int w = 0;
-            if (mn) walk[w++] = mn;
-            while (w > 0) {
-                HtmlNode *q = walk[--w];
-                for (HtmlAttribute *a = q->attributes; a; a = a->next) { DLF_MIX(a->name, strlen(a->name)); DLF_MIX(a->value, strlen(a->value)); }
-                for (HtmlNode *c = html_node_first_child(ctx->doc, q); c; c = html_node_next_sibling(ctx->doc, c))
-                    if (c->type == HTML_NODE_ELEMENT && w < 64) walk[w++] = c;
-            }
-        }
-    }
-#undef DLF_MIX
-    char key[64];
-    snprintf(key, sizeof key, "cyber-mask:%016llx:%dx%d", (unsigned long long)hs, aw, ah);
-    /* (images on their way: this frame's, not to be kept; the build after they're in keeps it) */
-    bool mk_busy = image_cache_has_pending(g_image_cache);
-    if (mk_busy || image_cache_status(g_image_cache, key) != 1) {
-        size_t N = (size_t)aw * ah;
-        uint8_t *rgb_w = (uint8_t *)malloc(N * 3), *rgb_b = (uint8_t *)malloc(N * 3), *rgba = (uint8_t *)malloc(N * 4);
-        DisplayListCmd *cmds = (DisplayListCmd *)malloc((size_t)(ncmd + 1) * sizeof(DisplayListCmd));
-        DisplayMask *mcopy = dl->mask_count > 0 ? (DisplayMask *)malloc((size_t)dl->mask_count * sizeof(DisplayMask)) : NULL;
-        float *acc = (float *)calloc(N, sizeof(float)), *lay = (float *)malloc(N * sizeof(float));
-        t_mk_incomplete = false;
-        if (rgb_w && rgb_b && rgba && cmds && acc && lay && (mcopy || !dl->mask_count)) {
-            memset(&cmds[0], 0, sizeof cmds[0]);
-            cmds[0].type = DL_RECT;
-            cmds[0].w = (float)aw; cmds[0].h = (float)ah;
-            cmds[0].a = 255;
-            memcpy(cmds + 1, dl->cmds + from, (size_t)ncmd * sizeof(DisplayListCmd));
-            for (int k = 1; k <= ncmd; k++) {
-                cmds[k].x -= (float)ax; cmds[k].y -= (float)ay;
-                if (cmds[k].type == DL_BORDER) { cmds[k].u.border.x -= (float)ax; cmds[k].u.border.y -= (float)ay; }
-            }
-            if (dl->mask_count) {
-                memcpy(mcopy, dl->masks, (size_t)dl->mask_count * sizeof(DisplayMask));
-                for (int k = 0; k < dl->mask_count; k++) {
-                    mcopy[k].x -= (float)ax; mcopy[k].y -= (float)ay;
-                    if (mcopy[k].kind == 1 || mcopy[k].iw > 0.0f) { mcopy[k].ix -= (float)ax; mcopy[k].iy -= (float)ay; }
-                }
-            }
-            DisplayList tmp = *dl;
-            tmp.masks = mcopy;
-            tmp.cmds = cmds + 1; tmp.count = ncmd; tmp.capacity = ncmd;
-            raster_display_list(&tmp, rgb_w, aw, ah);
-            tmp.cmds = cmds; tmp.count = ncmd + 1; tmp.capacity = ncmd + 1;
-            raster_display_list(&tmp, rgb_b, aw, ah);
-            /* the layers, the last at the bottom; each composited over those below by its operator */
-            /* (an image that came in while going through them, with no word of it left to
-             * come: through them again) */
-            for (int round = 0; round < 2; round++) {
-            t_mk_incomplete = false;
-            memset(acc, 0, N * sizeof(float));
-            for (int k = nl - 1; k >= 0; k--) {
-                memset(lay, 0, N * sizeof(float));
-                mk_layer_alpha(ctx, box, &L[k], ax, ay, aw, ah, lay);
-                const char *op = L[k].composite;
-                int o = !strcasecmp(op, "subtract") ? 1 : !strcasecmp(op, "intersect") ? 2 : !strcasecmp(op, "exclude") ? 3 : 0;
-                if (k == nl - 1) o = 0;
-                for (size_t i = 0; i < N; i++) {
-                    float s = lay[i], d = acc[i];
-                    acc[i] = o == 1 ? s * (1 - d) : o == 2 ? s * d : o == 3 ? s * (1 - d) + d * (1 - s) : s + d * (1 - s);
-                }
-            }
-            if (!t_mk_incomplete) break;
-            }
-            for (size_t k = 0; k < N; k++) {
-                int a = 255;
-                for (int c = 0; c < 3; c++) { int v = 255 - (int)rgb_w[k * 3 + c] + (int)rgb_b[k * 3 + c]; if (v < a) a = v; }
-                if (a < 0) a = 0;
-                for (int c = 0; c < 3; c++) {
-                    int v = a > 0 ? ((int)rgb_b[k * 3 + c] * 255 + a / 2) / a : 0;
-                    rgba[k * 4 + c] = (uint8_t)(v > 255 ? 255 : v);
-                }
-                rgba[k * 4 + 3] = (uint8_t)lround(a * acc[k]);
-            }
-            /* (not all there: for now, under a name of its own) */
-            if (t_mk_incomplete || mk_busy) { static unsigned mk_seq; size_t kl = strlen(key); snprintf(key + kl, sizeof key - kl, "p%u", ++mk_seq); }
-            image_cache_put_rgba(g_image_cache, key, aw, ah, rgba);
-        }
-        free(rgb_w); free(rgb_b); free(rgba); free(cmds); free(mcopy); free(acc); free(lay);
-    }
-    DisplayListCmd lastx;
-    bool has_x = false;
-    for (int k = from; k < dl->count; k++) if (dl->cmds[k].type == DL_XFORM) { lastx = dl->cmds[k]; has_x = true; }
-    dl->count = from;
-    int handle = image_cache_request(g_image_cache, key, aw, ah);
-    if (handle >= 0) display_list_add_image(dl, (float)ax, (float)ay, (float)aw, (float)ah, handle, 0.0f, 0.0f, 1.0f, 1.0f);
-    if (has_x && display_list_reserve(dl, 1)) dl->cmds[dl->count++] = lastx;
+    return hi;
 }
 
 /* ---- frames' display lists, by their <iframe> ---- */
@@ -3445,11 +3352,21 @@ static int dl_add_mask(DisplayList *dl, const DisplayMask *m);
 /* (a copy of mask mi moved by (dx, dy): its index) */
 static int dl_mask_moved(DisplayList *dl, int mi, float dx, float dy)
 {
-    DisplayMask m = dl->masks[mi];
-    m.x += dx;
-    m.y += dy;
-    if (m.kind != 9) { m.ix += dx; m.iy += dy; }   /* (a filter's: a drop-shadow's offsets) */
-    return dl_add_mask(dl, &m);
+    /* (a layered mask's layers, a polygon's further corners: after it there, and here) */
+    int n = 1, first = -1;
+    if (dl->masks[mi].kind == 12) n += dl->masks[mi].nstops;
+    else if (dl->masks[mi].kind == 7) while (mi + n < dl->mask_count && dl->masks[mi + n].kind == 11) n++;
+    if (mi + n > dl->mask_count) n = dl->mask_count - mi;
+    for (int k = 0; k < n; k++) {
+        DisplayMask m = dl->masks[mi + k];
+        m.x += dx;
+        m.y += dy;
+        if (m.kind != 9) { m.ix += dx; m.iy += dy; }   /* (a filter's: a drop-shadow's offsets) */
+        int ni = dl_add_mask(dl, &m);
+        if (ni < 0) return -1;
+        if (!k) first = ni;
+    }
+    return first;
 }
 
 static __thread int t_seg_pick = -1;
@@ -6178,8 +6095,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         int cbr_from = -1;
         while (nmask > 0 && !mask_covers(ctx, i, mask_start[nmask - 1], mask_end[nmask - 1])) {
             nmask--;
-            if (mask_idx[nmask] <= -100000000) { dl_cpu_mask_end(ctx, dl, mask_start[nmask], -100000000 - mask_idx[nmask]); }
-            else if (mask_idx[nmask] <= -1000) { dl_ref_filter_end(ctx, dl, mask_start[nmask], -1000 - mask_idx[nmask]); }
+            if (mask_idx[nmask] <= -1000) { dl_ref_filter_end(ctx, dl, mask_start[nmask], -1000 - mask_idx[nmask]); }
             else dl_add_mask_cmd(dl, DL_MASK_END, mask_idx[nmask], &dl->masks[mask_idx[nmask]]);
             if (mc_hold && nmask <= hold_level) {
                 mc_hold = false;
@@ -6277,13 +6193,19 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         }
         /* filter with a url(): the box and its subtree rasterized here, filtered
          * on the CPU, drawn as an image (mask_idx: where its commands begin) */
-        /* (a mask: outside the filter; on the CPU) */
-        bool mask_cpu = !any_tf && dl_mask_is_cpu(box) && box->width * box->height <= 1000000.0;
+        /* (a mask of several layers: outside the filter; a header and its layers) */
+        bool mask_cpu = dl_mask_is_layered(box);
         if (mask_cpu && nmask < 64) {
-            mask_start[nmask] = i;
-            mask_end[nmask] = subtree_end(ctx, i);
-            mask_idx[nmask] = -100000000 - dl->count;
-            nmask++;
+            int mi = dl_layered_mask(ctx, dl, box);
+            if (mi >= 0 && dl_add_mask_cmd(dl, DL_MASK_BEGIN, mi, &dl->masks[mi])) {
+                mask_start[nmask] = i;
+                mask_end[nmask] = subtree_end(ctx, i);
+                mask_idx[nmask] = mi;
+                if (nreg < REG_MAX && mask_end[nmask] > i + 1) {
+                    reg_start[nreg] = i; reg_end[nreg] = mask_end[nmask]; reg_idx[nreg] = mi; nreg++;
+                }
+                nmask++;
+            }
         }
         bool filt_cpu = dl_box_filter_cpu(box, any_tf);
         if (filt_cpu && nmask < 64) {
@@ -7405,8 +7327,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
     if (ncb) dl_cb_flush(ctx, dl, cbt, cba, cbb, &ncb, -1);
     while (nmask > 0) {
         nmask--;
-        if (mask_idx[nmask] <= -100000000) { dl_cpu_mask_end(ctx, dl, mask_start[nmask], -100000000 - mask_idx[nmask]); }
-        else if (mask_idx[nmask] <= -1000) { dl_ref_filter_end(ctx, dl, mask_start[nmask], -1000 - mask_idx[nmask]); }
+        if (mask_idx[nmask] <= -1000) { dl_ref_filter_end(ctx, dl, mask_start[nmask], -1000 - mask_idx[nmask]); }
         else dl_add_mask_cmd(dl, DL_MASK_END, mask_idx[nmask], &dl->masks[mask_idx[nmask]]);
         if (mc_hold && nmask <= hold_level) {
             mc_hold = false;

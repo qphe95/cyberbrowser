@@ -219,7 +219,7 @@ bool gpu_client_send(const DisplayList *dl, const GpuFrame *hdr) {
         }
     }
     for (int i = 0; i < dl->mask_count; i++)
-        if (dl->masks[i].kind == 1 && !send_image(dl->masks[i].image_handle)) return false;
+        if ((dl->masks[i].kind == 1 || dl->masks[i].kind == 13) && !send_image(dl->masks[i].image_handle)) return false;   /* (13: a layer of a layered mask) */
     uint8_t *msg = NULL;
     uint32_t n = gpu_encode_frame(dl, hdr, &msg);
     if (!n) return false;

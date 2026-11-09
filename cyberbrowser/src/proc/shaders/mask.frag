@@ -9,6 +9,15 @@
 layout(set = 1, binding = 0) uniform sampler2D mask_image;  // kind 1's image (else a 1 x 1 stand-in)
 layout(set = 2, binding = 0) uniform sampler2D saved;
 layout(set = 2, binding = 1) uniform sampler2D current;
+// (a layered mask's layers, kind 12: the kind 13 masks after it, the top one first)
+layout(set = 3, binding = 0) uniform sampler2D layer0;
+layout(set = 3, binding = 1) uniform sampler2D layer1;
+layout(set = 3, binding = 2) uniform sampler2D layer2;
+layout(set = 3, binding = 3) uniform sampler2D layer3;
+layout(set = 3, binding = 4) uniform sampler2D layer4;
+layout(set = 3, binding = 5) uniform sampler2D layer5;
+layout(set = 3, binding = 6) uniform sampler2D layer6;
+layout(set = 3, binding = 7) uniform sampler2D layer7;
 
 layout(location = 0) flat in int v_item;
 layout(location = 0) out vec4 out_color;
@@ -25,9 +34,49 @@ vec2 poly_pt(int mi, int k) {
     return vec2(v[f], v[f + 1]);
 }
 
+// (layer k's texel at uv, 0 .. 1 across its tile: nearest, as raster_cpu.c's layer_alpha_at)
+vec4 layer_fetch(int k, vec2 uv) {
+    ivec2 ts;
+    if (k == 0) { ts = textureSize(layer0, 0); return texelFetch(layer0, min(ivec2(uv * vec2(ts)), ts - 1), 0); }
+    else if (k == 1) { ts = textureSize(layer1, 0); return texelFetch(layer1, min(ivec2(uv * vec2(ts)), ts - 1), 0); }
+    else if (k == 2) { ts = textureSize(layer2, 0); return texelFetch(layer2, min(ivec2(uv * vec2(ts)), ts - 1), 0); }
+    else if (k == 3) { ts = textureSize(layer3, 0); return texelFetch(layer3, min(ivec2(uv * vec2(ts)), ts - 1), 0); }
+    else if (k == 4) { ts = textureSize(layer4, 0); return texelFetch(layer4, min(ivec2(uv * vec2(ts)), ts - 1), 0); }
+    else if (k == 5) { ts = textureSize(layer5, 0); return texelFetch(layer5, min(ivec2(uv * vec2(ts)), ts - 1), 0); }
+    else if (k == 6) { ts = textureSize(layer6, 0); return texelFetch(layer6, min(ivec2(uv * vec2(ts)), ts - 1), 0); }
+    else if (k == 7) { ts = textureSize(layer7, 0); return texelFetch(layer7, min(ivec2(uv * vec2(ts)), ts - 1), 0); }
+    return vec4(0.0);
+}
+// One layer's alpha at p: its image tiled from img by the steps in rx[0], rx[1],
+// inside its clip (box); misc.x 1: by luminance.
+float layer_alpha(int li, int k, vec2 p) {
+    Mask m = masks[li];
+    if (m.kind.x != 13 || m.kind.y == 0 || m.img.z <= 0.0 || m.img.w <= 0.0) return 0.0;
+    if (p.x < m.box.x || p.y < m.box.y || p.x >= m.box.x + m.box.z || p.y >= m.box.y + m.box.w) return 0.0;
+    float ux = p.x - m.img.x, uy = p.y - m.img.y;
+    int rep = int(m.misc.z + 0.5);
+    if ((rep & 1) != 0 && m.rx[0] > 0.0) ux -= floor(div_(ux, m.rx[0])) * m.rx[0];
+    if ((rep & 2) != 0 && m.rx[1] > 0.0) uy -= floor(div_(uy, m.rx[1])) * m.rx[1];
+    if (ux < 0.0 || uy < 0.0 || ux >= m.img.z || uy >= m.img.w) return 0.0;
+    vec4 t = layer_fetch(k, vec2(div_(ux, m.img.z), div_(uy, m.img.w)));
+    return m.misc.x > 0.5 ? t.a * dot(t.rgb, vec3(0.2125, 0.7154, 0.0721)) : t.a;
+}
+
 float mask_alpha(int mi, vec2 p) {
     Mask m = masks[mi];
     int kind = m.kind.x;
+    if (kind == 12) {
+        // layers from the bottom up, each over the rest by its operator (mask-composite):
+        // misc.w 1 add, 2 subtract, 3 intersect, 4 exclude
+        int n = min(min(int(m.misc.w + 0.5), 8), masks.length() - mi - 1);
+        float acc = 0.0;
+        for (int k = n - 1; k >= 0; k--) {
+            float s = layer_alpha(mi + 1 + k, k, p), d = acc;
+            int op = k == n - 1 ? 1 : int(masks[mi + 1 + k].misc.w + 0.5);
+            acc = op == 2 ? s * (1.0 - d) : op == 3 ? s * d : op == 4 ? s * (1.0 - d) + d * (1.0 - s) : s + d * (1.0 - s);
+        }
+        return acc;
+    }
     if (kind == 2) {
         float rad = m.misc.x * 3.14159265 / 180.0;
         float dx = sin(rad), dy = -cos(rad);
