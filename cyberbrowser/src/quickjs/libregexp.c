@@ -2789,6 +2789,9 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
     bp = s->stack_buf;
     stack_end = s->stack_buf + s->stack_size;
     
+    /* (a bound on backtracking: a catastrophic pattern ends in an error, not a stuck page) */
+    uint64_t split_count = 0;
+
 #define CHECK_STACK_SPACE(n)                            \
     if (unlikely((stack_end - sp) < (n))) {             \
         size_t saved_sp = sp - s->stack_buf;            \
@@ -2953,6 +2956,8 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
                     pc1 = pc;
                     pc = pc + (int)val;
                 }
+                if (unlikely(++split_count > 50000000))
+                    return LRE_RET_MEMORY_ERROR;
                 CHECK_STACK_SPACE(3);
                 sp[0].ptr = (uint8_t *)pc1;
                 sp[1].ptr = (uint8_t *)cptr;

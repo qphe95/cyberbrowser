@@ -33,6 +33,7 @@ uint32_t dom_parse_decode_entities(char *str, size_t len);
 /* The code point of an HTML named character reference (name without '&'
  * and ';'), 0 if unknown. */
 uint32_t dom_parse_named_entity(const char *name, size_t len);
+uint32_t dom_parse_named_entity2(const char *name, size_t len, uint32_t *second);
 
 /* Parse `len` bytes of HTML into a new detached fragment (owner `owner_doc`)
  * whose children are the top-level nodes.  Returns the fragment. */

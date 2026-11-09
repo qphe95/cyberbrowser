@@ -4008,6 +4008,23 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     if (prop[0] == 'h' || prop[0] == 'm') {
         /* (a size by its content) */
         int ckw = !strcasecmp(value, "min-content") ? 1 : !strcasecmp(value, "max-content") ? 2 : !strcasecmp(value, "fit-content") ? 3 : 0;
+        {
+            int mw = !strcasecmp(prop, "min-width") ? 0 : !strcasecmp(prop, "max-width") ? 1 : -1;
+            if (mw >= 0) {
+                box->s->mm_fc_set &= (unsigned char)~(1 << mw);
+                if (!strncasecmp(value, "fit-content(", 12)) {
+                    char *e2 = NULL;
+                    double v = strtod(value + 12, &e2);
+                    if (e2 && e2 != value + 12) {
+                        ckw = 3;
+                        box->s->mm_fc_set |= (unsigned char)(1 << mw);
+                        bool pc = *e2 == '%';
+                        box->s->mm_fc_pct[mw] = pc ? (float)(v / 100.0) : 0.0f;
+                        box->s->mm_fc_px[mw] = pc ? 0.0f : !strncasecmp(e2, "em", 2) ? (float)(v * (box->s->font_size > 0.0 ? box->s->font_size : 16.0)) : (float)v;
+                    }
+                }
+            }
+        }
         if (!strcasecmp(prop, "min-width")) box->s->mm_kw_w[0] = (unsigned char)ckw;
         else if (!strcasecmp(prop, "max-width")) box->s->mm_kw_w[1] = (unsigned char)ckw;
         else if (!strcasecmp(prop, "height")) box->s->h_kw = (unsigned char)ckw;
@@ -18667,7 +18684,10 @@ static void layout_mm_kw_widths(LayoutBox *box, double parent_content_width)
     for (int w = 0; w < 2; w++) {
         int ck = box->s->mm_kw_w[w];
         if (!ck) continue;
-        double v = ck == 1 ? mn : ck == 2 ? mx : (mx < avail ? mx : (mn > avail ? mn : avail));
+        double room = avail;
+        /* (fit-content(L): L in place of the room there is) */
+        if (box->s->mm_fc_set & (1 << w)) room = box->s->mm_fc_px[w] + box->s->mm_fc_pct[w] * parent_content_width + hb;
+        double v = ck == 1 ? mn : ck == 2 ? mx : (mx < room ? mx : (mn > room ? mn : room));
         if (w) box->max_width = v - hb;
         else box->min_width = v - hb;
     }
@@ -20903,6 +20923,33 @@ static double layout_intrinsic_width0(LayoutContext *ctx, int idx, bool want_max
     const LayoutBox *ob = layout_box(ctx, idx);
     if (ob->s->display != CSS_DISPLAY_INLINE) t_wm_across_ext = ob->s->writing_mode != 0;
     double v = layout_intrinsic_compute(ctx, idx, want_max);
+    /* (fit-content(L) of a length: its contribution either way is that fit) */
+    {
+        LayoutBox *fb = layout_box(ctx, idx);
+        const LayoutStyle *fs = fb->s;
+        bool wfc = fs->width_keyword == 3 && fs->fc_set && fs->fc_pct == 0.0f;
+        bool mfc = (fs->mm_fc_set & 1) && fs->mm_fc_pct[0] == 0.0f, xfc = (fs->mm_fc_set & 2) && fs->mm_fc_pct[1] == 0.0f;
+        if (wfc || mfc || xfc) {
+            unsigned char held_set = fs->width_set;
+            double held_min = fb->min_width, held_max = fb->max_width;
+            fb->s->width_set = 0;
+            fb->min_width = 0.0;
+            fb->max_width = -1.0;
+            unsigned char hk = fs->width_keyword;
+            fb->s->width_keyword = 0;
+            double mx = layout_intrinsic_compute(ctx, idx, true), mn = layout_intrinsic_compute(ctx, idx, false);
+            fb->s->width_keyword = hk;
+            fb->s->width_set = held_set;
+            fb->min_width = held_min;
+            fb->max_width = held_max;
+            double hb = fs->box_sizing == CSS_BOX_SIZING_BORDER_BOX ? 0.0 : layout_horizontal_border_padding(fb);
+            #define FIT(L) ((L) + hb > mx ? mx : ((L) + hb < mn ? mn : (L) + hb))
+            if (wfc) v = FIT(fs->fc_px);
+            if (mfc && FIT(fs->mm_fc_px[0]) > v) v = FIT(fs->mm_fc_px[0]);
+            if (xfc && FIT(fs->mm_fc_px[1]) < v) v = FIT(fs->mm_fc_px[1]);
+            #undef FIT
+        }
+    }
     t_wm_across_ext = held_across;
     if (cache) cache[2 * (size_t)idx + (want_max ? 1 : 0)] = v;
     return v;
@@ -24968,6 +25015,9 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
     double y = cur->y, last_x = content_left;
     int i = 0;
     double bal_cut = any && blk->s->tw_balance && blk->s->white_space != 1 && blk->s->white_space != 2 ? ifc_balance_shrink(ctx, blk, &I, avail_width, indent0) : 0.0;
+    /* (under a line-clamp of so many lines: as wrapped, what shows wouldn't be the same otherwise) */
+    for (int a = idx; a >= 0 && bal_cut > 0.0; a = ctx->tree.nodes[a].parent_idx)
+        if (ctx->boxes[a].s->line_clamp > 0 && !ctx->boxes[a].s->line_clamp_auto) bal_cut = 0.0;
     double band_h = 0.0;   /* (a line tried again: the height of the floats' band it must clear) */
     int fc_line = ctx->float_count;   /* (the floats there when the line was begun) */
     while (any && ltop && lh && lasc && deferred && i < I.n) {
@@ -27004,6 +27054,12 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
             int k = child->s->fb_kw;
             double av = avail_main - it->mm_s - it->mm_e;
             basis = k == 1 ? mn : k == 3 ? (mx < av ? mx : (mn > av ? mn : av)) : mx;
+            /* (its content size with a ratio and a definite height: through the ratio) */
+            if (child->s->aspect_ratio_prop && child->s->aspect_ratio > 0.0 && it->cross_def) {
+                double hb = layout_horizontal_border_padding(child), vb = layout_vertical_border_padding(child);
+                double rw = (child->height - vb > 0.0 ? child->height - vb : 0.0) / child->s->aspect_ratio + hb;
+                if (rw > basis) basis = rw;
+            }
             if (child->s->fb_csz) {
                 double bw = layout_horizontal_border_padding(child);
                 basis = csz_eval(child->s->fb_csz, basis - bw, avail_main, ctx->viewport_width, child->s->font_size) + bw;
@@ -27050,6 +27106,19 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
         if (basis < 0.0) {
             if (is_row) {
                 basis = layout_intrinsic_width(ctx, c, true);
+                /* (min- and max-height through a ratio) */
+                if (child->s->aspect_ratio_prop && child->s->aspect_ratio > 0.0) {
+                    double hb = layout_horizontal_border_padding(child), vb = layout_vertical_border_padding(child);
+                    double bs = child->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX;
+                    if (child->min_height > 0.0) {
+                        double w = (child->min_height - (bs ? vb : 0.0)) / child->s->aspect_ratio + hb;
+                        if (w > basis) basis = w;
+                    }
+                    if (child->max_height >= 0.0) {
+                        double w = (child->max_height - (bs ? vb : 0.0)) / child->s->aspect_ratio + hb;
+                        if (w < basis) basis = w;
+                    }
+                }
             } else {
                 /* Content height: lay the item out at its cross size. */
                 child->x = content_x + it->cm_s;
@@ -27405,6 +27474,15 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
             it->cross = child->height;
         } else {
             child->height = it->target;
+            it->cross = child->width;
+        }
+        /* (a column item with a ratio, in a container that takes its width from its items: its
+         * width from the height it flexed to) */
+        if (!is_row && !it->cross_def && child->s->aspect_ratio_prop && child->s->aspect_ratio > 0.0 &&
+            child->s->writing_mode == ct->s->writing_mode && !layout_is_img(layout_node_dom(ctx, ctx->tree.nodes[it->idx].dom_node_idx)) &&
+            (it->align != CSS_ALIGN_STRETCH || (ct->s->inline_level && !ct->s->width_set))) {
+            double bw = layout_horizontal_border_padding(child), bh = layout_vertical_border_padding(child);
+            child->width = flex_clamp((it->target - bh > 0.0 ? it->target - bh : 0.0) / child->s->aspect_ratio + bw, it->min_cross, it->max_cross);
             it->cross = child->width;
         }
         /* (an image not stretched: its other size through its ratio, from what it flexed to) */

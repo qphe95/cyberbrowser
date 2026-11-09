@@ -101,57 +101,43 @@ static int utf8_put(char *d, uint32_t cp) {
     return 4;
 }
 
-/* Named references in common use.  Every entry's UTF-8 is no longer than
- * "&name;", so decoding can run in place. */
-static const struct { const char *name; uint32_t cp; } k_entities[] = {
-    { "lt", '<' }, { "gt", '>' }, { "amp", '&' }, { "quot", '"' }, { "apos", '\'' },
-    { "Tab", 0x09 }, { "NewLine", 0x0A }, { "ZeroWidthSpace", 0x200B }, { "NoBreak", 0x2060 }, { "hairsp", 0x200A },
-    { "numsp", 0x2007 }, { "puncsp", 0x2008 }, { "MediumSpace", 0x205F }, { "ThinSpace", 0x2009 }, { "VeryThinSpace", 0x200A },
-    { "emsp13", 0x2004 }, { "emsp14", 0x2005 }, { "InvisibleTimes", 0x2062 }, { "af", 0x2061 }, { "ic", 0x2063 },
-    { "nbsp", 0xA0 }, { "copy", 0xA9 }, { "reg", 0xAE }, { "trade", 0x2122 },
-    { "mdash", 0x2014 }, { "ndash", 0x2013 }, { "hellip", 0x2026 }, { "middot", 0xB7 },
-    { "bull", 0x2022 }, { "lsquo", 0x2018 }, { "rsquo", 0x2019 }, { "ldquo", 0x201C },
-    { "rdquo", 0x201D }, { "laquo", 0xAB }, { "raquo", 0xBB }, { "times", 0xD7 },
-    { "divide", 0xF7 }, { "deg", 0xB0 }, { "plusmn", 0xB1 }, { "minus", 0x2212 },
-    { "sect", 0xA7 }, { "para", 0xB6 }, { "euro", 0x20AC }, { "pound", 0xA3 },
-    { "yen", 0xA5 }, { "cent", 0xA2 }, { "larr", 0x2190 }, { "rarr", 0x2192 },
-    { "uarr", 0x2191 }, { "darr", 0x2193 }, { "harr", 0x2194 }, { "thinsp", 0x2009 },
-    { "ensp", 0x2002 }, { "emsp", 0x2003 }, { "zwj", 0x200D }, { "zwnj", 0x200C },
-    { "shy", 0xAD }, { "iexcl", 0xA1 }, { "iquest", 0xBF }, { "eacute", 0xE9 },
-    { "egrave", 0xE8 }, { "aacute", 0xE1 }, { "agrave", 0xE0 }, { "ouml", 0xF6 },
-    { "uuml", 0xFC }, { "auml", 0xE4 }, { "szlig", 0xDF }, { "ccedil", 0xE7 },
-    { "ntilde", 0xF1 }, { "oacute", 0xF3 }, { "iacute", 0xED }, { "uacute", 0xFA },
-    { "frac12", 0xBD }, { "frac14", 0xBC }, { "frac34", 0xBE }, { "prime", 0x2032 },
-    { "Prime", 0x2033 }, { "dagger", 0x2020 }, { "hearts", 0x2665 }, { "check", 0x2713 },
-    { "Eacute", 0xC9 }, { "Egrave", 0xC8 }, { "Aacute", 0xC1 }, { "Agrave", 0xC0 }, { "Ouml", 0xD6 },
-    { "Uuml", 0xDC }, { "Auml", 0xC4 }, { "Ccedil", 0xC7 }, { "Ntilde", 0xD1 }, { "aring", 0xE5 },
-    { "Aring", 0xC5 }, { "oslash", 0xF8 }, { "Oslash", 0xD8 }, { "aelig", 0xE6 }, { "AElig", 0xC6 },
-    { "ecirc", 0xEA }, { "acirc", 0xE2 }, { "ocirc", 0xF4 }, { "icirc", 0xEE }, { "ucirc", 0xFB },
-    { "euml", 0xEB }, { "iuml", 0xEF }, { "yuml", 0xFF }, { "atilde", 0xE3 }, { "otilde", 0xF5 },
-    { "lrm", 0x200E }, { "rlm", 0x200F }, { "macr", 0xAF }, { "acute", 0xB4 }, { "cedil", 0xB8 },
-    { "ordf", 0xAA }, { "ordm", 0xBA }, { "not", 0xAC }, { "micro", 0xB5 }, { "brvbar", 0xA6 },
-    { "uml", 0xA8 }, { "curren", 0xA4 }, { "sup1", 0xB9 }, { "sup2", 0xB2 }, { "sup3", 0xB3 },
-    { "alpha", 0x3B1 }, { "beta", 0x3B2 }, { "gamma", 0x3B3 }, { "delta", 0x3B4 }, { "pi", 0x3C0 },
-    { "sigma", 0x3C3 }, { "omega", 0x3C9 }, { "lambda", 0x3BB }, { "mu", 0x3BC }, { "theta", 0x3B8 },
-    { "infin", 0x221E }, { "ne", 0x2260 }, { "le", 0x2264 }, { "ge", 0x2265 }, { "sum", 0x2211 },
-    { "spades", 0x2660 }, { "clubs", 0x2663 }, { "diams", 0x2666 }, { "loz", 0x25CA }, { "permil", 0x2030 },
-    { "sbquo", 0x201A }, { "bdquo", 0x201E }, { "lsaquo", 0x2039 }, { "rsaquo", 0x203A }, { "oline", 0x203E },
-};
+#include "html_entities.inc"
 
-/* The code point of the named reference name (without '&' and ';'), 0 if
- * not one of the above. */
-uint32_t dom_parse_named_entity(const char *name, size_t len) {
-    for (size_t k = 0; k < sizeof(k_entities) / sizeof(k_entities[0]); k++)
-        if (strlen(k_entities[k].name) == len && !memcmp(name, k_entities[k].name, len)) return k_entities[k].cp;
-    return 0;
+/* (its place in the table, -1 none) */
+static int html_entity_find(const char *name, size_t len) {
+    int lo = 0, hi = (int)(sizeof(k_html_entities) / sizeof(k_html_entities[0])) - 1;
+    while (lo <= hi) {
+        int m = (lo + hi) / 2;
+        const char *n = k_html_entities[m].name;
+        size_t nl = strlen(n);
+        int c = memcmp(name, n, len < nl ? len : nl);
+        if (!c) c = len < nl ? -1 : len > nl ? 1 : 0;
+        if (!c) return m;
+        if (c < 0) hi = m - 1; else lo = m + 1;
+    }
+    return -1;
 }
 
-/* Character references, in place on a NUL-terminated buffer.  Numeric
- * references (decimal and hex) and the named ones above become UTF-8;
- * anything else is left as written.  Returns the new length. */
-uint32_t dom_parse_decode_entities(char *str, size_t len) {
-    char *dest = str;
-    const char *src = str, *end = str + len;
+/* The code points of the named reference name (without '&' and ';'); 0 if not one.
+ * A few are two: *second the other, else 0. */
+uint32_t dom_parse_named_entity2(const char *name, size_t len, uint32_t *second) {
+    int k = html_entity_find(name, len);
+    if (second) *second = k >= 0 ? k_html_entities[k].cp2 : 0;
+    return k >= 0 ? k_html_entities[k].cp : 0;
+}
+
+uint32_t dom_parse_named_entity(const char *name, size_t len) {
+    return dom_parse_named_entity2(name, len, NULL);
+}
+
+/* Character references, in place on a NUL-terminated buffer, as HTML's tokenizer takes them:
+ * numeric ones, and the longest name that matches (with its semicolon, or without one for
+ * the legacy names; in an attribute's value not when '=' or a letter or digit follows).
+ * Anything else is left as written.  Two references grow (&nGt;, &nLt;: 6 bytes for 5): the
+ * buffer has room for that, see dom_decode_room.  Returns the new length. */
+static uint32_t decode_entities(char *str, size_t len, bool attr) {
+    char *dest = str, *end = str + len;
+    const char *src = str;
     while (*src && src < end) {
         if (*src != '&') { *dest++ = *src++; continue; }
         if (src[1] == '#') {
@@ -174,25 +160,45 @@ uint32_t dom_parse_decode_entities(char *str, size_t len) {
                     0x201D, 0x2022, 0x2013, 0x2014, 0x2DC, 0x2122, 0x161, 0x203A, 0x153, 0x9D,
                     0x17E, 0x178 };
                 if (val >= 0x80 && val < 0xA0) val = c1[val - 0x80];
+                /* (none, past Unicode, a surrogate: the replacement character) */
+                if (val == 0 || val >= 0x110000 || (val >= 0xD800 && val <= 0xDFFF)) val = 0xFFFD;
                 dest += utf8_put(dest, val);
                 src = q;
                 continue;
             }
-        } else if (isalpha((unsigned char)src[1])) {
+        } else if (isalnum((unsigned char)src[1])) {
             const char *q = src + 1;
-            while (isalnum((unsigned char)*q) && q - src < 10) q++;
-            size_t nl = (size_t)(q - src - 1);
-            bool done = false;
-            for (size_t k = 0; k < sizeof(k_entities) / sizeof(k_entities[0]); k++) {
-                if (strlen(k_entities[k].name) == nl && strncmp(src + 1, k_entities[k].name, nl) == 0 &&
-                    (*q == ';' || k_entities[k].cp < 0x80)) {
-                    src = *q == ';' ? q + 1 : q;
-                    dest += utf8_put(dest, k_entities[k].cp);
-                    done = true;
-                    break;
+            while (isalnum((unsigned char)*q) && q - src <= 32) q++;
+            size_t run = (size_t)(q - src - 1);
+            int k = *q == ';' ? html_entity_find(src + 1, run) : -1;
+            size_t used = run + 2;   /* (with '&' and ';') */
+            if (k < 0) {
+                /* (the longest legacy name it starts with) */
+                for (size_t l = run; l >= 2 && k < 0; l--) {
+                    int m = html_entity_find(src + 1, l);
+                    if (m >= 0 && k_html_entities[m].legacy) { k = m; used = l + 1; }
+                }
+                if (k >= 0 && attr) {
+                    char nx = src[used];
+                    if (nx == '=' || isalnum((unsigned char)nx)) k = -1;
                 }
             }
-            if (done) continue;
+            if (k >= 0) {
+                char *after = (char *)src + used;
+                size_t need = (size_t)utf8_put((char[4]){0}, k_html_entities[k].cp) +
+                              (k_html_entities[k].cp2 ? (size_t)utf8_put((char[4]){0}, k_html_entities[k].cp2) : 0);
+                /* (what's left moved along when this one is longer than all that's free) */
+                if (dest + need > after) {
+                    size_t by = (size_t)(dest + need - after);
+                    memmove(after + by, after, (size_t)(end - after) + 1);
+                    after += by;
+                    end += by;
+                }
+                dest += utf8_put(dest, k_html_entities[k].cp);
+                if (k_html_entities[k].cp2) dest += utf8_put(dest, k_html_entities[k].cp2);
+                src = after;
+                continue;
+            }
         }
         *dest++ = *src++;
     }
@@ -200,11 +206,16 @@ uint32_t dom_parse_decode_entities(char *str, size_t len) {
     return (uint32_t)(dest - str);
 }
 
+uint32_t dom_parse_decode_entities(char *str, size_t len) { return decode_entities(str, len, false); }
+
+/* (what a buffer for n bytes of source should have, so a reference that grows fits) */
+static inline size_t dom_decode_room(size_t n) { return n + n / 5 + 2; }
+
 /* Text: kept as written (white-space processing belongs to CSS), with CR LF
  * and lone CR normalized to LF and character references decoded. */
 static DomStr tok_text(TokChunk *c, const char *s, size_t n) {
     DomStr r;
-    r.s = dom_arena_alloc(&c->arena, n + 2, &r.blk);
+    r.s = dom_arena_alloc(&c->arena, dom_decode_room(n), &r.blk);
     size_t cl = 0;
     for (size_t i = 0; i < n; i++) {
         if (s[i] == '\r') {
@@ -221,8 +232,11 @@ static DomStr tok_text(TokChunk *c, const char *s, size_t n) {
 
 static DomStr tok_attr_value(TokChunk *c, const char *s, size_t n) {
     if (n == 0) return (DomStr){ NULL, 0, 0 };
-    DomStr r = dom_arena_str(&c->arena, s, n);
-    r.len = dom_parse_decode_entities(r.s, strlen(r.s));
+    DomStr r;
+    r.s = dom_arena_alloc(&c->arena, dom_decode_room(n), &r.blk);
+    memcpy(r.s, s, n);
+    r.s[n] = 0;
+    r.len = decode_entities(r.s, strlen(r.s), true);
     if (r.len == 0) { dom_str_release(&r); return (DomStr){ NULL, 0, 0 }; }
     return r;
 }

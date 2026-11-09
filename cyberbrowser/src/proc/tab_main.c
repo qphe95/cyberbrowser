@@ -1326,7 +1326,7 @@ load:
              * come for seconds, so a time limit of the page's own can come sooner) */
             ULONGLONG real = GetTickCount64();
             if (!waiting_since) waiting_since = real;
-            if (virtual_time && real - waiting_since > 3000) page_time_advance(16);
+            if (virtual_time && real - waiting_since > 3000) page_time_advance(250);
         }
     }
 

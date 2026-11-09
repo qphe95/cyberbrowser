@@ -1511,25 +1511,37 @@ static GCValue js_document_write_common(JSContextHandle ctx, int argc, GCValue *
     return JS_UNDEFINED;
 }
 
+/* (is this the document of the page, or the one being parsed in this realm?  The page's
+ * stream writes those; any other, a frame's after it loaded, is written directly) */
+static bool doc_is_streamed(JSContextHandle ctx, GCValue doc_val) {
+    NodeId d = dom_node_of(doc_val);
+    if (SAFE_VALID(g_js_context) && d == dom_node_of(JS_GetPropertyStr(g_js_context, JS_GetGlobalObject(g_js_context), "document"))) return true;
+    return g_page && g_page->ctx == ctx && d == dom_node_of(JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document"));
+}
+static GCValue js_document_proto_w(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+static GCValue js_document_proto_wl(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+static GCValue js_document_proto_open(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+static GCValue js_document_proto_close(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+
 static GCValue js_document_write(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)this_val;
+    if (!doc_is_streamed(ctx, this_val)) return js_document_proto_w(ctx, this_val, argc, argv);
     return js_document_write_common(ctx, argc, argv, false);
 }
 
 static GCValue js_document_writeln(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)this_val;
+    if (!doc_is_streamed(ctx, this_val)) return js_document_proto_wl(ctx, this_val, argc, argv);
     return js_document_write_common(ctx, argc, argv, true);
 }
 
 static GCValue js_document_open(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)ctx; (void)argc; (void)argv;
+    if (!doc_is_streamed(ctx, this_val)) return js_document_proto_open(ctx, this_val, argc, argv);
     /* (While the page is parsed, or already opened, it is a no-op.) */
     if (!g_page && !g_opened) g_opened = page_stream_open();
     return this_val;
 }
 
 static GCValue js_document_close(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)argc; (void)argv;
+    if (!doc_is_streamed(ctx, this_val)) return js_document_proto_close(ctx, this_val, argc, argv);
     if (g_opened && g_opened == g_page) {
         HtmlPageStream *ps = g_opened;
         g_opened = NULL;
@@ -1541,6 +1553,7 @@ static GCValue js_document_close(JSContextHandle ctx, GCValue this_val, int argc
 
 extern GCValue throw_dom_exception(JSContextHandle ctx, const char *name, const char *msg);
 extern void frame_api_hold(bool hold);
+extern void frame_api_doc_closed(JSContextHandle ctx, NodeId doc);
 extern bool mo_any_observing(JSContextHandle ctx);
 extern bool mo_child_list_observed(JSContextHandle ctx, GCValue target);
 extern void mo_notify_child_list(JSContextHandle ctx, GCValue target, GCValue added, GCValue removed, GCValue prev, GCValue next);
@@ -1562,7 +1575,7 @@ static GCValue js_document_proto_write(JSContextHandle ctx, GCValue this_val, in
     if (!d || dom_kind(d) != DOM_K_DOCUMENT) return JS_ThrowTypeError(ctx, "Illegal invocation");
     if (dom_flags(d) & DOMF_XML_DOCUMENT)
         return throw_dom_exception(ctx, "InvalidStateError", "Only HTML documents support write().");
-    if (d == dom_node_of(JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document")))
+    if (doc_is_streamed(ctx, this_val))
         return js_document_write_common(ctx, argc, argv, newline != 0);
     if (g_doc_write.doc != d) {
         doc_write_end();
@@ -1585,14 +1598,25 @@ static GCValue js_document_proto_w(JSContextHandle ctx, GCValue this_val, int ar
 static GCValue js_document_proto_wl(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) { return js_document_proto_write(ctx, this_val, argc, argv, 1); }
 
 static GCValue js_document_proto_open(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)ctx; (void)argc; (void)argv;
-    if (g_doc_write.doc == dom_node_of(this_val)) doc_write_end();
+    (void)argc; (void)argv;
+    NodeId d = dom_node_of(this_val);
+    if (!d || dom_kind(d) != DOM_K_DOCUMENT) return this_val;
+    if (dom_flags(d) & DOMF_XML_DOCUMENT)
+        return throw_dom_exception(ctx, "InvalidStateError", "Only HTML documents support open().");
+    /* (its content goes now, and a parser is open until close) */
+    doc_write_end();
+    for (NodeId c = dom_first_child(d); c; c = dom_first_child(d)) dom_detach(c, false);
+    g_doc_write.doc = d;
+    g_doc_write.st = dom_stream_begin(d, d);
     return this_val;
 }
 
 static GCValue js_document_proto_close(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)ctx; (void)argc; (void)argv;
-    if (g_doc_write.doc == dom_node_of(this_val)) doc_write_end();
+    (void)argc; (void)argv;
+    if (g_doc_write.doc == dom_node_of(this_val)) {
+        doc_write_end();
+        frame_api_doc_closed(ctx, dom_node_of(this_val));
+    }
     return JS_UNDEFINED;
 }
 

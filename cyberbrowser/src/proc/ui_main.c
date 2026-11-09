@@ -308,6 +308,26 @@ static int new_tab(void) {
     return -1;
 }
 
+/* A tab asked to navigate in its process that hasn't answered: its page is stuck (in a
+ * script, in layout) and can't take it.  Another process for the address asked for, and
+ * this one ended.  CYBER_NAV_HANG_MS, default 5 s. */
+static void restart_hung_tabs(void) {
+    static int limit = -1;
+    if (limit < 0) { const char *e = getenv("CYBER_NAV_HANG_MS"); limit = e ? atoi(e) : 5000; }
+    if (limit <= 0) return;
+    double now = ui_now_ms();
+    for (int i = 0; i < MAX_TABS; i++) {
+        Tab *t = &g_tabs[i];
+        if (!t->used || !t->nav_wait || !t->id || now - t->start_ms < limit) continue;
+        ui_log("[ui] tab %u did not take a navigation in %d ms: restarted", t->id, limit);
+        t->nav_wait = false;
+        end_process(t);
+        t->reuses = 0;
+        start_process(t);
+        update_tab(t);
+    }
+}
+
 /* Put tab ti into window wi at position pos (clamped), active. */
 static void insert_tab(int wi, int ti, int pos) {
     Win *w = &g_wins[wi];
@@ -1090,6 +1110,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     case WM_TIMER:
         drain_all();            /* also during Windows' move and resize loops */
+        restart_hung_tabs();
         return 0;
     case WM_SIZE:
         w->cw = LOWORD(lp);
@@ -1214,7 +1235,9 @@ static bool script_command(void) {
             else watch_folder_of(wf_path);
         }
         if (wf_path[0]) {
-            bool done = GetFileAttributesA(wf_path) != INVALID_FILE_ATTRIBUTES || now - g_cmd_start >= (DWORD)wf_ms;
+            /* (its tab gone: nothing will ever write it) */
+            bool done = GetFileAttributesA(wf_path) != INVALID_FILE_ATTRIBUTES || now - g_cmd_start >= (DWORD)wf_ms ||
+                        (t && t->state == ST_CRASHED);
             g_in_waitfile = !done;
             return done;
         }

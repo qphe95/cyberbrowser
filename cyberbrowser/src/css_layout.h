@@ -429,6 +429,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char font_palette_set;
     unsigned char tcy;    /* (text-combine-upright: all, in a vertical flow: a horizontal cell 1em square) */
     unsigned char tw_balance, tw_balance_set;   /* (text-wrap-style: balance, inherited) */
+    float mm_fc_px[2], mm_fc_pct[2];   /* (min-/max-width: fit-content(L)) */
+    unsigned char mm_fc_set;           /* (bit 0 min, bit 1 max) */
     unsigned char hyphens, hyphens_set;   /* (0 manual, 1 none, 2 auto; inherited) */
     signed char hyl_word, hyl_before, hyl_after, hyl_set;   /* (hyphenate-limit-chars, inherited: -1 auto) */
     unsigned char orphans, widows, ow_set;   /* (inherited; 0: the initial 2; ow_set bit 1 orphans, 2 widows) */

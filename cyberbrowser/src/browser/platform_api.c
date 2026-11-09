@@ -26,6 +26,12 @@ static const char *web_animations_js =
 static const char *form_controls_js =
 #include "form_controls_js.inc"
 ;
+static const char *reflect_table_js =
+#include "reflect_table_js.inc"
+;
+static const char *reflect_js =
+#include "reflect_js.inc"
+;
 
 static const char *cssom_js =
 #include "cssom_js.inc"
@@ -118,6 +124,8 @@ void platform_api_install(JSContextHandle ctx, GCValue global, GCValue window)
     anim_api_install(ctx, global);
     platform_api_run(ctx, web_animations_js, "<web_animations>", global, window);
     platform_api_run(ctx, canvas_api_js, "<canvas_api>", global, window);
+    platform_api_run(ctx, reflect_table_js, "<reflect_table>", global, window);
+    platform_api_run(ctx, reflect_js, "<reflect>", global, window);
     platform_api_run(ctx, xpath_js, "<xpath>", global, window);
     platform_api_run(ctx, xslt_js, "<xslt>", global, window);
     dom_token_list_install(ctx, global, window);

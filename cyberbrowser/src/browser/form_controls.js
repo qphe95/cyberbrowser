@@ -592,7 +592,10 @@
     function patternMismatch(el) {
         var p = el.localName === 'input' ? el.getAttributeNS(null, 'pattern') : null;
         if (p === null || !el.value) return false;
-        try { return !new RegExp('^(?:' + p + ')$', 'v').test(el.value); } catch (e) { return false; }
+        /* (a bad pattern: none; one that gives up, too much backtracking: no match) */
+        var re;
+        try { re = new RegExp('^(?:' + p + ')$', 'v'); } catch (e) { return false; }
+        try { return !re.test(el.value); } catch (e) { return true; }
     }
     function rangeMismatch(el, attr, under) {
         if (el.localName !== 'input' || !el.value || inputType(el) !== 'number') return false;

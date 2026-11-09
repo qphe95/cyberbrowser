@@ -226,9 +226,10 @@ static bool reference(P *p, size_t *n, NodeId parent) {
         return ok;
     }
     if (p->html_ents) {
-        uint32_t c = dom_parse_named_entity(p->p, l);
+        uint32_t c2 = 0, c = dom_parse_named_entity2(p->p, l, &c2);
         if (c) {
             buf_cp(p, n, c);
+            if (c2) buf_cp(p, n, c2);
             p->p += l + 1;
             return true;
         }

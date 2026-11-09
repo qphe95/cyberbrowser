@@ -1017,6 +1017,28 @@ static void frame_load(Frame *f) {
     if (!g_frame_initial_only) frame_fire(f->parent, dom_js(f->parent, f->iframe), "load");
 }
 
+/* A frame's document written from outside (document.open, write, close): the parser
+ * stopped, so its load events come in a task of their own. */
+void frame_api_doc_closed(JSContextHandle ctx, NodeId doc)
+{
+    (void)ctx;
+    for (Frame *f = g_frames; f; f = f->next) {
+        if (!SAFE_VALID(f->ctx) || !SAFE_VALID(f->parent)) continue;
+        GCValue dv = JS_GetPropertyStr(f->ctx, JS_GetGlobalObject(f->ctx), "document");
+        if (dom_node_of(dv) != doc) continue;
+        static const char src[] =
+            "(function (win, frame) { setTimeout(function () {"
+            " try { win.document.readyState = 'complete'; } catch (e) {}"
+            " win.dispatchEvent(new win.Event('load'));"
+            " if (frame) frame.dispatchEvent(new Event('load'));"
+            "}, 0); })";
+        GCValue fn = JS_Eval(f->parent, src, sizeof src - 1, "<frame_doc_closed>", JS_EVAL_TYPE_GLOBAL);
+        GCValue argv[2] = { JS_GetGlobalObject(f->ctx), dom_js(f->parent, f->iframe) };
+        if (!JS_IsFunction(f->parent, fn) || JS_IsException(JS_Call(f->parent, fn, JS_UNDEFINED, 2, argv))) JS_GetException(f->parent);
+        return;
+    }
+}
+
 /* ---- window[i], window.length (HTML 7.2.3: the document-tree child
  * navigables), from the iframes of the realm's document in tree order ---- */
 

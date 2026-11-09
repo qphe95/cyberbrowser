@@ -924,7 +924,7 @@
         /* (a button that shows, hides or toggles a popover) */
         if ((el.localName === 'button' || (isInput && /^(button|submit|reset|image)$/.test(type))) && el.hasAttribute('popovertarget') &&
             !disabledControl(el) && !((type === 'submit' || type === 'image' || (el.localName === 'button' && buttonType(el) === 'submit')) && formOf(el))) {
-            var pt = el.ownerDocument.getElementById(el.getAttribute('popovertarget'));
+            var pt = 'popoverTargetElement' in el ? el.popoverTargetElement : el.ownerDocument.getElementById(el.getAttribute('popovertarget'));
             if (pt && pt.hasAttribute('popover') && typeof pt.togglePopover === 'function') {
                 var act = String(el.getAttribute('popovertargetaction') || 'toggle').toLowerCase();
                 try {
@@ -987,6 +987,26 @@
         if (!loc) return;
         var url;
         try { url = new global.URL(href, a.baseURI || loc.href); } catch (e) { return; }
+        /* (target: another browsing context, the link's own or its document's <base>) */
+        var target = a.getAttribute('target');
+        if (target === null) {
+            var bt = a.ownerDocument && a.ownerDocument.querySelector('base[target]');
+            if (bt) target = bt.getAttribute('target');
+        }
+        target = target === null ? '' : String(target).replace(/[\t\n]/g, '');
+        var tl = target.toLowerCase();
+        if (tl && tl !== '_self') {
+            if (tl === '_parent' || tl === '_top') {
+                var up = tl === '_top' ? view.top : view.parent;
+                if (up && up !== view) { up.location.href = url.href; return; }
+            } else if (typeof view.open === 'function') {
+                var rel = ' ' + String(a.getAttribute('rel') || '').toLowerCase().replace(/\s+/g, ' ') + ' ';
+                var noopen = rel.indexOf(' noopener ') >= 0 || rel.indexOf(' noreferrer ') >= 0 ||
+                             (tl === '_blank' && rel.indexOf(' opener ') < 0);
+                view.open(url.href, target, noopen ? 'noopener' : '');
+                return;
+            }
+        }
         var cur;
         try { cur = new global.URL(loc.href); } catch (e) { return; }
         /* same-document navigation: a fragment change */
@@ -1352,6 +1372,8 @@
         Object.defineProperty(loc, 'href', { configurable: true, enumerable: true,
             get: hrefDesc.get,
             set: function (v) {
+                try { new global.URL(String(v), global.document.baseURI); }
+                catch (e) { throw new global.DOMException("'" + v + "' is not a valid URL.", 'SyntaxError'); }
                 var t = fragmentOnly(v);
                 if (t) navigateToFragment(t);
                 else if (!leave(v)) { setHref(String(v)); entries[index] = { url: getHref(), state: null }; }
@@ -1360,6 +1382,9 @@
             var orig = loc[k];
             if (typeof orig !== 'function') return;
             define(loc, k, function (v) {
+                /* (one that doesn't parse: the document stays) */
+                try { new global.URL(String(v), global.document.baseURI); }
+                catch (e) { throw new global.DOMException("'" + v + "' is not a valid URL.", 'SyntaxError'); }
                 var t = fragmentOnly(v);
                 if (t) {
                     if (k === 'replace') { var old = getHref(); setHref(t); entries[index] = { url: t, state: null }; fireHistoryEvents(old, t, null, true); }

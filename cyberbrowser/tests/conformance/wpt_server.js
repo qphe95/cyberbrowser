@@ -572,7 +572,9 @@ const server = http.createServer((req, res) => {
         res.writeHead(200, { 'content-type': type });
         return res.end(body);
     }
-    const file = path.join(root, decodeURIComponent(url.pathname));
+    let decoded_path;
+    try { decoded_path = decodeURIComponent(url.pathname); } catch (e) { res.writeHead(400); return res.end(); }
+    const file = path.join(root, decoded_path);
     if (!file.startsWith(root) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
         res.writeHead(404); return res.end();
     }

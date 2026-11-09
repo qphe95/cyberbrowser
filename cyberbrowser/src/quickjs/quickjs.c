@@ -38199,6 +38199,10 @@ static JSModuleDefHandle js_find_loaded_module(JSContextHandle ctx, JSAtom name)
             continue;
         JSModuleDefHandle m = (JSModuleDefHandle)(h);
         if (SAFE_VALID(m) && SAFE_GET_OR(m, JSModuleDefHandle, module_name, 0) == name) {
+            /* (one whose compile failed stays listed with no code: nothing to link or run) */
+            if (SAFE_GET_OR(m, JSModuleDefHandle, init_func, NULL) == NULL &&
+                JS_IsUndefined(SAFE_GET_OR(m, JSModuleDefHandle, func_obj, GC_UNDEFINED)))
+                continue;
             return m;
         }
     }
