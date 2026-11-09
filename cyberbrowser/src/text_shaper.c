@@ -29,6 +29,8 @@ struct TextShaper {
     int             font_offset;
     int             embolden;      /* synthetic bold: extra pixels per glyph */
     stbtt_fontinfo  font;
+    const uint8_t  *colr, *cpal;   /* (the color font tables, NULL none) */
+    uint32_t        colr_len, cpal_len;
     float           size_pixels;
     float           scale;
     float           ascent;
@@ -635,6 +637,23 @@ static int ts_kern(const TextShaper *s, int g1, int g2)
     return stbtt_GetGlyphKernAdvance(&s->font, g1, g2);   /* neighbourhood full */
 }
 
+/* (where the font's COLR and CPAL tables are, when it has both in a form we read) */
+static void ts_find_color_tables(TextShaper *s, int offset)
+{
+    const uint8_t *d = s->ttf_data;
+    size_t sz = s->ttf_size, o = (size_t)offset;
+    if (o + 12 > sz) return;
+    uint32_t nt = (uint32_t)d[o + 4] << 8 | d[o + 5];
+    for (uint32_t i = 0; i < nt && o + 12 + 16 * (size_t)(i + 1) <= sz; i++) {
+        const uint8_t *r = d + o + 12 + 16 * i;
+        uint32_t at = (uint32_t)r[8] << 24 | (uint32_t)r[9] << 16 | (uint32_t)r[10] << 8 | r[11];
+        uint32_t len = (uint32_t)r[12] << 24 | (uint32_t)r[13] << 16 | (uint32_t)r[14] << 8 | r[15];
+        if ((size_t)at + len > sz) continue;
+        if (!memcmp(r, "COLR", 4) && len >= 14) { s->colr = d + at; s->colr_len = len; }
+        else if (!memcmp(r, "CPAL", 4) && len >= 12) { s->cpal = d + at; s->cpal_len = len; }
+    }
+}
+
 /* Record a glyph command drawing atlas rectangle r (none: a glyph without a
  * bitmap). */
 static bool ts_add_glyph(DisplayList *dl, float x, float y, float w, float h, const GaRect *r, int gi, float cr,
@@ -658,6 +677,90 @@ static int ts_size_q(float px)
     return (int)lroundf(px * 4.0f);
 }
 
+/* ---- COLR v0: a glyph drawn as a stack of other glyphs, each in a CPAL color ---- */
+static inline uint32_t ts_be16(const uint8_t *p) { return (uint32_t)p[0] << 8 | p[1]; }
+static inline uint32_t ts_be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+
+static __thread int t_pal_kind, t_pal_index;   /* (0 normal, 1 light, 2 dark, 3 this palette) */
+static __thread int t_pal_n;
+static __thread int t_pal_over_i[16];
+static __thread float t_pal_over[16][4];
+
+void text_shaper_set_palette(int kind, int index, const int *over_index, const float (*over_rgba)[4], int n)
+{
+    t_pal_kind = kind;
+    t_pal_index = index;
+    t_pal_n = n > 16 ? 16 : n < 0 ? 0 : n;
+    for (int i = 0; i < t_pal_n; i++) {
+        t_pal_over_i[i] = over_index[i];
+        memcpy(t_pal_over[i], over_rgba[i], sizeof t_pal_over[i]);
+    }
+}
+
+/* (which of the font's palettes: the asked one, the first light or dark, else the first) */
+static int ts_palette_pick(const TextShaper *o)
+{
+    const uint8_t *c = o->cpal;
+    uint32_t len = o->cpal_len, np = ts_be16(c + 4);
+    if (t_pal_kind == 3) return t_pal_index >= 0 && (uint32_t)t_pal_index < np ? t_pal_index : 0;
+    if (t_pal_kind == 0 || ts_be16(c) < 1) return 0;
+    uint32_t after = 12 + 2 * np;
+    if (after + 4 > len) return 0;
+    uint32_t types = ts_be32(c + after);
+    if (!types || types + 4 * np > len) return 0;
+    uint32_t want = t_pal_kind == 1 ? 1u : 2u;
+    for (uint32_t i = 0; i < np; i++) if (ts_be32(c + types + 4 * i) & want) return (int)i;
+    return 0;
+}
+
+/* (the color of entry e of the palette: an override's, else the font's; false none) */
+static bool ts_palette_color(const TextShaper *o, int pal, uint32_t e, float *rgba)
+{
+    for (int i = t_pal_n - 1; i >= 0; i--)
+        if ((uint32_t)t_pal_over_i[i] == e) { memcpy(rgba, t_pal_over[i], sizeof t_pal_over[i]); return true; }
+    const uint8_t *c = o->cpal;
+    uint32_t len = o->cpal_len;
+    uint32_t ne = ts_be16(c + 2), first = ts_be32(c + 8), at = ts_be16(c + 12 + 2 * (uint32_t)pal);
+    if (e >= ne || first + 4 * (at + e) + 4 > len) return false;
+    const uint8_t *rec = c + first + 4 * (at + e);   /* (blue, green, red, alpha) */
+    rgba[0] = rec[2] / 255.0f; rgba[1] = rec[1] / 255.0f; rgba[2] = rec[0] / 255.0f; rgba[3] = rec[3] / 255.0f;
+    return true;
+}
+
+static bool ts_draw_glyph(DisplayList *dl, const TextShaper *o, int gi, float pen_x, float base_y, float scale,
+                          float r, float g, float b, float a);
+
+/* (glyph gi's color layers, if it has any: drawn; false: it's a plain glyph) */
+static bool ts_draw_color_glyph(DisplayList *dl, const TextShaper *o, int gi, float pen_x, float base_y, float scale,
+                                float r, float g, float b, float a, bool *ok)
+{
+    const uint8_t *c = o->colr;
+    uint32_t len = o->colr_len;
+    uint32_t nb = ts_be16(c + 2), bo = ts_be32(c + 4), lo = ts_be32(c + 8), nl = ts_be16(c + 12);
+    if (bo + 6 * nb > len || lo + 4 * nl > len) return false;
+    uint32_t lo_i = 0, hi = nb;
+    while (lo_i < hi) {
+        uint32_t m = (lo_i + hi) / 2, id = ts_be16(c + bo + 6 * m);
+        if (id == (uint32_t)gi) {
+            uint32_t first = ts_be16(c + bo + 6 * m + 2), n = ts_be16(c + bo + 6 * m + 4);
+            if (first + n > nl) return false;
+            int pal = o->cpal ? ts_palette_pick(o) : 0;
+            for (uint32_t k = 0; k < n; k++) {
+                const uint8_t *L = c + lo + 4 * (first + k);
+                uint32_t lg = ts_be16(L), e = ts_be16(L + 2);
+                float col[4] = { r, g, b, 1.0f };
+                /* (0xFFFF: the text's color) */
+                if (e != 0xFFFF && o->cpal && !ts_palette_color(o, pal, e, col)) continue;
+                if (!ts_draw_glyph(dl, o, -(int)lg - 1, pen_x, base_y, scale, col[0], col[1], col[2], col[3] * a)) { *ok = false; return true; }
+            }
+            *ok = true;
+            return true;
+        }
+        if (id < (uint32_t)gi) lo_i = m + 1; else hi = m;
+    }
+    return false;
+}
+
 /* Glyph gi of font o drawn with its pen at (pen_x, base_y), o's size times
  * scale: from o's strike at that size, where the glyph's box falls on the
  * right pixels (a scaled bitmap was a pixel or more off at large sizes, and
@@ -666,6 +769,12 @@ static int ts_size_q(float px)
 static bool ts_draw_glyph(DisplayList *dl, const TextShaper *o, int gi, float pen_x, float base_y, float scale,
                           float r, float g, float b, float a)
 {
+    /* (a layer comes back as -gid - 1: drawn plainly) */
+    if (gi < 0) gi = -gi - 1;
+    else if (o->colr) {
+        bool ok = true;
+        if (ts_draw_color_glyph(dl, o, gi, pen_x, base_y, scale, r, g, b, a, &ok)) return ok;
+    }
     float px = o->size_pixels * scale;
     GaRect rc;
     if (fabsf(scale - 1.0f) > 0.01f && px >= 4.0f && px <= 512.0f) {
@@ -858,6 +967,7 @@ static TextShaper *ts_create(uint8_t *data, size_t size, int font_index, float s
         text_shaper_destroy(s);
         return NULL;
     }
+    ts_find_color_tables(s, offset);
     s->metric_pages = calloc(TS_METRIC_PAGES, sizeof(*s->metric_pages));
     s->kern = calloc(TS_KERN_SLOTS, sizeof(*s->kern));
     if (!s->metric_pages || !s->kern) {

@@ -1176,9 +1176,101 @@ typedef struct { char family[64], kind[24], name[48]; int vals[4], n; } FfvEntry
 static FfvEntry *g_ffv;
 static int g_ffv_n, g_ffv_cap;
 static pthread_mutex_t g_ffv_mu = PTHREAD_MUTEX_INITIALIZER;
+/* ---- @font-palette-values ---- */
+typedef struct { char name[64], family[256], over[512]; int kind, index; } PpvEntry;
+static PpvEntry *g_ppv;
+static int g_ppv_n, g_ppv_cap;
+bool font_palette_values_get(const char *families, const char *name, int *kind, int *index, char *overrides, size_t cap)
+{
+    bool got = false;
+    pthread_mutex_lock(&g_ffv_mu);
+    for (int i = g_ppv_n - 1; i >= 0 && !got; i--) {
+        const PpvEntry *e = &g_ppv[i];
+        if (strcmp(e->name, name) || !families || !e->family[0]) continue;
+        /* (one of the rule's families among the box's) */
+        for (const char *q = e->family; *q && !got;) {
+            while (*q == ',' || *q == '"' || *q == '\'' || isspace((unsigned char)*q)) q++;
+            const char *qe = q;
+            while (*qe && *qe != ',' && *qe != '"' && *qe != '\'') qe++;
+            size_t fl = (size_t)(qe - q);
+            while (fl > 0 && isspace((unsigned char)q[fl - 1])) fl--;
+            for (const char *p = families; fl > 0 && *p && !got; p++)
+                if (!strncasecmp(p, q, fl) && (p == families || !(isalnum((unsigned char)p[-1]) || p[-1] == '-')) && !(isalnum((unsigned char)p[fl]) || p[fl] == '-')) got = true;
+            q = qe;
+            while (*q == '"' || *q == '\'') q++;
+        }
+        if (!got) continue;
+        *kind = e->kind;
+        *index = e->index;
+        snprintf(overrides, cap, "%s", e->over);
+    }
+    pthread_mutex_unlock(&g_ffv_mu);
+    return got;
+}
+static void ppv_scan(const char *css, size_t len)
+{
+    const char *end = css + len;
+    for (const char *p = css; p < end; p++) {
+        if (*p != '@' || (size_t)(end - p) < 20 || strncasecmp(p, "@font-palette-values", 20)) continue;
+        const char *q = p + 20;
+        while (q < end && isspace((unsigned char)*q)) q++;
+        const char *ne = q;
+        while (ne < end && !isspace((unsigned char)*ne) && *ne != '{') ne++;
+        const char *ob = ne;
+        while (ob < end && *ob != '{') ob++;
+        const char *cb = ob;
+        while (cb < end && *cb != '}') cb++;
+        if (cb >= end) return;
+        PpvEntry e;
+        memset(&e, 0, sizeof e);
+        snprintf(e.name, sizeof e.name, "%.*s", (int)(ne - q), q);
+        for (const char *d = ob + 1; d < cb;) {
+            while (d < cb && (isspace((unsigned char)*d) || *d == ';')) d++;
+            const char *c = d;
+            while (c < cb && *c != ':') c++;
+            if (c >= cb) break;
+            const char *v = c + 1, *ve = v;
+            /* (a declaration runs to a ; outside quotes and parentheses) */
+            int depth = 0; char quote = 0;
+            while (ve < cb && (quote || depth || *ve != ';')) {
+                if (quote) { if (*ve == quote) quote = 0; }
+                else if (*ve == '"' || *ve == '\'') quote = *ve;
+                else if (*ve == '(') depth++;
+                else if (*ve == ')') depth--;
+                ve++;
+            }
+            while (v < ve && isspace((unsigned char)*v)) v++;
+            const char *vt = ve;
+            while (vt > v && isspace((unsigned char)vt[-1])) vt--;
+            size_t pl = (size_t)(c - d);
+            while (pl > 0 && isspace((unsigned char)d[pl - 1])) pl--;
+            if (pl == 11 && !strncasecmp(d, "font-family", 11)) {
+                snprintf(e.family, sizeof e.family, "%.*s", (int)(vt - v), v);
+            } else if (pl == 12 && !strncasecmp(d, "base-palette", 12)) {
+                if (vt - v == 5 && !strncasecmp(v, "light", 5)) e.kind = 1;
+                else if (vt - v == 4 && !strncasecmp(v, "dark", 4)) e.kind = 2;
+                else if (vt > v && isdigit((unsigned char)*v)) { e.kind = 3; e.index = atoi(v); }
+            } else if (pl == 15 && !strncasecmp(d, "override-colors", 15)) {
+                snprintf(e.over, sizeof e.over, "%.*s", (int)(vt - v), v);
+            }
+            d = ve;
+        }
+        pthread_mutex_lock(&g_ffv_mu);
+        if (g_ppv_n == g_ppv_cap) {
+            int nc = g_ppv_cap ? g_ppv_cap * 2 : 16;
+            PpvEntry *ne2 = (PpvEntry *)realloc(g_ppv, (size_t)nc * sizeof(PpvEntry));
+            if (ne2) { g_ppv = ne2; g_ppv_cap = nc; }
+        }
+        if (g_ppv_n < g_ppv_cap) g_ppv[g_ppv_n++] = e;
+        pthread_mutex_unlock(&g_ffv_mu);
+        p = cb;
+    }
+}
+
 void font_feature_values_reset(void)
 {
     pthread_mutex_lock(&g_ffv_mu);
+    g_ppv_n = 0;
     g_ffv_n = 0;
     pthread_mutex_unlock(&g_ffv_mu);
 }
@@ -1287,6 +1379,7 @@ static void ffv_scan(const char *css, size_t len)
 void font_registry_scan_css(const char *css, size_t len, const char *base_url)
 {
     ffv_scan(css, len);
+    ppv_scan(css, len);
     if (!css || len < 10) return;
     /* Layouts hand the same sheets over again and again: a text seen before
      * (same length and bytes, and base) is not rescanned.  (Sheets a script

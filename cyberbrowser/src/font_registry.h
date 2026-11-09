@@ -84,6 +84,9 @@ bool font_registry_set_default_file(const char *path);
 /* @font-feature-values: the numbers `name` stands for in family's `kind` block
  * (styleset, stylistic, ...); the count, 0 when not defined. */
 int font_feature_values_get(const char *family, const char *kind, const char *name, int *vals, int cap);
+/* (@font-palette-values --name, for a font-family list: its base palette (kind 0 none, 1 light,
+ * 2 dark, 3 index), override colors as text; false: no such rule for these families) */
+bool font_palette_values_get(const char *families, const char *name, int *kind, int *index, char *overrides, size_t cap);
 void font_feature_values_reset(void);
 
 #endif /* FONT_REGISTRY_H */

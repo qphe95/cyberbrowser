@@ -73,6 +73,8 @@ void text_shaper_set_spacing(float letter_px, float word_px, float scale);
 /* OpenType features (4-byte tags, as 'smcp' = 0x736d6370) the text measured
  * and drawn next takes: their single and alternate substitutions; n = 0 none. */
 void text_shaper_set_features(const uint32_t *tags, int n);
+/* (the palette color glyphs use on this thread: kind 0 normal, 1 light, 2 dark, 3 palette index; n overrides) */
+void text_shaper_set_palette(int kind, int index, const int *over_index, const float (*over_rgba)[4], int n);
 /* The other fonts of the element's font-family list, tried in order for a
  * character the font lacks before the registry's fallbacks (n 0: none). */
 void text_shaper_set_chain(TextShaper *const *fonts, int n);

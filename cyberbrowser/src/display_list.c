@@ -100,6 +100,45 @@ bool display_list_add_border(DisplayList *dl, float x, float y, float w, float h
     return true;
 }
 
+/* (font-palette: the palette and override colors this box's color glyphs use) */
+static void dl_apply_font_palette(const LayoutStyle *st)
+{
+    const char *v = st->font_palette;
+    if (!v) { text_shaper_set_palette(0, 0, NULL, NULL, 0); return; }
+    if (!strcasecmp(v, "light")) { text_shaper_set_palette(1, 0, NULL, NULL, 0); return; }
+    if (!strcasecmp(v, "dark")) { text_shaper_set_palette(2, 0, NULL, NULL, 0); return; }
+    int kind = 0, index = 0, n = 0, oi[16];
+    float oc[16][4];
+    char over[512];
+    over[0] = 0;
+    if (strncmp(v, "--", 2) || !font_palette_values_get(st->font_family, v, &kind, &index, over, sizeof over)) {
+        text_shaper_set_palette(0, 0, NULL, NULL, 0);
+        return;
+    }
+    /* (index color, index color, ...) */
+    for (const char *p = over; *p && n < 16;) {
+        while (isspace((unsigned char)*p) || *p == ',') p++;
+        if (!isdigit((unsigned char)*p)) break;
+        char *e;
+        long ix = strtol(p, &e, 10);
+        p = e;
+        while (isspace((unsigned char)*p)) p++;
+        const char *ce = p;
+        int depth = 0;
+        while (*ce && (depth || *ce != ',')) { if (*ce == '(') depth++; else if (*ce == ')') depth--; ce++; }
+        char col[64];
+        snprintf(col, sizeof col, "%.*s", (int)(ce - p), p);
+        double rgba[4];
+        if (css_layout_parse_color_text(col, rgba)) {
+            oi[n] = (int)ix;
+            for (int k = 0; k < 4; k++) oc[n][k] = (float)rgba[k];
+            n++;
+        }
+        p = ce;
+    }
+    text_shaper_set_palette(kind, index, oi, (const float (*)[4])oc, n);
+}
+
 bool display_list_add_glyph(DisplayList *dl, float x, float y, float w, float h,
                             float u0, float v0, float u1, float v1,
                             uint32_t glyph_index,
@@ -5572,6 +5611,14 @@ static void paint_context(const LayoutContext *ctx, int root, PaintVec *out, int
     paint_walk(ctx, root, &L, root != ctx->tree.root_idx && !paint_is_context(ctx, root));
     paint_sort_z(ctx, &L.negs);
     paint_sort_z(ctx, &L.pos);
+    /* (in a 3D rendering context: by depth, the eye's nearest last) */
+    if (css_layout_style_keeps3d(ctx->boxes[root].s))
+        for (int a = 1; a < L.zeros.n; a++) {
+            int x = L.zeros.v[a], b = a - 1;
+            double zx = css_layout_box_depth3d(ctx, x);
+            while (b >= 0 && css_layout_box_depth3d(ctx, L.zeros.v[b]) > zx) { L.zeros.v[b + 1] = L.zeros.v[b]; b--; }
+            L.zeros.v[b + 1] = x;
+        }
     for (int k = 0; k < L.negs.n; k++) paint_context(ctx, L.negs.v[k], out, depth + 1);
     for (int k = 0; k < L.blocks.n; k++) pv_push(out, L.blocks.v[k]);
     for (int k = 0; k < L.floats.n; k++) paint_context(ctx, L.floats.v[k], out, depth + 1);
@@ -5632,12 +5679,23 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         const LayoutStyle *ks = ctx->boxes[k].s;
         any_tf = ks && (ks->tf_text || ks->tf_rotate || ks->tf_scale || ks->op_kind);
     }
+    bool any3d = false;
+    /* (only what paints: under display: none a box may never have been styled) */
+    for (int k = 0; k < order.n && !any3d; k++) {
+        const LayoutStyle *ks = ctx->boxes[order.v[k]].s;
+        if (ks && ks->display != CSS_DISPLAY_NONE) any3d = css_layout_style_3d(ks);
+    }
+    if (any3d) any_tf = true;
+    bool pending_hidden = false;
     float cur_xf[6] = { 1, 0, 0, 1, 0, 0 };
     enum { CBMAX = 256 };
     int cbt[CBMAX], cba[CBMAX], cbb[CBMAX], ncb = 0;   /* (collapsed cell borders waiting for their table's end) */
 
     for (int k = 0; k < order.n; k++) {
         int i = order.v[k];
+        /* (facing away, hidden: what it painted taken back) */
+        if (pending_box >= 0 && pending_hidden) { dl->count = pending_from; dl->mask_count = pending_mask; }
+        pending_hidden = false;
         if (pending_box >= 0 && off) dl_scroll_range(dl, pending_from, pending_mask, off[pending_box]);
         if (pending_box >= 0 && clip) dl_clip_range(dl, pending_from, clip[pending_box]);
         if (pending_box >= 0 && any_mc) {
@@ -5666,7 +5724,8 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         }
         if (any_tf) {
             double m[6] = { 1, 0, 0, 1, 0, 0 };
-            if (!css_layout_box_map(ctx, i, -1, m)) { m[0] = m[3] = 1.0; m[1] = m[2] = m[4] = m[5] = 0.0; }
+            if (any3d) css_layout_box_map3d(ctx, i, m, &pending_hidden);
+            else if (!css_layout_box_map(ctx, i, -1, m)) { m[0] = m[3] = 1.0; m[1] = m[2] = m[4] = m[5] = 0.0; }
             float f[6];
             for (int q = 0; q < 6; q++) f[q] = (float)m[q];
             if (memcmp(f, cur_xf, sizeof f) && display_list_reserve(dl, 1)) {
@@ -6175,6 +6234,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     text_shaper_set_spacing(box->s->letter_spacing, box->s->word_spacing, scale);
                     text_shaper_set_autospace(box->s->autospace);
                     text_shaper_set_features(box->s->ot_tags, box->s->ot_n);
+                    dl_apply_font_palette(box->s);
                     display_list_set_font_chain(box->s->font_family, box->s->font_weight, box->s->font_italic ? 1 : 0);
                     /* The white-space processed text the layout measured. */
                     const char *run_text = css_layout_box_text(ctx, i, css_layout_node_text(ctx, node));
@@ -6399,6 +6459,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     if (!(tfl && tfl->n > 0))
                         emit_text_decorations(dl, from_cmd, fs, box->s->text_decoration, tr, tg, tb, ta);
                     text_shaper_set_features(NULL, 0);
+                    if (box->s->font_palette) text_shaper_set_palette(0, 0, NULL, NULL, 0);
                     text_shaper_set_chain(NULL, 0);
                     if (vert_text) {
                         box->x = box_x0;
@@ -6747,6 +6808,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         }
 
     }
+    if (pending_box >= 0 && pending_hidden) { dl->count = pending_from; dl->mask_count = pending_mask; }
     if (pending_box >= 0 && off) dl_scroll_range(dl, pending_from, pending_mask, off[pending_box]);
     if (pending_box >= 0 && clip) dl_clip_range(dl, pending_from, clip[pending_box]);
     if (pending_box >= 0 && any_mc) {

@@ -146,6 +146,7 @@ set(BE_SOURCES
     src/page_engine.c
     src/raster_cpu.c
     src/svg_filter.c
+    src/hyphen.c
     src/raster_page.c
     src/tls_client.c
     src/proc/net_policy.c

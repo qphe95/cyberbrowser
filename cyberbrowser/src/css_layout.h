@@ -425,6 +425,12 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char owrap, owrap_set; /* (overflow-wrap, inherited: 1 break-word, 2 anywhere) */
     const char *hyph_char;          /* (hyphenate-character, inherited: the string, NULL auto) */
     unsigned char hyph_char_set;
+    const char *font_palette;       /* (font-palette, inherited: the text, NULL normal) */
+    unsigned char font_palette_set;
+    unsigned char tcy;    /* (text-combine-upright: all, in a vertical flow: a horizontal cell 1em square) */
+    unsigned char tw_balance, tw_balance_set;   /* (text-wrap-style: balance, inherited) */
+    unsigned char hyphens, hyphens_set;   /* (0 manual, 1 none, 2 auto; inherited) */
+    signed char hyl_word, hyl_before, hyl_after, hyl_set;   /* (hyphenate-limit-chars, inherited: -1 auto) */
     unsigned char orphans, widows, ow_set;   /* (inherited; 0: the initial 2; ow_set bit 1 orphans, 2 widows) */
     unsigned char text_orient, text_orient_set;   /* (text-orientation, inherited: 0 mixed, 1 upright, 2 sideways) */
     unsigned char disp_contents;    /* (display: contents: laid out as an inline with no box of its own) */
@@ -665,6 +671,9 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     double tft_x, tft_y, tft_xpct, tft_ypct, tpr_x, tpr_y, tpr_xpct, tpr_ypct;
     /* (more than a translation: as written; the box itself stays where it's laid out) */
     const char *tf_text, *tf_origin, *tf_rotate, *tf_scale;
+    double persp;                 /* (perspective: its length, 0 none) */
+    const char *persp_origin;     /* (perspective-origin as written, NULL the centre) */
+    unsigned char t3d_preserve, backface_hidden;   /* (transform-style: preserve-3d; backface-visibility: hidden) */
     const char *tf_raw;     /* (transform as written, translations too: for SVG elements) */
     unsigned char tb_trim, tb_over, tb_under;
     float h_lh;             /* (height in lh: of the line height the element comes to; 0 none) */
@@ -1244,6 +1253,14 @@ const char *css_layout_element_custom(LayoutContext *ctx, int idx, const char *n
  * custom properties of box holder (its nearest styled ancestor). */
 bool css_layout_dom_cascade(LayoutContext *ctx, int dom, int holder, CssCascadeFn fn, void *ud);
 bool css_layout_parse_color_text(const char *text, double *rgba);
+/* (does this box's style use what only a 3D transform chain can do?) */
+bool css_layout_style_3d(const LayoutStyle *s);
+/* (how near the eye a box's centre is within its 3D rendering context) */
+double css_layout_box_depth3d(const LayoutContext *ctx, int idx);
+bool css_layout_style_keeps3d(const LayoutStyle *s);
+/* (a box's 2D map through the 3D chain of its ancestors, flattened at its place; *hidden: it
+ * or what it is flattened into faces away with backface-visibility: hidden, or is behind the eye) */
+bool css_layout_box_map3d(const LayoutContext *ctx, int idx, double m[6], bool *hidden);
 /* The user agent's display of an element with tag (lower case). */
 const char *css_layout_tag_display(const char *tag);
 /* Layouts on kept trees reuse clean subtrees from the last layout's calls:
