@@ -129,6 +129,8 @@ typedef struct CssSimpleSelector {
     char not_list_arg[400];
     int  child_pos;          /* 0=none, 1=:first-child, 2=:last-child, 3=:only-child */
     int  dir_val;            /* :dir(): 1 ltr, 2 rtl, 3 neither (matches nothing) */
+    uint32_t slotted_id;     /* (:-webkit-cyber-slotted(N), ::slotted() of host N's tree: a node assigned to a slot of it) */
+    bool slotted_host;       /* (written after :host: that much more specific) */
     uint32_t node_id;        /* (:-webkit-cyber-host(N), a shadow host's scoping: the element with NodeId N) */
     char lang_ranges[96];    /* (:lang() with a list, wildcards or several subtags: its ranges, extended filtering) */
     int  type_pos;           /* 0=none, 1=:first-of-type, 2=:last-of-type, 3=:only-of-type */
@@ -199,7 +201,7 @@ int css_sel_chain_specificity(const CssSelectorPart *parts, int count);
 /* True for the parser's whitespace set (space, tab, CR, LF, FF). */
 /* (a compound of nothing but pseudo-classes tests something too; a pseudo-element alone doesn't) */
 static inline bool css_simple_substantive(const CssSimpleSelector *s) {
-    return s->has_substantive || s->child_pos || s->dir_val || s->node_id || s->lang_ranges[0] || s->type_pos || s->nth_kind || s->state_mask || s->requires_empty ||
+    return s->has_substantive || s->child_pos || s->dir_val || s->node_id || s->slotted_id || s->lang_ranges[0] || s->type_pos || s->nth_kind || s->state_mask || s->requires_empty ||
            s->requires_link || s->not_active || s->not_list_active || s->lang_count;
 }
 

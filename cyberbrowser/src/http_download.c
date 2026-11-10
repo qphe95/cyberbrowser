@@ -2043,16 +2043,141 @@ void http_mark_cors_url(const char *url)
     free(old);
 }
 
+/* ---- what url() request modifiers asked of a URL's fetch ---- */
+#define HTTP_NOTE_MAX 128
+typedef struct HttpUrlNote { char *url, *origin, *referer, *integrity; int cors; } HttpUrlNote;
+static HttpUrlNote g_notes[HTTP_NOTE_MAX];
+static size_t g_notes_n;
+
+static bool note_same(const char *a, const char *b) { return a ? (b && !strcmp(a, b)) : !b; }
+
+void http_note_url_request(const char *url, int cors, const char *origin, const char *referer, const char *integrity)
+{
+    if (!url) return;
+    res_lock();
+    HttpUrlNote *n = NULL;
+    for (size_t i = 0; i < g_notes_n && i < HTTP_NOTE_MAX && !n; i++) if (!strcmp(g_notes[i].url, url)) n = &g_notes[i];
+    if (n && n->cors == cors && note_same(n->origin, origin) && note_same(n->referer, referer) && note_same(n->integrity, integrity)) {
+        res_unlock();
+        return;
+    }
+    if (!n) {
+        n = &g_notes[g_notes_n++ % HTTP_NOTE_MAX];
+        free(n->url);
+        n->url = strdup(url);
+    }
+    free(n->origin); free(n->referer); free(n->integrity);
+    n->origin = origin ? strdup(origin) : NULL;
+    n->referer = referer ? strdup(referer) : NULL;
+    n->integrity = integrity ? strdup(integrity) : NULL;
+    n->cors = cors;
+    if (!n->url) n->url = strdup("");
+    res_unlock();
+}
+
+int mbedtls_sha256(const unsigned char *input, size_t ilen, unsigned char *output, int is224);
+int mbedtls_sha512(const unsigned char *input, size_t ilen, unsigned char *output, int is384);
+
+/* Whether a body is what integrity metadata says: one of the digests of its strongest algorithm. */
+static bool integrity_holds(const char *meta, const unsigned char *body, size_t len)
+{
+    static const char *const alg[] = { "sha256-", "sha384-", "sha512-" };
+    int best = -1;
+    for (const char *p = meta; *p; ) {
+        while (*p == ' ') p++;
+        for (int a = 0; a < 3; a++) if (!strncasecmp(p, alg[a], 7) && a > best) best = a;
+        while (*p && *p != ' ') p++;
+    }
+    if (best < 0) return true;   /* (nothing it knows: nothing asked) */
+    unsigned char dg[64];
+    size_t dn = best == 0 ? 32 : best == 1 ? 48 : 64;
+    if (best == 0 ? mbedtls_sha256(body, len, dg, 0) : mbedtls_sha512(body, len, dg, best == 1)) return false;
+    static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    char enc[96];
+    size_t o = 0;
+    for (size_t i = 0; i < dn; i += 3) {
+        unsigned v = (unsigned)dg[i] << 16 | (i + 1 < dn ? (unsigned)dg[i + 1] << 8 : 0) | (i + 2 < dn ? dg[i + 2] : 0);
+        enc[o++] = b64[v >> 18];
+        enc[o++] = b64[(v >> 12) & 63];
+        enc[o++] = i + 1 < dn ? b64[(v >> 6) & 63] : '=';
+        enc[o++] = i + 2 < dn ? b64[v & 63] : '=';
+    }
+    enc[o] = 0;
+    for (const char *p = meta; *p; ) {
+        while (*p == ' ') p++;
+        const char *e = p;
+        while (*e && *e != ' ' && *e != '?') e++;
+        if (!strncasecmp(p, alg[best], 7) && (size_t)(e - p - 7) == o && !strncmp(p + 7, enc, o)) return true;
+        while (*e && *e != ' ') e++;
+        p = e;
+    }
+    return false;
+}
+
+/* A response header's value in a raw header block. */
+static bool raw_header(const char *headers, const char *name, char *out, size_t cap)
+{
+    size_t nl = strlen(name);
+    for (const char *p = headers; p && *p; ) {
+        const char *e = strchr(p, '\n');
+        if (!strncasecmp(p, name, nl) && p[nl] == ':') {
+            const char *v = p + nl + 1;
+            while (*v == ' ' || *v == '\t') v++;
+            size_t k = 0;
+            while (*v && *v != '\r' && *v != '\n' && k + 1 < cap) out[k++] = *v++;
+            while (k && out[k - 1] == ' ') k--;
+            out[k] = 0;
+            return true;
+        }
+        p = e ? e + 1 : NULL;
+    }
+    return false;
+}
+
 bool http_get_to_memory(const char *url, HttpBuffer *outBuffer,
                         char *err, size_t errLen) {
     double t0 = wall_ms();
     bool cors = false;
+    int n_cors = 0;
+    bool noted = false;
+    char n_origin[300] = "", n_integ[600] = "", h_origin[320], h_ref[2200];
+    const char *hs[3];
+    size_t hn = 0;
     res_lock();
     for (size_t i = 0; i < g_cors_n && i < HTTP_CORS_MAX && !cors; i++) cors = !strcmp(g_cors_urls[i], url);
+    for (size_t i = 0; i < g_notes_n && i < HTTP_NOTE_MAX && !noted; i++) {
+        const HttpUrlNote *n = &g_notes[i];
+        if (strcmp(n->url, url)) continue;
+        noted = true;
+        n_cors = n->cors;
+        if (n->origin) snprintf(n_origin, sizeof n_origin, "%s", n->origin);
+        if (n->integrity) snprintf(n_integ, sizeof n_integ, "%s", n->integrity);
+        if (n->referer && n->referer[0]) { snprintf(h_ref, sizeof h_ref, "Referer: %s", n->referer); hs[hn++] = h_ref; }
+    }
     res_unlock();
-    static const char *const k_cors[] = { "Sec-Fetch-Mode: cors" };
-    bool ok = cors ? http_get_to_memory_with_headers(url, (const char **)k_cors, 1, outBuffer, err, errLen)
-                   : http_request(url, outBuffer, err, errLen, NULL, NULL);
+    /* (cors across origins only) */
+    if (n_cors && (!n_origin[0] || (!strncmp(url, n_origin, strlen(n_origin)) && url[strlen(n_origin)] == '/'))) n_cors = 0;
+    if (cors || n_cors) hs[hn++] = "Sec-Fetch-Mode: cors";
+    if (n_cors) { snprintf(h_origin, sizeof h_origin, "Origin: %s", n_origin); hs[hn++] = h_origin; }
+    bool ok = hn ? http_get_to_memory_with_headers(url, hs, hn, outBuffer, err, errLen)
+                 : http_request(url, outBuffer, err, errLen, NULL, NULL);
+    if (ok && noted) {
+        const char *why = NULL;
+        char acao[320] = "", acac[16] = "";
+        if (n_cors) {
+            if (!outBuffer->headers || !raw_header(outBuffer->headers, "Access-Control-Allow-Origin", acao, sizeof acao)) why = "no Access-Control-Allow-Origin";
+            else if (strcmp(acao, n_origin) && (n_cors == 2 || strcmp(acao, "*"))) why = "Access-Control-Allow-Origin is another origin's";
+            else if (n_cors == 2 && (!raw_header(outBuffer->headers, "Access-Control-Allow-Credentials", acac, sizeof acac) || strcmp(acac, "true")))
+                why = "no Access-Control-Allow-Credentials";
+        }
+        if (!why && n_integ[0] && !integrity_holds(n_integ, (const unsigned char *)(outBuffer->data ? outBuffer->data : ""), outBuffer->size))
+            why = "integrity mismatch";
+        if (why) {
+            snprintf(err, errLen, "blocked: %s", why);
+            http_free_buffer(outBuffer);
+            ok = false;
+        }
+    }
     char *c = strdup(url);
     if (c) {
         double t1 = wall_ms();

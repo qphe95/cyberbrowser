@@ -2738,7 +2738,7 @@ static void mir_compose(NodeId s, int m, NodeList *out) {
             return;
         }
         kind = 2;
-        if (mir_has_content(sid)) {
+        {
             mir_touch_nested_slots(sid);
             /* The shadow tree's children; a slot's assigned nodes are its own children when composed. */
             for (NodeId c = dom_first_child(sid); c; c = dom_next_sibling(c)) nl_push(out, c);

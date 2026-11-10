@@ -232,8 +232,7 @@ static void sd_element_features(CssStyleDoc *d, HtmlNode *node, int i)
         NodeId r = node->store_id;
         while (dom_parent(r)) r = dom_parent(r);
         uint32_t h = r != node->store_id && (dom_flags(r) & DOMF_SHADOW_ROOT) ? g_dom.host[dom_slot(r)] : 0;
-        const char *tn = h ? dom_local_name(dom_id_of(h)) : NULL;
-        if (h && (!tn || !strchr(tn, '-'))) d->flags[i] |= DF_SHADOW;
+        if (h) d->flags[i] |= DF_SHADOW;
     }
     if ((strcasecmp(node->tag_name, "a") == 0 || strcasecmp(node->tag_name, "area") == 0) &&
         node_attr(node, "href")) {
@@ -384,6 +383,11 @@ static CssStyleDoc *styledoc_build(HtmlDocument *doc, CssStyleDoc *old, uint32_t
         while (d->parent[i] >= 0 && node->store_id) {
             HtmlNode *pn = SD_NODE(d->parent[i]);
             if (pn->type != HTML_NODE_ELEMENT || !pn->tag_name || strcmp(pn->tag_name, "slot") || dom_parent(node->store_id) == pn->store_id) break;
+            /* (the host it is a child of, when that is above) */
+            NodeId dp = dom_parent(node->store_id);
+            int a = pn->array_node.parent;
+            while (a >= 0 && SD_NODE(a)->store_id != dp) a = SD_NODE(a)->array_node.parent;
+            if (a >= 0 && dp) { d->parent[i] = a; break; }
             d->parent[i] = d->parent[d->parent[i]];
         }
         d->store_id[i] = node->store_id;
@@ -583,6 +587,30 @@ int css_styledoc_compare(const CssStyleDoc *a, const CssStyleDoc *b)
     return -1;
 }
 
+/* (whether node x is assigned, after flattening, to a slot of host's shadow tree: the slot of its
+ * parent's tree with its name, that slot's own assignment in turn) */
+static bool sd_slotted_in(NodeId x, uint32_t host)
+{
+    for (int depth = 0; depth < 16 && x; depth++) {
+        NodeId p = dom_parent(x);
+        if (!p) return false;
+        uint32_t sh = g_dom.shadow[dom_slot(p)];
+        if (!sh) return false;
+        const char *name = dom_kind(x) == DOM_K_ELEMENT ? dom_get_attr_str(x, "slot") : NULL;
+        if (!name) name = "";
+        NodeId slot = DOM_NULL;
+        for (uint32_t s = g_dom.first[sh]; s && !slot; s = dom_next_in_subtree(s, sh)) {
+            if (g_dom.kind[s] != DOM_K_ELEMENT || strcmp(dom_tag_name(dom_id_of(s)), "slot")) continue;
+            const char *sn = dom_get_attr_str(dom_id_of(s), "name");
+            if (!strcmp(sn ? sn : "", name)) slot = dom_id_of(s);
+        }
+        if (!slot) return false;
+        if (p == host) return true;
+        x = slot;
+    }
+    return false;
+}
+
 /* ============================================================================
  * Compiled selectors
  * ============================================================================ */
@@ -595,6 +623,7 @@ typedef struct CComp {
     uint8_t attr_vals, nattr_vals;    /* any value test present */
     uint8_t root, link, empty, child_pos, type_pos, nth_kind, dir_val;
     uint32_t node_id;          /* (a shadow host by NodeId; 0 none) */
+    uint32_t slotted_id;       /* (assigned to a slot of this host's tree; 0 none) */
     uint8_t tag_upper;         /* (a type selector with capitals: none in an XML document) */
     const char *lang_ranges;   /* (:lang() by extended filtering; NULL none) */
     uint8_t not_active, not_has_tag, not_has_id;
@@ -792,6 +821,7 @@ static void compile_comp(Builder *b, const CssSimpleSelector *s, int comb, CComp
     c->child_pos = (uint8_t)s->child_pos;
     c->dir_val = (uint8_t)s->dir_val;
     c->node_id = s->node_id;
+    c->slotted_id = s->slotted_id;
     c->tag_upper = s->tag_upper;
     /* (the ranges interned: the selector it came from may not outlive the set) */
     c->lang_ranges = s->lang_ranges[0] ? css_atom_str(css_atom_intern(s->lang_ranges, strlen(s->lang_ranges))) : NULL;
@@ -1189,6 +1219,7 @@ static bool comp_match(const CssStyleSet *S, const CssStyleDoc *D, const CComp *
     if (c->state && (D->state[n] & c->state) != c->state) return false;
     if (c->root && D->tag[n] != S->atom_html) return false;
     if (c->node_id && (!D->store_id || D->store_id[n] != c->node_id)) return false;
+    if (c->slotted_id && (!D->store_id || !sd_slotted_in(D->store_id[n], c->slotted_id))) return false;
     if (c->tag_upper && D->store_id && D->store_id[n] && !dom_is_html_document(dom_owner(D->store_id[n]))) {
         /* (XML names are case-sensitive: capitals in the selector, none in the name) */
         const char *ln = dom_local_name(D->store_id[n]);

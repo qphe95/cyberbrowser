@@ -4234,7 +4234,9 @@
             if (fix[1] !== null) sz[1] = fix[1];
             else {
                 var sideMin = 2 * Math.max(A ? A.mn : 0, B ? B.mn : 0), sideMax = 2 * Math.max(A ? A.mx : 0, B ? B.mx : 0);
-                sz[1] = printDistribute(avail, C.mn, C.mx, sideMin, sideMax);
+                /* (sides all sized: the centre has the rest between them) */
+                if ((A || B) && (!A || fix[0] !== null) && (!B || fix[2] !== null)) sz[1] = Math.max(0, avail - sideMax);
+                else sz[1] = printDistribute(avail, C.mn, C.mx, sideMin, sideMax);
             }
             var rest = (avail - sz[1]) / 2;
             if (A) sz[0] = fix[0] !== null ? fix[0] : rest;
@@ -4270,21 +4272,21 @@
         var bw = w - ml - mr, bh = h - mt - mb;
         var wrap = document.createElement('div'), cell = printBoxEl(name, d, k, n);
         var kw = function (v) { return /content/.test(v); };
-        var cw = d.width !== undefined && d.width !== 'auto' && /corner|^left|^right/.test(name) ? (kw(d.width) ? printMeasure(host, name, d, k, n).maxW - printContentSize(host, name, d, k, n, true) : printLen(d.width, base)) : null;
-        var ch = d.height !== undefined && d.height !== 'auto' && /corner|^top|^bottom/.test(name) ? (kw(d.height) ? printMeasure(host, name, d, k, n).maxH - printContentSize(host, name, d, k, n, false) : printLen(d.height, base)) : null;
+        var cw = d.width !== undefined && d.width !== 'auto' && /corner|^left|^right/.test(name) ? (kw(d.width) ? printMeasure(host, name, d, k, n).maxW - printContentSize(host, name, d, k, n, true) : printLen(d.width, w)) : null;
+        var ch = d.height !== undefined && d.height !== 'auto' && /corner|^top|^bottom/.test(name) ? (kw(d.height) ? printMeasure(host, name, d, k, n).maxH - printContentSize(host, name, d, k, n, false) : printLen(d.height, h)) : null;
         if (cw !== null && d['box-sizing'] !== 'border-box') cw += printMeasure(host, name, d, k, n).maxW - printContentSize(host, name, d, k, n, true);
         if (ch !== null && d['box-sizing'] !== 'border-box') ch += printMeasure(host, name, d, k, n).maxH - printContentSize(host, name, d, k, n, false);
         var bx = x + ml, by = y + mt;
         if (cw !== null) {
             var fw = w - ml - mr - cw;
             if (aw[0] && aw[1]) bx = x + fw / 2;
-            else if (aw[0]) bx = x + fw + ml;
+            else if (aw[0] || (!aw[1] && /^left|left-corner$/.test(name))) bx = x + fw + ml;   /* (overconstrained: against the page area) */
             bw = cw;
         }
         if (ch !== null) {
             var fh = h - mt - mb - ch;
             if (ah[0] && ah[1]) by = y + fh / 2;
-            else if (ah[0]) by = y + fh + mt;
+            else if (ah[0] || (!ah[1] && /^top/.test(name))) by = y + fh + mt;
             bh = ch;
         }
         wrap.style.cssText = 'position:absolute;display:table;table-layout:fixed;left:' + bx + 'px;top:' + by + 'px;width:' + bw + 'px;height:' + bh + 'px;';
@@ -4339,7 +4341,7 @@
                 de.appendChild(hh);
                 return hh;
             };
-            var host = hostOf(2147483000), under = hostOf(-2147483000);
+            var host = hostOf(999999000), under = hostOf(-999999000), sheet = hostOf(-999999001);
             for (var k = 0; k < n; k++) {
                 var rs = printPageRules(rules, '', k), m = printMetrics(rs, pw, ph);
                 var px = -(m0.left + bl), py = k * ph - (m0.top + bt);
@@ -4350,6 +4352,15 @@
                 if (deco.replace(/;/g, '').trim()) {
                     box.style.cssText = deco + ';position:absolute;box-sizing:border-box;left:' + (px + m.left) + 'px;top:' + (py + m.top) + 'px;width:' + (pw - m.left - m.right) + 'px;height:' + (ph - m.top - m.bottom) + 'px;';
                     under.appendChild(box);
+                    /* (its colour: the whole sheet's, under the canvas's; the engine paints it from this hidden box) */
+                    var bgc = box.style.backgroundColor;
+                    if (bgc && bgc !== 'transparent') {
+                        box.style.backgroundColor = 'transparent';
+                        var sh = document.createElement('div');
+                        sh.style.cssText = 'position:absolute;visibility:hidden;left:' + px + 'px;top:' + py + 'px;width:' + pw + 'px;height:' + ph + 'px;';
+                        sh.style.backgroundColor = bgc;
+                        sheet.appendChild(sh);
+                    }
                 }
                 var d = printMarginDecls(rs);
                 var cwm = pw - m.left - m.right, chm = ph - m.top - m.bottom;

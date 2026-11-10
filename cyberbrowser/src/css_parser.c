@@ -17,6 +17,7 @@
 #include "browser_api_impl.h"
 #include "browser_api_impl_handle_helpers.h"
 #include "html_dom.h"
+#include "css_props.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -295,6 +296,7 @@ char* css_to_camel_case(const char *prop) {
  * Declarations
  * ============================================================================ */
 
+static char *filter_image_rewrite(char *v);
 static bool css_declaration_add(CssRule *rule, const char *prop, size_t prop_len,
                                 const char *value, size_t value_len) {
     char *p = css_strndup_trim(prop, prop_len);
@@ -310,7 +312,10 @@ static bool css_declaration_add(CssRule *rule, const char *prop, size_t prop_len
         free(p); free(v);
         return false;
     }
-    if (!(p[0] == '-' && p[1] == '-')) css_str_tolower(p);
+    if (!(p[0] == '-' && p[1] == '-')) {
+        css_str_tolower(p);
+        if (strstr(v, "filter(")) v = filter_image_rewrite(v);
+    }
 
     /* Detect and strip trailing !important (case-insensitive) from the value.
      * The important flag is stored on the declaration so the cascade can
@@ -551,6 +556,99 @@ static void val_put_name(Str *o, const char *v, size_t l, bool ident)
 /* Value tokens [a, b) as text: the source when it is the same thing,
  * else each token rebuilt (white space one space, strings and urls
  * quoted). */
+/* (filter(<image>, <filters>) is an image of its own: a url's goes to the image cache under a name
+ * that carries the list, "cbfilter:<list>|<url>"; a gradient's invert(1) goes into its stops) */
+static char *filter_image_rewrite(char *v)
+{
+    for (int round = 0; round < 8; round++) {
+        char *f = v, *hit = NULL;
+        while ((f = strstr(f, "filter(")) != NULL) {
+            if (f == v || !(isalnum((unsigned char)f[-1]) || f[-1] == '-' || f[-1] == '_')) { hit = f; break; }
+            f += 7;
+        }
+        if (!hit) break;
+        const char *a = hit + 7, *c = a, *comma = NULL;
+        int d = 1;
+        char q = 0;
+        for (; *c; c++) {
+            if (q) { if (*c == q) q = 0; continue; }
+            if (*c == '"' || *c == 39) q = *c;
+            else if (*c == '(') d++;
+            else if (*c == ')') { if (--d == 0) break; }
+            else if (*c == ',' && d == 1 && !comma) comma = c;
+        }
+        if (!*c || !comma) break;
+        while (a < comma && isspace((unsigned char)*a)) a++;
+        const char *ae = comma, *l = comma + 1, *le = c;
+        while (ae > a && isspace((unsigned char)ae[-1])) ae--;
+        while (l < le && isspace((unsigned char)*l)) l++;
+        while (le > l && isspace((unsigned char)le[-1])) le--;
+        size_t cap = strlen(v) * 4 + 256, n = 0;
+        char *rep = (char *)malloc(cap);
+        if (!rep) break;
+        if (ae - a > 5 && !strncasecmp(a, "url(", 4) && ae[-1] == ')') {
+            const char *u = a + 4, *ue = ae - 1;
+            while (u < ue && (isspace((unsigned char)*u) || *u == '"' || *u == 39)) u++;
+            while (ue > u && (isspace((unsigned char)ue[-1]) || ue[-1] == '"' || ue[-1] == 39)) ue--;
+            n += (size_t)snprintf(rep + n, cap - n, "url(\"cbfilter:");
+            for (const char *p = l; p < le; p++) {
+                char ch = *p == '(' ? '[' : *p == ')' ? ']' : *p == ',' ? ';' : isspace((unsigned char)*p) ? '_' : *p;
+                if (ch != '"' && ch != 39 && ch != '|') rep[n++] = ch;
+            }
+            n += (size_t)snprintf(rep + n, cap - n, "|%.*s\")", (int)(ue - u), u);
+        } else {
+            const char *op = memchr(a, '(', (size_t)(ae - a));
+            bool inv = le - l >= 8 && !strncasecmp(l, "invert(", 7) && le[-1] == ')';
+            if (inv) {
+                const char *x = l + 7;
+                while (x < le - 1 && isspace((unsigned char)*x)) x++;
+                size_t xl = (size_t)(le - 1 - x);
+                inv = xl == 0 || (xl == 1 && *x == '1') || (xl == 4 && !strncmp(x, "100%", 4));
+            }
+            if (!op || !inv || op - a < 8 || strncasecmp(op - 8, "gradient", 8) || ae[-1] != ')') { free(rep); break; }
+            memcpy(rep, a, (size_t)(op + 1 - a));
+            n = (size_t)(op + 1 - a);
+            /* (word by word: the ones that are colours, inverted) */
+            const char *p = op + 1, *end = ae - 1;
+            while (p < end) {
+                if (isspace((unsigned char)*p) || *p == ',') { rep[n++] = *p++; continue; }
+                const char *w = p;
+                int wd = 0;
+                while (p < end && (wd > 0 || !(isspace((unsigned char)*p) || *p == ','))) {
+                    if (*p == '(') wd++; else if (*p == ')') wd--;
+                    p++;
+                }
+                char word[160];
+                double rgba[4];
+                size_t wl = (size_t)(p - w);
+                if (wl < sizeof word) {
+                    memcpy(word, w, wl);
+                    word[wl] = 0;
+                    if ((isalpha((unsigned char)word[0]) || word[0] == '#') && strcasecmp(word, "currentcolor") && css_color_parse(word, rgba)) {
+                        n += (size_t)snprintf(rep + n, cap - n, "rgb(%.3f %.3f %.3f / %.4f)", 255.0 - rgba[0],
+                                              255.0 - rgba[1], 255.0 - rgba[2], rgba[3]);
+                        continue;
+                    }
+                }
+                memcpy(rep + n, w, wl);
+                n += wl;
+            }
+            rep[n++] = ')';
+        }
+        rep[n] = 0;
+        size_t pre = (size_t)(hit - v), suf = strlen(c + 1);
+        char *nv = (char *)malloc(pre + n + suf + 1);
+        if (!nv) { free(rep); break; }
+        memcpy(nv, v, pre);
+        memcpy(nv + pre, rep, n);
+        memcpy(nv + pre + n, c + 1, suf + 1);
+        free(rep);
+        free(v);
+        v = nv;
+    }
+    return v;
+}
+
 static char *decl_value_text(const CssTz *tz, const CssToken *t, int a, int b)
 {
     bool plain = true;
@@ -672,6 +770,7 @@ static void decl_finish(const CssTz *tz, const TokBuf *b, DeclSink sink, void *c
     bool custom = pl > 2 && pv[0] == '-' && pv[1] == '-';
     if (pl == 2 && pv[0] == '-' && pv[1] == '-') { free(prop); free(value); return; }
     if (custom && value && !value[0]) { free(value); value = strdup(" "); }
+    if (!custom && value && strstr(value, "filter(")) value = filter_image_rewrite(value);
     if (!prop || !value || !value[0]) { free(prop); free(value); return; }
     memcpy(prop, pv, pl);
     prop[pl] = 0;
@@ -2502,6 +2601,13 @@ static void css_apply_pseudo(CssSimpleSelector *out,
         out->has_substantive = true;
         return;
     }
+    if (css_pseudo_name_is(name, nl, "-webkit-cyber-slotted")) {
+        out->slotted_id = arg ? (uint32_t)strtoul(arg, NULL, 10) : 0;
+        out->slotted_host = arg && memchr(arg, 'h', al) != NULL;
+        if (!out->slotted_id) out->never_match = true;
+        out->has_substantive = true;
+        return;
+    }
     /* (:host outside of a shadow tree's own rewriting: there's no such element) */
     if (css_pseudo_name_is(name, nl, "host") || css_pseudo_name_is(name, nl, "host-context")) {
         out->never_match = true;
@@ -2829,6 +2935,8 @@ static void css_simple_reset(CssSimpleSelector *out) {
     out->child_pos = out->type_pos = out->nth_kind = out->nth_a = out->nth_b = 0;
     out->dir_val = 0;
     out->node_id = 0;
+    out->slotted_id = 0;
+    out->slotted_host = false;
     out->lang_ranges[0] = '\0';
     out->nth_of_active = false;
     out->nth_of_arg[0] = '\0';
@@ -3142,12 +3250,15 @@ static int css_specificity_from_simple(const CssSimpleSelector *simple) {
          (simple->nth_kind ? 1 : 0) + (simple->is_root ? 1 : 0) +
          (simple->requires_link ? 1 : 0) + (simple->requires_empty ? 1 : 0) + simple->lang_count;
     b += __builtin_popcount(simple->state_mask);
+    if (simple->node_id) b++;   /* (:host) */
+    if (simple->slotted_host) b++;
     if (simple->not_active) {
         a += simple->not_has_id ? 1 : 0;
         b += simple->not_class_count + simple->not_attr_count + __builtin_popcount(simple->not_state);
     }
     int c = (simple->has_tag && !simple->universal) ? 1 : 0;
     if (simple->not_active && simple->not_has_tag) c++;
+    if (simple->slotted_id) c++;   /* (::slotted()) */
     int spec = a * 1000 + b * 10 + c;
     /* (:not() of a list: its most specific selector) */
     if (simple->not_list_active) spec += css_list_best_specificity(simple->not_list_arg);
@@ -3684,6 +3795,11 @@ static double css_media_number(const char **sp) {
     static const struct { const char *u; double px; } units[] = {
         { "rem", 16.0 }, { "em", 16.0 }, { "px", 1.0 }, { "in", 96.0 }, { "cm", 96.0 / 2.54 },
         { "mm", 96.0 / 25.4 }, { "pt", 96.0 / 72.0 }, { "pc", 16.0 }, { "q", 96.0 / 101.6 },
+        /* (of the initial font: about what its metrics give) */
+        { "rex", 7.2 }, { "ex", 7.2 }, { "rch", 8.0 }, { "ch", 8.0 }, { "rcap", 10.6 }, { "cap", 10.6 }, { "ric", 16.0 }, { "ic", 16.0 },
+        { "rlh", 18.4 }, { "lh", 18.4 },
+        /* (resolutions, in dppx) */
+        { "dppx", 1.0 }, { "dpi", 1.0 / 96.0 }, { "dpcm", 2.54 / 96.0 }, { "x", 1.0 },
     };
     for (size_t i = 0; i < sizeof(units) / sizeof(units[0]); i++) {
         size_t n = strlen(units[i].u);
@@ -3717,8 +3833,25 @@ static double css_media_factor(const char **sp) {
         if (**sp == ')') (*sp)++;
         return v;
     }
-    if (**sp == '-') { (*sp)++; return -css_media_factor(sp); }
+    if (**sp == '-' && !isalpha((unsigned char)(*sp)[1])) { (*sp)++; return -css_media_factor(sp); }
     if (**sp == '+') { (*sp)++; return css_media_factor(sp); }
+    /* (calc(), sign(), abs(), min(), max()) */
+    static const char *const fn[] = { "calc(", "sign(", "abs(", "min(", "max(" };
+    for (int i = 0; i < 5; i++) {
+        size_t n = strlen(fn[i]);
+        if (strncasecmp(*sp, fn[i], n)) continue;
+        *sp += n;
+        double v = css_media_expr(sp);
+        css_media_skip_ws(sp);
+        while (**sp == ',') {
+            (*sp)++;
+            double w = css_media_expr(sp);
+            if (i == 3 ? w < v : i == 4 ? w > v : false) v = w;
+            css_media_skip_ws(sp);
+        }
+        if (**sp == ')') (*sp)++;
+        return i == 1 ? (v > 0.0 ? 1.0 : v < 0.0 ? -1.0 : 0.0) : i == 2 ? fabs(v) : v;
+    }
     return css_media_number(sp);
 }
 
@@ -3786,6 +3919,7 @@ static bool mq_length(const char *s, const char *e, double *out) {
 }
 
 static bool mq_number(const char *s, const char *e, double *out) {
+    if (memchr(s, '(', (size_t)(e - s))) return mq_length(s, e, out);   /* (math) */
     char buf[64];
     if (!mq_operand(s, e, buf, sizeof(buf), false)) return false;
     char *end = NULL;
@@ -3795,6 +3929,7 @@ static bool mq_number(const char *s, const char *e, double *out) {
 
 /* A resolution in dppx: <n>dpi, dpcm, dppx or x. */
 static bool mq_resolution(const char *s, const char *e, double *out) {
+    if (memchr(s, '(', (size_t)(e - s))) return mq_length(s, e, out);   /* (math: its units come out in dppx) */
     char buf[64];
     if (!mq_operand(s, e, buf, sizeof(buf), true)) return false;
     char *end = NULL;
@@ -3809,12 +3944,18 @@ static bool mq_resolution(const char *s, const char *e, double *out) {
 
 /* A ratio: <n> or <n> / <n>. */
 static bool mq_ratio(const char *s, const char *e, double *out) {
-    const char *slash = memchr(s, '/', (size_t)(e - s));
+    const char *slash = NULL;
+    int depth = 0;
+    for (const char *q = s; q < e && !slash; q++) {
+        if (*q == '(') depth++;
+        else if (*q == ')') depth--;
+        else if (*q == '/' && depth == 0) slash = q;
+    }
     if (!slash) return mq_number(s, e, out);
     double a, b;
     if (!mq_number(s, slash, &a) || !mq_number(slash + 1, e, &b) || a < 0.0 || b < 0.0) return false;
     /* (a degenerate ratio is a value, matching nothing but itself) */
-    *out = b != 0.0 ? a / b : NAN;
+    *out = b != 0.0 ? a / b : (double)INFINITY;
     return true;
 }
 
@@ -4319,6 +4460,33 @@ static char* css_transform_one_selector(const char *sel, size_t len, const char 
     char *out = NULL;
     size_t out_len = 0, out_cap = 0;
 
+    if (host_tag[0] == ':') {
+        /* (the host is the tree's top: a :host after a combinator has nothing before it to match;
+         * ::slotted() after a prefix: the host's children, the prefix's :host compound kept) */
+        int depth = 0;
+        bool comb = false;
+        for (size_t k = i; k < len; k++) {
+            char c = sel[k];
+            if (c == '(') depth++;
+            else if (c == ')') depth--;
+            else if (depth) continue;
+            else if (css_is_space(c) || c == '>' || c == '+' || c == '~') comb = true;
+            else if (comb && !strncasecmp(sel + k, ":host", 5)) return css_strdup("");
+            else if (k + 10 <= len && !strncasecmp(sel + k, "::slotted(", 10)) {
+                size_t open = k + 9, close = css_match_paren(sel, open, len);
+                bool lead = !strncasecmp(sel + i, ":host", 5);
+                const char *hid = strchr(host_tag, '(');
+                if (close > open + 1) css_buf_append(&out, &out_len, &out_cap, sel + open + 1, close - open - 1);
+                else css_buf_append_cstr(&out, &out_len, &out_cap, "*");
+                css_buf_append_cstr(&out, &out_len, &out_cap, ":-webkit-cyber-slotted(");
+                if (hid) css_buf_append(&out, &out_len, &out_cap, hid + 1, strcspn(hid + 1, ")"));
+                css_buf_append_cstr(&out, &out_len, &out_cap, lead ? " h)" : ")");
+                if (close + 1 < len) css_buf_append(&out, &out_len, &out_cap, sel + close + 1, len - close - 1);
+                return out;
+            }
+        }
+    }
+
     if (host_tag[0] == ':' && !strncasecmp(sel + i, ":host", 5) && strncasecmp(sel + i, ":host-context", 13) &&
         (i + 5 >= len || sel[i + 5] == '(' || sel[i + 5] == ':' || sel[i + 5] == '.' || sel[i + 5] == '[' ||
          sel[i + 5] == '#' || css_is_space(sel[i + 5]) || sel[i + 5] == '>' || sel[i + 5] == '+' || sel[i + 5] == '~')) {
@@ -4368,6 +4536,15 @@ static char* css_transform_one_selector(const char *sel, size_t len, const char 
         css_buf_append_cstr(&out, &out_len, &out_cap, host_tag);
         i += 5;
         css_buf_append(&out, &out_len, &out_cap, sel + i, len - i);
+    } else if (host_tag[0] == ':' && i + 10 <= len && strncasecmp(sel + i, "::slotted(", 10) == 0) {
+        size_t open = i + 9, close = css_match_paren(sel, open, len);
+        const char *hid = strchr(host_tag, '(');
+        if (close > open + 1) css_buf_append(&out, &out_len, &out_cap, sel + open + 1, close - open - 1);
+        else css_buf_append_cstr(&out, &out_len, &out_cap, "*");
+        css_buf_append_cstr(&out, &out_len, &out_cap, ":-webkit-cyber-slotted(");
+        if (hid) css_buf_append(&out, &out_len, &out_cap, hid + 1, strcspn(hid + 1, ")"));
+        css_buf_append_cstr(&out, &out_len, &out_cap, ")");
+        if (close + 1 < len) css_buf_append(&out, &out_len, &out_cap, sel + close + 1, len - close - 1);
     } else if (i + 9 <= len && strncasecmp(sel + i, "::slotted", 9) == 0) {
         /* ::slotted(<qualifier>) ... -> host_tag > <qualifier> ... */
         size_t open = i + 9;
@@ -4429,6 +4606,12 @@ static char* css_transform_one_selector(const char *sel, size_t len, const char 
             (i + host_len >= len || css_is_space(sel[i + host_len]) || sel[i + host_len] == '.' ||
              sel[i + host_len] == '#' || sel[i + host_len] == '[' || sel[i + host_len] == ':' ||
              sel[i + host_len] == '>' || sel[i + host_len] == '+' || sel[i + host_len] == '~')) {
+            css_buf_append(&out, &out_len, &out_cap, sel, len);
+        } else if (host_tag[0] == ':') {
+            /* (the scoping adds no specificity) */
+            css_buf_append_cstr(&out, &out_len, &out_cap, ":where(");
+            css_buf_append_cstr(&out, &out_len, &out_cap, host_tag);
+            css_buf_append_cstr(&out, &out_len, &out_cap, ") ");
             css_buf_append(&out, &out_len, &out_cap, sel, len);
         } else {
             css_buf_append_cstr(&out, &out_len, &out_cap, host_tag);

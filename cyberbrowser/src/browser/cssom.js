@@ -2789,6 +2789,19 @@
         }
         return { rule: false, end: n };
     }
+    /* text without its comments (those in strings stay) */
+    function noComments(t) {
+        if (t.indexOf('/*') < 0) return t;
+        var o = '', i = 0, n = t.length, q = null;
+        while (i < n) {
+            var c = t[i];
+            if (q) { if (c === '\\' && i + 1 < n) { o += c + t[i + 1]; i += 2; continue; } if (c === q || c === '\n') q = null; o += c; i++; continue; }
+            if (c === '/' && t[i + 1] === '*') { var e = t.indexOf('*/', i + 2); i = e < 0 ? n : e + 2; o += ' '; continue; }
+            if (c === '"' || c === "'") q = c;
+            o += c; i++;
+        }
+        return o;
+    }
     function braceEnd(block, open) {
         var d = 1, k = open + 1, q = null, n = block.length;
         while (k < n && d) {
@@ -2997,7 +3010,7 @@
                 if (!pageSelectorOk(p.prelude)) return null;
                 r = makeRule(CSSPageRule, 'page', { __selector: pageSelectorCanon(p.prelude), __style: null, __rules: [] });
                 /* (the margin at-rules in it: rules of their own; the rest its declarations) */
-                var pdecl = '', pi2 = 0, pb = p.block;
+                var pdecl = '', pi2 = 0, pb = noComments(p.block);
                 while (pi2 < pb.length) {
                     var pit = blockItem(pb, pi2), seg = pb.slice(pi2, pit.end);
                     var mm = pit.rule && /^\s*@([a-z-]+)\s*\{([\s\S]*)\}\s*$/i.exec(seg);

@@ -125,6 +125,11 @@ size_t http_resource_log_count(void);
 /* A URL that is fetched in cors mode wherever its request is made (a font, a
  * shape image): it says so in Sec-Fetch-Mode. */
 void http_mark_cors_url(const char *url);
+/* What a url()'s request modifiers ask of this URL's fetch (http_get_to_memory):
+ * cors 0 no-cors, 1 anonymous, 2 use-credentials, checked against origin (the
+ * requester's); referer NULL: as ever, "": none; integrity NULL or the
+ * metadata ("sha256-...").  A response that fails a check is no response. */
+void http_note_url_request(const char *url, int cors, const char *origin, const char *referer, const char *integrity);
 
 /* What the requests this thread makes next are for (SANDBOX_DESIGN.md
  * section 2.4), which the network process needs for ORB, CORS and Private

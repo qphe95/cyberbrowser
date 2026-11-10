@@ -360,7 +360,7 @@ function substitute(s, url) {
         if (expr === 'location[hostname]') return '127.0.0.1';
         if (expr === 'location[port]') return port;
         if (expr === 'location[scheme]') return 'http';
-        if (expr === 'location[path]') return url.pathname;
+        if (expr === 'location[path]' || expr === 'location[pathname]') return url.pathname;
         if (expr === 'location[query]') return url.search;
         if (expr === 'location[server]') return origin;
         let m = /^GET\[([^\]]*)\]$/.exec(expr);
@@ -577,6 +577,35 @@ const server = http.createServer((req, res) => {
         res.on('close', () => clearInterval(wait));
         return;
     }
+    /* (css-values/urls/support/*-referrer-policy.py: one thing when the Referer is the expected one, another when not) */
+    const rp = /^\/css\/css-values\/urls\/support\/(image|font|stylesheet|svg-filter)-referrer-policy\.py$/.exec(url.pathname);
+    if (rp) {
+        const q = url.searchParams, want = q.get('expected_referrer'), got = req.headers.referer || '';
+        const match = want === 'none' ? got === '' : want === 'origin' ? got === q.get('origin') : want === 'url' ? got === q.get('url') : null;
+        const h = { 'cache-control': 'no-cache; must-revalidate' };
+        let body;
+        if (rp[1] === 'image') {
+            body = fs.readFileSync(path.join(root, 'css/css-values/urls/support', match === null ? '1x1-navy.png' : match ? '1x1-green.png' : '1x1-red.png'));
+            h['content-type'] = 'image/png';
+            if (q.has('corp')) h['cross-origin-resource-policy'] = q.get('corp');
+            if (q.has('acao')) h['access-control-allow-origin'] = q.get('acao');
+        } else {
+            h['access-control-allow-origin'] = '*';
+            if (rp[1] === 'font') {
+                body = match ? fs.readFileSync(path.join(root, 'fonts/Ahem.ttf')) : Buffer.alloc(0);
+                h['content-type'] = match ? 'font/truetype' : 'text/plain';
+            } else if (rp[1] === 'stylesheet') {
+                body = Buffer.from(match ? '#test { color: green; }' : '#test { color: red; }');
+                h['content-type'] = 'text/css';
+            } else {
+                body = Buffer.from(match ? '<svg width="0" height="0" xmlns="http://www.w3.org/2000/svg" version="1.1"><defs><filter id="MyFilter" color-interpolation-filters="sRGB"><feColorMatrix type="hueRotate" values="90"/></filter></defs></svg>' : '');
+                h['content-type'] = 'image/svg+xml';
+            }
+        }
+        h['content-length'] = body.length;
+        res.writeHead(200, h);
+        return res.end(body);
+    }
     if (PY[url.pathname]) {
         const [type, body] = PY[url.pathname](url, req);
         res.writeHead(200, { 'content-type': type });
@@ -617,6 +646,8 @@ const server = http.createServer((req, res) => {
         const tag = REFREADY.replace('<script ', '<script xmlns="http://www.w3.org/1999/xhtml" ');
         if (end >= 0) data = Buffer.from(text.slice(0, end) + tag + text.slice(end), 'utf8');
     }
+    /* (?pipe=header(Name,Value)|header(...): response headers the URL asks for) */
+    for (const m of (url.searchParams.get('pipe') || '').matchAll(/header\(([^,()]+),([^()]*)\)/g)) headers[m[1].trim().toLowerCase()] = m[2].trim();
     res.writeHead(200, headers);
     res.end(data);
 });

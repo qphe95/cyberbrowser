@@ -49,6 +49,8 @@
 #include "platform.h"
 #include "cyber_env.h"
 #include "cyber_profile.h"
+#include "svg_filter.h"
+#include "css_props.h"
 
 #define LOG_TAG "image_cache"
 #define LOG_ERROR(...) platform_log(LOG_LEVEL_ERROR, LOG_TAG, __VA_ARGS__)
@@ -654,9 +656,61 @@ void image_cache_allow_local_files(bool allow)
     g_local_files = allow;
 }
 
+static bool flt_color(void *ud, const char *text, double *rgba)
+{
+    (void)ud;
+    if (!css_color_parse(text, rgba)) return false;
+    for (int i = 0; i < 3; i++) rgba[i] /= 255.0;
+    return true;
+}
+
+/* (a filter() image's size: the largest it's painted at, the natural one until it is) */
+static void flt_target(ImageEntry *e, int *tw, int *th)
+{
+    int ww = atomic_load(&e->want_w), wh = atomic_load(&e->want_h);
+    *tw = ww > 0 && ww < 4096 ? ww : atomic_load(&e->nat_w);
+    *th = wh > 0 && wh < 4096 ? wh : atomic_load(&e->nat_h);
+}
+
+/* (a filter() image, "cbfilter:<list>|<url>": the url's pixels at the size they're painted at, through the list) */
+static ImagePixels *pixels_filter(ImagePixels *px, const char *source, int tw, int th)
+{
+    const char *bar = strchr(source, '|');
+    char list[512];
+    size_t n = bar ? (size_t)(bar - source - 9) : 0;
+    if (!px || !bar || n >= sizeof list) return px;
+    for (size_t i = 0; i < n; i++) {
+        char ch = source[9 + i];
+        list[i] = ch == '[' ? '(' : ch == ']' ? ')' : ch == ';' ? ',' : ch == '_' ? ' ' : ch;
+    }
+    list[n] = 0;
+    if (strstr(list, "url(")) return px;
+    if (tw > 0 && th > 0 && (tw != px->width || th != px->height)) {
+        ImagePixels *q = pixels_new(tw, th);
+        if (q) {
+            const uint32_t *s = (const uint32_t *)px->data;
+            uint32_t *d = (uint32_t *)q->data;
+            for (int y = 0; y < th; y++) {
+                int sy = (int)(((int64_t)y * 2 + 1) * px->height / (2 * (int64_t)th));
+                for (int x = 0; x < tw; x++) d[(size_t)y * tw + x] = s[(size_t)sy * px->width + (int)(((int64_t)x * 2 + 1) * px->width / (2 * (int64_t)tw))];
+            }
+            pixels_free(px);
+            px = q;
+        }
+    }
+    SvgFilterEnv env;
+    memset(&env, 0, sizeof env);
+    env.color = flt_color;
+    env.current[3] = 1.0;
+    float box[4] = { 0, 0, (float)px->width, (float)px->height };
+    svg_filter_apply(&env, list, box, 16.0f, px->data, px->width, px->height);
+    return px;
+}
+
 static bool fetch_entry(ImageEntry *e)
 {
     const char *src = e->source;
+    if (!strncmp(src, "cbfilter:", 9)) { const char *bar = strchr(src, '|'); if (bar) src = bar + 1; }
     if (!strncmp(src, "noexif:", 7)) src += 7;   /* (image-orientation: none: the same bytes, unturned) */
     if (url_is_data_url(src)) {
         e->bytes = data_url_decode(src, &e->nbytes);
@@ -733,10 +787,12 @@ static void work_entry(ImageCache *c, ImageEntry *e)
 
     int ww = atomic_load(&e->want_w), wh = atomic_load(&e->want_h);
     int prev = atomic_exchange(&e->state, ST_DECODING);
+    bool flt = !strncmp(e->source, "cbfilter:", 9);
     ImagePixels *px;
     {
         CP_SCOPE_CAT("image-decode", "img");
         px = decode_bytes(e, ww, wh);
+        if (flt && px) { int tw, th; flt_target(e, &tw, &th); px = pixels_filter(px, e->source, tw, th); }
     }
     pthread_mutex_lock(&c->mu);
     if (!px) {
@@ -756,13 +812,19 @@ static void work_entry(ImageCache *c, ImageEntry *e)
             }
             c->retired[c->nretired++] = old;
         }
-        e->decoded_full = e->fmt != FMT_SVG &&
+        e->decoded_full = e->fmt != FMT_SVG && !flt &&
                           px->width >= atomic_load(&e->nat_w) && px->height >= atomic_load(&e->nat_h);
         atomic_store(&e->state, ST_READY);
+        if (flt) {
+            /* (painted at another size meanwhile: made again at that one) */
+            int tw, th;
+            flt_target(e, &tw, &th);
+            if (tw != px->width || th != px->height) enqueue_locked(c, e);
+        }
         /* A larger paint size requested while decoding: decode again
          * (only when the request grew, so a decoder that cannot reach the
          * target never loops). */
-        if (!e->decoded_full &&
+        if (!e->decoded_full && !flt &&
             (atomic_load(&e->want_w) > ww || atomic_load(&e->want_h) > wh)) {
             int tw, th;
             target_size(atomic_load(&e->nat_w), atomic_load(&e->nat_h),
@@ -877,6 +939,19 @@ static int get_entry_locked(ImageCache *c, const char *src, ImageEntry **out)
 /* Record the paint size and re-decode when it exceeds the decoded size. */
 static void want_size_locked(ImageCache *c, ImageEntry *e, int w, int h)
 {
+    if (!strncmp(e->source, "cbfilter:", 9)) {
+        /* (a filter() image is made at the size it's painted at) */
+        if (w <= 0 || h <= 0) return;
+        int ow = atomic_load(&e->want_w), oh = atomic_load(&e->want_h);
+        if (w <= ow && h <= oh) return;
+        atomic_store(&e->want_w, w > ow ? w : ow);
+        atomic_store(&e->want_h, h > oh ? h : oh);
+        ImagePixels *px = atomic_load(&e->pixels);
+        int tw, th;
+        flt_target(e, &tw, &th);
+        if (atomic_load(&e->state) == ST_READY && px && (tw != px->width || th != px->height)) enqueue_locked(c, e);
+        return;
+    }
     if (w <= 0 || h <= 0) {
         /* Natural size wanted. */
         w = 1 << 20;

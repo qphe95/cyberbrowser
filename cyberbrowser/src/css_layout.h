@@ -226,6 +226,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char table_layout_fixed;   /* table-layout: fixed */
     unsigned char table_group;          /* a row group: 0 body, 1 header, 2 footer */
     unsigned char flow_root;            /* display: flow-root (a block establishing a formatting context) */
+    unsigned char flow_orth;            /* (flow_root only for crossing its parent's flow) */
     unsigned char custom_layout;        /* display: layout(): no multi-column layout */
     unsigned char clip_on, clip_auto;   /* (clip: rect(): on; its auto sides, bits top right bottom left) */
     float clip_v[4];                    /* (its top, right, bottom, left offsets from the border box's corner) */
@@ -245,7 +246,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char ovf_clip_axes;   /* (overflow clip on its own: bit 1 the x axis, 2 the y; 0 both) */
     /* What makes it a containing block for absolute and fixed descendants without
      * being positioned: a bit per property (contain, transform, filter...). */
-    unsigned short abs_cb;
+    unsigned short abs_cb;         /* (1024: will-change: position, for absolute descendants only) */
+    unsigned char wc_sc;           /* (will-change names what makes a stacking context: 1 always, 2 z-index: when positioned or a flex / grid item) */
     unsigned char height_stretch;   /* height: stretch */
     unsigned char stretch_drop;     /* (margins a block-axis stretch leaves on: 1 top, 2 right, 4 bottom, 8 left) */
     unsigned char minmax_content;   /* (min/max width/height given as min-content, max-content or fit-content: bits as minmax_stretch) */
@@ -489,6 +491,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     /* (the declared text, each layer's: image, mode, repeat, position, clip, origin, size, composite; [8] the shorthand) */
     const char *mk_text[9];
     const char *clip_path;     /* (clip-path as written; NULL none) */
+    const char *content_img;   /* (content: url() on an element: the absolute URL of the image replacing it; NULL none) */
+    int repl_disp;             /* (inside an element content: url() replaces: its display before it was hidden, plus 1; 0 not hidden) */
     unsigned char mask_kind;
     unsigned char mask_size_kind;
     unsigned char mask_size_pct;
@@ -731,6 +735,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * lines as its height or max-height has room for */
     unsigned char line_clamp_std, line_clamp_auto;
     unsigned char lc_no_ell;    /* (line-clamp: N no-ellipsis) */
+    unsigned char lc_cont;      /* (continue: collapse set it) */
     const char *lc_ell;         /* (line-clamp: N "string": the block ellipsis; NULL: U+2026) */
     float max_h_lh;                   /* max-height as <n>lh (0: not): line-clamp: auto counts by it */
     /* text-overflow: ellipsis (for clipped single-line text). */
@@ -820,6 +825,7 @@ typedef struct LayoutBox {
     double margin_top, margin_right, margin_bottom, margin_left;
     double padding_top, padding_right, padding_bottom, padding_left;
     double content_width, content_height;
+    short grid_r, grid_rs;   /* (a grid item: its first row and span as last placed; span 0 not placed) */
     double baseline;
 
     double min_width, max_width;
@@ -835,6 +841,7 @@ typedef struct LayoutBox {
      * cleared by the absolute positioning pass. */
     unsigned char has_static;
     unsigned char clamp_gone;   /* (after a line-clamp's last line: not painted) */
+    unsigned char clamp_keep;   /* (a box of a height of its own before the clamp point: what overflows it stays) */
     int run_in_prev;            /* (a block a run-in goes into: its index + 1) */
     unsigned char clamp_clip;   /* (a line-clamp container that clamped: what is past clamp_y, its clamp point, not painted) */
     float clamp_y;
@@ -871,6 +878,9 @@ typedef struct LayoutTextFrag {
     unsigned char level;
     unsigned char ellipsis;   /* an ellipsis after it (line-clamp, text-overflow) */
     float ell_by;             /* (its line's baseline, the block's, below its own: where the ellipsis sits) */
+    unsigned char ell_abs;    /* (ell_top set: the ellipsis's em box top from the box's y, as the block's own text there would have it) */
+    double ell_top;
+    float ell_dx;            /* (the edges of inline boxes closing after it: the ellipsis past them) */
     unsigned char fl;         /* on a ::first-line whose color it takes (fl_rgba) */
     uint32_t fl_rgba;
 } LayoutTextFrag;
@@ -886,6 +896,7 @@ typedef struct LayoutTextFragList {
 typedef struct LayoutMcSeg {
     float src, end, h, dst;
     int used;   /* (the columns with content) */
+    float rgap; /* (a row of columns below the run before, this far below it; < 0: not one) */
 } LayoutMcSeg;
 
 typedef struct LayoutLineList {

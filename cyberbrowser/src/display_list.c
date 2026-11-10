@@ -1187,7 +1187,10 @@ static void border_side_color(const LayoutBox *box, int k, float op, float c[4])
         c[0] = (float)((v >> 24) & 0xFF) / 255.0f;
         c[1] = (float)((v >> 16) & 0xFF) / 255.0f;
         c[2] = (float)((v >> 8) & 0xFF) / 255.0f;
-        c[3] = (float)(v & 0xFF) / 255.0f * op;
+        /* (the alpha as it was written, in hundredths, when the byte is one of those) */
+        float al = (float)(v & 0xFF) / 255.0f, ah = roundf(al * 100.0f) / 100.0f;
+        if (fabsf(al - ah) < 0.002f) al = ah;
+        c[3] = al * op;
     } else {
         c[0] = (float)box->s->color_r;
         c[1] = (float)box->s->color_g;
@@ -1526,6 +1529,17 @@ static char *srcset_pick(const char *srcset, float css_width)
 static char* dl_resolve_url(const char *base_url, const char *href)
 {
     if (!href || !href[0]) return NULL;
+    if (!strncmp(href, "cbfilter:", 9)) {
+        /* (a filter() image: the url after the list is the one to resolve) */
+        const char *bar = strchr(href, '|');
+        char *in = bar ? dl_resolve_url(base_url, bar + 1) : NULL;
+        if (!in) return strdup(href);
+        size_t pl = (size_t)(bar + 1 - href), il = strlen(in);
+        char *out = (char *)malloc(pl + il + 1);
+        if (out) { memcpy(out, href, pl); memcpy(out + pl, in, il + 1); }
+        free(in);
+        return out;
+    }
     if (url_has_scheme(href))
         return strdup(href);
     if (base_url && url_has_scheme(base_url)) {
@@ -2533,6 +2547,7 @@ static const char *dl_image_attr(const HtmlNode *node)
 
 bool display_list_object_image(const HtmlNode *node)
 {
+    if (node && node->type == HTML_NODE_ELEMENT && node->content_img) return true;   /* (replaced by content: url()) */
     const char *attr = dl_image_attr(node);
     if (!attr) return false;
     const char *data = node_attribute_value((HtmlNode *)node, attr);
@@ -2595,6 +2610,7 @@ char *display_list_noexif(char *url, const char *base_url)
 char *display_list_image_source(const char *base_url, HtmlNode *node, float css_width)
 {
     if (!node || node->type != HTML_NODE_ELEMENT) return NULL;
+    if (node->content_img) return strdup(node->content_img);
     const char *src = node_attribute_value(node, display_list_object_image(node) ? dl_image_attr(node) : "src");
     /* srcset, when present, overrides src with the candidate that best
      * matches the laid-out width (or the 1x candidate); a <picture>'s
@@ -2992,7 +3008,9 @@ static bool gap_rule_of(const LayoutStyle *s, int a, int gi, int N, float op, in
         c[0] = (float)((v >> 24) & 0xFF) / 255.0f;
         c[1] = (float)((v >> 16) & 0xFF) / 255.0f;
         c[2] = (float)((v >> 8) & 0xFF) / 255.0f;
-        c[3] = (float)(v & 0xFF) / 255.0f * op;
+        float al = (float)(v & 0xFF) / 255.0f, ah = roundf(al * 100.0f) / 100.0f;
+        if (fabsf(al - ah) < 0.0021f) al = ah;   /* (a byte of alpha back to the hundredth it was written as) */
+        c[3] = al * op;
     } else {
         c[0] = (float)s->color_r; c[1] = (float)s->color_g; c[2] = (float)s->color_b; c[3] = (float)s->color_a * op;
     }
@@ -3035,6 +3053,7 @@ static void gap_rule_piece(DisplayList *dl, const LayoutBox *box, int axis, int 
  * visibility; true when that can't be told) */
 static bool gap_cross_on(const CssGapLine *lines, int nl, const CssGapSeg *segs, int ca, int ci, float pos, int vis)
 {
+    if (ci == -2) return true;   /* (a crossing gap of no index: a lane's own) */
     if (ci < 0) return false;
     if (vis == 1) return true;
     for (int i = 0; i < nl; i++) {
@@ -3051,22 +3070,21 @@ static bool gap_cross_on(const CssGapLine *lines, int nl, const CssGapSeg *segs,
             if (G[k].disc) continue;
             if ((vis == 2 && G[k].occ) || (vis == 3 && G[k].occ == 3)) return true;
         }
-        return !any;
+        if (any) return false;   /* (else: another stretch of that gap) */
     }
     return true;
 }
 
 static int mc_owner(const LayoutContext *ctx, int i, int *child);
-static void paint_gap_rules(const LayoutContext *ctx, DisplayList *dl, const LayoutBox *box, int idx, float op)
+static void mc_rule_piece(DisplayList *dl, const LayoutBox *mb, int axis, int style, float x, float y, float w, float h, const float c[4]);
+/* (kind 2: a multi-column container's rows of columns, ox and oy its columns' origin along their axes) */
+static void paint_gap_lines(const LayoutContext *ctx, DisplayList *dl, const LayoutBox *box, int idx, float op, unsigned char kind,
+                            const CssGapLine *lines, int nl, const CssGapSeg *segs, float ox, float oy)
 {
-    unsigned char kind = 0;
-    const CssGapLine *lines;
-    const CssGapSeg *segs;
-    int nl = css_layout_gap_lines(idx, &kind, &lines, &segs);
-    if (nl <= 0) return;
     const LayoutStyle *s = box->s;
-    float ox = (float)(box->x + box->padding_left + s->border_left);
-    float oy = (float)(box->y + box->padding_top + s->border_top);
+    /* (a vertical flow's: its geometry along the flow's axes from the content corner, turned as painted) */
+    int wv = kind & 0x10 ? (s->writing_mode == 1 || s->writing_mode == 3 ? 2 : 1) : 0;
+    kind &= 0xF;
     int N[2] = { 0, 0 };
     for (int i = 0; i < nl; i++) N[lines[i].axis]++;
     for (int pass = 0; pass < 2; pass++) {
@@ -3078,7 +3096,7 @@ static void paint_gap_rules(const LayoutContext *ctx, DisplayList *dl, const Lay
             float rw, c[4];
             if (!gap_rule_of(s, a, L->gi, L->nn ? L->nn : N[a], op, &style, &rw, c)) continue;
             /* (a row gap split by a column break, or the last thing before one: no rule, CSS Gaps 1) */
-            if (a == 1) {
+            if (a == 1 && kind != 2 && !wv) {
                 int mch_ = -1, mo_ = mc_owner(ctx, idx, &mch_);
                 if (mo_ >= 0 && !ctx->boxes[mo_].mc_vert) {
                     const LayoutBox *mb_ = &ctx->boxes[mo_], *cb_ = &ctx->boxes[mch_];
@@ -3093,13 +3111,15 @@ static void paint_gap_rules(const LayoutContext *ctx, DisplayList *dl, const Lay
             }
             int brk = s->gr[a].brk;
             if (kind == 1 && brk == 0) brk = 1;            /* (flex: normal is none) */
+            if (kind == 2 && brk == 0) brk = a == 0 ? 2 : 1;   /* (columns: each row its own rules, a row gap's all the way) */
             int vis = kind == 1 ? 1 : s->gr[a].vis;
-            if (vis == 0) vis = 1;
+            if (vis == 0) vis = kind == 2 && a == 0 ? 3 : 1;   /* (column rules: between columns with content) */
             const CssGapSeg *G = segs + L->at;
             int n = L->n;
             /* (the crossing rule's width, for overlap-join) */
             #define CROSS_W(ci) ({ int st_; float w_, c_[4]; \
-                (ci) >= 0 && gap_rule_of(s, 1 - a, (ci), N[1 - a], op, &st_, &w_, c_) ? w_ : 0.0f; })
+                (ci) >= 0 ? (gap_rule_of(s, 1 - a, (ci), N[1 - a], op, &st_, &w_, c_), w_) : 0.0f; })   /* (its width, painted or not) */
+            float done = -1e30f;   /* (how far this gap's rule is painted: pieces joined over a crossing cover it once) */
             for (int d0 = 0; d0 < n;) {
                 int d1 = d0;
                 if (brk == 1) d1 = n - 1;
@@ -3123,11 +3143,14 @@ static void paint_gap_rules(const LayoutContext *ctx, DisplayList *dl, const Lay
                     {
                         int cvis0 = kind == 1 ? 1 : s->gr[1 - a].vis;
                         if (cvis0 == 0) cvis0 = 1;
-                        if (junc && !gap_cross_on(lines, nl, segs, 1 - a, ci, L->pos, cvis0)) junc = false, jw = 0.0f;
+                        if (junc && !gap_cross_on(lines, nl, segs, 1 - a, ci, L->pos, cvis0)) junc = false;   /* (a cap: its percentage still of the crossing gap) */
                     }
-                    const __typeof__(s->gr[a].inset[0]) *in = &s->gr[a].inset[junc ? 2 : 0];
+                    /* (right to left: a row gap's start is at its far end as laid out) */
+                    int rv = a == 1 && s->direction == 1;
+                    const __typeof__(s->gr[a].inset[0]) *in = &s->gr[a].inset[(junc ? 2 : 0) + rv];
+                    bool ojs = in->oj && junc;
                     if (in->oj) st -= junc ? jw * 0.5f + CROSS_W(ci) * 0.5f : 0.0f;
-                    else st += in->px + in->pct * (junc ? jw : 0.0f);
+                    else st += in->px + in->pct * jw;
                     jw = q == n - 1 ? L->jw1 : G[q].jw;
                     ci = q == n - 1 ? L->ci1 : G[q].ci;
                     junc = q < n - 1 || L->jw1 > 0.0f;
@@ -3135,14 +3158,25 @@ static void paint_gap_rules(const LayoutContext *ctx, DisplayList *dl, const Lay
                         /* (a junction whose crossing rule isn't painted there ends it as a cap) */
                         int cvis = kind == 1 ? 1 : s->gr[1 - a].vis;
                         if (cvis == 0) cvis = 1;
-                        if (junc && !gap_cross_on(lines, nl, segs, 1 - a, ci, L->pos, cvis)) junc = false, jw = 0.0f;
+                        if (junc && !gap_cross_on(lines, nl, segs, 1 - a, ci, L->pos, cvis)) junc = false;
                     }
-                    in = &s->gr[a].inset[junc ? 3 : 1];
+                    in = &s->gr[a].inset[(junc ? 3 : 1) - rv];
                     if (in->oj) en += junc ? jw * 0.5f + CROSS_W(ci) * 0.5f : 0.0f;
-                    else en -= in->px + in->pct * (junc ? jw : 0.0f);
+                    else en -= in->px + in->pct * jw;
+                    /* (a flex or multicol row gap's pieces joined over a crossing: it's covered once) */
+                    if (ojs && a == 1 && kind != 0 && st < done) st = done;
+                    done = en;
                     if (en > st) {
                         float across = L->pos - rw * 0.5f;
-                        if (a == 0) gap_rule_piece(dl, box, 0, style, ox + across, oy + st, rw, en - st, c);
+                        if (wv) {
+                            float x_ = a == 0 ? across : st, y_ = a == 0 ? st : across, w_ = a == 0 ? rw : en - st, h_ = a == 0 ? en - st : rw;
+                            float cl_ = (float)(box->x + box->padding_left + s->border_left), ct_ = (float)(box->y + box->padding_top + s->border_top);
+                            gap_rule_piece(dl, box, 1 - a, style, wv == 1 ? cl_ + y_ : cl_ + (float)box->content_width - y_ - h_,
+                                           s->writing_mode == 4 ? ct_ + (float)box->content_height - x_ - w_ : ct_ + x_, h_, w_, c);
+                        } else if (kind == 2) {
+                            if (a == 0) mc_rule_piece(dl, box, 0, style, ox + across, oy + st, rw, en - st, c);
+                            else mc_rule_piece(dl, box, 1, style, ox + st, oy + across, en - st, rw, c);
+                        } else if (a == 0) gap_rule_piece(dl, box, 0, style, ox + across, oy + st, rw, en - st, c);
                         else gap_rule_piece(dl, box, 1, style, ox + st, oy + across, en - st, rw, c);
                     }
                     p = q + 1;
@@ -3152,6 +3186,18 @@ static void paint_gap_rules(const LayoutContext *ctx, DisplayList *dl, const Lay
             #undef CROSS_W
         }
     }
+}
+
+static void paint_gap_rules(const LayoutContext *ctx, DisplayList *dl, const LayoutBox *box, int idx, float op)
+{
+    unsigned char kind = 0;
+    const CssGapLine *lines;
+    const CssGapSeg *segs;
+    int nl = css_layout_gap_lines(idx, &kind, &lines, &segs);
+    if (nl <= 0) return;
+    if (box->s->writing_mode != 0) { paint_gap_lines(ctx, dl, box, idx, op, kind | 0x10, lines, nl, segs, 0.0f, 0.0f); return; }
+    paint_gap_lines(ctx, dl, box, idx, op, kind, lines, nl, segs, (float)(box->x + box->padding_left + box->s->border_left),
+                    (float)(box->y + box->padding_top + box->s->border_top));
 }
 
 /* A multi-column container's column rules (CSS Multicol 1 4): in the middle
@@ -3181,6 +3227,51 @@ static void paint_column_rules(const LayoutContext *ctx, int idx, DisplayList *d
     /* (runs by place in the one column) */
     if (mb->mc_nseg > 0) {
         int Nr = mb->mc_n - 1 > 0 ? mb->mc_n - 1 : 0;
+        /* (rows of columns between spanners: each run of rows a grid of gaps) */
+        const LayoutMcSeg *SG = &ctx->mc_segs[mb->mc_seg0];
+        int ns_ = mb->mc_nseg, per_ = mb->mc_n, nrow = 0;
+        for (int sg = 1; sg < ns_; sg++) if (SG[sg].rgap >= 0.0f) nrow++;
+        if (nrow > 0 && per_ <= 32 && ns_ <= 256 && !vm) {
+            CssGapLine *L = (CssGapLine *)calloc((size_t)ns_ * (size_t)per_ + 1, sizeof *L);
+            CssGapSeg *Sg = (CssGapSeg *)calloc((size_t)ns_ * (size_t)per_ * 2 + 1, sizeof *Sg);
+            int nl = 0, ns = 0, ri = 0;
+            for (int a = 0; L && Sg && a < ns_;) {
+                int b = a;
+                while (b + 1 < ns_ && SG[b + 1].rgap >= 0.0f) b++;
+                /* (column-rule-break: none: one rule through the runs, behind the spanners) */
+                int ca = a, cb = b;
+                if (s->gr[0].brk == 1) { ca = 0; cb = a == 0 ? ns_ - 1 : -1; }
+                for (int g = 0; g + 1 < per_ && cb >= ca; g++) {
+                    CssGapLine *l = &L[nl++];
+                    float mid = (g + 1) * (W + G) - G * 0.5f;
+                    l->axis = 0; l->gi = g; l->nn = Nr; l->pos = rtl ? U - mid : mid; l->w = G; l->ci0 = l->ci1 = -1; l->at = ns; l->n = cb - ca + 1;
+                    for (int r = ca, rj = ri; r <= cb; r++) {
+                        CssGapSeg *q = &Sg[ns++];
+                        bool jn = r < cb && SG[r + 1].rgap >= 0.0f;
+                        q->s = SG[r].dst - top; q->e = q->s + SG[r].h; q->jw = jn ? SG[r + 1].rgap : 0.0f; q->ci = jn ? rj++ : -1; q->jt = 2;
+                        q->occ = (unsigned char)((g < SG[r].used ? 1 : 0) | (g + 1 < SG[r].used ? 2 : 0));
+                    }
+                }
+                for (int r = a; r < b; r++) {
+                    CssGapLine *l = &L[nl++];
+                    float rgp = SG[r + 1].rgap;
+                    l->axis = 1; l->gi = ri + (r - a); l->nn = nrow; l->pos = SG[r].dst + SG[r].h + rgp * 0.5f - top; l->w = rgp; l->ci0 = l->ci1 = -1; l->at = ns; l->n = per_;
+                    for (int k = 0; k < per_; k++) {
+                        int col = rtl ? per_ - 1 - k : k;
+                        CssGapSeg *q = &Sg[ns++];
+                        q->s = rtl ? U - (col + 1) * (W + G) + G : col * (W + G); q->e = q->s + W;
+                        q->jw = k < per_ - 1 ? G : 0.0f; q->ci = k < per_ - 1 ? (rtl ? per_ - 2 - k : k) : -1; q->jt = 2;
+                        q->occ = (unsigned char)((col < SG[r].used ? 1 : 0) | (col < SG[r + 1].used ? 2 : 0));
+                    }
+                }
+                ri += b - a;
+                a = b + 1;
+            }
+            if (L && Sg) paint_gap_lines(ctx, dl, mb, idx, op, 2, L, nl, Sg, left, top);
+            free(L);
+            free(Sg);
+            return;
+        }
         for (int sg = 0; sg < mb->mc_nseg; sg++) {
             const LayoutMcSeg *S = &ctx->mc_segs[mb->mc_seg0 + sg];
             float base = vm ? S->dst - (float)(mb->y + mb->padding_top + s->border_top) * 0.0f : S->dst;
@@ -3203,7 +3294,11 @@ static void paint_column_rules(const LayoutContext *ctx, int idx, DisplayList *d
             any_span = ctx->boxes[c].mc_span && ctx->boxes[c].s->display != CSS_DISPLAY_NONE;
         if (any_span) {
             int k = ctx->tree.nodes[idx].first_child_idx;
-            while (k >= 0) {
+            /* (the runs: where each is painted, how tall, its columns with content, those overflowing too) */
+            enum { MR = 64, MG = 63 };
+            float rd[MR], rh[MR];
+            int rc[MR], nr = 0, maxc = 0;
+            while (k >= 0 && nr < MR) {
                 if (ctx->boxes[k].mc_span) { k = ctx->tree.nodes[k].next_sibling_idx; continue; }
                 float dst = ctx->boxes[k].mc_dst, src = ctx->boxes[k].mc_src, h = ctx->boxes[k].mc_seg_h, most = src;
                 for (; k >= 0 && !ctx->boxes[k].mc_span; k = ctx->tree.nodes[k].next_sibling_idx) {
@@ -3215,28 +3310,82 @@ static void paint_column_rules(const LayoutContext *ctx, int idx, DisplayList *d
                 if (h <= 0.5f || most <= src + 0.01f) continue;
                 int used = (int)ceilf((most - src - 0.01f) / h);
                 /* (the last run of a container of a height, balanced: its columns to the content edge, every one) */
-                if (k < 0 && s->height_set && s->column_fill == 0) used = mb->mc_n;
-                if (used > mb->mc_n) used = mb->mc_n;
-                int Nr = mb->mc_n - 1 > 0 ? mb->mc_n - 1 : 0;
-                for (int g = 0; g + 1 < used; g++) {
-                    int style;
-                    float rw, c[4];
-                    if (!gap_rule_of(s, 0, g, Nr, op, &style, &rw, c)) continue;
+                if (k < 0 && s->height_set && s->column_fill == 0 && used < mb->mc_n && s->gr[0].vis == 0) used = mb->mc_n;
+                if (k < 0 && s->height_set && s->column_fill == 0 && !vm && top + (float)mb->content_height - dst > h) h = top + (float)mb->content_height - dst;
+                if (used > maxc) maxc = used;
+                rd[nr] = dst; rh[nr] = h; rc[nr] = used; nr++;
+            }
+            /* (each gap a line through the runs: broken where a spanner crosses it, the overflowing columns' not) */
+            if (s->gr[0].vis == 1 && s->column_count > 0 && maxc < mb->mc_n) maxc = mb->mc_n;   /* (all: a count's every gap) */
+            int ng = maxc - 1 < MG ? maxc - 1 : MG;
+            if (ng > 0 && nr > 0) {
+                CssGapLine *L = (CssGapLine *)calloc((size_t)ng, sizeof *L);
+                CssGapSeg *Sg = (CssGapSeg *)calloc((size_t)ng * (size_t)nr * 2, sizeof *Sg);
+                int ns = 0;
+                for (int g = 0; L && Sg && g < ng; g++) {
+                    CssGapLine *l = &L[g];
                     float mid = (g + 1) * (W + G) - G * 0.5f;
-                    if (rtl) mid = U - mid;
-                    float st = dst, en = dst + h;
-                    if (!s->gr[0].inset[0].oj) st += s->gr[0].inset[0].px;
-                    if (!s->gr[0].inset[1].oj) en -= s->gr[0].inset[1].px;
-                    if (en > st) mc_rule_piece(dl, mb, 0, style, left + mid - rw * 0.5f, st, rw, en - st, c);
+                    l->axis = 0; l->gi = g; l->nn = mb->mc_n - 1 > 0 ? mb->mc_n - 1 : 0; l->pos = rtl ? U - mid : mid; l->w = G; l->ci0 = l->ci1 = -1; l->at = ns; l->n = 0;
+                    for (int r = 0; r < nr; r++) {
+                        CssGapSeg *q = &Sg[ns++];
+                        /* (a rule through the spanners: over each it's wanted, the spanner on both its sides) */
+                        if (r > 0 && s->gr[0].brk == 1 && g + 1 < mb->mc_n && rd[r] > rd[r - 1] + rh[r - 1]) {
+                            q->s = rd[r - 1] + rh[r - 1] - top; q->e = rd[r] - top; q->ci = -1; q->jt = 2; q->occ = 3;
+                            q = &Sg[ns++];
+                            l->n++;
+                        }
+                        l->n++;
+                        q->s = rd[r] - top; q->e = q->s + rh[r]; q->jw = 0.0f; q->ci = -1; q->jt = g + 1 < mb->mc_n ? 2 : 0;
+                        q->occ = (unsigned char)((g < rc[r] ? 1 : 0) | (g + 1 < rc[r] ? 2 : 0));
+                    }
                 }
+                if (L && Sg) paint_gap_lines(ctx, dl, mb, idx, op, 2, L, ng, Sg, left, top);
+                free(L);
+                free(Sg);
             }
             return;
         }
     }
     int per = wrap ? mb->mc_n : mb->mc_used;      /* (columns in a row) */
-    int used = mb->mc_used, rows = wrap ? (used + per - 1) / per : 1;
+    int used = mb->mc_used;
+    if (!wrap && s->gr[0].vis == 1 && per < mb->mc_n) per = used = mb->mc_n;   /* (rule-visibility-items: all, the empty columns' gaps too) */
+    int rows = wrap ? (used + per - 1) / per : 1;
     float RG = wrap ? mb->mc_rgap : 0.0f;
     int Nc = per - 1 > 0 ? per - 1 : 0;
+    /* (rows of columns: a grid of them, its gaps' segments by cell) */
+    if (wrap && rows > 1 && per <= 32 && rows <= 64) {
+        enum { ML = 96, MS = 32 * 64 * 2 };
+        CssGapLine *L = (CssGapLine *)calloc(ML, sizeof *L);
+        CssGapSeg *Sg = (CssGapSeg *)calloc(MS, sizeof *Sg);
+        int nl = 0, ns = 0;
+        if (L && Sg) {
+            for (int g = 0; g + 1 < per; g++) {
+                CssGapLine *l = &L[nl++];
+                float mid = (g + 1) * (W + G) - G * 0.5f;
+                l->axis = 0; l->gi = g; l->pos = rtl ? U - mid : mid; l->w = G; l->ci0 = l->ci1 = -1; l->at = ns; l->n = rows;
+                for (int r = 0; r < rows; r++) {
+                    CssGapSeg *q = &Sg[ns++];
+                    q->s = r * (H + RG); q->e = q->s + H; q->jw = r < rows - 1 ? RG : 0.0f; q->ci = r < rows - 1 ? r : -1; q->jt = 2;
+                    q->occ = (unsigned char)((r * per + g < used ? 1 : 0) | (r * per + g + 1 < used ? 2 : 0));
+                }
+            }
+            for (int r = 0; r + 1 < rows; r++) {
+                CssGapLine *l = &L[nl++];
+                l->axis = 1; l->gi = r; l->pos = (r + 1) * (H + RG) - RG * 0.5f; l->w = RG; l->ci0 = l->ci1 = -1; l->at = ns; l->n = per;
+                for (int k = 0; k < per; k++) {
+                    int col = rtl ? per - 1 - k : k;
+                    CssGapSeg *q = &Sg[ns++];
+                    q->s = rtl ? U - (col + 1) * (W + G) + G : col * (W + G); q->e = q->s + W;
+                    q->jw = k < per - 1 ? G : 0.0f; q->ci = k < per - 1 ? (rtl ? per - 2 - k : k) : -1; q->jt = 2;
+                    q->occ = (unsigned char)((r * per + col < used ? 1 : 0) | ((r + 1) * per + col < used ? 2 : 0));
+                }
+            }
+            paint_gap_lines(ctx, dl, mb, idx, op, 2, L, nl, Sg, left, top);
+        }
+        free(L);
+        free(Sg);
+        return;
+    }
     /* (rules between columns with content: in each row, each its row's height) */
     for (int pass = 0; pass < 2; pass++) {
         int a = s->gr_overlap ? 1 - pass : pass;
@@ -3549,7 +3698,7 @@ static void dl_mc_chain(const LayoutContext *ctx, DisplayList *dl, int from, int
         bool fx = false;
         for (int p = box, d = 0; p >= 0 && d < 1024; p = ctx->tree.nodes[p].parent_idx, d++) {
             const LayoutStyle *ps = ctx->boxes[p].s;
-            if (ps->position == CSS_POSITION_FIXED) { fx = ps->z_index != 2147483000 && ps->z_index != -2147483000; if (!fx) break; }
+            if (ps->position == CSS_POSITION_FIXED) { fx = ps->z_index != 999999000 && ps->z_index != -999999000 && ps->z_index != -999999001; if (!fx) break; }
         }
         const LayoutBox *rb = &ctx->boxes[ctx->tree.root_idx];
         if (fx && rb->mc_n > 0 && rb->mc_used > 1) {
@@ -5413,7 +5562,7 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
             {
                 int cp = ctx->tree.nodes[i].parent_idx;
                 bool inl_ok = ctx->boxes[cp >= 0 ? cp : 0].clamp_clip == 2 && b->s->display == CSS_DISPLAY_INLINE && !b->s->float_side;
-                if (cp >= 0 && cp < i && ctx->boxes[cp].clamp_clip && !inl_ok && b->s->position != CSS_POSITION_ABSOLUTE && b->s->position != CSS_POSITION_FIXED) {
+                if (cp >= 0 && cp < i && ctx->boxes[cp].clamp_clip && !inl_ok && !b->clamp_keep && b->s->position != CSS_POSITION_ABSOLUTE && b->s->position != CSS_POSITION_FIXED) {
                     const LayoutBox *cb2 = &ctx->boxes[cp];
                     float cy = cb2->clamp_y - (off ? off[cp][1] : 0.0f);
                     if (cy < c[3]) c[3] = cy;
@@ -5619,6 +5768,20 @@ static int canvas_background(LayoutContext *ctx, DisplayList *dl)
 {
     int root = ctx->tree.root_idx;
     if (root < 0 || root >= ctx->tree.count || !ctx->doc || !ctx->boxes[root].s) return -1;
+    /* (print: each sheet's page colour first, from the hidden boxes of the host at z-index -999999001) */
+    if (g_css_print.on) {
+        for (int c = ctx->tree.nodes[root].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+            const LayoutStyle *hs = ctx->boxes[c].s;
+            if (!hs || hs->position != CSS_POSITION_FIXED || hs->z_index != -999999001) continue;
+            for (int q = ctx->tree.nodes[c].first_child_idx; q >= 0; q = ctx->tree.nodes[q].next_sibling_idx) {
+                const LayoutBox *b = &ctx->boxes[q];
+                if (!b->s || !(b->flags & LAYOUT_HAS_LAYOUT) || b->s->background_color_a <= 0.0f) continue;
+                if (!display_list_add_rect(dl, (float)b->x, (float)b->y, (float)b->width, (float)b->height, (float)b->s->background_color_r,
+                                           (float)b->s->background_color_g, (float)b->s->background_color_b, (float)b->s->background_color_a))
+                    return -2;
+            }
+        }
+    }
     int src = -1;
     if (ctx->boxes[root].s->background_color_a > 0.0f || ctx->boxes[root].s->background_image_url[0] || ctx->boxes[root].s->bg_grad) {
         src = root;
@@ -5848,7 +6011,8 @@ static bool paint_is_context(const LayoutContext *ctx, int i)
 {
     const LayoutBox *b = &ctx->boxes[i];
     if (b->s->position == CSS_POSITION_FIXED || b->s->position == CSS_POSITION_STICKY) return true;
-    if (b->s->z_index_set) {
+    if (b->s->wc_sc == 1) return true;   /* (will-change names what makes one) */
+    if (b->s->z_index_set || b->s->wc_sc == 2) {
         if (b->s->position != CSS_POSITION_STATIC) return true;
         int p = ctx->tree.nodes[i].parent_idx;   /* (a flex or grid item) */
         if (p >= 0 && (ctx->boxes[p].s->display == CSS_DISPLAY_FLEX || ctx->boxes[p].s->display == CSS_DISPLAY_GRID))
@@ -6764,7 +6928,33 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                                 text_shaper_vmetrics(font, &a0, &d0, &g0);
                                 deco_by = (float)(box->y + fr->dy) + a0 * (float)fs;
                                 ul_a = dl->count;
-                                dl_text_decorations(dl, ctx, i, q, tfl->n, font, fs, dcx, dcw, deco_by, op, 0);
+                                unsigned char sk_all = box->s->tds_set && (box->s->tds_bits & 4) && (box->s->white_space == 2 || box->s->white_space == 3);
+                                size_t fn = fr->end - fr->start;
+                                char *seg = sk_all && fn > 0 && fn < 4096 && memchr(run_text + fr->start, ' ', fn) ? (char *)malloc(fn + 1) : NULL;
+                                if (seg) {
+                                    /* (text-decoration-skip-spaces: all: under each run between the spaces) */
+                                    size_t a = 0;
+                                    while (a < fn) {
+                                        while (a < fn && (run_text[fr->start + a] == ' ' || run_text[fr->start + a] == '\t')) a++;
+                                        size_t b = a;
+                                        while (b < fn && run_text[fr->start + b] != ' ' && run_text[fr->start + b] != '\t') b++;
+                                        if (b > a) {
+                                            float w0 = 0.0f, w1 = 0.0f, hh = 0.0f;
+                                            memcpy(seg, run_text + fr->start, b);
+                                            seg[a] = 0;
+                                            if (a) text_shaper_measure(font, seg, &w0, &hh);
+                                            memcpy(seg, run_text + fr->start, b);
+                                            seg[b] = 0;
+                                            text_shaper_measure(font, seg, &w1, &hh);
+                                            dl_text_decorations(dl, ctx, i, q, tfl->n, font, fs, (float)(box->x + fr->dx) + w0 * scale,
+                                                                (w1 - w0) * scale, deco_by, op, 0);
+                                        }
+                                        a = b;
+                                    }
+                                    free(seg);
+                                } else {
+                                    dl_text_decorations(dl, ctx, i, q, tfl->n, font, fs, dcx, dcw, deco_by, op, 0);
+                                }
                                 ul_b = dl->count;
                             }
                             if (box->s->autospace)
@@ -6851,19 +7041,21 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                                     text_shaper_vmetrics(font, &a0, &d0, &g0);
                                     text_shaper_vmetrics(ef, &a1, &d1, &g1);
                                     /* (on the block's baseline for the line) */
-                                    float ey = (float)(box->y + fr->dy) + (float)(a0 * fs) - (float)(a1 * efs) + fr->ell_by;
+                                    float ey = fr->ell_abs ? (float)(box->y + fr->ell_top) : (float)(box->y + fr->dy + (double)a0 * fs - (double)a1 * efs + (double)fr->ell_by);
                                     text_shaper_set_spacing(es->letter_spacing, es->word_spacing, (float)(efs / 16.0));
                                     const char *etx = css_layout_block_ellipsis(ctx, i);
                                     /* (right to left: before the text's left edge) */
-                                    float ex = (float)(box->x + fr->dx + fr->w);
+                                    float ex = (float)(box->x + fr->dx + fr->w) + fr->ell_dx;
                                     if (etx[0] && (es->direction == 1 || (fr->level & 1))) {
                                         float ew = 0.0f, eh = 0.0f;
                                         text_shaper_measure(ef, etx, &ew, &eh);
                                         ex = (float)(box->x + fr->dx) - ew * (float)(efs / 16.0);
                                     }
+                                    /* (the block's own text on its ::first-line: that line's color) */
+                                    bool efl = fr->fl && ctx->tree.nodes[i].parent_idx == eb;
                                     bool okp = !etx[0] || text_shaper_shape_span(ef, etx, 0, strlen(etx), ex, ey, (float)(efs / 16.0),
-                                                                     false, (float)es->color_r, (float)es->color_g, (float)es->color_b,
-                                                                     (float)es->color_a * op, dl);
+                                                                     false, efl ? fr_r : (float)es->color_r, efl ? fr_g : (float)es->color_g,
+                                                                     efl ? fr_b : (float)es->color_b, efl ? fr_a : (float)es->color_a * op, dl);
                                     text_shaper_set_spacing(box->s->letter_spacing, box->s->word_spacing, scale);
                                     if (!okp) return false;
                                     continue;
@@ -7095,7 +7287,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     mc[0], mc[1], mc[2], mc[3] * op, dl);
         }
 
-        if (box->mc_n > 0) paint_column_rules(ctx, i, dl, box, op);
+        if (box->mc_n > 0 && !box->s->gr_any) paint_column_rules(ctx, i, dl, box, op);
     replaced_border:
         paint_native_control(ctx, dl, i, node, op);
         cbr_from = dl->count;
@@ -7224,6 +7416,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         /* (gap decorations: just above the border) */
         if (box->s->gr_any) {
             int gfrom = dl->count;
+            if (box->mc_n > 0) paint_column_rules(ctx, i, dl, box, op);   /* (with insets and the rest: over its border as a grid's) */
             paint_gap_rules(ctx, dl, box, i, op);
             /* (inside its own overflow clip: its padding box) */
             if (box->s->overflow != 0) {

@@ -71,6 +71,7 @@ struct HtmlNode {
      * 2 shown (css_layout.c: a tree build leaving hidden subtrees out skips
      * the lookup for 2). */
     unsigned char hidden_hint;
+    const char *content_img;                 /* (content: url() on the element: the image that replaces it; interned, NULL none) */
 };
 
 struct HtmlArenaBlock;
