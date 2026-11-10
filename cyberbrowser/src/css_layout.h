@@ -836,6 +836,8 @@ typedef struct LayoutBox {
     /* Set by layout_resolve_used_sizes when a percentage height could not
      * resolve (indefinite containing block): the used height is auto. */
     unsigned char height_pct_unresolved;
+    unsigned char flex_def_h;   /* (a flex item whose height flex layout made definite) */
+    unsigned char flex_given;   /* (a table flex item in its layout: 1 its width, 2 its height what flex gave it) */
     /* An absolutely positioned box's static position, from the line it is
      * on (inline layout on items), relative to its parent's box; used and
      * cleared by the absolute positioning pass. */

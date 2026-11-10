@@ -20850,6 +20850,20 @@ static void layout_svg_size_in0(const LayoutBox *b, HtmlNode *dom, double pcw, d
     *out_h = h;
 }
 
+/* (an <svg> with a viewBox and no size of its own anywhere: its ratio,
+ * width over height; 0: not one) */
+static double layout_svg_ratio_only(const LayoutBox *b, HtmlNode *dom)
+{
+    if (!b || !dom || dom->type != HTML_NODE_ELEMENT || !dom->tag_name || strcasecmp(dom->tag_name, "svg") != 0) return 0.0;
+    if (b->s->width_set || b->s->width_percent > 0.0 || b->s->height_set || b->s->height_percent > 0.0 || b->s->aspect_ratio_prop) return 0.0;
+    const char *wa = layout_node_attribute(dom, "width"), *ha = layout_node_attribute(dom, "height");
+    if ((wa && wa[0]) || (ha && ha[0])) return 0.0;
+    const char *vb = layout_node_attribute(dom, "viewbox");
+    double v[4];
+    if (!vb || sscanf(vb, "%lf%*[ ,]%lf%*[ ,]%lf%*[ ,]%lf", &v[0], &v[1], &v[2], &v[3]) != 4 || v[2] <= 0.0 || v[3] <= 0.0) return 0.0;
+    return v[2] / v[3];
+}
+
 /* Find the first <img> descendant and return its width/height attributes.
  * Used to size inline elements (like <a><img></a>) that wrap an image. */
 static bool layout_first_img_size(HtmlDocument *doc, HtmlNode *node,
@@ -23403,6 +23417,41 @@ static void mc_close_up(LayoutContext *ctx, int idx, int c, double d)
 static void layout_node_serial(LayoutContext *ctx, int idx);
 
 /* (a container with spanners below its children) */
+/* (rows of columns in an outer column: the outer column's height (0 none) and
+ * where the first one starts) */
+static __thread double t_mc_row_p, t_mc_row_t;
+static __thread double t_mc_row_left;   /* (a row taller than the outer column: what of its height is to come) */
+
+/* (the row after one ending at pe, the gap rg between, ch high: where it starts, *end where
+ * it ends. In an outer column: the gap no further than that column's end; a row
+ * that would cross the end starts the next column, and one taller than a column
+ * ends with it, the rest to come) */
+static double mc_row_next(double pe, double rg, double ch, double *end)
+{
+    double p = t_mc_row_p, y = pe + rg;
+    t_mc_row_left = 0.0;
+    if (p <= 1.0) { *end = y + ch; return y; }
+    double ppos = pe - t_mc_row_t, pos = y - t_mc_row_t;
+    double lim_a = ppos > 0.01 ? (floor((ppos - 0.01) / p) + 1.0) * p : 0.0;
+    if (pos > lim_a && ppos > 0.01) pos = lim_a;
+    double lim = (floor((pos + 0.01) / p) + 1.0) * p;
+    if (pos + ch > lim + 0.01) {
+        if (pos - (lim - p) > 0.01) { pos = lim; lim += p; }
+        if (pos + ch > lim + 0.01) { t_mc_row_left = ch - p; *end = t_mc_row_t + lim; return t_mc_row_t + pos; }
+    }
+    *end = t_mc_row_t + pos + ch;
+    return t_mc_row_t + pos;
+}
+
+/* (the next piece of a row taller than the outer column, from the column's top at pe) */
+static double mc_row_more(double pe, double *end)
+{
+    double h = t_mc_row_left < t_mc_row_p ? t_mc_row_left : t_mc_row_p;
+    t_mc_row_left -= h;
+    *end = pe + h;
+    return pe;
+}
+
 static void layout_multicol_deep(LayoutContext *ctx, int idx, McNested *L, int N, double W, double G, double U, double top, bool auto_h, double ch, double rg)
 {
     LayoutBox *box = layout_box(ctx, idx);
@@ -23426,6 +23475,10 @@ static void layout_multicol_deep(LayoutContext *ctx, int idx, McNested *L, int N
     box->mc_nseg = 0;
     double extent = 0.0;
     double row_end = top + ch;   /* (rows of columns ch high: where the one being filled ends) */
+    if (ch > 0.5 && N > 0) {
+        box->mc_rgap = (float)rg;
+        dst = mc_row_next(top, 0.0, ch, &row_end);
+    }
     for (int k = 0; k <= nm; k++) {
         bool last = k == nm;
         double end = last ? all_end : marks[k];
@@ -23437,12 +23490,16 @@ static void layout_multicol_deep(LayoutContext *ctx, int idx, McNested *L, int N
         if (ch > 0.5 && N > 0) {
             double rem = ext, rsrc = src;
             bool joined = false;
-            if (row_end - dst < 0.5) { if (dst < row_end) dst = row_end; row_end = dst + ch; }
+            /* (past its row's end, a spanner through it: on at the next row the grid has) */
+            for (int guard = 0; guard < 4096 && row_end - dst < 0.5; guard++) {
+                double next = mc_row_next(row_end, rg, ch, &row_end);
+                if (dst < next) dst = next;
+            }
             for (int guard = 0; guard < 512; guard++) {
                 double hr = row_end - dst;
                 bool fits = rem <= N * hr + 0.01;
                 double h = hr;
-                if (fits && !last) {
+                if (fits && (!last || s->column_fill == 0)) {
                     h = ceil(rem / N);
                     if (N > 1 && rem > 0.0) {
                         int was_d = t_mc_depth;
@@ -23466,9 +23523,11 @@ static void layout_multicol_deep(LayoutContext *ctx, int idx, McNested *L, int N
                 sg->rgap = joined ? (float)rg : -1.0f;
                 box->mc_nseg++;
                 if (H <= 0.0) H = h;
-                if (fits) { dst += h; break; }
+                /* (the last row: balanced in it, the row as high as the rest) */
+                if (fits) { dst = last && rem > 0.01 && auto_h ? row_end : dst + h; break; }
                 rem -= N * hr; rsrc += N * hr;
-                dst = row_end + rg; row_end = dst + ch; joined = true;
+                dst = t_mc_row_left > 0.5 ? mc_row_more(row_end, &row_end) : mc_row_next(row_end, rg, ch, &row_end);
+                joined = true;
             }
             if (ext > extent) extent = ext;
             if (last) break;
@@ -23516,6 +23575,11 @@ static void layout_multicol_deep(LayoutContext *ctx, int idx, McNested *L, int N
         t_mc_depth = 0;
         layout_node_serial(ctx, L->v[k]);
         t_mc_depth = was_depth;
+        /* (rows of columns: not fitting what's left of a row begun, it starts the next) */
+        if (ch > 0.5) {
+            double sh = sp->height + (sp->margin_top > 0.0 ? sp->margin_top : 0.0) + (sp->margin_bottom > 0.0 ? sp->margin_bottom : 0.0);
+            if (dst - (row_end - ch) > 0.01 && dst + sh > row_end + 0.01) dst = mc_row_next(row_end, rg, ch, &row_end);
+        }
         double sy = dst + (sp->margin_top > 0.0 ? sp->margin_top : 0.0);
         layout_offset_subtree(ctx, L->v[k], 0.0, sy - sp->y);
         sp->y = sy;
@@ -23552,7 +23616,9 @@ static bool layout_multicol(LayoutContext *ctx, int idx)
     box->mc_nested = 0;
     box->mc_vert = 0;
     box->mc_nseg = 0;
-    if (!s->column_count && !s->column_width_set) return false;
+    /* (column-height alone: one column, in rows) */
+    bool rows_only = !s->column_count && !s->column_width_set && s->column_height > 0.0 && s->column_wrap != 1;
+    if (!s->column_count && !s->column_width_set && !rows_only) return false;
     if (s->custom_layout) return false;
     if (s->display != CSS_DISPLAY_BLOCK && s->display != CSS_DISPLAY_INLINE_BLOCK && s->display != CSS_DISPLAY_LIST_ITEM)
         return false;
@@ -23562,7 +23628,7 @@ static bool layout_multicol(LayoutContext *ctx, int idx)
     int N;
     double W;
     if (!s->column_width_set) {
-        N = s->column_count;
+        N = rows_only ? 1 : s->column_count;
         W = (U - (N - 1) * G) / N;
     } else {
         double fit = floor((U + G) / (s->column_width + G));
@@ -23589,7 +23655,8 @@ static bool layout_multicol(LayoutContext *ctx, int idx)
         if (o < 0.5 || o > t_mc_outer_h - 0.5) nest_h = t_mc_outer_h;
     }
     double saved_oh = t_mc_outer_h, saved_ot = t_mc_outer_top;
-    t_mc_outer_h = s->column_height > 0.0 && s->column_wrap != 1 ? s->column_height : nest_h > 0.0 ? nest_h : !auto_h ? box->content_height : 0.0;
+    double row_p = t_mc_depth > 0 && saved_oh > 1.0 ? saved_oh : 0.0;
+    t_mc_outer_h = s->column_height > 0.0 ? s->column_height : nest_h > 0.0 ? nest_h : !auto_h ? box->content_height : 0.0;
     t_mc_outer_top = top;
     t_mc_depth++;
     layout_block_flow_inner(ctx, idx);
@@ -23603,7 +23670,7 @@ static bool layout_multicol(LayoutContext *ctx, int idx)
      * on its own, a spanner laid out across the container after it. */
     {
         /* (a known column height and no spanner: breaks pushed to columns' tops) */
-        double ch = s->column_height > 0.0 && s->column_wrap != 1 ? s->column_height : nest_h > 0.0 ? nest_h : !auto_h ? box->content_height : 0.0;
+        double ch = s->column_height > 0.0 ? s->column_height : nest_h > 0.0 ? nest_h : !auto_h ? box->content_height : 0.0;
         bool spanner = false;
         for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0 && !spanner; c = ctx->tree.nodes[c].next_sibling_idx)
             spanner = layout_box(ctx, c)->s->column_span_all;
@@ -23619,9 +23686,14 @@ static bool layout_multicol(LayoutContext *ctx, int idx)
         for (int k = 0; k < N_.n; k++) if (ctx->tree.nodes[N_.v[k]].parent_idx != idx) deep = true;
         /* (rows of columns and a spanner: the runs by place too) */
         double rows_h = nest_h > 0.0 ? 0.0 : s->column_height > 0.0 && s->column_wrap != 1 ? s->column_height : s->column_wrap == 2 && !auto_h && box->content_height > 0.5 ? box->content_height : 0.0;
-        if (N_.n == 0) rows_h = 0.0;
+        /* (no spanner: the rows by the run below, but a last row to balance) */
+        if (N_.n == 0 && mc_forced(ctx, idx, 0) > 0) rows_h = 0.0;
         if (deep || rows_h > 0.5) {
+            double was_p = t_mc_row_p, was_t = t_mc_row_t;
+            t_mc_row_p = rows_h > 0.5 ? row_p : 0.0;
+            t_mc_row_t = saved_ot;
             layout_multicol_deep(ctx, idx, &N_, N, W, G, saved_cw, top, auto_h, rows_h, s->gap_row > 0.0 ? s->gap_row : 0.0);
+            t_mc_row_p = was_p; t_mc_row_t = was_t;
             free(N_.v);
             return true;
         }
@@ -23673,6 +23745,8 @@ static bool layout_multicol(LayoutContext *ctx, int idx)
         }
         /* (a height: the columns that high, balanced within it unless column-fill is auto) */
         if (!wrap && !auto_h && last && dst == top) h = s->column_fill == 0 && h < box->content_height ? h : box->content_height;
+        /* (column-height and no wrapping: the columns no higher, on along the row) */
+        if (!wrap && s->column_height > 0.0 && s->column_wrap == 1 && last && dst == top && (h > s->column_height || s->column_fill != 0)) h = s->column_height;
         if (!wrap && !auto_h && last && dst > top) {
             /* (the last run in what's left of the height: balanced within it too) */
             double rem = box->content_height - (dst - top);
@@ -28981,6 +29055,23 @@ static bool layout_height_sensitive(LayoutContext *ctx, int idx)
         LayoutBox *cb = layout_box(ctx, c);
         if (cb->s->display == CSS_DISPLAY_NONE) continue;
         if (cb->s->height_percent > 0.0) return true;
+        /* (a block inside an inline: its percentage is of this box too) */
+        if (cb->s->display == CSS_DISPLAY_INLINE && cb->s->block_in_inline && layout_height_sensitive(ctx, c)) return true;
+    }
+    return false;
+}
+
+/* (a column flex container of auto height with an auto-height item whose
+ * children have percentage heights: they wait on its height being known) */
+static bool flex_column_pct_waits(LayoutContext *ctx, int idx)
+{
+    const LayoutBox *b = layout_box(ctx, idx);
+    if (b->s->display != CSS_DISPLAY_FLEX || !layout_height_auto(b)) return false;
+    if (b->s->flex_direction != CSS_FLEX_DIRECTION_COLUMN && b->s->flex_direction != CSS_FLEX_DIRECTION_COLUMN_REVERSE) return false;
+    for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+        const LayoutBox *cb = layout_box(ctx, c);
+        if (cb->s->display == CSS_DISPLAY_NONE || cb->s->display == CSS_DISPLAY_FLEX || cb->s->display == CSS_DISPLAY_GRID) continue;
+        if (layout_height_auto(cb) && layout_height_sensitive(ctx, c)) return true;
     }
     return false;
 }
@@ -29137,6 +29228,8 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
         }
         it->cross_def = is_row ? h_def : w_def;
         bool main_def_item = is_row ? w_def : h_def;
+        child->flex_def_h = 0;
+        double svr = it->is_text ? 0.0 : layout_svg_ratio_only(child, dom);
 
         /* Cross-axis min/max (border-box). */
         if (is_row) {
@@ -29159,6 +29252,12 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
             layout_update_content_sizes(child);
         }
 
+        /* (an svg with only a ratio: across a column, the room there is) */
+        if (svr > 0.0 && !is_row) {
+            double room = cw - it->cm_s - it->cm_e;
+            child->width = flex_clamp(room > 0.0 ? room : 0.0, it->min_cross, it->max_cross);
+            layout_update_content_sizes(child);
+        }
         double basis = -1.0, ratio_main = -1.0;   /* (ratio_main: the main size its aspect-ratio gives) */
         /* (stretch: the room there is, less its margins) */
         if (child->s->fb_kw == 5) {
@@ -29205,6 +29304,14 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
                 basis = layout_flex_main_total(child, child->s->css_width, true);
             else if (!is_row && !layout_is_img(dom) && child->s->height_set && child->s->height_percent <= 0.0 && !child->s->h_kw && (child->min_height > 0.0 || child->max_height >= 0.0))
                 basis = layout_flex_main_total(child, child->s->css_height, false);
+        }
+        /* (an svg with only a ratio: along a row the room there is, down a column what its width gives) */
+        if (svr > 0.0 && !child->s->fb_kw && child->s->flex_basis_percent <= 0.0 && child->s->flex_basis < 0.0) {
+            double hb = layout_horizontal_border_padding(child), vb = layout_vertical_border_padding(child);
+            if (is_row) {
+                basis = avail_main - it->mm_s - it->mm_e;
+                if (basis < hb) basis = hb;
+            } else basis = (child->width - hb > 0.0 ? child->width - hb : 0.0) / svr + vb;
         }
         /* (an aspect-ratio and a definite cross size: the main size through
          * the ratio; a column's width is known by now) */
@@ -29320,6 +29427,7 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
                     }
                 }
                 if (w_def && child->width < mc) mc = child->width;
+                if (svr > 0.0) mc = 0.0;
                 if (it->max_main > 0.0 && mc > it->max_main) mc = it->max_main;
                 it->min_main = mc;
             }
@@ -29357,7 +29465,10 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
             fbh[k] = 1 + fs_->height_set; fbp[k] = fs_->height_percent;
             fs_->height_set = 0; fs_->height_percent = 0.0;
         }
+        /* (4: a table's content height, its min-height not in) */
+        for (int k = 0; k < nmeasure; k++) if (table_is_table(layout_box(ctx, list[k]))) layout_box(ctx, list[k])->flex_given = 4;
         layout_units(ctx, list, nmeasure);
+        for (int k = 0; k < nmeasure; k++) layout_box(ctx, list[k])->flex_given = 0;
         for (int k = 0; k < nmeasure && fbh && fbp; k++) {
             LayoutStyle *fs_ = layout_box(ctx, list[k])->s;
             if (fbh[k]) { fs_->height_set = fbh[k] - 1; fs_->height_percent = fbp[k]; }
@@ -29391,6 +29502,8 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
                 if (it->max_main > 0.0 && mc > it->max_main) mc = it->max_main;
                 it->min_main = mc > it->ratio_min ? mc : it->ratio_min;
             }
+            /* (a table: never shorter than its content) */
+            if (table_is_table(child) && !it->min_only && it->min_main < child->height) it->min_main = child->height;
         }
     }
     for (int i = 0; i < nkids; i++) {
@@ -29657,7 +29770,11 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
             layout_update_content_sizes(child);
             todo[ntodo++] = it->idx;
         } else {
-            if (it->measured && fabs(child->height - it->target) < 0.01) {
+            /* (measured with its height unknown: once the column's is known, its
+             * percentage children are laid out against the height it got) */
+            if (it->measured && fabs(child->height - it->target) < 0.01 &&
+                !(main_def && layout_height_auto(child) && child->s->display != CSS_DISPLAY_FLEX && child->s->display != CSS_DISPLAY_GRID &&
+                  layout_height_sensitive(ctx, it->idx))) {
                 layout_move_box(ctx, it->idx, x, y);
             } else {
                 child->height = it->target;
@@ -29667,7 +29784,13 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
             }
         }
     }
+    /* (tables: at the size they flexed to) */
+    for (int k = 0; k < ntodo; k++) {
+        LayoutBox *tb_ = layout_box(ctx, todo[k]);
+        if (table_is_table(tb_) && !t_wm_across_ext && tb_->s->writing_mode == 0) tb_->flex_given = is_row ? 1 : 3;
+    }
     if (ntodo > 0) layout_units(ctx, todo, ntodo);
+    for (int k = 0; k < ntodo; k++) layout_box(ctx, todo[k])->flex_given = 0;
     for (int i = 0; i < nkids; i++) {
         FlexItem *it = &items[i];
         if (it->is_text) continue;
@@ -29690,6 +29813,22 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
             double bw = layout_horizontal_border_padding(child), bh = layout_vertical_border_padding(child);
             child->width = flex_clamp((it->target - bh > 0.0 ? it->target - bh : 0.0) / child->s->aspect_ratio + bw, it->min_cross, it->max_cross);
             it->cross = child->width;
+        }
+        /* (an svg with only a ratio: its other size from what it flexed to) */
+        {
+            HtmlNode *sdom = layout_node_dom(ctx, ctx->tree.nodes[it->idx].dom_node_idx);
+            double svr = layout_svg_ratio_only(child, sdom);
+            if (svr > 0.0) {
+                double bw = layout_horizontal_border_padding(child), bh = layout_vertical_border_padding(child);
+                if (is_row) {
+                    child->height = flex_clamp((it->target - bw > 0.0 ? it->target - bw : 0.0) / svr + bh, it->min_cross, it->max_cross);
+                    it->cross = child->height;
+                } else {
+                    double room = cw - it->cm_s - it->cm_e;
+                    child->width = flex_clamp(room > 0.0 ? room : 0.0, it->min_cross, it->max_cross);
+                    it->cross = child->width;
+                }
+            }
         }
         /* (an image not stretched: its other size through its ratio, from what it flexed to) */
         if (!it->cross_def && it->align != CSS_ALIGN_STRETCH) {
@@ -29839,7 +29978,9 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
                         double pb = is_row ? child->padding_top + child->padding_bottom + child->s->border_top + child->s->border_bottom
                                            : child->padding_left + child->padding_right + child->s->border_left + child->s->border_right;
                         if (ns < pb) ns = pb;
+                        if (is_row) child->flex_def_h = 1;
                         if (fabs(ns - size) > 0.01) { size = ns; stretched = true; }
+                        else if (is_row && size > 0.0 && flex_column_pct_waits(ctx, it->idx)) stretched = true;
                     }
                     break;
                 case CSS_ALIGN_CENTER: off = (room - size) / 2.0; break;
@@ -29870,12 +30011,15 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
             if (stretched) {
                 if (is_row) child->height = size; else child->width = size;
                 layout_update_content_sizes(child);
-                if (!is_row || layout_height_sensitive(ctx, it->idx)) relayout[nrelayout++] = it->idx;
+                bool tbl_ = table_is_table(child) && !t_wm_across_ext && child->s->writing_mode == 0;
+                if (tbl_) child->flex_given = 3;
+                if (!is_row || tbl_ || layout_height_sensitive(ctx, it->idx)) relayout[nrelayout++] = it->idx;
             }
         }
     }
     if (nrelayout > 0) {
         layout_units(ctx, relayout, nrelayout);
+        for (int k = 0; k < nrelayout; k++) layout_box(ctx, relayout[k])->flex_given = 0;
         /* Re-layout must keep the stretched sizes. */
         for (int li = 0; li < nlines; li++) {
             for (int j = 0; j < lines[li].count; j++) {
@@ -34632,6 +34776,21 @@ static void table_distribute(const TableGrid *T, double W, double *w)
             maxs += T->cmax[k];
         }
     }
+    /* (the percentages and the others' least past the room: the percentage columns give way, down to their own least) */
+    bool spans = false;   /* (a spanning cell's least is shared out by guess: not to be held to) */
+    for (int i = 0; i < T->ncells; i++) if (T->cells[i].cs > 1) spans = true;
+    if (used > 0.0 && used + mins > avail + 0.01 && !spans) {
+        double room = avail - mins, raw = 0.0;
+        if (room < 0.0) room = 0.0;
+        for (int k = 0; k < T->ncols; k++) if (T->cpct[k] > 0.0) raw += T->cpct[k] * avail;
+        used = 0.0;
+        for (int k = 0; k < T->ncols; k++) {
+            if (!(T->cpct[k] > 0.0)) continue;
+            w[k] = raw > 0.0 ? T->cpct[k] * avail * room / raw : 0.0;
+            if (w[k] < T->cmin[k]) w[k] = T->cmin[k];
+            used += w[k];
+        }
+    }
     double R = avail - used;
     int nauto = 0, nfixed = 0;
     double auto_max = 0.0, fixed_max = 0.0;
@@ -34712,7 +34871,8 @@ static void layout_table_box(LayoutContext *ctx, int idx, LayoutBox *tb)
 {
     TableGrid T;
     bool anon = tb != layout_box(ctx, idx);
-    bool w_auto = !(tb->s->width_set || tb->s->width_percent > 0.0 || tb->s->width_keyword);
+    bool w_auto = !(tb->s->width_set || tb->s->width_percent > 0.0 || tb->s->width_keyword) && !(tb->flex_given & 1);
+    bool h_given = (tb->flex_given & 2) != 0;
     double hpb = layout_horizontal_border_padding(tb);
     if (!table_build(ctx, idx, tb, &T)) {
         /* (its row groups, rows and columns, with no rows: no area) */
@@ -34906,7 +35066,15 @@ static void layout_table_box(LayoutContext *ctx, int idx, LayoutBox *tb)
             collapsed[r] = true;
             T.rows[r].h = 0.0;
         }
-    double tb_want = !layout_height_auto(tb) ? tb->height : tb->min_height > 0.0 ? tb->min_height : -1.0;
+    double tb_want = !layout_height_auto(tb) ? tb->height : tb->min_height > 0.0 && !(tb->flex_given & 4) ? tb->min_height : -1.0;
+    if (h_given) {
+        /* (the height flex gave it: its captions' share out) */
+        tb_want = tb->height - cap_h;
+        for (int i = 0; i < T.ncaptions; i++) {
+            const LayoutBox *cap = layout_box(ctx, T.captions[i]);
+            if (css_layout_caption_bottom(ctx, T.captions[i])) tb_want -= cap->margin_top + cap->height + cap->margin_bottom;
+        }
+    }
     if (tb_want > 0.0 && T.nrows > 0) {
         /* A table taller than its rows (its height, or its min-height): they
          * share the rest, by their heights (evenly when none has any). */
@@ -34996,7 +35164,7 @@ static void layout_table_box(LayoutContext *ctx, int idx, LayoutBox *tb)
     double content_h = rows_end - content_y;
     double total = content_h + layout_vertical_border_padding(tb) + cap_h;
     /* (a set height is the table box's: the captions outside it) */
-    if (!layout_height_auto(tb) && cap_h > 0.0 && content_h + layout_vertical_border_padding(tb) < tb->height - 0.01)
+    if (!h_given && !layout_height_auto(tb) && cap_h > 0.0 && content_h + layout_vertical_border_padding(tb) < tb->height - 0.01)
         total = tb->height + cap_h;
     /* (captions with caption-side: bottom below the table box) */
     for (int i = 0; i < T.ncaptions; i++) {
@@ -35010,7 +35178,7 @@ static void layout_table_box(LayoutContext *ctx, int idx, LayoutBox *tb)
         layout_node_serial(ctx, c);
         total = cap->y + cap->height + cap->margin_bottom - tb->y;
     }
-    if (layout_height_auto(tb) || tb->height < total) {
+    if ((layout_height_auto(tb) && !h_given) || tb->height < total) {
         tb->height = total;
         layout_update_content_sizes(tb);
     }
@@ -37995,7 +38163,7 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
             if (b->s->position == CSS_POSITION_RELATIVE) {
                 /* (a percentage top or bottom of a box whose containing
                  * block's height depends on its content is auto, §9.3.2) */
-                bool vpct_auto = par >= 0 && par != ctx->tree.root_idx && layout_height_auto(&ctx->boxes[par]);
+                bool vpct_auto = par >= 0 && par != ctx->tree.root_idx && layout_height_auto(&ctx->boxes[par]) && !ctx->boxes[par].flex_def_h;
                 bool top_set = (b->s->positioned_sides & LAYOUT_SIDE_TOP) && !(vpct_auto && (b->s->inset_pct_bits & 1));
                 bool bottom_set = (b->s->positioned_sides & LAYOUT_SIDE_BOTTOM) && !(vpct_auto && (b->s->inset_pct_bits & 4));
                 /* (both left and right: the containing block's direction
