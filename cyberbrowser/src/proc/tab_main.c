@@ -44,6 +44,7 @@
 #include "text_shaper.h"
 #include "http_download.h"
 #include "image_cache.h"
+#include "browser/layout_api.h"   /* layout_render_tick_pending */
 #include "browser/storage_api.h"
 #include "browser/webgpu_bridge.h"
 
@@ -69,10 +70,11 @@ static void navigate_request(const uint8_t *url, uint32_t len);
 
 /* CYBER_REFTEST_HOOKS=1 (a reftest run's): __cyberFramePending(), true while
  * what the page last laid out (or is to lay out) has not gone to the GPU
- * process; the harness's ready script waits a frame more then. */
+ * process or been drawn there, or its rendering tick is owed; the harness's ready script waits a
+ * frame more then. */
 static GCValue js_frame_pending(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)ctx; (void)this_val; (void)argc; (void)argv;
-    return JS_NewBool(ctx, g_need_paint || page_needs_layout());
+    return JS_NewBool(ctx, g_need_paint || g_in_flight || page_needs_layout() || layout_render_tick_pending());
 }
 
 /* CYBER_TRACE_STEPS=1: a timestamped line at each step of a load (by the

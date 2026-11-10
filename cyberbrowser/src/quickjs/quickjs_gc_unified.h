@@ -729,6 +729,9 @@ bool gc_is_idle(void);
 /* Start a cycle if none is running (non-blocking).  Without a background
  * collector this does nothing. */
 void gc_request_cycle(bool major);
+/* What has been allocated with a background collector running, since the
+ * process started (JS thread). */
+uint64_t gc_allocated_bytes(void);
 /* Testing: run tick boundaries until the collector is idle (or timeout_ms
  * passes).  Returns true if it became idle. */
 bool gc_wait_idle(uint32_t timeout_ms);

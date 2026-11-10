@@ -29,6 +29,15 @@ const http = require('http'), fs = require('fs'), path = require('path');
 const [rootArg, port, out, ...dirs] = process.argv.slice(2);
 const root = path.resolve(rootArg);
 const origin = 'http://127.0.0.1:' + port;
+/* WPT_SERVER_PROF=<file>: a CPU profile of this server, seconds 3 to 15 of a
+ * run (it is killed at the end, so it cannot write one as it exits). */
+if (process.env.WPT_SERVER_PROF) {
+    const s = new (require('inspector').Session)();
+    s.connect();
+    s.post('Profiler.enable');
+    setTimeout(() => s.post('Profiler.start'), 3000);
+    setTimeout(() => s.post('Profiler.stop', (e, r) => { if (!e) fs.writeFileSync(process.env.WPT_SERVER_PROF, JSON.stringify(r.profile)); }), 15000);
+}
 /* testharness's own time limits (10 s, long 60 s), scaled by WPT_TIMEOUT_MULT
  * (testharness's timeout_multiplier; default 1), and some room. */
 const MULT = +(process.env.WPT_TIMEOUT_MULT || 1);
@@ -210,6 +219,25 @@ if (REFTEST) {
     }
     fs.writeFileSync(path.join(out, 'reftests.json'), JSON.stringify({ refInfo, steps }, null, 1));
 }
+/* (a step by its URL, and the paths that are steps: asked on every request, and
+ * a whole run has tens of thousands of steps to look through) */
+const STEP_BY_URL = new Map(steps.map(st => ['/' + st.url, st]));
+const STEP_PATHS = new Set(steps.map(st => '/' + st.url.split('?')[0]));
+/* A step's page is ready (or will never say so): its flag, once. */
+function stepReady(pathAndSearch) {
+    const st = STEP_BY_URL.get(pathAndSearch);
+    if (!st || st.flagged) return;
+    st.flagged = true;
+    /* (not waited for: making a file takes near a millisecond here, and every
+     * shard's requests would wait behind it) */
+    fs.writeFile(path.join(out, `step-${st.k}.flag`), 'ready', () => {});
+}
+/* Files as read, with their headers (a .headers file's among them), by path:
+ * a reference many tests share, a font, a support script are asked for
+ * hundreds of times, and each asking was five file system calls.  (the tree
+ * does not change during a run) */
+const FILE_CACHE = new Map();
+let fileCacheBytes = 0;
 /* Says when a reftest page is ready to be compared (posted to /refready). */
 const REFREADY = `<script style="display: none !important">//<![CDATA[
 (function () {
@@ -446,8 +474,7 @@ const server = http.createServer((req, res) => {
         let body = '';
         req.on('data', d => body += d);
         req.on('end', () => {
-            const st = steps.find(x => '/' + x.url === body && !fs.existsSync(path.join(out, `step-${x.k}.flag`)));
-            if (st) fs.writeFileSync(path.join(out, `step-${st.k}.flag`), 'ready');
+            stepReady(body);
             if (t_req) console.log(`[trace] ${t_req} refready request, ${((Date.now() * 10000) % 1e9 / 1e4).toFixed(1)} flag written`);
             res.writeHead(204); res.end();
         });
@@ -614,23 +641,34 @@ const server = http.createServer((req, res) => {
     let decoded_path;
     try { decoded_path = decodeURIComponent(url.pathname); } catch (e) { res.writeHead(400); return res.end(); }
     const file = path.join(root, decoded_path);
-    if (!file.startsWith(root) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
-        res.writeHead(404); return res.end();
-    }
-    let data = fs.readFileSync(file);
-    const ext = path.extname(file).toLowerCase();
-    if (/\.sub\.[^/]*$/.test(file)) data = Buffer.from(substitute(data.toString('utf8'), url), 'utf8');
-    const headers = { 'content-type': types[ext] || 'application/octet-stream' };
-    for (const hf of [file + '.headers', path.join(path.dirname(file), '__dir__.headers')]) {
-        if (!fs.existsSync(hf)) continue;
-        for (const line of fs.readFileSync(hf, 'utf8').split(/\r?\n/)) {
-            const i = line.indexOf(':');
-            if (i > 0) headers[line.slice(0, i).trim().toLowerCase()] = line.slice(i + 1).trim();
+    const cached = FILE_CACHE.get(file);
+    if (cached) return serveFile(res, url, file, cached);
+    /* (read off this thread, as the flag is written; a directory, or nothing there: the read fails) */
+    fs.readFile(file.startsWith(root) ? file : path.join(root, '\0'), (err, raw) => {
+        if (err) {
+            /* (a reftest's page that is not there will never say it is ready) */
+            if (REFTEST) stepReady(url.pathname + url.search);
+            res.writeHead(404); return res.end();
         }
-        break;
-    }
-    if (REFTEST && /^(text\/html|application\/xhtml\+xml)/.test(headers['content-type']) &&
-        steps.some(st => '/' + st.url.split('?')[0] === url.pathname)) {
+        const h = { 'content-type': types[path.extname(file).toLowerCase()] || 'application/octet-stream' };
+        for (const hf of [file + '.headers', path.join(path.dirname(file), '__dir__.headers')]) {
+            if (!fs.existsSync(hf)) continue;
+            for (const line of fs.readFileSync(hf, 'utf8').split(/\r?\n/)) {
+                const i = line.indexOf(':');
+                if (i > 0) h[line.slice(0, i).trim().toLowerCase()] = line.slice(i + 1).trim();
+            }
+            break;
+        }
+        const hit = { raw, h };
+        if (raw.length <= (1 << 20) && fileCacheBytes < (768 << 20) && !FILE_CACHE.has(file)) { FILE_CACHE.set(file, hit); fileCacheBytes += raw.length; }
+        try { serveFile(res, url, file, hit); } catch (e) { console.log('serving ' + file + ': ' + e); res.destroy(); }
+    });
+});
+function serveFile(res, url, file, hit) {
+    let data = hit.raw;
+    if (/\.sub\.[^/]*$/.test(file)) data = Buffer.from(substitute(data.toString('utf8'), url), 'utf8');
+    const headers = Object.assign({}, hit.h);
+    if (REFTEST && /^(text\/html|application\/xhtml\+xml)/.test(headers['content-type']) && STEP_PATHS.has(url.pathname)) {
         /* (inside the root element, so XHTML stays well-formed) */
         /* (found in the text itself: lower-casing can change its length, 'İ' -> 'i̇') */
         const text = data.toString('utf8'), ends = [...text.matchAll(/<\/html>/gi)];
@@ -638,8 +676,7 @@ const server = http.createServer((req, res) => {
         /* (a print reftest and its references: laid out as pages) */
         const rdy = PRINT_URLS.has(url.pathname) || url.searchParams.has('cyberprint') ? REFREADY.replace('/*PRINT*/', 'if (window.__cyberPrintBegin) window.__cyberPrintBegin();') : REFREADY;
         data = Buffer.from(end < 0 ? text + rdy : text.slice(0, end) + rdy + text.slice(end), 'utf8');
-    } else if (REFTEST && /^(application|text)\/(xml|[\w.+-]*\+xml)/.test(headers['content-type']) &&
-               steps.some(st => '/' + st.url.split('?')[0] === url.pathname)) {
+    } else if (REFTEST && /^(application|text)\/(xml|[\w.+-]*\+xml)/.test(headers['content-type']) && STEP_PATHS.has(url.pathname)) {
         /* (other XML, SVG among it: an XHTML script before the root element's end tag says when it's ready) */
         const text = data.toString('utf8'), ends = [...text.matchAll(/<\/[\w:.-]+\s*>/g)];
         const end = ends.length ? ends[ends.length - 1].index : -1;
@@ -650,7 +687,7 @@ const server = http.createServer((req, res) => {
     for (const m of (url.searchParams.get('pipe') || '').matchAll(/header\(([^,()]+),([^()]*)\)/g)) headers[m[1].trim().toLowerCase()] = m[2].trim();
     res.writeHead(200, headers);
     res.end(data);
-});
+}
 for (let i = 0; i < NPORTS; i++) {
     const s = i === 0 ? server : http.createServer(server.listeners('request')[0]);
     s.listen(+port + i, '127.0.0.1');

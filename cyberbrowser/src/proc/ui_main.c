@@ -241,11 +241,16 @@ static uint64_t chrome_key(const Win *w) {
     return h ? h : 1;
 }
 
+/* CYBER_UI_QUIET: titles, the address and the strip stay as first painted (a
+ * test run's six windows, each on a new page 25 times a second, spent a core
+ * painting them, and Explorer's taskbar half of one following the titles). */
+static bool g_quiet;
+
 static void update_chrome(Win *w) {
     if (!w->used) return;
     /* (unchanged: nothing to set or paint again; a page's load sends several) */
     uint64_t key = chrome_key(w);
-    if (key == w->chrome) { show_content(w); return; }
+    if (key == w->chrome || (g_quiet && w->chrome)) { show_content(w); return; }
     w->chrome = key;
     wchar_t buf[PROTO_URL_MAX + 64];
     Tab *t = active_tab(w);
@@ -617,7 +622,7 @@ static void from_tab(Tab *t, const ChanMsg *m) {
         t->nav_wait = false;
         t->state = u.state == TAB_LOADED ? ST_LOADED : u.state == TAB_LOAD_FAILED ? ST_FAILED : ST_LOADING;
         if (t->state == ST_LOADED && !t->loaded_ms) t->loaded_ms = ui_now_ms();
-        InvalidateRect(g_wins[t->win].wnd, NULL, FALSE);
+        if (!g_quiet) InvalidateRect(g_wins[t->win].wnd, NULL, FALSE);
         return;
     case TU_WANT_WEBGPU: {
         /* For this tab only: the id is the channel's, not the tab's word. */
@@ -1432,6 +1437,7 @@ int main(int argc, char **argv) {
         open_tab_in(g_focus, url);
     }
     g_reuse = getenv("CYBER_TAB_REUSE") != NULL;
+    g_quiet = getenv("CYBER_UI_QUIET") != NULL;
     g_reuse_max = getenv("CYBER_TAB_REUSE_MAX") ? atoi(getenv("CYBER_TAB_REUSE_MAX")) : 0;
     const char *script = getenv("CYBER_UI_SCRIPT");
     /* (a script waits in 1 ms steps, not the default 15.6 ms ticks) */

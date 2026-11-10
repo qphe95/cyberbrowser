@@ -109,7 +109,7 @@ if [ -n "$REFTEST" ]; then
         if [ "$i" = 1 ]; then
             for t in $(seq 200); do [ -s "$build/shard-0/logs/ui.log" ] && break; sleep 0.025; done
         fi
-        (cd "$build/shard-$i" && CYBER_FRAME_IMAGE_WAIT=1 CYBER_REFTEST_HOOKS=1 CYBER_RAF_MS=${CYBER_RAF_MS:-2} CYBER_UI_SCRIPT="$W/script-$i.txt" ./cb_coord.exe) \
+        (cd "$build/shard-$i" && CYBER_FRAME_IMAGE_WAIT=1 CYBER_REFTEST_HOOKS=1 CYBER_UI_QUIET=1 CYBER_RAF_MS=${CYBER_RAF_MS:-2} CYBER_UI_SCRIPT="$W/script-$i.txt" ./cb_coord.exe) \
             2> "$out/coord-$i.txt" &
         pids="$pids $!"
     done

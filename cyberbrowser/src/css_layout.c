@@ -715,6 +715,10 @@ void css_layout_tree_free(LayoutContext *ctx)
     for (int i = 0; ctx->pieces && i < ctx->pieces_n; i++) free(ctx->pieces[i].p);
     free(ctx->pieces);
     layout_text_frags_free(ctx);
+    /* (the multicol segments go with the boxes that index them, not with the
+     * text fragments: a container not laid out again after those were dropped
+     * still paints from its segments) */
+    free(ctx->mc_segs);
     for (int k = 0; k < ctx->pseudo_nodes_n; k++) free(ctx->pseudo_nodes[k].text_content);
     free(ctx->pseudo_nodes);
     free(ctx->anon_nodes);
@@ -1753,6 +1757,8 @@ static void layout_blockify(LayoutContext *ctx)
     layout_text_frags_free(ctx);
     ctx->pieces = NULL;
     ctx->pieces_n = 0;
+    /* (the multicol segments no box indexes any more: given back) */
+    { int top = 0; for (int k = 0; k < ctx->tree.count; k++) { const LayoutBox *b = &ctx->boxes[k]; if (b->mc_nseg > 0 && b->mc_seg0 + b->mc_nseg > top) top = b->mc_seg0 + b->mc_nseg; } if (top < ctx->mc_segs_n) ctx->mc_segs_n = top; }
     if (!post) return;
     bool split = false;
     for (int k = 0; k < ctx->tree.count; k++) {
@@ -16438,9 +16444,6 @@ static bool layout_build_orders(LayoutContext *ctx);
 
 static void layout_text_frags_free(LayoutContext *ctx)
 {
-    free(ctx->mc_segs);
-    ctx->mc_segs = NULL;
-    ctx->mc_segs_n = ctx->mc_segs_cap = 0;
     for (int i = 0; ctx->lines && i < ctx->lines_n; i++) { free(ctx->lines[i].t); free(ctx->lines[i].h); }
     free(ctx->lines);
     ctx->lines = NULL;
@@ -23615,6 +23618,8 @@ static bool layout_multicol(LayoutContext *ctx, int idx)
     box->mc_rgap = -1.0f;
     box->mc_nested = 0;
     box->mc_vert = 0;
+    /* (laid out again: its segments, when the last ones made, are written over) */
+    if (box->mc_nseg > 0 && box->mc_seg0 + box->mc_nseg == ctx->mc_segs_n) ctx->mc_segs_n = box->mc_seg0;
     box->mc_nseg = 0;
     /* (column-height alone: one column, in rows) */
     bool rows_only = !s->column_count && !s->column_width_set && s->column_height > 0.0 && s->column_wrap != 1;

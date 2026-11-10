@@ -1229,8 +1229,13 @@ bool page_load(void) {
         // lifecycle events.
         {
             CP_SCOPE("run-gc");
-            if (gc_is_background()) gc_request_cycle(true);
-            else JS_RunGC(JS_GetRuntime(g_ctx));
+            /* (in the background: once the pages since the last one have
+             * allocated 8 MB; a major cycle marks the whole platform heap,
+             * some 9 ms of a core, more than a small page's own load) */
+            static uint64_t s_at;
+            uint64_t now = gc_allocated_bytes();
+            if (!gc_is_background()) JS_RunGC(JS_GetRuntime(g_ctx));
+            else if (now - s_at >= (8u << 20)) { s_at = now; gc_request_cycle(true); }
         }
 
         if (!page_quiet()) printf("Dispatching DOMContentLoaded and load events ...\n");

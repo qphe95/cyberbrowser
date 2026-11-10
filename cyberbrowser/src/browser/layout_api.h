@@ -54,6 +54,7 @@ void layout_scroll_reset(void);
 /* Scroll snap, content-visibility and scroll-initial-target, when a page has
  * them and something changed (platform_api.js, __cyberRenderTick). */
 int layout_render_tick(JSContextHandle ctx);
+bool layout_render_tick_pending(void);
 
 /* The element's used font size in px from the cached layout (computed
  * values for getComputedStyle when only a relative declaration is known). */

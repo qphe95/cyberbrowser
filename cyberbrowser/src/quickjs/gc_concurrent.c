@@ -153,6 +153,7 @@ typedef struct GCConc {
     /* Allocation pacing (JS thread). */
     size_t young_bytes;           /* since the last minor start */
     size_t old_bytes;             /* since the last major start */
+    uint64_t total_bytes;         /* since the process started */
 
     /* Work handed between the threads with the request/answer protocol. */
     U32Vec pending_cards;         /* pulled but not yet rescanned */
@@ -772,6 +773,7 @@ static void trigger(uint32_t what) {
 
 void gc_core_note_allocation(size_t bytes, bool young) {
     if (!g_conc.running) return;
+    g_conc.total_bytes += bytes;
     if (young) {
         g_conc.young_bytes += bytes;
         if (g_conc.young_bytes >= g_core.config.nursery_size) trigger(TRIG_MINOR);
@@ -793,6 +795,7 @@ void gc_request_cycle(bool major) {
 }
 
 bool gc_is_background(void) { return g_conc.running; }
+uint64_t gc_allocated_bytes(void) { return g_conc.total_bytes; }
 
 bool gc_is_idle(void) {
     if (!g_conc.running) return true;

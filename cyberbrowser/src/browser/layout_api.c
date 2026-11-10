@@ -2132,7 +2132,11 @@ static GCValue lq_scroll_write(JSContextHandle ctx, GCValue this_val, int argc, 
     dom_scroll_set(s, top ? x : (float)v, top ? (float)v : y);
     layout_scroll_queue(ctx, s);
     /* (its lines cut by text-overflow: where they're cut moves with the scroll) */
-    if (g_lq_scroll_idx >= 0 && g_lq_scroll_idx < g_lq_layout.tree.count && g_lq_layout.boxes[g_lq_scroll_idx].ell_end > 0.0) dom_request_relayout();
+    if (g_lq_scroll_idx >= 0 && g_lq_scroll_idx < g_lq_layout.tree.count && g_lq_layout.boxes[g_lq_scroll_idx].ell_end > 0.0) {
+        /* (and not from the last layout's record: the scroll is no input of that) */
+        css_layout_retained_invalidate();
+        dom_request_relayout();
+    }
     return JS_UNDEFINED;
 }
 
@@ -2673,6 +2677,22 @@ static GCValue js_render_elements(JSContextHandle ctx, GCValue this_val, int arg
     return list;
 }
 
+/* (what the tick last looked at: layout runs, relayout requests, and when) */
+static uint64_t g_tick_seen, g_tick_seen_changes;
+static unsigned long long g_tick_last;
+
+/* A tick is owed: something to look at that it has not (it runs at most each
+ * 16 ms, so a page that loads faster than that is shown before its first). */
+bool layout_render_tick_pending(void)
+{
+    if (!g_css_render_features) return false;
+    const uint32_t *els;
+    const unsigned char *bits;
+    uint32_t n;
+    css_layout_render_list(&els, &bits, &n);
+    return g_tick_seen != g_layout_runs || g_render_tick_due || (n && g_tick_seen_changes != g_dom_relayout_requests);
+}
+
 int layout_render_tick(JSContextHandle ctx)
 {
     int features = g_css_render_features;
@@ -2687,19 +2707,17 @@ int layout_render_tick(JSContextHandle ctx)
      * each frame, and for only the elements that use these features.  With any
      * in the page, a change gets its layout now rather than at the next frame:
      * they are what depends on it. */
-    static uint64_t seen, seen_changes;
-    static unsigned long long last;
     const uint32_t *els;
     const unsigned char *bits;
     uint32_t n;
     css_layout_render_list(&els, &bits, &n);
-    if (seen == g_layout_runs && !g_render_tick_due && (!n || seen_changes == g_dom_relayout_requests)) return 0;
+    if (g_tick_seen == g_layout_runs && !g_render_tick_due && (!n || g_tick_seen_changes == g_dom_relayout_requests)) return 0;
     unsigned long long now = (unsigned long long)page_clock_now_ms();
-    if (now - last < 16) return 0;
-    last = now;
-    if (n && seen_changes != g_dom_relayout_requests) layout_api_update(ctx);
-    seen_changes = g_dom_relayout_requests;
-    seen = g_layout_runs;
+    if (now - g_tick_last < 16) return 0;
+    g_tick_last = now;
+    if (n && g_tick_seen_changes != g_dom_relayout_requests) layout_api_update(ctx);
+    g_tick_seen_changes = g_dom_relayout_requests;
+    g_tick_seen = g_layout_runs;
     g_render_tick_due = false;
     GCValue global = JS_GetGlobalObject(ctx);
     GCValue tick = JS_GetPropertyStr(ctx, global, "__cyberRenderTick");

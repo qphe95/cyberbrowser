@@ -1771,12 +1771,14 @@
         /* (scrolled since: its scroll's end decides) */
         if (st.sx !== el.scrollLeft || st.sy !== el.scrollTop) return;
         var lists = snapLists(el, axes);
-        var follow = function (list, targets, cur) {
+        var follow = function (list, targets, cur, range) {
             var t = snapPreferred(targets);
             for (var i = 0; t && i < list.length; i++) if (list[i].t === t) return list[i].pos;
-            return snapNearest(list, cur);
+            /* (snapped to nothing: a proximity scroller goes only to a position near it, as when it first snaps) */
+            var near = snapNearest(list, cur);
+            return near !== null && axes.proximity && Math.abs(near - cur) > range ? null : near;
         };
-        var x = follow(lists.x, st.x, st.sx), y = follow(lists.y, st.y, st.sy);
+        var x = follow(lists.x, st.x, st.sx, el.clientWidth / 3), y = follow(lists.y, st.y, st.sy, el.clientHeight / 3);
         if (x !== null && Math.abs(x - st.sx) >= 1) el.scrollLeft = x;
         if (y !== null && Math.abs(y - st.sy) >= 1) el.scrollTop = y;
         snapReport(el, snapRemember(el, lists, x, y));
