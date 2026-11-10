@@ -2535,6 +2535,14 @@ static bool css_nth_ok(const char *arg, size_t al)
     b[w] = 0;
     if (!w) return false;
     if (!strcmp(b, "odd") || !strcmp(b, "even")) return true;
+    {
+        /* (no space inside the An part: "1 n", "+ n") */
+        size_t a0 = 0, an = 0;
+        while (a0 < al && css_is_space(arg[a0])) a0++;
+        an = a0;
+        while (an < al && arg[an] != 'n' && arg[an] != 'N') an++;
+        if (an < al) for (size_t j = a0; j < an; j++) if (css_is_space(arg[j])) return false;
+    }
     size_t i = 0;
     if (b[i] == '+' || b[i] == '-') i++;
     size_t d0 = i;
@@ -2681,6 +2689,10 @@ static void css_apply_pseudo(CssSimpleSelector *out,
             }
             size_t n = al - s0;
             if (n == 0) out->never_match = true;   /* (of nothing: invalid) */
+            for (size_t q = s0, sq = 0; q < al; q++) {   /* (a string outside [] is no selector) */
+                if (arg[q] == '[') sq++; else if (arg[q] == ']' && sq) sq--;
+                else if (!sq && (arg[q] == '"' || arg[q] == 39)) out->never_match = true;
+            }
             if (n > 0 && n < sizeof(out->nth_of_arg)) {
                 memcpy(out->nth_of_arg, arg + s0, n);
                 out->nth_of_arg[n] = '\0';
@@ -2690,10 +2702,14 @@ static void css_apply_pseudo(CssSimpleSelector *out,
         return;
     }
     if (css_pseudo_name_is(name, nl, "nth-of-type")) {
-        out->nth_kind = 3; css_parse_nth(arg, al, &out->nth_a, &out->nth_b); return;
+        out->nth_kind = 3; css_parse_nth(arg, al, &out->nth_a, &out->nth_b);
+        if (!css_nth_ok(arg, al)) out->never_match = true;   /* (no "of S" here) */
+        return;
     }
     if (css_pseudo_name_is(name, nl, "nth-last-of-type")) {
-        out->nth_kind = 4; css_parse_nth(arg, al, &out->nth_a, &out->nth_b); return;
+        out->nth_kind = 4; css_parse_nth(arg, al, &out->nth_a, &out->nth_b);
+        if (!css_nth_ok(arg, al)) out->never_match = true;
+        return;
     }
     if (css_pseudo_name_is(name, nl, "not")) {
         /* Parse the first compound of the argument as a simple selector and
@@ -2849,7 +2865,7 @@ static void css_apply_pseudo(CssSimpleSelector *out,
         /* (ranges the attribute tests can't say, RFC 4647 extended filtering:
          * matched as they are) */
         bool complex = false;
-        for (size_t i = 0; i < al; i++) if (arg[i] == ',' || arg[i] == '*' || arg[i] == '\\') complex = true;
+        for (size_t i = 0; i < al; i++) if (arg[i] == ',' || arg[i] == '*' || arg[i] == '-' || arg[i] == '\\') complex = true;
         /* (each item a string or an identifier, else nothing matches) */
         for (size_t i = 0; i < al;) {
             while (i < al && css_is_space(arg[i])) i++;

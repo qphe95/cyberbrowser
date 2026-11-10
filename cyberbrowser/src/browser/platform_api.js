@@ -2002,6 +2002,11 @@
      * (or paused); a transition whose animations end soon shows nothing ---- */
     /* (auto and match-element: a name of the element's own; auto its id when it has one) */
     var VT_AUTO = new WeakMap(), vtAutoN = 0;
+    /* (an identifier without its escapes) */
+    var vtUnesc = function (s) {
+        if (s.indexOf('\\') < 0) return s;
+        return s.replace(/\\([0-9a-fA-F]{1,6})[ \t\n]?|\\([^])/g, function (m, h, c) { return h ? String.fromCodePoint(parseInt(h, 16) || 0xFFFD) : c; });
+    };
     var vtName = function (el) {
         var n = '';
         try { n = String(global.getComputedStyle(el).getPropertyValue('view-transition-name') || '').trim(); }
@@ -2012,7 +2017,7 @@
             if (!VT_AUTO.has(el)) VT_AUTO.set(el, '-cyber-vt-' + (++vtAutoN));
             return VT_AUTO.get(el);
         }
-        return n;
+        return vtUnesc(n);
     };
     var vtClasses = function (el) {
         try { var v = String(global.getComputedStyle(el).getPropertyValue('view-transition-class') || '').trim(); return v && v !== 'none' ? v.split(/\s+/) : []; }
@@ -2034,12 +2039,22 @@
         to.removeAttribute('id');
     };
     /* (a deep clone of el as it looks now, named descendants left out) */
-    var vtSnap = function (el) {
+    var vtSnap = function (el, isRoot) {
         var c = el.cloneNode(true);
         var walk = function (a, b, top) {
             if (a.nodeType !== 1 || b.nodeType !== 1) return;
             vtInline(a, b);
             if (!top && vtName(a)) { b.style.setProperty('visibility', 'hidden'); }
+            /* (a fixed descendant: where it is on screen, from the nearest positioned box of the clone) */
+            if (!top && !isRoot && global.getComputedStyle(a).position === 'fixed') {
+                var cb = a.parentNode;
+                while (cb && cb !== el && cb.nodeType === 1 && global.getComputedStyle(cb).position === 'static') cb = cb.parentNode;
+                if (cb && cb.nodeType === 1) {
+                    var ar = a.getBoundingClientRect(), cr = cb.getBoundingClientRect();
+                    [['position', 'absolute'], ['left', (ar.left - cr.left - (cb.clientLeft || 0)) + 'px'], ['top', (ar.top - cr.top - (cb.clientTop || 0)) + 'px'],
+                     ['right', 'auto'], ['bottom', 'auto'], ['margin', '0']].forEach(function (d) { b.style.setProperty(d[0], d[1]); });
+                }
+            }
             var ak = a.childNodes, bk = b.childNodes;
             for (var i = 0; i < ak.length && i < bk.length; i++) walk(ak[i], bk[i], false);
         };
@@ -2057,9 +2072,10 @@
         if (!b) return null;
         var bg = global.getComputedStyle(doc.documentElement).backgroundColor;
         if (!bg || /rgba\(0, 0, 0, 0\)|transparent/.test(bg)) bg = global.getComputedStyle(b).backgroundColor;
+        if (!bg || /rgba\(0, 0, 0, 0\)|transparent/.test(bg)) bg = 'white';
         var r = b.getBoundingClientRect();
         var bcs = global.getComputedStyle(b);
-        return { bg: bg, x: r.left, y: r.top, snap: vtSnap(b), margin: [bcs.marginTop, bcs.marginRight, bcs.marginBottom, bcs.marginLeft].join(' ') };
+        return { bg: bg, x: r.left, y: r.top, snap: vtSnap(b, true), margin: [bcs.marginTop, bcs.marginRight, bcs.marginBottom, bcs.marginLeft].join(' ') };
     };
     var vtCaptureState = function (doc, scope) {
         scope = scope || doc.documentElement;
@@ -2076,6 +2092,8 @@
         for (var i = 0; i < els.length; i++) {
             var el = els[i];
             if (el === scope || el.__cyberVtOverlay) continue;
+            var rn = el.getRootNode ? el.getRootNode() : null;
+            if (rn && rn.host && rn !== scope.getRootNode() && !el.hasAttribute('part')) continue;
             var n = vtName(el);
             if (!n || seen[n]) continue;
             var cs = global.getComputedStyle(el);
@@ -2107,9 +2125,9 @@
                     if (!m) return;
                     var pre = one.trim().slice(0, m.index).trim();
                     /* (:active-view-transition(-type()) as the attribute that stands for them) */
-                    if (pre) pre = pre.replace(/:active-view-transition-type(([^)]*))/gi, function (m, args) {
+                    if (pre) pre = pre.replace(/:active-view-transition-type\(([^)]*)\)/gi, function (m, args) {
                         return ':is(' + args.split(',').map(function (t) { return '[data-cyber-avt~="' + t.trim() + '"]'; }).join(',') + ')';
-                    }).replace(/:active-view-transition(?![-w])/gi, '[data-cyber-avt]');
+                    }).replace(/:active-view-transition(?![-\w])/gi, '[data-cyber-avt]');
                     if (pre) { var okp = false; try { okp = scope.matches(pre); } catch (e) { okp = false; } if (!okp) return; }
                     list.push({ kind: m[1] || 'root', name: (m[2] || '*').trim(), style: r.style });
                 });
@@ -2130,17 +2148,17 @@
         /* (the argument: a name or *, then .classes; * first, then classes, then names) */
         var parse = function (a) {
             var m = /^([^.]*)((?:\.[^.]+)*)$/.exec(a) || ['', a, ''];
-            return { n: m[1] || '*', c: m[2] ? m[2].slice(1).split('.') : [] };
+            return { n: vtUnesc(m[1] || '*'), u: (m[1] || '*') === '*', c: m[2] ? m[2].slice(1).split('.').map(vtUnesc) : [] };
         };
         var hit = function (r, level) {
             if (r.kind !== kind) return false;
             var p = parse(r.name);
-            if (p.n !== '*' && p.n !== name) return false;
+            if (!p.u && p.n !== name) return false;
             for (var i = 0; i < p.c.length; i++) if (!cls || cls.indexOf(p.c[i]) < 0) return false;
-            var lv = p.n !== '*' ? 2 : p.c.length ? 1 : 0;
+            var lv = !p.u || p.c.length ? 1 : 0;
             return lv === level;
         };
-        [0, 1, 2].forEach(function (lv) { rules.forEach(function (r) { if (hit(r, lv)) take(r); }); });
+        [0, 1].forEach(function (lv) { rules.forEach(function (r) { if (hit(r, lv)) take(r); }); });
         return d;
     };
     var vtSecs = function (v) {
@@ -2169,7 +2187,7 @@
         for (var p in d) if (!VT_SKIP.test(p)) {
             try { div.style.setProperty(p, d[p]); } catch (e) { }
             /* (a shorthand's CSS-wide keyword: its longhands too) */
-            if (p === 'background' && /^s*(inherit|initial|unset)s*$/.test(d[p]))
+            if (p === 'background' && /^\s*(inherit|initial|unset)\s*$/.test(d[p]))
                 ['background-color', 'background-image'].forEach(function (q) { try { div.style.setProperty(q, d[p].trim()); } catch (e) { } });
         }
     };
@@ -2222,7 +2240,8 @@
             [ga, oa, na].forEach(function (a) { if (!a.none && a.long) hold = true; });
             info[n] = { g: g, ip: ip, od: od, nd: nd, ga: ga, oa: oa, na: na };
         });
-        if (!hold) { onDone(); return null; }
+        var brief = !hold;
+        if (brief) for (var bn in info) [info[bn].ga, info[bn].oa, info[bn].na].forEach(function (a) { if (!a.none) a.long = true; });
         /* (nested groups, view-transition-group: each name's parent group, by its
          * element's value: nearest (the closest named ancestor), a name (the
          * closest ancestor of that name), normal (the closest named ancestor
@@ -2274,7 +2293,7 @@
         };
         var gOp = rootOp(ri.g, ri.ga), oOp = rootOp(ri.od, ri.oa, 1), nOp = rootOp(ri.nd, ri.na, 0);
         /* (the old page drawn only when the page's rules set the root's images still; mid crossfade the live page stands in) */
-        var oldRoot = rootIn && old.root && ri.oa.none && ri.na.none && gOp * oOp > 0.01 && ri.ip.visibility !== 'hidden';
+        var oldRoot = rootIn && old.root && ((ri.oa.none && ri.na.none) || (ri.oa.custom && ri.oa.long && oOp >= 0.99)) && gOp * oOp > 0.01 && (ri.od.visibility || ri.ip.visibility || ri.g.visibility) !== 'hidden';
         var rootShown = !rootIn || gOp * nOp > 0.01 || (!oldRoot && gOp * oOp > 0.01);
         if (oldRoot) {
             /* (the old page, as captured, under the groups) */
@@ -2339,12 +2358,21 @@
                 pg.kids.appendChild(g);
             } else ov.appendChild(g);
         });
-        root.appendChild(ov);
-        return function () {
+        /* (in a closed shadow tree of its own: the page's rules don't reach it) */
+        var host = doc.createElement('cyber-view-transition');
+        Object.defineProperty(host, '__cyberVtOverlay', { value: true });
+        host.setAttribute('style', 'display:contents;visibility:visible');
+        var hostOk = false;
+        try { host.attachShadow({ mode: 'closed' }).appendChild(ov); hostOk = true; } catch (e) { hostOk = false; }
+        root.appendChild(hostOk ? host : ov);
+        var undo = function () {
+            if (host.parentNode) host.parentNode.removeChild(host);
             if (ov.parentNode) ov.parentNode.removeChild(ov);
             hidden.forEach(function (h) { if (h[1]) h[0].style.setProperty('visibility', h[1], h[2]); else h[0].style.removeProperty('visibility'); });
             hidden = [];
         };
+        if (brief) { var bleft = 6, btick = function () { if (--bleft > 0) global.requestAnimationFrame(btick); else { undo(); onDone(); } }; global.requestAnimationFrame(btick); }
+        return undo;
     };
     var VT_ACTIVE = { cur: null };
     var newViewTransition = function (update, types, doc, root) {
@@ -2362,14 +2390,17 @@
         /* (the old state, captured now: painted once the update is done) */
         var vtOld = null, vtUndo = null;
         /* (the root matches :active-view-transition(-type) while it runs: its types in an attribute) */
-        var avtSet = function (list) { if (doc && doc.documentElement) doc.documentElement.setAttribute('data-cyber-avt', list.join(' ')); };
+        var avtSet = function (list) { if (doc && doc.documentElement) doc.documentElement.setAttribute('data-cyber-avt', list.filter(function (t) { return !/^(none$|-ua-)/i.test(t); }).join(' ')); };
         if (doc) { var tl = []; try { if (types) for (var ti of types) tl.push(String(ti)); } catch (e) { } avtSet(tl); }
         var vdoc = root && root.ownerDocument;
-        if (vdoc && (!doc || root === doc.documentElement)) {
-            try { vtOld = vtCaptureState(vdoc, root); } catch (e) { vtOld = null; }
-            if (vtOld && doc) { try { vtOld.root = vtRootSnap(doc); } catch (e) { vtOld.root = null; } }
-        }
-        Promise.resolve().then(update).then(function (v) {
+        var vtCapOld = function () {
+            if (skipped) return;
+            if (vdoc && (!doc || root === doc.documentElement)) {
+                try { vtOld = vtCaptureState(vdoc, root); } catch (e) { vtOld = null; }
+                if (vtOld && doc) { try { vtOld.root = vtRootSnap(doc); } catch (e) { vtOld.root = null; } }
+            }
+        };
+        Promise.resolve().then(function () { vtCapOld(); return update(); }).then(function (v) {
             global.clearTimeout(timer);
             if (timedOut) return;
             resolveDone(v);

@@ -199,9 +199,11 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * op_dist_pct); offset-rotate (op_rot_auto: the path's direction plus
      * op_rot degrees, else op_rot) */
     unsigned char op_kind, op_size, op_contain, op_dist_pct, op_rot_auto;
-    float op_angle, op_dist, op_rot;
+    float op_angle, op_dist, op_rot, op_dist_px;   /* (op_dist_px: a length beside a percentage) */
     const char *op_path;             /* (op_kind 2: path()'s SVG path data; 3 a basic shape; 4 url()'s id) */
     unsigned char op_anchor;         /* (offset-anchor given: op_a* its place in the box) */
+    unsigned char op_at, op_box;     /* (ray(): its "at" position given, in op_r*; the path's box: 0 border, 1 padding, 2 content) */
+    float op_rxp, op_rxl, op_ryp, op_ryl;
     unsigned char op_posk;           /* (offset-position: 0 normal (the containing block's centre), 1 auto, 2 op_p*) */
     float op_pxp, op_pxl, op_pyp, op_pyl;
     float op_axp, op_axl, op_ayp, op_ayl;   /* (its x and y: a fraction of the size and a length) */
@@ -254,6 +256,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char minmax_stretch;   /* min/max width/height: stretch (bits as minmax_pct_bits) */
     /* writing-mode (0 horizontal-tb, 1 vertical-rl, 2 vertical-lr, 3 sideways-rl, 4 sideways-lr). */
     unsigned char writing_mode, writing_mode_set;
+    unsigned char wm_own, dir_own, wm_own_set;   /* (a table's row, row group or column: its computed ones, what its children inherit; it flows as the table) */
     unsigned char wm_swapped;       /* now in the axes of a vertical flow being laid out */
     unsigned char wm_flipped;       /* and of one going right to left */
     /* line-break: 0 auto, 1 loose, 2 normal, 3 strict, 4 anywhere; word-break:
@@ -319,6 +322,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * the start and end (td_in_auto: auto)) */
     uint32_t td_rgba;
     unsigned char td_cset, td_style, td_tk, td_in_auto, td_in_pct;   /* (td_in_pct: bit k, td_in[k] a percentage) */
+    float td_in_cpct[2];   /* (a calc() inset's percentage part, a fraction) */
     float td_t, td_te, td_in[2];   /* (thickness: td_t px + td_te em) */
     /* (text-underline-offset, inherited: ul_k 0 auto 2 px 3 em (ul_v);
      * text-underline-position: under) */
@@ -403,7 +407,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char fv_set;
     /* (text-decoration-skip-ink, inherited: 0 auto, 1 none, 2 all; tdsi_set when given) */
     unsigned char tdsi, tdsi_set;
-    unsigned char ruby_ovh_none, ruby_ovh_set;   /* (ruby-overhang: none, inherited; auto lets an annotation over adjacent text) */
+    unsigned char ruby_ovh_none, ruby_ovh_set, ruby_ovh_sp;   /* (ruby_ovh_sp: spaces, over the spaces beside only) */
+    unsigned char ruby_ovh_pad_;   /* (ruby-overhang: none, inherited; auto lets an annotation over adjacent text) */
     /* (text-shadow, inherited: up to four, first on top; tsh_cur's bit k: its
      * color currentColor; tsh_set when given) */
     unsigned char tsh_n, tsh_cur, tsh_set;
@@ -418,6 +423,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * inherited. */
     float text_indent, text_indent_pct;
     unsigned char text_indent_set;
+    unsigned char trim_off, trim_set;   /* (text-spacing-trim: space-all, inherited) */
     unsigned char autospace, autospace_set;   /* (text-autospace, inherited: 1 ideograph-alpha, 2 ideograph-numeric) */
     unsigned char hang, hang_set;
     /* (outline: its style (a CssBorderStyle, 0 none; auto as none), width
@@ -460,6 +466,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     const char *bg_grad;            /* background-image: the first layer's gradient (NULL none) */
     const char *shape_outside;      /* shape-outside: a basic shape or a box, as written (NULL none) */
     double shape_margin;
+    float shape_margin_pct;   /* (a percentage: of the containing block's inline size, at layout) */
     /* Its placement: no-repeat per axis (repeat otherwise); position as a
      * fraction of the free room plus a length per axis; size kind 0 auto,
      * 1 cover, 2 contain, 3 given (bg_size_w/h: px, or a fraction of the
@@ -492,6 +499,12 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     const char *mk_text[9];
     const char *clip_path;     /* (clip-path as written; NULL none) */
     const char *content_img;   /* (content: url() on an element: the absolute URL of the image replacing it; NULL none) */
+    /* (ruby: ruby_role 1 container, 2 base, 3 text, 4 base container, 5 text container, 6 a column's box;
+     * an annotation's column box + 1 (ruby_col), its level, the next annotation of the same column + 1;
+     * a column's first annotation + 1; ruby_sv: the display, inline_level and position box generation
+     * changed, bit 0 set; ruby_align as declared: 1 start, 2 center, 3 space-between, 4 space-around) */
+    int ruby_col, ruby_next, ruby_first, ruby_sv;
+    unsigned char ruby_role, ruby_lvl, ruby_align;
     int repl_disp;             /* (inside an element content: url() replaces: its display before it was hidden, plus 1; 0 not hidden) */
     unsigned char mask_kind;
     unsigned char mask_size_kind;
@@ -583,6 +596,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     /* >0 if width/height had a percentage part; *_pct_px is the px addend
      * of a calc() mix (calc(100% - 20px) = 100% and -20px). */
     double width_percent, width_pct_px;
+    const char *w_mm;   /* (width: min()/max()/clamp() over percentages, as written; NULL none) */
     double height_percent, height_pct_px;
     double gap_row, gap_col;
     unsigned char gap_row_given;      /* row-gap other than normal */
@@ -602,6 +616,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     /* column-rule (column_rule_style a CssBorderStyle; color currentColor
      * unless column_rule_color_set) */
     float column_rule_width;
+    float contents_mp[8];   /* (display: contents: the margins and padding it computed, for a child's inherit) */
     unsigned char column_rule_style, column_rule_width_set, column_rule_color_set;
     uint32_t column_rule_rgba;
     /* Gap decorations (CSS Gaps 1), [0] the column rules, [1] the row rules:
@@ -789,6 +804,8 @@ const char *css_layout_marker_text(const struct LayoutContext *ctx, int idx);
 /* The color list item idx's ::marker gives (rgba 0..1); false: none of its own. */
 bool css_layout_marker_color(const struct LayoutContext *ctx, int idx, float rgba[4]);
 bool css_layout_marker_has_content(const struct LayoutContext *ctx, int idx);
+/* An inline box's content area (its metric font's ascent + descent, rounded) and its line advance. */
+double css_layout_content_area(const struct LayoutContext *ctx, int i, double *adv);
 const char *css_layout_block_ellipsis(const struct LayoutContext *ctx, int i);
 double css_layout_hl_length(const struct LayoutContext *ctx, int box, const char *v, double fs);
 /* The font list item idx's ::marker asks for: size (px), weight, italic, family; each left as given when not. */
@@ -811,6 +828,8 @@ typedef struct LayoutBox {
     unsigned char mc_nested;
     double bs_added;            /* (block-step-size: what was added to the end margin) */
     unsigned char mc_vert;      /* (its flow across: 1 block axis along +x, 2 along -x; its children's mc_src, mc_dst from its content start) */
+    unsigned char mc_hang;      /* (in columns: 1 can't break and passes its column's end, whole there; 2 a box around such a one) */
+    float mc_cut;               /* (2: how much of it went with what hangs, painted past the column's end) */
     unsigned char bdb_n;        /* (box-decoration-break: clone, in columns: the breaks in it, each its decorations again) */    /* (its columns in rows, one in each column of the multicol container around it) */
     float mc_rgap;              /* (column-wrap: rows of mc_n columns, this far apart; < 0 none) */
     /* A multi-column container's child: its run of columns (between spanners)
@@ -818,6 +837,7 @@ typedef struct LayoutBox {
      * mc_dst, columns mc_seg_h high (mc_seg_h 0: not set); mc_span: a spanner,
      * laid out across the container and painted where it is */
     float mc_src, mc_dst, mc_seg_h;
+    float rel_dx, rel_dy;       /* (its own relative offset and translate, applied after the columns are cut) */
     unsigned char mc_span, mc_seg_last;
     /* (a container with spanners deeper in it: its runs by where they are in the
      * one column, ctx->mc_segs[mc_seg0 .. mc_seg0 + mc_nseg)) */
@@ -836,6 +856,8 @@ typedef struct LayoutBox {
     /* Set by layout_resolve_used_sizes when a percentage height could not
      * resolve (indefinite containing block): the used height is auto. */
     unsigned char height_pct_unresolved;
+    float strut_cross;          /* (a collapsed flex item: its line's cross size from the layout with it shown) */
+    unsigned char pct_indef;    /* (a column flex item whose flexed height stays indefinite: no percentage base) */
     unsigned char flex_def_h;   /* (a flex item whose height flex layout made definite) */
     unsigned char flex_given;   /* (a table flex item in its layout: 1 its width, 2 its height what flex gave it) */
     /* An absolutely positioned box's static position, from the line it is
@@ -850,6 +872,7 @@ typedef struct LayoutBox {
     float marker_dx;   /* (an outside marker moved in by floats: its line's start past them) */
     double static_dx, static_dy;
     double opacity_eff;
+    double ell_start;           /* (right to left: how far before the content edge the furthest would have begun; negative, 0 none) */
     double ell_end;             /* (text-overflow cut its lines: where the furthest would have ended, for its scroll range; 0 none) */
 } LayoutBox;
 
@@ -1233,6 +1256,9 @@ void css_layout_box_scrolled(const LayoutContext *ctx, int idx, double *dx, doub
 /* What idx's transforms and its ancestors' (up to, not with, stop) make of points
  * in laid-out coordinates: an affine m[6] (a b c d e f); false when they make nothing of them. */
 bool css_layout_box_map(const LayoutContext *ctx, int idx, int stop, double m[6]);
+/* (the same with what is in multicol container mc about its piece in column
+ * col: the strip's top, a column's height) */
+bool css_layout_box_map_col(const LayoutContext *ctx, int idx, int mc, double top, double H, int col, double m[6]);
 /* A container query (a @container prelude) for the DOM node dom; self: dom may be the container. */
 bool css_layout_container_match(const LayoutContext *ctx, int dom, bool self, const char *query);
 /* A rect's bounds under m. */

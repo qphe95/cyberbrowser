@@ -178,7 +178,7 @@
      * Selectors (Selectors 4): parse, check, serialize
      * ================================================================== */
 
-    var PSEUDO_CLASSES = ('active any-link autofill blank checked current default defined disabled empty enabled ' +
+    var PSEUDO_CLASSES = ('active active-view-transition any-link autofill blank checked current default defined disabled empty enabled ' +
         'first first-child first-of-type focus focus-visible focus-within fullscreen future heading host hover ' +
         'in-range indeterminate invalid last-child last-of-type left link local-link modal muted only-child ' +
         'only-of-type open optional out-of-range past paused picture-in-picture placeholder-shown playing ' +
@@ -600,7 +600,7 @@
         p.skipWS();
         if (p.peek() || !list.length) throw new SyntaxError('bad selector');
         /* (view transition pseudo-elements: querySelector's stricter grammar) */
-        if (/::view-transition/i.test(text)) global.document.createDocumentFragment().querySelector(text);
+        if (/::view-transition/i.test(text)) global.document.createDocumentFragment().querySelector(text.replace(/:active-view-transition(-type\([^)]*\))?(?![-\w(])/gi, ''));
         return serList(list);
     }
     /* (the end of the input closes what's open) */
@@ -2622,6 +2622,7 @@
                     continue;
                 }
                 if (skipComment()) continue;
+                if (c === '\\') { i += 2; continue; }
                 if (c === '"' || c === "'") { q = c; i++; continue; }
                 if (c === '\\') { i += 2; continue; }
                 if (c === '(' || c === '[') depth++;
@@ -2634,6 +2635,7 @@
                         var d = text[i];
                         if (bq) { if (d === '\\') { i += 2; continue; } if (d === bq || d === '\n') bq = null; i++; continue; }
                         if (d === '/' && text[i + 1] === '*') { var e2 = text.indexOf('*/', i + 2); i = e2 < 0 ? n : e2 + 2; continue; }
+                        if (d === '\\') { i += 2; continue; }
                         if (d === '"' || d === "'") bq = d;
                         else if (d === '{') bd++;
                         else if (d === '}') bd--;
@@ -2662,6 +2664,7 @@
             while (j < n) {
                 var c = block[j];
                 if (q) { if (c === '\\') { j += 2; continue; } if (c === q) q = null; j++; continue; }
+                if (c === '\\') { j += 2; continue; }
                 if (c === '"' || c === "'") { q = c; j++; continue; }
                 if (c === '(' || c === '[') depth++;
                 else if ((c === ')' || c === ']') && depth) depth--;
@@ -2774,7 +2777,8 @@
         while (j < n) {
             var c = block[j];
             if (q) { if (c === '\\') { j += 2; continue; } if (c === q) q = null; j++; continue; }
-            if (c === '"' || c === "'") { q = c; j++; continue; }
+            if (c === '\\') { j += 2; continue; }
+                if (c === '"' || c === "'") { q = c; j++; continue; }
             if (c === '(' || c === '[') depth++;
             else if ((c === ')' || c === ']') && depth) depth--;
             else if (!depth && c === ';') return { rule: false, end: j + 1 };
@@ -2797,6 +2801,7 @@
             var c = t[i];
             if (q) { if (c === '\\' && i + 1 < n) { o += c + t[i + 1]; i += 2; continue; } if (c === q || c === '\n') q = null; o += c; i++; continue; }
             if (c === '/' && t[i + 1] === '*') { var e = t.indexOf('*/', i + 2); i = e < 0 ? n : e + 2; o += ' '; continue; }
+            if (c === '\\' && i + 1 < n) { o += c + t[i + 1]; i += 2; continue; }
             if (c === '"' || c === "'") q = c;
             o += c; i++;
         }
@@ -2807,6 +2812,7 @@
         while (k < n && d) {
             var c = block[k];
             if (q) { if (c === '\\') { k += 2; continue; } if (c === q) q = null; k++; continue; }
+            if (c === '\\') { k += 2; continue; }
             if (c === '"' || c === "'") q = c;
             else if (c === '{') d++;
             else if (c === '}') d--;
@@ -3085,6 +3091,7 @@
             for (var ti = 0; ti < text.length && end < 0; ti++) {
                 var ch = text[ti];
                 if (q) { if (ch === '\\') ti++; else if (ch === q) q = ''; continue; }
+                if (ch === '\\') { ti++; continue; }
                 if (ch === '"' || ch === "'") q = ch;
                 else if (ch === '/' && text[ti + 1] === '*') { var ce = text.indexOf('*/', ti + 2); ti = ce < 0 ? text.length : ce + 1; }
                 else if (ch === '{') depth++;

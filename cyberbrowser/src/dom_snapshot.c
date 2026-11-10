@@ -149,11 +149,59 @@ static int snap_node(HtmlDocument *doc, uint32_t s, int parent) {
     return idx;
 }
 
+/* The flat tree below s (in the shadow tree of sc's host, if any). */
+typedef struct SnapScope { uint32_t host; const struct SnapScope *outer; } SnapScope;
+static void snap_flat_kids(HtmlDocument *doc, uint32_t s, int parent, const SnapScope *sc, int depth);
+static void snap_flat_one(HtmlDocument *doc, uint32_t c, int parent, const SnapScope *sc, int depth) {
+    int k = g_dom.kind[c];
+    if (k != DOM_K_ELEMENT && k != DOM_K_TEXT && k != DOM_K_CDATA) return;
+    int idx = snap_node(doc, c, parent);
+    if (k == DOM_K_ELEMENT && !(g_dom.flags[c] & DOMF_RAW_TEXT) && depth < 2500) snap_flat_kids(doc, c, idx, sc, depth + 1);
+}
+static void snap_flat_kids(HtmlDocument *doc, uint32_t s, int parent, const SnapScope *sc, int depth) {
+    if (g_dom.kind[s] == DOM_K_ELEMENT && g_dom.shadow[s]) {
+        SnapScope in = { s, sc };
+        for (uint32_t c = g_dom.first[g_dom.shadow[s]]; c; c = g_dom.next[c]) snap_flat_one(doc, c, parent, &in, depth);
+        return;
+    }
+    const char *tn = g_dom.kind[s] == DOM_K_ELEMENT ? css_atom_str(g_dom.tag[s]) : NULL;
+    if (sc && tn && !strcasecmp(tn, "slot")) {
+        /* (the host's children of this slot's name; its own children when there are none) */
+        const char *name = dom_get_attr_str(dom_id_of(s), "name");
+        if (!name) name = "";
+        int got = 0;
+        for (uint32_t c = g_dom.first[sc->host]; c; c = g_dom.next[c]) {
+            const char *cs = g_dom.kind[c] == DOM_K_ELEMENT ? dom_get_attr_str(dom_id_of(c), "slot") : NULL;
+            if (g_dom.kind[c] != DOM_K_ELEMENT && g_dom.kind[c] != DOM_K_TEXT && g_dom.kind[c] != DOM_K_CDATA) continue;
+            if (strcmp(cs ? cs : "", name)) continue;
+            snap_flat_one(doc, c, parent, sc->outer, depth);
+            got++;
+        }
+        if (got) return;
+    }
+    for (uint32_t c = g_dom.first[s]; c; c = g_dom.next[c]) snap_flat_one(doc, c, parent, sc, depth);
+}
+static bool snap_has_shadow(uint32_t root) {
+    for (uint32_t s = g_dom.first[root]; s && s != root; ) {
+        if (g_dom.kind[s] == DOM_K_ELEMENT && g_dom.shadow[s]) return true;
+        if (g_dom.first[s]) { s = g_dom.first[s]; continue; }
+        while (s != root && !g_dom.next[s]) s = g_dom.parent[s];
+        if (s == root) break;
+        s = g_dom.next[s];
+    }
+    return false;
+}
+
 HtmlDocument *dom_snapshot_parsed(NodeId container) {
     if (!dom_valid(container)) return NULL;
     HtmlDocument *doc = html_document_new();
     if (!doc) return NULL;
     uint32_t root = dom_slot(container);
+    if (snap_has_shadow(root)) {
+        snap_flat_kids(doc, root, -1, NULL, 0);
+        html_document_find_roots(doc);
+        return doc;
+    }
     /* Iterative preorder with the HtmlDocument parent of each open level. */
     uint32_t cap = 64, sp = 0;
     int *pstack = malloc(cap * sizeof(int));

@@ -255,9 +255,10 @@ void plutovg_convert_argb_to_rgba(unsigned char* dst, const unsigned char* src, 
                 uint32_t g = (pixel >> 8) & 0xFF;
                 uint32_t b = (pixel >> 0) & 0xFF;
                 if(a != 255) {
-                    r = (r * 255) / a;
-                    g = (g * 255) / a;
-                    b = (b * 255) / a;
+                    /* (to nearest: half coverage of 128 is 64, and back 128, not 127) */
+                    r = (r * 255 + a / 2) / a; if(r > 255) r = 255;
+                    g = (g * 255 + a / 2) / a; if(g > 255) g = 255;
+                    b = (b * 255 + a / 2) / a; if(b > 255) b = 255;
                 }
 
                 *dst_row++ = r;

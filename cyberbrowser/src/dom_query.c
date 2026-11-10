@@ -972,7 +972,10 @@ uint32_t dom_element_state(NodeId el)
                               : ty && (!strcasecmp(ty, "checkbox") || !strcasecmp(ty, "radio")) && attr_val(s, g_a_checked, &n);
             if (!(st & DOM_ST_CHECK_SET)) st = has ? st | DOM_ST_CHECKED : st & ~(uint32_t)DOM_ST_CHECKED;
         }
-        if (input || select || textarea) st |= dom_get_attr_str(el, "required") ? DOM_ST_REQUIRED : DOM_ST_OPTIONAL;
+        /* (required applies to no button, hidden, range or color input) */
+        bool barred = ty && (!strcasecmp(ty, "hidden") || !strcasecmp(ty, "range") || !strcasecmp(ty, "color") || !strcasecmp(ty, "submit") ||
+                             !strcasecmp(ty, "image") || !strcasecmp(ty, "reset") || !strcasecmp(ty, "button"));
+        if ((input || select || textarea) && !barred) st |= dom_get_attr_str(el, "required") ? DOM_ST_REQUIRED : DOM_ST_OPTIONAL;
         if (textarea || input) {
             static const char *const text[] = { "text", "search", "url", "tel", "email", "password", "date", "month",
                                                 "week", "time", "datetime-local", "number" };

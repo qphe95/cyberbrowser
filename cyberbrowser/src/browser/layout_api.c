@@ -1873,8 +1873,10 @@ enum { M_OFFSET_W, M_OFFSET_H, M_OFFSET_T, M_OFFSET_L,
 
 /* Box idx's client size and scrollWidth / scrollHeight (the root's client box
  * is the viewport). */
+static bool g_lq_to_left, g_lq_to_top;   /* (the box last sized scrolls to the negative side there) */
 static void lq_scroll_size(int idx, bool root, double *cw, double *ch, double *sw, double *sh)
 {
+    g_lq_to_left = g_lq_to_top = false;
     const LayoutBox *b = &g_lq_layout.boxes[idx];
     double left = b->x + b->s->border_left, top = b->y + b->s->border_top;
     *cw = root ? g_lq_vw : b->width - b->s->border_left - b->s->border_right;
@@ -1898,6 +1900,8 @@ static void lq_scroll_size(int idx, bool root, double *cw, double *ch, double *s
         if (reverse) { if (main_vertical) to_top = !to_top; else to_left = !to_left; }
         if (s->flex_wrap == CSS_FLEX_WRAP_WRAP_REVERSE) { if (main_vertical) to_left = !to_left; else to_top = !to_top; }
     }
+    g_lq_to_left = to_left;
+    g_lq_to_top = to_top;
     if (to_left || to_top) {
         double l = left, t = top;
         css_layout_extent_start(&g_lq_layout, idx, &l, &t);
@@ -2106,9 +2110,12 @@ static GCValue lq_scroll_read(JSContextHandle ctx, GCValue this_val, bool top)
         return JS_NewInt32(ctx, 0);
     }
     if (!dom_scroll_get(s, &x, &y)) return JS_NewInt32(ctx, 0);
-    if (x > mx || y > my) {
-        x = x > mx ? (float)mx : x;
-        y = y > my ? (float)my : y;
+    double lx = g_lq_to_left ? -mx : 0.0, ly = g_lq_to_top ? -my : 0.0;
+    if (g_lq_to_left) mx = 0.0;
+    if (g_lq_to_top) my = 0.0;
+    if (x > mx || y > my || x < lx || y < ly) {
+        x = x > mx ? (float)mx : x < lx ? (float)lx : x;
+        y = y > my ? (float)my : y < ly ? (float)ly : y;
         dom_scroll_set(s, x, y);
         layout_scroll_queue(ctx, s);
     }
@@ -2120,19 +2127,20 @@ static GCValue lq_scroll_write(JSContextHandle ctx, GCValue this_val, int argc, 
     double v = 0.0;
     if (argc > 0 && JS_ToFloat64(ctx, &v, argv[0]) < 0) return JS_EXCEPTION;
     if (!isfinite(v)) v = 0.0;
-    if (v <= 0.0 && !g_dom_scrolls.n) return JS_UNDEFINED;
+    if (v == 0.0 && !g_dom_scrolls.n) return JS_UNDEFINED;
     double mx, my;
     NodeId s = lq_scroll_subject(ctx, dom_node_of(this_val), &mx, &my);
     if (!s) return JS_UNDEFINED;
     float x = 0.0f, y = 0.0f;
     dom_scroll_get(s, &x, &y);
     double m = top ? my : mx;
-    v = v < 0.0 ? 0.0 : v > m ? m : (double)lround(v);
+    bool neg = top ? g_lq_to_top : g_lq_to_left;
+    v = neg ? (v > 0.0 ? 0.0 : v < -m ? -m : (double)lround(v)) : v < 0.0 ? 0.0 : v > m ? m : (double)lround(v);
     if ((float)v == (top ? y : x)) return JS_UNDEFINED;
     dom_scroll_set(s, top ? x : (float)v, top ? (float)v : y);
     layout_scroll_queue(ctx, s);
     /* (its lines cut by text-overflow: where they're cut moves with the scroll) */
-    if (g_lq_scroll_idx >= 0 && g_lq_scroll_idx < g_lq_layout.tree.count && g_lq_layout.boxes[g_lq_scroll_idx].ell_end > 0.0) {
+    if (g_lq_scroll_idx >= 0 && g_lq_scroll_idx < g_lq_layout.tree.count && (g_lq_layout.boxes[g_lq_scroll_idx].ell_end > 0.0 || g_lq_layout.boxes[g_lq_scroll_idx].ell_start < 0.0)) {
         /* (and not from the last layout's record: the scroll is no input of that) */
         css_layout_retained_invalidate();
         dom_request_relayout();

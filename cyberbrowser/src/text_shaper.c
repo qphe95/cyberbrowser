@@ -296,7 +296,7 @@ static void ts_metric_owned(const TextShaper *s, uint32_t cp, int *glyph_index, 
         const TextShaper *f = s;
         int owner = 0;
         int gi = stbtt_FindGlyphIndex(&s->font, (int)cp);
-        if (gi == 0 && cp > ' ' && cp != 0xFFFD) {
+        if (gi == 0 && cp >= ' ' && cp != 0xFFFD) {   /* (a font with no space: the next one's) */
             int n = font_registry_fallback_count();
             for (int k = 0; k < n && n <= 254; k++) {
                 const TextShaper *fb = font_registry_fallback(k);
@@ -316,7 +316,7 @@ static void ts_metric_owned(const TextShaper *s, uint32_t cp, int *glyph_index, 
         if (owner != 0 || stbtt_FindGlyphIndex(&s->font, (int)cp) == 0) v |= (uint64_t)1 << 55;
         atomic_store_explicit(&page[cp & 255], v, memory_order_relaxed);
     }
-    if (t_chain_n > 0 && (v >> 55 & 1) && cp > ' ') {
+    if (t_chain_n > 0 && (v >> 55 & 1) && cp >= ' ') {
         /* (the element's other fonts first: not cached, the list being the element's) */
         for (int k = 0; k < t_chain_n; k++) {
             const TextShaper *cf = t_chain[k];
@@ -833,7 +833,7 @@ static inline int ts_as_class(uint32_t cp)
 /* (the space text-autospace puts before cp, at the loaded size) */
 static inline float ts_autospace(const TextShaper *s, uint32_t cp)
 {
-    if (!t_autospace) return 0.0f;
+    if (!(t_autospace & 3)) return 0.0f;
     /* (a combining mark: its base's class, as if not there) */
     if ((cp >= 0x300 && cp <= 0x36F) || (cp >= 0x1AB0 && cp <= 0x1AFF) || (cp >= 0x1DC0 && cp <= 0x1DFF) ||
         (cp >= 0x20D0 && cp <= 0x20FF) || (cp >= 0xFE20 && cp <= 0xFE2F) || (cp >= 0xFE00 && cp <= 0xFE0F)) return 0.0f;
@@ -1314,7 +1314,7 @@ static float ts_trim_of(uint32_t cp, const char *at, const char *after, float xa
 {
     *shift = false;
     int k = ts_cjk_punct(cp);
-    if (!k || !t_trim_text || xa < 15.0f) return 0.0f;
+    if (!k || !t_trim_text || xa < 15.0f || (t_autospace & 4)) return 0.0f;   /* (4: text-spacing-trim: space-all) */
     if (k == 2) {
         const char *q = after;
         uint32_t next = utf8_decode(&q);

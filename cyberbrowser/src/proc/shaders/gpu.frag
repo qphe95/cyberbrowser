@@ -96,5 +96,6 @@ void main() {
     }
     a *= edge_cov;
     if (a <= 0.0) discard;
-    out_color = vec4(rgb, min(a, 1.0));
+    // (on the 8-bit grid, halves up: the blend's own rounding of 1/2 is the hardware's)
+    out_color = vec4(rgb, floor(min(a, 1.0) * 255.0 + 0.5) / 255.0);
 }

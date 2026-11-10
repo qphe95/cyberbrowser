@@ -984,6 +984,7 @@ static bool doc_before(Builder *b, const DomTok *t, CssAtom tag) {
 
 typedef struct TreeAtoms {
     CssAtom li, dd, dt, p, option, optgroup, tr, td, th, button, address, div, select;
+    CssAtom rb, rt, rp, rtc;
     CssAtom table, tbody, thead, tfoot, caption, colgroup, col, html, tmpl;
     CssAtom special[96], scope[12], p_closer[40];
     int nspecial, nscope, np_closer;
@@ -1010,6 +1011,7 @@ static void tree_atoms(void) {
     g_t.dd = T("dd"); g_t.dt = T("dt"); g_t.p = T("p"); g_t.option = T("option"); g_t.optgroup = T("optgroup");
     g_t.tr = T("tr"); g_t.td = T("td"); g_t.th = T("th"); g_t.button = T("button"); g_t.address = T("address");
     g_t.div = T("div"); g_t.select = T("select");
+    g_t.rb = T("rb"); g_t.rt = T("rt"); g_t.rp = T("rp"); g_t.rtc = T("rtc");
     g_t.table = T("table"); g_t.tbody = T("tbody"); g_t.thead = T("thead"); g_t.tfoot = T("tfoot");
     g_t.caption = T("caption"); g_t.colgroup = T("colgroup"); g_t.col = T("col"); g_t.html = T("html");
     g_t.tmpl = T("template");
@@ -1112,6 +1114,16 @@ static void close_implied(Builder *b, CssAtom tag) {
     }
     if (tag == g_t.col && top == g_t.table) { implied(b, g_t.colgroup, b->stack[b->sp - 1]); return; }
     if (tag == g_t.option) { if (top == g_t.option) pop_to(b, b->sp - 1); return; }
+    /* (ruby's parts end the ones open before them; an rt or rp stays in its rtc) */
+    if (tag == g_t.rb || tag == g_t.rtc || tag == g_t.rt || tag == g_t.rp) {
+        bool in = tag == g_t.rt || tag == g_t.rp;
+        while (b->sp) {
+            CssAtom a = g_dom.tag[b->stack[b->sp - 1]];
+            if (!(a == g_t.rb || a == g_t.rt || a == g_t.rp || (a == g_t.rtc && !in))) break;
+            pop_to(b, b->sp - 1);
+        }
+        return;
+    }
     if (tag == g_t.optgroup) {
         if (top == g_t.option) { pop_to(b, b->sp - 1); top = b->sp ? g_dom.tag[b->stack[b->sp - 1]] : 0; }
         if (top == g_t.optgroup) pop_to(b, b->sp - 1);
