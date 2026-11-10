@@ -88,6 +88,7 @@ typedef struct ImageEntry {
     _Atomic unsigned dims;              /* its own width (1), height (2), ratio (4) */
     _Atomic float ratio;
     _Atomic int want_w, want_h;         /* largest requested paint size */
+    _Atomic int svg_w, svg_h;           /* largest paint size asked for, natural-size requests aside */
     _Atomic(ImagePixels *) pixels;
     int decoded_full;                   /* decoded at natural size */
 
@@ -332,6 +333,9 @@ static ImageFormat sniff(const uint8_t *d, size_t n, int *w, int *h, unsigned *d
             char *vb = strstr(svg, "viewBox=\"");
             if (!vb) vb = strstr(svg, "viewBox='");
             *dims = (fw > 0.0f ? 1u : 0u) | (fh > 0.0f ? 2u : 0u);
+            /* (a zero length given: its size all the same, 16 and 32) */
+            if (pw && fw <= 0.0f && pw[8] == '0' && !strchr("123456789.%", pw[9])) *dims |= 1u | 16u;
+            if (ph && fh <= 0.0f && ph[9] == '0' && !strchr("123456789.%", ph[10])) *dims |= 2u | 32u;
             if (fw > 0.0f && fh > 0.0f) { *dims |= 4u; *ratio = fw / fh; }
             else {
                 float a, b, c, e;
@@ -786,6 +790,11 @@ static void work_entry(ImageCache *c, ImageEntry *e)
     if (atomic_load(&e->state) == ST_ERROR) return;
 
     int ww = atomic_load(&e->want_w), wh = atomic_load(&e->want_h);
+    int rw = ww, rh = wh;   /* (the request as taken) */
+    if (e->fmt == FMT_SVG && !(atomic_load(&e->dims) & 4u) && ww >= (1 << 20) && atomic_load(&e->svg_w) > 0) {
+        ww = atomic_load(&e->svg_w);
+        wh = atomic_load(&e->svg_h);
+    }
     int prev = atomic_exchange(&e->state, ST_DECODING);
     bool flt = !strncmp(e->source, "cbfilter:", 9);
     ImagePixels *px;
@@ -825,12 +834,18 @@ static void work_entry(ImageCache *c, ImageEntry *e)
          * (only when the request grew, so a decoder that cannot reach the
          * target never loops). */
         if (!e->decoded_full && !flt &&
-            (atomic_load(&e->want_w) > ww || atomic_load(&e->want_h) > wh)) {
+            (atomic_load(&e->want_w) > rw || atomic_load(&e->want_h) > rh)) {
             int tw, th;
             target_size(atomic_load(&e->nat_w), atomic_load(&e->nat_h),
                         atomic_load(&e->want_w), atomic_load(&e->want_h), &tw, &th);
             if (tw > px->width || th > px->height || e->fmt == FMT_SVG) enqueue_locked(c, e);
         }
+        /* (a vector with no ratio, its paint size known since) */
+        if (e->fmt == FMT_SVG && !(atomic_load(&e->dims) & 4u) && atomic_load(&e->want_w) >= (1 << 20) &&
+            atomic_load(&e->svg_w) > 0 &&
+            (atomic_load(&e->svg_w) != px->width || atomic_load(&e->svg_h) != px->height) &&
+            (atomic_load(&e->svg_w) != ww || atomic_load(&e->svg_h) != wh))
+            enqueue_locked(c, e);
     }
     notify_locked(c, e);
     pthread_mutex_unlock(&c->mu);
@@ -956,6 +971,16 @@ static void want_size_locked(ImageCache *c, ImageEntry *e, int w, int h)
         /* Natural size wanted. */
         w = 1 << 20;
         h = 1 << 20;
+    } else if (w > atomic_load(&e->svg_w) || h > atomic_load(&e->svg_h)) {
+        int sw = atomic_load(&e->svg_w), sh = atomic_load(&e->svg_h);
+        atomic_store(&e->svg_w, w > sw ? w : sw);
+        atomic_store(&e->svg_h, h > sh ? h : sh);
+        /* (a vector with no ratio, decoded at its natural size: again at this one) */
+        ImagePixels *spx = atomic_load(&e->pixels);
+        if (atomic_load(&e->state) == ST_READY && spx && e->fmt == FMT_SVG && !(atomic_load(&e->dims) & 4u) &&
+            atomic_load(&e->want_w) >= (1 << 20) &&
+            (atomic_load(&e->svg_w) != spx->width || atomic_load(&e->svg_h) != spx->height))
+            enqueue_locked(c, e);
     }
     int ow = atomic_load(&e->want_w), oh = atomic_load(&e->want_h);
     if (w <= ow && h <= oh) return;
@@ -1069,7 +1094,7 @@ bool image_cache_intrinsic(ImageCache *c, const char *url_or_path, unsigned *dim
     if (handle >= 0) {
         unsigned d = atomic_load(&e->dims);
         int w = atomic_load(&e->nat_w), h = atomic_load(&e->nat_h);
-        *dims = d & 8u ? d & 7u : 7u;
+        *dims = d & 8u ? d & 0x37u : 7u;
         *ratio = d & 8u ? atomic_load(&e->ratio) : h > 0 ? (float)w / (float)h : 0.0f;
     }
     pthread_mutex_unlock(&c->mu);

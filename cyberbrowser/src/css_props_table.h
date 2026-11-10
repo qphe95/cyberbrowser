@@ -495,7 +495,7 @@ static CssPropDef g_props[] = {
     L("view-transition-group", "normal | contain | nearest | none | <custom-ident>", "normal", 0),
     L("text-decoration-stroke", "none | context-fill | context-stroke | <color> | <url> [ none | <color> ]?", "none", 0),
     L("text-decoration-fill", "none | context-fill | context-stroke | <color> | <url> [ none | <color> ]?", "none", 0),
-    L("margin-trim", "none | in-flow | all | block | block-start || block-end", "none", 0),
+    L("margin-trim", "none | [ block || inline ] | [ block-start || inline-start || block-end || inline-end ]", "none", 0),
     L("scroll-axis-lock", "none | auto", "none", 0),
     L("scroll-target-group", "none | auto", "none", 0),
     L("overlay", "none | auto", "none", 0),

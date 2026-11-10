@@ -464,6 +464,10 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     float shape_threshold;          /* shape-image-threshold */
     const char *shape_grad;         /* shape-outside: a gradient's text (NULL none) */
     const char *bg_grad;            /* background-image: the first layer's gradient (NULL none) */
+    /* (the background properties as written, interned: the shorthand, then image, position,
+     * size, repeat, origin, clip, attachment set after it; bg_nl: how many layers) */
+    const char *bg_raw[8];
+    unsigned char bg_nl;
     const char *shape_outside;      /* shape-outside: a basic shape or a box, as written (NULL none) */
     double shape_margin;
     float shape_margin_pct;   /* (a percentage: of the containing block's inline size, at layout) */
@@ -534,6 +538,9 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
 
     /* box-shadow: the first outer (non-inset) shadow, if any. */
     unsigned char shadow_set;
+    /* (box-shadow as written; how many shadows; several or an inset one: painted item by item; this one inset) */
+    const char *shadow_raw;
+    unsigned char shadow_n, shadow_multi, shadow_inset, shadow_cc;   /* (cc: no colour given, the element's) */
     float shadow_x, shadow_y, shadow_blur, shadow_spread;
     float shadow_r, shadow_g, shadow_b, shadow_a;
 
@@ -806,6 +813,7 @@ bool css_layout_marker_color(const struct LayoutContext *ctx, int idx, float rgb
 bool css_layout_marker_has_content(const struct LayoutContext *ctx, int idx);
 /* An inline box's content area (its metric font's ascent + descent, rounded) and its line advance. */
 double css_layout_content_area(const struct LayoutContext *ctx, int i, double *adv);
+bool css_layout_te_under(const struct LayoutContext *ctx, int i);
 const char *css_layout_block_ellipsis(const struct LayoutContext *ctx, int i);
 double css_layout_hl_length(const struct LayoutContext *ctx, int box, const char *v, double fs);
 /* The font list item idx's ::marker asks for: size (px), weight, italic, family; each left as given when not. */
@@ -875,6 +883,9 @@ typedef struct LayoutBox {
     double ell_start;           /* (right to left: how far before the content edge the furthest would have begun; negative, 0 none) */
     double ell_end;             /* (text-overflow cut its lines: where the furthest would have ended, for its scroll range; 0 none) */
 } LayoutBox;
+struct LayoutContext;
+bool css_layout_shadow_item(const struct LayoutContext *ctx, const LayoutBox *box, int k, LayoutStyle *out);
+bool css_layout_bg_layer(const struct LayoutContext *ctx, const LayoutBox *box, int k, LayoutStyle *out);
 
 /* A piece of an inline split around its block-level children
  * (block_in_inline 2): its border box, placed relative to its first child
@@ -1278,7 +1289,7 @@ void css_layout_anim_seed(const LayoutContext *ctx, int idx, uint32_t el);
  * side, 2 both), jw its width, ci its index.  kind 0 grid, 1 flex. */
 typedef struct { float s, e, jw; int ci; unsigned char occ, disc, jt; } CssGapSeg;
 typedef struct { unsigned char axis; int gi, nn; float pos, w, jw0, jw1; int ci0, ci1, at, n; } CssGapLine;   /* (nn: the gaps its lists run over, 0 its axis' all) */
-int css_layout_gap_lines(int idx, unsigned char *kind, const CssGapLine **lines, const CssGapSeg **segs);
+int css_layout_gap_lines(const LayoutContext *ctx, int idx, unsigned char *kind, const CssGapLine **lines, const CssGapSeg **segs);
 int css_layout_text_rects(const LayoutContext *ctx, int idx, size_t a, size_t b, double (*out)[4], int max);
 
 /* The text a text box lays out and paints (white space processed). */

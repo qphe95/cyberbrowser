@@ -1466,6 +1466,13 @@ plutosvg_document_t* plutosvg_document_load_from_data(const char* data, int leng
 
         float intrinsic_width = convert_length(&w, width);
         float intrinsic_height = convert_length(&h, height);
+        /* (drawn at a size: that is its viewport, when a viewBox fits in it or it has no full size of its own to scale from) */
+        plutovg_rect_t fit_box = {0, 0, 0, 0};
+        bool own_size = w.type != length_type_percent && h.type != length_type_percent && intrinsic_width > 0.f && intrinsic_height > 0.f;
+        if(width > 0.f && height > 0.f && (!own_size || parse_view_box(document->root_element, ATTR_VIEW_BOX, &fit_box))) {
+            intrinsic_width = width;
+            intrinsic_height = height;
+        }
         if(intrinsic_width <= 0.f || intrinsic_height <= 0.f) {
             plutovg_rect_t view_box = {0, 0, 0, 0};
             if(parse_view_box(document->root_element, ATTR_VIEW_BOX, &view_box)) {

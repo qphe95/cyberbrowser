@@ -9119,9 +9119,22 @@ static char *css_prop_canon_in(const CssPropDef *p, const char *v)
         return NULL;
     }
     if (!strcmp(n, "margin-trim")) {
-        char w[2][160];
-        if (canon_words(v, w, 2) == 2) return strdup("block");
-        return NULL;
+        char w[4][160];
+        int nw = canon_words(v, w, 4), bits = 0;
+        if (nw < 2) return NULL;
+        static const char *const side[4] = { "block-start", "inline-start", "block-end", "inline-end" };
+        for (int i = 0; i < nw; i++) {
+            if (!strcasecmp(w[i], "block")) bits |= 5;
+            else if (!strcasecmp(w[i], "inline")) bits |= 10;
+            for (int k = 0; k < 4; k++) if (!strcasecmp(w[i], side[k])) bits |= 1 << k;
+        }
+        if (bits == 15) return strdup("block inline");
+        if (bits == 5) return strdup("block");
+        if (bits == 10) return strdup("inline");
+        char o[64];
+        o[0] = 0;
+        for (int k = 0; k < 4; k++) if (bits & (1 << k)) { if (o[0]) strcat(o, " "); strcat(o, side[k]); }
+        return o[0] ? strdup(o) : NULL;
     }
     if (!strcmp(n, "max-lines")) {
         char w[2][160];
@@ -9452,6 +9465,15 @@ static char *css_prop_canon_in(const CssPropDef *p, const char *v)
                 else if (*e == ')' && --d == 0) break;
             }
             if (!*e) { buf_ch(&s, *p++); continue; }
+            {   /* (its name no keyword of every property, nor none) */
+                static const char *const bad[] = { "inherit", "initial", "unset", "revert", "revert-layer", "default", "none", NULL };
+                const char *n0 = a + 1, *n1;
+                while (n0 < e && isspace((unsigned char)*n0)) n0++;
+                n1 = n0;
+                while (n1 < e && *n1 != ',' && !isspace((unsigned char)*n1)) n1++;
+                for (int k = 0; bad[k]; k++)
+                    if ((size_t)(n1 - n0) == strlen(bad[k]) && !strncasecmp(n0, bad[k], strlen(bad[k]))) { free(s.s); return strdup(""); }
+            }
             /* (its last argument: after the last top-level comma) */
             const char *lc = NULL;
             d = 0; q = false;

@@ -2641,6 +2641,24 @@ static void css_apply_pseudo(CssSimpleSelector *out,
         out->has_substantive = true;
         return;
     }
+    /* (:open: a details or a dialog with the attribute) */
+    if (css_pseudo_name_is(name, nl, "open") && !out->where_active) {
+        snprintf(out->where_arg, sizeof(out->where_arg), "[open]:is(details, dialog)");
+        out->where_active = true;
+        out->is_weighted = true;
+        out->has_substantive = true;
+        return;
+    }
+    /* (a second :nth-*() of one compound: as :is() of it, the one slot taken) */
+    if (out->nth_kind && !out->where_active && arg && nl + al + 4 < sizeof(out->where_arg) &&
+        (css_pseudo_name_is(name, nl, "nth-child") || css_pseudo_name_is(name, nl, "nth-last-child") ||
+         css_pseudo_name_is(name, nl, "nth-of-type") || css_pseudo_name_is(name, nl, "nth-last-of-type"))) {
+        snprintf(out->where_arg, sizeof(out->where_arg), ":%.*s(%.*s)", (int)nl, name, (int)al, arg);
+        out->where_active = true;
+        out->is_weighted = true;
+        out->has_substantive = true;
+        return;
+    }
     /* (states nothing here has: no history, no autofill, no timeline) */
     if (css_pseudo_name_is(name, nl, "target-within") ||
         css_pseudo_name_is(name, nl, "autofill") ||

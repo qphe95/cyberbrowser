@@ -849,7 +849,7 @@ static inline float ts_autospace(const TextShaper *s, uint32_t cp)
 static inline bool ts_invisible(uint32_t cp)
 {
     return cp == 0x00AD || cp == 0x061C || cp == 0x200B || cp == 0xFEFF || cp == 0x200C || cp == 0x200D || cp == 0x200E || cp == 0x200F || cp == 0x2060 || (cp >= 0x202A && cp <= 0x202E) ||
-           (cp >= 0x2066 && cp <= 0x2069);
+           (cp >= 0x2066 && cp <= 0x2069) || cp == 0x034F || (cp >= 0x180B && cp <= 0x180F) || (cp >= 0x2061 && cp <= 0x2064);
 }
 
 /* (a combining mark: in its base's cluster, no letter-spacing between them) */
@@ -872,6 +872,10 @@ static inline float ts_spacing(uint32_t cp)
     if (t_letter_sp == 0.0f && t_word_sp == 0.0f) return 0.0f;
     bool word = cp == ' ' || cp == 0xA0 || cp == 0x1361 || cp == 0x10100 || cp == 0x10101 || cp == 0x1039F ||
                 cp == 0x1091F;
+    /* (cursive scripts stay joined: Arabic and its presentation forms, Syriac, N'Ko, Mandaic, Mongolian) */
+    if (cp >= 0x600 && ((cp >= 0x600 && cp <= 0x85F) || (cp >= 0x8A0 && cp <= 0x8FF) || (cp >= 0x1800 && cp <= 0x18AF) ||
+                        (cp >= 0xFB50 && cp <= 0xFDFF) || (cp >= 0xFE70 && cp <= 0xFEFC)))
+        return 0.0f;
     return t_letter_sp + (word ? t_word_sp : 0.0f);
 }
 

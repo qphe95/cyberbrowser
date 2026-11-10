@@ -113,7 +113,19 @@ typedef struct {
     unsigned char word[TF_ARGS];
     char sep[TF_ARGS];
     unsigned char bare;
+    /* (a calc() argument: a sum of lengths, cn of them; unit "calc") */
+    unsigned char cn[TF_ARGS];
+    double cv[TF_ARGS][3];
+    char cu[TF_ARGS][3][6];
 } TfFn;
+
+/* (an argument's terms, a plain length as one; their count) */
+static int tf_terms(const TfFn *f, int k, double *v, const char **u)
+{
+    if (!f->cn[k]) { v[0] = f->v[k]; u[0] = f->unit[k][0] ? f->unit[k] : "px"; return 1; }
+    for (int i = 0; i < f->cn[k]; i++) { v[i] = f->cv[k][i]; u[i] = f->cu[k][i]; }
+    return f->cn[k];
+}
 
 static int tf_fns(const char *s, TfFn *out, int cap)
 {
@@ -143,6 +155,33 @@ static int tf_fns(const char *s, TfFn *out, int cap)
             if (f->n >= TF_ARGS) return -1;
             f->sep[f->n] = f->n ? sep : 0;
             char *e = NULL;
+            if (!strncasecmp(p, "calc(", 5)) {
+                /* (calc(): lengths added and taken away) */
+                const char *q = p + 5;
+                int sign = 1, c = 0;
+                for (;;) {
+                    while (isspace((unsigned char)*q)) q++;
+                    double tv = strtod(q, &e);
+                    if (e == q || c >= 3) return -1;
+                    int u = 0;
+                    while (*e && (isalpha((unsigned char)*e) || *e == '%') && u < 5) f->cu[f->n][c][u++] = *e++;
+                    f->cu[f->n][c][u] = 0;
+                    if (!u) return -1;
+                    f->cv[f->n][c++] = sign * tv;
+                    q = e;
+                    while (isspace((unsigned char)*q)) q++;
+                    if (*q == ')') { q++; break; }
+                    if (*q == '+') sign = 1;
+                    else if (*q == '-') sign = -1;
+                    else return -1;
+                    q++;
+                }
+                f->cn[f->n] = (unsigned char)c;
+                strcpy(f->unit[f->n], "calc");
+                f->n++;
+                p = q;
+                continue;
+            }
             double v = strtod(p, &e);
             if (e == p) {
                 /* (a word: kept as it is, the same on both sides to go between) */
@@ -324,11 +363,41 @@ static const char *tf_mix_text(const char *a, const char *b, double t)
                 /* (a shape's px and %: as calc() between them) */
                 bool shape = !strcmp(A[i].name, "shape") || !strcmp(A[i].name, "polygon") || !strcmp(A[i].name, "inset") ||
                              !strcmp(A[i].name, "xywh") || !strcmp(A[i].name, "circle") || !strcmp(A[i].name, "ellipse");
-                bool pa = ua[0] == '%', pb = ub[0] == '%';
-                if (!shape || pa == pb || (!pa && strcasecmp(ua, "px")) || (!pb && strcasecmp(ub, "px"))) return NULL;
-                double px = (pa ? 0.0 : A[i].v[k] * (1.0 - t)) + (pb ? 0.0 : B[i].v[k] * t);
-                double pc = (pa ? A[i].v[k] * (1.0 - t) : 0.0) + (pb ? B[i].v[k] * t : 0.0);
-                at += (size_t)snprintf(o + at, at < cap ? cap - at : 0, "%scalc(%.6gpx + %.6g%%)", sep, px, pc);
+                if (!shape && strcmp(A[i].name, "rect")) return NULL;
+                /* (every term of both, the same units together) */
+                double tv[6], xv[3];
+                const char *tu[6], *xu[3];
+                int tn = tf_terms(&A[i], k, tv, tu);
+                for (int z = 0; z < tn; z++) tv[z] *= 1.0 - t;
+                int xn = tf_terms(&B[i], k, xv, xu);
+                for (int z = 0; z < xn; z++) {
+                    int w = 0;
+                    while (w < tn && strcasecmp(tu[w], xu[z])) w++;
+                    if (w < tn) tv[w] += xv[z] * t;
+                    else { tv[tn] = xv[z] * t; tu[tn++] = xu[z]; }
+                }
+                at += (size_t)snprintf(o + at, at < cap ? cap - at : 0, "%scalc(", sep);
+                for (int z = 0; z < tn; z++)
+                    at += (size_t)snprintf(o + at, at < cap ? cap - at : 0, "%s%.6g%s", z ? " + " : "", tv[z], tu[z]);
+                at += (size_t)snprintf(o + at, at < cap ? cap - at : 0, ")");
+                continue;
+            }
+            if (A[i].cn[k] || B[i].cn[k]) {   /* (two calc()s, or one and a bare 0: the same way) */
+                double tv[6], xv[3];
+                const char *tu[6], *xu[3];
+                int tn = tf_terms(&A[i], k, tv, tu);
+                for (int z = 0; z < tn; z++) tv[z] *= 1.0 - t;
+                int xn = tf_terms(&B[i], k, xv, xu);
+                for (int z = 0; z < xn; z++) {
+                    int w = 0;
+                    while (w < tn && strcasecmp(tu[w], xu[z])) w++;
+                    if (w < tn) tv[w] += xv[z] * t;
+                    else { tv[tn] = xv[z] * t; tu[tn++] = xu[z]; }
+                }
+                at += (size_t)snprintf(o + at, at < cap ? cap - at : 0, "%scalc(", sep);
+                for (int z = 0; z < tn; z++)
+                    at += (size_t)snprintf(o + at, at < cap ? cap - at : 0, "%s%.6g%s", z ? " + " : "", tv[z], tu[z]);
+                at += (size_t)snprintf(o + at, at < cap ? cap - at : 0, ")");
                 continue;
             }
             double v = A[i].v[k] + (B[i].v[k] - A[i].v[k]) * t;
