@@ -367,7 +367,8 @@ static size_t tok_start_tag(TokChunk *c, size_t pos, bool serial) {
         t = &c->toks[c->n - 2];
         r->kind = TK_RAW;
         r->src = (uint32_t)rb;
-        r->text = dom_arena_str(&c->arena, h + rb, p - rb);
+        r->text = tag == g_raw_atoms[2] || tag == g_raw_atoms[3] ? tok_text(c, h + rb, p - rb)   /* (RCDATA) */
+                                                                 : dom_arena_str(&c->arena, h + rb, p - rb);
         /* Skip the exact closing tag "</tag>". */
         if (p + tl + 3 <= len && h[p] == '<' && h[p + 1] == '/' &&
             strncasecmp(h + p + 2, tn, tl) == 0 && h[p + 2 + tl] == '>')

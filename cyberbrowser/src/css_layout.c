@@ -1711,8 +1711,16 @@ static bool layout_display_is_block_level(CssDisplay d)
  * containing such an inline is laid out as a block instead (the anonymous
  * block boxes a browser creates around its blocks span the same area).
  * Runs bottom-up so a promotion propagates to inline ancestors. */
+static bool grid_is_subgrid(const char *v);
 static void layout_blockify(LayoutContext *ctx)
 {
+    /* (layout or paint containment: an independent formatting context, so not a subgrid, CSS Grid 2 9) */
+    for (int i = 0; i < ctx->tree.count; i++) {
+        LayoutStyle *gs = ctx->boxes[i].s;
+        if (!gs || !(gs->contain_layout || gs->contain_paint) || gs->display != CSS_DISPLAY_GRID) continue;
+        if (gs->grid_cols && grid_is_subgrid(gs->grid_cols)) gs->grid_cols = NULL;
+        if (gs->grid_rows && grid_is_subgrid(gs->grid_rows)) gs->grid_rows = NULL;
+    }
     /* (print mode: the root's content in rows of one column, each a page) */
     if (g_css_print.on && ctx->tree.count > 0 && ctx->tree.root_idx >= 0) {
         LayoutStyle *rs = layout_box(ctx, ctx->tree.root_idx)->s;
@@ -3199,6 +3207,7 @@ static void bg_reset_placement(LayoutStyle *s)
     /* (origin and clip: set by the shorthand's own reading of its box keywords) */
     s->bg_pos_xf = s->bg_pos_yf = 0.0;
     s->bg_pos_xpx = s->bg_pos_ypx = 0.0;
+    s->bg_pos_neg = 0;
     s->bg_size_kind = 0;
     s->bg_size_pct = 0;
     s->bg_size_w = s->bg_size_h = -1.0;
@@ -3239,32 +3248,59 @@ static bool bg_length_token(const char *t)
            strncasecmp(t, "calc(", 5) == 0;
 }
 
-/* A length or percentage token: fraction (*f) or pixels (*px). */
+/* A length or percentage token: fraction (*f) or pixels (*px); t_bg_fn the
+ * fraction where the basis is negative (other than *f only in min()/max()) */
+static __thread double t_bg_fn;
 static void bg_value(const char *t, double area_base, double vw, double fs, double *f, double *px)
 {
     size_t n = strlen(t);
     *f = 0.0;
     *px = 0.0;
     if (n && t[n - 1] == '%') *f = atof(t) / 100.0;
+    else if ((!strncasecmp(t, "min(", 4) || !strncasecmp(t, "max(", 4)) && !strchr(t + 4, '(')) {
+        /* (min()/max() of percentages alone: the least (most) where the basis is positive, the other where negative) */
+        bool mx = (t[1] | 32) == 'a';
+        double lo = 1e30, hi = -1e30;
+        const char *p = t + 4;
+        bool ok = true;
+        while (*p && *p != ')') {
+            char *e;
+            double v = strtod(p, &e);
+            if (e == p || *e != '%') { ok = false; break; }
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+            p = e + 1;
+            while (*p == ' ' || *p == ',') p++;
+        }
+        if (ok && lo <= hi) {
+            *f = (mx ? hi : lo) / 100.0;
+            t_bg_fn = (mx ? lo : hi) / 100.0;
+            return;
+        }
+        *px = css_parse_length(t, 0.0, vw, fs);
+        *f = (css_parse_length(t, 1000.0, vw, fs) - *px) / 1000.0;
+    }
     else if (strchr(t, '(') && strchr(t, '%')) {
         /* (a calc() with a percentage in it: linear in its base, so the two parts from two bases) */
         *px = css_parse_length(t, 0.0, vw, fs);
         *f = (css_parse_length(t, 1000.0, vw, fs) - *px) / 1000.0;
     }
     else *px = css_parse_length(t, area_base, vw, fs);
+    t_bg_fn = *f;
 }
 
 /* background-position from its tokens (1 to 4). */
 static void bg_set_position(LayoutStyle *s, char toks[][64], int n, double vw, double fs)
 {
     double xf = 0.5, xpx = 0.0, yf = 0.5, ypx = 0.0;
+    double xfn = -1e9, yfn = -1e9;   /* (where the basis is negative: unset, as the other) */
     if (n == 1) {
         const char *a = toks[0];
         if (!strcasecmp(a, "top")) yf = 0.0;
         else if (!strcasecmp(a, "bottom")) yf = 1.0;
         else if (!strcasecmp(a, "left")) xf = 0.0;
         else if (!strcasecmp(a, "right")) xf = 1.0;
-        else if (strcasecmp(a, "center") != 0) bg_value(a, 0.0, vw, fs, &xf, &xpx);
+        else if (strcasecmp(a, "center") != 0) { bg_value(a, 0.0, vw, fs, &xf, &xpx); xfn = t_bg_fn; }
     } else if (n == 2) {
         const char *a = toks[0], *b = toks[1];
         bool swap = !strcasecmp(a, "top") || !strcasecmp(a, "bottom") || !strcasecmp(b, "left") || !strcasecmp(b, "right");
@@ -3272,11 +3308,11 @@ static void bg_set_position(LayoutStyle *s, char toks[][64], int n, double vw, d
         if (!strcasecmp(a, "left")) xf = 0.0;
         else if (!strcasecmp(a, "right")) xf = 1.0;
         else if (!strcasecmp(a, "center")) xf = 0.5;
-        else bg_value(a, 0.0, vw, fs, &xf, &xpx);
+        else { bg_value(a, 0.0, vw, fs, &xf, &xpx); xfn = t_bg_fn; }
         if (!strcasecmp(b, "top")) yf = 0.0;
         else if (!strcasecmp(b, "bottom")) yf = 1.0;
         else if (!strcasecmp(b, "center")) yf = 0.5;
-        else bg_value(b, 0.0, vw, fs, &yf, &ypx);
+        else { bg_value(b, 0.0, vw, fs, &yf, &ypx); yfn = t_bg_fn; }
     } else {
         /* Edge keywords with offsets: right 10px bottom 20% ... */
         for (int i = 0; i < n; i++) {
@@ -3293,6 +3329,9 @@ static void bg_set_position(LayoutStyle *s, char toks[][64], int n, double vw, d
     }
     s->bg_pos_xf = xf; s->bg_pos_xpx = xpx;
     s->bg_pos_yf = yf; s->bg_pos_ypx = ypx;
+    s->bg_pos_neg = (unsigned char)((xfn > -1e8 && fabs(xfn - xf) > 1e-9 ? 1 : 0) | (yfn > -1e8 && fabs(yfn - yf) > 1e-9 ? 2 : 0));
+    s->bg_pos_xfn = (float)xfn;
+    s->bg_pos_yfn = (float)yfn;
 }
 
 /* background-size from its tokens (1 or 2). */
@@ -4252,12 +4291,15 @@ static void layout_apply_declaration_in(LayoutBox *box, const CssDeclaration *de
                 box->s->cis_w = (float)a;
                 box->s->cis_h = (float)b;
                 box->s->cis_auto = (unsigned char)((auto1 ? 1 : 0) | (auto2 ? 2 : 0));
+                box->s->cis_given = (unsigned char)((strcasecmp(one, "none") && one[0] ? 1 : 0) | (two[0] ? (strcasecmp(two, "none") ? 2 : 0) : (strcasecmp(one, "none") && one[0] ? 2 : 0)));
             } else if (!strcasecmp(which, "width") || !strcasecmp(which, vert ? "block-size" : "inline-size")) {
                 box->s->cis_w = (float)a;
                 box->s->cis_auto = (unsigned char)((box->s->cis_auto & 2) | (auto1 ? 1 : 0));
+                box->s->cis_given = (unsigned char)((box->s->cis_given & 2) | (strcasecmp(one, "none") && one[0] ? 1 : 0));
             } else {
                 box->s->cis_h = (float)a;
                 box->s->cis_auto = (unsigned char)((box->s->cis_auto & 1) | (auto1 ? 2 : 0));
+                box->s->cis_given = (unsigned char)((box->s->cis_given & 1) | (strcasecmp(one, "none") && one[0] ? 2 : 0));
             }
         }
     }
@@ -4431,7 +4473,8 @@ static void layout_apply_declaration_in(LayoutBox *box, const CssDeclaration *de
     }
     if (prop[0] == 'w' && !strcasecmp(prop, "writing-mode")) {
         static const struct { const char *n; unsigned char v; } k[] = { { "horizontal-tb", 0 }, { "vertical-rl", 1 }, { "vertical-lr", 2 },
-            { "sideways-rl", 3 }, { "sideways-lr", 4 }, { "lr", 0 }, { "lr-tb", 0 }, { "rl", 0 }, { "rl-tb", 0 }, { "tb", 1 }, { "tb-rl", 1 } };
+            { "sideways-rl", 3 }, { "sideways-lr", 4 }, { "lr", 0 }, { "lr-tb", 0 }, { "rl", 0 }, { "rl-tb", 0 }, { "tb", 1 }, { "tb-rl", 1 },
+            { "initial", 0 }, { "revert", 0 } };   /* (initial: horizontal-tb) */
         for (size_t i = 0; i < sizeof k / sizeof k[0]; i++)
             if (!strcasecmp(value, k[i].n)) { box->s->writing_mode = k[i].v; box->s->writing_mode_set = 1; }
         return;
@@ -4922,9 +4965,10 @@ static void layout_apply_declaration_in(LayoutBox *box, const CssDeclaration *de
                     word[wl] = 0;
                     if ((isdigit((unsigned char)word[0]) || word[0] == '-' || word[0] == '.') && nl < 3)
                         len[nl++] = css_parse_length(word, parent_width, viewport_width, s->font_size);
+                    else if (!strcasecmp(word, "currentcolor")) col = false;   /* (the element's color, below) */
                     else if (css_parse_color(word, &cr, &cg, &cb, &ca)) col = true;
                 }
-                if (!col) { cr = s->color_r; cg = s->color_g; cb = s->color_b; ca = s->color_a; }
+                if (!col) { cr = s->color_r; cg = s->color_g; cb = s->color_b; ca = -1.0; }   /* (currentcolor: -1, the color when painted) */
                 s->filt_ds[0] = (float)len[0]; s->filt_ds[1] = (float)len[1]; s->filt_ds[2] = (float)len[2];
                 s->filt_ds[3] = (float)cr; s->filt_ds[4] = (float)cg; s->filt_ds[5] = (float)cb; s->filt_ds[6] = (float)ca;
             } else if (arg[0]) {
@@ -5102,6 +5146,11 @@ static void layout_apply_declaration_in(LayoutBox *box, const CssDeclaration *de
             box->s->tw_balance = strstr(value, "balance") != NULL;
             box->s->tw_balance_set = 1;
         }
+        return;
+    }
+    if (prop[0] == 'f' && !strcasecmp(prop, "frame-sizing")) {
+        box->s->frame_sizing = !strcasecmp(value, "content-height") || !strcasecmp(value, "content-block-size") ? 1
+                             : !strcasecmp(value, "content-width") || !strcasecmp(value, "content-inline-size") ? 2 : 0;
         return;
     }
     if (prop[0] == 'h' && !strcasecmp(prop, "hyphens")) {
@@ -5657,7 +5706,7 @@ static void layout_apply_declaration_in(LayoutBox *box, const CssDeclaration *de
         char *e = NULL;
         double d = strtod(v, &e);
         if (e != v && *e && !isspace((unsigned char)*e)) return;   /* (a percentage or a unit: not a value) */
-        box->s->fsa = e != v && d >= 0.0 ? (float)d : 0.0f;   /* (none, from-font: no change) */
+        box->s->fsa = e != v && d > 0.0 ? (float)d : e != v && d == 0.0 ? 1e-6f : 0.0f;   /* (none, from-font: no change; 0: a used size of 0) */
         box->s->fsa_metric = m;
         box->s->fsa_set = 1;
         return;
@@ -16684,6 +16733,34 @@ static bool quotes_nth(const char *q, int k, char *buf, size_t cap)
     return false;
 }
 
+/* (content: url(...) alone: its src attribute, interned and kept, one per address; NULL not that) */
+static HtmlAttribute *pseudo_content_image(const char *v)
+{
+    static HtmlAttribute *g_ci[64];
+    static int g_nci;
+    while (isspace((unsigned char)*v)) v++;
+    if (strncasecmp(v, "url(", 4)) return NULL;
+    const char *a = v + 4, *e = strchr(a, ')');
+    if (!e) return NULL;
+    const char *t = e + 1;
+    while (isspace((unsigned char)*t)) t++;
+    if (*t) return NULL;   /* (an image among other content: not this) */
+    while (a < e && isspace((unsigned char)*a)) a++;
+    const char *b = e;
+    while (b > a && isspace((unsigned char)b[-1])) b--;
+    if (b > a && (*a == '"' || *a == '\'') && b[-1] == *a) { a++; b--; }
+    if (b <= a) return NULL;
+    const char *u = layout_intern(a, (size_t)(b - a));
+    for (int k = 0; k < g_nci; k++) if (g_ci[k]->value == u) return g_ci[k];
+    if (g_nci >= 64) return NULL;
+    HtmlAttribute *at = (HtmlAttribute *)calloc(1, sizeof(HtmlAttribute));
+    if (!at) return NULL;
+    at->name = "src";
+    at->value = u;
+    g_ci[g_nci++] = at;
+    return at;
+}
+
 static void layout_pseudo_text(const char *v, const HtmlNode *owner, char *out, size_t cap)
 {
     size_t o = 0;
@@ -17045,8 +17122,10 @@ static void layout_scroll_pseudos_attach(LayoutContext *ctx, LayoutPseudoPair *p
     int base = ctx->base_count;
     for (int i = 0; i < base; i++) {
         const LayoutBox *b = &ctx->boxes[i];
-        if (b->s->display == CSS_DISPLAY_NONE || b->s->skipped || !layout_is_scroller(ctx, i)) continue;
+        if (b->s->display == CSS_DISPLAY_NONE || b->s->skipped) continue;
         const PseudoRec *r = (const PseudoRec *)ctx->pseudo_rec[i];
+        bool scroller = layout_is_scroller(ctx, i);
+        if (!scroller && !r) continue;
         int parent = ctx->tree.nodes[i].parent_idx;
         bool root = parent < 0;
         if (root) parent = i;
@@ -17059,7 +17138,7 @@ static void layout_scroll_pseudos_attach(LayoutContext *ctx, LayoutPseudoPair *p
             if (!content) continue;
             layout_scroll_pseudo_add(ctx, pairs, hn, kp, i, SIDE_BUTTON0 + d, k_button_tag[d], content, parent, next, any, dir, em_defer);
         }
-        if (!b->s->scroll_marker_group) continue;
+        if (!scroller || !b->s->scroll_marker_group) continue;
         int before = b->s->scroll_marker_group == 2 ? next : root ? ctx->tree.nodes[i].first_child_idx : i;
         int group = layout_scroll_pseudo_add(ctx, pairs, hn, kp, i, SIDE_GROUP, "::scroll-marker-group", "", parent, before,
                                              r ? &r->side[SIDE_GROUP] : NULL, NULL, em_defer);
@@ -17450,6 +17529,14 @@ static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
                 ht->tag_name = "";
                 ht->text_content = strdup(text);
                 ht->text_len = ht->text_content ? strlen(ht->text_content) : 0;
+                ht->attributes = NULL;
+                /* (an image for content: an <img> of it in place of the text) */
+                HtmlAttribute *ci = pseudo_content_image(ps->content);
+                if (ci) {
+                    ht->type = HTML_NODE_ELEMENT;
+                    ht->tag_name = "img";
+                    ht->attributes = ci;
+                }
             }
             LayoutNodeRef *E = &ctx->tree.nodes[pe], *T = &ctx->tree.nodes[pt], *O = &ctx->tree.nodes[owner];
             E->dom_node_idx = LAYOUT_PSEUDO_DOM0 + k;
@@ -21688,6 +21775,40 @@ static void layout_svg_size_in(const LayoutBox *b, HtmlNode *dom, double pcw, do
     if (hc && !hs && !(cr && ws && !(b->s->cis_h > 0.0f))) *out_h = b->s->cis_h > 0.0f ? b->s->cis_h : 0.0;
     (void)ow; (void)oh;
 }
+/* (frames that opted in to responsive sizing: their documents' sizes, by iframe) */
+static uint32_t g_fcs_node[64];
+static double g_fcs_w[64], g_fcs_h[64];
+static int g_fcs_n;
+static int frame_content_slot(uint32_t node)
+{
+    for (int k = 0; k < g_fcs_n; k++) if (g_fcs_node[k] == node) return k;
+    return -1;
+}
+void css_layout_frame_content_note(uint32_t iframe_node, LayoutContext *ctx)
+{
+    if (!ctx || !ctx->doc || !iframe_node) return;
+    /* (the opt-in: a meta named responsive-embedded-sizing) */
+    bool opt = false;
+    PreOrderCompactionArray *a = &ctx->doc->array;
+    int n = (int)po_array_count(a);
+#define FCS_NODE(i) ((const HtmlNode *)(a->buffer + (size_t)(i) * a->node_size))
+    for (int i = 0; i < n && !opt; i++) {
+        const HtmlNode *hn = FCS_NODE(i);
+        if (hn->array_node.state != PO_ARRAY_NODE_ACTIVE || hn->type != HTML_NODE_ELEMENT || !hn->tag_name || strcasecmp(hn->tag_name, "meta")) continue;
+        int pi = hn->array_node.parent;
+        const HtmlNode *pn = pi >= 0 && pi < n ? FCS_NODE(pi) : NULL;
+        if (!pn || !pn->tag_name || (strcasecmp(pn->tag_name, "head") && strcasecmp(pn->tag_name, "html"))) continue;   /* (in the head, or before the body) */
+        for (HtmlAttribute *at = hn->attributes; at; at = at->next)
+            if (at->name && !strcasecmp(at->name, "name") && at->value && !strcasecmp(at->value, "responsive-embedded-sizing")) opt = true;
+    }
+#undef FCS_NODE
+    int k = frame_content_slot(iframe_node);
+    if (!opt || ctx->tree.root_idx < 0) { if (k >= 0) g_fcs_h[k] = g_fcs_w[k] = -1.0; return; }
+    if (k < 0) { k = g_fcs_n < 64 ? g_fcs_n++ : 63; g_fcs_node[k] = iframe_node; }
+    const LayoutBox *rb = &ctx->boxes[ctx->tree.root_idx];
+    g_fcs_h[k] = rb->height + (rb->margin_top > 0.0 ? rb->margin_top : 0.0) + (rb->margin_bottom > 0.0 ? rb->margin_bottom : 0.0);
+    g_fcs_w[k] = rb->width + rb->margin_left + rb->margin_right;
+}
 static void layout_svg_size_in0(const LayoutBox *b, HtmlNode *dom, double pcw, double pch,
                                 double *out_w, double *out_h)
 {
@@ -21751,6 +21872,11 @@ static void layout_svg_size_in0(const LayoutBox *b, HtmlNode *dom, double pcw, d
     /* (aspect-ratio: its ratio over the natural one, unless auto and there is one) */
     if (b->s->aspect_ratio > 0.0 && b->s->aspect_ratio_prop && (b->s->aspect_ratio_prop == 1 || ratio <= 0.0))
         ratio = 1.0 / b->s->aspect_ratio;
+    /* (frame-sizing: content-height: the frame's document's height, when it opted in) */
+    if (h < 0.0 && b->s->frame_sizing == 1 && dom->store_id && dom->tag_name && !strcasecmp(dom->tag_name, "iframe")) {
+        int k = frame_content_slot(dom->store_id);
+        if (k >= 0 && g_fcs_h[k] >= 0.0) h = g_fcs_h[k];
+    }
     if (w < 0.0) w = (h >= 0.0 && ratio > 0.0) ? h * ratio : 300.0 * zf;
     if (h < 0.0) h = ratio > 0.0 ? w / ratio : 150.0 * zf;
     *out_w = w;
@@ -21922,6 +22048,24 @@ static bool layout_cleared_by_sibling(LayoutContext *ctx, int c, double m)
         (void)m;
         if (h > 0.0) return true;
     }
+    /* (a float before an ancestor this box starts, nothing in flow between, in the same formatting context) */
+    double acc = m;   /* (where the margin puts it below the float's top) */
+    for (int x = ctx->tree.nodes[c].parent_idx, dp = 0; cl && x >= 0 && dp < 8; x = ctx->tree.nodes[x].parent_idx, dp++) {
+        if (layout_establishes_bfc(ctx, x)) break;
+        acc += layout_box(ctx, x)->padding_top + layout_box(ctx, x)->s->border_top;
+        for (int p = ctx->tree.nodes[x].prev_sibling_idx; p >= 0; p = ctx->tree.nodes[p].prev_sibling_idx) {
+            const LayoutBox *pb = layout_box(ctx, p);
+            if (pb->s->position == CSS_POSITION_ABSOLUTE || pb->s->position == CSS_POSITION_FIXED || pb->s->display == CSS_DISPLAY_NONE) continue;
+            if (pb->s->float_side == 0) {
+                HtmlNode *pn = css_layout_box_node(ctx, p);
+                if (pn && pn->type == HTML_NODE_TEXT && layout_text_is_whitespace(css_layout_node_text(ctx, pn))) continue;
+                return false;
+            }
+            if (!(cl == 3 || cl == pb->s->float_side)) continue;
+            if (!pb->s->height_set || pb->s->css_height + pb->padding_top + pb->padding_bottom + pb->s->border_top + pb->s->border_bottom +
+                                          pb->margin_top + pb->margin_bottom > acc + 0.01) return true;
+        }
+    }
     return false;
 }
 
@@ -21943,7 +22087,8 @@ static bool layout_fc_past_adj_floats(LayoutContext *ctx, int idx)
 {
     const LayoutBox *b = layout_box(ctx, idx);
     if (t_adj_floats <= 0.0 || b->margin_top <= 0.0 || b->s->float_side) return false;
-    if (!(b->s->overflow != 0 || b->s->flow_root || table_is_table(b) || b->s->display == CSS_DISPLAY_FLEX || b->s->display == CSS_DISPLAY_GRID)) return false;
+    if (!(b->s->overflow != 0 || b->s->flow_root || table_is_table(b) || b->s->display == CSS_DISPLAY_FLEX || b->s->display == CSS_DISPLAY_GRID ||
+          ((b->s->contain_layout || b->s->contain_paint) && !b->s->table_role && !b->s->ruby_int))) return false;
     if (!b->s->width_set || b->s->width_percent > 0.0) return false;   /* (auto: narrows beside them) */
     int p = ctx->tree.nodes[idx].parent_idx;
     double room = p >= 0 ? layout_box(ctx, p)->content_width : 0.0;
@@ -22321,8 +22466,11 @@ static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_ma
         bool wraps = box->s->flex_wrap != CSS_FLEX_WRAP_NOWRAP;
         int n = 0;
         double trim_last = 0.0;
-        for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0;
-             c = ctx->tree.nodes[c].next_sibling_idx) {
+        /* (its items: through display: contents children) */
+        int nfk = 0;
+        int *fk = layout_collect_items(ctx, idx, &nfk);
+        for (int fq = 0; fq < nfk; fq++) {
+            int c = fk[fq];
             LayoutBox *cb = layout_box(ctx, c);
             if (!layout_is_in_flow(cb)) continue;
             HtmlNode *cn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
@@ -22341,20 +22489,44 @@ static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_ma
             else if (w > content) content = w;
             n++;
         }
+        free(fk);
         content -= trim_last;
         if (is_row && (want_max || !wraps) && n > 1) content += (n - 1) * box->s->gap_col;
         /* (a wrapping column one with a set height: its lines side by side, each as wide as its widest item) */
-        if (!is_row && wraps && want_max && box->s->height_set && !(box->s->height_percent > 0.0) && n > 1) {
-            double H = box->s->css_height;
-            if (box->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX) H -= layout_vertical_border_padding(box);
+        bool mh_only = !box->s->height_set && box->max_height >= 0.0 && !(box->s->minmax_pct_bits & 8);   /* (or a max-height alone) */
+        /* (or stretched in a row flex container of a definite height) */
+        double st_h = -1.0;
+        {
+            int fp = ctx->tree.nodes[idx].parent_idx;
+            const LayoutBox *pfb = fp >= 0 ? layout_box(ctx, fp) : NULL;
+            if (!box->s->height_set && !mh_only && pfb && pfb->s->display == CSS_DISPLAY_FLEX && pfb->s->flex_wrap == CSS_FLEX_WRAP_NOWRAP &&
+                (pfb->s->flex_direction == CSS_FLEX_DIRECTION_ROW || pfb->s->flex_direction == CSS_FLEX_DIRECTION_ROW_REVERSE) &&
+                pfb->s->height_set && !(pfb->s->height_percent > 0.0) && !(box->s->margin_auto & 5) &&
+                (box->s->align_self ? box->s->align_self == CSS_ALIGN_STRETCH + 1 : pfb->s->align_items == CSS_ALIGN_STRETCH)) {
+                st_h = pfb->s->css_height - (pfb->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX ? layout_vertical_border_padding(pfb) : 0.0) -
+                       box->margin_top - box->margin_bottom;
+            }
+        }
+        if (!is_row && wraps && want_max && ((box->s->height_set && !(box->s->height_percent > 0.0)) || mh_only || st_h >= 0.0) && n > 1) {
+            double H = box->s->height_set ? box->s->css_height : mh_only ? box->max_height : st_h;
+            if (box->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX || st_h >= 0.0) H -= layout_vertical_border_padding(box);
             double lines_w = 0.0, line_w = 0.0, used = 0.0;
             int nl = 0;
             bool first = true;
-            for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+            /* (in order-modified document order) */
+            int ord[256], no = 0;
+            for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0 && no < 256; c = ctx->tree.nodes[c].next_sibling_idx) {
                 LayoutBox *cb = layout_box(ctx, c);
                 if (!layout_is_in_flow(cb)) continue;
                 HtmlNode *cn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
                 if (cn && cn->type == HTML_NODE_TEXT && layout_text_is_whitespace(css_layout_node_text(ctx, cn))) continue;
+                int q = no++;
+                while (q > 0 && layout_box(ctx, ord[q - 1])->s->order > cb->s->order) { ord[q] = ord[q - 1]; q--; }
+                ord[q] = c;
+            }
+            for (int oi = 0; oi < no; oi++) {
+                int c = ord[oi];
+                LayoutBox *cb = layout_box(ctx, c);
                 double w = layout_intrinsic_contribution(ctx, c, true);
                 double m = cb->s->flex_basis >= 0.0 && !(cb->s->flex_basis_percent > 0.0) ? cb->s->flex_basis : cb->s->height_set ? cb->s->css_height : 0.0;
                 if (!first && used + box->s->gap_row + m > H + 0.01) { lines_w += line_w; nl++; line_w = 0.0; used = 0.0; first = true; }
@@ -22519,12 +22691,45 @@ static double layout_intrinsic_width(LayoutContext *ctx, int idx, bool want_max)
         double cmin = layout_intrinsic_width0(ctx, idx, false) - hbp, cmax = want_max ? w - hbp : cmin;
         if (cmin < 0.0) cmin = 0.0;
         if (cmax < 0.0) cmax = 0.0;
+        /* (spanners in it: the columns' content the rest, block-level children) */
+        {
+            bool spans = false, plain = true;
+            double rmin = 0.0, rmax = 0.0;
+            for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+                const LayoutBox *cb = layout_box(ctx, c);
+                HtmlNode *cn = css_layout_box_node(ctx, c);
+                if (cn && cn->type == HTML_NODE_TEXT) { if (!layout_text_is_whitespace(css_layout_node_text(ctx, cn))) plain = false; continue; }
+                if (!layout_is_in_flow(cb)) continue;
+                if (cb->s->column_span_all) { spans = true; continue; }
+                if (!layout_box_is_block_level(cb)) { plain = false; continue; }
+                double a = layout_intrinsic_contribution(ctx, c, false), z = want_max ? layout_intrinsic_contribution(ctx, c, true) : a;
+                if (a > rmin) rmin = a;
+                if (z > rmax) rmax = z;
+            }
+            if (spans && plain && !(CSS_CONTAIN_SIZE_OF(b->s) & 1)) { cmin = rmin; if (want_max) cmax = rmax; }
+        }
         double gap = b->s->gap_col_given ? b->s->gap_col : (b->s->font_size > 0.0 ? b->s->font_size : 16.0);
         int n = b->s->column_count > 0 ? b->s->column_count : 1;
         double cwid = b->s->column_width_set ? b->s->column_width : 0.0;
         double per = want_max ? (b->s->column_width_set ? fmax(cwid, cmin) : cmax) : (b->s->column_width_set ? fmin(cwid, cmin) : cmin);
-        double inner = want_max ? n * per + (n - 1) * gap : per;
-        if (want_max || b->s->column_width_set) w = inner + hbp;
+        /* (a spanner deeper than a child: its width in the content's, so one column of it) */
+        bool deep_span = false;
+        {
+            int end = idx;
+            while (end >= 0 && ctx->tree.nodes[end].next_sibling_idx < 0) end = ctx->tree.nodes[end].parent_idx;
+            end = end >= 0 ? ctx->tree.nodes[end].next_sibling_idx : ctx->tree.count;
+            for (int q = idx + 1; q < end && q < ctx->tree.count && !deep_span; q++)
+                deep_span = layout_box(ctx, q)->s->column_span_all && ctx->tree.nodes[q].parent_idx != idx;
+        }
+        double inner = want_max || (!b->s->column_width_set && !deep_span) ? n * per + (n - 1) * gap : per;
+        /* (a spanner: across all the columns, its own width at least) */
+        for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+            const LayoutBox *cb = layout_box(ctx, c);
+            if (!cb->s->column_span_all || !layout_is_in_flow(cb) || (CSS_CONTAIN_SIZE_OF(b->s) & 1)) continue;   /* (contained: as if empty) */
+            double sw = layout_intrinsic_contribution(ctx, c, want_max);
+            if (sw > inner) inner = sw;
+        }
+        w = inner + hbp;
     }
     if (b->s->csz_w && b->s->display != CSS_DISPLAY_INLINE) {
         double hbp = layout_horizontal_border_padding(b);
@@ -22550,6 +22755,8 @@ static double layout_intrinsic_width(LayoutContext *ctx, int idx, bool want_max)
 
 static double grid_subgrid_own_rows(const LayoutBox *b, int r, int n);
 static bool grid_is_subgrid(const char *v);
+static __thread double *t_rk_h;   /* (a grid's second pass: each item's row extent from the first, -1 none) */
+static __thread int t_rk_n;
 static __thread int t_sgr_idx = -1;   /* (a subgrid placed along row lanes: the box, and its row's extent) */
 static __thread double t_sgr_h;
 static __thread int t_sgr_n;
@@ -22609,6 +22816,7 @@ static double grid_item_row_h(LayoutContext *ctx, int idx)
 {
     int p = ctx->tree.nodes[idx].parent_idx;
     if (p < 0) return -1.0;
+    if (t_rk_h && idx < t_rk_n && t_rk_h[idx] >= 0.0) return t_rk_h[idx];
     const LayoutBox *pb = layout_box(ctx, p), *b = layout_box(ctx, idx);
     if (pb->s->display != CSS_DISPLAY_GRID || b->s->position == CSS_POSITION_ABSOLUTE || b->s->position == CSS_POSITION_FIXED ||
         pb->s->writing_mode != b->s->writing_mode || pb->s->grid_lanes) return -1.0;   /* (one flow: laid out as horizontal) */
@@ -22769,7 +22977,7 @@ static double layout_intrinsic_width0(LayoutContext *ctx, int idx, bool want_max
         LayoutBox *fb = layout_box(ctx, idx);
         const LayoutStyle *fs = fb->s;
         bool wfc = fs->width_keyword == 3 && fs->fc_set && fs->fc_pct == 0.0f;
-        bool mfc = (fs->mm_fc_set & 1) && fs->mm_fc_pct[0] == 0.0f, xfc = (fs->mm_fc_set & 2) && fs->mm_fc_pct[1] == 0.0f;
+        bool mfc = (fs->mm_fc_set & 1) != 0, xfc = (fs->mm_fc_set & 2) && fs->mm_fc_pct[1] == 0.0f;
         if (wfc || mfc || xfc) {
             unsigned char held_set = fs->width_set;
             double held_min = fb->min_width, held_max = fb->max_width;
@@ -22932,7 +23140,7 @@ static bool layout_establishes_bfc(LayoutContext *ctx, int idx)
      * captions) */
     if (b->s->flow_root || b->s->display == CSS_DISPLAY_FLEX || b->s->display == CSS_DISPLAY_GRID) return true;
     /* (layout or paint containment: an independent formatting context) */
-    if ((b->s->contain_layout || b->s->contain_paint) && !(b->s->table_role >= 2 && b->s->table_role != 5) &&
+    if ((b->s->contain_layout || b->s->contain_paint) && !(b->s->table_role == 2 || b->s->table_role == 3 || b->s->table_role == 6) && !b->s->ruby_int &&
         b->s->display != CSS_DISPLAY_INLINE) return true;
     /* (a line-clamp container: an independent formatting context) */
     if (b->s->line_clamp_auto || (b->s->line_clamp && b->s->line_clamp_std)) return true;
@@ -23122,7 +23330,7 @@ static void layout_place_float(LayoutContext *ctx, int c, double content_left, d
         fl_right = content_right;
         double next = -1.0;
         for (int fi = 0; fi < nf; fi++) {
-            if (fl[fi].bottom <= fy + 0.001 || fl[fi].top >= fy + (mh > 0.0 ? mh : 0.001) - 0.001) continue;
+            if (fl[fi].bottom <= fy + 0.001 || fl[fi].top >= fy + (mh > 0.002 ? mh - 0.001 : 0.0005)) continue;   /* (a float of no height: still beside those at its top) */
             /* (outside the containing block, a float on the other side
              * still counts when this one, too wide, would reach it: §9.5.1
              * rule 7) */
@@ -23994,6 +24202,7 @@ static double mc_push_walk(LayoutContext *ctx, int idx, double top, double H, in
     int prev = -1;   /* (the sibling before, in flow) */
     double float_floor = -1e30;   /* (no float above one before it) */
     double float_need = -1e30;   /* (what a float that grew asks of this box) */
+    double fl_move = 0.0, fl_from = 1e30;   /* (a float moved on: by how much, from below where it ended) */
     if (depth > 30) return 0.0;
     /* (only inline content: its lines) */
     if (ctx->lines && idx < ctx->lines_n && ctx->lines[idx].n > 0 && !mc_block_kids(ctx, idx))
@@ -24056,6 +24265,8 @@ static double mc_push_walk(LayoutContext *ctx, int idx, double top, double H, in
         cb->mc_cut = 0.0f;
         if (cb->s->float_side) {
             /* (floats: where the flow put them, moved with it; one that can't break, to the next column) */
+            /* (below one moved on: moved with it) */
+            if (fl_move > 0.0 && cb->y >= fl_from - 0.01) layout_move_box(ctx, c, cb->x, cb->y + fl_move);
             double fy = cb->y - top;
             if (cb->y < float_floor) { layout_move_box(ctx, c, cb->x, float_floor); fy = cb->y - top; }
             double fcol = floor((fy + 0.01) / H), fb = (fcol + 1.0) * H;
@@ -24066,7 +24277,11 @@ static double mc_push_walk(LayoutContext *ctx, int idx, double top, double H, in
                     flow_after = qb->s->display != CSS_DISPLAY_NONE && qb->s->position != CSS_POSITION_ABSOLUTE && qb->s->position != CSS_POSITION_FIXED &&
                                  !qb->s->float_side && qb->height > 0.0;
                 }
-                if (!flow_after) layout_move_box(ctx, c, cb->x, cb->y + (fb - fy));
+                if (!flow_after) {
+                    fl_from = cb->y + cb->height;
+                    fl_move = fb - fy;
+                    layout_move_box(ctx, c, cb->x, cb->y + (fb - fy));
+                }
             }
             float_floor = cb->y;
             /* (one that breaks: what is in it broken the same way, the box that holds it as tall) */
@@ -24079,6 +24294,12 @@ static double mc_push_walk(LayoutContext *ctx, int idx, double top, double H, in
                 }
             }
             continue;
+        }
+        /* (one that clears a float moved on, below it: moved with it, what follows too) */
+        if (fl_move > 0.0 && cb->s->clear && cb->y >= fl_from - 0.01) {
+            layout_move_box(ctx, c, cb->x, cb->y + fl_move);
+            shift += fl_move;
+            fl_move = 0.0;
         }
         double y = cb->y - top;
         double col = floor((y + 0.01) / H);
@@ -25049,6 +25270,7 @@ static double mc_row_more(double pe, double *end)
     return pe;
 }
 
+static double flex_clamp(double v, double mn, double mx);
 static void layout_multicol_deep(LayoutContext *ctx, int idx, McNested *L, int N, double W, double G, double U, double top, bool auto_h, double ch, double rg)
 {
     LayoutBox *box = layout_box(ctx, idx);
@@ -25376,6 +25598,11 @@ static bool layout_multicol(LayoutContext *ctx, int idx)
     {
         /* (a known column height and no spanner: breaks pushed to columns' tops) */
         double ch = s->column_height > 0.0 ? s->column_height : nest_h > 0.0 ? nest_h : !auto_h ? box->content_height : 0.0;
+        /* (size containment: the columns as high as it is empty) */
+        if (ch <= 0.0 && auto_h && (CSS_CONTAIN_SIZE_OF(s) & 2)) {
+            double e = flex_clamp(cis_size(ctx, idx, true), box->min_height > 0.0 ? box->min_height - (s->box_sizing == CSS_BOX_SIZING_BORDER_BOX ? layout_vertical_border_padding(box) : 0.0) : 0.0, box->max_height);
+            if (e > 0.5) ch = e;
+        }
         /* (column-fill: auto and a max-height alone: filled that high, one column after another) */
         if (ch <= 0.0 && auto_h && s->column_fill != 0 && box->max_height > 0.5 && t_mc_depth == 0 && s->column_wrap != 2 && !g_css_print.on) ch = box->max_height;
         bool spanner = false;
@@ -25538,6 +25765,11 @@ static bool layout_multicol(LayoutContext *ctx, int idx)
     if (auto_h) {
         double frame = box->padding_top + box->padding_bottom + box->s->border_top + box->s->border_bottom;
         box->content_height = dst - top;
+        /* (size containment: as if empty) */
+        if (CSS_CONTAIN_SIZE_OF(s) & 2) {
+            double mn = box->min_height > 0.0 ? box->min_height - (s->box_sizing == CSS_BOX_SIZING_BORDER_BOX ? frame : 0.0) : 0.0;
+            box->content_height = flex_clamp(cis_size(ctx, idx, true), mn, box->max_height);
+        }
         box->height = box->content_height + frame;
     }
     if (H <= 0.0) H = auto_h ? box->content_height : box->content_height;
@@ -27095,15 +27327,23 @@ static void ifc_collect(LayoutContext *ctx, int p, int c0, int stop, IfcItems *I
                         const char *fp = t + i;
                         uint32_t b0 = layout_utf8_next(&fp), a0 = I->last_cp;
                         if (k >= 0 && k == I->last_tok && I->t[k].kind == IFC_WORD && I->t[k].box != c &&
-                            (a0 >= 0x80 || b0 >= 0x80 || a0 == '-' || a0 == '|') && cb->s->word_break != 1 && cb->s->line_break != 4) {
+                            (a0 >= 0x80 || b0 >= 0x80 || a0 == '-' || a0 == '|' || cb->s->word_break == 1) && cb->s->line_break != 4) {
                             int lang = lb_lang(ctx, c);
                             if (lb_between(a0, b0, cb->s, lang != 0, lang == 2) && ifc_wrap_between(ctx, I->t[k].box, c)) ifc_put(I, c, i, i, 0.0, IFC_SPACE);
                         }
                     }
+                    /* (overflow-wrap: what of the word is before it, in other elements) */
+                    double ow_pre = 0.0;
+                    for (int k = I->n - 1; ow && k >= 0; k--) {
+                        if (I->t[k].kind == IFC_OPEN || I->t[k].kind == IFC_CLOSE) continue;
+                        if (I->t[k].kind != IFC_WORD) break;
+                        ow_pre += I->t[k].w;
+                    }
                     for (uint32_t a = i; a < j;) {
                         uint32_t e = lb_piece_end(ctx, c, cb->s, t, a, j);
                         double pw = ifc_width(ctx, c, t, a, e);
-                        if (ow && pw > avail_width + 0.01) {
+                        double pre = a == i ? ow_pre : 0.0;
+                        if (ow && pw + pre > avail_width + 0.01) {
                             /* (overflow-wrap: a piece wider than a line broken where a line ends,
                              * between characters, as many as fit, at least one) */
                             uint32_t s0 = a;
@@ -27114,7 +27354,7 @@ static void ifc_collect(LayoutContext *ctx, int p, int c0, int stop, IfcItems *I
                                     while (nk < e && (((unsigned char)t[nk] & 0xC0) == 0x80 ||
                                                       ((unsigned char)t[nk] == 0xCC || ((unsigned char)t[nk] == 0xCD && (unsigned char)t[nk + 1] < 0xB0))))
                                         nk++;   /* (whole sequences, combining marks kept on) */
-                                    if (last > s0 && ifc_width(ctx, c, t, s0, nk) > avail_width + 0.01) break;
+                                    if (last > s0 && ifc_width(ctx, c, t, s0, nk) + (s0 == a ? pre : 0.0) > avail_width + 0.01) break;
                                     last = nk;
                                     k = nk;
                                 }
@@ -28743,7 +28983,7 @@ static double layout_baseline_walk(LayoutContext *ctx, int i, int depth, bool fi
     double best = NAN;
     if (depth > 40) return best;
     /* (layout containment: no baseline of its content, CSS Contain 1 3.2) */
-    if (layout_box(ctx, i)->s->contain_layout && !(layout_box(ctx, i)->s->table_role >= 2 && layout_box(ctx, i)->s->table_role != 5)) return best;
+    if (layout_box(ctx, i)->s->contain_layout && !(layout_box(ctx, i)->s->table_role == 2 || layout_box(ctx, i)->s->table_role == 3 || layout_box(ctx, i)->s->table_role == 6) && !layout_box(ctx, i)->s->ruby_int) return best;
     {
         /* (a multicol container: its content laid out in one column, painted in
          * columns; a baseline where its column puts it) */
@@ -28827,7 +29067,9 @@ static double layout_baseline_walk(LayoutContext *ctx, int i, int depth, bool fi
         if (!isnan(best) && own->s->overflow != 0 && best > own->y + own->height) best = own->y + own->height;
         return best;
     }
-    double off_line = NAN;
+    double off_line = NAN, off_strut = NAN;   /* (off_strut: the line's own baseline, its strut's, by them) */
+    IfcVa sm;
+    ifc_va_metrics(layout_box(ctx, i), &sm);
     /* (line-clamp: the lines it left only) */
     double cut0 = t_bw_cut;
     const LayoutBox *ib = layout_box(ctx, i);
@@ -28872,10 +29114,20 @@ static double layout_baseline_walk(LayoutContext *ctx, int i, int depth, bool fi
         if (!isnan(v) && (cb->s->vertical_align == 2 || cb->s->vertical_align == 3) &&
             (cb->s->display == CSS_DISPLAY_INLINE || cb->s->display == CSS_DISPLAY_INLINE_BLOCK)) {
             if (isnan(off_line) || (first ? v < off_line : v > off_line)) off_line = v;
+            /* (the line's top at its top, the line's bottom at its bottom) */
+            double sb;
+            if (cb->s->display == CSS_DISPLAY_INLINE) {
+                IfcVa cm;
+                ifc_va_metrics(cb, &cm);
+                sb = cb->s->vertical_align == 2 ? v - cm.A + sm.A : v + cm.D - sm.D;
+            } else sb = cb->s->vertical_align == 2 ? cb->y - cb->margin_top + sm.A : cb->y + cb->height + cb->margin_bottom - sm.D;
+            if (isnan(off_strut) || (first ? sb < off_strut : sb > off_strut)) off_strut = sb;
             continue;
         }
         if (!isnan(v) && (isnan(best) || (first ? v < best : v > best))) best = v;
     }
+    /* (a block's line of those alone: the line's own baseline) */
+    if (isnan(best) && !isnan(off_strut) && ib->s->writing_mode == 0 && ib->s->display != CSS_DISPLAY_INLINE) return off_strut;
     return isnan(best) ? off_line : best;
 }
 
@@ -29097,7 +29349,7 @@ static void ifc_line_extent(LayoutContext *ctx, const IfcItems *I, IfcLines *V, 
                 double bo = (e >= 0 ? V->el[e].bo : 0.0) + ifc_va_offset(layout_box(ctx, t->box), &m, pv);
                 ifc_extent_put(V, tb, m.A, m.D, bo, &up, &dn);
             }
-        } else if ((kind == IFC_WORD || kind == IFC_SPACE || kind == IFC_BR) && (e < 0 || I->el[e].box != t->box)) {
+        } else if ((kind == IFC_WORD || kind == IFC_SPACE) && (e < 0 || I->el[e].box != t->box)) {   /* (a <br>: its own font no part of the line) */
             /* (a text box, or a line break: its own metrics, its parent's baseline) */
             if (t->box != last_text) {
                 ifc_va_metrics(layout_box(ctx, t->box), &tv);
@@ -29348,7 +29600,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
     bool bidi = ifc_bidi_levels(ctx, idx, &I, &B.para) && ifc_bidi_init(&B, &I);
     bool any = false;   /* (anything that makes a line: a word, an edge, a break) */
     for (int k = 0; k < I.n && !any; k++)
-        any = I.t[k].kind != IFC_SPACE && I.t[k].kind != IFC_MARK && I.t[k].kind != IFC_FLOAT && I.t[k].kind != IFC_CTL &&
+        any = (I.t[k].kind != IFC_SPACE || I.t[k].kept) && I.t[k].kind != IFC_MARK && I.t[k].kind != IFC_FLOAT && I.t[k].kind != IFC_CTL &&
               I.t[k].kind != IFC_ABS;
     /* (no line: its floats where the content starts) */
     for (int k = 0; !any && k < I.n; k++)
@@ -29536,6 +29788,19 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
                 j++;
             }
             has_word = has_word || has_atom;
+            /* (one that ends at a soft hyphen: with the hyphen shown there) */
+            for (int k = j - 1; k >= i; k--) {
+                const IfcTok *tk = &I.t[k];
+                if (tk->kind == IFC_CLOSE || tk->kind == IFC_OPEN || tk->kind == IFC_CTL) continue;
+                if (tk->kind != IFC_WORD || tk->end < tk->start + 2) break;
+                HtmlNode *tn = css_layout_box_node(ctx, tk->box);
+                const char *raw = tn ? css_layout_node_text(ctx, tn) : NULL;
+                const char *tt = raw ? css_layout_box_text(ctx, tk->box, raw) : NULL;
+                if (tt && (unsigned char)tt[tk->end - 2] == 0xC2 && (unsigned char)tt[tk->end - 1] == 0xAD &&
+                    layout_box(ctx, tk->box)->s->hyphens != 1)
+                    { const char *hc = layout_box(ctx, tk->box)->s->hyph_char; if (!hc) hc = "‐"; ww += ifc_width(ctx, tk->box, hc, 0, (uint32_t)strlen(hc)); }
+                break;
+            }
             /* (first on the line, and fits only without the space it ends with: that goes down) */
             if (!word && x + ww > lx + la + 0.01 && j - 1 > i && I.t[j - 1].bsp && x + ww - I.t[j - 1].w <= lx + la + 0.01) {
                 ww -= I.t[j - 1].w;
@@ -29597,7 +29862,25 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
             }
             /* (a line that floats narrow too much for its first content goes
              * down past them, CSS 2.1 section 9.5) */
-            if (!word && x + ww > lx + la + 0.01 && la < avail_width - 0.01) {
+            double ww_t = ww;   /* (less the spaces it ends with: they hang, or overflow) */
+            if (!word && x + ww > lx + la + 0.01 && la < avail_width - 0.01)
+                for (int k = j - 1; k >= i; k--) {
+                    const IfcTok *tk = &I.t[k];
+                    if (tk->kind == IFC_BR || tk->kind == IFC_CTL || ((tk->kind == IFC_CLOSE || tk->kind == IFC_OPEN) && tk->w == 0.0)) continue;
+                    if (tk->kind == IFC_SPACE) { ww_t -= tk->w; continue; }
+                    if (tk->kind != IFC_WORD) break;
+                    HtmlNode *tn = css_layout_box_node(ctx, tk->box);
+                    const char *raw = tn ? css_layout_node_text(ctx, tn) : NULL;
+                    const char *tt = raw ? css_layout_box_text(ctx, tk->box, raw) : NULL;
+                    if (!tt) break;
+                    uint32_t e = tk->end;
+                    while (e > tk->start && (tt[e - 1] == ' ' || tt[e - 1] == '\t')) e--;
+                    if (e < tk->end) ww_t -= tk->w - (e > tk->start ? ifc_width(ctx, tk->box, tt, tk->start, e) : 0.0);
+                    if (e > tk->start) break;
+                }
+            /* (not a line that can't wrap: that stays beside them) */
+            unsigned char pws = layout_box(ctx, idx)->s->white_space;
+            if (!word && x + ww_t > lx + la + 0.01 && la < avail_width - 0.01 && !(pws == 1 || pws == 2)) {
                 double next = -1.0;
                 for (int fi = t_float_base; fi < ctx->float_count; fi++) {
                     double fb = ctx->float_stack[fi].bottom;
@@ -30340,8 +30623,8 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
                 for (int q = el->tok0; q < el->tok1; q++) {
                     const IfcTok *t = &I.t[q];
                     if (t->line != L || t->drop || t->kind == IFC_CTL || t->kind == IFC_ABS || t->kind == IFC_FLOAT) continue;
-                    if (t->kind == IFC_SPACE) {
-                        /* (the line's last content, only end edges after it: it hangs, outside) */
+                    if (t->kind == IFC_SPACE && !t->kept) {
+                        /* (the line's last content, only end edges after it: it hangs, outside; a preserved one still in it) */
                         int nq = q + 1;
                         while (nq < I.n && I.t[nq].line == L && (I.t[nq].kind == IFC_CLOSE || I.t[nq].drop)) nq++;
                         if (nq >= I.n || I.t[nq].line != L) continue;
@@ -30385,7 +30668,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
                 if (ab->margin_top + ab->height + ab->margin_bottom > atom_h) atom_h = ab->margin_top + ab->height + ab->margin_bottom;
             }
             /* (a space that ends a line hangs outside) */
-            if (t->kind == IFC_SPACE && (q + 1 >= I.n || I.t[q + 1].line != t->line)) continue;
+            if (t->kind == IFC_SPACE && !t->kept && (q + 1 >= I.n || I.t[q + 1].line != t->line)) continue;
             double a = ifc_tok_left(ctx, t), z = ifc_tok_right(ctx, t);
             if (a < x0) x0 = a;
             if (z > x1) x1 = z;
@@ -30542,6 +30825,13 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
         if (p < 0) continue;
         /* (no line: the start of one, its right end when right to left) */
         double sx = blk->s->direction == 1 && ab->s->abs_inline ? content_left + avail_width : content_left, sy = cur->y;
+        if (nlines == 0 && ab->s->abs_inline && blk->s->writing_mode == 0) {
+            /* (the room beside floats there, the point text-align puts an empty line's content at) */
+            double bx = content_left, bw = avail_width;
+            ifc_band_geometry(ctx, sy, 0.0, content_left, avail_width, &bx, &bw);
+            CssTextAlign eta = blk->s->text_align;
+            sx = eta == CSS_TEXT_ALIGN_CENTER ? bx + bw / 2.0 : eta == CSS_TEXT_ALIGN_RIGHT ? bx + bw : bx;
+        }
         if (nlines > 0) {
             int L = I.t[k].line < nlines ? I.t[k].line : nlines - 1;
             sy = ltop[L];
@@ -30913,6 +31203,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
             if (nfl > 0 && child->s->float_side == 0 &&
                 (child->s->overflow != 0 || child->s->flow_root || table_is_table(child) ||
                  child->s->display == CSS_DISPLAY_FLEX || child->s->display == CSS_DISPLAY_GRID ||
+                 ((child->s->contain_layout || child->s->contain_paint) && !child->s->table_role && !child->s->ruby_int) ||
                  /* (a replaced block: no overlap either) */
                  layout_is_img(css_layout_box_node(ctx, c)) || layout_is_svg_box(css_layout_box_node(ctx, c)))) {
                 const FloatRec *fl = ctx->float_stack + t_float_base;
@@ -32018,6 +32309,21 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
                 ratio_main = basis;
             }
         }
+        /* (an image down a column, its width set: its automatic minimum through its ratio, its height if that is less) */
+        if (!is_row && ratio_main < 0.0 && layout_is_img(dom) && child->s->width_set && !(child->s->width_percent > 0.0) && !child->s->width_keyword &&
+            child->s->writing_mode == ct->s->writing_mode && child->s->overflow == 0 && !(child->s->min_size_set & 2) && child->min_height <= 0.0) {
+            double nw = 0.0, nh = 0.0, own = 0.0;
+            unsigned dims = 0;
+            if (layout_img_natural(ctx, dom, &nw, &nh, &dims, &own) && nw > 0.0 && nh > 0.0) {
+                double vbp = layout_vertical_border_padding(child), hbp = layout_horizontal_border_padding(child);
+                double t = (child->width - hbp > 0.0 ? child->width - hbp : 0.0) * nh / nw + vbp;
+                if (child->s->height_set && child->s->height_percent <= 0.0 && !child->s->h_kw) {
+                    double sh = layout_flex_main_total(child, child->s->css_height, false);
+                    if (sh < t) t = sh;
+                }
+                ratio_main = t;
+            }
+        }
         /* (a height of its own in a column it can shrink in: the automatic minimum, that or its content's if less) */
         if (!is_row && ct->s->writing_mode == 0 && child->s->writing_mode == 0 && !t_wm_across_ext && ct->s->flex_wrap == CSS_FLEX_WRAP_NOWRAP && child->height > 0.0 && main_def && main_def_item && child->s->height_set && child->s->height_percent <= 0.0 && child->s->overflow == 0 && !(child->s->min_size_set & 2) &&
             child->min_height <= 0.0 && child->s->flex_shrink > 0.0 && !layout_is_img(dom) && !layout_is_svg_box(dom) && nmeasure < nkids && !it->is_text) {
@@ -32053,7 +32359,19 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
         }
         if (basis < 0.0) {
             if (is_row) {
+                /* (its max-width not applied to the base size: lifted while measuring) */
+                double held_mx = child->max_width;
+                bool lift = held_mx >= 0.0 && !(child->s->minmax_pct_bits & 2) && !it->is_text && ctx->intrinsic_cache &&
+                            !layout_is_img(dom) && !layout_is_svg_box(dom) && !child->s->aspect_ratio_prop;
+                if (lift) {
+                    child->max_width = -1.0;
+                    ctx->intrinsic_cache[2 * (size_t)c] = ctx->intrinsic_cache[2 * (size_t)c + 1] = -1.0;
+                }
                 basis = layout_intrinsic_width(ctx, c, true);
+                if (lift) {
+                    child->max_width = held_mx;
+                    ctx->intrinsic_cache[2 * (size_t)c] = ctx->intrinsic_cache[2 * (size_t)c + 1] = -1.0;
+                }
                 /* (min- and max-height through a ratio) */
                 if (child->s->aspect_ratio_prop && child->s->aspect_ratio > 0.0) {
                     if (child->min_height > 0.0) {
@@ -32341,6 +32659,7 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
             if (lines[li].count > 1) sum += (lines[li].count - 1) * gap_main;
             if (sum > longest) longest = sum;
         }
+        if (!is_row && (CSS_CONTAIN_SIZE_OF(ct->s) & 2)) longest = cis_size(ctx, idx, true);   /* (contained: as if empty) */
         avail_main = flex_clamp(longest, cmin_h, cmax_h);
     }
 
@@ -32657,6 +32976,7 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
     if (nlines > 1) total_cross += (nlines - 1) * gap_cross;
     if (!cross_def) {
         /* Auto cross size (row container, auto height). */
+        if (is_row && (CSS_CONTAIN_SIZE_OF(ct->s) & 2)) total_cross = cis_size(ctx, idx, true);   /* (contained: as if empty) */
         inner_cross = flex_clamp(total_cross, cmin_h, cmax_h);
     }
     if (!do_wrap && nlines == 1) {
@@ -34752,7 +35072,7 @@ static double layout_grid_intrinsic(LayoutContext *ctx, int idx, bool want_max)
             sgi = grid_subgrid_items(&G2, &nsg, true);
         } else sgi = grid_subgrid_items(&G, &nsg, grid_column_lanes(layout_box(ctx, idx)->s));
         grid_size_tracks(G.cols, G.ncols, -1.0, layout_box(ctx, idx)->s->gap_col, sgi ? sgi : lanes ? lanes : G.items,
-                         sgi ? nsg : lanes ? na : G.nitems, false, want_max ? 2 : 1, false);
+                         (CSS_CONTAIN_SIZE_OF(layout_box(ctx, idx)->s) & 1) && !(layout_box(ctx, idx)->s->cis_given & 1) && !grid_row_lanes(layout_box(ctx, idx)->s) ? 0 : sgi ? nsg : lanes ? na : G.nitems, false, want_max ? 2 : 1, false);   /* (size containment: as if empty) */
         free(sgi);
         free(lanes);
         w = grid_tracks_total(G.cols, G.ncols, layout_box(ctx, idx)->s->gap_col);
@@ -35190,6 +35510,17 @@ static int grid_self_mode(const LayoutBox *ct, const LayoutBox *child, bool inli
 static __thread float t_grid_gpr;
 static void layout_grid_body(LayoutContext *ctx, int idx, LayoutBox *ct, double content_x, double content_y, double cw,
                              bool height_def, double chh);
+/* (grid item c's row known: 1 a percentage height of its own, 2 stretched over it with a percentage-height child) */
+static int grid_rk_kind(LayoutContext *ctx, int idx, int c)
+{
+    const LayoutBox *cb = layout_box(ctx, c);
+    if (cb->s->height_percent > 0.0) return cb->s->height_pct_px == 0.0 ? 1 : 0;
+    if (cb->s->height_set || cb->s->h_kw || (cb->s->margin_auto & 5)) return 0;
+    if (!(cb->s->align_self ? cb->s->align_self == CSS_ALIGN_STRETCH + 1 : layout_box(ctx, idx)->s->align_items == CSS_ALIGN_STRETCH)) return 0;
+    for (int q = ctx->tree.nodes[c].first_child_idx; q >= 0; q = ctx->tree.nodes[q].next_sibling_idx)
+        if (layout_box(ctx, q)->s->height_percent > 0.0 && layout_box(ctx, q)->s->display != CSS_DISPLAY_NONE) return 2;
+    return 0;
+}
 static void layout_grid_container(LayoutContext *ctx, int idx)
 {
     LayoutBox *ct = layout_box(ctx, idx);
@@ -35219,8 +35550,50 @@ static void layout_grid_container(LayoutContext *ctx, int idx)
         layout_grid_body(ctx, idx, ct, content_x, content_y, cw, height_def, chh);
         t_fit_idx = was_idx; t_fit_mode = was_mode; t_fit_used = was_used;
         free(fit_used);
-    } else
-    layout_grid_body(ctx, idx, ct, content_x, content_y, cw, height_def, chh);
+    } else {
+        double was_h = ct->height;
+        layout_grid_body(ctx, idx, ct, content_x, content_y, cw, height_def, chh);
+        /* (items whose width can follow their row, the row not a length: once more, the rows known) */
+        bool again = false;
+        if (!t_rk_h && !grid_column_lanes(ct->s) && !grid_row_lanes(ct->s) && ct->s->writing_mode == 0 && !grid_is_subgrid(ct->s->grid_rows))
+            for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0 && !again; c = ctx->tree.nodes[c].next_sibling_idx) {
+                const LayoutBox *cb = layout_box(ctx, c);
+                if (cb->s->display == CSS_DISPLAY_NONE || cb->s->position == CSS_POSITION_ABSOLUTE || cb->s->position == CSS_POSITION_FIXED) continue;
+                if (cb->s->writing_mode != 0 || cb->s->width_set || cb->s->width_keyword) continue;
+                if (!grid_rk_kind(ctx, idx, c)) continue;
+                if (grid_item_row_h(ctx, c) >= 0.0) continue;
+                again = true;
+            }
+        if (again && ctx->intrinsic_cache) {
+            t_rk_n = ctx->tree.count;
+            t_rk_h = (double *)malloc((size_t)t_rk_n * sizeof(double));
+            if (t_rk_h) {
+                for (int k = 0; k < t_rk_n; k++) t_rk_h[k] = -1.0;
+                for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+                    const LayoutBox *cb = layout_box(ctx, c);
+                    if (cb->s->display == CSS_DISPLAY_NONE || cb->s->position == CSS_POSITION_ABSOLUTE || cb->s->position == CSS_POSITION_FIXED) continue;
+                    int kind = grid_rk_kind(ctx, idx, c);
+                    if (!kind) continue;
+                    /* (its row from what the percentage came to, or the margin box stretched over it) */
+                    double hb = cb->height - (cb->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX ? 0.0 : layout_vertical_border_padding(cb));
+                    t_rk_h[c] = kind == 1 ? hb / cb->s->height_percent + cb->margin_top + cb->margin_bottom : cb->height + cb->margin_top + cb->margin_bottom;
+                    /* (what was measured in it without that, dropped) */
+                    int stk[64], sn = 0;
+                    stk[sn++] = c;
+                    while (sn > 0) {
+                        int x = stk[--sn];
+                        ctx->intrinsic_cache[2 * (size_t)x] = ctx->intrinsic_cache[2 * (size_t)x + 1] = -1.0;
+                        for (int q = ctx->tree.nodes[x].first_child_idx; q >= 0 && sn < 64; q = ctx->tree.nodes[q].next_sibling_idx) stk[sn++] = q;
+                    }
+                }
+                ct->height = was_h;
+                layout_update_content_sizes(ct);
+                layout_grid_body(ctx, idx, ct, content_x, content_y, cw, height_def, chh);
+                free(t_rk_h);
+                t_rk_h = NULL;
+            }
+        }
+    }
     t_grid_gpr = 0.0f;
     ct->s->gap_col = held_gc;
     ct->s->gap_row = held_gr;
@@ -36096,7 +36469,17 @@ static void layout_grid_body(LayoutContext *ctx, int idx, LayoutBox *ct, double 
     if (!height_def) {
         double h = lanes_h >= 0.0 ? lanes_h : grid_tracks_total(G.rows, G.nrows, gap_r);
         /* (grid lanes under size containment: its contain-intrinsic-size) */
-        if (lanes_untemplated(ct->s) && (CSS_CONTAIN_SIZE_OF(ct->s) & 2)) h = cis_size(ctx, idx, true);
+        if ((lanes_untemplated(ct->s) || (grid_column_lanes(ct->s) && !(ct->s->cis_given & 2))) && (CSS_CONTAIN_SIZE_OF(ct->s) & 2)) h = cis_size(ctx, idx, true);   /* (column lanes: rows the stacking axis) */
+        else if ((CSS_CONTAIN_SIZE_OF(ct->s) & 2) && G.nrows > 0 && !(ct->s->cis_given & 2) && !grid_column_lanes(ct->s)) {
+            /* (size containment: the rows as if it had no items) */
+            GridSize *er = (GridSize *)malloc((size_t)G.nrows * sizeof(GridSize));
+            if (er) {
+                memcpy(er, G.rows, (size_t)G.nrows * sizeof(GridSize));
+                grid_size_tracks(er, G.nrows, -1.0, gap_r, NULL, 0, true, 0, false);
+                h = grid_tracks_total(er, G.nrows, gap_r);
+                free(er);
+            }
+        }
         double mn = ct->min_height, mx = ct->max_height;
         if (ct->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX) {
             double v = layout_vertical_border_padding(ct);
@@ -36315,7 +36698,15 @@ static void layout_grid_body(LayoutContext *ctx, int idx, LayoutBox *ct, double 
                     }
                     for (int u = k0; u < g_gap_nline; u++) {
                         g_gap_line[u].nn = cnt;
-                        if (rev_fill) g_gap_line[u].gi = cnt - 1 - g_gap_line[u].gi;   /* (counted from where the lane fills from) */
+                        if (rev_fill && !(rl && rtl && !ct->s->lanes_fill_rev)) g_gap_line[u].gi = cnt - 1 - g_gap_line[u].gi;   /* (counted from where the lane fills from) */
+                    }
+                }
+                /* (row lanes right to left: the items are mirrored after this, the gaps with them) */
+                if (rl && rtl) {
+                    double cwm = ct->content_width;
+                    for (int u = l0; u < g_gap_nline; u++) {
+                        CssGapLine *L = &g_gap_line[u];
+                        if (L->axis == 0) L->pos = (float)(cwm - L->pos);
                     }
                 }
                 rec.n = g_gap_nline - l0;
@@ -38636,6 +39027,7 @@ static void wm_swap_style(LayoutStyle *s, bool to)
     s->wm_swapped = (unsigned char)to;
     { float c_ = s->cis_w; s->cis_w = s->cis_h; s->cis_h = c_; }
     s->cis_auto = (unsigned char)(((s->cis_auto & 1) << 1) | ((s->cis_auto & 2) >> 1));
+    s->cis_given = (unsigned char)(((s->cis_given & 1) << 1) | ((s->cis_given & 2) >> 1));
     /* (stretch: a keyword one way, a percentage flag the other) */
     bool was_w_stretch = s->width_keyword == 4, was_h_stretch = s->height_stretch != 0;
     {
@@ -39259,7 +39651,23 @@ static void layout_static_position(LayoutContext *ctx, int idx, double *sx, doub
     int p = ctx->tree.nodes[idx].parent_idx;
     if (p < 0 || B->has_static || !B->s->abs_inline) return;
     const LayoutBox *P = layout_box(ctx, p);
-    if (P->s->direction != 0 || P->s->writing_mode != 0 || P->s->display == CSS_DISPLAY_FLEX || P->s->display == CSS_DISPLAY_GRID) return;
+    if (P->s->writing_mode != 0 || P->s->display == CSS_DISPLAY_FLEX || P->s->display == CSS_DISPLAY_GRID) return;
+    if (P->s->direction == 1) {
+        /* (right to left: the line between the floats there, its right edge at the point text-align gives) */
+        double L = P->x + P->s->border_left + P->padding_left, Rr = L + P->content_width;
+        for (int k = ctx->tree.nodes[idx].prev_sibling_idx; k >= 0; k = ctx->tree.nodes[k].prev_sibling_idx) {
+            const LayoutBox *kb = layout_box(ctx, k);
+            if (!kb->s->float_side || kb->s->display == CSS_DISPLAY_NONE) continue;
+            double t = kb->y - kb->margin_top, b = kb->y + kb->height + kb->margin_bottom;
+            if (!(*sy + 0.01 >= t && *sy + 0.01 < b)) continue;
+            if (kb->s->float_side == 1 && kb->x + kb->width + kb->margin_right > L) L = kb->x + kb->width + kb->margin_right;
+            if (kb->s->float_side == 2 && kb->x - kb->margin_left < Rr) Rr = kb->x - kb->margin_left;
+        }
+        CssTextAlign ta = P->s->text_align;
+        *sx = ta == CSS_TEXT_ALIGN_LEFT ? L : ta == CSS_TEXT_ALIGN_CENTER ? (L + Rr) / 2.0 : Rr;
+        t_static_right = true;
+        return;
+    }
     for (int k = ctx->tree.nodes[idx].prev_sibling_idx; k >= 0; k = ctx->tree.nodes[k].prev_sibling_idx) {
         const LayoutBox *kb = layout_box(ctx, k);
         if (kb->s->float_side != 1 || kb->s->display == CSS_DISPLAY_NONE) continue;
@@ -40833,7 +41241,15 @@ static void layout_position_absolute_box(LayoutContext *ctx, int idx)
     LayoutStyle base_style = *box->s;
     LayoutBox base_box = *box;
     layout_place_absolute(ctx, idx);
-    if (try_fits(box)) return;
+    /* (with an order: the base style one of the options sorted, its room now) */
+    bool base_fits = try_fits(box);
+    double base_size = 0.0;
+    if (base_style.try_order) {
+        bool vert0 = base_style.writing_mode != 0;
+        bool wide0 = base_style.try_order == 1 || (base_style.try_order == 4 && !vert0) || (base_style.try_order == 3 && vert0);
+        base_size = wide0 ? t_imcb[2] - t_imcb[0] : t_imcb[3] - t_imcb[1];
+    }
+    if (base_fits && !base_style.try_order) return;
     const CssStyleSet *set = styleset_cached(ctx->style_gen, ctx->viewport_width, ctx->viewport_height);
     LayoutStyle *sp = box->s;
     /* (the options, in the order they're to be tried) */
@@ -40868,10 +41284,24 @@ static void layout_position_absolute_box(LayoutContext *ctx, int idx)
             for (; j >= 0 && size[j] < s0; j--) { ob[j + 1] = ob[j]; oe[j + 1] = oe[j]; size[j + 1] = size[j]; }
             ob[j + 1] = b0; oe[j + 1] = e0; size[j + 1] = s0;
         }
+        /* (the base where its room puts it, first among equals) */
+        if (nopt < TRY_MAX) {
+            int at = 0;
+            while (at < nopt && size[at] > base_size + 0.01) at++;
+            for (int j = nopt; j > at; j--) { ob[j] = ob[j - 1]; oe[j] = oe[j - 1]; size[j] = size[j - 1]; }
+            ob[at] = NULL; oe[at] = NULL; size[at] = base_size;
+            nopt++;
+        }
     }
     for (int i = 0; i < nopt; i++) {
         *sp = base_style;
         { LayoutBox t = base_box; t.s = sp; *box = t; }
+        if (!ob[i]) {
+            /* (the base style) */
+            layout_place_absolute(ctx, idx);
+            if (try_fits(box)) return;
+            continue;
+        }
         if (try_apply_option(ctx, box, set, ob[i], oe[i])) {
             layout_place_absolute(ctx, idx);
             if (try_fits(box)) return;

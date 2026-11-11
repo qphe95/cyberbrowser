@@ -436,6 +436,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char owrap, owrap_set; /* (overflow-wrap, inherited: 1 break-word, 2 anywhere) */
     const char *hyph_char;          /* (hyphenate-character, inherited: the string, NULL auto) */
     unsigned char hyph_char_set;
+    unsigned char frame_sizing;     /* (frame-sizing: 1 content-height, 2 content-width) */
     const char *font_palette;       /* (font-palette, inherited: the text, NULL normal) */
     unsigned char font_palette_set;
     unsigned char tcy;    /* (text-combine-upright: all, in a vertical flow: a horizontal cell 1em square) */
@@ -488,6 +489,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     float bi_slice[4], bi_w[4], bi_out[4];
     unsigned char bi_slice_pct, bi_fill, bi_w_kind[4], bi_out_num, bi_rep[2], bi_init;
     double bg_pos_xf, bg_pos_xpx, bg_pos_yf, bg_pos_ypx;
+    float bg_pos_xfn, bg_pos_yfn;   /* (the fractions where the basis is negative, bg_pos_neg bits 1 x, 2 y) */
+    unsigned char bg_pos_neg;
     unsigned char bg_size_kind, bg_size_pct, bg_fixed;
     double bg_size_w, bg_size_h;
 
@@ -575,9 +578,10 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char te_left;   /* (vertical text: the marks on the left, else the right) */
     uint32_t te_rgba;
 /* (size containment from contain, content-visibility, or container-type: 1 inline axis, 2 block axis) */
-#define CSS_CONTAIN_SIZE_OF(s) (((s)->table_role >= 2 && (s)->table_role != 5) ? 0 :     ((s)->contain_size | ((s)->container_type == 2 ? 3 : (s)->container_type == 1 ? 1 : 0)))
+#define CSS_CONTAIN_SIZE_OF(s) ((((s)->table_role >= 2 && (s)->table_role != 5) || (s)->ruby_int) ? 0 :     ((s)->contain_size | ((s)->container_type == 2 ? 3 : (s)->container_type == 1 ? 1 : 0)))
     float cis_w, cis_h;     /* contain-intrinsic-width and -height, px; 0 none */
     unsigned char cis_auto; /* auto before them: the last remembered size first (1 width, 2 height) */
+    unsigned char cis_given; /* (not none: 1 width, 2 height) */
     unsigned char cv_hidden; /* content-visibility: hidden (its contents skipped) */
     unsigned char margin_trim; /* margin-trim: 1 block-start, 2 inline-start, 4 block-end, 8 inline-end */
     unsigned char baseline_src; /* baseline-source: 0 auto, 1 first, 2 last */
@@ -1315,6 +1319,8 @@ void css_layout_tree_free(LayoutContext *ctx);
 bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet);
 
 /* Convenience: allocate/resolve/free in one call. */
+/* (a frame's document just laid out in ctx, the iframe its NodeId: its content size noted when it opts in to responsive sizing) */
+void css_layout_frame_content_note(uint32_t iframe_node, LayoutContext *ctx);
 bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
                     double viewport_width, double viewport_height);
 /* Layouts that kept the previous tree, and that built one (tests,

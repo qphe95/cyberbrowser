@@ -61,6 +61,8 @@ typedef struct {
     struct { int weight, slot; } inst[16];
     int ninst;
     size_t bytes;                 /* the file's decoded size (the cache's budget) */
+    float ov[3];                  /* ascent-, descent-, line-gap-override, of the em; -1 normal */
+    bool has_ov;                  /* (any of them given) */
     uint32_t used_gen;            /* the face generation a page last asked for it in */
 } WebFace;
 
@@ -939,6 +941,7 @@ static void add_face_rule(const char *body, const char *end, const char *base)
 {
     WebFace w;
     memset(&w, 0, sizeof(w));
+    w.ov[0] = w.ov[1] = w.ov[2] = -1.0f;
     w.wmin = w.wmax = 400;
     w.smin = w.smax = 100.0f;
     w.slot = -1;
@@ -1026,6 +1029,14 @@ static void add_face_rule(const char *body, const char *end, const char *base)
             }
         } else if (nl == 13 && strncasecmp(ns, "unicode-range", 13) == 0) {
             parse_unicode_range(&w, vs, ve);
+        } else if ((nl == 15 && !strncasecmp(ns, "ascent-override", 15)) || (nl == 16 && !strncasecmp(ns, "descent-override", 16)) ||
+                   (nl == 17 && !strncasecmp(ns, "line-gap-override", 17))) {
+            /* (a percentage of the em; normal: the font's own) */
+            char *e1 = NULL;
+            double v = strtod(vs, &e1);
+            int k = ns[0] == 'a' || ns[0] == 'A' ? 0 : ns[0] == 'd' || ns[0] == 'D' ? 1 : 2;
+            if (e1 != vs && e1 < ve && *e1 == '%' && v >= 0.0) { w.ov[k] = (float)(v / 100.0); w.has_ov = true; }
+            else if (ve - vs == 6 && !strncasecmp(vs, "normal", 6)) w.ov[k] = -1.0f;   /* (the font's own again) */
         }
     }
     if (!w.family[0] || !src) { free(src); free(w.ranges); return; }
@@ -1034,7 +1045,8 @@ static void add_face_rule(const char *body, const char *end, const char *base)
         if (strcmp(g_web[i].url, src) == 0 && strcmp(g_web[i].family, w.family) == 0 &&
             g_web[i].wmin == w.wmin && g_web[i].wmax == w.wmax && g_web[i].italic == w.italic &&
             g_web[i].oblique == w.oblique && g_web[i].amin == w.amin && g_web[i].amax == w.amax &&
-            g_web[i].smin == w.smin && g_web[i].smax == w.smax) {
+            g_web[i].smin == w.smin && g_web[i].smax == w.smax &&
+            g_web[i].ov[0] == w.ov[0] && g_web[i].ov[1] == w.ov[1] && g_web[i].ov[2] == w.ov[2]) {
             pthread_mutex_unlock(&g_mu);
             free(src);
             free(w.ranges);
@@ -1542,6 +1554,7 @@ int font_registry_load_pending(void)
         /* (a file already here: the same shaper; slots run out, and go by file) */
         for (int j = 0; j < g_nweb; j++) {
             if (j == i || g_web[j].state != WEB_READY || strcmp(g_web[j].url, g_web[i].url)) continue;
+            if (g_web[i].has_ov || g_web[j].has_ov) continue;   /* (metric overrides: a shaper of its own) */
             g_web[i].slot = g_web[j].slot;
             g_web[i].var_sfnt = g_web[j].var_sfnt;
             g_web[i].var_len = g_web[j].var_len;
@@ -1598,7 +1611,8 @@ int font_registry_load_pending(void)
         w->slot = -1;
         w->used_gen = g_face_generation;
         w->bytes = j->sfnt ? j->len : 0;
-        if (src && src[t] != t) {
+        bool own_ov = w->has_ov;
+        if (src && src[t] != t && !own_ov) {
             /* (a file this batch loaded for an earlier face: that face's shaper) */
             const WebFace *o = &g_web[which[src[t]]];
             w->slot = o->slot;
@@ -1618,6 +1632,7 @@ int font_registry_load_pending(void)
             uint8_t *copy = (uint8_t *)malloc(j->len);
             if (copy) memcpy(copy, j->sfnt, j->len);
             TextShaper *s = text_shaper_create_from_memory(copy, j->len, 0, FONT_PIXELS);
+            if (s && own_ov) text_shaper_override_vmetrics(s, w->ov[0], w->ov[1], w->ov[2]);
             w->slot = s ? add_web_slot_locked(s) : -1;
         }
         w->state = w->slot >= 0 ? WEB_READY : WEB_FAILED;

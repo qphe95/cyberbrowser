@@ -399,8 +399,11 @@ static void emit_background_image(const LayoutContext *ctx, DisplayList *dl, con
     }
     int handle = image_cache_request(g_image_cache, src, (int)ceil(tw), (int)ceil(th));
     if (handle < 0) return;
-    double ox = ax + s->bg_pos_xf * (aw - tw) + s->bg_pos_xpx;
-    double oy = ay + s->bg_pos_yf * (ah - th) + s->bg_pos_ypx;
+    /* (min()/max() of percentages: another fraction where the basis is negative) */
+    double pfx = (s->bg_pos_neg & 1) && aw - tw < 0.0 ? s->bg_pos_xfn : s->bg_pos_xf;
+    double pfy = (s->bg_pos_neg & 2) && ah - th < 0.0 ? s->bg_pos_yfn : s->bg_pos_yf;
+    double ox = ax + pfx * (aw - tw) + s->bg_pos_xpx;
+    double oy = ay + pfy * (ah - th) + s->bg_pos_ypx;
     /* clip: the border box (and the viewport for a fixed one) */
     float c[4] = { (float)bx, (float)by, (float)(bx + bw), (float)(by + bh) };
     if (area) {
@@ -2977,8 +2980,11 @@ static void dl_text_decorations(DisplayList *dl, const LayoutContext *ctx, int i
             float y = ts->ul_under ? by + d0 * (float)fs + off : by + (ts->ul_k ? off : ul_pos * (float)fs);
             dl_deco_line(dl, x0, x1, roundf(y), t, rs->td_style, c);
         }
-        if (lines & 4) dl_deco_line(dl, x0, x1, roundf(by - a0 * (float)fs), t, rs->td_style, c);
-        if (lines & 2) dl_deco_line(dl, x0, x1, roundf(by - st_pos * (float)fs), t, rs->td_style, c);
+        float thin = roundf(ul_th * fs);   /* (the font's own thickness: a thicker one grows from it) */
+        if (thin < 1.0f) thin = 1.0f;
+        float grow = t > thin ? t - thin : 0.0f;
+        if (lines & 4) dl_deco_line(dl, x0, x1, roundf(by - a0 * (float)fs - grow), t, rs->td_style, c);
+        if (lines & 2) dl_deco_line(dl, x0, x1, roundf(by - st_pos * (float)fs - grow / 2.0f), t, rs->td_style, c);
         by = by0;
     }
 }
@@ -5825,8 +5831,31 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
         any_flt = any_flt || ks->filt_url || ks->filt_n;
     }
     t_flt_clip = any_flt ? (float (*)[4])calloc((size_t)n + 1, sizeof(*t_flt_clip)) : NULL;
+    /* (the boxes in tree order, a parent before its children: anonymous ones come after them in the array) */
+    int *cord = clip ? (int *)malloc(((size_t)n + 1) * sizeof(int)) : NULL;
+    unsigned char *cdone = clip ? (unsigned char *)calloc((size_t)n + 1, 1) : NULL;
+    if (cord && cdone) {
+        int m = 0;
+        for (int r = 0; r < n; r++) {
+            if (ctx->tree.nodes[r].parent_idx >= 0 && ctx->tree.nodes[r].parent_idx < n) continue;
+            int x = r;
+            while (x >= 0 && m < n) {
+                if (!cdone[x]) { cdone[x] = 1; cord[m++] = x; }
+                int fc = ctx->tree.nodes[x].first_child_idx;
+                if (fc >= 0 && fc < n && !cdone[fc]) { x = fc; continue; }
+                while (x >= 0 && x != r && ctx->tree.nodes[x].next_sibling_idx < 0) x = ctx->tree.nodes[x].parent_idx;
+                if (x < 0 || x == r) break;
+                x = ctx->tree.nodes[x].next_sibling_idx;
+            }
+        }
+        for (int r = 0; r < n && m < n; r++) if (!cdone[r]) { cdone[r] = 1; cord[m++] = r; }
+        memset(cdone, 0, (size_t)n + 1);
+    } else { free(cord); free(cdone); cord = NULL; cdone = NULL; }
     if (clip) {
-        for (int i = 0; i < n; i++) {
+        for (int oi = 0; oi < n; oi++) {
+            int i = cord ? cord[oi] : oi;
+            if (cdone) cdone[i] = 1;
+#define CDONE(q) (cdone ? ((q) < n && cdone[q] != 0) : (q) < i)
             int p = ctx->tree.nodes[i].parent_idx;
             LayoutBox *b = &ctx->boxes[i];
             /* (an absolutely positioned box: clipped as its containing
@@ -5846,7 +5875,7 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                 /* (the frame scrolls as a whole with the viewport: this stays) */
                 if (off) { off[i][0] = -view_x; off[i][1] = -view_y; }
             }
-            if (p >= 0 && p < i && (b->s->position != CSS_POSITION_FIXED || fixed_contained)) {
+            if (p >= 0 && CDONE(p) && (b->s->position != CSS_POSITION_FIXED || fixed_contained)) {
                 memcpy(c, clip[p], sizeof(c));
                 float sx, sy;
                 if (off) {
@@ -5960,7 +5989,7 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
             {
                 int cp = ctx->tree.nodes[i].parent_idx;
                 bool inl_ok = ctx->boxes[cp >= 0 ? cp : 0].clamp_clip == 2 && b->s->display == CSS_DISPLAY_INLINE && !b->s->float_side;
-                if (cp >= 0 && cp < i && ctx->boxes[cp].clamp_clip && (ctx->boxes[cp].clamp_clip != 3 || b->s->float_side) && !inl_ok && !b->clamp_keep && b->s->position != CSS_POSITION_ABSOLUTE && b->s->position != CSS_POSITION_FIXED) {
+                if (cp >= 0 && CDONE(cp) && ctx->boxes[cp].clamp_clip && (ctx->boxes[cp].clamp_clip != 3 || b->s->float_side) && !inl_ok && !b->clamp_keep && b->s->position != CSS_POSITION_ABSOLUTE && b->s->position != CSS_POSITION_FIXED) {
                     const LayoutBox *cb2 = &ctx->boxes[cp];
                     float cy = cb2->clamp_y - (off ? off[cp][1] : 0.0f);
                     if (cy < c[3]) c[3] = cy;
@@ -5973,7 +6002,7 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                 const HtmlNode *pn = css_layout_box_node(ctx, i);
                 if (pn && pn->type == HTML_NODE_ELEMENT && ctx->boxes[i].s->ruby_col) pos_out = false;
             }
-            if (tp >= 0 && tp < i && ((ctx->boxes[tp].s->cv_hidden && dl_cv_applies(ctx, tp)) ||
+            if (tp >= 0 && CDONE(tp) && ((ctx->boxes[tp].s->cv_hidden && dl_cv_applies(ctx, tp)) ||
                                       (clip[tp][0] > clip[tp][2] && clip[tp][0] == 1e30f && !(pos_out && ctx->boxes[tp].clamp_gone && !ctx->boxes[i].clamp_gone)))) {
                 c[0] = c[1] = 1e30f;
                 c[2] = c[3] = -1e30f;
@@ -5988,12 +6017,26 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                 const LayoutStyle *ps = ctx->boxes[i].s;
                 int an = ps->pv_anchor - 1;
                 bool gone = ps->pv_hidden != 0;
-                if (!gone && an >= 0 && an < i && !(ps->pos_vis & 1) && (ps->pos_vis == 0 || (ps->pos_vis & 2))) {
+                if (!gone && an >= 0 && an < n && CDONE(an) && !(ps->pos_vis & 1) && (ps->pos_vis == 0 || (ps->pos_vis & 2))) {
                     const LayoutBox *ab = &ctx->boxes[an];
                     float ox = off ? off[an][0] : 0.0f, oy = off ? off[an][1] : 0.0f;
                     float ax0 = (float)ab->x - ox, ay0 = (float)ab->y - oy, ax1 = ax0 + (float)ab->width, ay1 = ay0 + (float)ab->height;
                     const float *ac = clip[an];
-                    gone = ac[0] > ac[2] || ax1 <= ac[0] || ax0 >= ac[2] || ay1 <= ac[1] || ay0 >= ac[3];
+                    /* (the target's containing block an ancestor of the anchor: the clips between them alone) */
+                    bool under = false;
+                    for (int q = ctx->tree.nodes[an].parent_idx; q >= 0 && !under; q = ctx->tree.nodes[q].parent_idx) under = q == p;
+                    bool gone_all = ac[0] > ac[2] || ax1 <= ac[0] || ax0 >= ac[2] || ay1 <= ac[1] || ay0 >= ac[3];   /* (by every clip on it) */
+                    if (under && p >= 0 && ps->position == CSS_POSITION_ABSOLUTE && gone_all) {
+                        gone = ac[0] > ac[2];   /* (an anchor hidden itself) */
+                        for (int q = ctx->tree.nodes[an].parent_idx; q >= 0 && q != p && !gone; q = ctx->tree.nodes[q].parent_idx) {
+                            const LayoutBox *qb = &ctx->boxes[q];
+                            if (qb->s->overflow == 0 && !qb->s->overflow_clip && !dl_paint_contained(qb)) continue;
+                            float qx = off ? off[q][0] : 0.0f, qy = off ? off[q][1] : 0.0f;
+                            float q0 = (float)(qb->x + qb->s->border_left) - qx, q1 = (float)(qb->y + qb->s->border_top) - qy;
+                            float q2 = (float)(qb->x + qb->width - qb->s->border_right) - qx, q3 = (float)(qb->y + qb->height - qb->s->border_bottom) - qy;
+                            gone = ax1 <= q0 || ax0 >= q2 || ay1 <= q1 || ay0 >= q3;
+                        }
+                    } else gone = gone_all;
                 }
                 if (gone) {
                     c[0] = c[1] = 1e30f;
@@ -6007,8 +6050,11 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                 c[2] = c[3] = 1e30f;
             }
             memcpy(clip[i], c, sizeof(c));
+#undef CDONE
         }
     }
+    free(cord);
+    free(cdone);
     g_dom_scrolls.fixed = fixed;
     /* (print mode: as many pages as the content, what is out of flow too, takes) */
     if (g_css_print.on && ctx->tree.root_idx >= 0) {
@@ -6268,14 +6314,18 @@ static bool pv_push(PaintVec *p, int x)
 
 /* (contain: paint where it applies: not inline boxes, nor ruby or table
  * internals but a cell) */
-static bool dl_paint_contained(const LayoutBox *b)
+static bool dl_contain_applies(const LayoutBox *b)
 {
-    if (!b->s->contain_paint || b->s->ruby_int) return false;
+    if (b->s->ruby_int) return false;
     CssDisplay d = b->s->display;
     if (d == CSS_DISPLAY_INLINE || d == CSS_DISPLAY_NONE) return false;
-    if (d == CSS_DISPLAY_OTHER && b->s->table_role != 5 && b->s->table_role != 1) return false;
-    if (b->s->table_role >= 2 && b->s->table_role <= 4) return false;
+    if (d == CSS_DISPLAY_OTHER && b->s->table_role != 5 && b->s->table_role != 1 && b->s->table_role != 4) return false;
+    if (b->s->table_role == 2 || b->s->table_role == 3 || b->s->table_role == 6) return false;
     return true;
+}
+static bool dl_paint_contained(const LayoutBox *b)
+{
+    return b->s->contain_paint && dl_contain_applies(b);
 }
 
 /* (content-visibility applies: a box with size containment, so not an inline,
@@ -6422,7 +6472,7 @@ static bool paint_is_context(const LayoutContext *ctx, int i)
             return true;
     }
     if ((b->s->clip_path || b->s->mask_kind) && b->s->display != CSS_DISPLAY_INLINE) return true;   /* (clipped by a path, masked) */
-    if (b->s->blend || b->s->filt_n || b->s->filt_url || b->s->bf_n || dl_paint_contained(b)) return true;   /* (mix-blend-mode, filter: a stacking context, painted as z-index 0) */
+    if (b->s->blend || b->s->filt_n || b->s->filt_url || b->s->bf_n || dl_paint_contained(b) || (b->s->contain_layout && dl_contain_applies(b))) return true;   /* (mix-blend-mode, filter, containment: a stacking context, painted as z-index 0) */
     return b->s->opacity_set && b->s->opacity < 1.0;
 }
 
@@ -6818,6 +6868,10 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             m.ix = box->s->filt_ds[0]; m.iy = box->s->filt_ds[1]; m.blur = box->s->filt_ds[2];
             m.border[0] = box->s->filt_ds[3] * 255.0f; m.border[1] = box->s->filt_ds[4] * 255.0f;
             m.border[2] = box->s->filt_ds[5] * 255.0f; m.border[3] = box->s->filt_ds[6] * 255.0f;
+            if (box->s->filt_ds[6] < 0.0f) {   /* (currentcolor) */
+                m.border[0] = (float)box->s->color_r * 255.0f; m.border[1] = (float)box->s->color_g * 255.0f;
+                m.border[2] = (float)box->s->color_b * 255.0f; m.border[3] = (float)box->s->color_a * 255.0f;
+            }
             int mi = dl_add_mask(dl, &m);
             if (mi >= 0 && dl_add_mask_cmd(dl, DL_MASK_BEGIN, mi, &m)) {
                 mask_start[nmask] = i;
@@ -7494,8 +7548,31 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                                 }
                             }
                             /* (a line broken at a soft hyphen: the hyphenate-character at its end) */
-                            if (q + 1 < tfl->n && fr->end >= 2 && (unsigned char)run_text[fr->end - 2] == 0xC2 &&
-                                (unsigned char)run_text[fr->end - 1] == 0xAD && fabs(tfl->f[q + 1].dy - fr->dy) > 0.5) {
+                            bool shy_brk = false;
+                            if (fr->end >= 2 && (unsigned char)run_text[fr->end - 2] == 0xC2 && (unsigned char)run_text[fr->end - 1] == 0xAD) {
+                                if (q + 1 < tfl->n) shy_brk = fabs(tfl->f[q + 1].dy - fr->dy) > 0.5;
+                                else {
+                                    /* (it ends its text: the text after it in the paragraph, on a later line) */
+                                    int j = i;
+                                    for (int st = 0; st < 64 && j >= 0; st++) {
+                                        int nx = st ? ctx->tree.nodes[j].first_child_idx : -1;
+                                        while (nx < 0 && j >= 0) {
+                                            if (j != i && ctx->boxes[j].s->display != CSS_DISPLAY_INLINE && ctx->tree.nodes[j].first_child_idx >= 0) { j = -1; break; }
+                                            nx = ctx->tree.nodes[j].next_sibling_idx;
+                                            if (nx < 0) j = ctx->tree.nodes[j].parent_idx;
+                                        }
+                                        if (j < 0 || nx < 0) break;
+                                        j = nx;
+                                        if (ctx->boxes[j].s->display != CSS_DISPLAY_INLINE && ctx->tree.nodes[j].first_child_idx >= 0) break;
+                                        const LayoutTextFragList *nf = j < ctx->text_frags_n ? &ctx->text_frags[j] : NULL;
+                                        if (nf && nf->n > 0 && nf->f[0].end > nf->f[0].start) {
+                                            shy_brk = ctx->boxes[j].y + nf->f[0].dy > box->y + fr->dy + 0.5;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if (shy_brk) {
                                 const char *hc = box->s->hyph_char ? box->s->hyph_char : (text_shaper_has_glyph(font, 0x2010) ? "\xE2\x80\x90" : "-");
                                 size_t hl = strlen(hc);
                                 if (hl && !text_shaper_shape_span(font, hc, 0, hl, (float)(box->x + fr->dx + fr->w), (float)(box->y + fr->dy), scale,
@@ -7713,7 +7790,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             }
         }
         if (default_font && node && node->type == HTML_NODE_ELEMENT && !image_marker && !box->s->list_inside &&
-            box->s->display == CSS_DISPLAY_LIST_ITEM && !css_layout_box_clips(ctx, i) && (box->s->list_style_type != 0 || (!(node->tag_name && node->tag_name[0] == ':') && css_layout_marker_has_content(ctx, i))) && !css_layout_marker_none(ctx, i)) {   /* (::marker content: shown with list-style-type none too) */
+            box->s->display == CSS_DISPLAY_LIST_ITEM && !css_layout_box_clips(ctx, i) && !dl_paint_contained(box) && (box->s->list_style_type != 0 || (!(node->tag_name && node->tag_name[0] == ':') && css_layout_marker_has_content(ctx, i))) && !css_layout_marker_none(ctx, i)) {   /* (::marker content: shown with list-style-type none too) */
             char marker[512];
             /* (its text from the counter pass: the list-item counter in its counter style; the
              * suffix's trailing space is the gap below) */

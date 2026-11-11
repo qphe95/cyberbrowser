@@ -1198,6 +1198,14 @@ float text_shaper_zero_vadvance(const TextShaper *s)
     return (float)adv * s->scale / s->size_pixels;
 }
 
+void text_shaper_override_vmetrics(TextShaper *s, float ascent, float descent, float line_gap)
+{
+    if (!s || s->size_pixels <= 0.0f) return;
+    if (ascent >= 0.0f) s->ascent = ascent * s->size_pixels;
+    if (descent >= 0.0f) s->descent = -descent * s->size_pixels;
+    if (line_gap >= 0.0f) s->line_gap = line_gap * s->size_pixels;
+}
+
 bool text_shaper_vmetrics(const TextShaper *s, float *ascent, float *descent, float *line_gap)
 {
     if (!s || s->size_pixels <= 0.0f) return false;

@@ -884,6 +884,7 @@ static void page_frames_build(void) {
             bool frame_laid = css_layout_run(lc, fd, NULL, ws[k], hs[k]);
             g_css_print.on = held_print;
             if (frame_laid) {
+                css_layout_frame_content_note((uint32_t)iframes[k], lc);
                 DisplayList dl;
                 display_list_init(&dl);
                 if (css_layout_build_display_list(lc, &dl)) display_list_frame_set((uint32_t)iframes[k], &dl);
