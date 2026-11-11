@@ -57,6 +57,7 @@ float text_shaper_zero_advance(const TextShaper *shaper);
 float text_shaper_zero_vadvance(const TextShaper *shaper);
 /* (codepoint cp's advance, of the em, vertical or not; -1 without a glyph) */
 float text_shaper_cp_advance(const TextShaper *s, uint32_t cp, bool vert);
+bool text_shaper_is_mark(uint32_t cp);   /* (a combining mark: in its base's cluster) */
 /* (text-orientation: upright in vertical text, for what's measured and drawn next: 1 on) */
 void text_shaper_set_upright(int on);
 /* The underline's top below the baseline and its thickness, the strikeout's

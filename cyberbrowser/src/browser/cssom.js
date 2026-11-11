@@ -838,12 +838,52 @@
             for (var i = 0; i < ys.length; i++) for (var j = 0; j < xs.length; j++) origins.push([xs[j], ys[i]]);
             return { w: w, h: h, origins: origins };
         }
+        /* (border-image-source: paint(name), sliced 0 with fill: the middle is the whole image) */
+        function paintBorderImage(el, cs) {
+            var src = String(cs.borderImageSource || ''), m = /^\s*paint\(\s*([-\w]+)\s*\)\s*$/.exec(src);
+            if (!m || !defs[m[1]] || !/fill/.test(String(cs.borderImageSlice || '')) || !global.__cyberPaintContext(el)) return;
+            var px = function (v) { var n = parseFloat(v); return isFinite(n) ? n : 0; };
+            var bl = px(cs.borderLeftWidth), bt = px(cs.borderTopWidth), br = px(cs.borderRightWidth), bb = px(cs.borderBottomWidth);
+            var ot = String(cs.borderImageOutset || '0').trim().split(/\s+/);
+            var bw4 = [bt, br, bb, bl];
+            var four = [ot[0], ot.length > 1 ? ot[1] : ot[0], ot.length > 2 ? ot[2] : ot[0], ot.length > 3 ? ot[3] : (ot.length > 1 ? ot[1] : ot[0])];
+            var o = [0, 1, 2, 3].map(function (k) {
+                var t = four[k];
+                /* (a number: of the border width) */
+                return /px$/.test(t) ? px(t) : px(t) * bw4[k];
+            });
+            var gw = el.offsetWidth + o[1] + o[3], gh = el.offsetHeight + o[0] + o[2];
+            var mx = -o[3], my = -o[0], mw = gw - bl - br, mh = gh - bt - bb;
+            if (!(gw > 0 && gh > 0 && mw > 0 && mh > 0)) return;
+            var nat = global.__cyberCanvasRect, buf = [], ok = true;
+            Object.defineProperty(global, '__cyberCanvasRect', { configurable: true, writable: true,
+                value: function () { buf.push(Array.prototype.slice.call(arguments)); } });
+            try {
+                var ctx = global.__cyberPaintContext(el, true);
+                new defs[m[1]]().paint(ctx, { width: gw, height: gh }, { get: function () { return null; }, getAll: function () { return []; }, has: function () { return false; } }, []);
+            } catch (e) { ok = false; }
+            Object.defineProperty(global, '__cyberCanvasRect', { configurable: true, writable: true, value: nat });
+            if (!ok) return;
+            var sx = mw / gw, sy = mh / gh;
+            buf.forEach(function (a) {
+                var b = a.slice();
+                b[0] = el;
+                var x0 = Math.max(b[1], 0), y0 = Math.max(b[2], 0), x1 = Math.min(b[1] + b[3], gw), y1 = Math.min(b[2] + b[4], gh);
+                if (x1 <= x0 || y1 <= y0) return;
+                /* (from the padding box's corner: the middle starts at the outset less the border, as the border is there) */
+                b[1] = mx + x0 * sx; b[2] = my + y0 * sy; b[3] = (x1 - x0) * sx; b[4] = (y1 - y0) * sy;
+                if (b[9]) return;   /* (a clear: not here) */
+                b[9] = 2;   /* (not cut to the box) */
+                nat.apply(null, b);
+            });
+        }
         function paintAll() {
             var doc = global.document;
             if (!doc || typeof global.__cyberPaintContext !== 'function') return;
             var els = doc.querySelectorAll('*');
             for (var i = 0; i < els.length; i++) {
                 var el = els[i], cs = global.getComputedStyle(el), bi = cs.backgroundImage;
+                paintBorderImage(el, cs);
                 if (!bi || bi.indexOf('paint(') < 0) continue;
                 /* (each layer's paint(name, args): the last first, as layers stack) */
                 var re = /paint\(\s*([-\w]+)\s*(?:,((?:[^()]|\((?:[^()]|\([^()]*\))*\))*))?\)/g, layers = [], mm;

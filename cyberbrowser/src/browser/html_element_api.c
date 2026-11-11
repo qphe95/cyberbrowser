@@ -410,7 +410,7 @@ static GCValue js_canvas_rect(JSContextHandle ctx, GCValue this_val, int argc, G
     for (int i = 0; i < 3; i++) ch[i] = (int)(v[4 + i] < 0 ? 0 : v[4 + i] > 255 ? 255 : v[4 + i] + 0.5);
     ch[3] = (int)(v[7] < 0 ? 0 : v[7] > 1 ? 255 : v[7] * 255.0 + 0.5);
     uint32_t rgba = (uint32_t)ch[0] << 24 | (uint32_t)ch[1] << 16 | (uint32_t)ch[2] << 8 | (uint32_t)ch[3];
-    display_list_canvas_rect(el, (float)v[0], (float)v[1], (float)v[2], (float)v[3], rgba, v[8] != 0.0);
+    display_list_canvas_rect(el, (float)v[0], (float)v[1], (float)v[2], (float)v[3], rgba, v[8] == 2.0 ? 2 : v[8] != 0.0);   /* (2: drawn, not cut to the box) */
     dom_mark_dirty(el, DOMF_DIRTY_ATTR);
     dom_request_layout();
     return JS_UNDEFINED;

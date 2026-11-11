@@ -31,6 +31,7 @@ typedef struct CStyle {
     char extends[CS_NAME];          /* system: extends <name> (resolved after the scan) */
     char fallback[CS_NAME];
     unsigned char system, special;
+    unsigned char disc;             /* (1 disclosure-open, 2 disclosure-closed: its triangle by the flow) */
     bool range_auto;
     unsigned set;                   /* D_* */
     int first;                      /* fixed: the first symbol's value */
@@ -435,6 +436,7 @@ static void cs_resolve(int i, int depth)
     memcpy(c->name, own.name, sizeof c->name);
     c->extends[0] = 0;
     c->set = base->set | own.set;
+    if (own.set & D_SYMBOLS) c->disc = 0;
     /* (strings: the base's buffer, the rule's own appended) */
 #define TAKE(flag, field) if (own.set & flag) c->field = cs_store(c, CS_STR(&own, own.field))
     TAKE(D_PREFIX, prefix_off);
@@ -580,6 +582,10 @@ static void cs_init(void)
     if (g_npre) return;
     g_n = 0;
     cs_scan(k_predefined, sizeof k_predefined - 1, true);
+    for (int i = 0; i < g_n; i++) {
+        if (!strcmp(g_cs[i].name, "disclosure-open")) g_cs[i].disc = 1;
+        else if (!strcmp(g_cs[i].name, "disclosure-closed")) g_cs[i].disc = 2;
+    }
     for (int i = 0; i < g_n; i++) cs_resolve(i, 0);
     g_npre = g_n;
 }
@@ -886,6 +892,25 @@ static int cs_style_index(const char *style)
     return i >= 0 ? i : cs_lookup("decimal");
 }
 
+/* (the flow the next formats are for: writing mode (0 horizontal, 1 vertical-rl, 2 vertical-lr, 3 sideways-rl,
+ * 4 sideways-lr) and right to left) */
+static __thread int t_cs_wm, t_cs_rtl;
+void cstyle_set_flow(int wm, int rtl) { t_cs_wm = wm; t_cs_rtl = rtl; }
+/* (a disclosure triangle in out turned for the flow) */
+static void cs_disc_turn(int disc, char *out)
+{
+    if (!disc) return;
+    /* U+25B8 right, U+25C2 left, U+25BE down, U+25B4 up */
+    static const char *const R8 = "\xE2\x96\xB8", *const L8 = "\xE2\x97\x82", *const D8 = "\xE2\x96\xBE", *const U8 = "\xE2\x96\xB4";
+    const char *from = disc == 2 ? R8 : D8, *to;
+    bool vert = t_cs_wm != 0;
+    if (disc == 2) to = vert ? (t_cs_rtl ? U8 : D8) : (t_cs_rtl ? L8 : R8);
+    else to = !vert ? D8 : (t_cs_wm == 1 || t_cs_wm == 3) ? L8 : R8;
+    if (t_cs_wm == 4 && disc == 2) to = t_cs_rtl ? D8 : U8;   /* (sideways-lr: the inline end is up) */
+    if (to == from) return;
+    for (char *p = strstr(out, from); p; p = strstr(p + 3, from)) memcpy(p, to, 3);
+}
+
 void cstyle_format(const char *style, long long v, char *out, size_t cap)
 {
     if (!cap) return;
@@ -894,6 +919,7 @@ void cstyle_format(const char *style, long long v, char *out, size_t cap)
     int si = cs_style_index(style), used = si;
     Out o = { out, cap, 0, true };
     cs_rep(si, v, &o, 0, &used);
+    if (si >= 0) cs_disc_turn(g_cs[si].disc, out);
 }
 
 void cstyle_marker(const char *style, long long v, char *out, size_t cap)
@@ -909,4 +935,5 @@ void cstyle_marker(const char *style, long long v, char *out, size_t cap)
     const char *prefix = c->set & D_PREFIX || c->prefix_off ? CS_STR(c, c->prefix_off) : "";
     const char *suffix = (c->set & D_SUFFIX) || c->suffix_off ? CS_STR(c, c->suffix_off) : ". ";
     snprintf(out, cap, "%s%s%s", prefix, rep, suffix);
+    cs_disc_turn(c->disc, out);
 }

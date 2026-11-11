@@ -2013,7 +2013,7 @@
         catch (e) { return ''; }
         if (!n || n === 'none') return '';
         if (n === 'auto' || n === 'match-element') {
-            if (n === 'auto' && el.id) return el.id;
+            if (n === 'auto' && el.id) return '-cyber-vt-id-' + el.id;
             if (!VT_AUTO.has(el)) VT_AUTO.set(el, '-cyber-vt-' + (++vtAutoN));
             return VT_AUTO.get(el);
         }
@@ -2046,9 +2046,12 @@
             vtInline(a, b);
             if (!top && vtName(a)) { b.style.setProperty('visibility', 'hidden'); }
             /* (a fixed descendant: where it is on screen, from the nearest positioned box of the clone) */
-            if (!top && !isRoot && global.getComputedStyle(a).position === 'fixed') {
+            var apos = !top && !isRoot ? global.getComputedStyle(a).position : '';
+            if (apos === 'fixed' || apos === 'absolute') {
                 var cb = a.parentNode;
                 while (cb && cb !== el && cb.nodeType === 1 && global.getComputedStyle(cb).position === 'static') cb = cb.parentNode;
+                /* (an absolute one: only when its containing block is outside, the clone standing in for it) */
+                if (apos === 'absolute' && !(cb === el && global.getComputedStyle(el).position === 'static')) cb = null;
                 if (cb && cb.nodeType === 1) {
                     var ar = a.getBoundingClientRect(), cr = cb.getBoundingClientRect();
                     [['position', 'absolute'], ['left', (ar.left - cr.left - (cb.clientLeft || 0)) + 'px'], ['top', (ar.top - cr.top - (cb.clientTop || 0)) + 'px'],
@@ -2276,8 +2279,14 @@
         var root = doc.documentElement;
         var ov = doc.createElement('div');
         Object.defineProperty(ov, '__cyberVtOverlay', { value: true });
-        /* (a scoped one over its element's border box; its groups placed from there) */
-        var sr = scoped ? scope.getBoundingClientRect() : { left: 0, top: 0 };
+        /* (a scoped one over its element's padding box; its groups placed from there) */
+        var sr = { left: 0, top: 0 };
+        if (scoped) {
+            var sb = scope.getBoundingClientRect(), scs = getComputedStyle(scope);
+            var bl = parseFloat(scs.borderLeftWidth) || 0, bt = parseFloat(scs.borderTopWidth) || 0;
+            var br = parseFloat(scs.borderRightWidth) || 0, bb = parseFloat(scs.borderBottomWidth) || 0;
+            sr = { left: sb.left + bl, top: sb.top + bt, width: Math.max(0, sb.width - bl - br), height: Math.max(0, sb.height - bt - bb) };
+        }
         ov.setAttribute('style', 'position:fixed;z-index:2147483647;pointer-events:none;' +
                                  (scoped ? 'left:' + sr.left + 'px;top:' + sr.top + 'px;width:' + sr.width + 'px;height:' + sr.height + 'px;'
                                          : 'left:0;top:0;width:100vw;height:100vh;') +
@@ -2322,9 +2331,12 @@
                 geo = { x: mix(e.old.x, e.nu.x), y: mix(e.old.y, e.nu.y), w: mix(e.old.w, e.nu.w), h: mix(e.old.h, e.nu.h) };
             }
             var g = doc.createElement('div');
-            g.setAttribute('style', 'position:absolute;left:0;top:0;margin:0;padding:0;border:0;box-sizing:border-box;width:' + geo.w + 'px;height:' + geo.h +
+            g.setAttribute('style', 'position:absolute;left:0;top:0;margin:0;padding:0;border:0;box-sizing:content-box;width:' + geo.w + 'px;height:' + geo.h +
                                     'px;transform:translate(' + (geo.x - sr.left) + 'px,' + (geo.y - sr.top) + 'px);transform-origin:0 0');
             vtApply(g, f.g);
+            /* (the group's width after its rules: what the images span) */
+            var gw = /px\s*$/.test(g.style.width) ? parseFloat(g.style.width) : geo.w;
+            if (!(gw >= 0)) gw = geo.w;
             var ip = doc.createElement('div');
             ip.setAttribute('style', 'position:absolute;left:0;top:0;width:100%;height:100%;isolation:isolate');
             vtApply(ip, f.ip);
@@ -2337,8 +2349,27 @@
                 if (!a.none && a.long && !a.custom) o = op0;
                 vtApply(w, d);
                 w.style.setProperty('opacity', String(o));
-                var snap = s.snap.cloneNode(true), sc = s.w > 0 ? geo.w / s.w : 1;
-                if (Math.abs(sc - 1) > 0.001) { snap.style.setProperty('transform', 'scale(' + sc + ')'); snap.style.setProperty('transform-origin', '0 0'); }
+                var snap = s.snap.cloneNode(true), sc = s.w > 0 ? gw / s.w : 1;
+                /* (hidden with its group, image pair or itself) */
+                var hid = [f.g, f.ip, d].some(function (x) { return x && String(x.visibility || '').trim() === 'hidden'; });
+                if (hid) snap.style.setProperty('visibility', 'hidden');
+                var fit = d['object-fit'] ? String(d['object-fit']).trim() : '';
+                if (fit === 'none' && s.w > 0) {
+                    /* (its own size, centred in the box its width gives it) */
+                    var bh = s.h * gw / s.w, opx = [0.5, 0], opy = [0.5, 0];
+                    var ops = d['object-position'] ? String(d['object-position']).trim().split(/\s+/) : [];
+                    var opv = function (t, hz) {
+                        if (t === 'left' || t === 'top') return [0, 0];
+                        if (t === 'right' || t === 'bottom') return [1, 0];
+                        if (t === 'center') return [0.5, 0];
+                        if (/%$/.test(t)) return [parseFloat(t) / 100, 0];
+                        var v = parseFloat(t);
+                        return isNaN(v) ? [0.5, 0] : [0, v];
+                    };
+                    if (ops.length >= 1) opx = opv(ops[0]);
+                    if (ops.length >= 2) opy = opv(ops[1]);
+                    snap.style.setProperty('transform', 'translate(' + (opx[0] * (gw - s.w) + opx[1]) + 'px,' + (opy[0] * (bh - s.h) + opy[1]) + 'px)');
+                } else if (Math.abs(sc - 1) > 0.001) { snap.style.setProperty('transform', 'scale(' + sc + ')'); snap.style.setProperty('transform-origin', '0 0'); }
                 w.appendChild(snap);
                 ip.appendChild(w);
             };
@@ -4174,7 +4205,7 @@
         /* (strings, counter(page), counter(pages), as text) */
         var out = '', re = /"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|counter\(\s*(page|pages)\s*(?:,[^)]*)?\)/g, m;
         while ((m = re.exec(c))) {
-            if (m[3]) out += m[3] === 'page' ? k + 1 : n;
+            if (m[3]) out += m[3] === 'page' ? (printPageNo >= 0 ? printPageNo : k + 1) : n;
             else out += (m[1] !== undefined ? m[1] : m[2]).replace(/\\(.)/g, '$1');
         }
         return out;
@@ -4185,10 +4216,24 @@
         return c !== 'none' && c !== 'normal';
     }
     /* (one margin box's element holding its text; for measuring and showing) */
-    var printSeq = 0, printSheet = null;
+    var printSeq = 0, printSheet = null, printPageCtr = '', printPageNo = -1, printCtrMap = {};
+    /* (counter-reset/-increment/-set text: [name, value] pairs, each value defaulting to dflt) */
+    function printCtrList(v, dflt) {
+        var o = [], t = String(v || '').trim().split(/\s+/);
+        if (!t[0] || t[0] === 'none') return o;
+        for (var i = 0; i < t.length; i++) {
+            var name = t[i];
+            if (!/^-?[A-Za-z_][\w-]*$/.test(name)) continue;
+            var nv = dflt;
+            if (i + 1 < t.length && /^-?\d+$/.test(t[i + 1])) { nv = parseInt(t[i + 1], 10); i++; }
+            o.push([name, nv]);
+        }
+        return o;
+    }
     function printBoxEl(name, d, k, n) {
         var cell = document.createElement('div'), def = MB_DEFAULT[name];
-        var skip = { content: 1, width: 1, height: 1, 'min-width': 1, 'max-width': 1, 'min-height': 1, 'max-height': 1 };
+        var skip = { content: 1, width: 1, height: 1, 'min-width': 1, 'max-width': 1, 'min-height': 1, 'max-height': 1,
+                     'counter-reset': 1, 'counter-increment': 1, 'counter-set': 1 };
         cell.style.cssText = 'display:table-cell;box-sizing:border-box;text-align:' + def[0] + ';vertical-align:' + def[1] + ';white-space:pre-wrap;';
         for (var p in d) {
             if (skip[p] || /^margin/.test(p)) continue;
@@ -4197,9 +4242,19 @@
         /* (its content as a generated box's; the page counters as counters) */
         var cn = 'cyber-mb-' + (printSeq++);
         cell.className = cn;
-        cell.style.counterReset = 'page ' + (k + 1) + ' pages ' + n;
+        cell.style.counterReset = 'page ' + (printPageNo >= 0 ? printPageNo : k + 1) + ' pages ' + n + printPageCtr;
         if (!printSheet) { printSheet = document.createElement('style'); (document.head || document.documentElement).appendChild(printSheet); }
-        printSheet.appendChild(document.createTextNode('.' + cn + '::before{content:' + d.content + '}\n'));
+        /* (the page context's counters, after its own counter properties, as their values) */
+        var loc = {};
+        for (var q0 in printCtrMap) loc[q0] = printCtrMap[q0];
+        printCtrList(d['counter-reset'], 0).forEach(function (p) { loc[p[0]] = p[1]; });
+        printCtrList(d['counter-increment'], 1).forEach(function (p) { loc[p[0]] = (loc[p[0]] || 0) + p[1]; });
+        printCtrList(d['counter-set'], 0).forEach(function (p) { loc[p[0]] = p[1]; });
+        var content = String(d.content).replace(/\bcounter\(\s*([\w-]+)\s*\)|\bcounters\(\s*([\w-]+)\s*,\s*(?:"[^"]*"|'[^']*')\s*\)/g, function (m0, a, b) {
+            var nm = a || b;
+            return nm !== 'page' && nm !== 'pages' && Object.prototype.hasOwnProperty.call(loc, nm) ? '"' + loc[nm] + '"' : m0;
+        });
+        printSheet.appendChild(document.createTextNode('.' + cn + '::before{content:' + content + '}\n'));
         return cell;
     }
     function printMeasure(host, name, d, k, n) {
@@ -4375,8 +4430,20 @@
                 return hh;
             };
             var host = hostOf(999999000), under = hostOf(-999999000), sheet = hostOf(-999999001);
+            /* (the page context's counters: from the root's counter-reset, then each page's) */
+            var ctr = {}, pno = 0;
+            try { printCtrList(getComputedStyle(de).counterReset, 0).forEach(function (p) { if (p[0] !== 'page' && p[0] !== 'pages') ctr[p[0]] = p[1]; }); } catch (e) { /* (none) */ }
             for (var k = 0; k < n; k++) {
                 var rs = printPageRules(rules, '', k), m = printMetrics(rs, pw, ph);
+                var pinc = 1;
+                printCtrList(printDecl(rs, 'counter-reset'), 0).forEach(function (p) { if (p[0] === 'page') pno = p[1]; else ctr[p[0]] = p[1]; });
+                printCtrList(printDecl(rs, 'counter-increment'), 1).forEach(function (p) { if (p[0] === 'page') pinc = p[1]; else ctr[p[0]] = (ctr[p[0]] || 0) + p[1]; });
+                pno += pinc;
+                printCtrList(printDecl(rs, 'counter-set'), 0).forEach(function (p) { if (p[0] === 'page') pno = p[1]; else ctr[p[0]] = p[1]; });
+                printPageNo = pno;
+                printCtrMap = ctr;
+                printPageCtr = '';
+                for (var cn0 in ctr) if (cn0 !== 'page' && cn0 !== 'pages') printPageCtr += ' ' + cn0 + ' ' + ctr[cn0];
                 var px = -(m0.left + bl), py = k * ph - (m0.top + bt);
                 var box = document.createElement('div');
                 /* (the page box's decorations, under nothing else of it) */

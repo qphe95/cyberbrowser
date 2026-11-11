@@ -193,6 +193,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     /* text-align-last: 0 auto, 1 start, 2 end, 3 left, 4 right, 5 center, 6 justify (inherited) */
     unsigned char tal, tal_set;
     unsigned char tj_none, tj_set;   /* text-justify: none (inherited) */
+    unsigned char tj_char;           /* (text-justify: 1 inter-character or distribute, 2 inter-word; inherited) */
     /* offset-path ray(): op_kind 1, its angle (deg), size (0 closest-side,
      * 1 closest-corner, 2 farthest-side, 3 farthest-corner, 4 sides) and
      * contain; offset-distance (px, or a fraction of the path when
@@ -312,6 +313,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * the cascade, before layout; -1 = not resolved). */
     int    font_slot;
     unsigned char font_weight_set;
+    unsigned char fw_rel;           /* (font-weight: 1 bolder, 2 lighter, of the parent's) */
     unsigned char font_italic_set;
     /* text-decoration bitmask: 1 = underline, 2 = line-through, 4 = overline. */
     unsigned char text_decoration;
@@ -386,6 +388,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     float letter_spacing, word_spacing;
     /* (letter-spacing as a percentage of the font size: inherited as one) */
     float ls_pct;
+    float ws_pct, ws_px;            /* (word-spacing: a fraction of the space's width, and a length, when ws_pct_set) */
+    unsigned char ws_pct_set;
     unsigned char ls_pct_set;
     /* (tab-size, inherited: spaces, or px when tab_len; tab_set when given) */
     float tab_size;
@@ -437,6 +441,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     const char *hyph_char;          /* (hyphenate-character, inherited: the string, NULL auto) */
     unsigned char hyph_char_set;
     unsigned char frame_sizing;     /* (frame-sizing: 1 content-height, 2 content-width) */
+    unsigned char text_fit, text_fit_per;   /* (text-fit: 1 grow, 2 shrink; per: 0 consistent, 1 per-line, 2 per-line-all) */
+    float text_fit_max;             /* (its <percentage>: the most it scales, 0 no limit) */
     const char *font_palette;       /* (font-palette, inherited: the text, NULL normal) */
     unsigned char font_palette_set;
     unsigned char tcy;    /* (text-combine-upright: all, in a vertical flow: a horizontal cell 1em square) */
@@ -923,6 +929,7 @@ typedef struct LayoutTextFrag {
     float ell_dx;            /* (the edges of inline boxes closing after it: the ellipsis past them) */
     unsigned char fl;         /* on a ::first-line whose color it takes (fl_rgba) */
     uint32_t fl_rgba;
+    float jls;                /* (text-justify: inter-character: the room added after each character) */
 } LayoutTextFrag;
 
 typedef struct LayoutTextFragList {

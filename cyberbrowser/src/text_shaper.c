@@ -856,6 +856,13 @@ static inline bool ts_invisible(uint32_t cp)
 static inline bool ts_is_mark(uint32_t cp)
 {
     if (cp < 0x300) return false;
+    /* (Lao, Tibetan, Myanmar, Khmer) */
+    if (cp == 0xEB1 || (cp >= 0xEB4 && cp <= 0xEBC) || (cp >= 0xEC8 && cp <= 0xECE) || (cp >= 0xF71 && cp <= 0xF84) ||
+        (cp >= 0xF8D && cp <= 0xFBC) || (cp >= 0x102B && cp <= 0x103E) || (cp >= 0x1056 && cp <= 0x1059) ||
+        (cp >= 0x1062 && cp <= 0x1064) || (cp >= 0x1067 && cp <= 0x106D) || (cp >= 0x1071 && cp <= 0x1074) ||
+        (cp >= 0x1082 && cp <= 0x108D) || cp == 0x108F || (cp >= 0x109A && cp <= 0x109D) ||
+        (cp >= 0x17B4 && cp <= 0x17D3) || cp == 0x17DD)
+        return true;
     return (cp <= 0x36F) || (cp >= 0x483 && cp <= 0x489) || (cp >= 0x591 && cp <= 0x5BD) || cp == 0x5BF || cp == 0x5C1 || cp == 0x5C2 ||
            cp == 0x5C4 || cp == 0x5C5 || cp == 0x5C7 || (cp >= 0x610 && cp <= 0x61A) || (cp >= 0x64B && cp <= 0x65F) || cp == 0x670 ||
            (cp >= 0x6D6 && cp <= 0x6DC) || (cp >= 0x6DF && cp <= 0x6E4) || cp == 0x6E7 || cp == 0x6E8 || (cp >= 0x6EA && cp <= 0x6ED) ||
@@ -865,6 +872,8 @@ static inline bool ts_is_mark(uint32_t cp)
            (cp >= 0x1AB0 && cp <= 0x1AFF) || (cp >= 0x1DC0 && cp <= 0x1DFF) || (cp >= 0x20D0 && cp <= 0x20FF) ||
            (cp >= 0x302A && cp <= 0x302F) || cp == 0x3099 || cp == 0x309A || (cp >= 0xFE00 && cp <= 0xFE0F) || (cp >= 0xFE20 && cp <= 0xFE2F);
 }
+
+bool text_shaper_is_mark(uint32_t cp) { return ts_is_mark(cp); }
 
 /* The spacing after codepoint cp (at the loaded size). */
 static inline float ts_spacing(uint32_t cp)
@@ -946,6 +955,59 @@ static inline bool ts_upright_adv(const TextShaper *s, uint32_t cp, int gi, floa
     return true;
 }
 
+/* (an anchor table's point, font units) */
+static void ts_anchor(const uint8_t *d, size_t sz, size_t o, int *x, int *y)
+{
+    *x = (int16_t)ot_rd16(d, sz, o + 2);
+    *y = (int16_t)ot_rd16(d, sz, o + 4);
+}
+
+/* (GPOS mark-to-base: where mark glyph mg goes on base glyph bg, from the base's origin in font units;
+ * false when no lookup has the pair) */
+static bool ts_mark_base(const TextShaper *s, int bg, int mg, int *dx, int *dy)
+{
+    const uint8_t *d = s->font.data;
+    size_t sz = s->ttf_size;
+    uint32_t gpos = stbtt__find_table((stbtt_uint8 *)d, (stbtt_uint32)s->font.fontstart, "GPOS");
+    if (!gpos || gpos >= sz) return false;
+    size_t ll = gpos + ot_rd16(d, sz, gpos + 8);
+    uint32_t nl = ot_rd16(d, sz, ll);
+    for (uint32_t li = 0; li < nl && li < 4096; li++) {
+        size_t lk = ll + ot_rd16(d, sz, ll + 2 + 2 * (size_t)li);
+        uint32_t type = ot_rd16(d, sz, lk), nsub = ot_rd16(d, sz, lk + 4);
+        if (type != 4 && type != 9) continue;
+        for (uint32_t k = 0; k < nsub && k < 256; k++) {
+            size_t st = lk + ot_rd16(d, sz, lk + 6 + 2 * (size_t)k);
+            uint32_t t = type;
+            if (t == 9) { t = ot_rd16(d, sz, st + 2); st = st + ot_rd32(d, sz, st + 4); }
+            if (t != 4 || ot_rd16(d, sz, st) != 1) continue;
+            int mi = ot_coverage(d, sz, st + ot_rd16(d, sz, st + 2), (uint32_t)mg);
+            if (mi < 0) continue;
+            int bi = ot_coverage(d, sz, st + ot_rd16(d, sz, st + 4), (uint32_t)bg);
+            if (bi < 0) continue;
+            uint32_t ncls = ot_rd16(d, sz, st + 6);
+            size_t ma = st + ot_rd16(d, sz, st + 8), ba = st + ot_rd16(d, sz, st + 10);
+            if ((uint32_t)mi >= ot_rd16(d, sz, ma) || (uint32_t)bi >= ot_rd16(d, sz, ba)) continue;
+            size_t mr = ma + 2 + 4 * (size_t)mi;
+            uint32_t cls = ot_rd16(d, sz, mr);
+            if (cls >= ncls) continue;
+            uint32_t bao = ot_rd16(d, sz, ba + 2 + (2 * (size_t)ncls) * (size_t)bi + 2 * (size_t)cls);
+            if (!bao) continue;
+            int mx, my, bx, by;
+            ts_anchor(d, sz, ma + ot_rd16(d, sz, mr + 2), &mx, &my);
+            ts_anchor(d, sz, ba + bao, &bx, &by);
+            *dx = bx - mx;
+            *dy = by - my;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* (the base glyph last drawn and where: for the marks after it) */
+static __thread int t_mb_gi = -1;
+static __thread float t_mb_x;
+
 static bool ts_emit_glyph(const TextShaper *s, uint32_t cp, float *pen_x, float base_y, float scale, int *prev_glyph,
                           float r, float g, float b, float a, DisplayList *dl)
 {
@@ -962,7 +1024,18 @@ static bool ts_emit_glyph(const TextShaper *s, uint32_t cp, float *pen_x, float 
     *pen_x += ts_autospace(s, cp) * scale;
     int c0 = dl->count;
     (void)xh;
-    if (!ts_draw_glyph(dl, gs, gi, *pen_x + pre * scale, base_y, scale, r, g, b, a)) return false;
+    float gx = *pen_x + pre * scale, gy = base_y;
+    if (ts_is_mark(cp)) {
+        int adx, ady;
+        if (owner == 0 && t_mb_gi >= 0 && ts_mark_base(s, t_mb_gi, gi, &adx, &ady)) {
+            gx = t_mb_x + (float)adx * s->scale * scale;
+            gy = base_y - (float)ady * s->scale * scale;
+        }
+    } else {
+        t_mb_gi = owner == 0 && !upr ? gi : -1;
+        t_mb_x = gx;
+    }
+    if (!ts_draw_glyph(dl, gs, gi, gx, gy, scale, r, g, b, a)) return false;
     /* (Mongolian and Phags-pa, scripts written down the page: on their side even when upright is asked) */
     uint8_t vr = (cp >= 0x1800 && cp <= 0x18AF) || (cp >= 0xA840 && cp <= 0xA877) ? 2 : ts_vo_rotated(cp) ? 1 : 0;
     if (vr)

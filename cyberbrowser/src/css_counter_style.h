@@ -18,6 +18,7 @@ void cstyle_scan_css(const char *css, size_t len);
  * representation (counter() and counters()), or the marker's text: the
  * style's prefix, the representation and its suffix (a list item's). */
 void cstyle_format(const char *style, long long v, char *out, size_t cap);
+void cstyle_set_flow(int wm, int rtl);   /* (the element's writing mode and direction for disclosure triangles) */
 void cstyle_marker(const char *style, long long v, char *out, size_t cap);
 
 /* A name some counter style has (list-style-type keeps an unknown one: it

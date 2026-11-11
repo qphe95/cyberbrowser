@@ -308,7 +308,7 @@ static void emit_background_image(const LayoutContext *ctx, DisplayList *dl, con
     bool fixed_vp = s->bg_fixed == 1;
     for (int p = (int)(box - ctx->boxes); fixed_vp && p >= 0 && p < ctx->tree.count; p = ctx->tree.nodes[p].parent_idx) {
         const LayoutStyle *ps = ctx->boxes[p].s;
-        if (ps && (ps->tf_text || ps->tf_rotate || ps->tf_scale)) fixed_vp = false;
+        if (ps && (ps->tf_text || ps->tf_rotate || ps->tf_scale || ps->has_translate || ps->tf_raw)) fixed_vp = false;
     }
     if (fixed_vp) { ax = 0.0; ay = 0.0; aw = ctx->viewport_width; ah = ctx->viewport_height; }
     else if (s->bg_fixed == 2) {
@@ -484,9 +484,11 @@ static bool emit_border_image(DisplayList *dl, const LayoutBox *box, float op)
 {
     const LayoutStyle *s = box->s;
     if ((!s->bi_src || !s->bi_src[0]) && !s->bi_grad) return false;
+    if (s->bi_src && !strncmp(s->bi_src, "cyber-paint:", 12)) return true;   /* (a worklet's, drawn by it) */
     t_grad_em = s->font_size > 0.0 ? s->font_size : 16.0;
     if (!g_image_cache) return false;
-    const double bwd[4] = { s->border_top, s->border_right, s->border_bottom, s->border_left };
+    const double bwd[4] = { s->border_style[2] >= CSS_BORDER_SOLID ? s->border_top : 0.0, s->border_style[1] >= CSS_BORDER_SOLID ? s->border_right : 0.0,
+                            s->border_style[3] >= CSS_BORDER_SOLID ? s->border_bottom : 0.0, s->border_style[0] >= CSS_BORDER_SOLID ? s->border_left : 0.0 };
     double out[4], W[4], S[4];
     for (int k = 0; k < 4; k++) out[k] = (s->bi_out_num >> k & 1) ? s->bi_out[k] * bwd[k] : s->bi_out[k];
     double ax = box->x - out[3], ay = box->y - out[0];
@@ -544,6 +546,9 @@ static bool emit_border_image(DisplayList *dl, const LayoutBox *box, float op)
     if (s->bi_fill) {
         double kx = S[0] > 0.0 ? W[0] / S[0] : (S[2] > 0.0 ? W[2] / S[2] : 1.0);
         double ky = S[3] > 0.0 ? W[3] / S[3] : (S[1] > 0.0 ? W[1] / S[1] : 1.0);
+        if (!(kx > 0.0) && ky > 0.0) kx = ky;
+        else if (!(ky > 0.0) && kx > 0.0) ky = kx;
+        else if (!(kx > 0.0) && !(ky > 0.0)) kx = ky = 1.0;
         bi_piece(dl, handle, nw, nh, sx0, sy0, sx1, sy1, mx0, my0, mx1 - mx0, my1 - my0, rx, ry, tmid * kx, lmid * ky, op);
     }
     return true;
@@ -1493,6 +1498,37 @@ static void paint_pieces(LayoutContext *ctx, DisplayList *dl, int el, int anchor
         float pw = (float)pc->w, ph = (float)pc->h;
         if (pw <= 0.0f || ph <= 0.0f) continue;
         snap_rect(&px, &py, &pw, &ph);
+        /* (its slice of the shadow: none past a side the line cut, slice) */
+        if (box->s->shadow_set && !box->s->shadow_multi && !box->s->shadow_inset) {
+            const LayoutStyle *ss = box->s;
+            float sp = ss->shadow_spread;
+            bool cl_ = !(pc->sides & 1) && !box->s->bdb_clone, cr_ = !(pc->sides & 2) && !box->s->bdb_clone;
+            float x0 = px + ss->shadow_x - sp, x1 = px + pw + ss->shadow_x + sp;
+            if (cl_) x0 = px;
+            if (cr_) x1 = px + pw;
+            DisplayMask sm;
+            memset(&sm, 0, sizeof(sm));
+            sm.kind = 5;
+            sm.image_handle = -1;
+            sm.x = x0; sm.y = py + ss->shadow_y - sp; sm.w = x1 - x0; sm.h = ph + 2.0f * sp;
+            sm.blur = ss->shadow_blur;
+            sm.ix = px; sm.iy = py; sm.iw = pw; sm.ih = ph;
+            if (sm.w > 0.0f && sm.h > 0.0f) {
+                int mi = dl_add_mask(dl, &sm);
+                if (mi >= 0 && display_list_reserve(dl, 1)) {
+                    DisplayListCmd *cmd = &dl->cmds[dl->count++];
+                    memset(cmd, 0, sizeof(*cmd));
+                    cmd->type = DL_SHADOW;
+                    float pad = sm.blur;
+                    cmd->x = sm.x - pad; cmd->y = sm.y - pad;
+                    cmd->w = sm.w + 2.0f * pad; cmd->h = sm.h + 2.0f * pad;
+                    cmd->r = ss->shadow_r; cmd->g = ss->shadow_g; cmd->b = ss->shadow_b;
+                    cmd->a = ss->shadow_a * op;
+                    if (ss->shadow_cc) { cmd->r = (float)box->s->color_r; cmd->g = (float)box->s->color_g; cmd->b = (float)box->s->color_b; cmd->a = (float)box->s->color_a * op; }
+                    cmd->u.mask_index = mi;
+                }
+            }
+        }
         if (box->s->background_color_a > 0.0f)
             display_list_add_rect(dl, px, py, pw, ph, (float)box->s->background_color_r,
                                   (float)box->s->background_color_g, (float)box->s->background_color_b,
@@ -1782,7 +1818,9 @@ static void emit_image_async(DisplayList *dl, const LayoutBox *box, const char *
         dx -= (float)vbx * sx; dy -= (float)vby * sy;
         dw = (float)fullw * sx; dh = (float)fullh * sy;
     }
-    if (dw > 0.0f && dh > 0.0f && (dx < cx - 0.01f || dy < cy - 0.01f || dx + dw > cx + cw + 0.01f || dy + dh > cy + ch + 0.01f)) {
+    /* (overflow: visible given: what is past the content box painted too) */
+    bool img_vis = box->s->ovf_visible_given && box->s->overflow == 0 && !box->s->overflow_clip;
+    if (!img_vis && dw > 0.0f && dh > 0.0f && (dx < cx - 0.01f || dy < cy - 0.01f || dx + dw > cx + cw + 0.01f || dy + dh > cy + ch + 0.01f)) {
         float vx0 = fmaxf(dx, cx), vy0 = fmaxf(dy, cy);
         float vx1 = fminf(dx + dw, cx + cw), vy1 = fminf(dy + dh, cy + ch);
         if (vx1 <= vx0 || vy1 <= vy0) return;
@@ -4115,32 +4153,48 @@ static bool parse_mask_gradient(const char *g, DisplayMask *m, float w, float h)
                 if (strncasecmp(end, "rad", 3) == 0) { m->angle_deg = (float)(v * 180.0 / M_PI); continue; }
             }
         }
-        /* color [position]: the position is the last space-separated token
-         * outside parentheses. */
-        const char *cut = NULL;
+        /* color [position [position]]: the positions the space-separated
+         * tokens outside parentheses after the color (two: the color held
+         * between them, two stops) */
+        const char *cuts[3];
+        int ncut = 0;
         depth = 0;
         for (const char *q = st; q < st + n; q++) {
             if (*q == '(') depth++;
             else if (*q == ')') depth--;
-            else if (depth == 0 && isspace((unsigned char)*q)) cut = q;
+            else if (depth == 0 && isspace((unsigned char)*q) && (q + 1 < st + n && !isspace((unsigned char)q[1])) && ncut < 3) cuts[ncut++] = q;
         }
-        int k = m->nstops++;
-        has_pos[k] = false;
-        pos[k] = 0.0f;
-        m->stop_alpha[k] = mask_color_alpha(st, cut ? (size_t)(cut - st) : n);
-        if (cut) {
-            char tok[64];
-            size_t tl = (size_t)(st + n - (cut + 1));
-            if (tl >= sizeof(tok)) tl = sizeof(tok) - 1;
-            memcpy(tok, cut + 1, tl);
-            tok[tl] = '\0';
-            char *end = NULL;
-            double v = strtod(tok, &end);
-            if (end != tok) {
-                has_pos[k] = true;
-                double rad = m->angle_deg * M_PI / 180.0;
-                double line = fabs(w * sin(rad)) + fabs(h * cos(rad));
-                pos[k] = (float)(*end == '%' ? v / 100.0 : (line > 0 ? v / line : 0.0));
+        /* (the color: up to the first token that is a number) */
+        int ci = 0;
+        while (ci < ncut) {
+            const char *t = cuts[ci] + 1;
+            if (isdigit((unsigned char)*t) || *t == '-' || *t == '.' || *t == '+') break;
+            ci++;
+        }
+        float a = mask_color_alpha(st, ci < ncut ? (size_t)(cuts[ci] - st) : n);
+        int npos = ncut - ci;
+        if (npos < 1) npos = 1;
+        if (npos > 2) npos = 2;
+        for (int pi = 0; pi < npos && m->nstops < DL_MASK_STOPS; pi++) {
+            int k = m->nstops++;
+            has_pos[k] = false;
+            pos[k] = 0.0f;
+            m->stop_alpha[k] = a;
+            if (ci + pi < ncut) {
+                const char *t0 = cuts[ci + pi] + 1, *t1 = ci + pi + 1 < ncut ? cuts[ci + pi + 1] : st + n;
+                char tok[64];
+                size_t tl = (size_t)(t1 - t0);
+                if (tl >= sizeof(tok)) tl = sizeof(tok) - 1;
+                memcpy(tok, t0, tl);
+                tok[tl] = '\0';
+                char *end = NULL;
+                double v = strtod(tok, &end);
+                if (end != tok) {
+                    has_pos[k] = true;
+                    double rad = m->angle_deg * M_PI / 180.0;
+                    double line = fabs(w * sin(rad)) + fabs(h * cos(rad));
+                    pos[k] = (float)(*end == '%' ? v / 100.0 : (line > 0 ? v / line : 0.0));
+                }
             }
         }
     }
@@ -5917,12 +5971,15 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                         if (b->s->table_caption || b->s->table_role == 5) { px0 = c[0]; py0 = c[1]; px1 = c[2]; py1 = c[3]; }
                     }
                     /* (overflow-clip-margin: overflow: clip and paint containment clip that far out) */
-                    if ((pb->s->overflow_clip_margin > 0.0f || pb->s->ocm_box) && (pb->s->overflow_clip || (pb->s->overflow == 0 && dl_paint_contained(pb)))) {
+                    if ((pb->s->overflow_clip_margin != 0.0f || pb->s->ocm_box) && (pb->s->overflow_clip || (pb->s->overflow == 0 && dl_paint_contained(pb)) ||
+                                                                             (pb->s->overflow != 0 && (pb->s->overflow_clip_margin < 0.0f || pb->s->ocm_box == 2)))) {   /* (a scroller: only inward) */
                         float om = pb->s->overflow_clip_margin;
+                        float hx0 = px0, hy0 = py0, hx1 = px1, hy1 = py1;   /* (a scroller cut to nothing: its padding box as it was) */
                         /* (from its border box, or its content box) */
                         if (pb->s->ocm_box == 1) { px0 -= (float)pb->s->border_left; py0 -= (float)pb->s->border_top; px1 += (float)pb->s->border_right; py1 += (float)pb->s->border_bottom; }
                         else if (pb->s->ocm_box == 2) { px0 += (float)pb->padding_left; py0 += (float)pb->padding_top; px1 -= (float)pb->padding_right; py1 -= (float)pb->padding_bottom; }
                         px0 -= om; py0 -= om; px1 += om; py1 += om;
+                        if (pb->s->overflow != 0 && !pb->s->overflow_clip && (px1 <= px0 || py1 <= py0)) { px0 = hx0; py0 = hy0; px1 = hx1; py1 = hy1; }
                     }
                     /* (overflow: clip on one axis alone: the other not clipped) */
                     unsigned char cax = pb->s->overflow_clip && pb->s->ovf_clip_axes ? pb->s->ovf_clip_axes : 3;
@@ -6010,6 +6067,14 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
             if (ctx->boxes[i].clamp_gone) {   /* (past a line-clamp's last line) */
                 c[0] = c[1] = 1e30f;
                 c[2] = c[3] = -1e30f;
+            }
+            /* (an iframe's children: its fallback, never shown) */
+            if (tp >= 0) {
+                const HtmlNode *fn_ = css_layout_box_node(ctx, tp);
+                if (fn_ && fn_->type == HTML_NODE_ELEMENT && fn_->tag_name && !strcasecmp(fn_->tag_name, "iframe")) {
+                    c[0] = c[1] = 1e30f;
+                    c[2] = c[3] = -1e30f;
+                }
             }
             /* (position-visibility: no-overflow that overflowed; anchors-visible (as initially)
              * with its anchor scrolled or clipped out of sight) */
@@ -6380,7 +6445,7 @@ static void dl_cb_flush(const LayoutContext *ctx, DisplayList *dl, int *t, int *
 }
 
 /* ---- 2D canvases: the solid rectangles drawn on each, by NodeId ---- */
-typedef struct { uint32_t node; int n, cap; float (*r)[4]; uint32_t *c; char **url; } DlCanvasOps;   /* (url: an image's, else NULL) */
+typedef struct { uint32_t node; int n, cap; float (*r)[4]; uint32_t *c; char **url; unsigned char *free_r; } DlCanvasOps;   /* (free_r: not cut to the box) */   /* (url: an image's, else NULL) */
 static DlCanvasOps *g_cv;
 static int g_cv_n, g_cv_cap;
 
@@ -6405,6 +6470,8 @@ void display_list_canvas_rect(uint32_t node, float x, float y, float w, float h,
 {
     if (w < 0.0f) { x += w; w = -w; }
     if (h < 0.0f) { y += h; h = -h; }
+    bool unclipped = clear == 2;
+    if (unclipped) clear = 0;
     DlCanvasOps *o = dl_canvas_ops(node, !clear);
     if (!o) return;
     if (clear) {
@@ -6417,6 +6484,7 @@ void display_list_canvas_rect(uint32_t node, float x, float y, float w, float h,
             memcpy(o->r[k], r, sizeof o->r[k]);
             o->c[k] = o->c[i];
             o->url[k] = o->url[i];
+            o->free_r[k] = o->free_r[i];
             k++;
         }
         o->n = k;
@@ -6434,11 +6502,15 @@ void display_list_canvas_rect(uint32_t node, float x, float y, float w, float h,
         char **nu = (char **)realloc(o->url, (size_t)nc * sizeof *nu);
         if (!nu) return;
         o->url = nu;
+        unsigned char *nf = (unsigned char *)realloc(o->free_r, (size_t)nc);
+        if (!nf) return;
+        o->free_r = nf;
         o->cap = nc;
     }
     o->r[o->n][0] = x; o->r[o->n][1] = y; o->r[o->n][2] = w; o->r[o->n][3] = h;
     o->c[o->n] = rgba;
     o->url[o->n] = NULL;
+    o->free_r[o->n] = unclipped;
     o->n++;
 }
 
@@ -6446,7 +6518,7 @@ void display_list_canvas_reset(void)
 {
     for (int i = 0; i < g_cv_n; i++) {
         for (int k = 0; k < g_cv[i].n; k++) free(g_cv[i].url[k]);
-        free(g_cv[i].r); free(g_cv[i].c); free(g_cv[i].url);
+        free(g_cv[i].r); free(g_cv[i].c); free(g_cv[i].url); free(g_cv[i].free_r);
     }
     g_cv_n = 0;
 }
@@ -6798,7 +6870,20 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         /* backdrop-filter: what is under the box filtered within its border box,
          * the box and its subtree then over it (a mask of kind 10, its functions
          * as a filter's) */
-        if (box->s->bf_n && nmask < 64) {
+        bool bf_empty = false;
+        if (box->s->bf_n) {
+            for (int p = ctx->tree.nodes[i].parent_idx; p >= 0 && p != ctx->tree.root_idx; p = ctx->tree.nodes[p].parent_idx) {
+                const LayoutBox *pb = &ctx->boxes[p];
+                const LayoutStyle *ps = pb->s;
+                bool broot = (ps->opacity_set && ps->opacity < 1.0) || ps->filt_n || ps->filt_url || ps->bf_n || ps->blend ||
+                             (ps->mask_image && ps->mask_image[0]) || (ps->clip_path && ps->clip_path[0]) || ps->wc_sc == 1;
+                if (!broot) continue;
+                bf_empty = box->x >= pb->x + pb->width || box->x + box->width <= pb->x ||
+                           box->y >= pb->y + pb->height || box->y + box->height <= pb->y;
+                break;
+            }
+        }
+        if (box->s->bf_n && nmask < 64 && !bf_empty) {
             DisplayMask m;
             memset(&m, 0, sizeof m);
             m.kind = 10;
@@ -7006,7 +7091,8 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             if (!sh_tmp || !css_layout_shadow_item(ctx, box, shk, sh_tmp) || sh_tmp->shadow_inset) continue;
             ss = sh_tmp;
         }
-        if (ss->shadow_set && ((box->width > 0.0 && box->height > 0.0) || (ss->shadow_spread > 0.0f && box->width >= 0.0 && box->height >= 0.0))) {
+        if (ss->shadow_set && !(ctx->pieces && i < ctx->pieces_n && ctx->pieces[i].n > 0 && !box->s->shadow_multi) &&
+            ((box->width > 0.0 && box->height > 0.0) || (ss->shadow_spread > 0.0f && box->width >= 0.0 && box->height >= 0.0))) {
             DisplayMask sm, rr;
             memset(&sm, 0, sizeof(sm));
             sm.kind = 5;
@@ -7050,13 +7136,17 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         /* border-radius: rounds the box's own background and border, and
          * clips the whole subtree when the box clips (overflow) or is a
          * replaced element (rounded thumbnails, avatars). */
+        int round_mi = -1;   /* (the box's own round mask: a border image outside it) */
         if (nmask < 64) {
             DisplayMask rm;
             if (box_round_mask(box, &rm)) {
                 int mi = dl_add_mask(dl, &rm);
                 if (mi >= 0 && dl_add_mask_cmd(dl, DL_MASK_BEGIN, mi, &rm)) {
+                    round_mi = mi;
                     mask_start[nmask] = i;
-                    mask_end[nmask] = (box->s->overflow != 0 || is_replaced_tag(node)) ? subtree_end(ctx, i) : i + 1;
+                    /* (clipped on one axis alone: no rounded clip, CSS Overflow 3) */
+                    bool one_axis = box->s->overflow_clip && box->s->ovf_clip_axes && box->s->ovf_clip_axes != 3;
+                    mask_end[nmask] = (box->s->overflow != 0 || is_replaced_tag(node)) && !one_axis ? subtree_end(ctx, i) : i + 1;
                     mask_idx[nmask] = mi;
                     if (nreg < REG_MAX && mask_end[nmask] > i + 1) {
                         reg_start[nreg] = i; reg_end[nreg] = mask_end[nmask]; reg_idx[nreg] = mi; nreg++;
@@ -7116,7 +7206,53 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             if (in[0] > 0.0f || in[1] > 0.0f || in[2] > 0.0f || in[3] > 0.0f) cr_mi = dl_add_mask(dl, &cr_m);
             if (cr_mi >= 0 && !dl_add_mask_cmd(dl, DL_MASK_BEGIN, cr_mi, &cr_m)) cr_mi = -1;
         }
-        if (!pieces && !hid_cell && i != canvas_src && box->width > 0.0f && box->height > cap_top + cap_bot && box->s->background_color_a > 0.0f &&
+        bool row_cells = !pieces && (box->s->table_role == 3 || box->s->table_role == 2 || (box->s->table_role == 6 && box->width > 0.0)) && box->s->bg_nl <= 1 &&
+                         box->s->bg_clip != 3 &&
+                         (box->s->background_color_a > 0.0f || box->s->background_image_url[0] || box->s->bg_grad);
+        if (row_cells) {
+            /* (the cells: a row's own; a column's, those of its table starting in it) */
+            int cells[512], ncell = 0;
+            if (box->s->table_role == 3) {
+                for (int c = ctx->tree.nodes[i].first_child_idx; c >= 0 && ncell < 512; c = ctx->tree.nodes[c].next_sibling_idx) cells[ncell++] = c;
+            } else if (box->s->table_role == 2) {
+                for (int r = ctx->tree.nodes[i].first_child_idx; r >= 0; r = ctx->tree.nodes[r].next_sibling_idx)
+                    if (ctx->boxes[r].s->table_role == 3 && ctx->boxes[r].s->display != CSS_DISPLAY_NONE)
+                        for (int c = ctx->tree.nodes[r].first_child_idx; c >= 0 && ncell < 512; c = ctx->tree.nodes[c].next_sibling_idx) cells[ncell++] = c;
+            } else {
+                int t = ctx->tree.nodes[i].parent_idx;
+                while (t >= 0 && ctx->boxes[t].s->table_role != 1) t = ctx->tree.nodes[t].parent_idx;
+                bool tv = t >= 0 && ctx->boxes[t].s->writing_mode != 0;
+                double c0 = (tv ? box->y : box->x) - 0.5, c1 = (tv ? box->y + box->height : box->x + box->width) - 0.5;
+                for (int g = t >= 0 ? ctx->tree.nodes[t].first_child_idx : -1; g >= 0; g = ctx->tree.nodes[g].next_sibling_idx) {
+                    int rr[2] = { g, -1 };
+                    bool grp = ctx->boxes[g].s->table_role == 2;
+                    for (int r = grp ? ctx->tree.nodes[g].first_child_idx : rr[0]; r >= 0; r = grp ? ctx->tree.nodes[r].next_sibling_idx : rr[1]) {
+                        if (ctx->boxes[r].s->table_role != 3) continue;
+                        for (int c = ctx->tree.nodes[r].first_child_idx; c >= 0 && ncell < 512; c = ctx->tree.nodes[c].next_sibling_idx) {
+                            const LayoutBox *cb = &ctx->boxes[c];
+                            double sx = tv ? (cb->s->direction == 1 ? cb->y + cb->height - 1.0 : cb->y) : (cb->s->direction == 1 ? cb->x + cb->width - 1.0 : cb->x);
+                            if (sx >= c0 && sx < c1) cells[ncell++] = c;
+                        }
+                    }
+                }
+            }
+            for (int q = 0; q < ncell; q++) {
+                int c = cells[q];
+                const LayoutBox *cb = &ctx->boxes[c];
+                if (cb->s->table_role != 4 || cb->s->display == CSS_DISPLAY_NONE || cb->width <= 0.0 || cb->height <= 0.0) continue;
+                float cx = (float)cb->x, cy = (float)cb->y, cw = (float)cb->width, ch = (float)cb->height;
+                snap_rect(&cx, &cy, &cw, &ch);
+                if (box->s->background_color_a > 0.0f &&
+                    !display_list_add_rect(dl, cx, cy, cw, ch, (float)box->s->background_color_r, (float)box->s->background_color_g,
+                                           (float)box->s->background_color_b, (float)box->s->background_color_a * op))
+                    return false;
+                if (g_image_cache && (box->s->background_image_url[0] || box->s->bg_grad)) {
+                    float ca[4] = { cx, cy, cx + cw, cy + ch };
+                    emit_background_image(ctx, dl, box, ca);
+                }
+            }
+        }
+        if (!row_cells && !pieces && !hid_cell && i != canvas_src && box->width > 0.0f && box->height > cap_top + cap_bot && box->s->background_color_a > 0.0f &&
             box->s->bg_clip != 3) {
             float bgx = (float)box->x, bgy = (float)box->y + cap_top, bgw = (float)box->width, bgh = (float)box->height - cap_top - cap_bot;
             int cclip = bg_color_clip(ctx, box);
@@ -7135,7 +7271,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                                        (float)box->s->background_color_a * op))
                 return false;
         }
-        if (!pieces && box->width >= 2.0f && box->height >= 2.0f && box->width * box->height >= 6.0f) {
+        if (!row_cells && !pieces && box->width >= 2.0f && box->height >= 2.0f && box->width * box->height >= 6.0f) {
             if (g_image_cache && (box->s->background_image_url[0] || box->s->bg_grad || box->s->bg_nl > 1) && i != canvas_src && !hid_cell && box->s->bg_clip != 3) {
                 float bca[4];
                 const float *bcp = NULL;
@@ -7244,6 +7380,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     double bx0 = cx + (cw - bw * sx) * pxf + pxp, by0 = cy + (ch - bh * sy) * pyf + pyp;
                     int from_c = dl->count;
                     for (int q = 0; q < co->n; q++) {
+                        if (co->free_r && co->free_r[q]) continue;   /* (after the clip, below) */
                         double x0 = co->r[q][0], y0 = co->r[q][1], x1 = x0 + co->r[q][2], y1 = y0 + co->r[q][3];
                         if (co->url[q]) {
                             /* (an image: drawn whole, the bitmap's edges cutting it) */
@@ -7266,6 +7403,14 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     /* (a canvas: overflow: visible shows what is past its box, the bitmap's edges still) */
                     if (is_cv && box->s->ovf_visible_given && box->s->overflow == 0) { cc[0] = (float)bx0; cc[1] = (float)by0; cc[2] = (float)(bx0 + bw * sx); cc[3] = (float)(by0 + bh * sy); }
                     if (dl->count > from_c) dl_clip_range(dl, from_c, cc);
+                    /* (a worklet's border-image: wherever it reaches) */
+                    for (int q = 0; !is_cv && co->free_r && q < co->n; q++) {
+                        if (!co->free_r[q]) continue;
+                        uint32_t v = co->c[q];
+                        display_list_add_rect(dl, (float)(cx + co->r[q][0]), (float)(cy + co->r[q][1]), co->r[q][2], co->r[q][3],
+                                              (float)(v >> 24) / 255.0f, (float)((v >> 16) & 255) / 255.0f, (float)((v >> 8) & 255) / 255.0f,
+                                              (float)(v & 255) / 255.0f * op);
+                    }
                 }
             }
         }
@@ -7359,6 +7504,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     if (tfl && tfl->n > 0) {
                         for (int q = 0; q < tfl->n; q++) {
                             const LayoutTextFrag *fr = &tfl->f[q];
+                            text_shaper_set_spacing(box->s->letter_spacing + fr->jls, box->s->word_spacing, scale);
                             /* (text-autospace: the character before the fragment, here or in the text before) */
                             if (box->s->autospace)
                                 text_shaper_set_autospace_prev(fr->start > 0 ? css_layout_cp_before(run_text, fr->start) : css_layout_text_prev_cp(ctx, i));
@@ -7789,6 +7935,37 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                 display_list_add_rect(dl, (float)cx, (float)cy, (float)cw, (float)ch, (float)rgba[0], (float)rgba[1], (float)rgba[2], (float)rgba[3] * op);
             }
         }
+        /* (with text: the caret at its start, over the first character) */
+        if (node && node->type == HTML_NODE_ELEMENT && box->s->caret_shape == 2 && box->s->writing_mode == 0 && box->s->direction == 0 && node->store_id &&
+            (dom_element_state(node->store_id) & DOM_ST_FOCUS) && ctx->tree.nodes[i].first_child_idx >= 0) {
+            const char *ce = node_attribute_value(node, "contenteditable");
+            int tc = ctx->tree.nodes[i].first_child_idx;
+            const HtmlNode *tn = css_layout_box_node(ctx, tc);
+            if (ce && strcasecmp(ce, "false") && tn && tn->type == HTML_NODE_TEXT && ctx->text_frags && tc < ctx->text_frags_n &&
+                ctx->text_frags[tc].n > 0) {
+                const LayoutBox *tb = &ctx->boxes[tc];
+                const LayoutTextFrag *fr = &ctx->text_frags[tc].f[0];
+                const char *tx = css_layout_box_text(ctx, tc, css_layout_node_text(ctx, (HtmlNode *)tn));
+                if (tx && fr->start < strlen(tx)) {
+                    const unsigned char *p = (const unsigned char *)tx + fr->start;
+                    uint32_t cp = p[0];
+                    if (cp >= 0xF0) cp = ((cp & 7) << 18) | ((p[1] & 63) << 12) | ((p[2] & 63) << 6) | (p[3] & 63);
+                    else if (cp >= 0xE0) cp = ((cp & 15) << 12) | ((p[1] & 63) << 6) | (p[2] & 63);
+                    else if (cp >= 0xC0) cp = ((cp & 31) << 6) | (p[1] & 63);
+                    double rgba[4] = { box->s->color_r, box->s->color_g, box->s->color_b, box->s->color_a };
+                    if (box->s->caret_color) css_layout_parse_color_text(box->s->caret_color, rgba);
+                    double fs = tb->s->font_size > 0.0 ? tb->s->font_size : 16.0;
+                    TextShaper *cf = display_list_get_font(tb->s->font_slot >= 0 ? tb->s->font_slot : 0);
+                    float adv = cf ? text_shaper_cp_advance(cf, cp, false) : 0.5f;
+                    float a0 = 0.8f, d0 = 0.2f, g0 = 0.0f;
+                    if (cf) text_shaper_vmetrics(cf, &a0, &d0, &g0);
+                    double cw = (adv > 0.0f ? adv : 0.5f) * fs, ch = (double)(a0 + d0) * fs;
+                    double cx = tb->x + fr->dx, cy = floor(tb->y + fr->dy - (double)g0 * fs - 0.5);   /* (the content area: above the half leading) */
+                    if (box->s->caret_shape == 3) { double t = fs * 0.1 < 1.0 ? 1.0 : fs * 0.1; cy += ch - t; ch = t; }
+                    display_list_add_rect(dl, (float)cx, (float)cy, (float)cw, (float)ch, (float)rgba[0], (float)rgba[1], (float)rgba[2], (float)rgba[3] * op);
+                }
+            }
+        }
         if (default_font && node && node->type == HTML_NODE_ELEMENT && !image_marker && !box->s->list_inside &&
             box->s->display == CSS_DISPLAY_LIST_ITEM && !css_layout_box_clips(ctx, i) && !dl_paint_contained(box) && (box->s->list_style_type != 0 || (!(node->tag_name && node->tag_name[0] == ':') && css_layout_marker_has_content(ctx, i))) && !css_layout_marker_none(ctx, i)) {   /* (::marker content: shown with list-style-type none too) */
             char marker[512];
@@ -7870,7 +8047,13 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
          * The color defaults to currentColor when no border-color was given.
          * Emitted before the small-box filter: a thin box (e.g. <hr>) still
          * needs its border painted. */
-        if (!pieces && !hid_cell && (box->s->bi_src || box->s->bi_grad) && emit_border_image(dl, box, op)) {
+        if (round_mi >= 0 && !pieces && !hid_cell && (box->s->bi_src || box->s->bi_grad)) {
+            DisplayMask rmk = dl->masks[round_mi];
+            dl_add_mask_cmd(dl, DL_MASK_END, round_mi, &rmk);
+            bool drawn = emit_border_image(dl, box, op);
+            dl_add_mask_cmd(dl, DL_MASK_BEGIN, round_mi, &rmk);
+            (void)drawn;
+        } else if (!pieces && !hid_cell && (box->s->bi_src || box->s->bi_grad) && emit_border_image(dl, box, op)) {
             /* (a border image instead) */
         } else if (!pieces && !hid_cell && (box->s->border_top > 0.0 || box->s->border_right > 0.0 ||
                         box->s->border_bottom > 0.0 || box->s->border_left > 0.0)) {
@@ -7893,7 +8076,9 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             const double used[4] = { box->s->border_top, box->s->border_right, box->s->border_bottom, box->s->border_left };
             bool outward = false;
             for (int q = 0; q < 4; q++) {
-                bool painted = box->s->border_style[sk[q]] >= CSS_BORDER_SOLID && used[q] > 0.0;
+                /* (rows, row groups and columns of a separated-borders table: no borders of their own) */
+                bool painted = box->s->border_style[sk[q]] >= CSS_BORDER_SOLID && used[q] > 0.0 &&
+                               !((box->s->table_role == 2 || box->s->table_role == 3 || box->s->table_role == 6) && !box->s->border_collapse);
                 bwid[q] = painted ? (float)used[q] : 0.0f;
                 out[q] = painted ? box->s->border_out[sk[q]] : 0.0f;
                 if (out[q] > 0.0f) { bwid[q] += out[q]; outward = true; }

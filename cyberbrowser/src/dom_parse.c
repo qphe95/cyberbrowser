@@ -907,6 +907,34 @@ static void push_open(Builder *b, uint32_t s) {
 }
 
 /* An element the markup leaves out (html, head, body), opened under parent. */
+/* (documents whose head had a meta named responsive-embedded-sizing when their body started: their html elements) */
+static NodeId g_resp_html[64];
+static int g_resp_n;
+bool dom_responsive_opt(NodeId html) {
+    for (int k = 0; k < g_resp_n; k++) if (g_resp_html[k] == html) return true;
+    return false;
+}
+static bool resp_is_meta(NodeId c) {
+    static CssAtom a_meta;
+    if (!a_meta) a_meta = css_atom_intern("meta", 4);
+    if (g_dom.tag[dom_slot(c)] != a_meta) return false;
+    const char *nm = dom_get_attr_str(c, "name");
+    return nm && !strcasecmp(nm, "responsive-embedded-sizing");
+}
+static void resp_add(uint32_t el_html) {
+    NodeId h = dom_id_of(el_html);
+    if (!dom_responsive_opt(h)) { if (g_resp_n < 64) g_resp_html[g_resp_n++] = h; else g_resp_html[63] = h; }
+}
+static void resp_body_note(uint32_t el_head, uint32_t el_html) {
+    if (!el_html) return;
+    for (int w = 0; w < 2; w++) {
+        uint32_t p = w == 0 ? el_head : el_html;
+        if (!p) continue;
+        for (NodeId c = dom_first_child(dom_id_of(p)); c; c = dom_next_sibling(c))
+            if (resp_is_meta(c)) { resp_add(el_html); return; }
+    }
+}
+
 static uint32_t implied(Builder *b, CssAtom tag, uint32_t parent) {
     DomTok t;
     memset(&t, 0, sizeof t);
@@ -966,6 +994,9 @@ static bool doc_before(Builder *b, const DomTok *t, CssAtom tag) {
             if (tag == g_a_body) return false;
             if (tag == g_a_html) { merge_attrs(b->el_html, t); return true; }
             if (tag == g_a_head) return true;
+            /* (head content here: into the head after all) */
+            if (tag && head_content(tag) && b->el_head) { push_open(b, b->el_head); b->phase = DOC_IN_HEAD; return false; }
+            resp_body_note(b->el_head, b->el_html);
             b->el_body = implied(b, g_a_body, b->el_html);
             b->phase = DOC_IN_BODY;
             continue;
@@ -1242,8 +1273,9 @@ static bool build_tokens(Builder *b, TokChunk *c, size_t *pi, size_t *detour) {
             if (b->doc_mode) {
                 if (t->tag == g_a_html && !b->el_html) { b->el_html = s; b->phase = DOC_BEFORE_HEAD; }
                 else if (t->tag == g_a_head && !b->el_head) { b->el_head = s; b->phase = DOC_IN_HEAD; }
-                else if (t->tag == g_a_body && !b->el_body) { b->el_body = s; b->phase = DOC_IN_BODY; }
+                else if (t->tag == g_a_body && !b->el_body) { resp_body_note(b->el_head, b->el_html); b->el_body = s; b->phase = DOC_IN_BODY; }
             }
+            if (b->doc_mode && !b->el_body && b->el_html && parent == b->el_head && b->el_head && resp_is_meta(dom_id_of(s))) resp_add(b->el_html);
             uint16_t f = g_dom.flags[s];
             if (f & DOMF_RAW_TEXT && !(f & DOMF_SELF_CLOSED)) {
                 if (i + 1 < c->n && c->toks[i + 1].kind == TK_RAW) {
