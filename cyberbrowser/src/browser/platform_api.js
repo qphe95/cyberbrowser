@@ -1593,15 +1593,18 @@
     function snapLists(el, axes) {
         /* (the root's scrollport is the viewport, which its box moves in) */
         var isRoot = el === el.ownerDocument.documentElement;
-        var r = el.getBoundingClientRect(), left = isRoot ? 0 : r.left + el.clientLeft, top = isRoot ? 0 : r.top + el.clientTop;
-        var sx = el.scrollLeft, sy = el.scrollTop, cw = el.clientWidth, ch = el.clientHeight;
-        var maxX = el.scrollWidth - cw, maxY = el.scrollHeight - ch, out = { x: [], y: [] };
+        var rz = el.currentCSSZoom || 1, r = el.getBoundingClientRect(), left = isRoot ? 0 : r.left + el.clientLeft * rz, top = isRoot ? 0 : r.top + el.clientTop * rz;
+        /* (sizes zoomed: layout px, as the scroll offsets are) */
+        var ez = el.currentCSSZoom || 1;
+        var sx = el.scrollLeft, sy = el.scrollTop, cw = el.clientWidth * ez, ch = el.clientHeight * ez;
+        var maxX = el.scrollWidth * ez - cw, maxY = el.scrollHeight * ez - ch, out = { x: [], y: [] };
         /* (the snapport is the scrollport less scroll-padding; a snap area is the box and its scroll-margin) */
-        var ecs = global.getComputedStyle(el), elPx = function (v, of) {
+        /* (lengths zoomed as layout has them) */
+        var ecs = global.getComputedStyle(el), elPx = function (v, of, z) {
             var m = /^(-?[\d.]+)(px|%)$/.exec(v || '');
-            return !m ? 0 : m[2] === '%' ? +m[1] * of / 100 : +m[1];
+            return !m ? 0 : m[2] === '%' ? +m[1] * of / 100 : +m[1] * (z || 1);
         };
-        var padL = elPx(ecs.scrollPaddingLeft, cw), padR = elPx(ecs.scrollPaddingRight, cw), padT = elPx(ecs.scrollPaddingTop, ch), padB = elPx(ecs.scrollPaddingBottom, ch);
+        var padL = elPx(ecs.scrollPaddingLeft, cw, ez), padR = elPx(ecs.scrollPaddingRight, cw, ez), padT = elPx(ecs.scrollPaddingTop, ch, ez), padB = elPx(ecs.scrollPaddingBottom, ch, ez);
         var at = function (align, lo, hi, view, pa, pb) {
             return align === 'start' ? lo - pa : align === 'end' ? hi - view + pb : (lo + hi - view - pa + pb) / 2 ;
         };
@@ -1626,13 +1629,13 @@
             var align = global.getComputedStyle(c).scrollSnapAlign;
             if (!align || align === 'none') continue;
             var parts = align.split(' '), block = parts[0], inline = parts[1] || parts[0], b = c.getBoundingClientRect();
-            var tcs = global.getComputedStyle(c);
+            var tcs = global.getComputedStyle(c), tz = c.currentCSSZoom || 1;
             if (axes.x && inline !== 'none') {
-                var xlo = b.left - left + sx - elPx(tcs.scrollMarginLeft, 0), xhi = b.right - left + sx + elPx(tcs.scrollMarginRight, 0);
+                var xlo = b.left - left + sx - elPx(tcs.scrollMarginLeft, 0, tz), xhi = b.right - left + sx + elPx(tcs.scrollMarginRight, 0, tz);
                 out.x.push({ t: c, pos: Math.max(0, Math.min(maxX, at(inline, xlo, xhi, cw, padL, padR))), lo: xlo - padL, hi: xhi + padR });
             }
             if (axes.y && block !== 'none') {
-                var ylo = b.top - top + sy - elPx(tcs.scrollMarginTop, 0), yhi = b.bottom - top + sy + elPx(tcs.scrollMarginBottom, 0);
+                var ylo = b.top - top + sy - elPx(tcs.scrollMarginTop, 0, tz), yhi = b.bottom - top + sy + elPx(tcs.scrollMarginBottom, 0, tz);
                 out.y.push({ t: c, pos: Math.max(0, Math.min(maxY, at(block, ylo, yhi, ch, padT, padB))), lo: ylo - padT, hi: yhi + padB });
             }
         }
@@ -1656,7 +1659,7 @@
         if (snapHeld || !global.__cyberHasSnap || !global.__cyberHasSnap() || !el.isConnected) return null;
         var axes = snapAxes(global.getComputedStyle(el));
         if (!axes) return null;
-        var lists = snapLists(el, axes), cw = el.clientWidth, ch = el.clientHeight;
+        var lz = el.currentCSSZoom || 1, lists = snapLists(el, axes), cw = el.clientWidth * lz, ch = el.clientHeight * lz;
         var pick = function (list, cur, view) {
             for (var i = 0; i < list.length; i++) if (list[i].hi - list[i].lo > view && list[i].lo <= cur && list[i].hi >= cur + view) return cur;
             var best = snapNearest(list, cur);
@@ -2136,7 +2139,11 @@
                 });
             }
         };
-        var sheets = doc.styleSheets;
+        /* (the sheets of the scope's tree: a shadow root's own and adopted ones too) */
+        var tr = scope.getRootNode ? scope.getRootNode() : doc, sheets = [];
+        var addAll = function (l) { if (l) for (var i = 0; i < l.length; i++) sheets.push(l[i]); };
+        addAll(tr && tr.styleSheets ? tr.styleSheets : doc.styleSheets);
+        try { addAll(tr && tr.adoptedStyleSheets); } catch (e) { }
         for (var i = 0; i < sheets.length; i++) { try { walk(sheets[i].cssRules); } catch (e) { } }
         return list;
     };
@@ -2177,6 +2184,10 @@
         var dur = d['animation-duration'] != null ? vtSecs(d['animation-duration']) : null;
         if (dur == null && a) { var mm = /(-?[\d.]+m?s)/.exec(a); if (mm) dur = vtSecs(mm[1]); }
         if (dur == null) dur = inheritDur;
+        /* (a long delay: its start state held, as long as a long animation) */
+        var del = d['animation-delay'] != null ? vtSecs(d['animation-delay']) : null;
+        if (del == null && a) { var tm = a.match(/-?[\d.]+m?s\b/g); if (tm && tm.length > 1) del = vtSecs(tm[1]); }
+        if (del != null && del >= 2) dur = Math.max(dur, del);
         var paused = /paused/.test(String(d['animation-play-state'] || '') + ' ' + a);
         /* (where it is at its start: steps(n, start) has jumped once) */
         var tf = String(d['animation-timing-function'] || '') + ' ' + a, p0 = 0;
@@ -2220,8 +2231,9 @@
         var scoped = scope !== doc.documentElement;
         var nu = vtCaptureState(doc, scope), rules = vtRules(doc, scope);
         var byName = {}, order = [];
-        nu.forEach(function (n) { byName[n.name] = { nu: n, old: null }; order.push(n.name); });
-        old.forEach(function (o) { if (!byName[o.name]) { byName[o.name] = { nu: null, old: o }; order.push(o.name); } else byName[o.name].old = o; });
+        /* (the old capture's names first, in its paint order, the new ones after: the groups' order, CSS View Transitions 1) */
+        old.forEach(function (o) { byName[o.name] = { nu: null, old: o }; order.push(o.name); });
+        nu.forEach(function (n) { if (!byName[n.name]) { byName[n.name] = { nu: n, old: null }; order.push(n.name); } else byName[n.name].nu = n; });
         /* (the animations: the group's duration the others inherit) */
         var hold = false, info = {};
         /* (the root takes part unless its view-transition-name is none) */
@@ -2230,10 +2242,12 @@
         var va = vtAnim(vtDecls(rules, 'root', '*'), 0.25);
         if (!va.none && va.long && (va.custom || va.dur >= 2)) hold = true;
         if (!rootIn && !order.length && !hold) { onDone(); return null; }
-        order.concat(['root']).forEach(function (n) {
+        /* (the root's rules by its own view-transition-name) */
+        var rootNm = (scoped ? '' : vtName(doc.documentElement)) || 'root';
+        order.concat(order.indexOf('root') < 0 ? ['root'] : []).forEach(function (n) {
             var e = byName[n] || { nu: null, old: null };
-            var cl = (e.nu || e.old || {}).cls || [];
-            var g = vtDecls(rules, 'group', n, cl), ip = vtDecls(rules, 'image-pair', n, cl), od = vtDecls(rules, 'old', n, cl), nd = vtDecls(rules, 'new', n, cl);
+            var cl = (e.nu || e.old || {}).cls || [], ln = n === 'root' ? rootNm : n;
+            var g = vtDecls(rules, 'group', ln, cl), ip = vtDecls(rules, 'image-pair', ln, cl), od = vtDecls(rules, 'old', ln, cl), nd = vtDecls(rules, 'new', ln, cl);
             var ga = vtAnim(g, 0.25), gd = ga.none ? 0.25 : ga.dur;
             var oa = vtAnim(od, gd), na = vtAnim(nd, gd);
             var both = (n === 'root' && rootIn) || (e.nu && e.old);
@@ -2244,7 +2258,7 @@
             info[n] = { g: g, ip: ip, od: od, nd: nd, ga: ga, oa: oa, na: na };
         });
         var brief = !hold;
-        if (brief) for (var bn in info) [info[bn].ga, info[bn].oa, info[bn].na].forEach(function (a) { if (!a.none) a.long = true; });
+        if (brief) for (var bn in info) [info[bn].ga, info[bn].oa, info[bn].na].forEach(function (a) { if (!a.none && a.dur !== 0) a.long = true; });   /* (a 0s one: at its end already) */
         /* (nested groups, view-transition-group: each name's parent group, by its
          * element's value: nearest (the closest named ancestor), a name (the
          * closest ancestor of that name), normal (the closest named ancestor
@@ -2276,6 +2290,13 @@
             for (var i = 0; i < anc.length; i++) if (contains[anc[i]]) { parentOf[n] = anc[i]; break; }
         });
         var gdivs = {};
+        /* (the overlay's elements by their pseudo-elements: what animate() with pseudoElement drives) */
+        var vtEls = {}, vtAnims = [];
+        Object.defineProperty(global, '__cyberVtHold', { configurable: true, value: function (a) { vtAnims.push(a); } });
+        Object.defineProperty(global, '__cyberVtEl', { configurable: true, value: function (p) {
+            var m = /^::view-transition-(group|image-pair|old|new)\(\s*([^)\s]*)\s*\)$/.exec(String(p || ''));
+            return m ? vtEls[m[1] + ':' + m[2]] || null : null;
+        } });
         var root = doc.documentElement;
         var ov = doc.createElement('div');
         Object.defineProperty(ov, '__cyberVtOverlay', { value: true });
@@ -2338,12 +2359,15 @@
             var gw = /px\s*$/.test(g.style.width) ? parseFloat(g.style.width) : geo.w;
             if (!(gw >= 0)) gw = geo.w;
             var ip = doc.createElement('div');
-            ip.setAttribute('style', 'position:absolute;left:0;top:0;width:100%;height:100%;isolation:isolate');
+            ip.setAttribute('style', 'position:absolute;left:0;top:0;width:100%;height:100%');
             vtApply(ip, f.ip);
             g.appendChild(ip);
-            var put = function (s, d, a, op0) {
+            vtEls['group:' + n] = g;
+            vtEls['image-pair:' + n] = ip;
+            var put = function (s, d, a, op0, kind) {
                 if (!s) return;
                 var w = doc.createElement('div');
+                vtEls[kind + ':' + n] = w;
                 w.setAttribute('style', 'position:absolute;left:0;top:0;width:100%;height:100%;overflow:visible');
                 var o = d.opacity != null && d.opacity !== '' ? parseFloat(d.opacity) : 1;
                 if (!a.none && a.long && !a.custom) o = op0;
@@ -2373,8 +2397,8 @@
                 w.appendChild(snap);
                 ip.appendChild(w);
             };
-            put(e.old, f.od, f.oa, 1);
-            put(e.nu, f.nd, f.na, 0);
+            put(e.old, f.od, f.oa, 1, 'old');
+            put(e.nu, f.nd, f.na, 0, 'new');
             gdivs[n] = { g: g, geo: geo, kids: null };
             var pn = parentOf[n], pg = pn ? gdivs[pn] : null;
             if (pg) {
@@ -2402,7 +2426,9 @@
             hidden.forEach(function (h) { if (h[1]) h[0].style.setProperty('visibility', h[1], h[2]); else h[0].style.removeProperty('visibility'); });
             hidden = [];
         };
-        if (brief) { var bleft = 6, btick = function () { if (--bleft > 0) global.requestAnimationFrame(btick); else { undo(); onDone(); } }; global.requestAnimationFrame(btick); }
+        /* (while animations started on its pseudo-elements run: held) */
+        var vtLive = function () { return vtAnims.some(function (a) { try { return a.playState === 'running' || a.playState === 'paused'; } catch (e) { return false; } }); };
+        if (brief) { var bleft = 6, btick = function () { if (vtLive()) { global.requestAnimationFrame(btick); return; } if (--bleft > 0) global.requestAnimationFrame(btick); else { undo(); onDone(); } }; global.requestAnimationFrame(btick); }
         return undo;
     };
     var VT_ACTIVE = { cur: null };
@@ -2847,8 +2873,23 @@
             pendX += run.l1 - rawLeft.get.call(a);
             pendY += run.t1 - rawTop.get.call(a);
         };
+        /* (its scroll-margin: the area scrolled to) */
+        var sm = [0, 0, 0, 0];
+        try {
+            var ecs = global.getComputedStyle(el);
+            var smz = el.currentCSSZoom || 1;
+            sm = [ecs.scrollMarginTop, ecs.scrollMarginRight, ecs.scrollMarginBottom, ecs.scrollMarginLeft].map(function (v) { return (parseFloat(v) || 0) * smz; });
+        } catch (e) { /* (none) */ }
+        /* (a scroller's scroll-padding: in from its view) */
+        var spOf = function (a) {
+            try {
+                var c = global.getComputedStyle(a), z = a.currentCSSZoom || 1;
+                return [c.scrollPaddingTop, c.scrollPaddingRight, c.scrollPaddingBottom, c.scrollPaddingLeft].map(function (v) { return /%$/.test(v) ? 0 : (parseFloat(v) || 0) * z; });
+            } catch (e) { return [0, 0, 0, 0]; }
+        };
         var rectOf = function () {
-            var r = el.getBoundingClientRect();
+            var r0 = el.getBoundingClientRect();
+            var r = { left: r0.left - sm[3], top: r0.top - sm[0], right: r0.right + sm[1], bottom: r0.bottom + sm[2] };
             if (!inner) return pendX || pendY ? { left: r.left - pendX, top: r.top - pendY, right: r.right - pendX, bottom: r.bottom - pendY } : r;
             var left = r.left + el.clientLeft + inner.left - pendX, top = r.top + el.clientTop + inner.top - pendY;
             return { left: left, top: top, right: left + inner.right - inner.left, bottom: top + inner.bottom - inner.top };
@@ -2862,17 +2903,18 @@
             if (a.scrollHeight <= a.clientHeight && a.scrollWidth <= a.clientWidth) continue;
             /* (overflow: clip and visible: no scrolling box) */
             if (!isScrollBox(global.getComputedStyle(a))) continue;
-            var r = rectOf(), b = a.getBoundingClientRect();
-            var l = b.left + a.clientLeft, t = b.top + a.clientTop;
-            scrollLast = scrollGo(a, rawLeft.get.call(a) + scrollAlign(inline, r.left, r.right, l, l + a.clientWidth),
-                                  rawTop.get.call(a) + scrollAlign(block, r.top, r.bottom, t, t + a.clientHeight), scrollWith);
+            var r = rectOf(), b = a.getBoundingClientRect(), sp = spOf(a);
+            var bz = a.currentCSSZoom || 1, l = b.left + a.clientLeft * bz, t = b.top + a.clientTop * bz;
+            var az = a.currentCSSZoom || 1;
+            scrollLast = scrollGo(a, rawLeft.get.call(a) + scrollAlign(inline, r.left, r.right, l + sp[3], l + a.clientWidth * az - sp[1]),
+                                  rawTop.get.call(a) + scrollAlign(block, r.top, r.bottom, t + sp[0], t + a.clientHeight * az - sp[2]), scrollWith);
             pend(a);
         }
         var se = d.scrollingElement;
         if (!se) return;
-        var v = rectOf();
-        scrollLast = scrollGo(se, rawLeft.get.call(se) + scrollAlign(inline, v.left, v.right, 0, global.innerWidth),
-                              rawTop.get.call(se) + scrollAlign(block, v.top, v.bottom, 0, global.innerHeight), scrollWith);
+        var v = rectOf(), vp = spOf(root);
+        scrollLast = scrollGo(se, rawLeft.get.call(se) + scrollAlign(inline, v.left, v.right, vp[3], global.innerWidth - vp[1]),
+                              rawTop.get.call(se) + scrollAlign(block, v.top, v.bottom, vp[0], global.innerHeight - vp[2]), scrollWith);
         pend(se);
         /* (the parent's too, if this window may reach it) */
         var fe = global.frameElement, view = fe && fe.ownerDocument && fe.ownerDocument.defaultView;
@@ -3117,7 +3159,20 @@
             }
         }
     };
+    var hlLastKey = null, hlIds = new WeakMap(), hlNextId = 1;
+    var hlNodeId = function (n) {
+        if (!n) return 0;
+        var v = hlIds.get(n);
+        if (!v) { v = hlNextId++; hlIds.set(n, v); }
+        return v;
+    };
+    var hlInFlush = false;
     var hlFlush = function () {
+        if (hlInFlush) return;
+        hlInFlush = true;
+        try { hlFlush0(); } finally { hlInFlush = false; }
+    };
+    var hlFlush0 = function () {
         hlDirty = false;
         if (typeof global.__cyberHighlightSet !== 'function') return;
         var names = [], prios = [], flat = [];
@@ -3125,8 +3180,10 @@
         if (theRegistry) HL.get(theRegistry).forEach(function (h, name) {
             var hi = names.length;
             names.push(name);
-            prios.push(hlState.get(h).priority);
-            HL.get(h).forEach(function (r) { try { hlRange(r, hi, flat); } catch (e) {} });
+            /* (one made in another window: through its own methods) */
+            var own = hlState.get(h);
+            prios.push(own ? own.priority : (Number(h.priority) | 0));
+            (HL.get(h) || h).forEach(function (r) { try { hlRange(r, hi, flat); } catch (e) {} });
         });
         /* (the URL's text fragment: ::target-text, under the selection) */
         try { hlTargetText(names, prios, flat); } catch (e) {}
@@ -3136,7 +3193,33 @@
             var si = names.length;
             names.push('\u0001selection');
             prios.push(0x3fffffff);
+            var f0 = flat.length;
             try { hlRange(sr, si, flat); } catch (e) {}
+            /* (text of user-select: none is not selected) */
+            for (var fq = flat.length - 4; fq >= f0; fq -= 4) {
+                var tn = flat[fq + 1], pe = tn && tn.parentElement;
+                var us = '';
+                try { us = pe ? global.getComputedStyle(pe).getPropertyValue('user-select') : ''; } catch (e) { us = ''; }
+                if (us === 'none') flat.splice(fq, 4);
+            }
+        } else if (sr) {
+            /* (collapsed: where the caret is, at a text node's offset) */
+            try {
+                var cn = sr.startContainer, co = sr.startOffset;
+                if (cn && cn.nodeType === 1) {
+                    var bef = co > 0 ? cn.childNodes[co - 1] : null, aft = cn.childNodes[co] || null;
+                    if (bef && bef.nodeType === 3) { cn = bef; co = bef.data.length; }
+                    else if (aft && aft.nodeType === 3) { cn = aft; co = 0; }
+                }
+                var host = cn && cn.parentNode;
+                while (host && host.nodeType === 1 && !(host.getAttribute && host.hasAttribute('contenteditable') && host.getAttribute('contenteditable') !== 'false')) host = host.parentNode;
+                if (cn && cn.nodeType === 3 && host && host.nodeType === 1) {
+                    var ci = names.length;
+                    names.push('\u0001caret');
+                    prios.push(0);
+                    flat.push(ci, cn, co, co);
+                }
+            } catch (e) {}
         }
         /* (one highlight's ranges over the same text: painted once, as their union) */
         var segs = [];
@@ -3156,6 +3239,10 @@
             flat = [];
             merged.forEach(function (o) { flat.push(o[0], o[1], o[2], o[3]); });
         }
+        /* (the same as last time: nothing to paint again) */
+        var key = names.join('\u0002') + '|' + prios.join(',') + '|' + flat.map(function (x) { return typeof x === 'object' ? (hlNodeId(x)) : x; }).join(',');
+        if (key === hlLastKey) return;
+        hlLastKey = key;
         global.__cyberHighlightSet(names, prios, flat);
     };
     if (global.addEventListener) {
@@ -3240,7 +3327,7 @@
     } });
     Object.defineProperty(HighlightRegistry.prototype, 'set', { configurable: true, enumerable: true, writable: true, value: function set(k, v) {
         if (arguments.length < 2) throw new TypeError('2 arguments required');
-        if (!(v instanceof Highlight)) throw new TypeError("Failed to execute 'set' on 'HighlightRegistry': not a Highlight");
+        if (!(v instanceof Highlight) && Object.prototype.toString.call(v) !== '[object Highlight]') throw new TypeError("Failed to execute 'set' on 'HighlightRegistry': not a Highlight");
         hlOf(this).set(String(k), v);
         hlTouch();
         return this;
@@ -3256,6 +3343,22 @@
     /* (a new page: nothing painted from the last one's) */
     if (typeof global.__cyberHighlightSet === 'function') global.__cyberHighlightSet([], [], []);
     HL.set(theRegistry, new Map());
+    /* (a range in a highlight changed: painted again) */
+    if (global.Range && global.Range.prototype) ['setStart', 'setEnd', 'setStartBefore', 'setStartAfter', 'setEndBefore', 'setEndAfter',
+                                                'collapse', 'selectNode', 'selectNodeContents'].forEach(function (m) {
+        var d = Object.getOwnPropertyDescriptor(global.Range.prototype, m);
+        if (!d || typeof d.value !== 'function') return;
+        var orig = d.value;
+        var w = function () {
+            var r = orig.apply(this, arguments);
+            try { if (!hlInFlush && !hlDirty && HL.get(theRegistry).size) hlTouch(); } catch (e) { /* (none) */ }
+            return r;
+        };
+        Object.defineProperty(w, 'name', { configurable: true, value: orig.name });
+        Object.defineProperty(w, 'length', { configurable: true, value: orig.length });
+        d.value = w;
+        Object.defineProperty(global.Range.prototype, m, d);
+    });
     Object.defineProperty(global, '__cyberHighlights', { configurable: true, value: theRegistry });
     if (global.CSS) Object.defineProperty(global.CSS, 'highlights', { configurable: true, enumerable: true, get: function () { return theRegistry; } });
 
@@ -4096,12 +4199,28 @@
      * engine paginates the root (__cyberPrintSet); here the @page rules, the page
      * boxes and their margin boxes.  Default page: 5in x 3in, margins 0.5in, as
      * WPT's print reftests expect. */
-    function printRules(list, out) {
+    /* (cascade layers by first mention, dotted paths; an @page rule's layer as __printLayer) */
+    var printLayers = [];
+    function printLayerRank(path) {
+        var k = printLayers.indexOf(path);
+        if (k < 0) { printLayers.push(path); k = printLayers.length - 1; }
+        return k;
+    }
+    var printAnon = 0;
+    function printRules(list, out, layer) {
         for (var i = 0; list && i < list.length; i++) {
             var r = list[i];
-            if (global.CSSPageRule && r instanceof global.CSSPageRule) out.push(r);
-            else if (r.cssRules) { try { printRules(r.cssRules, out); } catch (e) { /* (none) */ } }
-            else if (r.styleSheet) { try { printRules(r.styleSheet.cssRules, out); } catch (e) { /* (cross origin) */ } }
+            if (global.CSSPageRule && r instanceof global.CSSPageRule) { r.__printLayer = layer === undefined ? null : layer; out.push(r); }
+            else if (global.CSSLayerStatementRule && r instanceof global.CSSLayerStatementRule) {
+                (r.nameList || []).forEach(function (n) { printLayerRank(layer ? layer + '.' + n : n); });
+            }
+            else if (global.CSSLayerBlockRule && r instanceof global.CSSLayerBlockRule) {
+                var nm = r.name ? (layer ? layer + '.' + r.name : r.name) : (layer ? layer + '.' : '') + '\u0000' + (printAnon++);
+                printLayerRank(nm);
+                try { printRules(r.cssRules, out, nm); } catch (e) { /* (none) */ }
+            }
+            else if (r.cssRules) { try { printRules(r.cssRules, out, layer); } catch (e) { /* (none) */ } }
+            else if (r.styleSheet) { try { printRules(r.styleSheet.cssRules, out, layer); } catch (e) { /* (cross origin) */ } }
         }
     }
     var PAGE_SIZES = { a5: [148, 210], a4: [210, 297], a3: [297, 420], b5: [176, 250], b4: [250, 353], 'jis-b5': [182, 257], 'jis-b4': [257, 364] };
@@ -4142,8 +4261,12 @@
     /* (the rules of page k, least specific first; later of the same specificity after) */
     function printPageRules(rules, name, k) {
         var o = [];
-        rules.forEach(function (r, i) { var s = printSpec(r.selectorText, name, k); if (s >= 0) o.push([s, i, r]); });
-        o.sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });
+        rules.forEach(function (r, i) {
+            var s = printSpec(r.selectorText, name, k);
+            var L = r.__printLayer == null ? 1e9 : printLayerRank(r.__printLayer);
+            if (s >= 0) o.push([s, i, r, L]);
+        });
+        o.sort(function (a, b) { return a[3] - b[3] || a[0] - b[0] || a[1] - b[1]; });
         return o.map(function (x) { return x[2]; });
     }
     function printDecl(rs, prop) {

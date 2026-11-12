@@ -929,6 +929,8 @@ static int calc_value(const Toks *ts, int i, int pct) {
         int d = 0;
         for (int a = 0; a < na; a++) if (args[a]) { if (d && (d & ~D_PERCENT) && (args[a] & ~D_PERCENT) && (d & ~D_PERCENT) != (args[a] & ~D_PERCENT)) return -1; d |= args[a]; }
         if (strcasecmp(f, "clamp") == 0 && na != 3) return -1;
+        /* (a number beside a percentage that is not one: a unitless 0 among lengths, invalid) */
+        if ((d & D_NUMBER) && (d & D_PERCENT) && pct != D_NUMBER) return -1;
         return d;
     }
     default: return -1;
@@ -2749,6 +2751,10 @@ static Color color_convert(const Color *c, int cs) {
 /* The color as sRGB 0-255 and alpha 0-1, clipped to the gamut. */
 static void color_to_rgba(const Color *c, double rgba[4]) {
     Color s = color_convert(c, CS_SRGB);
+    /* (CIE lightness at either end: white or black, whatever the chroma) */
+    if ((c->cs == CS_LAB || c->cs == CS_LCH) && !(c->none & 1) && (c->c[0] >= 100.0 || c->c[0] <= 0.0)) { s.c[0] = s.c[1] = s.c[2] = c->c[0] >= 100.0 ? 1.0 : 0.0; s.none &= 8; }
+    /* (OK lightness the same, of 1) */
+    if ((c->cs == CS_OKLAB || c->cs == CS_OKLCH) && !(c->none & 1) && (c->c[0] >= 1.0 - 1e-5 || c->c[0] <= 1e-5)) { s.c[0] = s.c[1] = s.c[2] = c->c[0] >= 0.5 ? 1.0 : 0.0; s.none &= 8; }
     /* (snapped so that 127.4999999 from float noise rounds as 127.5) */
     for (int i = 0; i < 3; i++) rgba[i] = round(((s.none >> i & 1) ? 0 : clamp01(s.c[i])) * 255 * 1e6) / 1e6;
     rgba[3] = (c->none & 8) ? 0 : clamp01(c->alpha);
@@ -4999,7 +5005,16 @@ static bool one_math_function(const char *v)
         const char *p = v + l;
         for (; *p && d; p++) d += *p == '(' ? 1 : *p == ')' ? -1 : 0;
         while (*p && isspace((unsigned char)*p)) p++;
-        return d == 0 && !*p;
+        if (d != 0 || *p) return false;
+        /* (a bare number in it: the grammar decides, a unitless 0 among lengths is invalid) */
+        for (const char *q = v + l; *q; q++) {
+            if (!isdigit((unsigned char)*q) || (q > v && (isalnum((unsigned char)q[-1]) || q[-1] == '.' || q[-1] == '-' || q[-1] == '_'))) continue;
+            const char *e = q;
+            while (isdigit((unsigned char)*e) || *e == '.') e++;
+            if (!isalpha((unsigned char)*e) && *e != '%') return false;
+            q = e;
+        }
+        return true;
     }
     return false;
 }
@@ -5316,7 +5331,23 @@ static int sup_cond(const Toks *ts, int b, int e, const char *src) {
 
 bool css_supports_condition(const char *cond) {
     Toks ts;
-    if (!cond || !tokenize(cond, strlen(cond), &ts)) return false;
+    if (!cond) return false;
+    {
+        /* (a bracket closed by another kind, or one never opened: not a condition) */
+        char st[64];
+        int d = 0;
+        char q = 0;
+        for (const char *p = cond; *p; p++) {
+            if (q) { if (*p == '\\' && p[1]) p++; else if (*p == q) q = 0; continue; }
+            if (*p == '"' || *p == '\'') q = *p;
+            else if (*p == '(' || *p == '[' || *p == '{') { if (d < 64) st[d] = *p == '(' ? ')' : *p == '[' ? ']' : '}'; d++; }
+            else if (*p == ')' || *p == ']' || *p == '}') {
+                if (d == 0 || (d <= 64 && st[d - 1] != *p)) return false;
+                d--;
+            }
+        }
+    }
+    if (!tokenize(cond, strlen(cond), &ts)) return false;
     t_sup_from = NULL;
     int r = sup_cond(&ts, 0, ts.n, cond);
     toks_free(&ts);
@@ -6060,9 +6091,17 @@ static int expand_side_radius(const char *v, char **out)
     if (nh < 1 || nh > 2) return -1;
     int nv = sl ? sscanf(right, "%95s %95s %7s", w[0], w[1], ex) : 0;
     if (sl && (nv < 1 || nv > 2)) return -1;
-    if (nh == 1) strcpy(h[1], h[0]);
-    if (nv == 1) strcpy(w[1], w[0]);
-    if (!nv) { strcpy(w[0], h[0]); strcpy(w[1], h[1]); }
+    if (sl) {
+        /* (a slash: before it the first corner's radii, after it the second's) */
+        char c0[2][96], c1[2][96];
+        strcpy(c0[0], h[0]); strcpy(c0[1], nh == 2 ? h[1] : h[0]);
+        strcpy(c1[0], w[0]); strcpy(c1[1], nv == 2 ? w[1] : w[0]);
+        strcpy(h[0], c0[0]); strcpy(w[0], c0[1]);
+        strcpy(h[1], c1[0]); strcpy(w[1], c1[1]);
+    } else {
+        if (nh == 1) strcpy(h[1], h[0]);
+        strcpy(w[0], h[0]); strcpy(w[1], h[1]);
+    }
     for (int i = 0; i < 2; i++) {
         char t[200];
         if (!strcmp(h[i], w[i])) snprintf(t, sizeof t, "%s", h[i]);

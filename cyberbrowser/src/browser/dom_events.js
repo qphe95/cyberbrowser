@@ -1315,7 +1315,11 @@
             if (newURL.indexOf(':~:') >= 0 && typeof global.__cyberSelectionChanged === 'function') global.__cyberSelectionChanged();
             fireHistoryEvents(oldURL, newURL, null, true);
         };
-        /* (the URL's fragment as the document finishes loading) */
+        /* (the URL's fragment once the document is parsed, and again as it finishes loading) */
+        global.addEventListener('DOMContentLoaded', function () {
+            var h = new global.URL(getHref()).hash;
+            if (h) { try { scrollToFragment(global, h); } catch (e) { /* (at load) */ } }
+        }, { once: true });
         global.addEventListener('load', function () {
             var h = new global.URL(getHref()).hash;
             if (h) scrollToFragment(global, h);
@@ -1884,7 +1888,17 @@
                 for (var i = 0; i < named.length && !el; i++) if (named[i].localName === 'a') el = named[i];
             }
         }
-        if (el) el.scrollIntoView({ block: 'start', inline: 'nearest' });
+        if (el) {
+            /* (its scroll-snap-align, where it has one: how it is aligned) */
+            var blk = 'start', inl = 'nearest';
+            try {
+                var sa = String(view.getComputedStyle(el).scrollSnapAlign || '').trim().split(/\s+/);
+                if (/^(start|end|center)$/.test(sa[0])) blk = sa[0];
+                var si = sa.length > 1 ? sa[1] : sa[0];
+                if (/^(start|end|center)$/.test(si)) inl = si;
+            } catch (e) { /* (as start) */ }
+            el.scrollIntoView({ block: blk, inline: inl });
+        }
         else if (!name || name.toLowerCase() === 'top') view.scrollTo(0, 0);
     }
     var KEYS = { '\uE003': 'Backspace', '\uE004': 'Tab', '\uE006': 'Enter', '\uE007': 'Enter', '\uE008': 'Shift', '\uE009': 'Control',

@@ -3412,6 +3412,9 @@
         if (!this || this.nodeType !== 9) throw new TypeError('Illegal invocation');
         return sheetList(this);
     }, configurable: true, enumerable: true });
+    /* (a shadow root's: the sheets of its own <style> and <link> elements) */
+    if (global.ShadowRoot && !Object.getOwnPropertyDescriptor(global.ShadowRoot.prototype, 'styleSheets'))
+        Object.defineProperty(global.ShadowRoot.prototype, 'styleSheets', { get: function styleSheets() { return sheetList(this); }, configurable: true, enumerable: true });
     if (global.document && Object.prototype.hasOwnProperty.call(global.document, 'styleSheets')) {
         try { delete global.document.styleSheets; } catch (e) { /* (kept) */ }
     }

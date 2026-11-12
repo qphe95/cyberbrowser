@@ -356,11 +356,13 @@ static int cs_find_exact(const char *name)
  * predefined one (any case); -1: none. */
 static int cs_lookup(const char *name)
 {
-    int i = cs_find_exact(name);
-    if (i >= 0) return i;
+    /* (a predefined name in any case: that name in lower case, a page's rule of it first) */
     for (int k = g_npre - 1; k >= 0; k--)
-        if (!strcasecmp(g_cs[k].name, name)) return k;
-    return -1;
+        if (!strcasecmp(g_cs[k].name, name)) {
+            int j = cs_find_exact(g_cs[k].name);
+            return j >= 0 ? j : k;
+        }
+    return cs_find_exact(name);
 }
 
 /* One @counter-style block: its name and body text. */
@@ -546,6 +548,40 @@ static const char k_predefined[] =
     "@counter-style korean-hanja-formal { system: -cb-special; range: -9999999999999999 9999999999999999; negative: '\\B9C8\\C774\\B108\\C2A4  '; suffix: ', '; fallback: cjk-decimal; }"
     "@counter-style ethiopic-numeric { system: -cb-special; range: 1 infinite; suffix: '/ '; }";
 
+/* (is at inside an @media or @supports block of css whose condition does not hold? as laid out, 800 by 600) */
+extern bool css_media_query_matches(const char *query, double viewport_width, double viewport_height);
+extern bool css_supports_condition(const char *cond);
+static bool cs_in_false_block(const char *css, const char *at)
+{
+    bool st[64];
+    int d = 0;
+    char quote = 0;
+    for (const char *p = css; p < at; p++) {
+        if (quote) { if (*p == '\\' && p + 1 < at) p++; else if (*p == quote) quote = 0; continue; }
+        if (*p == '"' || *p == '\'') { quote = *p; continue; }
+        if (*p == '/' && p + 1 < at && p[1] == '*') { const char *e = strstr(p + 2, "*/"); if (!e || e >= at) return false; p = e + 1; continue; }
+        if (*p == '@' && (!strncasecmp(p, "@media", 6) || !strncasecmp(p, "@supports", 9))) {
+            bool media = p[1] == 'm' || p[1] == 'M';
+            const char *q = p + (media ? 6 : 9), *b = q;
+            while (b < at && *b != '{' && *b != ';') b++;
+            if (b >= at || *b != '{') continue;
+            char cond[512];
+            size_t n = (size_t)(b - q) < sizeof cond - 1 ? (size_t)(b - q) : sizeof cond - 1;
+            memcpy(cond, q, n);
+            cond[n] = 0;
+            bool on = media ? css_media_query_matches(cond, 800.0, 600.0) : css_supports_condition(cond);
+            if (d < 64) st[d] = !on;
+            d++;
+            p = b;
+            continue;
+        }
+        if (*p == '{') { if (d < 64) st[d] = false; d++; }
+        else if (*p == '}' && d > 0) d--;
+    }
+    for (int k = 0; k < d && k < 64; k++) if (st[k]) return true;
+    return false;
+}
+
 /* @counter-style rules in css text (the predefined ones too). */
 static void cs_scan(const char *css, size_t len, bool predefined)
 {
@@ -572,7 +608,7 @@ static void cs_scan(const char *css, size_t len, bool predefined)
             else if (*b == '}') depth--;
             if (depth) b++;
         }
-        cs_rule(name, body, b, predefined);
+        if (predefined || !cs_in_false_block(css, at)) cs_rule(name, body, b, predefined);
         p = b < end ? b + 1 : end;
     }
 }

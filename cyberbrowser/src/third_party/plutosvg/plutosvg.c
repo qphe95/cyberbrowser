@@ -971,7 +971,12 @@ static bool parse_transform(const element_t* element, int id, plutovg_matrix_t* 
     const string_t* value = find_attribute(element, id, false);
     if(value == NULL)
         return false;
-    return plutovg_matrix_parse(matrix, value->data, value->length);
+    /* (cyberbrowser: an invalid list leaves the matrix as it was) */
+    plutovg_matrix_t m;
+    if(!plutovg_matrix_parse(&m, value->data, value->length))
+        return false;
+    *matrix = m;
+    return true;
 }
 
 static bool parse_points(const element_t* element, int id, plutovg_path_t* path)
@@ -2842,6 +2847,122 @@ static void render_image(const element_t* element, render_context_t* context, re
     render_state_end(&new_state);
 }
 
+/* (cyberbrowser: a length of a basic shape: px or a percentage of ref) */
+static const char* clip_shape_len(const char* p, const char* end, float ref, float* out)
+{
+    while(p < end && (*p == ' ' || *p == '\t')) p++;
+    char* e = NULL;
+    char buf[32];
+    size_t n = 0;
+    while(p + n < end && n < sizeof(buf) - 1 && (isdigit((unsigned char)p[n]) || p[n] == '.' || p[n] == '-' || p[n] == '+')) { buf[n] = p[n]; n++; }
+    if(!n) return NULL;
+    buf[n] = 0;
+    float v = strtof(buf, &e);
+    p += n;
+    if(p < end && *p == '%') { v = v * ref / 100.f; p++; }
+    else if(p + 1 < end && p[0] == 'p' && p[1] == 'x') p += 2;
+    *out = v;
+    return p;
+}
+
+static bool element_box(const element_t* element, const render_state_t* parent, bool fill, plutovg_rect_t* out);
+/* (cyberbrowser: clip-path inset() or circle() with an optional box keyword:
+ * in the element's user space, its transform included, of its fill box, or
+ * the viewport's box for view-box) */
+static bool apply_clip_shape(const element_t* element, render_context_t* context, render_state_t* state, const char* it, const char* end)
+{
+    while(it < end && *it == ' ') it++;
+    bool inset = end - it > 6 && !strncmp(it, "inset(", 6), circle = end - it > 7 && !strncmp(it, "circle(", 7);
+    if(!inset && !circle)
+        return false;
+    const char* close = memchr(it, ')', (size_t)(end - it));
+    if(!close)
+        return false;
+    bool view_box = false;
+    for(const char* q = close + 1; q + 8 <= end; q++)
+        if(!strncmp(q, "view-box", 8)) view_box = true;
+    render_state_t ls;
+    render_state_begin(element, &ls, state);
+    plutovg_rect_t b = {0, 0, 0, 0};
+    length_t lx = {0, length_type_fixed}, ly = {0, length_type_fixed}, lw = {0, length_type_fixed}, lh = {0, length_type_fixed};
+    if(view_box) {
+        b.w = state->view_width; b.h = state->view_height;
+    } else if(element->id == TAG_RECT) {
+        parse_length(element, ATTR_X, &lx, true, false);
+        parse_length(element, ATTR_Y, &ly, true, false);
+        parse_length(element, ATTR_WIDTH, &lw, false, false);
+        parse_length(element, ATTR_HEIGHT, &lh, false, false);
+        b.x = resolve_length(state, &lx, 'x'); b.y = resolve_length(state, &ly, 'y');
+        b.w = resolve_length(state, &lw, 'x'); b.h = resolve_length(state, &lh, 'y');
+    } else if(element->id == TAG_CIRCLE || element->id == TAG_ELLIPSE) {
+        parse_length(element, ATTR_CX, &lx, true, false);
+        parse_length(element, ATTR_CY, &ly, true, false);
+        float rx, ry;
+        if(element->id == TAG_CIRCLE) {
+            parse_length(element, ATTR_R, &lw, false, false);
+            rx = ry = resolve_length(state, &lw, 'o');
+        } else {
+            parse_length(element, ATTR_RX, &lw, false, false);
+            parse_length(element, ATTR_RY, &lh, false, false);
+            rx = resolve_length(state, &lw, 'x'); ry = resolve_length(state, &lh, 'y');
+        }
+        b.x = resolve_length(state, &lx, 'x') - rx; b.y = resolve_length(state, &ly, 'y') - ry; b.w = 2.f * rx; b.h = 2.f * ry;
+    } else {
+        /* (a container: its children's boxes in its user space) */
+        bool any = false;
+        for(const element_t* c = element->first_child; c; c = c->next_sibling) {
+            plutovg_rect_t r;
+            if(!element_box(c, &ls, true, &r)) continue;
+            if(!any) { b = r; any = true; continue; }
+            float x1 = b.x + b.w > r.x + r.w ? b.x + b.w : r.x + r.w, y1 = b.y + b.h > r.y + r.h ? b.y + b.h : r.y + r.h;
+            if(r.x < b.x) b.x = r.x;
+            if(r.y < b.y) b.y = r.y;
+            b.w = x1 - b.x; b.h = y1 - b.y;
+        }
+        if(!any)
+            return false;
+    }
+    plutovg_path_t* path = plutovg_path_create();
+    const char* p = it + (inset ? 6 : 7);
+    if(inset) {
+        float v[4];
+        int n = 0;
+        while(n < 4) {
+            const char* q = clip_shape_len(p, close, (n & 1) ? b.w : b.h, &v[n]);
+            if(!q) break;
+            p = q;
+            n++;
+        }
+        if(n == 0) { plutovg_path_destroy(path); return false; }
+        float t = v[0], r = n > 1 ? v[1] : t, bo = n > 2 ? v[2] : t, l = n > 3 ? v[3] : r;
+        if(n > 1 && n < 4) { r = v[1]; l = v[1]; }
+        if(n == 2) bo = v[0];
+        float w = b.w - l - r, h = b.h - t - bo;
+        if(w < 0.f) w = 0.f;
+        if(h < 0.f) h = 0.f;
+        plutovg_path_add_rect(path, b.x + l, b.y + t, w, h);
+    } else {
+        float rad;
+        const char* q = clip_shape_len(p, close, sqrtf((b.w * b.w + b.h * b.h) / 2.f), &rad);
+        if(!q) rad = (b.w < b.h ? b.w : b.h) / 2.f;   /* (closest-side, the shape centred) */
+        float cx = b.x + b.w / 2.f, cy = b.y + b.h / 2.f;
+        const char* at = q ? q : p;
+        while(at < close && *at == ' ') at++;
+        if(close - at > 3 && !strncmp(at, "at ", 3)) {
+            float px, py;
+            const char* q2 = clip_shape_len(at + 3, close, b.w, &px);
+            if(q2 && clip_shape_len(q2, close, b.h, &py)) { cx = b.x + px; cy = b.y + py; }
+        }
+        plutovg_path_add_circle(path, cx, cy, rad);
+    }
+    plutovg_canvas_save(context->canvas);
+    plutovg_canvas_set_matrix(context->canvas, &ls.matrix);
+    plutovg_canvas_set_fill_rule(context->canvas, PLUTOVG_FILL_RULE_NON_ZERO);
+    plutovg_canvas_clip_path(context->canvas, path);
+    plutovg_path_destroy(path);
+    return true;
+}
+
 /* (cyberbrowser: clip-path="url(#id)" of a <clipPath>: its circles, ellipses
  * and rects, in the user space the element is drawn in, the canvas clipped to
  * them; true when it was, and the canvas then saved) */
@@ -2854,6 +2975,8 @@ static bool apply_clip_path(const element_t* element, render_context_t* context,
         return false;
     const char* it = v->data;
     const char* end = it + v->length;
+    if(apply_clip_shape(element, context, state, it, end))
+        return true;
     string_t id;
     if(!parse_url_value(&it, end, &id))
         return false;
@@ -2949,7 +3072,8 @@ static void render_element(const element_t* element, render_context_t* context, 
     plutovg_rect_t bb = {0, 0, 0, 0}, dev;
     float box[4] = {0, 0, 0, 0};
     if(element_box(element, state, true, &bb)) {
-        plutovg_matrix_map_rect(&m, &bb, &dev);
+        /* (cyberbrowser: by the state's matrix, the viewBox's scale in it; the canvas's may not be set yet) */
+        plutovg_matrix_map_rect(&state->matrix, &bb, &dev);
         box[0] = dev.x; box[1] = dev.y; box[2] = dev.w; box[3] = dev.h;
     }
     unsigned char* data = plutovg_surface_get_data(layer);

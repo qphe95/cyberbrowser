@@ -33,6 +33,7 @@ struct TextShaper {
     uint32_t        colr_len, cpal_len;
     float           size_pixels;
     float           scale;
+    float           adj;           /* (@font-face size-adjust: 0 or 1 none) */
     float           ascent;
     float           descent;
     float           line_gap;
@@ -86,7 +87,8 @@ static uint32_t utf8_decode(const char **ptr)
     if (c < 0x80) {
         *ptr = (const char *)p;
         /* (a control character other than tab and line feed: visible, as a
-         * box, CSS Text 3 4.1.1) */
+         * box, CSS Text 3 4.1.1; a carriage return is a space) */
+        if (c == 0x0D) return 0x20;
         if ((c > 0 && c < 0x20 && c != 0x09 && c != 0x0A) || c == 0x7F) return 0x25A1;
         return c;
     }
@@ -126,7 +128,7 @@ static Strike *ts_strike(const TextShaper *s, int size_q)
     float px = (float)size_q * 0.25f;
     k->face = s;
     k->size_q = size_q;
-    k->scale = stbtt_ScaleForMappingEmToPixels(&s->font, px);
+    k->scale = stbtt_ScaleForMappingEmToPixels(&s->font, px) * (s->adj > 0.0f ? s->adj : 1.0f);
     k->embolden = s->embolden ? (int)roundf((float)s->embolden * px / s->size_pixels) : 0;
     if (s->embolden && k->embolden < 1) k->embolden = 1;
     k->next = g_strikes[b];
@@ -1269,6 +1271,18 @@ float text_shaper_zero_vadvance(const TextShaper *s)
     int k = gi < nlong ? gi : nlong - 1;
     int adv = ttUSHORT(d + vmtx + 4 * k);
     return (float)adv * s->scale / s->size_pixels;
+}
+
+/* (size-adjust: everything of the face scaled by f, before anything is measured) */
+void text_shaper_size_adjust(TextShaper *s, float f)
+{
+    if (!s || !(f > 0.0f) || f == 1.0f) return;
+    s->adj = f;
+    s->scale *= f;
+    s->ascent *= f;
+    s->descent *= f;
+    s->line_gap *= f;
+    s->baseline = s->ascent;
 }
 
 void text_shaper_override_vmetrics(TextShaper *s, float ascent, float descent, float line_gap)

@@ -63,6 +63,7 @@ typedef struct {
     size_t bytes;                 /* the file's decoded size (the cache's budget) */
     float ov[3];                  /* ascent-, descent-, line-gap-override, of the em; -1 normal */
     bool has_ov;                  /* (any of them given) */
+    float sa;                     /* (size-adjust, 1 none) */
     uint32_t used_gen;            /* the face generation a page last asked for it in */
 } WebFace;
 
@@ -621,12 +622,15 @@ static int match_web_locked(const char *family, int weight, bool italic)
     return -2;
 }
 
+static bool g_name_quoted;   /* (the name being resolved was quoted: no generic) */
 static int resolve_name_locked(const char *name, int weight, bool italic, bool *pending)
 {
     int s = match_web_locked(name, weight, italic);
     if (s >= 0) return s;
     if (s == -2) { *pending = true; return -1; }
-    for (size_t g = 0; g < sizeof(k_generics) / sizeof(k_generics[0]); g++) {
+    /* (quoted: not one of CSS 2's generics; the newer ones still match) */
+    bool css2 = !strcmp(name, "serif") || !strcmp(name, "sans-serif") || !strcmp(name, "monospace") || !strcmp(name, "cursive") || !strcmp(name, "fantasy");
+    for (size_t g = 0; !(g_name_quoted && css2) && g < sizeof(k_generics) / sizeof(k_generics[0]); g++) {
         if (strcmp(name, k_generics[g].generic) != 0) continue;
         for (int i = 0; k_generics[g].names[i]; i++) {
             s = match_system_locked(k_generics[g].names[i], weight, italic);
@@ -638,7 +642,7 @@ static int resolve_name_locked(const char *name, int weight, bool italic, bool *
     if (s >= 0) return s;
     for (size_t a = 0; a < sizeof(k_aliases) / sizeof(k_aliases[0]); a++)
         if (strcmp(name, k_aliases[a].name) == 0 && strcmp(name, k_aliases[a].as) != 0)
-            return resolve_name_locked(k_aliases[a].as, weight, italic, pending);
+            { g_name_quoted = false; return resolve_name_locked(k_aliases[a].as, weight, italic, pending); }   /* (what it stands for: a generic too) */
     return -1;
 }
 
@@ -667,7 +671,9 @@ int font_registry_resolve_chain(const char *family_list, int weight, bool italic
         }
         char name[FAMILY_MAX];
         lower_copy(name, sizeof(name), st, (size_t)(en - st));
+        g_name_quoted = quoted;
         int s = name[0] ? resolve_name_locked(name, weight, italic, &pending) : -1;
+        g_name_quoted = false;
         bool dup = false;
         for (int k = 0; k < n; k++) dup |= out[k] == s;
         if (s >= 0 && !dup) out[n++] = s;
@@ -755,7 +761,9 @@ int font_registry_resolve_style(const char *family_list, int weight, bool italic
             }
             name[k] = 0;
         }
+        g_name_quoted = quoted;
         if (name[0]) slot = resolve_name_locked(name, weight, italic, &pending);
+        g_name_quoted = false;
         while (*p && *p != ',') p++;
     }
     if (slot < 0) slot = resolve_name_locked("serif", weight, italic, &pending);   /* (none of them: the default standard font, a serif one) */
@@ -942,6 +950,7 @@ static void add_face_rule(const char *body, const char *end, const char *base)
     WebFace w;
     memset(&w, 0, sizeof(w));
     w.ov[0] = w.ov[1] = w.ov[2] = -1.0f;
+    w.sa = 1.0f;
     w.wmin = w.wmax = 400;
     w.smin = w.smax = 100.0f;
     w.slot = -1;
@@ -1037,6 +1046,10 @@ static void add_face_rule(const char *body, const char *end, const char *base)
             int k = ns[0] == 'a' || ns[0] == 'A' ? 0 : ns[0] == 'd' || ns[0] == 'D' ? 1 : 2;
             if (e1 != vs && e1 < ve && *e1 == '%' && v >= 0.0) { w.ov[k] = (float)(v / 100.0); w.has_ov = true; }
             else if (ve - vs == 6 && !strncasecmp(vs, "normal", 6)) w.ov[k] = -1.0f;   /* (the font's own again) */
+        } else if (nl == 11 && !strncasecmp(ns, "size-adjust", 11)) {
+            char *e1 = NULL;
+            double v = strtod(vs, &e1);
+            (void)v;   /* (not applied yet: unicode-range fallback and font-size-adjust with it lose more than it wins) */
         }
     }
     if (!w.family[0] || !src) { free(src); free(w.ranges); return; }
@@ -1046,7 +1059,7 @@ static void add_face_rule(const char *body, const char *end, const char *base)
             g_web[i].wmin == w.wmin && g_web[i].wmax == w.wmax && g_web[i].italic == w.italic &&
             g_web[i].oblique == w.oblique && g_web[i].amin == w.amin && g_web[i].amax == w.amax &&
             g_web[i].smin == w.smin && g_web[i].smax == w.smax &&
-            g_web[i].ov[0] == w.ov[0] && g_web[i].ov[1] == w.ov[1] && g_web[i].ov[2] == w.ov[2]) {
+            g_web[i].ov[0] == w.ov[0] && g_web[i].ov[1] == w.ov[1] && g_web[i].ov[2] == w.ov[2] && g_web[i].sa == w.sa) {
             pthread_mutex_unlock(&g_mu);
             free(src);
             free(w.ranges);
@@ -1633,6 +1646,7 @@ int font_registry_load_pending(void)
             if (copy) memcpy(copy, j->sfnt, j->len);
             TextShaper *s = text_shaper_create_from_memory(copy, j->len, 0, FONT_PIXELS);
             if (s && own_ov) text_shaper_override_vmetrics(s, w->ov[0], w->ov[1], w->ov[2]);
+            if (s && w->sa != 1.0f) text_shaper_size_adjust(s, w->sa);
             w->slot = s ? add_web_slot_locked(s) : -1;
         }
         w->state = w->slot >= 0 ? WEB_READY : WEB_FAILED;

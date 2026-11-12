@@ -35,6 +35,16 @@
 
 /* A transition has been declared somewhere: see lq_who_affected. */
 bool g_css_saw_transition;
+extern bool g_css_saw_container;
+/* (a value with a container unit: a number then cqw, cqh, cqi, cqb, cqmin or cqmax) */
+static bool css_value_has_cq(const char *v)
+{
+    for (const char *p = v ? strstr(v, "cq") : NULL; p; p = strstr(p + 2, "cq")) {
+        char c = p[2];
+        if (p > v && (isdigit((unsigned char)p[-1]) || p[-1] == '.') && (c == 'w' || c == 'h' || c == 'i' || c == 'b' || c == 'm')) return true;
+    }
+    return false;
+}
 bool g_css_saw_composition;     /* (animation-composition: what the engine's tracks don't do) */
 int g_css_attr_any_ns;
 int g_css_type_ns;
@@ -112,8 +122,10 @@ static void css_ns_put_uri(char **o, size_t *on, size_t *ocap, const char *uri)
     b[k++] = '|';
     css_ns_put(o, on, ocap, b, k);
 }
+static __thread bool t_ns_bad;   /* (the last rewrite met a prefix the sheet never declared, outside a forgiving list) */
 static char *css_ns_rewrite(const char *sel)
 {
+    t_ns_bad = false;
     if (!t_nns && !t_ns_has_default) return NULL;
     size_t n = strlen(sel), on = 0, ocap = n * 2 + 64;
     char *o = (char *)malloc(ocap);
@@ -151,7 +163,8 @@ static char *css_ns_rewrite(const char *sel)
             while (b > 0 && (isalnum((unsigned char)sel[b - 1]) || sel[b - 1] == '-')) b--;
             bool selp = (i - b == 3 && !strncasecmp(sel + b, "not", 3)) || (i - b == 2 && !strncasecmp(sel + b, "is", 2)) ||
                         (i - b == 5 && !strncasecmp(sel + b, "where", 5)) || (i - b == 3 && !strncasecmp(sel + b, "has", 3)) ||
-                        (i - b == 7 && !strncasecmp(sel + b, "matches", 7)) || (i - b == 3 && !strncasecmp(sel + b, "any", 3));
+                        (i - b == 7 && !strncasecmp(sel + b, "matches", 7)) || (i - b == 3 && !strncasecmp(sel + b, "any", 3)) ||
+                        (i - b == 4 && !strncasecmp(sel + b, "host", 4)) || (i - b == 12 && !strncasecmp(sel + b, "host-context", 12));
             depth++;
             if (selp) sel_depth++;
             css_ns_put(&o, &on, &ocap, sel + i, 1);
@@ -183,7 +196,7 @@ static char *css_ns_rewrite(const char *sel)
                 const char *uri = NULL;
                 for (int k = t_nns - 1; k >= 0 && !uri; k--) if (!strcmp(t_ns[k].p, id)) uri = t_ns[k].uri;
                 if (uri) css_ns_put_uri(&o, &on, &ocap, uri);
-                else css_ns_put(&o, &on, &ocap, sel + i, e + 1 - i);
+                else { css_ns_put(&o, &on, &ocap, sel + i, e + 1 - i); if (depth == 0) t_ns_bad = true; }
                 i = e + 1;
             } else {
                 if (t_ns_has_default) css_ns_put_uri(&o, &on, &ocap, t_ns_default);
@@ -348,6 +361,7 @@ static bool css_declaration_add(CssRule *rule, const char *prop, size_t prop_len
         rule->declaration_capacity = new_cap;
     }
     if (!strncasecmp(p, "transition", 10)) g_css_saw_transition = true;
+    if (css_value_has_cq(v)) g_css_saw_container = true;   /* (container units: the sizes layout comes to) */
     if (!strncasecmp(p, "animation-composition", 21)) g_css_saw_composition = true;
     rule->declarations[rule->declaration_count].property = p;
     rule->declarations[rule->declaration_count].value = v;
@@ -894,6 +908,7 @@ static void sink_rule(void *ctx, char *prop, char *value, bool important)
     }
     CssDeclaration *d = &rule->declarations[rule->declaration_count++];
     if (prop && !strncasecmp(prop, "transition", 10)) g_css_saw_transition = true;
+    if (css_value_has_cq(value)) g_css_saw_container = true;
     if (prop && !strncasecmp(prop, "animation-composition", 21)) g_css_saw_composition = true;
     d->property = prop;
     d->value = value;
@@ -1658,6 +1673,15 @@ static size_t css_keyframes_rule(const char *s, size_t len, size_t pre, size_t p
         CssRule r;
         memset(&r, 0, sizeof r);
         css_parse_declaration_block(s, len, &pos, &r);
+        {
+            /* (!important in a keyframe: that declaration ignored) */
+            int w = 0;
+            for (int d = 0; d < r.declaration_count; d++) {
+                if (r.declarations[d].important) { free(r.declarations[d].property); free(r.declarations[d].value); continue; }
+                r.declarations[w++] = r.declarations[d];
+            }
+            r.declaration_count = w;
+        }
         if (!k || !name || !name[0]) {
             css_declarations_free(r.declarations, r.declaration_count);
             continue;
@@ -1798,8 +1822,11 @@ static size_t css_at_rule(const char *s, size_t len, size_t pos, bool nested, Cs
     if (is_namespace && !block && !nested && !t_ns_closed) {
         /* (its prefix, if any, and URI: url(...) or a string; anything else after it invalid) */
         char *c = css_strndup_trim(s + pre, pre_end - pre);
+        if (c && strstr(c, "/*")) css_strip_comments(c);   /* (comments: between tokens) */
         const char *p = c ? c : "";
+        while (css_is_space(*p)) p++;
         size_t pn = strlen(p), k = 0;
+        while (pn && css_is_space(p[pn - 1])) pn--;
         char pfx[32] = { 0 }, uri[200] = { 0 }, fn[16];
         bool ok = true, has_uri = false;
         if (pn && p[0] != '"' && p[0] != '\'') {
@@ -1906,8 +1933,24 @@ static size_t css_at_rule(const char *s, size_t len, size_t pos, bool nested, Cs
         }
     }
     if (!block) return end;
-    if (sheet && ((nl == 9 && !strncasecmp(name, "keyframes", 9)) || (nl == 17 && !strncasecmp(name, "-webkit-keyframes", 17))))
+    if (sheet && ((nl == 9 && !strncasecmp(name, "keyframes", 9)) || (nl == 17 && !strncasecmp(name, "-webkit-keyframes", 17)))) {
+        /* (inside an @media that does not hold: not defined; as the page is laid out, 800 by 600) */
+        if (cond && cond[0]) {
+            CssRule mq;
+            memset(&mq, 0, sizeof mq);
+            mq.media_query = (char *)cond;
+            if (!css_rule_media_matches(&mq, 800.0, 600.0)) {
+                size_t e;
+                if (css_block_skip_fast(s, len, end, &e)) return e;
+                CssTz tz;
+                css_tz_init(&tz, s, len, end);
+                end = css_tokens_skip_block(&tz);
+                css_tz_free(&tz);
+                return end;
+            }
+        }
         return css_keyframes_rule(s, len, pre, pre_end, end, sheet);
+    }
     if (sheet && nl == 12 && !strncasecmp(name, "position-try", 12)) {
         char *c = css_strndup_trim(s + pre, pre_end - pre);
         CssRule *r = c && c[0] == '-' && c[1] == '-' ? css_stylesheet_add_rule(sheet) : NULL;
@@ -2086,6 +2129,15 @@ static size_t css_rule_item(const char *s, size_t len, size_t pos, bool nested, 
         css_skip_rule_block(s, len, &pos);
         return pos;
     }
+    {
+        char *nw = css_ns_rewrite(sel);
+        if (nw) { free(sel); sel = nw; }
+        if (t_ns_bad) {   /* (an undeclared prefix: the whole list invalid) */
+            free(sel);
+            css_skip_rule_block(s, len, &pos);
+            return pos;
+        }
+    }
     if (counts) *counts = true;
     if (!nested) t_ns_closed = true;
     CssRule *rule = sheet ? css_stylesheet_add_rule(sheet) : NULL;
@@ -2093,10 +2145,6 @@ static size_t css_rule_item(const char *s, size_t len, size_t pos, bool nested, 
         free(sel);
         css_skip_rule_block(s, len, &pos);
         return pos;
-    }
-    {
-        char *nw = css_ns_rewrite(sel);
-        if (nw) { free(sel); sel = nw; }
     }
     if (t_scope_a) {
         char *sw = scope_apply(sel, t_scope_a, t_scope_b, true);
@@ -4561,7 +4609,25 @@ static char* css_transform_one_selector(const char *sel, size_t len, const char 
         size_t close = css_match_paren(sel, open, len);
         css_buf_append_cstr(&out, &out_len, &out_cap, host_tag);
         if (close > open + 1) {
-            css_buf_append(&out, &out_len, &out_cap, sel + open + 1, close - open - 1);
+            /* (a compound only: a combinator in it, nothing matches) */
+            const char *qa = sel + open + 1;
+            size_t qn = close - open - 1;
+            while (qn && css_is_space(*qa)) { qa++; qn--; }
+            while (qn && css_is_space(qa[qn - 1])) qn--;
+            bool complex = false;
+            int qd = 0;
+            for (size_t q = 0; q < qn && !complex; q++) {
+                char c = qa[q];
+                if (c == '(' || c == '[') qd++;
+                else if ((c == ')' || c == ']') && qd) qd--;
+                else if (!qd && (css_is_space(c) || c == '>' || c == '+' || c == '~' || c == ',')) complex = true;
+            }
+            if (complex) css_buf_append_cstr(&out, &out_len, &out_cap, ":not(*)");
+            else {
+                css_buf_append_cstr(&out, &out_len, &out_cap, ":is(");
+                css_buf_append(&out, &out_len, &out_cap, qa, qn);
+                css_buf_append_cstr(&out, &out_len, &out_cap, ")");
+            }
         }
         i = close + 1;
         css_buf_append(&out, &out_len, &out_cap, sel + i, len - i);

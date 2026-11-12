@@ -67,6 +67,7 @@ bool text_shaper_deco_metrics(const TextShaper *shaper, float *ul_pos, float *ul
 /* Vertical metrics as fractions of the em (descent positive). */
 /* (@font-face metric overrides: fractions of the em, a negative one kept as it is) */
 void text_shaper_override_vmetrics(TextShaper *shaper, float ascent, float descent, float line_gap);
+void text_shaper_size_adjust(TextShaper *shaper, float f);
 bool text_shaper_vmetrics(const TextShaper *shaper, float *ascent, float *descent,
                           float *line_gap);
 

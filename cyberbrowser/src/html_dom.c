@@ -2573,15 +2573,10 @@ static void mir_buf_add(MirBuf *b, const char *s, size_t n) {
         b->s = ns;
         b->cap = nc;
     }
-    /* The tokenizer turns CR LF and lone CR into LF. */
-    for (size_t i = 0; i < n; i++) {
-        char c = s[i];
-        if (c == '\r') {
-            if (i + 1 < n && s[i + 1] == '\n') continue;
-            c = '\n';
-        }
-        b->s[b->n++] = c;
-    }
+    /* (the source's CR LF and lone CR the tokenizer made LF; a CR left in
+     * the DOM came from a reference or a script: kept, CSS's to treat as a space) */
+    memcpy(b->s + b->n, s, n);
+    b->n += n;
     b->s[b->n] = '\0';
 }
 

@@ -1477,7 +1477,10 @@ static int32_t after_base_list(Builder *b, const char *branch, size_t blen, int 
         /* (these from here on are the kinds k_after_kind gives) */
         "::scroll-marker:checked", "::scroll-button(block-start)", "::scroll-button(block-end)",
         "::scroll-button(inline-start)", "::scroll-button(inline-end)",
-        "::slider-track", "::slider-fill", "::slider-thumb" };
+        "::slider-track", "::slider-fill", "::slider-thumb",
+        /* (a button's :enabled, :disabled: (*), up, down, left, right, then the logical ones) */
+        "::scroll-button(*):enabled", "::scroll-button(up):enabled", "::scroll-button(down):enabled", "::scroll-button(left):enabled", "::scroll-button(right):enabled", "::scroll-button(block-start):enabled", "::scroll-button(block-end):enabled", "::scroll-button(inline-start):enabled", "::scroll-button(inline-end):enabled", "::scroll-button(*):disabled", "::scroll-button(up):disabled", "::scroll-button(down):disabled", "::scroll-button(left):disabled", "::scroll-button(right):disabled", "::scroll-button(block-start):disabled", "::scroll-button(block-end):disabled", "::scroll-button(inline-start):disabled", "::scroll-button(inline-end):disabled",
+        "::column::scroll-marker", "::column::scroll-marker:target-current" };
     char buf[512];
     if (blen == 0 || blen >= sizeof(buf)) return -1;
     memcpy(buf, branch, blen);
@@ -1644,12 +1647,16 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
                     while (blen > 0 && isspace((unsigned char)bp[blen - 1])) blen--;
                     if (blen > 0) {
                         /* (logical buttons as physical: horizontal flow, all layout has) */
-                        static const unsigned char k_after_kind[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 6, 9, 10, 11, 12, 13, 14, 15 };
+                        static const unsigned char k_after_kind[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 6, 26, 27, 28, 29, 13, 14, 15,
+                                                                      16, 17, 18, 19, 20, 30, 31, 32, 33, 21, 22, 23, 24, 25, 34, 35, 36, 37, 38, 39 };
                         int32_t is_before = 0, li = -1;
                         for (int kk = 0; li < 0 && kk < (int)sizeof k_after_kind; kk++) {
                             /* (only those whose kind of name is in it) */
                             if (kk >= 5 && kk < 18 && !ci_strstr((char *)sel, ":scroll-")) continue;
-                            if (kk >= 18 && !ci_strstr((char *)sel, ":slider-")) break;
+                            if ((kk == 5 || kk == 6 || kk == 13) && ci_strstr((char *)sel, "::column::")) continue;   /* (a column's, not the element's) */
+                            if (kk >= 18 && kk < 21 && !ci_strstr((char *)sel, ":slider-")) continue;
+                            if (kk >= 21 && kk < 39 && !ci_strstr((char *)sel, ":scroll-button")) continue;
+                            if (kk >= 39 && !ci_strstr((char *)sel, "::column::scroll-marker")) continue;
                             li = after_base_list(&b, bp, blen, kk);
                             is_before = k_after_kind[kk];
                         }
@@ -2112,7 +2119,7 @@ int css_style_match_after(const CssStyleSet *S, const CssStyleDoc *D, int dom,
         t->after_hits.v[j] = v;
     }
     int32_t last_rule = -1;
-    unsigned kinds = 0;
+    uint64_t kinds = 0;
     for (size_t i = 0; i < t->after_hits.n; i++) {
         const CAfter *af = &S->afters[t->after_hits.v[i]];
         {
@@ -2121,8 +2128,8 @@ int css_style_match_after(const CssStyleSet *S, const CssStyleDoc *D, int dom,
         }
         if (af->rule != last_rule) kinds = 0;
         last_rule = af->rule;
-        if (kinds & (1u << af->is_before)) continue;
-        kinds |= 1u << af->is_before;
+        if (kinds & (1ull << af->is_before)) continue;
+        kinds |= 1ull << af->is_before;
         /* (the user agent's sheet below every author rule, as for elements) */
         CssAfterMatch m = { af->rule, af->spec - (S->rules[af->rule].ua ? (1 << 28) : 0), af->is_before };
         VEC_PUSH(t->after_out, m);

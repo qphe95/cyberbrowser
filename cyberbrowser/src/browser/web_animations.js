@@ -3411,6 +3411,17 @@
 
     /* ---- Element.animate, getAnimations ---- */
     Object.defineProperty(ELP, 'animate', { configurable: true, enumerable: true, writable: true, value: function animate(keyframes, options) {
+        /* (a view transition's pseudo-element: the element painting it, while there is one) */
+        if (options && typeof options === 'object' && options.pseudoElement && global.__cyberVtEl) {
+            var vte = global.__cyberVtEl(options.pseudoElement);
+            if (vte) {
+                var o2 = {};
+                for (var ok in options) if (ok !== 'pseudoElement') o2[ok] = options[ok];
+                var va = animate.call(vte, keyframes, o2);
+                if (global.__cyberVtHold) global.__cyberVtHold(va);
+                return va;
+            }
+        }
         var effect = new KeyframeEffect(this, keyframes, options);
         var anim = new Animation(effect, options && options.timeline !== undefined ? options.timeline : undefined);
         if (options && typeof options === 'object' && options.id !== undefined) anim.id = String(options.id);

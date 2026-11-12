@@ -175,6 +175,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     CssTextAlign text_align;
     unsigned char text_align_set;
     unsigned char is_th;
+    unsigned char is_fieldset;      /* (a fieldset: no internal table display of its own) */
     unsigned char ovf_visible_given;
     unsigned char ovf_moved;
     unsigned char ovf_from_body;   /* (a root's overflow that is the body's, moved: undone before moving again) */
@@ -192,6 +193,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char ta_match;   /* (text-align: match-parent: the parent's, start and end as the parent's direction has them) */
     /* text-align-last: 0 auto, 1 start, 2 end, 3 left, 4 right, 5 center, 6 justify (inherited) */
     unsigned char tal, tal_set;
+    unsigned char tga;   /* (text-group-align: 0 none, 1 start, 2 end, 3 left, 4 right, 5 center) */
     unsigned char tj_none, tj_set;   /* text-justify: none (inherited) */
     unsigned char tj_char;           /* (text-justify: 1 inter-character or distribute, 2 inter-word; inherited) */
     /* offset-path ray(): op_kind 1, its angle (deg), size (0 closest-side,
@@ -485,7 +487,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * viewport (fixed). */
     unsigned char bg_no_repeat_x, bg_no_repeat_y;
     unsigned char bg_space, bg_round;   /* (background-repeat space / round: bit 1 across, 2 down) */
-    unsigned char bg_clip, bg_origin;   /* (clip: 0 border-box, 1 padding-box, 2 content-box; origin: 0 padding-box, 1 border-box, 2 content-box) */
+    unsigned char bg_clip, bg_origin;
+    unsigned char bg_clip_col;   /* (the last layer's clip, the color's: 1 + as bg_clip; 0 as bg_clip) */   /* (clip: 0 border-box, 1 padding-box, 2 content-box; origin: 0 padding-box, 1 border-box, 2 content-box) */
     /* border-image: bi_src the image (NULL none); slices top right bottom
      * left (bit k of bi_slice_pct: a percent) and fill; widths by bi_w_kind
      * (0 a multiple of the border width, 1 px, 2 percent, 3 auto); outsets
@@ -511,6 +514,9 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     /* (the declared text, each layer's: image, mode, repeat, position, clip, origin, size, composite; [8] the shorthand) */
     const char *mk_text[9];
     const char *clip_path;     /* (clip-path as written; NULL none) */
+    const char *border_shape;  /* (border-shape as written; NULL none) */
+    uint32_t tfill_rgba;            /* (-webkit-text-fill-color: tfill_set 1 a color of its own, else the text's color; inherited) */
+    unsigned char tfill_set, tfill_given;
     const char *content_img;   /* (content: url() on an element: the absolute URL of the image replacing it; NULL none) */
     /* (ruby: ruby_role 1 container, 2 base, 3 text, 4 base container, 5 text container, 6 a column's box;
      * an annotation's column box + 1 (ruby_col), its level, the next annotation of the same column + 1;
@@ -806,6 +812,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * border-spacing (when border_spacing_set; else the cellspacing
      * attribute or 2px) and border-collapse: collapse (no spacing). */
     unsigned char table_role;
+    unsigned char isolate;      /* (isolation: isolate: a stacking context) */
     unsigned char border_spacing_set, border_collapse, border_collapse_set;   /* (border-collapse: inherited) */
     unsigned char empty_cells_hide, empty_cells_set;   /* (empty-cells: inherited) */
     double border_spacing_h, border_spacing_v;
@@ -825,6 +832,8 @@ bool css_layout_marker_has_content(const struct LayoutContext *ctx, int idx);
 double css_layout_content_area(const struct LayoutContext *ctx, int i, double *adv);
 bool css_layout_te_under(const struct LayoutContext *ctx, int i);
 const char *css_layout_block_ellipsis(const struct LayoutContext *ctx, int i);
+const char *css_layout_line_ellipsis(const struct LayoutContext *ctx, int i);
+void css_layout_marker_spacing(const struct LayoutContext *ctx, int idx, double fs, float *ls, float *ws);
 double css_layout_hl_length(const struct LayoutContext *ctx, int box, const char *v, double fs);
 /* The font list item idx's ::marker asks for: size (px), weight, italic, family; each left as given when not. */
 void css_layout_marker_font(const struct LayoutContext *ctx, int idx, double *fs, int *weight, int *italic, const char **family);
@@ -848,6 +857,8 @@ typedef struct LayoutBox {
     unsigned char mc_vert;      /* (its flow across: 1 block axis along +x, 2 along -x; its children's mc_src, mc_dst from its content start) */
     unsigned char mc_hang;      /* (in columns: 1 can't break and passes its column's end, whole there; 2 a box around such a one) */
     float mc_cut;               /* (2: how much of it went with what hangs, painted past the column's end) */
+    int rep_h, rep_f;           /* (a table in columns: its header and footer groups repeated at its breaks, -1 none) */
+    unsigned char clr_empty;    /* (an empty box placed with clearance: the margins collapsed through it stay in its parent) */
     unsigned char bdb_n;        /* (box-decoration-break: clone, in columns: the breaks in it, each its decorations again) */    /* (its columns in rows, one in each column of the multicol container around it) */
     float mc_rgap;              /* (column-wrap: rows of mc_n columns, this far apart; < 0 none) */
     /* A multi-column container's child: its run of columns (between spanners)
@@ -980,6 +991,7 @@ typedef struct CssCustomProps CssCustomProps;
 typedef struct {
     double left, right, top, bottom;   /* (margin box) */
     unsigned char side;
+    unsigned char il;                  /* (an initial letter: a float on its side after it goes below it) */
     /* shape-outside (CSS Shapes 1), what lines wrap around: 0 none (the
      * margin box), 1 an ellipse (s[0..3]: cx, cy, rx, ry), 2 a rounded
      * rectangle (s[0..3]: x0, y0, x1, y1; rad: tl, tr, br, bl, x and y), 3 a
