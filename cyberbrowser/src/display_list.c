@@ -6341,6 +6341,7 @@ static bool dl_ellipsis_span(TextShaper *f, const char *s, float x, float y, flo
     }
     off[n] = (uint32_t)(p - (const unsigned char *)s);
     if (!rl || *p) return text_shaper_shape_span(f, s, 0, strlen(s), x, y, scale, false, r, g, b, a, dl);
+    if (base < 0) base = bidi_first_strong_level(cps, n) > 0 ? 1 : 0;   /* (-1: its own, from its first strong character) */
     bidi_resolve(cps, n, base, lv);
     bidi_reorder(lv, n, ord);
     for (int k = 0; k < n;) {
@@ -8587,7 +8588,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                                     const char *etx = fr->ellipsis >= 2 ? css_layout_line_ellipsis(ctx, i) : css_layout_block_ellipsis(ctx, i);
                                     /* (right to left: before the text's left edge) */
                                     float ex = (float)(box->x + fr->dx + fr->w) + fr->ell_dx;
-                                    if (etx[0] && fr->ellipsis != 2 && (es->direction == 1 || (fr->level & 1))) {
+                                    if (etx[0] && fr->ellipsis != 2 && (fr->ell_dir ? fr->ell_dir == 1 : es->direction == 1)) {   /* (the block's end: its direction, whatever the text's) */
                                         float ew = 0.0f, eh = 0.0f;
                                         text_shaper_measure(ef, etx, &ew, &eh);
                                         ex = (float)(box->x + fr->dx) - ew * (float)(efs / 16.0);
@@ -8595,7 +8596,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                                     /* (the block's own text on its ::first-line: that line's color) */
                                     bool efl = (fr->fl && ctx->tree.nodes[i].parent_idx == eb) || clip_on;
                                     bool okp = !etx[0] || dl_ellipsis_span(ef, etx, ex, ey, (float)(efs / 16.0),
-                                                                     fr->ellipsis != 2 && es->direction == 1, efl ? fr_r : (float)es->color_r, efl ? fr_g : (float)es->color_g,
+                                                                     fr->ellipsis == 1 ? -1 : fr->ellipsis != 2 && es->direction == 1, efl ? fr_r : (float)es->color_r, efl ? fr_g : (float)es->color_g,
                                                                      efl ? fr_b : (float)es->color_b, efl ? fr_a : (float)es->color_a * op, dl);
                                     text_shaper_set_spacing(box->s->letter_spacing, box->s->word_spacing, scale);
                                     display_list_set_font_chain(box->s->font_family, box->s->font_weight, box->s->font_italic ? 1 : 0);

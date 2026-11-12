@@ -190,6 +190,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * center (as it is), 2 end; start and end follow direction (1: rtl,
      * inherited). */
     unsigned char text_align_how, direction, direction_set;
+    unsigned char fl_brk;   /* (a ::first-line box: the line ends after it) */
     unsigned char ta_match;   /* (text-align: match-parent: the parent's, start and end as the parent's direction has them) */
     /* text-align-last: 0 auto, 1 start, 2 end, 3 left, 4 right, 5 center, 6 justify (inherited) */
     unsigned char tal, tal_set;
@@ -935,6 +936,7 @@ typedef struct LayoutTextFrag {
     unsigned char level;
     unsigned char ellipsis;   /* an ellipsis after it (line-clamp, text-overflow) */
     float ell_by;             /* (its line's baseline, the block's, below its own: where the ellipsis sits) */
+    unsigned char ell_dir;    /* (its paragraph's direction where plaintext gives it one: 1 rtl, 2 ltr; 0 the block's) */
     unsigned char ell_abs;    /* (ell_top set: the ellipsis's em box top from the box's y, as the block's own text there would have it) */
     double ell_top;
     float ell_dx;            /* (the edges of inline boxes closing after it: the ellipsis past them) */

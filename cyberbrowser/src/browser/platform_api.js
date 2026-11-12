@@ -4354,7 +4354,7 @@
         return o;
     }
     function printBoxEl(name, d, k, n) {
-        var cell = document.createElement('div'), def = MB_DEFAULT[name];
+        var cell = document.createElement('cyber-pm'), def = MB_DEFAULT[name];
         var skip = { content: 1, width: 1, height: 1, 'min-width': 1, 'max-width': 1, 'min-height': 1, 'max-height': 1,
                      'counter-reset': 1, 'counter-increment': 1, 'counter-set': 1 };
         cell.style.cssText = 'display:table-cell;box-sizing:border-box;text-align:' + def[0] + ';vertical-align:' + def[1] + ';white-space:pre-wrap;';
@@ -4405,10 +4405,10 @@
         return [one(a), one(b)];
     }
     /* (CSS Page 3 5.3.1: sizes of two groups along the available length) */
-    function printDistribute(av, aMin, aMax, bMin, bMax) {
+    function printDistribute(av, aMin, aMax, bMin, bMax, t0) {
         var sumMax = aMax + bMax, sumMin = aMin + bMin;
         if (sumMax <= av) {
-            var fl = av - sumMax, t = sumMax > 0 ? aMax / sumMax : 0.5;
+            var fl = av - sumMax, t = sumMax > 0 ? aMax / sumMax : (t0 === undefined ? 0.5 : t0);   /* (none wanting any: by count, t0) */
             return aMax + fl * t;
         }
         if (sumMin < av) {
@@ -4447,7 +4447,7 @@
                 var sideMin = 2 * Math.max(A ? A.mn : 0, B ? B.mn : 0), sideMax = 2 * Math.max(A ? A.mx : 0, B ? B.mx : 0);
                 /* (sides all sized: the centre has the rest between them) */
                 if ((A || B) && (!A || fix[0] !== null) && (!B || fix[2] !== null)) sz[1] = Math.max(0, avail - sideMax);
-                else sz[1] = printDistribute(avail, C.mn, C.mx, sideMin, sideMax);
+                else sz[1] = printDistribute(avail, C.mn, C.mx, sideMin, sideMax, 1 / 3);   /* (the centre against two sides) */
             }
             var rest = (avail - sz[1]) / 2;
             if (A) sz[0] = fix[0] !== null ? fix[0] : rest;
@@ -4481,10 +4481,10 @@
         var mt = printMarginSum(d, 'margin-top', 'margin-top', base) / 2, mb = printMarginSum(d, 'margin-bottom', 'margin-bottom', base) / 2;
         var aw = printAutos(d, 'margin-left', 'margin-right'), ah = printAutos(d, 'margin-top', 'margin-bottom');
         var bw = w - ml - mr, bh = h - mt - mb;
-        var wrap = document.createElement('div'), cell = printBoxEl(name, d, k, n);
+        var wrap = document.createElement('cyber-pm'), cell = printBoxEl(name, d, k, n);
         var kw = function (v) { return /content/.test(v); };
-        var cw = d.width !== undefined && d.width !== 'auto' && /corner|^left|^right/.test(name) ? (kw(d.width) ? printMeasure(host, name, d, k, n).maxW - printContentSize(host, name, d, k, n, true) : printLen(d.width, w)) : null;
-        var ch = d.height !== undefined && d.height !== 'auto' && /corner|^top|^bottom/.test(name) ? (kw(d.height) ? printMeasure(host, name, d, k, n).maxH - printContentSize(host, name, d, k, n, false) : printLen(d.height, h)) : null;
+        var cw = d.width !== undefined && d.width !== 'auto' && /corner|^left|^right/.test(name) ? (kw(d.width) ? printContentSize(host, name, d, k, n, true) : printLen(d.width, w)) : null;
+        var ch = d.height !== undefined && d.height !== 'auto' && /corner|^top|^bottom/.test(name) ? (kw(d.height) ? printContentSize(host, name, d, k, n, false) : printLen(d.height, h)) : null;
         if (cw !== null && d['box-sizing'] !== 'border-box') cw += printMeasure(host, name, d, k, n).maxW - printContentSize(host, name, d, k, n, true);
         if (ch !== null && d['box-sizing'] !== 'border-box') ch += printMeasure(host, name, d, k, n).maxH - printContentSize(host, name, d, k, n, false);
         var bx = x + ml, by = y + mt;
@@ -4515,7 +4515,7 @@
         var pw = size[0], ph = size[1], de = document.documentElement;
         /* (the page box's own border and padding take room from the content) */
         var extra = function (p) { var o = 0; ['border-' + p + '-width', 'padding-' + p].forEach(function (q) { var v = printDecl(first, q); if (v) o += printLen(v, pw); }); return o; };
-        var probe = document.createElement('div');
+        var probe = document.createElement('cyber-pm');
         var bt = 0, br = 0, bb = 0, bl = 0;
         first.forEach(function (r) {
             probe.style.cssText = r.style.cssText.replace(/\bsize\s*:[^;]*;?/g, '').replace(/\bmargin[^:]*:[^;]*;?/g, '');
@@ -4541,7 +4541,7 @@
             var n = Math.max(1, __cyberPrintPages());
             if (n > 40) n = 40;
             var hostOf = function (z) {
-                var hh = document.createElement('div');
+                var hh = document.createElement('cyber-pm');
                 hh.setAttribute('data-cyber-print', '');
                 hh.style.cssText = 'all:initial;position:fixed;left:0;top:0;width:0;height:0;z-index:' + z + ';';
                 var inh = {};
@@ -4558,6 +4558,10 @@
             try { printCtrList(getComputedStyle(de).counterReset, 0).forEach(function (p) { if (p[0] !== 'page' && p[0] !== 'pages') ctr[p[0]] = p[1]; }); } catch (e) { /* (none) */ }
             for (var k = 0; k < n; k++) {
                 var rs = printPageRules(rules, '', k), m = printMetrics(rs, pw, ph);
+                /* (a width or height of the page box: the area that big, the end margin the rest) */
+                var wdk = printDecl(rs, 'width'), hdk = printDecl(rs, 'height');
+                if (wdk && wdk !== 'auto') m.right = pw - m.left - printLen(wdk, pw) - bl - br;
+                if (hdk && hdk !== 'auto') m.bottom = ph - m.top - printLen(hdk, ph) - bt - bb;
                 var pinc = 1;
                 printCtrList(printDecl(rs, 'counter-reset'), 0).forEach(function (p) { if (p[0] === 'page') pno = p[1]; else ctr[p[0]] = p[1]; });
                 printCtrList(printDecl(rs, 'counter-increment'), 1).forEach(function (p) { if (p[0] === 'page') pinc = p[1]; else ctr[p[0]] = (ctr[p[0]] || 0) + p[1]; });
@@ -4568,7 +4572,7 @@
                 printPageCtr = '';
                 for (var cn0 in ctr) if (cn0 !== 'page' && cn0 !== 'pages') printPageCtr += ' ' + cn0 + ' ' + ctr[cn0];
                 var px = -(m0.left + bl), py = k * ph - (m0.top + bt);
-                var box = document.createElement('div');
+                var box = document.createElement('cyber-pm');
                 /* (the page box's decorations, under nothing else of it) */
                 var deco = '';
                 rs.forEach(function (r) { deco += r.style.cssText.replace(/\bsize\s*:[^;]*;?/g, '').replace(/\bmargin[^:]*:[^;]*;?/g, '').replace(/\b(page-orientation|marks|bleed|width|height)\s*:[^;]*;?/g, '') + ';'; });
@@ -4579,7 +4583,7 @@
                     var bgc = box.style.backgroundColor;
                     if (bgc && bgc !== 'transparent') {
                         box.style.backgroundColor = 'transparent';
-                        var sh = document.createElement('div');
+                        var sh = document.createElement('cyber-pm');
                         sh.style.cssText = 'position:absolute;visibility:hidden;left:' + px + 'px;top:' + py + 'px;width:' + pw + 'px;height:' + ph + 'px;';
                         sh.style.backgroundColor = bgc;
                         sheet.appendChild(sh);

@@ -686,6 +686,8 @@ static CssPropDef g_props[] = {
     L("-webkit-text-stroke-color", "<color>", "currentcolor", 1),
     S("-webkit-text-stroke", "<'-webkit-text-stroke-width'> || <'-webkit-text-stroke-color'>", "-webkit-text-stroke-width -webkit-text-stroke-color", CSS_SH_GRAMMAR),
     L("-webkit-box-orient", "horizontal | vertical | inline-axis | block-axis", "horizontal", 0),
+    L("-webkit-box-align", "stretch | start | end | center | baseline", "stretch", 0),
+    L("-webkit-box-pack", "start | end | center | justify", "start", 0),
     L("line-height", "normal | <number [0,inf]> | <length-percentage [0,inf]>", "normal", 1),
     SI("list-style", "<'list-style-position'> || <'list-style-image'> || <'list-style-type'>",
        "list-style-position list-style-image list-style-type", CSS_SH_SPECIAL),
