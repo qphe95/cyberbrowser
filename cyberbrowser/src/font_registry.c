@@ -33,6 +33,7 @@
 typedef struct {
     char family[FAMILY_MAX];      /* lowercase legacy family (name ID 1) */
     char typo[FAMILY_MAX];        /* lowercase typographic family (ID 16), or "" */
+    char loc[FAMILY_MAX];         /* (a localized family name, another language's ID 1, or "") */
     char *path;
     int index;                    /* face index inside a collection */
     int weight;
@@ -274,6 +275,7 @@ static uint32_t be32(const uint8_t *p)
 
 /* Name `id` from a name table (UTF-16BE Windows names preferred, US English
  * first), lowercased ASCII/UTF-8 into out. */
+static __thread bool t_name_loc;   /* (name_lookup: a Windows name in a language other than US English only) */
 static bool name_lookup(const uint8_t *name, size_t len, int id, char *out, size_t cap)
 {
     if (len < 6) return false;
@@ -283,6 +285,7 @@ static bool name_lookup(const uint8_t *name, size_t len, int id, char *out, size
         const uint8_t *r = name + 6 + i * 12;
         int plat = be16(r), enc = be16(r + 2), lang = be16(r + 4), nid = be16(r + 6);
         if (nid != id) continue;
+        if (t_name_loc && !(plat == 3 && (enc == 1 || enc == 10) && lang != 0x409)) continue;
         int score = -1;
         if (plat == 3 && (enc == 1 || enc == 10)) score = lang == 0x409 ? 3 : 2;
         else if (plat == 0) score = 1;
@@ -337,6 +340,11 @@ static void index_face(FILE *f, const char *path, long base, int index)
     bool ok = read_at(f, name_off, name, name_len) &&
               name_lookup(name, name_len, 1, face.family, sizeof(face.family));
     if (ok) name_lookup(name, name_len, 16, face.typo, sizeof(face.typo));
+    if (ok) {
+        t_name_loc = true;
+        if (!name_lookup(name, name_len, 1, face.loc, sizeof(face.loc)) || !strcmp(face.loc, face.family)) face.loc[0] = 0;
+        t_name_loc = false;
+    }
     free(name);
     if (!ok) return;
     face.weight = 400;
@@ -539,7 +547,7 @@ static int match_system_locked(const char *family, int weight, bool italic)
     for (int i = 0; i < g_nsys; i++) {
         SysFace *f = &g_sys[i];
         if (f->slot == -2) continue;
-        if (strcmp(f->family, family) != 0 && strcmp(f->typo, family) != 0) continue;
+        if (strcmp(f->family, family) != 0 && strcmp(f->typo, family) != 0 && (!f->loc[0] || strcmp(f->loc, family) != 0)) continue;
         int score = weight_distance(weight, f->weight, f->weight) + (f->italic != italic ? 10000 : 0);
         /* A face whose legacy family is exactly the name (Arial vs "Arial Black"). */
         if (strcmp(f->family, family) != 0) score += 1;
@@ -1690,7 +1698,7 @@ bool font_registry_family_file(const char *family, char *path, size_t cap, int *
         int best = -1, best_score = 1 << 30;
         for (int i = 0; i < g_nsys; i++) {
             const SysFace *f = &g_sys[i];
-            if (strcmp(f->family, names[k]) != 0 && strcmp(f->typo, names[k]) != 0) continue;
+            if (strcmp(f->family, names[k]) != 0 && strcmp(f->typo, names[k]) != 0 && (!f->loc[0] || strcmp(f->loc, names[k]) != 0)) continue;
             int score = weight_distance(400, f->weight, f->weight) + (f->italic ? 10000 : 0);
             if (score < best_score) { best_score = score; best = i; }
         }

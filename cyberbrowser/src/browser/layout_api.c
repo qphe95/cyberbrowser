@@ -1589,8 +1589,8 @@ bool layout_query_cascade(JSContextHandle ctx, GCValue element, LayoutCascadeFn 
     used->font_size = b->s->font_size / uz;
     static const char *const roles[] = { NULL, "table", "table-row-group", "table-row", "table-cell", "table-caption", "table-column" };
     switch (b->s->display) {
-    case CSS_DISPLAY_BLOCK: used->display = "block"; break;
-    case CSS_DISPLAY_INLINE_BLOCK: used->display = "inline-block"; break;
+    case CSS_DISPLAY_BLOCK: used->display = b->s->table_role > 0 && b->s->table_role < 7 ? (b->s->table_role == 1 && b->s->inline_level ? "inline-table" : roles[b->s->table_role]) : "block"; break;   /* (a table part: its role) */
+    case CSS_DISPLAY_INLINE_BLOCK: used->display = b->s->table_role == 1 ? "inline-table" : "inline-block"; break;
     case CSS_DISPLAY_FLEX: used->display = "flex"; break;
     case CSS_DISPLAY_GRID: used->display = "grid"; break;
     case CSS_DISPLAY_NONE: used->display = "none"; break;

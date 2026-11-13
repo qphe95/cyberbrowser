@@ -366,6 +366,24 @@
         var X = m[0] * x + m[4], Y = m[3] * y + m[5], W = m[0] * w, H = m[3] * h;
         if (clear) { f(cv, X, Y, W, H, 0, 0, 0, 0, 1); return; }
         var s = ctx._s, c = rgbaOf(s.fillStyle);
+        /* (a linear gradient: a CSS one over the rectangle, its line where the canvas's maps) */
+        var gimg = global.__cyberCanvasImage, fg = s.fillStyle;
+        if (!c && fg instanceof CanvasGradient && fg._kind === 'linear' && fg._stops.length && typeof gimg === 'function' &&
+            s.globalCompositeOperation === 'source-over' && W > 0 && H > 0) {
+            var a = fg._args.map(Number);
+            var x0 = m[0] * a[0] + m[4], y0 = m[3] * a[1] + m[5], x1 = m[0] * a[2] + m[4], y1 = m[3] * a[3] + m[5];
+            var dx = x1 - x0, dy = y1 - y0, len = Math.sqrt(dx * dx + dy * dy);
+            if (!(len > 0) || !isFinite(len)) return;
+            var ux = dx / len, uy = dy / len, L = Math.abs(W * ux) + Math.abs(H * uy);
+            var cx = X + W / 2, cy = Y + H / 2, k = (cx - x0) * ux + (cy - y0) * uy;
+            var st = fg._stops.slice().map(function (p, i) { return [p[0], p[1], i]; }).sort(function (p, q) { return p[0] - q[0] || p[2] - q[2]; });
+            var parts = st.map(function (p) { return p[1] + ' ' + (len * p[0] - k + L / 2).toFixed(3) + 'px'; });
+            var deg = Math.atan2(dx, -dy) * 180 / Math.PI;
+            var css = 'linear-gradient(' + deg.toFixed(4) + 'deg, ' + parts.join(', ') + ')';
+            if (s.globalAlpha < 1) return;
+            gimg(cv, 'cyber-cvgrad:' + css, X, Y, W, H);
+            return;
+        }
         if (!c || s.globalCompositeOperation !== 'source-over') return;
         f(cv, X, Y, W, H, c[0], c[1], c[2], c[3] * s.globalAlpha, 0);
     }
@@ -410,6 +428,17 @@
             throw new TypeError("Failed to execute 'drawImage': The provided value is not of type '(CanvasImageSource)'.");
         /* (an <img> drawn whole, upright: painted through __cyberCanvasImage) */
         var f = global.__cyberCanvasImage, m = this._m, n = arguments.length;
+        /* (a CSSImageValue, a paint worklet's: its url, at the size given) */
+        if (image.__text && typeof image.src !== 'string' && (n === 5 || n === 3)) {
+            var um = /^url\(\s*(['"]?)(.*?)\1\s*\)$/.exec(String(image.__text).trim());
+            if (!um) return;
+            var abs = um[2];
+            try { abs = new URL(um[2], global.document && global.document.baseURI).href; } catch (e) { }
+            var xw = num(arguments[1], NaN), yw = num(arguments[2], NaN), ww = n === 5 ? num(arguments[3], NaN) : 0, hw = n === 5 ? num(arguments[4], NaN) : 0;   /* (three: its natural size, found natively) */
+            if (typeof f !== 'function' || m[1] !== 0 || m[2] !== 0 || !isFinite(xw + yw + ww + hw) || (n === 5 && (!ww || !hw))) return;
+            f(this._canvas, abs, m[0] * xw + m[4], m[3] * yw + m[5], m[0] * ww, m[3] * hw);
+            return;
+        }
         if (typeof f !== 'function' || n === 9 || m[1] !== 0 || m[2] !== 0 || typeof image.src !== 'string' || !image.src) return;
         var w = n === 5 ? num(arguments[3], NaN) : (image.naturalWidth || image.width || 0);
         var h = n === 5 ? num(arguments[4], NaN) : (image.naturalHeight || image.height || 0);

@@ -906,18 +906,23 @@
                     /* (its tile: background-size, -position and -repeat of this layer, in the padding box) */
                     var W = el.clientWidth, H = el.clientHeight, tl = tileOf(cs, layers.length - 1 - li, W, H);
                     /* (what it draws held back until paint() returns: one that throws is an invalid image, nothing) */
-                    var buf = [], ok = true;
+                    var buf = [], ok = true, natI = global.__cyberCanvasImage;
                     Object.defineProperty(global, '__cyberCanvasRect', { configurable: true, writable: true,
                         value: function () { buf.push(Array.prototype.slice.call(arguments)); } });
+                    /* (its images: held back with the rectangles, in order) */
+                    Object.defineProperty(global, '__cyberCanvasImage', { configurable: true, writable: true,
+                        value: function () { var a = Array.prototype.slice.call(arguments); a.__img = true; buf.push(a); } });
                     try {
                         var ctx = global.__cyberPaintContext(el, true);
                         new defs[m[1]]().paint(ctx, { width: tl.w, height: tl.h }, lp, args);
                     } catch (e) { ok = false; }
                     Object.defineProperty(global, '__cyberCanvasRect', { configurable: true, writable: true, value: nat });
+                    Object.defineProperty(global, '__cyberCanvasImage', { configurable: true, writable: true, value: natI });
                     if (ok) tl.origins.forEach(function (o) {
                         buf.forEach(function (a) {
                             var b = a.slice();
                             b[0] = el;
+                            if (a.__img) { if (typeof natI === 'function') natI(el, b[1], b[2] + o[0], b[3] + o[1], b[4], b[5]); return; }
                             if (!b[9]) {
                                 /* (clipped to the tile, then put at its place) */
                                 var x0 = Math.max(b[1], 0), y0 = Math.max(b[2], 0), x1 = Math.min(b[1] + b[3], tl.w), y1 = Math.min(b[2] + b[4], tl.h);

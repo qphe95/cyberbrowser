@@ -487,11 +487,81 @@ static ImagePixels *decode_svg(const uint8_t *d, size_t n, int nw, int nh, int w
     return px;
 }
 
+/* (a PNG's iCCP profile, when its red, green and blue primaries are sRGB's own in some other
+ * order: which sRGB channel each of the image's goes to; false otherwise, the image left as sRGB) */
+static bool png_iccp_swap(const uint8_t *d, size_t n, int map[3])
+{
+    if (n < 8 || memcmp(d, "\x89PNG\r\n\x1a\n", 8)) return false;
+    size_t p = 8;
+    while (p + 12 <= n) {
+        uint32_t len = ((uint32_t)d[p] << 24) | ((uint32_t)d[p + 1] << 16) | ((uint32_t)d[p + 2] << 8) | d[p + 3];
+        const uint8_t *ty = d + p + 4, *cd = d + p + 8;
+        if (p + 12 + (size_t)len > n) return false;
+        if (!memcmp(ty, "IDAT", 4)) return false;
+        if (!memcmp(ty, "iCCP", 4)) {
+            size_t k = 0;
+            while (k < len && k < 80 && cd[k]) k++;
+            if (k + 2 >= len || cd[k + 1] != 0) return false;   /* (name, nul, method 0: zlib) */
+            int il = 0;
+            char *icc = stbi_zlib_decode_malloc((const char *)cd + k + 2, (int)(len - k - 2), &il);
+            if (!icc) return false;
+            const uint8_t *u = (const uint8_t *)icc;
+            bool ok = false;
+            double col[3][3];
+            int got = 0;
+            if (il >= 132) {
+                uint32_t nt = ((uint32_t)u[128] << 24) | ((uint32_t)u[129] << 16) | ((uint32_t)u[130] << 8) | u[131];
+                for (uint32_t t = 0; t < nt && 132 + (size_t)t * 12 + 12 <= (size_t)il; t++) {
+                    const uint8_t *e = u + 132 + t * 12;
+                    int which = !memcmp(e, "rXYZ", 4) ? 0 : !memcmp(e, "gXYZ", 4) ? 1 : !memcmp(e, "bXYZ", 4) ? 2 : -1;
+                    if (which < 0) continue;
+                    uint32_t off = ((uint32_t)e[4] << 24) | ((uint32_t)e[5] << 16) | ((uint32_t)e[6] << 8) | e[7];
+                    if ((size_t)off + 20 > (size_t)il || memcmp(u + off, "XYZ ", 4)) continue;
+                    for (int c = 0; c < 3; c++) {
+                        const uint8_t *v = u + off + 8 + c * 4;
+                        int32_t fx = (int32_t)(((uint32_t)v[0] << 24) | ((uint32_t)v[1] << 16) | ((uint32_t)v[2] << 8) | v[3]);
+                        col[which][c] = fx / 65536.0;
+                    }
+                    got |= 1 << which;
+                }
+            }
+            if (got == 7) {
+                /* (sRGB's primaries, D50 adapted, as an sRGB profile gives them) */
+                static const double srgb[3][3] = { { 0.4361, 0.2225, 0.0139 }, { 0.3851, 0.7169, 0.0971 }, { 0.1431, 0.0606, 0.7141 } };
+                int used = 0;
+                ok = true;
+                for (int i = 0; i < 3 && ok; i++) {
+                    int m = -1;
+                    for (int j = 0; j < 3; j++) {
+                        double dd = fabs(col[i][0] - srgb[j][0]) + fabs(col[i][1] - srgb[j][1]) + fabs(col[i][2] - srgb[j][2]);
+                        if (dd < 0.03) m = j;
+                    }
+                    if (m < 0 || (used >> m & 1)) ok = false;
+                    else { map[i] = m; used |= 1 << m; }
+                }
+                if (ok && map[0] == 0 && map[1] == 1 && map[2] == 2) ok = false;   /* (sRGB itself: nothing to do) */
+            }
+            free(icc);
+            return ok;
+        }
+        p += 12 + (size_t)len;
+    }
+    return false;
+}
+
 static ImagePixels *decode_stb(const uint8_t *d, size_t n)
 {
     int w = 0, h = 0, ch = 0;
     uint8_t *data = stbi_load_from_memory(d, (int)n, &w, &h, &ch, 4);
     if (!data) return NULL;
+    {
+        int map[3];
+        if (png_iccp_swap(d, n, map))
+            for (size_t q = 0; q < (size_t)w * (size_t)h; q++) {
+                uint8_t *pp = data + q * 4, o[3] = { pp[0], pp[1], pp[2] };
+                for (int c = 0; c < 3; c++) pp[map[c]] = o[c];
+            }
+    }
     ImagePixels *px = (ImagePixels *)malloc(sizeof(ImagePixels));
     if (!px) { stbi_image_free(data); return NULL; }
     px->width = w;
@@ -1101,6 +1171,17 @@ bool image_cache_intrinsic(ImageCache *c, const char *url_or_path, unsigned *dim
     }
     pthread_mutex_unlock(&c->mu);
     return !(st == ST_ERROR || st == ST_QUEUED || st == ST_FETCHING);
+}
+
+bool image_cache_bytes(ImageCache *c, const char *url_or_path, const uint8_t **out, size_t *n)
+{
+    if (!c || !url_or_path || !url_or_path[0]) return false;
+    bool ok = false;
+    pthread_mutex_lock(&c->mu);
+    ImageEntry *e = find_locked(c, url_or_path, hash_str(url_or_path));
+    if (e && atomic_load(&e->state) >= ST_SIZED && e->bytes && e->nbytes > 0) { *out = e->bytes; *n = e->nbytes; ok = true; }
+    pthread_mutex_unlock(&c->mu);
+    return ok;
 }
 
 int image_cache_status(ImageCache *c, const char *url_or_path)

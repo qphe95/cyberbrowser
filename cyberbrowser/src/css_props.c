@@ -3029,6 +3029,47 @@ static void color_mix2(Color a, Color b, double t, int cs, int hue_method, Color
 /* color-mix() (CSS Color 5 §2): one color or more mixed in a space, each by
  * its share (unsaid shares split what the said leave; under 100% in all, the
  * mix as transparent as what's missing). */
+static int color_eval(const Toks *ts, int i, Color *out, int depth);
+static int color_layers_first(const Toks *ts, const Tok *f);
+/* color-layers(): the colors as layers, the first on top; a blend mode other than normal not had */
+static int color_layers(const Toks *ts, const Tok *f, Color *out, int depth) {
+    int i = color_layers_first(ts, f);
+    if (i < 0) return 0;
+    if (i > f->first && !tok_ident(&ts->t[f->first], "normal")) return -1;   /* (another blend mode: valid, not flattened here) */
+    enum { MAXL = 16 };
+    Color c[MAXL];
+    int nc = 0, res = 1;
+    while (i < f->end) {
+        if (nc == MAXL) return -1;
+        int r = color_eval(ts, i, &c[nc], depth + 1);
+        if (!r) return 0;
+        if (r < 0) res = -1;
+        nc++;
+        i = tok_next(ts, i);
+        if (i < f->end) { if (ts->t[i].type != T_COMMA) return 0; i++; if (i >= f->end) return 0; }
+    }
+    if (nc == 0) return 0;
+    if (res < 0) return -1;
+    /* (from the bottom: each layer over what is under it) */
+    double a = 0, rgb[3] = { 0, 0, 0 };
+    for (int k = nc - 1; k >= 0; k--) {
+        Color s1 = color_convert(&c[k], CS_SRGB);
+        double ta = (s1.none & 8) ? 0 : s1.alpha;
+        double na = ta + a * (1 - ta);
+        for (int j = 0; j < 3; j++) {
+            double tc = (s1.none >> j & 1) ? 0 : s1.c[j];
+            rgb[j] = na > 0 ? (tc * ta + rgb[j] * a * (1 - ta)) / na : 0;
+        }
+        a = na;
+    }
+    memset(out, 0, sizeof *out);
+    out->cs = CS_SRGB;
+    for (int j = 0; j < 3; j++) out->c[j] = rgb[j];
+    out->alpha = a;
+    out->derived = true;
+    return 1;
+}
+
 static int color_mix(const Toks *ts, const Tok *f, Color *out, int depth) {
     int cs = CS_OKLAB, hue_method = 0;      /* shorter, longer, increasing, decreasing */
     int i = f->first;
@@ -3218,6 +3259,7 @@ static int color_eval(const Toks *ts, int i, Color *out, int depth) {
     }
     if (t->type != T_FUNC) return 0;
     if (!strcasecmp(t->str, "color-mix")) return color_mix(ts, t, out, depth);
+    if (!strcasecmp(t->str, "color-layers")) return color_layers(ts, t, out, depth);
     if (!strcasecmp(t->str, "contrast-color")) {
         /* (black or white, whichever stands out: WCAG luminance) */
         int j = t->first;
@@ -4521,7 +4563,7 @@ static void color_raw_note(const char *canon, const char *raw) {
 }
 
 static const char *color_raw_of(const char *value) {
-    if (!strstr(value, "from ") && !strstr(value, "color-mix(")) return value;
+    if (!strstr(value, "from ") && !strstr(value, "color-mix(") && !strstr(value, "color-layers(")) return value;
     for (int i = 0; i < COLOR_RAW_N; i++)
         if (g_color_raw[i][0] && !strcmp(g_color_raw[i][0], value)) return g_color_raw[i][1];
     return value;
@@ -10336,7 +10378,7 @@ char *css_prop_parse(const CssPropDef *p, const char *value)
         if (c) { free(v); v = c; }
         if (c && !c[0]) { free(v); return NULL; }
     }
-    if (v && (strstr(value, "from ") || strstr(value, "color-mix(")) && strcmp(v, value)) color_raw_note(v, value);
+    if (v && (strstr(value, "from ") || strstr(value, "color-mix(") || strstr(value, "color-layers(")) && strcmp(v, value)) color_raw_note(v, value);
     if (v && p && (!strcmp(p->name, "opacity") || strstr(p->name, "-opacity")) && strchr(v, '%') && !strchr(v, '(')) {
         char b[48];
         snprintf(b, sizeof b, "%.6g", atof(v) / 100.0);

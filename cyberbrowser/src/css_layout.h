@@ -36,8 +36,10 @@ extern "C" {
 #define LAYOUT_STYLE_SKIPPED 0x04
 
 /* (a corner's vertical radius in px, of a border box h high: its own, else its horizontal one) */
-#define LAYOUT_RADIUS_Y(s, c, h) (((s)->radius_v_set >> (c) & 1) ? (((s)->radius_vpct >> (c) & 1) ? (s)->radius_v[c] * (h) : (s)->radius_v[c]) \
-                                  : (((s)->radius_pct >> (c) & 1) ? (s)->radius[c] * (h) : (s)->radius[c]))
+#define LAYOUT_RADIUS_Y(s, c, h) fmax(0.0, ((s)->radius_v_set >> (c) & 1) ? (((s)->radius_vpct >> (c) & 1) ? (s)->radius_v[c] * (h) + (s)->radius_vadd[c] : (s)->radius_v[c]) \
+                                  : (((s)->radius_pct >> (c) & 1) ? (s)->radius[c] * (h) + (s)->radius_add[c] : (s)->radius[c]))
+/* (a corner's horizontal radius in px, of a border box w wide) */
+#define LAYOUT_RADIUS_X(s, c, w) fmax(0.0, ((s)->radius_pct >> (c) & 1) ? (s)->radius[c] * (w) + (s)->radius_add[c] : (s)->radius[c])
 
 /* CSS display value used for visibility decisions. */
 typedef enum {
@@ -331,7 +333,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     float td_t, td_te, td_in[2];   /* (thickness: td_t px + td_te em) */
     /* (text-underline-offset, inherited: ul_k 0 auto 2 px 3 em (ul_v);
      * text-underline-position: under) */
-    unsigned char ul_k, ul_set, ul_under, ul_pos_set;
+    unsigned char ul_k, ul_set, ul_under, ul_pos_set, ul_right;   /* (ul_right: text-underline-position: right, in vertical text the over side) */
     float ul_v, ul_e;              /* (offset: ul_v px + ul_e em) */
     /* Resolved line-height in px; <= 0 means "normal" (1.5 x font-size). */
     double line_height;
@@ -410,7 +412,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     /* (font-variant-* and font-feature-settings, inherited, as written:
      * position, caps, numeric, east-asian, alternates, ligatures, settings;
      * fv_set's bit k when given here; ot_tags the OpenType features they ask for) */
-    const char *fv[7];
+    const char *fv[8];   /* (and [7] font-kerning: normal, none, NULL auto) */
     unsigned char fv_set;
     /* (text-decoration-skip-ink, inherited: 0 auto, 1 none, 2 all; tdsi_set when given) */
     unsigned char tdsi, tdsi_set;
@@ -545,6 +547,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * radius_pct is set (elliptical radii use their horizontal value). */
     float radius[4];
     unsigned char radius_pct;
+    float radius_add[4], radius_vadd[4];   /* (calc(): px with the fraction) */
     /* (elliptical corners: the vertical radius, where radius_v_set's bit
      * says one was given, a fraction of the height when radius_vpct's is) */
     float radius_v[4];
@@ -775,6 +778,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * (-webkit-line-clamp only a -webkit-box); line_clamp_auto: as many
      * lines as its height or max-height has room for */
     unsigned char line_clamp_std, line_clamp_auto;
+    unsigned char cont_discard;   /* (continue: discard: no fragments past its last, a multicol's columns past its count) */
     unsigned char lc_no_ell;    /* (line-clamp: N no-ellipsis) */
     unsigned char lc_cont;      /* (continue: collapse set it) */
     const char *lc_ell;         /* (line-clamp: N "string": the block ellipsis; NULL: U+2026) */
@@ -833,6 +837,7 @@ bool css_layout_marker_color(const struct LayoutContext *ctx, int idx, float rgb
 bool css_layout_marker_has_content(const struct LayoutContext *ctx, int idx);
 /* An inline box's content area (its metric font's ascent + descent, rounded) and its line advance. */
 double css_layout_content_area(const struct LayoutContext *ctx, int i, double *adv);
+int css_layout_box_lang(const struct LayoutContext *ctx, int i);
 bool css_layout_te_under(const struct LayoutContext *ctx, int i);
 const char *css_layout_block_ellipsis(const struct LayoutContext *ctx, int i);
 const char *css_layout_line_ellipsis(const struct LayoutContext *ctx, int i);
@@ -841,6 +846,8 @@ double css_layout_hl_length(const struct LayoutContext *ctx, int box, const char
 /* The font list item idx's ::marker asks for: size (px), weight, italic, family; each left as given when not. */
 void css_layout_marker_font(const struct LayoutContext *ctx, int idx, double *fs, int *weight, int *italic, const char **family);
 double css_layout_marker_baseline(struct LayoutContext *ctx, int idx);
+/* (the first text in item idx: its em box top as drawn and its font size; NAN when none) */
+double css_layout_marker_text_top(struct LayoutContext *ctx, int idx, double *font_size);
 /* An outside marker's tab-size in spaces (its ::marker's, else the item's). */
 int css_layout_marker_tab(const struct LayoutContext *ctx, int idx);
 
@@ -1296,6 +1303,8 @@ void css_layout_box_scrolled(const LayoutContext *ctx, int idx, double *dx, doub
 /* What idx's transforms and its ancestors' (up to, not with, stop) make of points
  * in laid-out coordinates: an affine m[6] (a b c d e f); false when they make nothing of them. */
 bool css_layout_box_map(const LayoutContext *ctx, int idx, int stop, double m[6]);
+/* (offset-path path(): the point offset-distance along it and the turn offset-rotate gives there) */
+bool css_layout_motion_point(const LayoutStyle *s, double *px, double *py, double *rot_deg);
 /* (the same with what is in multicol container mc about its piece in column
  * col: the strip's top, a column's height) */
 bool css_layout_box_map_col(const LayoutContext *ctx, int idx, int mc, double top, double H, int col, double m[6]);

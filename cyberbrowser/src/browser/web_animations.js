@@ -3474,7 +3474,8 @@
             var root = this.documentElement;
             return root ? [root].concat(Array.from(root.querySelectorAll('*'))).reduce(function (all, el) {
                 return nativeGet ? all.concat(Array.from(nativeGet.call(el))) : all;
-            }, []).concat(Array.from(animations).filter(relevant).sort(function (x, y) { return x._seq - y._seq; })) : [];
+            }, []).concat(Array.from(animations).filter(relevant).sort(function (x, y) { return x._seq - y._seq; }))
+              .concat(typeof global.__cyberVtFades === 'function' ? global.__cyberVtFades() : []) : [];
         } });
     }
     var SRP = global.ShadowRoot && global.ShadowRoot.prototype;

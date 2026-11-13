@@ -99,6 +99,8 @@ void text_shaper_set_autospace_prev(uint32_t cp);
  * data appended to *out (malloc'd, *len its length, *cap its room); the advance it took. */
 double text_shaper_outline_path(const TextShaper *s, const char *utf8, size_t n, double px, double x, double y,
                                 char **out, size_t *len, size_t *cap);
+/* (glyphs whose pen is at or past this x left out of the outlines; < 0 none) */
+extern _Thread_local double text_shaper_outline_cull;
 bool text_shaper_measure(const TextShaper *shaper, const char *utf8,
                          float *out_width, float *out_height);
 

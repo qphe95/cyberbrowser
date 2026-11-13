@@ -929,7 +929,7 @@ static bool size_spec_special(const char *s)
 /* A color that isn't rgb(), rgba(), hsl(), hwb() or a name. */
 static bool color_spec_wide(const char *s)
 {
-    return s && (strstr(s, "color(") || strstr(s, "lab(") || strstr(s, "lch(") || strstr(s, "color-mix("));
+    return s && (strstr(s, "color(") || strstr(s, "lab(") || strstr(s, "lch(") || strstr(s, "color-mix(") || strstr(s, "color-layers("));
 }
 
 static bool before_color_wide(NodeId el, const CssPropDef *p)
@@ -1399,6 +1399,11 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
     const char *n = p->name;
     /* (an element's default display is the user agent's: what layout gave it) */
     if (!s && !strcmp(n, "display") && cs->used.display) s = cs->used.display;
+    /* (<table>'s border-spacing: the user agent's 2px) */
+    if (!s && !strcmp(n, "border-spacing") && dom_valid(cs->el) && !cs->pseudo && g_dom.ns[dom_slot(cs->el)] == DOM_NS_HTML) {
+        const char *tg = dom_tag_name(cs->el);
+        if (tg && !strcasecmp(tg, "table")) s = "2px 2px";
+    }
     /* (anchor(): the number it came to; none: auto) */
     if (s && !cs->pseudo && strstr(s, "anchor") && (!strcmp(n, "top") || !strcmp(n, "right") || !strcmp(n, "bottom") || !strcmp(n, "left"))) {
         double v = 0.0;

@@ -1357,6 +1357,7 @@ static void ts_path_put(char **out, size_t *len, size_t *cap, const char *fmt, d
     *len += (size_t)w;
 }
 
+_Thread_local double text_shaper_outline_cull = -1.0;
 double text_shaper_outline_path(const TextShaper *s, const char *utf8, size_t n, double px, double x, double y,
                                 char **out, size_t *len, size_t *cap)
 {
@@ -1374,7 +1375,7 @@ double text_shaper_outline_path(const TextShaper *s, const char *utf8, size_t n,
         prev = owner == 0 ? gi : -1;
         double k = (double)gs->scale * px / (double)(gs->size_pixels > 0.0f ? gs->size_pixels : s->size_pixels);
         stbtt_vertex *v = NULL;
-        int nv = gi > 0 ? stbtt_GetGlyphShape(&gs->font, gi, &v) : 0;
+        int nv = gi > 0 && !(text_shaper_outline_cull >= 0.0 && pen >= text_shaper_outline_cull) ? stbtt_GetGlyphShape(&gs->font, gi, &v) : 0;
         bool open = false;
         for (int q = 0; q < nv; q++) {
             double vx = pen + v[q].x * k, vy = y - v[q].y * k;

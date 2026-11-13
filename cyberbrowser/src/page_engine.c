@@ -887,7 +887,16 @@ static void page_frames_build(void) {
                 css_layout_frame_content_note((uint32_t)iframes[k], lc);
                 DisplayList dl;
                 display_list_init(&dl);
-                if (css_layout_build_display_list(lc, &dl)) display_list_frame_set((uint32_t)iframes[k], &dl);
+                /* (its window's scroll) */
+                double fsx = 0.0, fsy = 0.0;
+                if (ctxs[k]) {
+                    GCValue fg = JS_GetGlobalObject(ctxs[k]);
+                    JS_ToFloat64(ctxs[k], &fsx, JS_GetPropertyStr(ctxs[k], fg, "scrollX"));
+                    JS_ToFloat64(ctxs[k], &fsy, JS_GetPropertyStr(ctxs[k], fg, "scrollY"));
+                    if (!(fsx == fsx) || fsx < 0.0) fsx = 0.0;
+                    if (!(fsy == fsy) || fsy < 0.0) fsy = 0.0;
+                }
+                if (css_layout_build_display_list(lc, &dl)) display_list_frame_set((uint32_t)iframes[k], &dl, (float)fsx, (float)fsy);
                 display_list_free(&dl);
             }
             css_layout_tree_free(lc);
@@ -1716,6 +1725,7 @@ void page_set_viewport(int width, int height) {
     JS_SetPropertyStr(g_ctx, win, "outerWidth", JS_NewInt32(g_ctx, width));
     JS_SetPropertyStr(g_ctx, win, "outerHeight", JS_NewInt32(g_ctx, height));
     dom_request_relayout();
+    if (g_css_print.on) return;   /* (printing: the page box, no resize of the window) */
     static const char fire[] = "window.dispatchEvent(new Event('resize'))";
     GCValue r = JS_Eval(g_ctx, fire, sizeof(fire) - 1, "<resize>", JS_EVAL_TYPE_GLOBAL);
     if (JS_IsException(r)) JS_GetException(g_ctx);

@@ -899,6 +899,7 @@ static int inherited_run(NodeId el, int ps, int p, const AnimVal *v)
     return r >= 0 && val_same(&A.b[r], v) ? r : -1;
 }
 
+extern bool g_anim_no_transitions;
 bool anim_value(NodeId el, int ps, int prop, double now, AnimVal *out)
 {
     bool got = false;
@@ -907,6 +908,7 @@ bool anim_value(NodeId el, int ps, int prop, double now, AnimVal *out)
         AnimVal v;
         if (A.kind[r] == K_TRACK && !got && track_value(r, now, &v)) { *out = v; got = true; }
     }
+    if (g_anim_no_transitions) return got;   /* (printing: the transitions' ends) */
     /* (transitions over animations: the cascade's transition origin) */
     FOR_ROWS(r, el)
         if (A.ps[r] == ps && A.prop[r] == prop && A.kind[r] == K_TRANS) { *out = trans_value(r, now); return true; }
@@ -1008,6 +1010,7 @@ void anim_seed(NodeId el, int ps, const AnimVal base[ANIM_NPROP])
     }
 }
 
+bool g_anim_no_transitions;   /* (printing: no transition starts from the screen's style to the page's) */
 void anim_box(NodeId el, int ps, const char *spec, const AnimVal base[ANIM_NPROP], bool detect, double now,
               AnimKeyframesFn kf, AnimFrameFn frame, void *ud, AnimVal cur[ANIM_NPROP], bool set[ANIM_NPROP])
 {
@@ -1017,7 +1020,7 @@ void anim_box(NodeId el, int ps, const char *spec, const AnimVal base[ANIM_NPROP
     for (int f = 0; f < ANIM_NFIELD; f++) list_split(at[f], end[f], &L[f]);
     char buf[128];
 
-    if (detect) {
+    if (detect && !g_anim_no_transitions) {
         /* Transitions: the list item covering each property (-1: none). */
         int cover[ANIM_NPROP];
         for (int p = 0; p < ANIM_NPROP; p++) cover[p] = -1;

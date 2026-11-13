@@ -49,6 +49,7 @@ enum {
     ATTR_CSS_TRANSFORM,
     ATTR_CX,
     ATTR_CY,
+    ATTR_CYBER_MOTION,
     ATTR_D,
     ATTR_DISPLAY,
     ATTR_FILL,
@@ -162,6 +163,7 @@ static int attributeid(const char* data, size_t length)
         {"css-transform", ATTR_CSS_TRANSFORM},
         {"cx", ATTR_CX},
         {"cy", ATTR_CY},
+        {"cyber-motion", ATTR_CYBER_MOTION},
         {"d", ATTR_D},
         {"display", ATTR_DISPLAY},
         {"fill", ATTR_FILL},
@@ -1767,7 +1769,55 @@ static void render_state_begin(const element_t* element, render_state_t* state, 
         if(!css_ok)
             state->matrix = parent->matrix;
     }
-    if(element->parent && element != t_bbox_of && (css_ok || parse_transform(element, ATTR_TRANSFORM, &state->matrix))) {
+    /* (cyberbrowser) offset-path's motion: the anchor (the transform origin) put at the
+     * path point, turned there, after the element's own transform */
+    const string_t* motion = element->parent && element != t_bbox_of ? find_attribute(element, ATTR_CYBER_MOTION, false) : NULL;
+    float mv[7] = { 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f };
+    int nmv = 0;
+    if(motion) {
+        const char* mi = motion->data;
+        const char* me = mi + motion->length;
+        while(nmv < 7 && mi < me) {
+            while(mi < me && *mi == ' ') ++mi;
+            if(mi >= me || !parse_float(&mi, me, &mv[nmv]))
+                break;
+            ++nmv;
+        }
+        if(nmv != 3 && nmv != 7)
+            motion = NULL;
+    }
+    if(motion) {
+        plutovg_matrix_t c = state->matrix;
+        if(!css_ok && !parse_transform(element, ATTR_TRANSFORM, &c))
+            plutovg_matrix_init_identity(&c);
+        if(!css_ok && find_attribute(element, ATTR_TRANSFORM, false) == NULL)
+            plutovg_matrix_init_identity(&c);
+        float ox = 0.f, oy = 0.f;
+        parse_transform_origin(element, parent, &ox, &oy);
+        /* (offset-anchor: a place in the reference box, else the origin) */
+        float ax = ox, ay = oy;
+        if(nmv == 7) {
+            float bx = 0.f, by = 0.f, bw = parent->view_width, bh = parent->view_height;
+            const string_t* tb = find_attribute(element, ATTR_TRANSFORM_BOX, false);
+            if(tb && !(tb->length == 8 && !strncmp(tb->data, "view-box", 8))) {
+                plutovg_rect_t rb;
+                bool fill = (tb->length == 8 && tb->data[0] == 'f') || tb->data[0] == 'c';
+                if(element_box(element, parent, fill, &rb)) { bx = rb.x; by = rb.y; bw = rb.w; bh = rb.h; }
+            }
+            ax = bx + mv[3] * bw + mv[4];
+            ay = by + mv[5] * bh + mv[6];
+        }
+        plutovg_matrix_t m, r, t;
+        plutovg_matrix_init_translate(&m, -ox, -oy);
+        plutovg_matrix_multiply(&m, &m, &c);
+        plutovg_matrix_init_translate(&t, ox - ax, oy - ay);
+        plutovg_matrix_multiply(&m, &m, &t);
+        plutovg_matrix_init_rotate(&r, mv[2] * PLUTOVG_PI / 180.f);
+        plutovg_matrix_multiply(&m, &m, &r);
+        plutovg_matrix_init_translate(&t, mv[0], mv[1]);
+        plutovg_matrix_multiply(&m, &m, &t);
+        plutovg_matrix_multiply(&state->matrix, &m, &parent->matrix);
+    } else if(element->parent && element != t_bbox_of && (css_ok || parse_transform(element, ATTR_TRANSFORM, &state->matrix))) {
         float ox, oy;
         if(parse_transform_origin(element, parent, &ox, &oy)) {
             /* (about the origin: there, the transform, back) */
@@ -2766,6 +2816,7 @@ static void transform_view_rect(const view_position_t* position, plutovg_rect_t*
     }
 }
 
+__thread plutosvg_image_hook_t plutosvg_image_hook;
 static plutovg_surface_t* load_image(const element_t* element)
 {
     const string_t* value = find_attribute(element, ATTR_HREF, false);
@@ -2773,6 +2824,16 @@ static plutovg_surface_t* load_image(const element_t* element)
         return NULL;
     const char* it = value->data;
     const char* end = it + value->length;
+    if(plutosvg_image_hook && !(value->length > 5 && !strncmp(it, "data:", 5))) {
+        const unsigned char* px = NULL;
+        int w = 0, h = 0;
+        if(!plutosvg_image_hook(it, (int)value->length, &px, &w, &h) || !px || w <= 0 || h <= 0)
+            return NULL;
+        plutovg_surface_t* sf = plutovg_surface_create(w, h);
+        if(sf)
+            plutovg_convert_rgba_to_argb(plutovg_surface_get_data(sf), px, w, h, plutovg_surface_get_stride(sf));
+        return sf;
+    }
     if(!skip_string(&it, end, "data:image/png")
         && !skip_string(&it, end, "data:image/jpg")
         && !skip_string(&it, end, "data:image/jpeg")) {
@@ -3015,6 +3076,19 @@ static bool apply_clip_path(const element_t* element, render_context_t* context,
             if(ok)
                 plutovg_path_add_path(path, tmp, has_tf ? &cm : NULL);
             plutovg_path_destroy(tmp);
+        }
+    }
+    /* (objectBoundingBox: the element's fill box the unit square) */
+    units_type_t cu = units_type_user_space_on_use;
+    parse_units_type(cp, ATTR_CLIP_PATH_UNITS, &cu);
+    if(cu == units_type_object_bounding_box) {
+        plutovg_rect_t bb;
+        if(!element_box(element, state, true, &bb) || IS_EMPTY_RECT(bb)) {
+            plutovg_path_reset(path);
+        } else {
+            plutovg_matrix_t um;
+            plutovg_matrix_init(&um, bb.w, 0, 0, bb.h, bb.x, bb.y);
+            plutovg_path_transform(path, &um);
         }
     }
     /* (clip-rule, from its first shape) */

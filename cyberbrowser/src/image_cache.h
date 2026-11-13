@@ -108,6 +108,10 @@ bool image_cache_get(ImageCache *cache, int handle,
  * pixels taken at generation g is current while this stays g. */
 uint64_t image_cache_generation(ImageCache *cache, int handle);
 
+/* The fetched bytes of url_or_path (an SVG document's text, say), once in; false before
+ * then or never asked for.  They stay while the cache does. */
+bool image_cache_bytes(ImageCache *cache, const char *url_or_path, const uint8_t **out, size_t *n);
+
 #ifdef __cplusplus
 }
 #endif

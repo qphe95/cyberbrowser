@@ -2349,7 +2349,14 @@
         });
         var gdivs = {};
         /* (the overlay's elements by their pseudo-elements: what animate() with pseudoElement drives) */
-        var vtEls = {}, vtAnims = [];
+        var vtEls = {}, vtAnims = [], vtFades = [], vtRunEls = [];
+        /* (the images' UA fades as animations a page can seek: currentTime the opacity along it) */
+        Object.defineProperty(global, '__cyberVtFades', { configurable: true, value: function () {
+            var out = vtFades.filter(function (f) { return f._live(); });
+            /* (and the keyframes run on the images, in the overlay's closed shadow root) */
+            vtRunEls.forEach(function (el) { if (el.isConnected) try { out = out.concat(Array.from(el.getAnimations())); } catch (e) { } });
+            return out;
+        } });
         Object.defineProperty(global, '__cyberVtHold', { configurable: true, value: function (a) { vtAnims.push(a); } });
         Object.defineProperty(global, '__cyberVtEl', { configurable: true, value: function (p) {
             var m = /^::view-transition-(group|image-pair|old|new)\(\s*([^)\s]*)\s*\)$/.exec(String(p || ''));
@@ -2431,6 +2438,29 @@
                 if (!a.none && a.long && !a.custom) o = op0;
                 vtApply(w, d);
                 w.style.setProperty('opacity', String(o));
+                /* (its own keyframes, paused: run on it, for the page to seek) */
+                if (!a.none && a.custom && /paused/.test(String(d['animation-play-state'] || '') + ' ' + String(d.animation || '')))
+                { for (var ap in d) if (/^animation/.test(ap)) { try { w.style.setProperty(ap, d[ap]); } catch (e) { } } vtRunEls.push(w); }
+                if (!a.none && a.long && !a.custom && a.dur > 0) {
+                    var durMs = a.dur * 1000, cur = 0, full = o;
+                    var fade = {
+                        _live: function () { return !!w.isConnected; },
+                        get currentTime() { return cur; },
+                        set currentTime(t) {
+                            cur = Math.max(0, Math.min(durMs, +t || 0));
+                            var k = cur / durMs;
+                            w.style.setProperty('opacity', String(op0 === 0 ? k : 1 - k));
+                        },
+                        playState: 'paused',
+                        pause: function () { this.playState = 'paused'; },
+                        play: function () { this.playState = 'running'; },
+                        finish: function () { this.currentTime = durMs; this.playState = 'finished'; },
+                        cancel: function () { w.style.setProperty('opacity', String(full)); },
+                        effect: { pseudoElement: '::view-transition-' + kind + '(' + n + ')', getTiming: function () { return { duration: durMs }; },
+                                  getComputedTiming: function () { return { duration: durMs, progress: cur / durMs }; } }
+                    };
+                    vtFades.push(fade);
+                }
                 var snap = s.snap.cloneNode(true), sc = s.w > 0 ? gw / s.w : 1;
                 /* (hidden with its group, image pair or itself) */
                 var hid = [f.g, f.ip, d].some(function (x) { return x && String(x.visibility || '').trim() === 'hidden'; });
@@ -2992,6 +3022,15 @@
                 if (arg.inline !== undefined) inline = scrollEnum('scrollIntoView', 'Element', arg.inline, LOGICAL);
             } else if (arg !== undefined && arg !== null && !arg) {
                 block = 'end';
+            }
+            /* (no alignment asked for: its scroll-snap-align's, where it has one) */
+            if (arg === undefined || arg === true) {
+                try {
+                    var sa = String(global.getComputedStyle(this).scrollSnapAlign || '').trim().split(/\s+/);
+                    if (/^(start|end|center)$/.test(sa[0])) block = sa[0];
+                    var si = sa.length > 1 ? sa[1] : sa[0];
+                    if (/^(start|end|center)$/.test(si)) inline = si;
+                } catch (e) { /* (as asked) */ }
             }
             scrollIntoViewOf(this, block, inline);
             scrollWith = undefined;
@@ -4404,6 +4443,7 @@
         if (nums.length === 1) { w = h = nums[0]; }
         else if (nums.length >= 2) { w = nums[0]; h = nums[1]; }
         if ((land && h > w) || (port && w > h)) { var q = w; w = h; h = q; }
+        if (!(w > 0) || !(h > 0)) return [480, 288];   /* (a page of no size: invalid, the default one) */
         return [w, h];
     }
     function printMetrics(rs, pw, ph) {
@@ -4620,7 +4660,7 @@
         var firstEl = document.body && document.body.firstElementChild, firstName = '';
         for (var fe = firstEl; fe; fe = fe.firstElementChild) { var pn = getComputedStyle(fe).page; if (pn && pn !== 'auto') { firstName = pn; break; } }
         var first = printPageRules(rules, firstName, 0), size = printSize(first), m0 = printMetrics(first, size[0], size[1]);
-        var pw = size[0], ph = size[1], de = document.documentElement;
+        var pw = size[0], ph = size[1], opw = pw, oph = ph, de = document.documentElement;   /* (opw, oph: what percentages are of) */
         /* (the page box's own border and padding take room from the content) */
         var extra = function (p) { var o = 0; ['border-' + p + '-width', 'padding-' + p].forEach(function (q) { var v = printDecl(first, q); if (v) o += printLen(v, pw); }); return o; };
         var probe = document.createElement('cyber-pm');
@@ -4638,10 +4678,10 @@
         bl = parseFloat(pcs.borderLeftWidth) + parseFloat(pcs.paddingLeft);
         probe.remove();
         var cw = Math.max(1, pw - m0.left - m0.right - bl - br), chh = Math.max(1, ph - m0.top - m0.bottom - bt - bb);
-        /* (a width or height of the page box: its area that big; the overconstrained margin gives) */
         var wd = printDecl(first, 'width'), hd = printDecl(first, 'height');
-        if (wd && wd !== 'auto') { var wv = printLen(wd, pw); m0.right += cw - wv; cw = wv; }
-        if (hd && hd !== 'auto') { var hv = printLen(hd, ph); m0.bottom += chh - hv; chh = hv; }
+        /* (overconstrained: the page box resized to fit it, its margins kept) */
+        if (wd && wd !== 'auto') { var wv = printLen(wd, pw); cw = wv; pw = wv + m0.left + m0.right + bl + br; }
+        if (hd && hd !== 'auto') { var hv = printLen(hd, ph); chh = hv; ph = hv + m0.top + m0.bottom + bt + bb; }
         /* (reftest-pages: the first page named shown first) */
         var rpm = document.querySelector('meta[name="reftest-pages"]'), skip = 0;
         if (rpm) { var rpv = /^\s*(\d+)/.exec(rpm.getAttribute('content') || ''); if (rpv && +rpv[1] > 1) skip = +rpv[1] - 1; }
@@ -4669,11 +4709,11 @@
             try { printCtrList(getComputedStyle(de).counterReset, 0).forEach(function (p) { if (p[0] !== 'page' && p[0] !== 'pages') ctr[p[0]] = p[1]; }); } catch (e) { /* (none) */ }
             for (var k = 0; k < n; k++) {
                 var pnm = k > 0 && typeof __cyberPrintPageName === 'function' ? __cyberPrintPageName(k) : firstName;
-                var rs = printPageRules(rules, pnm, k), m = printMetrics(rs, pw, ph);
+                var rs = printPageRules(rules, pnm, k), m = printMetrics(rs, opw, oph);
                 /* (a width or height of the page box: the area that big, the end margin the rest) */
                 var wdk = printDecl(rs, 'width'), hdk = printDecl(rs, 'height');
-                if (wdk && wdk !== 'auto') m.right = pw - m.left - printLen(wdk, pw) - bl - br;
-                if (hdk && hdk !== 'auto') m.bottom = ph - m.top - printLen(hdk, ph) - bt - bb;
+                if (wdk && wdk !== 'auto') m.right = pw - m.left - printLen(wdk, opw) - bl - br;
+                if (hdk && hdk !== 'auto') m.bottom = ph - m.top - printLen(hdk, oph) - bt - bb;
                 var pinc = 1;
                 printCtrList(printDecl(rs, 'counter-reset'), 0).forEach(function (p) { if (p[0] === 'page') pno = p[1]; else ctr[p[0]] = p[1]; });
                 printCtrList(printDecl(rs, 'counter-increment'), 1).forEach(function (p) { if (p[0] === 'page') pinc = p[1]; else ctr[p[0]] = (ctr[p[0]] || 0) + p[1]; });

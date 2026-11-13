@@ -2017,7 +2017,8 @@ static void cascade_reverts(const CssStyleSet *S, CssStyleScratch *t)
             CssAppliedDecl *b = &t->applied.v[j];
             if (!b->decl) continue;
             const CRule *br = &S->rules[b->rule];
-            if (br->ua || (layer && br->layer_bias != ar->layer_bias)) continue;
+            /* (revert-layer: its layer and those after it gone, an important one past the later layers' important ones too) */
+            if (br->ua || (layer && br->layer_bias > ar->layer_bias)) continue;   /* (bias: how far below no layer; earlier layers more) */
             const char *bp = b->decl->property;
             size_t bl = strlen(bp);
             if (all || (bl == pl && !strcmp(bp, prop)) || (bl > pl && !strncmp(bp, prop, pl) && bp[pl] == '-')) b->decl = NULL;
