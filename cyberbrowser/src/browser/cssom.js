@@ -787,7 +787,10 @@
                 has: function (n) { return ip.indexOf(String(n)) >= 0; },
                 keys: function () { return ip.slice()[Symbol.iterator](); },
                 get size() { return ip.length; },
-                forEach: function (cb, t) { var self = this; ip.forEach(function (n) { cb.call(t, self.getAll(n), n, self); }); }
+                forEach: function (cb, t) { var self = this; ip.forEach(function (n) { cb.call(t, self.getAll(n), n, self); }); },
+                entries: function () { var self = this; return ip.map(function (n) { return [n, self.getAll(n)]; })[Symbol.iterator](); },
+                values: function () { var self = this; return ip.map(function (n) { return self.getAll(n); })[Symbol.iterator](); },
+                [Symbol.iterator]: function () { return this.entries(); }
             };
         }
         function splitArgs(s) {
@@ -2617,7 +2620,20 @@
     [['system', 'system'], ['symbols', 'symbols'], ['additiveSymbols', 'additive-symbols'], ['negative', 'negative'], ['prefix', 'prefix'],
      ['suffix', 'suffix'], ['range', 'range'], ['pad', 'pad'], ['speakAs', 'speak-as'], ['fallback', 'fallback']].forEach(function (m) {
         getter(CSSCounterStyleRule.prototype, m[0], function () { return this.__descs[m[1]] || ''; }, function (v) {
-            var r = CS_DESC[m[1]](csWords(String(v).trim()));
+            var raw = String(v).trim(), words = raw ? raw.split(/\s+/) : [];
+            var sysOf = function (t) { var w = String(t || 'symbolic').trim().split(/\s+/)[0].toLowerCase(); return w || 'symbolic'; };
+            /* (the system: not to another algorithm) */
+            if (m[1] === 'system' && sysOf(raw) !== sysOf(this.__descs.system)) return;
+            if (m[1] === 'symbols') {
+                /* (each a string, an image or an identifier; enough of them for the system) */
+                if (!words.length) return;
+                for (var wi = 0; wi < words.length; wi++)
+                    if (!/^(?:"[^"]*"|'[^']*'|-?[A-Za-z_\u0080-\uffff][\w\-\u0080-\uffff]*|url\(.*\))$/.test(words[wi])) return;
+                var sy = sysOf(this.__descs.system);
+                if ((sy === 'alphabetic' || sy === 'numeric') && words.length < 2) return;
+            }
+            if (m[1] === 'fallback' && (words.length !== 1 || /^none$/i.test(words[0]))) return;
+            var r = CS_DESC[m[1]](csWords(raw));
             if (r !== null) { this.__descs[m[1]] = r; touched(this); }
         });
     });

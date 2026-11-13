@@ -247,14 +247,42 @@ extern void page_set_viewport(int width, int height);
 static GCValue js_print_set(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
 {
     (void)this_val;
-    double v[6] = { 0 };
-    for (int i = 0; i < 6 && i < argc; i++) JS_ToFloat64(ctx, &v[i], argv[i]);
+    double v[7] = { 0 };
+    for (int i = 0; i < 7 && i < argc; i++) JS_ToFloat64(ctx, &v[i], argv[i]);
+    g_css_print.skip = v[6] > 0.0 && v[6] < 1000.0 ? (int)v[6] : 0;   /* (pages before the first one shown) */
+    memset(g_css_print.pdx, 0, sizeof g_css_print.pdx);
+    memset(g_css_print.pdy, 0, sizeof g_css_print.pdy);
     g_css_print.pw = v[5];
     g_css_print.on = true;
     g_css_print.w = v[0]; g_css_print.h = v[1]; g_css_print.gap = v[2]; g_css_print.ml = v[3]; g_css_print.mt = v[4];
     page_set_viewport((int)v[0], (int)v[1]);
     dom_request_relayout();
     return JS_UNDEFINED;
+}
+
+/* __cyberPrintPageOff(page, dx, dy): where page's content goes from where the first page's margins put it */
+static GCValue js_print_page_off(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    double v[3] = { 0 };
+    for (int i = 0; i < 3 && i < argc; i++) JS_ToFloat64(ctx, &v[i], argv[i]);
+    int k = (int)v[0];
+    if (k >= 0 && k < 64 && (g_css_print.pdx[k] != (float)v[1] || g_css_print.pdy[k] != (float)v[2])) {
+        g_css_print.pdx[k] = (float)v[1];
+        g_css_print.pdy[k] = (float)v[2];
+        dom_request_relayout();
+    }
+    return JS_UNDEFINED;
+}
+
+/* __cyberPrintPageName(page): its name, "" for none */
+static GCValue js_print_page_name(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    double k = 0;
+    if (argc > 0) JS_ToFloat64(ctx, &k, argv[0]);
+    int i = (int)k;
+    return JS_NewString(ctx, i >= 0 && i < 64 ? g_css_print.pname[i] : "");
 }
 
 /* __cyberPrintPages(): how many pages the last layout took */
@@ -301,6 +329,8 @@ void anim_api_install(JSContextHandle ctx, GCValue global)
     JS_DefinePropertyValueStr(ctx, global, "__cyberRenderFeature", JS_NewCFunction(ctx, js_render_feature, "__cyberRenderFeature", 1), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberColorScheme", JS_NewCFunction(ctx, js_color_scheme, "__cyberColorScheme", 1), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberPrintPages", JS_NewCFunction(ctx, js_print_pages, "__cyberPrintPages", 0), JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberPrintPageName", JS_NewCFunction(ctx, js_print_page_name, "__cyberPrintPageName", 1), JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberPrintPageOff", JS_NewCFunction(ctx, js_print_page_off, "__cyberPrintPageOff", 3), JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberPrintSet", JS_NewCFunction(ctx, js_print_set, "__cyberPrintSet", 5), JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberMediaPref", JS_NewCFunction(ctx, js_media_pref, "__cyberMediaPref", 2), JS_PROP_CONFIGURABLE);
 }

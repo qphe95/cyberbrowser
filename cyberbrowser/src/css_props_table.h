@@ -209,7 +209,7 @@ static const CssTypeDef g_types[] = {
 
     /* generated content, lists */
     { "counter-style", "<counter-style-name> | symbols( [ cyclic | numeric | alphabetic | symbolic | fixed ]? [ <string> | <image> ]+ )" },
-    { "counter-style-name", "<custom-ident>" },
+    { "counter-style-name", "<counter-style-ident>" },
     { "counter", "counter( <custom-ident> [ , <counter-style> ]? ) | counters( <custom-ident> , <string> [ , <counter-style> ]? )" },
     { "quote", "open-quote | close-quote | no-open-quote | no-close-quote" },
     { "content-list", "[ <string> | contents | <image> | <counter> | <quote> | attr( <any-value>+ ) ]+" },

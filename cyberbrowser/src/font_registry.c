@@ -95,6 +95,7 @@ static int web_instance_locked(WebFace *w, int weight)
         s = text_shaper_create_from_memory_ex(copy, w->var_len, 0, FONT_PIXELS,
                                               weight >= 600 && adef < 600 ? 1 : 0);
     }
+    if (s && w->ranges) text_shaper_set_ranges(s, w->ranges, w->nranges);
     int slot = s ? add_web_slot_locked(s) : -1;
     if (slot >= 0 && w->ninst < (int)(sizeof(w->inst) / sizeof(w->inst[0]))) {
         w->inst[w->ninst].weight = weight;
@@ -1049,7 +1050,7 @@ static void add_face_rule(const char *body, const char *end, const char *base)
         } else if (nl == 11 && !strncasecmp(ns, "size-adjust", 11)) {
             char *e1 = NULL;
             double v = strtod(vs, &e1);
-            (void)v;   /* (not applied yet: unicode-range fallback and font-size-adjust with it lose more than it wins) */
+            (void)v;   /* (not applied yet: glyphs drawn below the scaled line, and font-size-adjust with it doubles up) */
         }
     }
     if (!w.family[0] || !src) { free(src); free(w.ranges); return; }
@@ -1059,7 +1060,8 @@ static void add_face_rule(const char *body, const char *end, const char *base)
             g_web[i].wmin == w.wmin && g_web[i].wmax == w.wmax && g_web[i].italic == w.italic &&
             g_web[i].oblique == w.oblique && g_web[i].amin == w.amin && g_web[i].amax == w.amax &&
             g_web[i].smin == w.smin && g_web[i].smax == w.smax &&
-            g_web[i].ov[0] == w.ov[0] && g_web[i].ov[1] == w.ov[1] && g_web[i].ov[2] == w.ov[2] && g_web[i].sa == w.sa) {
+            g_web[i].ov[0] == w.ov[0] && g_web[i].ov[1] == w.ov[1] && g_web[i].ov[2] == w.ov[2] && g_web[i].sa == w.sa &&
+            g_web[i].nranges == w.nranges && (!w.nranges || !memcmp(g_web[i].ranges, w.ranges, (size_t)w.nranges * 2 * sizeof(uint32_t)))) {
             pthread_mutex_unlock(&g_mu);
             free(src);
             free(w.ranges);
@@ -1126,6 +1128,7 @@ void font_registry_forget_faces(void)
             w->var_sfnt = NULL;
             keep = false;
         }
+        if (w->nranges) keep = false;   /* (its shaper held to a unicode-range: not one for others) */
         free(w->ranges);
         w->ranges = NULL;
         w->nranges = 0;
@@ -1568,6 +1571,8 @@ int font_registry_load_pending(void)
         for (int j = 0; j < g_nweb; j++) {
             if (j == i || g_web[j].state != WEB_READY || strcmp(g_web[j].url, g_web[i].url)) continue;
             if (g_web[i].has_ov || g_web[j].has_ov) continue;   /* (metric overrides: a shaper of its own) */
+            if (g_web[i].sa != g_web[j].sa || g_web[i].nranges != g_web[j].nranges ||
+                (g_web[i].nranges && memcmp(g_web[i].ranges, g_web[j].ranges, (size_t)g_web[i].nranges * 2 * sizeof(uint32_t)))) continue;   /* (another size or unicode-range: its own too) */
             g_web[i].slot = g_web[j].slot;
             g_web[i].var_sfnt = g_web[j].var_sfnt;
             g_web[i].var_len = g_web[j].var_len;
@@ -1625,7 +1630,9 @@ int font_registry_load_pending(void)
         w->used_gen = g_face_generation;
         w->bytes = j->sfnt ? j->len : 0;
         bool own_ov = w->has_ov;
-        if (src && src[t] != t && !own_ov) {
+        if (src && src[t] != t && !own_ov && g_web[which[src[t]]].sa == w->sa && !g_web[which[src[t]]].has_ov &&
+            g_web[which[src[t]]].nranges == w->nranges &&
+            (!w->nranges || (g_web[which[src[t]]].ranges && w->ranges && !memcmp(g_web[which[src[t]]].ranges, w->ranges, (size_t)w->nranges * 2 * sizeof(uint32_t))))) {   /* (its size-adjust and the other's the same) */
             /* (a file this batch loaded for an earlier face: that face's shaper) */
             const WebFace *o = &g_web[which[src[t]]];
             w->slot = o->slot;
@@ -1647,6 +1654,7 @@ int font_registry_load_pending(void)
             TextShaper *s = text_shaper_create_from_memory(copy, j->len, 0, FONT_PIXELS);
             if (s && own_ov) text_shaper_override_vmetrics(s, w->ov[0], w->ov[1], w->ov[2]);
             if (s && w->sa != 1.0f) text_shaper_size_adjust(s, w->sa);
+            if (s && w->ranges) text_shaper_set_ranges(s, w->ranges, w->nranges);
             w->slot = s ? add_web_slot_locked(s) : -1;
         }
         w->state = w->slot >= 0 ? WEB_READY : WEB_FAILED;

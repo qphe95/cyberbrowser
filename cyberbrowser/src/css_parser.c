@@ -123,6 +123,24 @@ static void css_ns_put_uri(char **o, size_t *on, size_t *ocap, const char *uri)
     css_ns_put(o, on, ocap, b, k);
 }
 static __thread bool t_ns_bad;   /* (the last rewrite met a prefix the sheet never declared, outside a forgiving list) */
+/* (the compound starting at i: is a combinator after it, before its list's ',' or ')'?) */
+static bool css_ns_not_subject(const char *sel, size_t n, size_t i)
+{
+    int d = 0;
+    while (i < n) {
+        char c = sel[i];
+        if (c == '(' || c == '[') { d++; i++; continue; }
+        if (c == ')' || c == ']') { if (d == 0) return false; d--; i++; continue; }
+        if (c == '\\' && i + 1 < n) { i += 2; continue; }
+        if (d == 0 && (c == ',')) return false;
+        if (d == 0 && (c == ' ' || c == '\t' || c == '\n' || c == '>' || c == '+' || c == '~')) {
+            while (i < n && (sel[i] == ' ' || sel[i] == '\t' || sel[i] == '\n')) i++;
+            return i < n && sel[i] != ',' && sel[i] != ')';
+        }
+        i++;
+    }
+    return false;
+}
 static char *css_ns_rewrite(const char *sel)
 {
     t_ns_bad = false;
@@ -147,7 +165,7 @@ static char *css_ns_rewrite(const char *sel)
             size_t j = i;
             while (j < n && sel[j] != ']') { if (sel[j] == '\\' && j + 1 < n) j++; j++; }
             if (j < n) j++;
-            if (start && t_ns_has_default && depth == 0) { css_ns_put_uri(&o, &on, &ocap, t_ns_default); css_ns_put(&o, &on, &ocap, "*", 1); }
+            if (start && t_ns_has_default && (depth == 0 || (depth == sel_depth && css_ns_not_subject(sel, n, i)))) { css_ns_put_uri(&o, &on, &ocap, t_ns_default); css_ns_put(&o, &on, &ocap, "*", 1); }
             css_ns_put(&o, &on, &ocap, sel + i, j - i);
             i = j; start = false;
             continue;
@@ -206,7 +224,7 @@ static char *css_ns_rewrite(const char *sel)
             start = false;
             continue;
         }
-        if (start && in_sel && depth == 0 && t_ns_has_default && (c == '.' || c == '#' || c == ':') && strncasecmp(sel + i, ":host", 5)) {   /* (:host is featureless: no namespace) */
+        if (start && in_sel && (depth == 0 || css_ns_not_subject(sel, n, i)) && t_ns_has_default && (c == '.' || c == '#' || c == ':') && strncasecmp(sel + i, ":host", 5)) {   /* (:host is featureless: no namespace) */
             css_ns_put_uri(&o, &on, &ocap, t_ns_default);
             css_ns_put(&o, &on, &ocap, "*", 1);
         }
@@ -2957,7 +2975,16 @@ static void css_apply_pseudo(CssSimpleSelector *out,
             char r[48];
             memcpy(r, arg + k, e - k);
             r[e - k] = '\0';
-            snprintf(out->where_arg, sizeof(out->where_arg),
+            /* (an XML-namespace xml:lang, -cb-xmllang in the mirror, first) */
+            char xl[1024];
+            int xn = snprintf(xl, sizeof xl,
+                     "[lang|=\"%s\" i]:not([-cb-xmllang]), [-cb-xmllang|=\"%s\" i], "
+                     "[lang|=\"%s\" i]:not([-cb-xmllang]) *:not([lang]):not([-cb-xmllang]), [-cb-xmllang|=\"%s\" i] *:not([lang]):not([-cb-xmllang]), "
+                     "html:not([lang]):has(meta[http-equiv=\"content-language\" i][content|=\"%s\" i]), "
+                     "html:not([lang]):has(meta[http-equiv=\"content-language\" i][content|=\"%s\" i]) *:not([lang])",
+                     r, r, r, r, r, r);
+            if (xn > 0 && (size_t)xn < sizeof(out->where_arg)) memcpy(out->where_arg, xl, (size_t)xn + 1);
+            else snprintf(out->where_arg, sizeof(out->where_arg),
                      "[lang|=\"%s\" i], [lang|=\"%s\" i] *:not([lang]), "
                      "html:not([lang]):has(meta[http-equiv=\"content-language\" i][content|=\"%s\" i]), "
                      "html:not([lang]):has(meta[http-equiv=\"content-language\" i][content|=\"%s\" i]) *:not([lang])",

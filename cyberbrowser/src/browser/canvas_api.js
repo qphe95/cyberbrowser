@@ -298,9 +298,9 @@
         if (a !== null && typeof a === 'object') {
             var o = a;
             check2d(o);
-            setM(this, [num(o.a !== undefined ? o.a : o.m11, 1), num(o.b !== undefined ? o.b : o.m12, 0),
-                        num(o.c !== undefined ? o.c : o.m21, 0), num(o.d !== undefined ? o.d : o.m22, 1),
-                        num(o.e !== undefined ? o.e : o.m41, 0), num(o.f !== undefined ? o.f : o.m42, 0)]);
+            /* (a member not finite: the whole call ignored) */
+            var g = function (x, y, d) { return x !== undefined ? Number(x) : y !== undefined ? Number(y) : d; };
+            setM(this, [g(o.a, o.m11, 1), g(o.b, o.m12, 0), g(o.c, o.m21, 0), g(o.d, o.m22, 1), g(o.e, o.m41, 0), g(o.f, o.m42, 0)]);
         } else if (arguments.length === 0) {
             setM(this, [1, 0, 0, 1, 0, 0]);
         } else {

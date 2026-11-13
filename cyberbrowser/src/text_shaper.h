@@ -68,6 +68,8 @@ bool text_shaper_deco_metrics(const TextShaper *shaper, float *ul_pos, float *ul
 /* (@font-face metric overrides: fractions of the em, a negative one kept as it is) */
 void text_shaper_override_vmetrics(TextShaper *shaper, float ascent, float descent, float line_gap);
 void text_shaper_size_adjust(TextShaper *shaper, float f);
+/* (@font-face unicode-range: n [lo, hi] pairs; a code point outside them the font hasn't) */
+void text_shaper_set_ranges(TextShaper *shaper, const uint32_t *pairs, int n);
 bool text_shaper_vmetrics(const TextShaper *shaper, float *ascent, float *descent,
                           float *line_gap);
 
@@ -93,6 +95,10 @@ void text_shaper_set_autospace(int mode);
 /* (the character before what's measured or drawn next, for text-autospace) */
 void text_shaper_set_autospace_prev(uint32_t cp);
 
+/* utf8's glyph outlines at px pixels, its pen starting at (x, y) on the baseline, as SVG path
+ * data appended to *out (malloc'd, *len its length, *cap its room); the advance it took. */
+double text_shaper_outline_path(const TextShaper *s, const char *utf8, size_t n, double px, double x, double y,
+                                char **out, size_t *len, size_t *cap);
 bool text_shaper_measure(const TextShaper *shaper, const char *utf8,
                          float *out_width, float *out_height);
 

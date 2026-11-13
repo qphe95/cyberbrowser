@@ -470,6 +470,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
 
     /* Background image URL, interned (lives for the process; "" none). */
     const char *background_image_url;
+    float bg_res;                 /* (image-set(): the chosen image's resolution, its dppx; 0 as 1) */
+    float content_res;            /* (content: image-set(): the same for the image replacing the element) */
     const char *shape_image_url;    /* shape-outside: url() */
     float shape_threshold;          /* shape-image-threshold */
     const char *shape_grad;         /* shape-outside: a gradient's text (NULL none) */
@@ -839,6 +841,8 @@ double css_layout_hl_length(const struct LayoutContext *ctx, int box, const char
 /* The font list item idx's ::marker asks for: size (px), weight, italic, family; each left as given when not. */
 void css_layout_marker_font(const struct LayoutContext *ctx, int idx, double *fs, int *weight, int *italic, const char **family);
 double css_layout_marker_baseline(struct LayoutContext *ctx, int idx);
+/* An outside marker's tab-size in spaces (its ::marker's, else the item's). */
+int css_layout_marker_tab(const struct LayoutContext *ctx, int idx);
 
 /* A box of the layout tree: its computed style (shared, read-only once the
  * style pass is over) and the geometry the layout passes compute.  The
@@ -1335,6 +1339,8 @@ void css_layout_forget_document(void);
 
 /* Free resources held by a layout tree. */
 void css_layout_tree_free(LayoutContext *ctx);
+/* Print: each of the n pages' names into g_css_print.pname. */
+void css_layout_print_names(LayoutContext *ctx, int n);
 
 /* Style and lay out the tree (parallel inside, synchronous to the caller). */
 bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet);

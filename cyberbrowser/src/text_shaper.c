@@ -34,6 +34,8 @@ struct TextShaper {
     float           size_pixels;
     float           scale;
     float           adj;           /* (@font-face size-adjust: 0 or 1 none) */
+    uint32_t       *ur;            /* (@font-face unicode-range: [lo, hi] pairs; NULL all) */
+    int             ur_n;
     float           ascent;
     float           descent;
     float           line_gap;
@@ -268,6 +270,13 @@ void text_shaper_set_chain(TextShaper *const *fonts, int n)
     for (int i = 0; i < n; i++) t_chain[i] = fonts[i];
     t_chain_n = n;
 }
+/* (cp within the font's unicode-range) */
+static bool ts_in(const TextShaper *s, uint32_t cp)
+{
+    if (!s->ur) return true;
+    for (int i = 0; i < s->ur_n; i++) if (cp >= s->ur[2 * i] && cp <= s->ur[2 * i + 1]) return true;
+    return false;
+}
 static TextShaper *ts_owner_shaper(const TextShaper *s, int owner)
 {
     if (owner >= 240) return owner - 240 < t_chain_n ? t_chain[owner - 240] : (TextShaper *)s;   /* (the font-family list's) */
@@ -297,7 +306,7 @@ static void ts_metric_owned(const TextShaper *s, uint32_t cp, int *glyph_index, 
     if (!v) {
         const TextShaper *f = s;
         int owner = 0;
-        int gi = stbtt_FindGlyphIndex(&s->font, (int)cp);
+        int gi = ts_in(s, cp) ? stbtt_FindGlyphIndex(&s->font, (int)cp) : 0;
         if (gi == 0 && cp >= ' ' && cp != 0xFFFD) {   /* (a font with no space: the next one's) */
             int n = font_registry_fallback_count();
             for (int k = 0; k < n && n <= 254; k++) {
@@ -315,14 +324,14 @@ static void ts_metric_owned(const TextShaper *s, uint32_t cp, int *glyph_index, 
         memcpy(&bits, &xa, sizeof(bits));
         v = ((uint64_t)owner << 56) | ((uint64_t)((uint32_t)(gi + 1) & 0xFFFFFF) << 32) | bits;
         /* (bit 55: the font itself lacks it) */
-        if (owner != 0 || stbtt_FindGlyphIndex(&s->font, (int)cp) == 0) v |= (uint64_t)1 << 55;
+        if (owner != 0 || !ts_in(s, cp) || stbtt_FindGlyphIndex(&s->font, (int)cp) == 0) v |= (uint64_t)1 << 55;
         atomic_store_explicit(&page[cp & 255], v, memory_order_relaxed);
     }
     if (t_chain_n > 0 && (v >> 55 & 1) && cp >= ' ') {
         /* (the element's other fonts first: not cached, the list being the element's) */
         for (int k = 0; k < t_chain_n; k++) {
             const TextShaper *cf = t_chain[k];
-            if (!cf || cf == s) continue;
+            if (!cf || cf == s || !ts_in(cf, cp)) continue;
             int g2 = stbtt_FindGlyphIndex(&cf->font, (int)cp);
             if (!g2) continue;
             int adv2, lsb2;
@@ -356,7 +365,7 @@ void text_shaper_set_features(const uint32_t *tags, int n)
 }
 
 /* (a ligature: its first glyph, the others, the glyph they make) */
-typedef struct { uint16_t first, n, comp[4], lig; uint32_t ord; } OtLig;
+typedef struct { uint16_t first, n, comp[31], lig; uint32_t ord; } OtLig;   /* (up to 32 glyphs: icon fonts spell words) */
 static int ot_lig_cmp(const void *a, const void *b)
 {
     const OtLig *x = (const OtLig *)a, *y = (const OtLig *)b;
@@ -465,7 +474,7 @@ static uint16_t *ot_build(const TextShaper *s, const uint32_t *tags, int ntags)
                         for (uint32_t li2 = 0; li2 < nl2 && li2 < 256; li2++) {
                             size_t lg = ls + ot_rd16(d, sz, ls + 2 + 2 * (size_t)li2);
                             uint32_t lgl = ot_rd16(d, sz, lg), cc = ot_rd16(d, sz, lg + 2);
-                            if (cc < 2 || cc > 5) continue;
+                            if (cc < 2 || cc > 32) continue;
                             if (t_build_nlig == t_build_cap) {
                                 int nc = t_build_cap ? t_build_cap * 2 : 64;
                                 OtLig *nlp = (OtLig *)realloc(t_build_ligs, (size_t)nc * sizeof(OtLig));
@@ -870,7 +879,16 @@ static inline bool ts_is_mark(uint32_t cp)
            (cp >= 0x6D6 && cp <= 0x6DC) || (cp >= 0x6DF && cp <= 0x6E4) || cp == 0x6E7 || cp == 0x6E8 || (cp >= 0x6EA && cp <= 0x6ED) ||
            (cp >= 0x900 && cp <= 0x903) || (cp >= 0x93A && cp <= 0x93C) || (cp >= 0x93E && cp <= 0x94F) || (cp >= 0x951 && cp <= 0x957) ||
            cp == 0x962 || cp == 0x963 || (cp >= 0x981 && cp <= 0x983) || cp == 0x9BC || (cp >= 0x9BE && cp <= 0x9CD) || cp == 0x9D7 ||
-           cp == 0x9E2 || cp == 0x9E3 || cp == 0xE31 || (cp >= 0xE34 && cp <= 0xE3A) || (cp >= 0xE47 && cp <= 0xE4E) ||
+           cp == 0x9E2 || cp == 0x9E3 ||
+           /* (Gurmukhi to Sinhala: signs, viramas) */
+           (cp >= 0xA01 && cp <= 0xA03) || (cp >= 0xA3C && cp <= 0xA51) || cp == 0xA70 || cp == 0xA71 || cp == 0xA75 ||
+           (cp >= 0xA81 && cp <= 0xA83) || cp == 0xABC || (cp >= 0xABE && cp <= 0xACD) || cp == 0xAE2 || cp == 0xAE3 ||
+           (cp >= 0xB01 && cp <= 0xB03) || cp == 0xB3C || (cp >= 0xB3E && cp <= 0xB57) || cp == 0xB62 || cp == 0xB63 ||
+           cp == 0xB82 || (cp >= 0xBBE && cp <= 0xBCD) || cp == 0xBD7 ||
+           (cp >= 0xC00 && cp <= 0xC04) || cp == 0xC3C || (cp >= 0xC3E && cp <= 0xC56) || cp == 0xC62 || cp == 0xC63 ||
+           (cp >= 0xC81 && cp <= 0xC83) || cp == 0xCBC || (cp >= 0xCBE && cp <= 0xCD6) || cp == 0xCE2 || cp == 0xCE3 ||
+           (cp >= 0xD00 && cp <= 0xD03) || cp == 0xD3B || cp == 0xD3C || (cp >= 0xD3E && cp <= 0xD4D) || cp == 0xD57 || cp == 0xD62 || cp == 0xD63 ||
+           (cp >= 0xD81 && cp <= 0xD83) || (cp >= 0xDCA && cp <= 0xDDF) || cp == 0xDF2 || cp == 0xDF3 || cp == 0xE31 || (cp >= 0xE34 && cp <= 0xE3A) || (cp >= 0xE47 && cp <= 0xE4E) ||
            (cp >= 0x1AB0 && cp <= 0x1AFF) || (cp >= 0x1DC0 && cp <= 0x1DFF) || (cp >= 0x20D0 && cp <= 0x20FF) ||
            (cp >= 0x302A && cp <= 0x302F) || cp == 0x3099 || cp == 0x309A || (cp >= 0xFE00 && cp <= 0xFE0F) || (cp >= 0xFE20 && cp <= 0xFE2F);
 }
@@ -1173,6 +1191,7 @@ void text_shaper_destroy(TextShaper *s)
         free((void *)s->metric_pages);
     }
     free((void *)s->kern);
+    free(s->ur);
     ts_release_data(s->ttf_data, s->ttf_mapped);
     free(s);
 }
@@ -1273,6 +1292,17 @@ float text_shaper_zero_vadvance(const TextShaper *s)
     return (float)adv * s->scale / s->size_pixels;
 }
 
+void text_shaper_set_ranges(TextShaper *s, const uint32_t *pairs, int n)
+{
+    if (!s || !pairs || n <= 0) return;
+    uint32_t *c = (uint32_t *)malloc((size_t)n * 2 * sizeof(uint32_t));
+    if (!c) return;
+    memcpy(c, pairs, (size_t)n * 2 * sizeof(uint32_t));
+    free(s->ur);
+    s->ur = c;
+    s->ur_n = n;
+}
+
 /* (size-adjust: everything of the face scaled by f, before anything is measured) */
 void text_shaper_size_adjust(TextShaper *s, float f)
 {
@@ -1308,6 +1338,56 @@ float text_shaper_normal_line_height(const TextShaper *s, float font_size)
     if (!text_shaper_vmetrics(s, &a, &d, &g) || font_size <= 0.0f) return 0.0f;
     /* Browsers round ascent, descent and line gap to whole pixels. */
     return roundf(a * font_size) + roundf(d * font_size) + roundf(g * font_size);
+}
+
+static void ts_path_put(char **out, size_t *len, size_t *cap, const char *fmt, double a, double b, double c, double d, double e, double f, int nv)
+{
+    char t[160];
+    int w = nv == 2 ? snprintf(t, sizeof t, fmt, a, b) : nv == 4 ? snprintf(t, sizeof t, fmt, a, b, c, d) : nv == 6 ? snprintf(t, sizeof t, fmt, a, b, c, d, e, f) : snprintf(t, sizeof t, "%s", fmt);
+    if (w <= 0) return;
+    if (*len + (size_t)w + 1 > *cap) {
+        size_t nc = *cap ? *cap * 2 : 1024;
+        while (nc < *len + (size_t)w + 1) nc *= 2;
+        char *p = (char *)realloc(*out, nc);
+        if (!p) return;
+        *out = p;
+        *cap = nc;
+    }
+    memcpy(*out + *len, t, (size_t)w + 1);
+    *len += (size_t)w;
+}
+
+double text_shaper_outline_path(const TextShaper *s, const char *utf8, size_t n, double px, double x, double y,
+                                char **out, size_t *len, size_t *cap)
+{
+    if (!s || !utf8 || s->size_pixels <= 0.0f || px <= 0.0) return 0.0;
+    double k0 = px / (double)s->size_pixels, pen = x;
+    const char *p = utf8, *end = utf8 + n;
+    int prev = -1;
+    while (p < end && *p) {
+        uint32_t cp = utf8_decode(&p);
+        int gi = 0, owner = 0;
+        float xa = 0.0f;
+        ts_metric(s, cp, &gi, &xa, &owner);
+        const TextShaper *gs = ts_owner_shaper(s, owner);
+        if (prev >= 0 && owner == 0) pen += (double)ts_kern(s, prev, gi) * s->scale * k0;
+        prev = owner == 0 ? gi : -1;
+        double k = (double)gs->scale * px / (double)(gs->size_pixels > 0.0f ? gs->size_pixels : s->size_pixels);
+        stbtt_vertex *v = NULL;
+        int nv = gi > 0 ? stbtt_GetGlyphShape(&gs->font, gi, &v) : 0;
+        bool open = false;
+        for (int q = 0; q < nv; q++) {
+            double vx = pen + v[q].x * k, vy = y - v[q].y * k;
+            if (v[q].type == STBTT_vmove) { if (open) ts_path_put(out, len, cap, "Z", 0, 0, 0, 0, 0, 0, 0); ts_path_put(out, len, cap, "M%.2f %.2f", vx, vy, 0, 0, 0, 0, 2); open = true; }
+            else if (v[q].type == STBTT_vline) ts_path_put(out, len, cap, "L%.2f %.2f", vx, vy, 0, 0, 0, 0, 2);
+            else if (v[q].type == STBTT_vcurve) ts_path_put(out, len, cap, "Q%.2f %.2f %.2f %.2f", pen + v[q].cx * k, y - v[q].cy * k, vx, vy, 0, 0, 4);
+            else if (v[q].type == STBTT_vcubic) ts_path_put(out, len, cap, "C%.2f %.2f %.2f %.2f %.2f %.2f", pen + v[q].cx * k, y - v[q].cy * k, pen + v[q].cx1 * k, y - v[q].cy1 * k, vx, vy, 6);
+        }
+        if (open) ts_path_put(out, len, cap, "Z", 0, 0, 0, 0, 0, 0, 0);
+        if (v) stbtt_FreeShape(&gs->font, v);
+        pen += (double)xa * k0;
+    }
+    return pen - x;
 }
 
 bool text_shaper_measure(const TextShaper *s, const char *utf8,

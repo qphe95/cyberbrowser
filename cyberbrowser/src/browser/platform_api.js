@@ -2023,7 +2023,38 @@
         return vtUnesc(n);
     };
     var vtClasses = function (el) {
-        try { var v = String(global.getComputedStyle(el).getPropertyValue('view-transition-class') || '').trim(); return v && v !== 'none' ? v.split(/\s+/) : []; }
+        try {
+            var root = el.getRootNode ? el.getRootNode() : null;
+            var v;
+            if (root && root !== el.ownerDocument && root.host) {
+                /* (in a shadow tree: its own classes are its tree's, not the document's; the document's ::part() rules') */
+                v = '';
+                var parts = String(el.getAttribute('part') || '').split(/\s+/);
+                var walk = function (rules) {
+                    for (var i = 0; i < rules.length; i++) {
+                        var r = rules[i];
+                        if (r.cssRules && !r.selectorText) { walk(r.cssRules); continue; }
+                        var sel = r.selectorText, st = r.style;
+                        if (!sel || !st) continue;
+                        var cv = st.getPropertyValue('view-transition-class');
+                        if (!cv) continue;
+                        var list = sel.split(',');
+                        for (var j = 0; j < list.length; j++) {
+                            var m = /^(.*)::part\(([^)]*)\)\s*$/.exec(list[j].trim());
+                            if (!m || parts.indexOf(m[2].trim()) < 0) continue;
+                            try { if (m[1] && !root.host.matches(m[1])) continue; } catch (e2) { continue; }
+                            v = cv;
+                        }
+                    }
+                };
+                var sheets = el.ownerDocument.styleSheets;
+                for (var k = 0; k < sheets.length; k++) { try { walk(sheets[k].cssRules); } catch (e3) {} }
+                /* (the shadow tree's own !important wins over the document's) */
+                if (el.style && el.style.getPropertyPriority('view-transition-class') === 'important') v = el.style.getPropertyValue('view-transition-class');
+                v = String(v).trim();
+            } else v = String(global.getComputedStyle(el).getPropertyValue('view-transition-class') || '').trim();
+            return v && v !== 'none' ? v.split(/\s+/) : [];
+        }
         catch (e) { return []; }
     };
     var vtInline = function (from, to) {
@@ -2106,7 +2137,22 @@
             if (cs.display === 'none' || cs.display === 'contents') continue;
             seen[n] = true;
             var r = el.getBoundingClientRect();
-            out.push({ name: n, el: el, cls: vtClasses(el), x: r.left, y: r.top, w: r.width, h: r.height, snap: vtSnap(el) });
+            var ent = { name: n, el: el, cls: vtClasses(el), x: r.left, y: r.top, w: r.width, h: r.height, snap: vtSnap(el) };
+            /* (transformed: the border box's size, placed so its transform takes it where it shows) */
+            var tm = /^matrix\(([^)]*)\)$/.exec(String(cs.transform || '').trim());
+            if (tm && typeof el.offsetWidth === 'number') {
+                var mv = tm[1].split(',').map(parseFloat), bw = el.offsetWidth, bh = el.offsetHeight;
+                var to = String(cs.transformOrigin || '').split(/\s+/).map(parseFloat), ox = to[0] || 0, oy = to[1] || 0;
+                if (mv.length === 6 && mv.every(isFinite) && bw > 0 && bh > 0) {
+                    var ccx = r.left + r.width / 2, ccy = r.top + r.height / 2, qx = bw / 2 - ox, qy = bh / 2 - oy;
+                    ent.x = ccx - ox - (mv[0] * qx + mv[2] * qy) - mv[4];
+                    ent.y = ccy - oy - (mv[1] * qx + mv[3] * qy) - mv[5];
+                    ent.w = bw; ent.h = bh;
+                    /* (about the group's centre, its transform-origin) */
+                    ent.m = 'translate(' + (ox - bw / 2) + 'px,' + (oy - bh / 2) + 'px) matrix(' + mv.join(',') + ') translate(' + (bw / 2 - ox) + 'px,' + (bh / 2 - oy) + 'px)';
+                }
+            }
+            out.push(ent);
         }
         return out;
     };
@@ -2231,6 +2277,18 @@
         var scoped = scope !== doc.documentElement;
         var nu = vtCaptureState(doc, scope), rules = vtRules(doc, scope);
         var byName = {}, order = [];
+        /* (the root in the old state only: the old page, the viewport's size, a group of its own) */
+        if (!scoped && old.root && old.rootIn && !vtRootNamed(doc)) {
+            var vw0 = global.innerWidth, vh0 = global.innerHeight, sd = doc.createElement('div');
+            sd.setAttribute('style', 'position:relative;margin:0;width:' + vw0 + 'px;height:' + vh0 + 'px;overflow:hidden;background:' + old.root.bg);
+            var bs0 = old.root.snap.cloneNode(true);
+            bs0.style.setProperty('position', 'static');
+            bs0.style.setProperty('margin', old.root.margin);
+            sd.appendChild(bs0);
+            var old2 = [{ name: old.rootName, el: doc.documentElement, cls: [], x: 0, y: 0, w: vw0, h: vh0, snap: sd }].concat(old.filter(function (o) { return o.name !== old.rootName; }));
+            old2.root = null;
+            old = old2;
+        }
         /* (the old capture's names first, in its paint order, the new ones after: the groups' order, CSS View Transitions 1) */
         old.forEach(function (o) { byName[o.name] = { nu: null, old: o }; order.push(o.name); });
         nu.forEach(function (n) { if (!byName[n.name]) { byName[n.name] = { nu: n, old: null }; order.push(n.name); } else byName[n.name].nu = n; });
@@ -2278,7 +2336,7 @@
             return out;
         };
         var contains = {};
-        order.forEach(function (n) { gval[n] = vtGroupVal(elOf[n]); if (gval[n] === 'contain') contains[n] = true; });
+        order.forEach(function (n) { gval[n] = vtGroupVal(elOf[n]); if (gval[n] !== 'normal') contains[n] = true;   /* (any value but normal: it contains) */ });
         order.forEach(function (n) {
             var anc = namedAnc(elOf[n]), v = gval[n];
             if (v === 'nearest' && anc.length) { parentOf[n] = anc[0]; contains[anc[0]] = true; }
@@ -2353,7 +2411,7 @@
             }
             var g = doc.createElement('div');
             g.setAttribute('style', 'position:absolute;left:0;top:0;margin:0;padding:0;border:0;box-sizing:content-box;width:' + geo.w + 'px;height:' + geo.h +
-                                    'px;transform:translate(' + (geo.x - sr.left) + 'px,' + (geo.y - sr.top) + 'px);transform-origin:0 0');
+                                    'px;transform:translate(' + (geo.x - sr.left) + 'px,' + (geo.y - sr.top) + 'px)' + (geo.m ? ' ' + geo.m : ''));
             vtApply(g, f.g);
             /* (the group's width after its rules: what the images span) */
             var gw = /px\s*$/.test(g.style.width) ? parseFloat(g.style.width) : geo.w;
@@ -2409,7 +2467,7 @@
                     vtApply(pg.kids, vtDecls(rules, 'group-children', pn, (byName[pn].nu || byName[pn].old).cls || []));
                     pg.g.appendChild(pg.kids);
                 }
-                g.style.setProperty('transform', 'translate(' + (geo.x - pg.geo.x) + 'px,' + (geo.y - pg.geo.y) + 'px)');
+                g.style.setProperty('transform', 'translate(' + (geo.x - pg.geo.x) + 'px,' + (geo.y - pg.geo.y) + 'px)' + (geo.m ? ' ' + geo.m : ''));
                 pg.kids.appendChild(g);
             } else ov.appendChild(g);
         });
@@ -2455,6 +2513,7 @@
             if (vdoc && (!doc || root === doc.documentElement)) {
                 try { vtOld = vtCaptureState(vdoc, root); } catch (e) { vtOld = null; }
                 if (vtOld && doc) { try { vtOld.root = vtRootSnap(doc); } catch (e) { vtOld.root = null; } }
+                if (vtOld && doc) { try { vtOld.rootIn = vtRootNamed(doc); vtOld.rootName = vtName(doc.documentElement) || 'root'; } catch (e) { vtOld.rootIn = false; } }
             }
         };
         Promise.resolve().then(function () { vtCapOld(); return update(); }).then(function (v) {
@@ -3117,9 +3176,17 @@
         if (lr.collapsed) return;
         var root = lr.commonAncestorContainer;
         if (root.nodeType === 3) { flat.push(hi, root, so, eo); return; }
-        var w = doc.createTreeWalker(root, 4);
+        var w = doc.createTreeWalker(root, 5);
         for (var t = w.nextNode(); t; t = w.nextNode()) {
             if (!lr.intersectsNode(t)) continue;
+            if (t.nodeType === 1) {
+                /* (a replaced element the range holds whole: a segment of its own) */
+                if (/^(img|video|canvas|svg|object|embed|iframe)$/i.test(t.localName || '') && t.parentNode) {
+                    var ix = Array.prototype.indexOf.call(t.parentNode.childNodes, t);
+                    if (lr.comparePoint(t.parentNode, ix) >= 0 && lr.comparePoint(t.parentNode, ix + 1) <= 0) flat.push(hi, t, 0, 1);
+                }
+                continue;
+            }
             var s = t === sc ? so : 0, e = t === ec ? eo : t.length;
             if (e > s) flat.push(hi, t, s, e);
         }
@@ -3136,21 +3203,48 @@
             if (p === 'script' || p === 'style') continue;
             nodes.push(t); starts.push(text.length); text += t.data;
         }
-        var low = text.toLowerCase(), ti = -1;
+        var low = text.toLowerCase().replace(/\u00a0/g, ' '), ti = -1;
+        /* (a word character: a match starts and ends between words) */
+        var wordy = function (c) { return !!c && /[0-9A-Za-z\u00c0-\u024f\u0370-\u03ff\u0400-\u04ff]/.test(c); };
+        var findw = function (q, from) {
+            for (var i = low.indexOf(q, from); i >= 0; i = low.indexOf(q, i + 1))
+                if (!(wordy(q.charAt(0)) && wordy(low.charAt(i - 1))) && !(wordy(q.charAt(q.length - 1)) && wordy(low.charAt(i + q.length)))) return i;
+            return -1;
+        };
+        var norm = function (x) { return x.toLowerCase().replace(/\u00a0/g, ' '); };
         for (var d = 0; d < dirs.length; d++) {
             if (dirs[d].slice(0, 5) !== 'text=') continue;
             var parts = dirs[d].slice(5).split(',').map(function (x) { try { return decodeURIComponent(x); } catch (e) { return x; } });
-            if (parts.length && /-$/.test(parts[0])) parts.shift();
-            if (parts.length && /^-/.test(parts[parts.length - 1])) parts.pop();
+            var pre = parts.length && /-$/.test(parts[0]) ? norm(parts.shift().slice(0, -1)) : '';
+            var suf = parts.length && /^-/.test(parts[parts.length - 1]) ? norm(parts.pop().slice(1)) : '';
             if (!parts.length || !parts[0]) continue;
-            var a = low.indexOf(parts[0].toLowerCase());
-            if (a < 0) continue;
-            var b = a + parts[0].length;
-            if (parts.length > 1 && parts[1]) {
-                var eb = low.indexOf(parts[1].toLowerCase(), b);
-                if (eb < 0) continue;
-                b = eb + parts[1].length;
+            var q0 = norm(parts[0]), a = -1, b = -1;
+            for (var from = 0; ; ) {
+                var at0 = findw(q0, from);
+                if (at0 < 0) break;
+                from = at0 + 1;
+                /* (a prefix: just before it, white space between) */
+                if (pre) {
+                    var pe = at0;
+                    while (pe > 0 && /\s/.test(low.charAt(pe - 1))) pe--;
+                    if (low.slice(pe - pre.length, pe) !== pre || wordy(low.charAt(pe - pre.length - 1))) continue;
+                }
+                var e0 = at0 + q0.length;
+                if (parts.length > 1 && parts[1]) {
+                    var eb = findw(norm(parts[1]), e0);
+                    if (eb < 0) break;
+                    e0 = eb + parts[1].length;
+                }
+                /* (a suffix: just after it) */
+                if (suf) {
+                    var ss = e0;
+                    while (ss < low.length && /\s/.test(low.charAt(ss))) ss++;
+                    if (low.slice(ss, ss + suf.length) !== suf || wordy(low.charAt(ss + suf.length))) continue;
+                }
+                a = at0; b = e0;
+                break;
             }
+            if (a < 0) continue;
             if (ti < 0) { ti = names.length; names.push('\u0001target-text'); prios.push(0x3ffffff0); }
             for (var k = 0; k < nodes.length; k++) {
                 var ns = starts[k], ne = ns + nodes[k].data.length;
@@ -3669,6 +3763,20 @@
         if (DocP && typeof DocP.getSelection !== 'function') define(DocP, 'getSelection', docGetSelection);
         if (global.document && typeof global.document.getSelection !== 'function')
             define(global.document, 'getSelection', docGetSelection);
+        /* (execCommand: selectAll only, the editing host focused or else the body) */
+        var execCommand = function execCommand(cmd) {
+            if (String(cmd).toLowerCase() !== 'selectall') return false;
+            var doc = this && this.nodeType === 9 ? this : global.document;
+            var host = doc.activeElement;
+            while (host && host.nodeType === 1 && !host.isContentEditable) host = null;
+            var root = host || doc.body || doc.documentElement;
+            if (!root) return false;
+            var sel = (doc.defaultView || global).getSelection();
+            if (sel && sel.selectAllChildren) sel.selectAllChildren(root);
+            return true;
+        };
+        if (DocP && typeof DocP.execCommand !== 'function') define(DocP, 'execCommand', execCommand);
+        if (global.document && typeof global.document.execCommand !== 'function') define(global.document, 'execCommand', execCommand);
     }
 
     /* ---- tables ---- */
@@ -4534,7 +4642,10 @@
         var wd = printDecl(first, 'width'), hd = printDecl(first, 'height');
         if (wd && wd !== 'auto') { var wv = printLen(wd, pw); m0.right += cw - wv; cw = wv; }
         if (hd && hd !== 'auto') { var hv = printLen(hd, ph); m0.bottom += chh - hv; chh = hv; }
-        __cyberPrintSet(cw, chh, m0.top + m0.bottom + bt + bb, m0.left + bl, m0.top + bt, pw);
+        /* (reftest-pages: the first page named shown first) */
+        var rpm = document.querySelector('meta[name="reftest-pages"]'), skip = 0;
+        if (rpm) { var rpv = /^\s*(\d+)/.exec(rpm.getAttribute('content') || ''); if (rpv && +rpv[1] > 1) skip = +rpv[1] - 1; }
+        __cyberPrintSet(cw, chh, m0.top + m0.bottom + bt + bb, m0.left + bl, m0.top + bt, pw, skip);
         var tries = 0;
         function pages() {
             /* (from the root's height, once laid out as pages) */
@@ -4557,7 +4668,8 @@
             var ctr = {}, pno = 0;
             try { printCtrList(getComputedStyle(de).counterReset, 0).forEach(function (p) { if (p[0] !== 'page' && p[0] !== 'pages') ctr[p[0]] = p[1]; }); } catch (e) { /* (none) */ }
             for (var k = 0; k < n; k++) {
-                var rs = printPageRules(rules, '', k), m = printMetrics(rs, pw, ph);
+                var pnm = k > 0 && typeof __cyberPrintPageName === 'function' ? __cyberPrintPageName(k) : firstName;
+                var rs = printPageRules(rules, pnm, k), m = printMetrics(rs, pw, ph);
                 /* (a width or height of the page box: the area that big, the end margin the rest) */
                 var wdk = printDecl(rs, 'width'), hdk = printDecl(rs, 'height');
                 if (wdk && wdk !== 'auto') m.right = pw - m.left - printLen(wdk, pw) - bl - br;
@@ -4572,6 +4684,7 @@
                 printPageCtr = '';
                 for (var cn0 in ctr) if (cn0 !== 'page' && cn0 !== 'pages') printPageCtr += ' ' + cn0 + ' ' + ctr[cn0];
                 var px = -(m0.left + bl), py = k * ph - (m0.top + bt);
+                if (typeof __cyberPrintPageOff === 'function') __cyberPrintPageOff(k, m.left - m0.left, m.top - m0.top);
                 var box = document.createElement('cyber-pm');
                 /* (the page box's decorations, under nothing else of it) */
                 var deco = '';

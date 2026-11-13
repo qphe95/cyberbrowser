@@ -1063,6 +1063,8 @@
     /* What a registered property's computed value comes to, by its syntax. */
     function reifyRegistered(text, syntax) {
         text = String(text).trim();
+        /* (a url: an image where the syntax takes one, else just a value) */
+        if (/^url\(/i.test(text) && !/<image>/.test(syntax)) return generic(text, '--x');
         if (/^url\(/i.test(text)) {
             var iv = new CSSImageValue(ILLEGAL);
             Object.defineProperty(iv, '__text', { value: text });
@@ -1083,7 +1085,10 @@
     }
     function registeredList(p, t) {
         var syntax = REGISTERED[p];
-        var parts = /#\s*$/.test(syntax) ? splitCommas(t) : /\+\s*$/.test(syntax) ? String(t).trim().split(/\s+(?![^(]*\))/) : [t];
+        /* (a list where an alternative is one: <length>+ | none) */
+        var alts = String(syntax).split('|').map(function (a) { return a.trim(); });
+        var parts = alts.some(function (a) { return /#$/.test(a); }) ? splitCommas(t) :
+                    alts.some(function (a) { return /\+$/.test(a); }) ? String(t).trim().split(/\s+(?![^(]*\))/) : [t];
         return parts.map(function (x) { return reifyRegistered(x, syntax); });
     }
     function reify(prop, text, mode) {

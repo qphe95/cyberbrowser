@@ -2463,6 +2463,14 @@ static void mir_store_attrs(NodeId s, MirStoreAttrs *a) {
         a->values[a->n] = v;
         a->lens[a->n] = vl;
         a->n++;
+        /* (the XML namespace's xml:lang: the language, under a name of its own; an
+         * HTML page's markup xml:lang is a plain attribute) */
+        if (at->ns == DOM_NS_XML && (!strcmp(nm, "xml:lang") || !strcmp(nm, "lang")) && a->n < 64) {
+            a->names[a->n] = "-cb-xmllang";
+            a->values[a->n] = v;
+            a->lens[a->n] = vl;
+            a->n++;
+        }
     }
     if (style_at >= 0 && a->n < 64) {
         const DomAttr *at = dom_attr_at(s, style_at);

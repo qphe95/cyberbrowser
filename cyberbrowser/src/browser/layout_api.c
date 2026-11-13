@@ -1605,6 +1605,22 @@ bool layout_query_cascade(JSContextHandle ctx, GCValue element, LayoutCascadeFn 
         used->content_width = b->content_width / uz;
         used->content_height = b->content_height / uz;
         double m[4] = { b->margin_top / uz, b->margin_right / uz, b->margin_bottom / uz, b->margin_left / uz };
+        /* (auto margins of a flex or grid container's only item: the room they took) */
+        int pi = g_lq_layout.tree.nodes[idx].parent_idx;
+        if (b->s->margin_auto && pi >= 0 && (g_lq_layout.boxes[pi].s->display == CSS_DISPLAY_FLEX || g_lq_layout.boxes[pi].s->display == CSS_DISPLAY_GRID)) {
+            int others = 0;
+            for (int c = g_lq_layout.tree.nodes[pi].first_child_idx; c >= 0; c = g_lq_layout.tree.nodes[c].next_sibling_idx)
+                if (c != idx && g_lq_layout.boxes[c].s->display != CSS_DISPLAY_NONE && g_lq_layout.boxes[c].s->display != CSS_DISPLAY_INLINE && g_lq_layout.boxes[c].s->position != CSS_POSITION_ABSOLUTE &&
+                    g_lq_layout.boxes[c].s->position != CSS_POSITION_FIXED && g_lq_layout.tree.nodes[c].dom_node_idx < LAYOUT_PSEUDO_DOM0) others++;
+            if (!others) {
+                const LayoutBox *P = &g_lq_layout.boxes[pi];
+                double cx = P->x + P->s->border_left + P->padding_left, cy = P->y + P->s->border_top + P->padding_top;
+                if (b->s->margin_auto & 1) m[0] = (b->y - cy) / uz;
+                if (b->s->margin_auto & 2) m[1] = (cx + P->content_width - b->x - b->width) / uz;
+                if (b->s->margin_auto & 4) m[2] = (cy + P->content_height - b->y - b->height) / uz;
+                if (b->s->margin_auto & 8) m[3] = (b->x - cx) / uz;
+            }
+        }
         double p[4] = { b->padding_top / uz, b->padding_right / uz, b->padding_bottom / uz, b->padding_left / uz };
         double r[4] = { b->s->border_top / uz, b->s->border_right / uz, b->s->border_bottom / uz, b->s->border_left / uz };
         memcpy(used->margin, m, sizeof m);

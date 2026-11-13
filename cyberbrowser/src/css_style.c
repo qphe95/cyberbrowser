@@ -1009,12 +1009,17 @@ static inline bool nth_matches(int a, int b, int pos)
 /* (element n's language: the nearest lang attribute up from it; NULL none) */
 static const char *lang_of(const CssStyleDoc *D, int n)
 {
-    static CssAtom a_lang;
+    static CssAtom a_lang, a_xlang;
     if (!a_lang) a_lang = css_atom_intern("lang", 4);
+    if (!a_xlang) a_xlang = css_atom_intern("-cb-xmllang", 11);
     for (int k = n, guard = 0; k >= 0 && guard < 4096; k = D->parent[k], guard++) {
         const CssAtom *attrs = D->pool + D->attr_off[k];
-        for (uint32_t j = 0; j < D->attr_n[k]; j++)
-            if (attrs[j] == a_lang) return D->pool_val[D->attr_off[k] + j];
+        const char *l = NULL;
+        for (uint32_t j = 0; j < D->attr_n[k]; j++) {
+            if (attrs[j] == a_xlang) return D->pool_val[D->attr_off[k] + j];   /* (xml:lang first) */
+            if (attrs[j] == a_lang && !l) l = D->pool_val[D->attr_off[k] + j];
+        }
+        if (l) return l;
     }
     return NULL;
 }

@@ -236,7 +236,10 @@ static void desc(CStyle *c, const char *name, size_t nl, const char *v, const ch
         unsigned short off[CS_SYMS];
         CStyle tmp = *c;
         while (!at_end(p, end)) {
+            const char *q0 = skip_ws(p, end);
+            bool quoted = *q0 == '"' || *q0 == '\'';
             if (n == CS_SYMS || !read_symbol(&p, end, sym, sizeof sym)) return;
+            if (!quoted && strcasecmp(sym, "none") && !name_ok(sym)) return;   /* (a CSS-wide keyword is no symbol) */
             off[n++] = cs_store(&tmp, sym);
         }
         if (!n) return;
@@ -431,6 +434,9 @@ static void cs_resolve(int i, int depth)
     if (!c->extends[0]) return;
     int b = depth < 16 ? cs_lookup(c->extends) : -1;
     if (b == i) b = -1;
+    /* (i in a cycle: decimal its base) */
+    for (int j = b, k = 0; j >= 0 && k < 64 && g_cs[j].extends[0]; j = cs_lookup(g_cs[j].extends), k++)
+        if (j == i) { b = -1; break; }
     if (b >= 0 && g_cs[b].extends[0]) cs_resolve(b, depth + 1);
     if (b < 0 || g_cs[b].extends[0]) b = cs_lookup("decimal");
     CStyle own = *c, *base = &g_cs[b];
@@ -637,6 +643,12 @@ void cstyle_scan_css(const char *css, size_t len)
     cs_init();
     int from = g_n;
     cs_scan(css, len, false);
+    /* (those in an extends cycle: each extends decimal, found before any is resolved) */
+    unsigned char cyc[256] = { 0 };
+    for (int i = from; i < g_n && i - from < 256; i++)
+        for (int j = g_cs[i].extends[0] ? cs_lookup(g_cs[i].extends) : -1, k = 0; j >= 0 && k < 64 && g_cs[j].extends[0]; j = cs_lookup(g_cs[j].extends), k++)
+            if (j == i) { cyc[i - from] = 1; break; }
+    for (int i = from; i < g_n && i - from < 256; i++) if (cyc[i - from]) snprintf(g_cs[i].extends, sizeof g_cs[i].extends, "%s", "decimal");
     for (int i = from; i < g_n; i++) cs_resolve(i, 0);
 }
 
@@ -668,8 +680,20 @@ static void out_pre(Out *o, const char *t)
 
 static size_t cps(const char *s)
 {
+    /* (grapheme clusters, near enough: code points less the combining marks) */
     size_t n = 0;
-    for (; *s; s++) n += ((unsigned char)*s & 0xC0) != 0x80;
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p) {
+        uint32_t cp = *p;
+        int l = 1;
+        if (cp >= 0xF0 && p[1] && p[2] && p[3]) { cp = ((cp & 7u) << 18) | ((p[1] & 63u) << 12) | ((p[2] & 63u) << 6) | (p[3] & 63u); l = 4; }
+        else if (cp >= 0xE0 && p[1] && p[2]) { cp = ((cp & 15u) << 12) | ((p[1] & 63u) << 6) | (p[2] & 63u); l = 3; }
+        else if (cp >= 0xC0 && p[1]) { cp = ((cp & 31u) << 6) | (p[1] & 63u); l = 2; }
+        bool mark = (cp >= 0x300 && cp <= 0x36F) || (cp >= 0x1AB0 && cp <= 0x1AFF) || (cp >= 0x1DC0 && cp <= 0x1DFF) ||
+                    (cp >= 0x20D0 && cp <= 0x20FF) || (cp >= 0xFE20 && cp <= 0xFE2F) || cp == 0x200D || (cp >= 0xFE00 && cp <= 0xFE0F);
+        if (!mark) n++;
+        p += l;
+    }
     return n;
 }
 
@@ -862,13 +886,15 @@ static void cs_rep(int si, long long v, Out *o, int depth, int *used)
             break;
         }
         if (ok && o->ok) {
-            if (v < 0 && uses_negative(c)) {
+            bool neg = v < 0 && uses_negative(c);
+            if (c->pad > 0) {
+                /* (the negative sign's length counts, the padding goes inside it) */
+                size_t have = cps(o->s) + (neg ? cps(CS_STR(c, c->neg_off[0])) + (c->has_neg2 ? cps(CS_STR(c, c->neg_off[1])) : 0) : 0);
+                for (size_t k = have; k < (size_t)c->pad && o->ok; k++) out_pre(o, CS_STR(c, c->pad_off));
+            }
+            if (neg) {
                 out_pre(o, CS_STR(c, c->neg_off[0]));
                 if (c->has_neg2) out_add(o, CS_STR(c, c->neg_off[1]));
-            }
-            if (c->pad > 0) {
-                size_t have = cps(o->s);
-                for (size_t k = have; k < (size_t)c->pad && o->ok; k++) out_pre(o, CS_STR(c, c->pad_off));
             }
             if (o->ok) return;
         }

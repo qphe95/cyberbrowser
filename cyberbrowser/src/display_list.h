@@ -144,6 +144,7 @@ struct HtmlNode;
  * data an image file): laid out and painted as an <img> of its data. */
 bool display_list_object_image(const struct HtmlNode *node);
 char *display_list_image_source(const char *base_url, struct HtmlNode *node, float css_width);
+double display_list_image_density(void);   /* (the srcset candidate display_list_image_source last picked: its x density, else 1) */
 /* (image-orientation: none: url as the cache's unturned variant, when the
  * image is of the page's own origin; url freed or returned) */
 char *display_list_noexif(char *url, const char *base_url);

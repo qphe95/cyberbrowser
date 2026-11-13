@@ -470,6 +470,8 @@ static ImagePixels *decode_svg(const uint8_t *d, size_t n, int nw, int nh, int w
     if (ww > 0 && wh > 0) scale = fmaxf((float)ww / sw, (float)wh / sh);
     if (sw * scale > 4096.0f || sh * scale > 4096.0f) scale = 4096.0f / fmaxf(sw, sh);
     int iw = (int)(sw * scale + 0.5f), ih = (int)(sh * scale + 0.5f);
+    if (iw < 1) iw = 1;   /* (a sliver of a ratio: a pixel of it still, stretched where drawn) */
+    if (ih < 1) ih = 1;
     /* (no ratio of its own: drawn into the size asked for, its viewport that) */
     if ((dims & 8u) && !(dims & 4u) && ww > 0 && wh > 0 && ww <= 4096 && wh <= 4096) { iw = ww; ih = wh; }
     uint8_t *rgba = NULL;

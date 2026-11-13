@@ -1128,6 +1128,7 @@ static int builtin_type(const GNode *g, const Toks *ts, int i) {
     if (!strcmp(n, "zero")) return (t->type == T_NUMBER && v == 0) ? 1 : 0;   /* a unitless 0 (as an <angle> in transforms) */
     if (!strcmp(n, "ident")) return t->type == T_IDENT;
     if (!strcmp(n, "custom-ident")) return custom_ident_ok(t);
+    if (!strcmp(n, "counter-style-ident")) return custom_ident_ok(t) && strcasecmp(t->str, "none") != 0;   /* (a counter style's name: not none) */
     if (!strcmp(n, "dashed-ident")) return t->type == T_IDENT && t->str[0] == '-' && t->str[1] == '-';
     if (!strcmp(n, "string")) return t->type == T_STRING;
     if (!strcmp(n, "url")) {
@@ -10229,8 +10230,55 @@ static char *url_mods_canon(const char *v)
     return b.s;
 }
 
+/* (image(a, b, colour) as layers: url(a), url(b), a gradient of the colour; NULL: none in it) */
+static char *image_fn_layers(const char *v)
+{
+    const char *at = NULL;
+    for (const char *q = v; (q = strstr(q, "image(")) != NULL; q++)
+        if (q == v || !(isalnum((unsigned char)q[-1]) || q[-1] == '-' || q[-1] == '_')) { at = q; break; }
+    if (!at) return NULL;
+    Buf b = { 0 };
+    buf_add(&b, v, (size_t)(at - v));
+    const char *q = at + 6;
+    int depth = 0, n = 0;
+    while (*q) {
+        while (*q == ' ' || *q == '\t' || *q == '\n') q++;
+        const char *a0 = q;
+        char quote = 0;
+        for (; *q; q++) {
+            if (quote) { if (*q == '\\' && q[1]) q++; else if (*q == quote) quote = 0; continue; }
+            if (*q == '"' || *q == '\'') { quote = *q; continue; }
+            if (*q == '(') depth++;
+            else if (*q == ')') { if (depth == 0) break; depth--; }
+            else if (*q == ',' && depth == 0) break;
+        }
+        const char *a1 = q;
+        while (a1 > a0 && (a1[-1] == ' ' || a1[-1] == '\t')) a1--;
+        if (a1 > a0) {
+            if (n++) buf_str(&b, ", ");
+            if (*a0 == '"' || *a0 == '\'') { buf_str(&b, "url("); buf_add(&b, a0, (size_t)(a1 - a0)); buf_ch(&b, ')'); }
+            else if (!strncasecmp(a0, "url(", 4)) buf_add(&b, a0, (size_t)(a1 - a0));
+            else { buf_str(&b, "linear-gradient("); buf_add(&b, a0, (size_t)(a1 - a0)); buf_str(&b, ", "); buf_add(&b, a0, (size_t)(a1 - a0)); buf_ch(&b, ')'); }
+        }
+        if (*q == ',') { q++; continue; }
+        break;
+    }
+    if (*q != ')' || !n) { free(b.s); return NULL; }
+    buf_str(&b, q + 1);
+    buf_ch(&b, 0);
+    /* (another image() after it) */
+    char *more = image_fn_layers(b.s);
+    if (more) { free(b.s); return more; }
+    return b.s;
+}
+
 char *css_prop_parse(const CssPropDef *p, const char *value)
 {
+    if (value && p && (!strcmp(p->name, "background") || !strcmp(p->name, "background-image") || !strcmp(p->name, "list-style-image") ||
+                       !strcmp(p->name, "mask-image") || !strcmp(p->name, "border-image-source")) && strstr(value, "image(")) {
+        char *lay = image_fn_layers(value);
+        if (lay) { char *r = css_prop_parse(p, lay); free(lay); return r; }
+    }
     /* (worked out as far as it can be; what's left is checked as its sum, and stays) */
     if (value && strstr(value, "calc-mix(") && !has_substitution(value)) {
         char *canon = calc_mix_canon(value);

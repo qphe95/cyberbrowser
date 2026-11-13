@@ -193,6 +193,12 @@ function refsOf(f) {
         refs.push({ kind: rel[1].toLowerCase(), url });
     }
     const fuzzy = [...src.matchAll(/<meta\s+name=["']?fuzzy["']?\s+content=["']([^"']*)["']/gi)].map(m => m[1]);
+    /* (variants: the first one's query, on the test and its references: wptrunner never runs one without) */
+    const variant = (/<meta\s+name=["']?variant["']?\s+content=["']([^"']*)["']/i.exec(src) || [])[1];
+    if (variant && variant.startsWith('?')) {
+        for (const r of refs) if (r.url !== BLANK) r.url += (r.url.includes('?') ? '&' : '?') + variant.slice(1);
+        return { refs, fuzzy, url: f + variant };
+    }
     return { refs, fuzzy };
 }
 const steps = [];                 /* { k, url, shot }, one per page */
@@ -211,7 +217,7 @@ if (REFTEST) {
             PRINT_URLS.add('/' + t.split('?')[0]);
             for (const r of info.refs) r.url += (r.url.includes('?') ? '&' : '?') + 'cyberprint=1';
         }
-        for (const u of [t, ...info.refs.map(r => r.url)]) {
+        for (const u of [info.url || t, ...info.refs.map(r => r.url)]) {
             if (seen.has(u)) continue;
             seen.add(u);
             steps.push({ k: steps.length + 1, url: u, shot: path.join(out, 'shots', `${steps.length + 1}.rle`) });
@@ -672,7 +678,34 @@ function serveFile(res, url, file, hit) {
         /* (inside the root element, so XHTML stays well-formed) */
         /* (found in the text itself: lower-casing can change its length, 'İ' -> 'i̇') */
         const text = data.toString('utf8'), ends = [...text.matchAll(/<\/html>/gi)];
-        const end = ends.length ? ends[ends.length - 1].index : -1;
+        let end = ends.length ? ends[ends.length - 1].index : -1;
+        /* (in the head when it has one: the body's children as the page wrote them, :last-child and the like) */
+        /* (a tag of the page's own: outside any quoted attribute value, a data: URL's markup not counted) */
+        const tagAt = re => {
+            let q = '', inTag = false;
+            for (let k = 0; k < text.length; k++) {
+                const ch = text[k];
+                if (q) { if (ch === q) q = ''; continue; }
+                if (inTag) { if (ch === '"' || ch === "'") q = ch; else if (ch === '>') inTag = false; continue; }
+                if (ch === '<') {
+                    if (re.test(text.slice(k, k + 8))) return k;
+                    if (text.startsWith('<script', k) || text.startsWith('<style', k)) {   /* (their content: text, not tags) */
+                        const close = text.toLowerCase().indexOf(text.startsWith('<script', k) ? '</script' : '</style', k + 1);
+                        if (close < 0) return -1;
+                        k = close;
+                        continue;
+                    }
+                    if (text.startsWith('<!--', k)) { const c = text.indexOf('-->', k + 4); if (c < 0) return -1; k = c + 2; continue; }
+                    inTag = true;
+                }
+            }
+            return -1;
+        };
+        const hd = tagAt(/^<\/head\s*>/i), bd = hd >= 0 ? -1 : tagAt(/^<body[\s>]/i);
+        if (hd >= 0) end = hd;
+        else if (bd >= 0) end = bd;
+        /* (no end tag, the file ending in a tag left open ('</html' and nothing after): before that) */
+        if (end < 0 && text.lastIndexOf('<') > text.lastIndexOf('>')) end = text.lastIndexOf('<');
         /* (a print reftest and its references: laid out as pages) */
         const rdy = PRINT_URLS.has(url.pathname) || url.searchParams.has('cyberprint') ? REFREADY.replace('/*PRINT*/', 'if (window.__cyberPrintBegin) window.__cyberPrintBegin();') : REFREADY;
         data = Buffer.from(end < 0 ? text + rdy : text.slice(0, end) + rdy + text.slice(end), 'utf8');

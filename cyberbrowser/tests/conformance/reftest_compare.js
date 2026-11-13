@@ -94,7 +94,7 @@ const results = {};
 const byUrl = new Map(steps.map(s => [s.url, s]));
 let k = 0;
 for (const [test, info] of Object.entries(refInfo)) {
-    const mine = [test, ...info.refs.map(r => r.url)].map(u => byUrl.get(u));
+    const mine = [info.url || test, ...info.refs.map(r => r.url)].map(u => byUrl.get(u));
     const raw = readFile(mine[0].shot);
     let decoded;
     const shot = raw && { get v() { return decoded || (decoded = readBmp(mine[0].shot)); } };
