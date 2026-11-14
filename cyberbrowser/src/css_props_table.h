@@ -559,6 +559,7 @@ static CssPropDef g_props[] = {
     L("flex-line-count", "<integer [1,inf]>", "1", 0),
     /* (a page's size, as @page gives it) */
     L("size", "<length [0,inf]>{1,2} | auto | [ [ a5 | a4 | a3 | b5 | b4 | jis-b5 | jis-b4 | letter | legal | ledger ] || [ portrait | landscape ] ]", "auto", 0),
+    L("page-orientation", "upright | rotate-left | rotate-right", "upright", 0),   /* (@page's) */
     L("float", "left | right | inline-start | inline-end | none", "none", 0),
     L("flood-color", "<color>", "black", 0),
     L("flood-opacity", "<alpha-value>", "1", 0),

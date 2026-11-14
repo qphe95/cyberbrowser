@@ -1608,6 +1608,11 @@
         var at = function (align, lo, hi, view, pa, pb) {
             return align === 'start' ? lo - pa : align === 'end' ? hi - view + pb : (lo + hi - view - pa + pb) / 2 ;
         };
+        /* (its writing mode: which axis is the block one, which run from the far side) */
+        var wm_ = String(ecs.writingMode || ''), vert_ = /^(vertical|sideways)/.test(wm_), rtl_ = ecs.direction === 'rtl';
+        var flipX = vert_ ? /-rl$/.test(wm_) : rtl_, flipY = vert_ ? rtl_ : false;
+        var flipA = function (a, f) { return !f ? a : a === 'start' ? 'end' : a === 'end' ? 'start' : a; };
+        var minX = flipX ? -maxX : 0, hiX = flipX ? 0 : maxX, minY = flipY ? -maxY : 0, hiY = flipY ? 0 : maxY;
         /* (what the cascade says has a scroll-snap-align, in tree order; a
          * nested scroller's targets are its own) */
         var aligned = global.__cyberRenderElements(16);
@@ -1629,14 +1634,15 @@
             var align = global.getComputedStyle(c).scrollSnapAlign;
             if (!align || align === 'none') continue;
             var parts = align.split(' '), block = parts[0], inline = parts[1] || parts[0], b = c.getBoundingClientRect();
+            var ax_ = flipA(vert_ ? block : inline, flipX), ay_ = flipA(vert_ ? inline : block, flipY);
             var tcs = global.getComputedStyle(c), tz = c.currentCSSZoom || 1;
-            if (axes.x && inline !== 'none') {
+            if (axes.x && ax_ !== 'none') {
                 var xlo = b.left - left + sx - elPx(tcs.scrollMarginLeft, 0, tz), xhi = b.right - left + sx + elPx(tcs.scrollMarginRight, 0, tz);
-                out.x.push({ t: c, pos: Math.max(0, Math.min(maxX, at(inline, xlo, xhi, cw, padL, padR))), lo: xlo - padL, hi: xhi + padR });
+                out.x.push({ t: c, pos: Math.max(minX, Math.min(hiX, at(ax_, xlo, xhi, cw, padL, padR))), lo: xlo - padL, hi: xhi + padR });
             }
-            if (axes.y && block !== 'none') {
+            if (axes.y && ay_ !== 'none') {
                 var ylo = b.top - top + sy - elPx(tcs.scrollMarginTop, 0, tz), yhi = b.bottom - top + sy + elPx(tcs.scrollMarginBottom, 0, tz);
-                out.y.push({ t: c, pos: Math.max(0, Math.min(maxY, at(block, ylo, yhi, ch, padT, padB))), lo: ylo - padT, hi: yhi + padB });
+                out.y.push({ t: c, pos: Math.max(minY, Math.min(hiY, at(ay_, ylo, yhi, ch, padT, padB))), lo: ylo - padT, hi: yhi + padB });
             }
         }
         return out;
@@ -4780,6 +4786,11 @@
                 for (var cn0 in printCtrMap) if (cn0 !== 'page' && cn0 !== 'pages') printPageCtr += ' ' + cn0 + ' ' + printCtrMap[cn0];
                 var px = -(m0.left + bl), py = k * ph - (m0.top + bt);
                 if (typeof __cyberPrintPageOff === 'function') __cyberPrintPageOff(k, m.left - m0.left, m.top - m0.top);
+                /* (the page shown: page-orientation turns it) */
+                if (k === skip && typeof __cyberPrintRotate === 'function') {
+                    var po = (printDecl(rs, 'page-orientation') || '').trim();
+                    __cyberPrintRotate(po === 'rotate-right' ? 1 : po === 'rotate-left' ? -1 : 0);
+                }
                 var box = document.createElement('cyber-pm');
                 /* (the page box's decorations, under nothing else of it) */
                 var deco = '';

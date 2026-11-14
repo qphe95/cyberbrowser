@@ -409,6 +409,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * fs_unadj the font size before the adjustment, 0 not yet made) */
     float fsa;
     unsigned char fsa_metric, fsa_set;
+    unsigned char fsa_from;   /* (from-font: the first font's aspect; the fallbacks matched to it) */
     double fs_unadj;
     unsigned char fs_vunit;   /* (font-size in vi 1 or vb 2: fs_vval of them, by its own writing mode) */
     float fs_vval;
@@ -438,6 +439,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char cs_dark;   /* (color-scheme, inherited: the dark one used) */
     unsigned char ti_hang;   /* (text-indent: 1 hanging: the lines after the first indented, not it; 2 each-line: after a forced break as the first) */
     unsigned char trim_off, trim_set;   /* (text-spacing-trim: space-all, inherited) */
+    unsigned char trim_start;           /* (text-spacing-trim: 1 trim-start (each line's start), 2 space-first (after a soft wrap)) */
     unsigned char autospace, autospace_set;   /* (text-autospace, inherited: 1 ideograph-alpha, 2 ideograph-numeric) */
     unsigned char hang, hang_set;
     /* (outline: its style (a CssBorderStyle, 0 none; auto as none), width
@@ -924,6 +926,7 @@ typedef struct LayoutBox {
     unsigned char clamp_clip;   /* (a line-clamp container that clamped: what is past clamp_y, its clamp point, not painted) */
     float clamp_y;
     float marker_dx;   /* (an outside marker moved in by floats: its line's start past them) */
+    float fs_off, fs_gx0, fs_gx1;   /* (a fieldset with a rendered legend: its border box this far down; the top border not painted from x + fs_gx0 to x + fs_gx1) */
     double static_dx, static_dy;
     double opacity_eff;
     double ell_start;           /* (right to left: how far before the content edge the furthest would have begun; negative, 0 none) */

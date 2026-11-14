@@ -861,6 +861,25 @@ static bool page_frame_size_changed(uint32_t node, double w, double h)
 /* The frames' documents, each laid out and listed on its own, for the page's list to
  * take in at their <iframe>s.  Before the page's layout: a layout's tables are for the
  * display list built right after it. */
+/* (the meta color-scheme under node n: "light", "dark", or NULL for none or both) */
+static const char *page_meta_scheme(NodeId n, int depth) {
+    for (NodeId c = dom_first_child(n); c && depth < 64; c = dom_next_sibling(c)) {
+        const char *ln = dom_local_name(c);
+        if (ln && !strcasecmp(ln, "meta")) {
+            const char *nm = dom_get_attr_str(c, "name"), *ct = dom_get_attr_str(c, "content");
+            if (nm && ct && !strcasecmp(nm, "color-scheme")) {
+                bool dk = strstr(ct, "dark") != NULL, lt = strstr(ct, "light") != NULL;
+                return dk && !lt ? "dark" : lt && !dk ? "light" : NULL;
+            }
+        }
+        if (ln && (!strcasecmp(ln, "html") || !strcasecmp(ln, "head"))) {
+            const char *r = page_meta_scheme(c, depth + 1);
+            if (r) return r;
+        }
+    }
+    return NULL;
+}
+
 static void page_frames_build(void) {
     extern int frame_api_paint_list(NodeId *iframes, NodeId *docs, JSContextHandle *ctxs, double *ws, double *hs, int cap);
     enum { MAXF = 32 };
@@ -881,7 +900,29 @@ static void page_frames_build(void) {
             /* (print mode is the page's, not its frames') */
             bool held_print = g_css_print.on;
             g_css_print.on = false;
+            /* (its iframe's color-scheme: what it prefers) */
+            const char *held_cs = css_media_color_scheme();
+            {
+                const char *st = dom_get_attr_str(iframes[k], "style");
+                const char *cs = st ? strstr(st, "color-scheme") : NULL;
+                if (cs) {
+                    const char *v = strchr(cs, ':');
+                    char w[64] = "";
+                    if (v) { size_t L = strcspn(v + 1, ";"); if (L > 63) L = 63; memcpy(w, v + 1, L); w[L] = 0; }
+                    bool dk = strstr(w, "dark") != NULL, lt = strstr(w, "light") != NULL;
+                    if (dk && !lt) css_media_set_color_scheme("dark");
+                    else if (lt && !dk) css_media_set_color_scheme("light");
+                    else cs = NULL;
+                }
+                if (!cs) {
+                    /* (normal: the page's own, as its meta gives it) */
+                    NodeId doc = dom_owner(iframes[k]);
+                    const char *ms = doc ? page_meta_scheme(doc, 0) : NULL;
+                    if (ms) css_media_set_color_scheme(ms);
+                }
+            }
             bool frame_laid = css_layout_run(lc, fd, NULL, ws[k], hs[k]);
+            css_media_set_color_scheme(held_cs);
             g_css_print.on = held_print;
             if (frame_laid) {
                 css_layout_frame_content_note((uint32_t)iframes[k], lc);

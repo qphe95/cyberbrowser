@@ -2082,6 +2082,13 @@ static NodeId lq_scroll_subject(JSContextHandle ctx, NodeId id, double *mx, doub
         size_t len = 0;
         const char *v = JS_ToCStringLen(ctx, &len, JS_GetPropertyStr(ctx, dom_js(ctx, id), "value"));
         double w = (double)len * g_lq_layout.boxes[idx].s->font_size * 0.5;
+        if (v && is_tag(id, "input")) {
+            /* (an input: its value as painted, between its paddings) */
+            extern double css_layout_text_width(const LayoutBox *box, const char *text);
+            const LayoutBox *ib = &g_lq_layout.boxes[idx];
+            double tw = css_layout_text_width(ib, v);
+            if (tw >= 0.0) w = ib->padding_left + tw + ib->padding_right;
+        }
         if (v) JS_FreeCString(ctx, v);
         if (w > sw) sw = w;
     }

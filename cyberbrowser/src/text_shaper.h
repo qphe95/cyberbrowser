@@ -72,6 +72,7 @@ bool text_shaper_deco_metrics(const TextShaper *shaper, float *ul_pos, float *ul
 /* (@font-face metric overrides: fractions of the em, a negative one kept as it is) */
 void text_shaper_override_vmetrics(TextShaper *shaper, float ascent, float descent, float line_gap);
 void text_shaper_size_adjust(TextShaper *shaper, float f);
+void text_shaper_chain_adjust(int metric);
 /* (@font-face unicode-range: n [lo, hi] pairs; a code point outside them the font hasn't) */
 void text_shaper_set_ranges(TextShaper *shaper, const uint32_t *pairs, int n);
 /* (the font's own ascent over its size, what glyphs are drawn below an em box's top by, overrides or not) */

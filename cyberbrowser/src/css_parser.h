@@ -37,9 +37,10 @@ bool css_logical_shorthand(const char *prop, char start[64], char end[64]);
 unsigned char css_note_property(const char *prop);
 /* A page's <meta name=color-scheme> asking for one: prefers-color-scheme says
  * so ("light", "dark", static strings; NULL: as usual).  True if it changed. */
-typedef struct CssPrintMode { bool on; double w, h, gap, ml, mt, pw; int pages, skip; float pdx[64], pdy[64]; char pname[64][24]; } CssPrintMode;
+typedef struct CssPrintMode { bool on; double w, h, gap, ml, mt, pw; int pages, skip; float pdx[64], pdy[64]; char pname[64][24]; int rot; } CssPrintMode;   /* (rot: the page shown turned, 1 clockwise, -1 back) */
 extern __thread CssPrintMode g_css_print;
 bool css_media_set_color_scheme(const char *scheme);
+const char *css_media_color_scheme(void);   /* (the scheme set, NULL the user's) */
 /* navigator.preferences: a preference media feature's override (NULL or "": none); true if it changed. */
 bool css_media_set_pref(const char *name, const char *value);
 

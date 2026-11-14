@@ -4148,6 +4148,8 @@ static const char *g_mq_color_scheme;
 /* (print mode: the page area, what lies between pages, the first page's margins) */
 __thread CssPrintMode g_css_print;
 
+const char *css_media_color_scheme(void) { return g_mq_color_scheme; }
+
 bool css_media_set_color_scheme(const char *scheme) {
     if (scheme == g_mq_color_scheme) return false;
     g_mq_color_scheme = scheme;

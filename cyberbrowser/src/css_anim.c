@@ -46,6 +46,8 @@ static struct {
     AnimVal *a, *b;
     float (*kfo)[ANIM_KF];
     AnimVal (*kfv)[ANIM_KF];
+    uint8_t (*kfe)[ANIM_KF];          /* (a keyframe's own timing function: kind + 1, 0 the animation's) */
+    float (*kfp)[ANIM_KF][4];
     uint64_t *alive, *ev_run, *ev_start, *ev_end, *seen, *paused, *held;
     int *head;              /* per store slot */
     uint32_t head_n;
@@ -72,7 +74,9 @@ static const char *const k_props[ANIM_NPROP] = { "left", "top", "right", "bottom
                                                   "margin-top", "margin-right", "margin-bottom", "margin-left",
                                                   "border-top-width", "border-right-width", "border-bottom-width",
                                                   "border-left-width", "font-size", "letter-spacing", "word-spacing", "font-weight", "font-style",
-                                                  "rotate", "scale", "clip-path", "filter", "backdrop-filter" };
+                                                  "rotate", "scale", "clip-path", "filter", "backdrop-filter",
+                                                  "border-top-color", "border-right-color", "border-bottom-color", "border-left-color",
+                                                  "grid-template-columns", "grid-template-rows" };
 
 const char *anim_prop_name(int p) { return p >= 0 && p < ANIM_NPROP ? k_props[p] : ""; }
 
@@ -421,7 +425,7 @@ static const char *tf_text_of(const AnimVal *v, char *buf, size_t cap)
 static AnimVal tf_mix(const AnimVal *x, const AnimVal *y, double t)
 {
     /* (a clip-path, z 2: none and a shape don't go between) */
-    if ((x->z == 2.0f || y->z == 2.0f) && (!x->tf || !y->tf)) return t < 0.5 ? *x : *y;
+    if ((x->z == 2.0f || y->z == 2.0f || x->z == 3.0f || y->z == 3.0f) && (!x->tf || !y->tf)) return t < 0.5 ? *x : *y;
     char ba[96], bb[96];
     const char *ta = tf_text_of(x, ba, sizeof ba), *tb = tf_text_of(y, bb, sizeof bb);
     const char *m = tf_mix_text(ta, tb, t);
@@ -429,7 +433,7 @@ static AnimVal tf_mix(const AnimVal *x, const AnimVal *y, double t)
         AnimVal r = t < 0.5 ? *x : *y;
         return r;
     }
-    AnimVal r = { (float)(x->x + (y->x - x->x) * t), (float)(x->y + (y->y - x->y) * t), 1, 0, 0, m };
+    AnimVal r = { (float)(x->x + (y->x - x->x) * t), (float)(x->y + (y->y - x->y) * t), 1, x->z == 3.0f ? 3.0f : 0.0f, 0, m };
     return r;
 }
 
@@ -468,7 +472,7 @@ static AnimVal val_mix(const AnimVal *x, const AnimVal *y, double t)
 
 void anim_val_css(int prop, const AnimVal *v, char *buf, size_t cap)
 {
-    if (prop == ANIM_COLOR || prop == ANIM_BGCOLOR) {
+    if (ANIM_IS_COLOR(prop)) {
         #define ANIM_C8(c) ((c) < 0.0f ? 0 : (c) > 1.0f ? 255 : (int)lround((c) * 255.0f + 0.002f))
         int r = ANIM_C8(v->x), g = ANIM_C8(v->y), b = (int)lround((v->z < 0.0f ? 0.0f : v->z > 1.0f ? 1.0f : v->z) * 255.0f);
         if (v->w >= 1.0f) snprintf(buf, cap, "rgb(%d, %d, %d)", r, g, b);
@@ -487,6 +491,13 @@ void anim_val_css(int prop, const AnimVal *v, char *buf, size_t cap)
     bool floor0 = prop == ANIM_WIDTH || prop == ANIM_HEIGHT || prop == ANIM_FONT_SIZE ||
                   (prop >= ANIM_PADDING_TOP && prop <= ANIM_PADDING_LEFT) || (prop >= ANIM_BORDER_TOP && prop <= ANIM_BORDER_LEFT);
     if (prop == ANIM_CLIP_PATH || prop == ANIM_FILTER || prop == ANIM_BACKDROP) snprintf(buf, cap, "%s", v->tf ? v->tf : "none");
+    else if (prop == ANIM_GTC || prop == ANIM_GTR) {
+        /* (the list inside g( )) */
+        const char *q = v->tf && !strncmp(v->tf, "g(", 2) ? v->tf + 2 : v->tf ? v->tf : "none";
+        size_t L = strlen(q);
+        if (v->tf && !strncmp(v->tf, "g(", 2) && L && q[L - 1] == ')') L--;
+        snprintf(buf, cap, "%.*s", (int)L, q);
+    }
     else if (prop == ANIM_TRANSFORM && v->tf) snprintf(buf, cap, "%s", v->tf);
     else if (prop == ANIM_TRANSFORM) snprintf(buf, cap, "matrix(1, 0, 0, 1, %.6g, %.6g)", v->x, v->y);
     else if (prop == ANIM_ROTATE) snprintf(buf, cap, "%.6gdeg", v->x);
@@ -680,7 +691,7 @@ static bool rows_grow(void)
     int cap = A.cap ? A.cap * 2 : 64;
 #define G(f) do { void *q = realloc((void *)A.f, (size_t)cap * sizeof(*A.f)); if (!q) return false; A.f = q; } while (0)
     G(el); G(ps); G(kind); G(prop); G(ease); G(dir); G(fill); G(kfn); G(ep); G(start); G(delay); G(dur);
-    G(iters); G(pause_at); G(name); G(owner); G(next); G(iter); G(gen); G(a); G(b); G(kfo); G(kfv);
+    G(iters); G(pause_at); G(name); G(owner); G(next); G(iter); G(gen); G(a); G(b); G(kfo); G(kfv); G(kfe); G(kfp);
 #undef G
     size_t words = (size_t)cap / 64, old = (size_t)A.cap / 64;
     uint64_t **bits[] = { &A.alive, &A.ev_run, &A.ev_start, &A.ev_end, &A.seen, &A.paused, &A.held };
@@ -811,7 +822,7 @@ static AnimVal trans_value(int r, double now)
     t_anim_before = false;
     double ex = ease_apply(A.ease[r], A.ep[r], x);
     if (A.prop[r] == ANIM_FONT_STYLE && (A.a[r].y > 0.5f) != (A.b[r].y > 0.5f)) return ex < 0.5 ? A.a[r] : A.b[r];
-    if (A.prop[r] == ANIM_COLOR || A.prop[r] == ANIM_BGCOLOR) return color_mix(&A.a[r], &A.b[r], ex);
+    if (ANIM_IS_COLOR(A.prop[r])) return color_mix(&A.a[r], &A.b[r], ex);
     return val_mix(&A.a[r], &A.b[r], ex);
 }
 
@@ -881,19 +892,21 @@ static bool track_value(int r, double now, AnimVal *out)
     float off[ANIM_KF + 2];
     AnimVal v[ANIM_KF + 2];
     int n = 0;
-    if (!A.kfn[r] || A.kfo[r][0] > 0) { off[n] = 0; v[n++] = A.a[r]; }
-    for (int i = 0; i < A.kfn[r]; i++) { off[n] = A.kfo[r][i]; v[n++] = A.kfv[r][i]; }
-    if (off[n - 1] < 1) { off[n] = 1; v[n++] = A.a[r]; }
+    int src[ANIM_KF + 2];   /* (each point's keyframe, -1 none) */
+    if (!A.kfn[r] || A.kfo[r][0] > 0) { src[n] = -1; off[n] = 0; v[n++] = A.a[r]; }
+    for (int i = 0; i < A.kfn[r]; i++) { src[n] = i; off[n] = A.kfo[r][i]; v[n++] = A.kfv[r][i]; }
+    if (off[n - 1] < 1) { src[n] = -1; off[n] = 1; v[n++] = A.a[r]; }
     int i = 0;
     while (i + 2 < n && off[i + 1] <= p) i++;
     double span = off[i + 1] - off[i];
     double local = span > 0 ? (p - off[i]) / span : 1;
     /* (the timing function over each keyframe interval, CSS Animations 3.8) */
-    local = ease_apply(A.ease[o], A.ep[o], local);
+    if (src[i] >= 0 && A.kfe[r][src[i]]) local = ease_apply((uint8_t)(A.kfe[r][src[i]] - 1), A.kfp[r][src[i]], local);   /* (the keyframe's own) */
+    else local = ease_apply(A.ease[o], A.ep[o], local);
     t_anim_before = false;
     /* (italic doesn't go between) */
     if (A.prop[r] == ANIM_FONT_STYLE && (v[i].y > 0.5f) != (v[i + 1].y > 0.5f)) *out = local < 0.5 ? v[i] : v[i + 1];
-    else *out = A.prop[r] == ANIM_COLOR || A.prop[r] == ANIM_BGCOLOR ? color_mix(&v[i], &v[i + 1], local) : val_mix(&v[i], &v[i + 1], local);
+    else *out = ANIM_IS_COLOR(A.prop[r]) ? color_mix(&v[i], &v[i + 1], local) : val_mix(&v[i], &v[i + 1], local);
     return out->ok;
 }
 
@@ -1039,8 +1052,11 @@ void anim_box(NodeId el, int ps, const char *spec, const AnimVal base[ANIM_NPROP
             /* (a shorthand: its longhands) */
             else if (!strcasecmp(nm, "padding")) for (int p = ANIM_PADDING_TOP; p <= ANIM_PADDING_LEFT; p++) cover[p] = j;
             else if (!strcasecmp(nm, "margin")) for (int p = ANIM_MARGIN_TOP; p <= ANIM_MARGIN_LEFT; p++) cover[p] = j;
-            else if (!strcasecmp(nm, "border-width") || !strcasecmp(nm, "border"))
+            else if (!strcasecmp(nm, "border-width") || !strcasecmp(nm, "border")) {
                 for (int p = ANIM_BORDER_TOP; p <= ANIM_BORDER_LEFT; p++) cover[p] = j;
+                if (!strcasecmp(nm, "border")) for (int p = ANIM_BC_TOP; p <= ANIM_BC_LEFT; p++) cover[p] = j;   /* (border: its colors too) */
+            }
+            else if (!strcasecmp(nm, "border-color")) for (int p = ANIM_BC_TOP; p <= ANIM_BC_LEFT; p++) cover[p] = j;
             else if (!strcasecmp(nm, "inset")) for (int p = ANIM_LEFT; p <= ANIM_BOTTOM; p++) cover[p] = j;
             /* (the logical pairs, in a horizontal flow) */
             else if (!strcasecmp(nm, "margin-block")) { cover[ANIM_MARGIN_TOP] = j; cover[ANIM_MARGIN_BOTTOM] = j; }
@@ -1135,6 +1151,17 @@ void anim_box(NodeId el, int ps, const char *spec, const AnimVal base[ANIM_NPROP
                     if (k >= ANIM_KF) continue;
                     A.kfo[t][k] = offs[i];
                     A.kfv[t][k] = v[p];
+                    A.kfe[t][k] = 0;
+                    {
+                        /* (its own animation-timing-function) */
+                        const CssDeclaration *fd = (const CssDeclaration *)decls[i];
+                        for (int q = 0; q < counts[i]; q++)
+                            if (fd[q].property && fd[q].value && !strcasecmp(fd[q].property, "animation-timing-function")) {
+                                uint8_t ek = 0;
+                                parse_ease(fd[q].value, &ek, A.kfp[t][k]);
+                                A.kfe[t][k] = (uint8_t)(ek + 1);
+                            }
+                    }
                     A.kfn[t] = (uint8_t)(k + 1);
                 }
             }
