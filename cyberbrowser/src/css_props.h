@@ -114,6 +114,9 @@ bool css_supports_condition(const char *cond);
 /* A color value's sRGB components when it is one (0-255 and 0-1 alpha);
  * false for currentcolor, system colors and colors outside sRGB syntax. */
 bool css_color_parse(const char *value, double rgba[4]);
+bool css_color_parse_cur(const char *value, double rgba[4], const double cur[4]);
+/* (light-dark(): its dark color while set, the element styled being in a dark color scheme) */
+extern _Thread_local int g_css_ld_dark;
 /* "rgb(r, g, b)" or "rgba(r, g, b, a)" (malloc'd). */
 char *css_color_serialize_rgba(const double rgba[4]);
 

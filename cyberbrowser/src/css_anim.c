@@ -785,6 +785,13 @@ bool anim_has(NodeId el, int ps)
     return false;
 }
 
+/* (something running or waiting to on el of a property that makes a stacking context: a transform, rotate, scale, opacity) */
+bool anim_makes_context(NodeId el, int ps)
+{
+    FOR_ROWS(r, el) if (A.ps[r] == ps && (A.prop[r] == ANIM_TRANSFORM || A.prop[r] == ANIM_ROTATE || A.prop[r] == ANIM_SCALE || A.prop[r] == ANIM_OPACITY)) return true;
+    return false;
+}
+
 /* Cancellations since the last tick (once it has been seen to run). */
 static AnimEvent g_cancels[32];
 static int g_ncancels;

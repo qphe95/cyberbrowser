@@ -876,7 +876,21 @@ static size_t css_consume_declarations(const char *s, size_t len, size_t pos, bo
             if (nesting && mode == DECL && depth == 0 && t.type == CT_RBRACE && item_brace && buf.n) {
                 size_t pl;
                 const char *pv = css_tok_val(&tz.arena, &buf.t[0], &pl);
-                if (!(pl >= 2 && pv[0] == '-' && pv[1] == '-')) {
+                /* (name: { ... var() ... } alone: a declaration all the same) */
+                bool var_blk = false, colon_ = false, other_ = false;
+                for (int k = 1; k < buf.n; k++) {
+                    const CssToken *bt = &buf.t[k];
+                    if (!colon_) { if (bt->type == CT_COLON) colon_ = true; else if (bt->type != CT_WHITESPACE) other_ = true; continue; }
+                    if (bt->type == CT_FUNCTION) { size_t fl; const char *fv = css_tok_val(&tz.arena, bt, &fl); if (fl >= 3 && !strncasecmp(fv, "var", 3)) var_blk = true; }
+                }
+                if (colon_ && !other_ && var_blk && buf.n > 2) {
+                    int k = 1;
+                    while (k < buf.n && buf.t[k].type != CT_COLON) k++;
+                    k++;
+                    while (k < buf.n && buf.t[k].type == CT_WHITESPACE) k++;
+                    if (!(k < buf.n && buf.t[k].type == CT_LBRACE)) var_blk = false;
+                }
+                if (!(pl >= 2 && pv[0] == '-' && pv[1] == '-') && !var_blk) {
                     css_nest_push(item_start, item_brace, ((CssRule *)ctx)->declaration_count);
                     mode = NONE;
                     buf.n = 0;
@@ -1150,7 +1164,7 @@ static void css_strip_comments(char *s) {
 static bool css_pseudo_known(const char *n, size_t nl, bool elem)
 {
     static const char *const classes[] = {
-        "active", "active-view-transition", "active-view-transition-type", "any-link", "autofill", "blank", "buffering", "checked", "closed", "current", "default",
+        "active", "active-view-transition", "active-view-transition-type", "animated-image", "any-link", "autofill", "blank", "buffering", "checked", "closed", "current", "default",
         "defined", "has-slotted", "dir", "disabled", "empty", "enabled", "first", "first-child", "first-of-type", "focus",
         "focus-visible", "focus-within", "fullscreen", "future", "has", "has-slotted", "heading", "host", "host-context", "hover",
         "in-range", "indeterminate", "invalid", "is", "lang", "last-child", "last-of-type", "left", "link",
@@ -1188,6 +1202,32 @@ static bool css_prelude_invalid(const char *sel)
     /* (view transition pseudo-elements: the whole selector's grammar) */
     extern bool dom_selector_valid(const char *s);
     if (strstr(sel, "::view-transition") && !dom_selector_valid(sel)) return true;
+    /* (an attribute selector with an operator and nothing after it: [a=], [a~=]) */
+    {
+        char q = 0;
+        for (const char *p = sel; *p; p++) {
+            if (q) { if (*p == '\\' && p[1]) p++; else if (*p == q) q = 0; continue; }
+            if (*p == '"' || *p == '\'') { q = *p; continue; }
+            if (*p == '\\' && p[1]) { p++; continue; }
+            if (*p != '[') continue;
+            const char *e = p + 1;
+            char q2 = 0;
+            const char *eq = NULL;
+            while (*e && (q2 || *e != ']')) {
+                if (q2) { if (*e == '\\' && e[1]) e++; else if (*e == q2) q2 = 0; }
+                else if (*e == '"' || *e == '\'') q2 = *e;
+                else if (*e == '=' && !eq) eq = e;
+                e++;
+            }
+            if (!*e) break;
+            if (eq) {
+                const char *v = eq + 1;
+                while (v < e && css_is_space(*v)) v++;
+                if (v == e) return true;
+            }
+            p = e;
+        }
+    }
     /* (case-insensitive substring search) */
     #define css_ci_find(h_, n_) ({ const char *r_ = NULL; size_t nl_ = strlen(n_); for (const char *q_ = (h_); *q_ && !r_; q_++) if (!strncasecmp(q_, (n_), nl_)) r_ = q_; r_; })
     /* (:not() empty, or with a pseudo-element in it: invalid) */
@@ -2142,7 +2182,7 @@ static size_t css_rule_item(const char *s, size_t len, size_t pos, bool nested, 
     if (sel != tsel) free(tsel);
     /* (the text scan has checked what css_prelude_invalid looks for, but
      * for pseudo-elements and :lang()) */
-    if (!sel || ((!fast || strchr(sel, ':')) && css_prelude_invalid(sel))) {
+    if (!sel || ((!fast || strchr(sel, ':') || strchr(sel, '[')) && css_prelude_invalid(sel))) {
         free(sel);
         css_skip_rule_block(s, len, &pos);
         return pos;
@@ -2694,6 +2734,8 @@ static void css_apply_pseudo(CssSimpleSelector *out,
         return;
     }
     if (css_pseudo_name_is(name, nl, "empty")) { out->requires_empty = true; return; }
+    if (css_pseudo_name_is(name, nl, "animated-image")) { out->anim_img = true; out->has_substantive = true; return; }
+    if (css_pseudo_name_is(name, nl, "defined")) { out->ce_defined = true; out->has_substantive = true; return; }
     if (css_pseudo_name_is(name, nl, "link") || css_pseudo_name_is(name, nl, "any-link")) {
         out->requires_link = true;
         out->link_kind = css_pseudo_name_is(name, nl, "link") ? 1 : 0;
@@ -2701,6 +2743,13 @@ static void css_apply_pseudo(CssSimpleSelector *out,
     }
     /* (:visited: a link to this document itself, the one page in its history) */
     if (css_pseudo_name_is(name, nl, "visited")) { out->requires_link = true; out->link_kind = 2; return; }
+    /* (:has-slotted(sel): its own test, not the state) */
+    if (css_pseudo_name_is(name, nl, "has-slotted") && arg && al > 0 && al < sizeof(out->hs_sel)) {
+        memcpy(out->hs_sel, arg, al);
+        out->hs_sel[al] = '\0';
+        out->has_substantive = true;
+        return;
+    }
     uint32_t state_bit = css_state_bit(name, nl);
     if (state_bit) {
         out->state_mask |= state_bit;
@@ -3035,7 +3084,8 @@ static void css_simple_reset(CssSimpleSelector *out) {
     out->class_count = out->attr_count = 0;
     out->has_tag = out->has_id = out->is_root = out->universal = false;
     out->tag_upper = false;
-    out->has_substantive = out->is_pseudo_element = out->requires_empty = false;
+    out->has_substantive = out->is_pseudo_element = out->requires_empty = out->anim_img = out->ce_defined = false;
+    out->hs_sel[0] = '\0';
     out->never_match = out->requires_link = false;
     out->link_kind = 0;
     out->state_mask = out->not_state = 0;
@@ -3359,6 +3409,9 @@ static int css_specificity_from_simple(const CssSimpleSelector *simple) {
          (simple->nth_kind ? 1 : 0) + (simple->is_root ? 1 : 0) +
          (simple->requires_link ? 1 : 0) + (simple->requires_empty ? 1 : 0) + simple->lang_count;
     b += __builtin_popcount(simple->state_mask);
+    if (simple->hs_sel[0]) b++;   /* (:has-slotted(), a pseudo-class) */
+    if (simple->anim_img) b++;
+    if (simple->ce_defined) b++;
     if (simple->node_id) b++;   /* (:host) */
     if (simple->slotted_host) b++;
     if (simple->not_active) {
@@ -3549,6 +3602,18 @@ static bool css_simple_matches_ex(const CssSimpleSelector *simple, HtmlDocument 
         if (hit) return false;
     }
     if (simple->has_active) return false;   /* compiled matcher only */
+    if (simple->hs_sel[0]) {
+        extern bool (*g_dom_slot_flattened_match)(NodeId el, const char *sel);
+        if (!g_dom_slot_flattened_match || !g_dom_slot_flattened_match(node->store_id, simple->hs_sel)) return false;
+    }
+    if (simple->anim_img) {
+        extern bool (*g_dom_animated_image)(NodeId el);
+        if (!g_dom_animated_image || !g_dom_animated_image(node->store_id)) return false;
+    }
+    if (simple->ce_defined) {
+        extern bool (*g_dom_ce_defined)(NodeId el);
+        if (g_dom_ce_defined && !g_dom_ce_defined(node->store_id)) return false;
+    }
     if (simple->where_active) {
         /* :where()/:is() — the element must match the inner selector. */
         if (!css_selector_matches(simple->where_arg, doc, node)) return false;

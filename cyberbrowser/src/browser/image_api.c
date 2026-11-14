@@ -231,6 +231,41 @@ void image_api_scan(JSContextHandle ctx)
     }
 }
 
+/* (:animated-image: an <img> whose image, in, has frames; a GIF's or an APNG's) */
+static bool img_animated(NodeId id)
+{
+    if (!dom_valid(id) || !is_img(id)) return false;
+    ImageCache *ic = display_list_get_image_cache();
+    char *url = ic ? img_url_of(id) : NULL;
+    if (!url) return false;
+    bool r = false;
+    if (image_cache_status(ic, url) > 0) {
+        const uint8_t *b = NULL;
+        size_t n = 0;
+        if (image_cache_bytes(ic, url, &b, &n) && b) {
+            if (n > 8 && !memcmp(b, "\x89PNG", 4)) {
+                /* (an acTL chunk before the image data) */
+                for (size_t p = 8; p + 8 <= n; ) {
+                    uint32_t len = (uint32_t)b[p] << 24 | (uint32_t)b[p + 1] << 16 | (uint32_t)b[p + 2] << 8 | b[p + 3];
+                    if (!memcmp(b + p + 4, "acTL", 4)) { r = true; break; }
+                    if (!memcmp(b + p + 4, "IDAT", 4) || len > n) break;
+                    p += 12 + (size_t)len;
+                }
+            } else if (n > 6 && !memcmp(b, "GIF8", 4)) {
+                int d[2];
+                r = image_cache_anim_frames(ic, url, d, 2) > 1;
+            }
+        }
+    }
+    free(url);
+    return r;
+}
+__attribute__((constructor)) static void img_animated_hook(void)
+{
+    extern bool (*g_dom_animated_image)(NodeId el);
+    g_dom_animated_image = img_animated;
+}
+
 static void fire(JSContextHandle ctx, GCValue el, const char *type)
 {
     GCValue global = JS_GetGlobalObject(ctx);
@@ -349,12 +384,14 @@ void image_api_notify(JSContextHandle ctx, const char *url)
         }
         char *u = img_url_of(id);
         if (dbg == 1 && u) fprintf(stderr, "[IMG] cand w=%d c=%d %.100s\n", dom_has_wrapper(id), dom_is_connected(id), u);
-        if (!dom_has_wrapper(id)) { free(u); continue; }
         bool match = u && strcmp(u, url) == 0;
         free(u);
         if (!match) continue;
+        /* (no wrapper: only a handler in its content attribute could hear it) */
+        bool attr_h = dom_get_attr_str(id, st > 0 ? "onload" : "onerror") != NULL;
+        if (!dom_has_wrapper(id) && !attr_h) continue;
         nmatch++;
-        GCValue el = dom_js_existing(id);
+        GCValue el = dom_has_wrapper(id) ? dom_js_existing(id) : dom_js(ctx, id);
         if (!JS_IsObject(el)) continue;
         /* Once per URL per element. */
         GCValue fired = JS_GetPropertyStr(ctx, el, "__cyber_img_fired");

@@ -224,6 +224,7 @@ static double grad_unit(double v, const char **e)
 /* (the box's units for its gradients: the root's font size, the viewport, its nearest size container) */
 static void grad_units_for(const LayoutContext *ctx, const LayoutBox *box)
 {
+    g_css_ld_dark = box && box->s ? box->s->cs_dark : 0;   /* (light-dark() in its stops: the box's color scheme) */
     t_grad_vw = ctx->viewport_width > 0 ? ctx->viewport_width : 800.0;
     t_grad_vh = ctx->viewport_height > 0 ? ctx->viewport_height : 600.0;
     t_grad_cw = t_grad_vw;
@@ -275,6 +276,7 @@ static float table_caption_top(const LayoutContext *ctx, int i, const LayoutBox 
     return (float)ext;
 }
 
+static void dl_viewport_scroll(LayoutContext *ctx, float *x, float *y);
 static __thread int t_bg_area_clip;   /* (the next call's area is the box's background-clip box) */
 /* (the box a background layer of style ls is clipped to: false, the border box) */
 static bool bg_clip_rect(const LayoutContext *ctx, const LayoutBox *box, const LayoutStyle *ls, int clip, float o[4])
@@ -318,6 +320,8 @@ static int bg_color_clip(const LayoutContext *ctx, const LayoutBox *box)
     free(ls);
     return c;
 }
+static char *dl_anim_frame_url(char *url, uint32_t node, unsigned char mode);
+static __thread int t_bg_owner = -1;   /* (the box whose background a copy of it paints: the canvas's the root) */
 static void emit_background_image(const LayoutContext *ctx, DisplayList *dl, const LayoutBox *box,
                                   const float *area)
 {
@@ -372,7 +376,12 @@ static void emit_background_image(const LayoutContext *ctx, DisplayList *dl, con
         const LayoutStyle *ps = ctx->boxes[p].s;
         if (ps && (ps->tf_text || ps->tf_rotate || ps->tf_scale || ps->has_translate || ps->tf_raw)) fixed_vp = false;
     }
-    if (fixed_vp) { ax = 0.0; ay = 0.0; aw = ctx->viewport_width; ah = ctx->viewport_height; }
+    if (fixed_vp) {
+        /* (where the viewport is: the scroll the box's painting is moved back by) */
+        float vx_ = 0.0f, vy_ = 0.0f;
+        if (g_dom_scrolls.n) dl_viewport_scroll((LayoutContext *)ctx, &vx_, &vy_);
+        ax = vx_; ay = vy_; aw = ctx->viewport_width; ah = ctx->viewport_height;
+    }
     else if (s->bg_fixed == 2) {
         /* (local, on a scroller: the area its content scrolls over, moved as it is scrolled) */
         int bi = (int)(box - ctx->boxes);
@@ -382,8 +391,29 @@ static void emit_background_image(const LayoutContext *ctx, DisplayList *dl, con
             double sw = right - ax + (s->bg_origin == 2 ? 0.0 : box->padding_right), sh = bottom - ay + (s->bg_origin == 2 ? 0.0 : box->padding_bottom);
             if (sw > aw) aw = sw;
             if (sh > ah) ah = sh;
+            /* (content overflowing at the start, right-to-left or reversed: the area out that way too) */
             float sx = 0.0f, sy = 0.0f;
-            if (css_layout_box_offset(ctx, bi, &sx, &sy)) { ax -= sx; ay -= sy; }
+            bool scrolled_ = css_layout_box_offset(ctx, bi, &sx, &sy);
+            {
+                double mnx = ax, mny = ay;
+                int end_ = bi;
+                while (end_ >= 0 && ctx->tree.nodes[end_].next_sibling_idx < 0) end_ = ctx->tree.nodes[end_].parent_idx;
+                end_ = end_ >= 0 ? ctx->tree.nodes[end_].next_sibling_idx : ctx->tree.count;
+                for (int k = bi + 1; k < end_ && k < ctx->tree.count; k++) {
+                    const LayoutBox *kb = &ctx->boxes[k];
+                    if (kb->s->display == CSS_DISPLAY_NONE || kb->s->position == CSS_POSITION_FIXED || (kb->width <= 0.0 && kb->height <= 0.0)) continue;
+                    const HtmlNode *kn_ = css_layout_box_node(ctx, k);
+                    if (!kn_ || kn_->type != HTML_NODE_ELEMENT || kb->s->position == CSS_POSITION_ABSOLUTE) continue;   /* (elements: text boxes are no measure) */
+                    if (kb->x - kb->margin_left < mnx) mnx = kb->x - kb->margin_left;
+                    if (kb->y - kb->margin_top < mny) mny = kb->y - kb->margin_top;
+                }
+                /* (a reversed flex container's; a right-to-left block's scroll offsets have it already) */
+                if (box->s->display == CSS_DISPLAY_FLEX && box->s->direction != 1) {
+                    if (mnx < ax - 0.5) { aw += ax - mnx; ax = mnx; }
+                    if (mny < ay - 0.5) { ah += ay - mny; ay = mny; }
+                }
+            }
+            if (scrolled_) { ax -= sx; ay -= sy; }
         }
     }
     if (aw <= 0.0 || ah <= 0.0) return;
@@ -408,8 +438,14 @@ static void emit_background_image(const LayoutContext *ctx, DisplayList *dl, con
         }
     } else if (s->bg_size_kind == 3) {
         double w = s->bg_size_w, hgt = s->bg_size_h;
-        if (w >= 0.0 && (s->bg_size_pct & 1)) w *= aw;
-        if (hgt >= 0.0 && (s->bg_size_pct & 2)) hgt *= ah;
+        /* (calc() of a percentage and a length: both, no less than 0) */
+        extern double css_layout_len_px_at(const char *v, double font_size, double pct_base);
+        if ((s->bg_size_pct & 16) && s->bg_size_raw[0]) { w = css_layout_len_px_at(s->bg_size_raw[0], s->font_size, aw); if (w < 0.0) w = 0.0; }
+        else if (s->bg_size_pct & 4) { w = w * aw + s->bg_size_cpx[0]; if (w < 0.0) w = 0.0; }
+        else if (w >= 0.0 && (s->bg_size_pct & 1)) w *= aw;
+        if ((s->bg_size_pct & 32) && s->bg_size_raw[1]) { hgt = css_layout_len_px_at(s->bg_size_raw[1], s->font_size, ah); if (hgt < 0.0) hgt = 0.0; }
+        else if (s->bg_size_pct & 8) { hgt = hgt * ah + s->bg_size_cpx[1]; if (hgt < 0.0) hgt = 0.0; }
+        else if (hgt >= 0.0 && (s->bg_size_pct & 2)) hgt *= ah;
         if (w >= 0.0 && hgt >= 0.0) { tw = w; th = hgt; }
         else if (w >= 0.0) { tw = w; th = has_r ? w / ratio : (dims & 2) ? nh : ah; }
         else if (hgt >= 0.0) { th = hgt; tw = has_r ? hgt * ratio : (dims & 1) ? nw : aw; }
@@ -431,8 +467,8 @@ static void emit_background_image(const LayoutContext *ctx, DisplayList *dl, con
         double otw = tw, oth = th;
         if (s->bg_round & 1) { double n = floor(aw / tw + 0.5); if (n < 1.0) n = 1.0; tw = aw / n; }
         if (s->bg_round & 2) { double n = floor(ah / th + 0.5); if (n < 1.0) n = 1.0; th = ah / n; }
-        bool hauto = s->bg_size_kind == 0 || (s->bg_size_kind == 3 && s->bg_size_h < 0.0);
-        bool wauto = s->bg_size_kind == 0 || (s->bg_size_kind == 3 && s->bg_size_w < 0.0);
+        bool hauto = s->bg_size_kind == 0 || (s->bg_size_kind == 3 && s->bg_size_h < 0.0 && !(s->bg_size_pct & 8));
+        bool wauto = s->bg_size_kind == 0 || (s->bg_size_kind == 3 && s->bg_size_w < 0.0 && !(s->bg_size_pct & 4));
         if ((s->bg_round & 3) == 1 && hauto && otw > 0.0) th = oth * tw / otw;
         if ((s->bg_round & 3) == 2 && wauto && oth > 0.0) tw = otw * th / oth;
     }
@@ -461,7 +497,21 @@ static void emit_background_image(const LayoutContext *ctx, DisplayList *dl, con
         if (!grad_image_key(grad, gw, gh, gkey, sizeof gkey)) return;
         src = gkey;
     }
+    /* (an animated image: the frame its box's image-animation and time say) */
+    char *anim_src = NULL;
+    if (!grad && src && src[0]) {
+        int bi = box >= ctx->boxes && box < ctx->boxes + ctx->tree.count ? (int)(box - ctx->boxes) : t_bg_owner;
+        const HtmlNode *bn = bi >= 0 ? css_layout_box_node(ctx, bi) : NULL;
+        if (bn && bn->store_id) {
+            char *u = strdup(src);
+            if (u) {
+                anim_src = dl_anim_frame_url(u, bn->store_id, s->img_anim);
+                src = anim_src;
+            }
+        }
+    }
     int handle = image_cache_request(g_image_cache, src, (int)ceil(tw), (int)ceil(th));
+    free(anim_src);
     if (handle < 0) return;
     /* (min()/max() of percentages: another fraction where the basis is negative) */
     double pfx = (s->bg_pos_neg & 1) && aw - tw < 0.0 ? s->bg_pos_xfn : s->bg_pos_xf;
@@ -480,15 +530,15 @@ static void emit_background_image(const LayoutContext *ctx, DisplayList *dl, con
     bool rx = !s->bg_no_repeat_x, ry = !s->bg_no_repeat_y;
     if (rx && (s->bg_space & 1)) {
         /* (space: the whole tiles that fit, first and last at the area's edges,
-         * the room between them; one: placed as no-repeat; none: none) */
+         * the room between them; fewer than two: one placed as no-repeat) */
         double n = floor(aw / tw + 1e-6);
         if (n >= 2.0) { stx = tw + (aw - n * tw) / (n - 1.0); ox = ax; }
-        else { rx = false; if (n < 1.0) return; }
+        else rx = false;   /* (one, or no room for one: one placed, as no-repeat) */
     }
     if (ry && (s->bg_space & 2)) {
         double n = floor(ah / th + 1e-6);
         if (n >= 2.0) { sty = th + (ah - n * th) / (n - 1.0); oy = ay; }
-        else { ry = false; if (n < 1.0) return; }
+        else ry = false;
     }
     x0 = ox; x1 = ox + tw; y0 = oy; y1 = oy + th;
     if (rx) {
@@ -713,7 +763,7 @@ static double grad_calc_term(const char **p, double len)
     for (;;) {
         while (isspace((unsigned char)**p)) (*p)++;
         if (**p == '*') { (*p)++; v *= grad_calc_factor(p, len); }
-        else if (**p == '/') { (*p)++; double d = grad_calc_factor(p, len); v = d != 0.0 ? v / d : v; }
+        else if (**p == '/') { (*p)++; double d = grad_calc_factor(p, len); v = d != 0.0 ? v / d : v == 0.0 ? 0.0 : copysign(INFINITY, v); }   /* (by zero: no end to it) */
         else return v;
     }
 }
@@ -828,6 +878,7 @@ static double grad_pos_val(const char *w, double sz, bool *ok)
     if (!strcasecmp(w, "left") || !strcasecmp(w, "top")) return 0.0;
     if (!strcasecmp(w, "right") || !strcasecmp(w, "bottom")) return sz;
     if (!strcasecmp(w, "center")) return sz / 2.0;
+    if (!strncasecmp(w, "calc(", 5)) { const char *cp = w; double cv = grad_calc_factor(&cp, sz); return isnan(cv) ? 0.0 : fmax(-33554428.0, fmin(33554428.0, cv)); }   /* (calc(): its percentages of the size) */
     char *e;
     double v = strtod(w, &e);
     if (e == w) { *ok = false; return sz / 2.0; }
@@ -1070,7 +1121,7 @@ static bool grad_image_key(const char *g, int w, int h, char *key, size_t kn)
     uint64_t hs = 1469598103934665603ull;
     for (const char *q = g; *q; q++) { hs ^= (unsigned char)*q; hs *= 1099511628211ull; }
     /* (the units its stops may be in: the viewport's, the container's, rem) */
-    snprintf(key, kn, "cyber-grad:%016llx:%dx%d:%g:%g:%g:%g:%g:%g:%g:%g", (unsigned long long)hs, w, h, t_grad_em, t_grad_rem, t_grad_vw, t_grad_vh, t_grad_cw, t_grad_ch, t_grad_lh, t_grad_rlh);
+    snprintf(key, kn, "cyber-grad:%016llx:%dx%d:%g:%g:%g:%g:%g:%g:%g:%g:%d", (unsigned long long)hs, w, h, t_grad_em, t_grad_rem, t_grad_vw, t_grad_vh, t_grad_cw, t_grad_ch, t_grad_lh, t_grad_rlh, g_css_ld_dark);
     if (image_cache_status(g_image_cache, key) == 1) return true;
     uint8_t *px = grad_raster(g, w, h);
     if (!px) return false;
@@ -1180,6 +1231,7 @@ static bool dl_svg_image_hook(const char *href, int len, const unsigned char **r
     *rgba = px;
     return true;
 }
+static void dl_svg_mask_hook(const char *value, const float fb[4], const float sb[4], const float vb[4], const float sp[4], unsigned char *rgba, int w, int h);
 static void dl_svg_filter_hook(const char *value, const float box[4], unsigned char *rgba, int w, int h)
 {
     LayoutContext *ctx = t_flt_ctx;
@@ -1930,6 +1982,50 @@ static char* dl_resolve_url(const char *base_url, const char *href)
     return strdup(buf);
 }
 
+double anim_now(void);   /* (css_anim.c: the page clock, ms) */
+/* (an animated image of element node: the url of the frame its image-animation and time say; url itself for the first) */
+static char *dl_anim_frame_url(char *url, uint32_t node, unsigned char mode)
+{
+    if (!g_image_cache || !url || !node) return url;
+    int d[64];
+    int n = image_cache_anim_frames(g_image_cache, url, d, 64);
+    if (n <= 1) return url;
+    enum { NS = 256 };
+    static struct { uint32_t node; double acc, start; unsigned char mode, run; unsigned gen; const void *bctx; } st[NS];
+    static int nst;
+    double now = anim_now();
+    extern unsigned g_dl_build_gen;
+    extern const void *g_dl_build_ctx;
+    int k = -1;
+    for (int q = 0; q < nst; q++) if (st[q].node == node) { k = q; break; }
+    if (k < 0) {
+        if (nst >= NS) return url;
+        k = nst++;
+        st[k].node = node; st[k].acc = 0.0; st[k].start = now; st[k].run = mode <= 1; st[k].mode = mode;
+    }
+
+    st[k].gen = g_dl_build_gen;
+    st[k].bctx = g_dl_build_ctx;
+    bool run = mode <= 1;
+    if (mode == 3) { st[k].acc = 0.0; st[k].run = 0; }
+    else if (run && !st[k].run) { st[k].start = now; st[k].run = 1; }
+    else if (!run && st[k].run) { st[k].acc += now - st[k].start; st[k].run = 0; }
+    st[k].mode = mode;
+    double t = st[k].acc + (st[k].run ? now - st[k].start : 0.0);
+    int total = 0;
+    for (int q = 0; q < n; q++) total += d[q];
+    if (total <= 0) return url;
+    t = fmod(t, (double)total);
+    int f = 0;
+    for (double acc = 0.0; f < n - 1; f++) { acc += d[f]; if (t < acc) break; }
+    if (f == 0) return url;
+    char *key = (char *)malloc(strlen(url) + 24);
+    if (!key) return url;
+    sprintf(key, "cbgif%d:%s", f, url);
+    free(url);
+    return key;
+}
+
 static void emit_image(DisplayList *dl, float x, float y, float w, float h, int handle)
 {
     if (handle < 0) return;
@@ -2128,7 +2224,7 @@ static void svg_casc_decl(void *ud, const char *prop, const char *value, bool im
         "stop-color", "stop-opacity", "visibility", "color", "font-family", "font-size", "font-weight", "font-style",
         "text-anchor", "clip-rule", "paint-order", "vector-effect", "x", "y", "width", "height", "r", "cx", "cy", "rx",
         "ry", "d", "dominant-baseline", "letter-spacing", "word-spacing", "flood-color", "flood-opacity", "lighting-color",
-        "marker-start", "marker-mid", "marker-end", "mix-blend-mode", "display" };
+        "marker-start", "marker-mid", "marker-end", "mix-blend-mode", "display", "clip-path" };
     SvgCasc *c = (SvgCasc *)ud;
     if (!prop || !value || prop[0] == 1) return;
     bool ok = false;
@@ -2142,6 +2238,8 @@ static void svg_casc_decl(void *ud, const char *prop, const char *value, bool im
         for (size_t k = 0; k < sizeof inh / sizeof inh[0] && !ok; k++) ok = !strcasecmp(prop, inh[k]);
     }
     if (!ok || strchr(value, '"') || strstr(value, "var(")) return;
+    /* (clip-path from the rules: path() only, the rest drawn as the box's clip) */
+    if (!strcasecmp(prop, "clip-path")) { const char *cv_ = value; while (*cv_ == ' ') cv_++; if (strncasecmp(cv_, "path(", 5)) return; }
     static const char *const geo[] = { "x", "y", "width", "height", "r", "cx", "cy", "rx", "ry" };
     for (size_t k = 0; k < sizeof geo / sizeof geo[0]; k++) {
         if (strcasecmp(prop, geo[k])) continue;
@@ -2306,13 +2404,29 @@ static void svg_serialize(PreOrderCompactionArray *arr, int idx, SvgBuf *b, bool
             }
             /* (the translate property first, then transform: as CSS composes them) */
             /* (only with no transform text: a transform's own translation shares those fields) */
-            bool tr = !(eb->s->tf_raw && strstr(eb->s->tf_raw, "translate")) && eb->s->has_translate && (eb->s->translate_x != 0.0 || eb->s->translate_y != 0.0);
-            if (eb->s->tf_raw || tr) {
+            /* (the translate property; with no transform list, the transform's translation too: it is only in the sums) */
+            bool sum_ = !eb->s->tf_raw;
+            double trx = sum_ ? eb->s->translate_x : eb->s->tpr_x, try_ = sum_ ? eb->s->translate_y : eb->s->tpr_y;
+            double trxp = sum_ ? eb->s->translate_xpct : eb->s->tpr_xpct, tryp = sum_ ? eb->s->translate_ypct : eb->s->tpr_ypct;
+            bool tr = eb->s->has_translate && (trx != 0.0 || try_ != 0.0 || trxp != 0.0 || tryp != 0.0);
+            bool rot = eb->s->tf_rotate && !strchr(eb->s->tf_rotate, ' '), scl = eb->s->tf_scale != NULL;
+            if (eb->s->tf_raw || tr || rot || scl) {
                 sb_puts(b, " css-transform=\"");
                 if (tr) {
-                    char tt[96];
-                    snprintf(tt, sizeof tt, "translate(%gpx, %gpx) ", eb->s->translate_x, eb->s->translate_y);
+                    char tt[160];
+                    if (trxp != 0.0 || tryp != 0.0)
+                        snprintf(tt, sizeof tt, "translate(%gpx, %gpx) translate(%g%%, %g%%) ", trx, try_, trxp * 100.0, tryp * 100.0);
+                    else snprintf(tt, sizeof tt, "translate(%gpx, %gpx) ", trx, try_);
                     sb_puts(b, tt);
+                }
+                if (rot) { sb_puts(b, "rotate("); sb_escaped(b, eb->s->tf_rotate, strlen(eb->s->tf_rotate)); sb_puts(b, ") "); }
+                if (scl) {
+                    char sc[96];
+                    snprintf(sc, sizeof sc, "%s", eb->s->tf_scale);
+                    for (char *z = sc; *z; z++) if (*z == ' ') *z = ',';   /* (scale(x, y)) */
+                    sb_puts(b, "scale(");
+                    sb_puts(b, sc);
+                    sb_puts(b, ") ");
                 }
                 if (eb->s->tf_raw) sb_escaped(b, eb->s->tf_raw, strlen(eb->s->tf_raw));
                 else {   /* (no transform property: the transform attribute after the translate, as they compose) */
@@ -2332,6 +2446,12 @@ static void svg_serialize(PreOrderCompactionArray *arr, int idx, SvgBuf *b, bool
                     else snprintf(mt, sizeof mt, " cyber-motion=\"%g %g %g\"", mpx, mpy, mrot);
                     sb_puts(b, mt);
                 }
+            }
+            /* (a CSS mask: the element's own index, the hook finds its layers by it) */
+            if ((eb->s->mk_text[0] || eb->s->mk_text[8]) && strcasecmp(n->tag_name, "svg")) {
+                char mt[48];
+                snprintf(mt, sizeof mt, " cb-mask=\"%d\"", idx);
+                sb_puts(b, mt);
             }
             static const char *const boxes[] = { NULL, "fill-box", "stroke-box", "content-box", "border-box" };
             if (eb->s->tf_box > 0 && eb->s->tf_box <= 4) {
@@ -2713,12 +2833,14 @@ static void emit_inline_svg(LayoutContext *ctx, DisplayList *dl, const LayoutBox
         t_flt_ctx = ctx;
         t_flt_color[0] = box->s->color_r; t_flt_color[1] = box->s->color_g; t_flt_color[2] = box->s->color_b; t_flt_color[3] = box->s->color_a;
         plutosvg_filter_hook = dl_svg_filter_hook;
+        plutosvg_mask_hook = dl_svg_mask_hook;
         plutosvg_image_hook = dl_svg_image_hook;
         t_svg_noexif = box->s->img_orient_none;
         bool was_pend = t_flt_img_pend;
         t_flt_img_pend = false;
         bool svg_ok = svg_render_rgba(b.s, b.n, cw + 2 * Mx, ch + 2 * My, color, &px, &pw, &ph);
         plutosvg_filter_hook = NULL;
+        plutosvg_mask_hook = NULL;
         plutosvg_image_hook = NULL;
         t_flt_ctx = NULL;
         if (svg_ok && t_flt_img_pend) { free(px); svg_ok = false; }   /* (an image still loading: not kept, drawn again once it is in) */
@@ -2735,6 +2857,69 @@ static void emit_inline_svg(LayoutContext *ctx, DisplayList *dl, const LayoutBox
     fill_style.object_fit = 0;
     fill_box.x -= Mx; fill_box.y -= My; fill_box.width += 2 * Mx; fill_box.height += 2 * My;
     emit_image_async(dl, &fill_box, key, op);
+}
+
+static int dl_layered_mask(LayoutContext *ctx, DisplayList *dl, const LayoutBox *box);
+static __thread bool t_mk_svg;   /* (an SVG element's mask: border box its stroke box, content its fill box, margin its view box) */
+/* (a CSS mask on an SVG element: its layers over the surface, the element's layer's alpha times their coverage) */
+static void dl_svg_mask_hook(const char *value, const float fb0[4], const float sb0[4], const float vb0[4], const float sp[4], unsigned char *rgba, int w0, int h0)
+{
+    LayoutContext *ctx = t_flt_ctx;
+    int di = atoi(value);
+    LayoutBox *eb = ctx ? css_layout_box_for_node(ctx, di) : NULL;
+    if (!eb || !eb->s || w0 <= 0 || h0 <= 0) return;
+    /* (in user units: the surface's pixels through the space's scale and offset) */
+    float fb[4], sb[4], vb[4];
+    for (int k = 0; k < 2; k++) {
+        fb[k] = (fb0[k] - sp[2 + k]) / sp[k]; fb[2 + k] = fb0[2 + k] / sp[k];
+        sb[k] = (sb0[k] - sp[2 + k]) / sp[k]; sb[2 + k] = sb0[2 + k] / sp[k];
+        vb[k] = (vb0[k] - sp[2 + k]) / sp[k]; vb[2 + k] = vb0[2 + k] / sp[k];
+    }
+    float ux0 = -sp[2] / sp[0], uy0 = -sp[3] / sp[1];   /* (the surface's corner in user units) */
+    fb[0] -= ux0; sb[0] -= ux0; vb[0] -= ux0;
+    fb[1] -= uy0; sb[1] -= uy0; vb[1] -= uy0;
+    int w = (int)ceilf((float)w0 / sp[0]), h = (int)ceilf((float)h0 / sp[1]);
+    if (w <= 0 || h <= 0 || w > 8192 || h > 8192) return;
+    LayoutBox mb = *eb;
+    LayoutStyle ms = *eb->s;
+    mb.s = &ms;
+    mb.x = sb[0]; mb.y = sb[1]; mb.width = sb[2]; mb.height = sb[3];
+    ms.border_left = fb[0] - sb[0] > 0.0f ? fb[0] - sb[0] : 0.0;
+    ms.border_top = fb[1] - sb[1] > 0.0f ? fb[1] - sb[1] : 0.0;
+    ms.border_right = sb[0] + sb[2] - fb[0] - fb[2] > 0.0f ? sb[0] + sb[2] - fb[0] - fb[2] : 0.0;
+    ms.border_bottom = sb[1] + sb[3] - fb[1] - fb[3] > 0.0f ? sb[1] + sb[3] - fb[1] - fb[3] : 0.0;
+    mb.padding_left = mb.padding_top = mb.padding_right = mb.padding_bottom = 0.0;
+    mb.margin_left = sb[0] - vb[0]; mb.margin_top = sb[1] - vb[1];
+    mb.margin_right = vb[0] + vb[2] - sb[0] - sb[2]; mb.margin_bottom = vb[1] + vb[3] - sb[1] - sb[3];
+    DisplayList dl;
+    display_list_init(&dl);
+    t_mk_svg = true;
+    int hi = dl_layered_mask(ctx, &dl, &mb);
+    t_mk_svg = false;
+    /* (no layer with an image, failed or loading: the mask ignored) */
+    bool any_img = false;
+    for (int k = 0; hi >= 0 && k < dl.masks[hi].nstops && hi + 1 + k < dl.mask_count; k++) any_img |= dl.masks[hi + 1 + k].image_handle >= 0;
+    if (hi >= 0 && !any_img) { if (image_cache_has_pending(g_image_cache)) t_flt_img_pend = true; display_list_free(&dl); return; }
+    if (hi < 0) { display_list_free(&dl); return; }
+    uint8_t *rgb = (uint8_t *)calloc((size_t)w * h, 3);
+    /* (black under it, white through it: what shows is its coverage) */
+    if (rgb && display_list_add_rect(&dl, 0.0f, 0.0f, (float)w, (float)h, 0.0f, 0.0f, 0.0f, 1.0f) && dl_add_mask_cmd(&dl, DL_MASK_BEGIN, hi, &dl.masks[hi])) {
+        DisplayMask hm = dl.masks[hi];
+        display_list_add_rect(&dl, 0.0f, 0.0f, (float)w, (float)h, 1.0f, 1.0f, 1.0f, 1.0f);
+        dl_add_mask_cmd(&dl, DL_MASK_END, hi, &hm);
+        raster_display_list(&dl, rgb, w, h);
+        for (int y = 0; y < h0; y++)
+            for (int x = 0; x < w0; x++) {
+                int ux = (int)floorf((x + 0.5f) / sp[0]), uy = (int)floorf((y + 0.5f) / sp[1]);
+                unsigned c = ux >= 0 && uy >= 0 && ux < w && uy < h ? rgb[((size_t)uy * w + ux) * 3] : 0;
+                unsigned char *a = &rgba[((size_t)y * w0 + x) * 4 + 3];
+                *a = (unsigned char)((*a * c + 127) / 255);
+            }
+    }
+    free(rgb);
+    /* (an image of its layers still on its way: this render not kept) */
+    if (image_cache_has_pending(g_image_cache)) t_flt_img_pend = true;
+    display_list_free(&dl);
 }
 
 static bool dl_flt_element(void *ud, const char *id, int w, int h, const uint8_t **px, int *ch)
@@ -2901,6 +3086,11 @@ static bool dl_mask_is_layered(const LayoutBox *box)
 static void mk_box_rect(const LayoutBox *b, const char *name, double dflt_border, double r[4])
 {
     (void)dflt_border;
+    if (t_mk_svg && name && name[0]) {
+        if (!strcasecmp(name, "view-box")) name = "margin-box";
+        else if (!strcasecmp(name, "fill-box") || !strcasecmp(name, "content-box") || !strcasecmp(name, "padding-box")) name = "content-box";
+        else name = "border-box";
+    }
     double bl = b->s->border_left, bt = b->s->border_top, br = b->s->border_right, bb = b->s->border_bottom;
     r[0] = b->x; r[1] = b->y; r[2] = b->width; r[3] = b->height;
     if (!name || !name[0] || !strcasecmp(name, "border-box") || !strcasecmp(name, "stroke-box") || !strcasecmp(name, "view-box") || !strcasecmp(name, "border")) return;
@@ -3669,9 +3859,10 @@ static void dl_text_decorations(DisplayList *dl, const LayoutContext *ctx, int i
         double lfs = shifted_ && rs->font_size > 0.0 ? rs->font_size : fs;
         if (shifted_ && rs->td_tk < 2) { t = roundf((float)(ul_th * lfs)); if (t < 1.0f) t = 1.0f; }
         if (lines & 1) {
-            float off = ts->ul_k ? ts->ul_v + (float)(ts->ul_e * fs) : 0.0f;
+            /* (its offset the decorating box's, whatever a box between says) */
+            float off = rs->ul_k ? rs->ul_v + (float)(rs->ul_e * fs) : 0.0f;
             if (ctx->boxes[i].s->writing_mode == 2 && ctx->boxes[i].s->text_orient != 2 && !ts->ul_under && !ts->ul_right) off = -off;   /* (vertical-lr: its lines mirrored, the offset toward the left still) */
-            float y = ts->ul_under ? by + d0 * (float)lfs + off : by + (ts->ul_k ? off : ul_pos * (float)lfs);
+            float y = ts->ul_under ? by + d0 * (float)lfs + off : by + (rs->ul_k ? off : ul_pos * (float)lfs);
             dl_deco_line(dl, x0, x1, roundf(y), t, rs->td_style, c);
         }
         float thin = roundf(ul_th * fs);   /* (the font's own thickness: a thicker one grows from it) */
@@ -4014,7 +4205,27 @@ static void paint_gap_lines(const LayoutContext *ctx, DisplayList *dl, const Lay
                         } else if (kind == 2) {
                             if (a == 0) mc_rule_piece(dl, box, 0, style, ox + across, oy + st, rw, en - st, c);
                             else mc_rule_piece(dl, box, 1, style, ox + st, oy + across, en - st, rw, c);
-                        } else if (a == 0) gap_rule_piece(dl, box, 0, style, ox + across, oy + st, rw, en - st, c);
+                        } else if (a == 0) {
+                            /* (in columns: broken at each column break it crosses, capped on both sides of it) */
+                            float y0 = oy + st, y1 = oy + en;
+                            int mch_ = -1, mo_ = mc_owner(ctx, idx, &mch_);
+                            if (mo_ >= 0 && !ctx->boxes[mo_].mc_vert) {
+                                const LayoutBox *mb_ = &ctx->boxes[mo_], *cb_ = &ctx->boxes[mch_];
+                                double H_ = cb_->mc_seg_h > 0.0f ? cb_->mc_seg_h : mb_->mc_h;
+                                double top_ = cb_->mc_seg_h > 0.0f ? cb_->mc_src : mb_->y + mb_->padding_top + mb_->s->border_top;
+                                if (H_ > 1.0) {
+                                    float ce = s->gr[0].inset[1].oj ? 0.0f : s->gr[0].inset[1].px, cs = s->gr[0].inset[0].oj ? 0.0f : s->gr[0].inset[0].px;
+                                    for (int g = 0; g < 64; g++) {
+                                        double k = floor((y0 - top_) / H_ + 1e-6) + 1.0, bnd = top_ + k * H_;
+                                        if (bnd >= y1 - 0.01) break;
+                                        float e_ = (float)bnd - ce;
+                                        if (e_ > y0) gap_rule_piece(dl, box, 0, style, ox + across, y0, rw, e_ - y0, c);
+                                        y0 = (float)bnd + cs;
+                                    }
+                                }
+                            }
+                            if (y1 > y0) gap_rule_piece(dl, box, 0, style, ox + across, y0, rw, y1 - y0, c);
+                        }
                         else gap_rule_piece(dl, box, 1, style, ox + st, oy + across, en - st, rw, c);
                     }
                     p = q + 1;
@@ -4120,6 +4331,15 @@ static void paint_column_rules(const LayoutContext *ctx, int idx, DisplayList *d
                         q->s = rtl ? U - (col + 1) * (W + G) + G : col * (W + G); q->e = q->s + W;
                         q->jw = k < per_ - 1 ? G : 0.0f; q->ci = k < per_ - 1 ? (rtl ? per_ - 2 - k : k) : -1; q->jt = 2;
                         q->occ = (unsigned char)((col < SG[r].used ? 1 : 0) | (col < SG[r + 1].used ? 2 : 0));
+                    }
+                    /* (at a break of the columns around it: none) */
+                    int och_ = -1, oo_ = mc_owner(ctx, idx, &och_);
+                    if (oo_ >= 0 && !ctx->boxes[oo_].mc_vert && ctx->boxes[oo_].mc_h > 1.0f) {
+                        const LayoutBox *ob_ = &ctx->boxes[oo_];
+                        float otop_ = (float)(ob_->y + ob_->s->border_top + ob_->padding_top), oh_ = ob_->mc_h;
+                        float g0_ = SG[r].dst + SG[r].h - otop_, g1_ = g0_ + rgp;
+                        float kb_ = floorf(g1_ / oh_ + 0.001f) * oh_;
+                        if (kb_ > 0.5f && kb_ >= g0_ - 0.01f && kb_ <= g1_ + 0.01f) l->n = 0;
                     }
                 }
                 ri += b - a;
@@ -4237,6 +4457,15 @@ static void paint_column_rules(const LayoutContext *ctx, int idx, DisplayList *d
                     q->s = rtl ? U - (col + 1) * (W + G) + G : col * (W + G); q->e = q->s + W;
                     q->jw = k < per - 1 ? G : 0.0f; q->ci = k < per - 1 ? (rtl ? per - 2 - k : k) : -1; q->jt = 2;
                     q->occ = (unsigned char)((r * per + col < used ? 1 : 0) | ((r + 1) * per + col < used ? 2 : 0));
+                }
+                /* (at a break of the columns around it: none) */
+                int och_ = -1, oo_ = mc_owner(ctx, idx, &och_);
+                if (oo_ >= 0 && !ctx->boxes[oo_].mc_vert && ctx->boxes[oo_].mc_h > 1.0f) {
+                    const LayoutBox *ob_ = &ctx->boxes[oo_];
+                    float otop_ = (float)(ob_->y + ob_->s->border_top + ob_->padding_top), oh_ = ob_->mc_h;
+                    float g0_ = top + (r + 1) * H + r * RG - otop_, g1_ = g0_ + RG;
+                    float kb_ = floorf(g1_ / oh_ + 0.001f) * oh_;   /* (the break at or before its end) */
+                    if (kb_ > 0.5f && kb_ >= g0_ - 0.01f && kb_ <= g1_ + 0.01f) l->n = 0;
                 }
             }
             paint_gap_lines(ctx, dl, mb, idx, op, 2, L, nl, Sg, left, top);
@@ -5007,6 +5236,8 @@ static bool box_mask(const LayoutBox *box, DisplayMask *m)
 
 static __thread double t_cp_vw = 800.0, t_cp_vh = 600.0;
 static __thread double t_cp_ex = 0.5;      /* (the box's font's x-height, of its size) */
+static __thread double t_cp_ch = 0.5;   /* (its "0"'s advance) */
+static __thread double t_cp_rem = 16.0;   /* (the root's font size) */      /* (its "0"'s advance, of its size) */
 /* (a clip-path polygon's corners past its mask's ten, from its box's corner:
  * the kind 11 masks after it carry them) */
 #define CP_POLY_MAX 128
@@ -5014,6 +5245,8 @@ static __thread float t_cp_px[CP_POLY_MAX], t_cp_py[CP_POLY_MAX];
 static __thread int t_cp_n;
 static __thread int t_cp_sub;              /* (its subpaths: more than one, their joins drawn no edge) */
 static __thread HtmlDocument *t_cp_doc;    /* (for url(#id)) */
+static __thread bool t_cp_vb_on;           /* (SVG content: view-box its svg's viewport, t_cp_vb x y w h) */
+static __thread double t_cp_vb[4];
 static __thread const char *t_cp_base;     /* (for url(file#id): the document's URL) */
 static __thread char *t_cp_ext_url;        /* (the last external document parsed, kept) */
 static __thread HtmlDocument *t_cp_ext_doc;
@@ -5050,9 +5283,9 @@ static bool cp_len(const char **pp, double base, double fs, double *out)
     if (e == p) return false;
     if (*e == '%') { v = v * base / 100.0; e++; }
     else if (!strncasecmp(e, "px", 2)) e += 2;
-    else if (!strncasecmp(e, "rem", 3)) { v *= 16.0; e += 3; }
+    else if (!strncasecmp(e, "rem", 3)) { v *= t_cp_rem; e += 3; }
     else if (!strncasecmp(e, "em", 2)) { v *= fs; e += 2; }
-    else if (!strncasecmp(e, "ch", 2)) { v *= fs * 0.5; e += 2; }
+    else if (!strncasecmp(e, "ch", 2)) { v *= fs * t_cp_ch; e += 2; }
     else if (!strncasecmp(e, "ex", 2)) { v *= fs * t_cp_ex; e += 2; }
     else if (!strncasecmp(e, "vmin", 4)) { v *= fmin(t_cp_vw, t_cp_vh) / 100.0; e += 4; }
     else if (!strncasecmp(e, "vmax", 4)) { v *= fmax(t_cp_vw, t_cp_vh) / 100.0; e += 4; }
@@ -5099,8 +5332,11 @@ static void cp_position(const char *p, double w, double h, double fs, double *cx
 }
 
 /* (an ellipse's radius on an axis: closest-side, farthest-side or a length) */
+static __thread double t_cp_corner[2];   /* (the centre's distances to the closest and farthest corners) */
 static bool cp_radius(const char **pp, double base, double fs, double d1, double d2, double *r)
 {
+    if (cp_word(pp, "closest-corner")) { *r = t_cp_corner[0]; return true; }
+    if (cp_word(pp, "farthest-corner")) { *r = t_cp_corner[1]; return true; }
     if (cp_word(pp, "closest-side")) { *r = d1 < d2 ? d1 : d2; return true; }
     if (cp_word(pp, "farthest-side")) { *r = d1 > d2 ? d1 : d2; return true; }
     return cp_len(pp, base, fs, r);
@@ -5224,10 +5460,18 @@ static bool svg_clip_shape(HtmlNode *n, const char *v, char *out, size_t cap)
     if (at) { cp_position(at + 3, w, h, 16.0, &cx, &cy); *at = 0; }
     double dx1 = cx, dx2 = w - cx, dy1 = cy, dy2 = h - cy;
     const char *q = a;
+    {
+        double c0 = 1e30, c1 = 0.0;
+        double xs[2] = { dx1, dx2 }, ys[2] = { dy1, dy2 };
+        for (int i = 0; i < 2; i++) for (int j = 0; j < 2; j++) { double d = sqrt(xs[i] * xs[i] + ys[j] * ys[j]); if (d < c0) c0 = d; if (d > c1) c1 = d; }
+        t_cp_corner[0] = c0; t_cp_corner[1] = c1;
+    }
     if (circ) {
         double r = fmin(fmin(dx1, dx2), fmin(dy1, dy2));
         double diag = sqrt((w * w + h * h) / 2.0);
         if (cp_word(&q, "farthest-side")) r = fmax(fmax(dx1, dx2), fmax(dy1, dy2));
+        else if (cp_word(&q, "closest-corner")) r = t_cp_corner[0];
+        else if (cp_word(&q, "farthest-corner")) r = t_cp_corner[1];
         else if (!cp_word(&q, "closest-side")) { double rr; if (cp_len(&q, diag, 16.0, &rr)) r = rr; }
         snprintf(out, cap, "<circle cx=\"%.4f\" cy=\"%.4f\" r=\"%.4f\"/>", x + cx, y + cy, r);
     } else {
@@ -5486,9 +5730,15 @@ bool cp_shape_path(const char *q, double w, double h, double fs, char *out, size
             PAIR(x, y, by);
             if (!cp_word(&q, "of")) return false;
             double rx, ry;
+            const char *q0 = q;
             if (!cp_len(&q, w, fs, &rx)) return false;
             const char *q2 = q;
-            if (!cp_len(&q2, h, fs, &ry)) ry = rx; else q = q2;
+            if (!cp_len(&q2, h, fs, &ry)) {
+                /* (one radius: a percentage of the diagonal, normalized) */
+                const char *q3 = q0;
+                if (cp_len(&q3, sqrt((w * w + h * h) / 2.0), fs, &rx)) q = q3;
+                ry = rx;
+            } else q = q2;
             bool cw = false, large = false;
             double rot = 0.0;
             for (;;) {
@@ -5658,16 +5908,18 @@ static int cp_url_points(const char *args, double bx, double by, double bw, doub
             n += m;
             shapes += t_cp_sub - sub0;
         } else if (!strcasecmp(tg, "rect")) {
-            double x = cp_svg_num(c, "x", 1.0), y = cp_svg_num(c, "y", 1.0);
-            double w = cp_svg_num(c, "width", 1.0), h = cp_svg_num(c, "height", 1.0);
+            /* (percentages: of the box in user space, of 1 for the bounding box) */
+            double x = cp_svg_num(c, "x", obb ? 1.0 : bw), y = cp_svg_num(c, "y", obb ? 1.0 : bh);
+            double w = cp_svg_num(c, "width", obb ? 1.0 : bw), h = cp_svg_num(c, "height", obb ? 1.0 : bh);
             if (w <= 0.0 || h <= 0.0 || n + 5 > max) continue;
             double X[5] = { x, x + w, x + w, x, x }, Y[5] = { y, y, y + h, y + h, y };
             for (int i = 0; i < 5; i++) { px[n] = X[i]; py[n] = Y[i]; n++; }
             shapes++;
         } else if (!strcasecmp(tg, "circle") || !strcasecmp(tg, "ellipse")) {
             bool circ = tg[0] == 'c' || tg[0] == 'C';
-            double cx = cp_svg_num(c, "cx", 1.0), cy = cp_svg_num(c, "cy", 1.0);
-            double rx = cp_svg_num(c, circ ? "r" : "rx", 1.0), ry = circ ? rx : cp_svg_num(c, "ry", 1.0);
+            double dg = obb ? 1.0 : sqrt((bw * bw + bh * bh) / 2.0);
+            double cx = cp_svg_num(c, "cx", obb ? 1.0 : bw), cy = cp_svg_num(c, "cy", obb ? 1.0 : bh);
+            double rx = cp_svg_num(c, circ ? "r" : "rx", circ ? dg : obb ? 1.0 : bw), ry = circ ? rx : cp_svg_num(c, "ry", obb ? 1.0 : bh);
             const int segs = 40;
             if (rx <= 0.0 || ry <= 0.0 || n + segs + 1 > max) continue;
             for (int i = 0; i <= segs; i++) {
@@ -5742,7 +5994,8 @@ static bool box_clip_mask(const LayoutBox *box, DisplayMask *m)
         while (*p == ' ') p++;
         if (!*p) break;
         if (cp_word(&p, "margin-box")) ref = 0;
-        else if (cp_word(&p, "border-box") || cp_word(&p, "stroke-box") || cp_word(&p, "view-box")) ref = 1;
+        else if (cp_word(&p, "view-box")) ref = t_cp_vb_on ? 4 : 1;
+        else if (cp_word(&p, "border-box") || cp_word(&p, "stroke-box")) ref = 1;
         else if (cp_word(&p, "padding-box")) ref = 2;
         else if (cp_word(&p, "content-box") || cp_word(&p, "fill-box")) ref = 3;
         else {
@@ -5766,6 +6019,7 @@ static bool box_clip_mask(const LayoutBox *box, DisplayMask *m)
     if (ref >= 2) { ins[0] = s->border_top; ins[1] = s->border_right; ins[2] = s->border_bottom; ins[3] = s->border_left; }
     if (ref == 3) { ins[0] += box->padding_top; ins[1] += box->padding_right; ins[2] += box->padding_bottom; ins[3] += box->padding_left; }
     double bx = box->x + ins[3], by = box->y + ins[0], bw = box->width - ins[1] - ins[3], bh = box->height - ins[0] - ins[2];
+    if (ref == 4) { bx = t_cp_vb[0]; by = t_cp_vb[1]; bw = t_cp_vb[2]; bh = t_cp_vb[3]; }
     if (bw < 0.0) bw = 0.0;
     if (bh < 0.0) bh = 0.0;
     memset(m, 0, sizeof(*m));
@@ -5780,6 +6034,25 @@ static bool box_clip_mask(const LayoutBox *box, DisplayMask *m)
         if (cp_word(&q, "evenodd")) evenodd = true;
         else cp_word(&q, "nonzero");
         while (*q == ' ' || *q == ',') q++;
+        /* (polygon(round r, ...): its corners rounded) */
+        double round_r = 0.0;
+        if (fn[0] == 'p' && fn[1] == 'o' && cp_word(&q, "round")) {
+            while (*q == ' ') q++;
+            if (!cp_len(&q, sqrt((bw * bw + bh * bh) / 2.0), fs, &round_r)) {
+                /* (what the simple reader can't: calc() with functions, by the style's reader, up to the comma) */
+                const char *e = q;
+                int dep = 0;
+                while (*e && (dep || *e != ',')) { if (*e == '(') dep++; else if (*e == ')') { if (!dep) break; dep--; } e++; }
+                char rb[256];
+                size_t rl = (size_t)(e - q) < sizeof rb - 1 ? (size_t)(e - q) : sizeof rb - 1;
+                memcpy(rb, q, rl);
+                rb[rl] = 0;
+                extern double css_layout_len_px(const char *v, double font_size, double pct_base);
+                round_r = css_layout_len_px(rb, fs, sqrt((bw * bw + bh * bh) / 2.0));
+                q = e;
+            }
+            while (*q == ' ' || *q == ',') q++;
+        }
         double px[CP_POLY_MAX], py[CP_POLY_MAX];
         int n = 0;
         t_cp_n = 0;
@@ -5824,6 +6097,39 @@ static bool box_clip_mask(const LayoutBox *box, DisplayMask *m)
             if (*q == ',') q++;
         }
         if (n < 3) { m->kind = 3; m->x = (float)bx; m->y = (float)by; m->w = m->h = 0.0f; return true; }
+        if (round_r > 0.0 && n * 9 <= CP_POLY_MAX) {
+            double qx[CP_POLY_MAX], qy[CP_POLY_MAX];
+            int nq = 0;
+            for (int k = 0; k < n; k++) {
+                double ax = px[(k + n - 1) % n], ay = py[(k + n - 1) % n], cx = px[k], cy = py[k], ex = px[(k + 1) % n], ey = py[(k + 1) % n];
+                double l1 = hypot(ax - cx, ay - cy), l2 = hypot(ex - cx, ey - cy);
+                if (l1 < 1e-6 || l2 < 1e-6) { qx[nq] = cx; qy[nq++] = cy; continue; }
+                double u1x = (ax - cx) / l1, u1y = (ay - cy) / l1, u2x = (ex - cx) / l2, u2y = (ey - cy) / l2;
+                double dot = u1x * u2x + u1y * u2y;
+                if (dot > 1.0) dot = 1.0;
+                if (dot < -1.0) dot = -1.0;
+                double th = acos(dot);
+                if (th < 1e-3 || th > M_PI - 1e-3) { qx[nq] = cx; qy[nq++] = cy; continue; }
+                double d = round_r / tan(th / 2.0);
+                if (d > l1 / 2.0) d = l1 / 2.0;
+                if (d > l2 / 2.0) d = l2 / 2.0;
+                double r = d * tan(th / 2.0);
+                double bxv = u1x + u2x, byv = u1y + u2y, bl = hypot(bxv, byv);
+                double ccx = cx + bxv / bl * (r / sin(th / 2.0)), ccy = cy + byv / bl * (r / sin(th / 2.0));
+                double t1x = cx + u1x * d, t1y = cy + u1y * d, t2x = cx + u2x * d, t2y = cy + u2y * d;
+                double a0 = atan2(t1y - ccy, t1x - ccx), a1 = atan2(t2y - ccy, t2x - ccx);
+                double da = a1 - a0;
+                while (da > M_PI) da -= 2.0 * M_PI;
+                while (da < -M_PI) da += 2.0 * M_PI;
+                for (int j = 0; j <= 8; j++) {
+                    double a = a0 + da * j / 8.0;
+                    qx[nq] = ccx + r * cos(a);
+                    qy[nq++] = ccy + r * sin(a);
+                }
+            }
+            n = nq;
+            for (int k = 0; k < n; k++) { px[k] = qx[k]; py[k] = qy[k]; }
+        }
         double lx = px[0], ly = py[0], hx = px[0], hy = py[0];
         for (int k = 1; k < n; k++) { lx = fmin(lx, px[k]); ly = fmin(ly, py[k]); hx = fmax(hx, px[k]); hy = fmax(hy, py[k]); }
         m->kind = 7;
@@ -5846,6 +6152,15 @@ static bool box_clip_mask(const LayoutBox *box, DisplayMask *m)
             double ix = (c == 0 || c == 3) ? ins[3] : ins[1], iy = (c == 0 || c == 1) ? ins[0] : ins[2];
             if (rx > 0.0) m->rx[c] = (float)(rx - ix > 0.0 ? rx - ix : 0.0);
             if (ry > 0.0) m->ry[c] = (float)(ry - iy > 0.0 ? ry - iy : 0.0);
+        }
+        /* (corners that would overlap on the box: all scaled down alike, as border-radius) */
+        {
+            double f_ = 1.0, sx_[2] = { m->rx[0] + m->rx[1], m->rx[3] + m->rx[2] }, sy_[2] = { m->ry[0] + m->ry[3], m->ry[1] + m->ry[2] };
+            for (int k = 0; k < 2; k++) {
+                if (sx_[k] > bw && sx_[k] > 0.0) f_ = fmin(f_, bw / sx_[k]);
+                if (sy_[k] > bh && sy_[k] > 0.0) f_ = fmin(f_, bh / sy_[k]);
+            }
+            if (f_ < 1.0) for (int c = 0; c < 4; c++) { m->rx[c] = (float)(m->rx[c] * f_); m->ry[c] = (float)(m->ry[c] * f_); }
         }
     } else if (!strcmp(fn, "inset")) {
         double u[4];
@@ -6665,6 +6980,8 @@ static void dl_hl_finish(DlHlStyle *st, double fs)
 {
     char v[160];
     double c[4];
+    /* (light-dark(): the originating element's color scheme) */
+    g_css_ld_dark = st->ctx && st->el >= 0 && st->el < st->ctx->tree.count && st->ctx->boxes[st->el].s ? st->ctx->boxes[st->el].s->cs_dark : 0;
     if (st->rtdc[0] && dl_hl_subst(st, st->rtdc, v, sizeof v, 0) && css_color_parse(v, c)) { memcpy(st->td_c, c, sizeof c); st->td_cset = 1; }
     if (st->rtds[0] && dl_hl_subst(st, st->rtds, v, sizeof v, 0)) {
         static const char *const sk2[] = { "solid", "double", "dotted", "dashed", "wavy" };
@@ -6952,17 +7269,24 @@ static bool dl_highlight_frag(DisplayList *dl, LayoutContext *ctx, int i, HtmlNo
                 cb = (float)(st[best].c[2] / 255.0); ca = (float)st[best].c[3] * op;
             }
             if (pass == 1) {
-                /* (the topmost highlight's text-shadow that sets one) */
-                int sb = -1;
-                for (int k = 0; k < np; k++)
-                    if (ps[k] <= s && pe[k] >= e && st[k].rtsh[0] && (sb < 0 || prio[k] > prio[sb] || (prio[k] == prio[sb] && ph[k] >= ph[sb]))) sb = k;
-                if (sb < 0) continue;
+                /* (each highlight's text-shadow that sets one, in their paint order: the lowest first) */
+                int ord_[16], no_ = 0;
+                for (int k = 0; k < np && no_ < 16; k++)
+                    if (ps[k] <= s && pe[k] >= e && st[k].rtsh[0]) ord_[no_++] = k;
+                if (!no_) continue;
+                for (int u = 1; u < no_; u++)
+                    for (int v = u; v > 0; v--) {
+                        int a_ = ord_[v - 1], b_ = ord_[v];
+                        if (prio[a_] < prio[b_] || (prio[a_] == prio[b_] && ph[a_] <= ph[b_])) break;
+                        ord_[v - 1] = b_; ord_[v] = a_;
+                    }
                 size_t l1 = e - start < sizeof buf - 1 ? e - start : sizeof buf - 1;
                 memcpy(buf, run_text + start, l1);
                 buf[l1] = 0;
                 text_shaper_measure(font, buf, &w1, &hgt);
                 float cc[4] = { cr, cg, cb, ca };
-                if (!dl_hl_shadows(dl, &st[sb], font, run_text, s, e, px, y, scale, (w1 - w0) * scale, fs, cc, op)) { *ok = false; return true; }
+                for (int u = 0; u < no_; u++)
+                    if (!dl_hl_shadows(dl, &st[ord_[u]], font, run_text, s, e, px, y, scale, (w1 - w0) * scale, fs, cc, op)) { *ok = false; return true; }
                 continue;
             }
             /* (the highlights' decorations: under- and overlines beneath the text, line-throughs over it) */
@@ -7084,6 +7408,7 @@ static bool dl_frags_ell(const LayoutContext *ctx, int i)
     for (int q = 0; l && q < l->n; q++) if (l->f[q].ellipsis) return true;
     return false;
 }
+static __thread const LayoutStyle *t_te_clip;   /* (a box whose background is clipped to the text: transparent marks show its color) */
 static void dl_emphasis_marks(DisplayList *dl, TextShaper *font, const LayoutBox *box, const char *text, size_t start,
                               size_t end, float x, float y, float scale, float op, float rs, bool under)
 {
@@ -7115,6 +7440,10 @@ static void dl_emphasis_marks(DisplayList *dl, TextShaper *font, const LayoutBox
         c[2] = (float)((v >> 8) & 0xFF) / 255.0f; c[3] = (float)(v & 0xFF) / 255.0f * op;
     } else {
         c[0] = (float)s->color_r; c[1] = (float)s->color_g; c[2] = (float)s->color_b; c[3] = (float)s->color_a * op;
+    }
+    if (c[3] <= 0.0f && t_te_clip) {
+        c[0] = (float)t_te_clip->background_color_r; c[1] = (float)t_te_clip->background_color_g; c[2] = (float)t_te_clip->background_color_b;
+        c[3] = (float)t_te_clip->background_color_a * op;
     }
     char buf[512];
     size_t at = start;
@@ -7153,9 +7482,21 @@ static void dl_viewport_scroll(LayoutContext *ctx, float *x, float *y)
     if (rn) dom_scroll_get(dom_owner(rn->store_id), x, y);
 }
 
+/* (builds of a layout context, counted: an animated image not in one or more began again) */
+unsigned g_dl_build_gen;
+const void *g_dl_build_ctx;
 bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
 {
     if (!ctx || !dl) return false;
+    {
+        static struct { const void *ctx; unsigned gen; } bg[8];
+        int k = 0;
+        while (k < 8 && bg[k].ctx && bg[k].ctx != ctx) k++;
+        if (k == 8) { k = 0; bg[0].gen = 0; }
+        bg[k].ctx = ctx;
+        g_dl_build_gen = ++bg[k].gen;
+        g_dl_build_ctx = ctx;
+    }
     display_list_init(dl);
     /* overflow != visible clips descendants to the padding box, and they
      * move by its scroll offset (off: only while something is scrolled). */
@@ -7637,7 +7978,17 @@ static int canvas_background(LayoutContext *ctx, DisplayList *dl)
         w = g_css_print.pw;
         h = (g_css_print.pages > 0 ? g_css_print.pages : 1) * (g_css_print.h + g_css_print.gap);
     }
-    if (s->background_color_a > 0.0f &&
+    if (g_css_print.on && s->background_color_a > 0.0f) {
+        /* (each page's page area) */
+        int np = g_css_print.pages > 0 ? g_css_print.pages : 1;
+        for (int k = 0; k < np && k < 64; k++) {
+            float py = (float)(k * (g_css_print.h + g_css_print.gap)) + roundf(g_css_print.pdy[k]), px = roundf(g_css_print.pdx[k]);
+            if (!display_list_add_rect(dl, px, py, (float)g_css_print.w, (float)g_css_print.h, (float)s->background_color_r,
+                                       (float)s->background_color_g, (float)s->background_color_b,
+                                       (float)s->background_color_a * (float)ctx->boxes[src].opacity_eff))
+                return -2;
+        }
+    } else if (s->background_color_a > 0.0f &&
         !display_list_add_rect(dl, pr0, pr1, (float)ceil(w), (float)ceil(h), (float)s->background_color_r,
                                (float)s->background_color_g, (float)s->background_color_b,
                                (float)s->background_color_a * (float)ctx->boxes[src].opacity_eff))
@@ -7658,7 +8009,10 @@ static int canvas_background(LayoutContext *ctx, DisplayList *dl)
         /* (a root of no height: its images placed in the viewport, as browsers do, not nowhere) */
         if (pb.height < 1.0) { pb.y = 0.0; pb.height = ctx->viewport_height; }
         if (pb.width < 1.0) { pb.x = 0.0; pb.width = ctx->viewport_width; }
+        ps.img_anim = rs->img_anim;   /* (the canvas's image-animation: the root element's) */
+        t_bg_owner = root;
         emit_background_image(ctx, dl, &pb, area);
+        t_bg_owner = -1;
     }
     return src;
 }
@@ -7851,7 +8205,7 @@ static bool paint_is_context(const LayoutContext *ctx, int i)
 {
     const LayoutBox *b = &ctx->boxes[i];
     if (b->s->position == CSS_POSITION_FIXED || b->s->position == CSS_POSITION_STICKY) return true;
-    if (b->s->wc_sc == 1) return true;   /* (will-change names what makes one) */
+    if (b->s->wc_sc == 1 || b->s->wc_sc == 3) return true;   /* (will-change names what makes one; 3 a transform or opacity animation) */
     if (b->s->isolate && b->s->display != CSS_DISPLAY_INLINE) return true;   /* (isolation: isolate) */
     if ((b->s->abs_cb & (1 | 2 | 4 | 8 | 16 | 512)) && b->s->display != CSS_DISPLAY_INLINE) return true;   /* (transformed: one, were the transform the identity) */
     if (b->s->z_index_set || b->s->wc_sc == 2) {
@@ -8231,13 +8585,21 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         if (ol_later) { ol_put(dl, i); continue; }
         /* The pieces of a split inline that start with this box: where their
          * line is in the paint order. */
-        int par = ctx->tree.nodes[i].parent_idx;
-        if (par >= 0 && ctx->pieces && par < ctx->pieces_n && ctx->pieces[par].n > 0) {
-            const LayoutBox *pb = &ctx->boxes[par];
-            if (pb->s->block_in_inline == 2 && (pb->flags & LAYOUT_HAS_LAYOUT) && pb->s->display != CSS_DISPLAY_NONE &&
-                pb->s->visibility != CSS_VISIBILITY_HIDDEN && pb->opacity_eff >= 0.004 &&
-                !box_or_ancestor_hidden(ctx, par))
-                paint_pieces(ctx, dl, par, i, (float)pb->opacity_eff);
+        /* (split inlines one in another: the outer ones' pieces anchored here too, outermost first) */
+        {
+            int chain_[16], nc_ = 0;
+            for (int par = ctx->tree.nodes[i].parent_idx; par >= 0 && nc_ < 16 && ctx->pieces && par < ctx->pieces_n && ctx->boxes[par].s->block_in_inline == 2 &&
+                 ctx->boxes[par].s->display == CSS_DISPLAY_INLINE; par = ctx->tree.nodes[par].parent_idx)
+                chain_[nc_++] = par;
+            for (int c_ = nc_ - 1; c_ >= 0; c_--) {
+                int par = chain_[c_];
+                if (ctx->pieces[par].n <= 0) continue;
+                const LayoutBox *pb = &ctx->boxes[par];
+                if ((pb->flags & LAYOUT_HAS_LAYOUT) && pb->s->display != CSS_DISPLAY_NONE &&
+                    pb->s->visibility != CSS_VISIBILITY_HIDDEN && pb->opacity_eff >= 0.004 &&
+                    !box_or_ancestor_hidden(ctx, par))
+                    paint_pieces(ctx, dl, par, i, (float)pb->opacity_eff);
+            }
         }
         if (!(box->flags & LAYOUT_HAS_LAYOUT)) continue;
         if (box->s->display == CSS_DISPLAY_NONE) continue;
@@ -8370,6 +8732,109 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                 nmask++;
             }
         }
+        /* (clip and clip-path: after the filter, around what it makes) */
+        /* clip: rect() on an absolutely positioned box: its subtree cut to the rectangle
+         * (offsets from its border box's corner; auto the border box's edge) */
+        if (box->s->clip_on && (box->s->position == CSS_POSITION_ABSOLUTE || box->s->position == CSS_POSITION_FIXED) && nmask < 64) {
+            DisplayMask cm;
+            memset(&cm, 0, sizeof cm);
+            cm.kind = 3;
+            cm.image_handle = -1;
+            unsigned char au = box->s->clip_auto;
+            float t = (au & 1) ? 0.0f : box->s->clip_v[0], r = (au & 2) ? (float)box->width : box->s->clip_v[1];
+            float b = (au & 4) ? (float)box->height : box->s->clip_v[2], l = (au & 8) ? 0.0f : box->s->clip_v[3];
+            cm.x = (float)box->x + l;
+            cm.y = (float)box->y + t;
+            cm.w = r - l > 0.0f ? r - l : 0.0f;
+            cm.h = b - t > 0.0f ? b - t : 0.0f;
+            cm.ix = -400000.0f; cm.iy = -400000.0f; cm.iw = 800000.0f; cm.ih = 800000.0f;
+            int ci = dl_add_mask(dl, &cm);
+            if (ci >= 0 && dl_add_mask_cmd(dl, DL_MASK_BEGIN, ci, &cm)) {
+                mask_start[nmask] = i;
+                mask_end[nmask] = subtree_end(ctx, i);
+                mask_idx[nmask] = ci;
+                nmask++;
+            }
+        }
+        /* clip-path: a shape over the box and its subtree, all outside it gone
+         * (the mask's region far beyond its shape: ix.. kind 3's region) */
+        if (box->s->clip_path && nmask < 64) {
+            DisplayMask m;
+            t_cp_vw = ctx->viewport_width;
+            t_cp_vh = ctx->viewport_height;
+            {
+                /* (ch and ex of its font) */
+                TextShaper *cf = box->s->font_slot >= 0 ? display_list_get_font(box->s->font_slot) : NULL;
+                t_cp_ch = 0.5; t_cp_ex = 0.5;
+                t_cp_rem = ctx->tree.root_idx >= 0 && ctx->boxes[ctx->tree.root_idx].s->font_size > 0.0 ? ctx->boxes[ctx->tree.root_idx].s->font_size : 16.0;
+                if (cf) {
+                    float zw = text_shaper_zero_advance(cf);
+                    if (zw > 0.0f) t_cp_ch = zw;
+                    float xh = text_shaper_x_height(cf);
+                    if (xh > 0.0f) t_cp_ex = xh;
+                }
+            }
+            t_cp_doc = ctx->doc;
+            t_cp_base = ctx->base_url;
+            t_cp_n = 0;
+            /* (a foreignObject: view-box its svg's viewport) */
+            t_cp_vb_on = false;
+            if (node && node->type == HTML_NODE_ELEMENT && node->tag_name && !strcasecmp(node->tag_name, "foreignObject")) {
+                int sp_ = ctx->tree.nodes[i].parent_idx;
+                const HtmlNode *sn_ = sp_ >= 0 ? css_layout_box_node(ctx, sp_) : NULL;
+                while (sp_ >= 0 && !(sn_ && sn_->type == HTML_NODE_ELEMENT && sn_->tag_name && !strcasecmp(sn_->tag_name, "svg"))) {
+                    sp_ = ctx->tree.nodes[sp_].parent_idx;
+                    sn_ = sp_ >= 0 ? css_layout_box_node(ctx, sp_) : NULL;
+                }
+                if (sp_ >= 0) {
+                    const LayoutBox *sb_ = &ctx->boxes[sp_];
+                    t_cp_vb[0] = sb_->x + sb_->s->border_left + sb_->padding_left;
+                    t_cp_vb[1] = sb_->y + sb_->s->border_top + sb_->padding_top;
+                    t_cp_vb[2] = sb_->content_width;
+                    t_cp_vb[3] = sb_->content_height;
+                    const char *vbs_ = node_attribute_value((HtmlNode *)sn_, "viewBox");
+                    double vb_[4];
+                    if (vbs_ && sscanf(vbs_, " %lf%*[ ,]%lf%*[ ,]%lf%*[ ,]%lf", &vb_[0], &vb_[1], &vb_[2], &vb_[3]) == 4 && vb_[2] > 0.0 && vb_[3] > 0.0) {
+                        t_cp_vb[2] = vb_[2]; t_cp_vb[3] = vb_[3];
+                    }
+                    t_cp_vb_on = true;
+                }
+            }
+            /* (an inline on several lines: its first line's part the reference box) */
+            LayoutBox first = *box;
+            if (box->s->display == CSS_DISPLAY_INLINE && !box->s->inline_level) {
+                double cr[2][4];
+                if (css_layout_client_rects(ctx, i, cr, 2) >= 2) { first.x = cr[0][0]; first.y = cr[0][1]; first.width = cr[0][2]; first.height = cr[0][3]; }
+            }
+            bool cpm_ = box_clip_mask(&first, &m);
+            t_cp_vb_on = false;
+            if (cpm_) {
+                m.ix = -400000.0f; m.iy = -400000.0f; m.iw = 800000.0f; m.ih = 800000.0f;
+                int mi = dl_add_mask(dl, &m);
+                /* (a polygon of more than ten corners: ten more in each mask after it) */
+                for (int k0 = 10; mi >= 0 && m.kind == 7 && k0 < t_cp_n; k0 += 10) {
+                    DisplayMask c;
+                    memset(&c, 0, sizeof c);
+                    c.kind = 11;
+                    c.image_handle = -1;
+                    c.x = m.x; c.y = m.y; c.w = m.w; c.h = m.h;
+                    c.nstops = 1;
+                    float *slot[20];
+                    for (int k = 0; k < 4; k++) { slot[k] = &c.rx[k]; slot[4 + k] = &c.ry[k]; slot[8 + k] = &c.border[k]; slot[12 + k] = &c.ex_rx[k]; slot[16 + k] = &c.ex_ry[k]; }
+                    for (int k = k0; k < t_cp_n && k < k0 + 10; k++) { *slot[2 * (k - k0)] = t_cp_px[k]; *slot[2 * (k - k0) + 1] = t_cp_py[k]; }
+                    if (dl_add_mask(dl, &c) < 0) break;
+                }
+                if (mi >= 0 && dl_add_mask_cmd(dl, DL_MASK_BEGIN, mi, &m)) {
+                    mask_start[nmask] = i;
+                    mask_end[nmask] = subtree_end(ctx, i);
+                    mask_idx[nmask] = mi;
+                    if (nreg < REG_MAX && mask_end[nmask] > i + 1) {
+                        reg_start[nreg] = i; reg_end[nreg] = mask_end[nmask]; reg_idx[nreg] = mi; nreg++;
+                    }
+                    nmask++;
+                }
+            }
+        }
         bool filt_cpu = dl_box_filter_cpu(box, any_tf);
         /* (an empty SVG shape: its filter draws nothing either) */
         if (filt_cpu && node && node->type == HTML_NODE_ELEMENT && node->tag_name && inside_svg(&ctx->doc->array, ctx->tree.nodes[i].dom_node_idx) && svg_shape_empty(node)) filt_cpu = false;
@@ -8458,71 +8923,6 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                         mask_idx[nmask] = ci;
                         nmask++;
                     }
-                }
-            }
-        }
-        /* clip: rect() on an absolutely positioned box: its subtree cut to the rectangle
-         * (offsets from its border box's corner; auto the border box's edge) */
-        if (box->s->clip_on && (box->s->position == CSS_POSITION_ABSOLUTE || box->s->position == CSS_POSITION_FIXED) && nmask < 64) {
-            DisplayMask cm;
-            memset(&cm, 0, sizeof cm);
-            cm.kind = 3;
-            cm.image_handle = -1;
-            unsigned char au = box->s->clip_auto;
-            float t = (au & 1) ? 0.0f : box->s->clip_v[0], r = (au & 2) ? (float)box->width : box->s->clip_v[1];
-            float b = (au & 4) ? (float)box->height : box->s->clip_v[2], l = (au & 8) ? 0.0f : box->s->clip_v[3];
-            cm.x = (float)box->x + l;
-            cm.y = (float)box->y + t;
-            cm.w = r - l > 0.0f ? r - l : 0.0f;
-            cm.h = b - t > 0.0f ? b - t : 0.0f;
-            cm.ix = -400000.0f; cm.iy = -400000.0f; cm.iw = 800000.0f; cm.ih = 800000.0f;
-            int ci = dl_add_mask(dl, &cm);
-            if (ci >= 0 && dl_add_mask_cmd(dl, DL_MASK_BEGIN, ci, &cm)) {
-                mask_start[nmask] = i;
-                mask_end[nmask] = subtree_end(ctx, i);
-                mask_idx[nmask] = ci;
-                nmask++;
-            }
-        }
-        /* clip-path: a shape over the box and its subtree, all outside it gone
-         * (the mask's region far beyond its shape: ix.. kind 3's region) */
-        if (box->s->clip_path && nmask < 64) {
-            DisplayMask m;
-            t_cp_vw = ctx->viewport_width;
-            t_cp_vh = ctx->viewport_height;
-            t_cp_doc = ctx->doc;
-            t_cp_base = ctx->base_url;
-            t_cp_n = 0;
-            /* (an inline on several lines: its first line's part the reference box) */
-            LayoutBox first = *box;
-            if (box->s->display == CSS_DISPLAY_INLINE && !box->s->inline_level) {
-                double cr[2][4];
-                if (css_layout_client_rects(ctx, i, cr, 2) >= 2) { first.x = cr[0][0]; first.y = cr[0][1]; first.width = cr[0][2]; first.height = cr[0][3]; }
-            }
-            if (box_clip_mask(&first, &m)) {
-                m.ix = -400000.0f; m.iy = -400000.0f; m.iw = 800000.0f; m.ih = 800000.0f;
-                int mi = dl_add_mask(dl, &m);
-                /* (a polygon of more than ten corners: ten more in each mask after it) */
-                for (int k0 = 10; mi >= 0 && m.kind == 7 && k0 < t_cp_n; k0 += 10) {
-                    DisplayMask c;
-                    memset(&c, 0, sizeof c);
-                    c.kind = 11;
-                    c.image_handle = -1;
-                    c.x = m.x; c.y = m.y; c.w = m.w; c.h = m.h;
-                    c.nstops = 1;
-                    float *slot[20];
-                    for (int k = 0; k < 4; k++) { slot[k] = &c.rx[k]; slot[4 + k] = &c.ry[k]; slot[8 + k] = &c.border[k]; slot[12 + k] = &c.ex_rx[k]; slot[16 + k] = &c.ex_ry[k]; }
-                    for (int k = k0; k < t_cp_n && k < k0 + 10; k++) { *slot[2 * (k - k0)] = t_cp_px[k]; *slot[2 * (k - k0) + 1] = t_cp_py[k]; }
-                    if (dl_add_mask(dl, &c) < 0) break;
-                }
-                if (mi >= 0 && dl_add_mask_cmd(dl, DL_MASK_BEGIN, mi, &m)) {
-                    mask_start[nmask] = i;
-                    mask_end[nmask] = subtree_end(ctx, i);
-                    mask_idx[nmask] = mi;
-                    if (nreg < REG_MAX && mask_end[nmask] > i + 1) {
-                        reg_start[nreg] = i; reg_end[nreg] = mask_end[nmask]; reg_idx[nreg] = mi; nreg++;
-                    }
-                    nmask++;
                 }
             }
         }
@@ -8708,6 +9108,49 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     ba_m.x = ba_m.ix = t_bs_ring_r[0]; ba_m.y = ba_m.iy = t_bs_ring_r[1];
                     ba_m.w = ba_m.iw = t_bs_ring_r[2]; ba_m.h = ba_m.ih = t_bs_ring_r[3];
                 }
+            } else if (g_image_cache) {
+                /* (a side not solid: where its strokes go, drawn white on black, an image's alpha) */
+                const float bwid_[4] = { (float)box->s->border_top, (float)box->s->border_right, (float)box->s->border_bottom, (float)box->s->border_left };
+                static const int sk_[4] = { 2, 1, 3, 0 };
+                bool styled_ = false;
+                for (int sd = 0; sd < 4; sd++) {
+                    int st_ = box->s->border_style[sk_[sd]];
+                    if (bwid_[sd] > 0.0f && (st_ == CSS_BORDER_DASHED || st_ == CSS_BORDER_DOTTED || st_ == CSS_BORDER_DOUBLE)) styled_ = true;   /* (3D styles: the whole side, as solid) */
+                }
+                int W_ = (int)ceil(box->width), H_ = (int)ceil(box->height);
+                if (styled_ && W_ > 0 && H_ > 0 && W_ <= 4096 && H_ <= 4096) {
+                    char key_[200];
+                    snprintf(key_, sizeof key_, "cyber-bam:%dx%d:%g,%g,%g,%g:%d%d%d%d:%g,%g,%g,%g,%g,%g,%g,%g", W_, H_, bwid_[0], bwid_[1], bwid_[2], bwid_[3],
+                             box->s->border_style[0], box->s->border_style[1], box->s->border_style[2], box->s->border_style[3],
+                             ba_m.rx[0], ba_m.rx[1], ba_m.rx[2], ba_m.rx[3], ba_m.ry[0], ba_m.ry[1], ba_m.ry[2], ba_m.ry[3]);
+                    if (image_cache_status(g_image_cache, key_) != 1) {
+                        DisplayList tl_;
+                        display_list_init(&tl_);
+                        display_list_add_rect(&tl_, 0.0f, 0.0f, (float)W_, (float)H_, 0.0f, 0.0f, 0.0f, 1.0f);
+                        float col_[4][4];
+                        for (int k = 0; k < 4; k++) { col_[k][0] = col_[k][1] = col_[k][2] = col_[k][3] = 1.0f; }
+                        LayoutBox lb_ = *box;
+                        lb_.x = 0.0; lb_.y = 0.0;
+                        paint_border_sides(&tl_, &lb_, 0.0f, 0.0f, (float)box->width, (float)box->height, (const float (*)[4])col_, bwid_);
+                        uint8_t *rgb_ = (uint8_t *)malloc((size_t)W_ * H_ * 3), *rgba_ = (uint8_t *)malloc((size_t)W_ * H_ * 4);
+                        if (rgb_ && rgba_) {
+                            raster_display_list(&tl_, rgb_, W_, H_);
+                            for (size_t k = 0, N = (size_t)W_ * H_; k < N; k++) { rgba_[k * 4] = rgba_[k * 4 + 1] = rgba_[k * 4 + 2] = 255; rgba_[k * 4 + 3] = rgb_[k * 3]; }
+                            image_cache_put_rgba(g_image_cache, key_, W_, H_, rgba_);
+                        }
+                        free(rgb_);
+                        free(rgba_);
+                        display_list_free(&tl_);
+                    }
+                    int h_ = image_cache_request(g_image_cache, key_, W_, H_);
+                    if (h_ >= 0) {
+                        memset(&ba_m, 0, sizeof ba_m);
+                        ba_m.kind = 1;
+                        ba_m.image_handle = h_;
+                        ba_m.x = ba_m.ix = (float)box->x; ba_m.y = ba_m.iy = (float)box->y;
+                        ba_m.w = ba_m.iw = (float)W_; ba_m.h = ba_m.ih = (float)H_;
+                    }
+                }
             }
             ba_mi = dl_add_mask(dl, &ba_m);
             if (ba_mi >= 0 && !dl_add_mask_cmd(dl, DL_MASK_BEGIN, ba_mi, &ba_m)) ba_mi = -1;
@@ -8817,7 +9260,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                 /* (border-area of a border-shape: as far as its ring goes) */
                 if (ba_mi >= 0 && box->s->border_shape && dl->masks[ba_mi].kind == 1) { const DisplayMask *bm = &dl->masks[ba_mi]; bca[0] = bm->x; bca[1] = bm->y; bca[2] = bm->x + bm->w; bca[3] = bm->y + bm->h; bcp = bca; }
                 if (!bcp && cap_top + cap_bot > 0.0f) { bca[0] = (float)tbx.x; bca[1] = (float)tbx.y; bca[2] = (float)(tbx.x + tbx.width); bca[3] = (float)(tbx.y + tbx.height); bcp = bca; }
-                if (!bcp || (bca[2] > bca[0] && bca[3] > bca[1]) || box->s->bg_nl > 1) { t_bg_area_clip = 1; emit_background_image(ctx, dl, ebx, bcp); t_bg_area_clip = 0; }
+                if (!bcp || (bca[2] > bca[0] && bca[3] > bca[1]) || box->s->bg_nl > 1) { t_bg_area_clip = 1; t_bg_owner = i; emit_background_image(ctx, dl, ebx, bcp); t_bg_owner = -1; t_bg_area_clip = 0; }
             }
         }
         if (ba_mi >= 0) dl_add_mask_cmd(dl, DL_MASK_END, ba_mi, &ba_m);
@@ -8889,6 +9332,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             /* (content-visibility: hidden: its image is its content, skipped) */
             char *url = box->s->cv_hidden ? NULL : display_list_image_source(ctx->base_url, node, (float)box->width);
             if (url && box->s->img_orient_none) url = display_list_noexif(url, ctx->base_url);
+            if (url && node->store_id) url = dl_anim_frame_url(url, node->store_id, box->s->img_anim);
             if (url) {
                 /* (rounded, with a border or padding: the content box's curve too) */
                 float in4[4] = { (float)(box->s->border_top + box->padding_top), (float)(box->s->border_right + box->padding_right),
@@ -9115,6 +9559,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                         ctx->text_frags && i < ctx->text_frags_n ? &ctx->text_frags[i] : NULL;
                     /* (::first-line's background: the block whose first line it is, its declarations) */
                     float flbg[4] = { 0, 0, 0, 0 };
+                    float fl_op = 1.0f;   /* (and its opacity) */
                     bool flbg_on = false;
                     for (int q = 0; tfl && q < tfl->n && !flbg_on; q++) {
                         if (!tfl->f[q].fl) continue;
@@ -9124,6 +9569,12 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                         int fn = fb >= 0 ? css_layout_pseudo_decls(ctx, fb, 4, &fds) : 0;
                         for (int d = 0; d < fn && fds; d++) {
                             if (!fds[d]->property || !fds[d]->value) continue;
+                            if (!strcasecmp(fds[d]->property, "opacity")) {
+                                char *oe = NULL;
+                                double ov = strtod(fds[d]->value, &oe);
+                                if (oe != fds[d]->value) { if (*oe == '%') ov /= 100.0; fl_op = (float)(ov < 0.0 ? 0.0 : ov > 1.0 ? 1.0 : ov); }
+                                continue;
+                            }
                             if (strcasecmp(fds[d]->property, "background-color") && strcasecmp(fds[d]->property, "background")) continue;
                             double rgba[4];
                             if (css_layout_parse_color_text(fds[d]->value, rgba)) for (int c = 0; c < 4; c++) flbg[c] = (float)rgba[c];
@@ -9142,14 +9593,14 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                                 float fa = 0.8f, fd = 0.2f, fg = 0.0f;
                                 text_shaper_vmetrics(font, &fa, &fd, &fg);
                                 display_list_add_rect(dl, (float)(box->x + fr->dx), (float)(box->y + fr->dy), (float)fr->w,
-                                                      (float)((fa + fd) * fs), flbg[0], flbg[1], flbg[2], flbg[3] * op);
+                                                      (float)((fa + fd) * fs), flbg[0], flbg[1], flbg[2], flbg[3] * op * fl_op);
                             }
                             float fr_r = tr, fr_g = tg, fr_b = tb, fr_a = ta;
                             if (fr->fl) {   /* (on a ::first-line) */
                                 fr_r = (float)(fr->fl_rgba >> 24) / 255.0f;
                                 fr_g = (float)((fr->fl_rgba >> 16) & 255) / 255.0f;
                                 fr_b = (float)((fr->fl_rgba >> 8) & 255) / 255.0f;
-                                fr_a = (float)(fr->fl_rgba & 255) / 255.0f * op;
+                                fr_a = (float)(fr->fl_rgba & 255) / 255.0f * op * fl_op;
                             }
                             /* (background-clip: text above it: that background's color through the glyphs, under them) */
                             for (int pa = clip_on ? -1 : ctx->tree.nodes[i].parent_idx; pa >= 0; pa = ctx->tree.nodes[pa].parent_idx) {
@@ -9288,11 +9739,23 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                             }
                             if (box->s->autospace)
                                 text_shaper_set_autospace_prev(fr->start > 0 ? css_layout_cp_before(run_text, fr->start) : css_layout_text_prev_cp(ctx, i));
-                            if (dl_highlight_frag(dl, ctx, i, node, font, run_text, fr->start, fr->end, (float)(box->x + fr->dx),
+                            float rj_dx = 0.0f;   /* (right to left, ending in a justified space: that room on the text's left) */
+                            if ((fr->level & 1) && fr->end > fr->start && fr->end - fr->start < 1024 && run_text[fr->end - 1] == ' ' &&
+                                box->s->letter_spacing == 0.0f && box->s->word_spacing == 0.0f && !fr->jls) {
+                                char segb[1024];
+                                size_t fn_ = fr->end - fr->start;
+                                memcpy(segb, run_text + fr->start, fn_);
+                                segb[fn_] = 0;
+                                float mw_ = 0.0f, mh_ = 0.0f;
+                                text_shaper_measure(font, segb, &mw_, &mh_);
+                                float d_ = (float)fr->w - mw_ * scale;
+                                if (d_ > 0.5f) rj_dx = d_;
+                            }
+                            if (dl_highlight_frag(dl, ctx, i, node, font, run_text, fr->start, fr->end, (float)(box->x + fr->dx) + rj_dx,
                                                   (float)(box->y + fr->dy), scale, (fr->level & 1) != 0, fr_r, fr_g, fr_b,
                                                   fr_a, op, &hl_ok)) {
                                 if (!hl_ok) return false;
-                            } else if (!text_shaper_shape_span(font, run_text, fr->start, fr->end, (float)(box->x + fr->dx),
+                            } else if (!text_shaper_shape_span(font, run_text, fr->start, fr->end, (float)(box->x + fr->dx) + rj_dx,
                                                         (float)(box->y + fr->dy), scale, (fr->level & 1) != 0, fr_r,
                                                         fr_g, fr_b, fr_a, dl))
                                 return false;
@@ -9352,20 +9815,27 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                             }
                             /* (a line broken at a soft hyphen: the hyphenate-character at its end) */
                             bool shy_brk = false;
+                            float shy_adv = 0.0f;   /* (the hyphen's advance: an ellipsis goes after it) */
                             if (fr->end >= 2 && (unsigned char)run_text[fr->end - 2] == 0xC2 && (unsigned char)run_text[fr->end - 1] == 0xAD) {
-                                if (q + 1 < tfl->n) shy_brk = fabs(tfl->f[q + 1].dy - fr->dy) > 0.5;
+                                if (fr->ellipsis && fr->ellipsis != 2) shy_brk = true;   /* (cut there for an ellipsis) */
+                                else if (q + 1 < tfl->n) shy_brk = fabs(tfl->f[q + 1].dy - fr->dy) > 0.5;
                                 else {
                                     /* (it ends its text: the text after it in the paragraph, on a later line) */
                                     int j = i;
+                                    bool oof_ = false;   /* (an out-of-flow box: past it, not into it) */
                                     for (int st = 0; st < 64 && j >= 0; st++) {
-                                        int nx = st ? ctx->tree.nodes[j].first_child_idx : -1;
+                                        int nx = st && !oof_ ? ctx->tree.nodes[j].first_child_idx : -1;
                                         while (nx < 0 && j >= 0) {
-                                            if (j != i && ctx->boxes[j].s->display != CSS_DISPLAY_INLINE && ctx->tree.nodes[j].first_child_idx >= 0) { j = -1; break; }
+                                            bool jo = ctx->boxes[j].s->float_side != 0 || ctx->boxes[j].s->position == CSS_POSITION_ABSOLUTE || ctx->boxes[j].s->position == CSS_POSITION_FIXED;
+                                            if (j != i && !(jo && oof_) && ctx->boxes[j].s->display != CSS_DISPLAY_INLINE && ctx->tree.nodes[j].first_child_idx >= 0) { j = -1; break; }
+                                            oof_ = false;
                                             nx = ctx->tree.nodes[j].next_sibling_idx;
                                             if (nx < 0) j = ctx->tree.nodes[j].parent_idx;
                                         }
                                         if (j < 0 || nx < 0) break;
                                         j = nx;
+                                        oof_ = ctx->boxes[j].s->float_side != 0 || ctx->boxes[j].s->position == CSS_POSITION_ABSOLUTE || ctx->boxes[j].s->position == CSS_POSITION_FIXED;
+                                        if (oof_) continue;
                                         if (ctx->boxes[j].s->display != CSS_DISPLAY_INLINE && ctx->tree.nodes[j].first_child_idx >= 0) break;
                                         const LayoutTextFragList *nf = j < ctx->text_frags_n ? &ctx->text_frags[j] : NULL;
                                         if (nf && nf->n > 0 && nf->f[0].end > nf->f[0].start) {
@@ -9378,6 +9848,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                             if (shy_brk) {
                                 const char *hc = box->s->hyph_char ? box->s->hyph_char : (text_shaper_has_glyph(font, 0x2010) ? "\xE2\x80\x90" : "-");
                                 size_t hl = strlen(hc);
+                                if (hl && fr->ellipsis) { float hw_ = 0.0f, hh_ = 0.0f; text_shaper_measure(font, hc, &hw_, &hh_); shy_adv = hw_ * scale; }
                                 /* (its shadows beneath it, as the text's) */
                                 for (int sk = (int)box->s->tsh_n - 1; hl && sk >= 0 && !vert_text; sk--) {
                                     float sc[4];
@@ -9417,6 +9888,12 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                             }
                             if (box->s->te_mark[0]) {
                                 int em0 = dl->count;
+                                t_te_clip = NULL;
+                                for (int p = i; p >= 0 && !t_te_clip; p = ctx->tree.nodes[p].parent_idx) {
+                                    const LayoutStyle *ps_ = ctx->boxes[p].s;
+                                    if (ps_->bg_clip == 3 && ps_->background_color_a > 0.0f && !ps_->bg_grad && !ps_->background_image_url[0]) t_te_clip = ps_;
+                                    if (ps_->display != CSS_DISPLAY_INLINE) break;
+                                }
                                 dl_emphasis_marks(dl, font, box, run_text, fr->start, fr->end, (float)(box->x + fr->dx),
                                                   (float)(box->y + fr->dy), scale, op, dl_emph_ruby(ctx, i), css_layout_te_under(ctx, i));
                                 /* (emphasis marks stay upright in vertical text) */
@@ -9455,11 +9932,32 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                                     display_list_set_font_chain(es->font_family, es->font_weight, es->font_italic ? 1 : 0);
                                     const char *etx = fr->ellipsis >= 2 ? css_layout_line_ellipsis(ctx, i) : css_layout_block_ellipsis(ctx, i);
                                     /* (right to left: before the text's left edge) */
-                                    float ex = (float)(box->x + fr->dx + fr->w) + fr->ell_dx;
+                                    float ex = (float)(box->x + fr->dx + fr->w) + fr->ell_dx + shy_adv;
                                     if (etx[0] && fr->ellipsis != 2 && (fr->ell_dir ? fr->ell_dir == 1 : es->direction == 1)) {   /* (the block's end: its direction, whatever the text's) */
                                         float ew = 0.0f, eh = 0.0f;
                                         text_shaper_measure(ef, etx, &ew, &eh);
                                         ex = (float)(box->x + fr->dx) - ew * (float)(efs / 16.0);
+                                    }
+                                    /* (too wide for what is left of the line, text-overflow: ellipsis on the clipping block: itself cut with one) */
+                                    char ecut[512];
+                                    if (etx[0] && fr->ellipsis == 1 && es->text_overflow_ellipsis && !es->to_str && es->overflow != 0 && es->direction != 1 && strlen(etx) < sizeof ecut - 4) {
+                                        const LayoutBox *ebx = &ctx->boxes[eb];
+                                        float right = (float)(ebx->x + ebx->width - ebx->s->border_right - ebx->padding_right);
+                                        float k = (float)(efs / 16.0), ew = 0.0f, eh = 0.0f;
+                                        text_shaper_measure(ef, etx, &ew, &eh);
+                                        if (ex + ew * k > right + 0.5f) {
+                                            size_t n = strlen(etx);
+                                            while (n > 0) {
+                                                n--;
+                                                while (n > 0 && ((unsigned char)etx[n] & 0xC0) == 0x80) n--;
+                                                memcpy(ecut, etx, n);
+                                                memcpy(ecut + n, "\xE2\x80\xA6", 4);
+                                                text_shaper_measure(ef, ecut, &ew, &eh);
+                                                if (ex + ew * k <= right + 0.5f) break;
+                                            }
+                                            if (n == 0) memcpy(ecut, "\xE2\x80\xA6", 4);
+                                            etx = ecut;
+                                        }
                                     }
                                     /* (the block's own text on its ::first-line: that line's color) */
                                     bool efl = (fr->fl && ctx->tree.nodes[i].parent_idx == eb) || clip_on;
@@ -9586,6 +10084,29 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                             dl->count += extra;
                         }
                     }
+                    /* (italic or oblique of a face that is neither, upright in vertical text: its glyphs sheared down the column, a run per column) */
+                    if ((box->s->font_italic || box->s->font_is_oblique) && font && !text_shaper_is_italic(font) && vert_text && box->s->text_orient == 1) {
+                        double deg = box->s->font_is_oblique ? box->s->font_oblique_deg : 14.0, t = tan(deg * M_PI / 180.0);
+                        for (int k = from_cmd; fabs(t) > 1e-6 && k < dl->count;) {
+                            if (dl->cmds[k].type != DL_GLYPH) { k++; continue; }
+                            double mid = dl->cmds[k].x + dl->cmds[k].w * 0.5;
+                            int e = k + 1;
+                            while (e < dl->count && dl->cmds[e].type == DL_GLYPH && fabs(dl->cmds[e].x + dl->cmds[e].w * 0.5 - mid) < 1.0) e++;
+                            if (!display_list_reserve(dl, 2)) break;
+                            double sk[6] = { 1, t, 0, 1, 0, -t * mid };   /* (y + t (x - mid)) */
+                            float m[6];
+                            m[0] = (float)(cur_xf[0] * sk[0] + cur_xf[2] * sk[1]); m[1] = (float)(cur_xf[1] * sk[0] + cur_xf[3] * sk[1]);
+                            m[2] = (float)(cur_xf[0] * sk[2] + cur_xf[2] * sk[3]); m[3] = (float)(cur_xf[1] * sk[2] + cur_xf[3] * sk[3]);
+                            m[4] = (float)(cur_xf[0] * sk[4] + cur_xf[2] * sk[5] + cur_xf[4]); m[5] = (float)(cur_xf[1] * sk[4] + cur_xf[3] * sk[5] + cur_xf[5]);
+                            memmove(&dl->cmds[e + 2], &dl->cmds[e], (size_t)(dl->count - e) * sizeof(DisplayListCmd));
+                            memmove(&dl->cmds[k + 1], &dl->cmds[k], (size_t)(e - k) * sizeof(DisplayListCmd));
+                            DisplayListCmd *x0 = &dl->cmds[k], *x1 = &dl->cmds[e + 1];
+                            memset(x0, 0, sizeof *x0); x0->type = DL_XFORM; memcpy(x0->u.xf, m, sizeof m);
+                            memset(x1, 0, sizeof *x1); x1->type = DL_XFORM; memcpy(x1->u.xf, cur_xf, sizeof cur_xf);
+                            dl->count += 2;
+                            k = e + 2;
+                        }
+                    }
                 }
             }
         }
@@ -9595,7 +10116,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         /* (list-style-image: the image, when it has loaded, outside to the
          * left of the first line) */
         bool image_marker = false;
-        if (g_image_cache && node && node->type == HTML_NODE_ELEMENT && box->s->display == CSS_DISPLAY_LIST_ITEM &&
+        if (g_image_cache && node && node->type == HTML_NODE_ELEMENT && CSS_IS_LI(box->s) &&
             box->s->list_image && box->s->list_image[0] && !css_layout_marker_none(ctx, i)) {
             int iw = 0, ih = 0;
             const char *lurl = box->s->list_image;
@@ -9721,7 +10242,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             }
         }
         if (default_font && node && node->type == HTML_NODE_ELEMENT && !image_marker && !box->s->list_inside &&
-            box->s->display == CSS_DISPLAY_LIST_ITEM && !css_layout_box_clips(ctx, i) && !dl_paint_contained(box) && (box->s->list_style_type != 0 || (!(node->tag_name && node->tag_name[0] == ':') && css_layout_marker_has_content(ctx, i))) && !css_layout_marker_none(ctx, i)) {   /* (::marker content: shown with list-style-type none too) */
+            CSS_IS_LI(box->s) && !css_layout_box_clips(ctx, i) && !dl_paint_contained(box) && (box->s->list_style_type != 0 || (!(node->tag_name && node->tag_name[0] == ':') && css_layout_marker_has_content(ctx, i))) && !css_layout_marker_none(ctx, i)) {   /* (::marker content: shown with list-style-type none too) */
             char marker[512];
             /* (its text from the counter pass: the list-item counter in its counter style; the
              * suffix's trailing space is the gap below) */
@@ -9856,6 +10377,18 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             }
             bool m_rtl_ = false;   /* (right-to-left letters in it: its runs in visual order, shaped, isolated in its own direction) */
             for (const unsigned char *q = (const unsigned char *)marker; *q && !m_rtl_; q++) m_rtl_ = *q == 0xD6 || *q == 0xD7 || *q == 0xD8 || *q == 0xD9 || *q == 0xDA || *q == 0xDB || *q == 0xDC || *q == 0xDD;
+            /* (right to left, no letters of that direction: the punctuation that ends it goes to its left, as bidi places a neutral there) */
+            if (!m_rtl_ && !mstr && box->s->direction == 1 && marker[0]) {
+                size_t ml_ = strlen(marker), k_ = ml_;
+                while (k_ > 0 && strchr(".,:;)]}-/ ", marker[k_ - 1])) k_--;
+                if (k_ > 0 && k_ < ml_ && ml_ < sizeof marker) {
+                    char rot_[512];
+                    memcpy(rot_, marker + k_, ml_ - k_);
+                    memcpy(rot_ + (ml_ - k_), marker, k_);
+                    rot_[ml_] = 0;
+                    memcpy(marker, rot_, ml_ + 1);
+                }
+            }
             if (m_rtl_) dl_ellipsis_span(mfont, marker, (float)mx, my, mscale, box->s->direction == 1 ? 1 : 0, mc[0], mc[1], mc[2], mc[3] * op, dl);
             else
             text_shaper_shape_to_display_list_scaled(mfont, marker,
@@ -9905,7 +10438,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             bool outward = false;
             for (int q = 0; q < 4; q++) {
                 /* (rows, row groups and columns of a separated-borders table: no borders of their own) */
-                bool painted = box->s->border_style[sk[q]] >= CSS_BORDER_SOLID && used[q] > 0.0 &&
+                bool painted = box->s->border_style[sk[q]] >= CSS_BORDER_SOLID && (used[q] > 0.0 || (box->s->border_coll && box->s->border_out[sk[q]] > 0.0f)) &&
                                !((box->s->table_role == 2 || box->s->table_role == 3 || box->s->table_role == 6) && !box->s->border_collapse);
                 bwid[q] = painted ? (float)used[q] : 0.0f;
                 out[q] = painted ? box->s->border_out[sk[q]] : 0.0f;
@@ -9943,6 +10476,26 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     else if (first >= 0) paint_border_sides(dl, box, bx, by, bw, bh, col, bwid);
                     dl_add_mask_cmd(dl, DL_MASK_END, mi, &ring);
                 }
+            } else if (!border_uniform(box, col, bwid) && box->s->table_role == 4 && box->s->border_collapse &&
+                       (bwid[0] <= 0.0f || box->s->border_style[2] == CSS_BORDER_SOLID) && (bwid[1] <= 0.0f || box->s->border_style[1] == CSS_BORDER_SOLID) &&
+                       (bwid[2] <= 0.0f || box->s->border_style[3] == CSS_BORDER_SOLID) && (bwid[3] <= 0.0f || box->s->border_style[0] == CSS_BORDER_SOLID)) {
+                /* (a collapsed cell: each edge square, the edges along its row over the corners unless the others are wider) */
+                bool vert_rows = box->s->writing_mode != 0;
+                float hmax = fmaxf(bwid[0], bwid[2]), vmax = fmaxf(bwid[1], bwid[3]);
+                bool hown = vert_rows ? !(vmax > hmax) : hmax > vmax;   /* (in its half of each edge, the sides along the rows own the corners) */
+                if (hown) {
+                    if (bwid[0] > 0.0f) display_list_add_rect(dl, bx, by, bw, bwid[0], ct[0], ct[1], ct[2], ct[3]);
+                    if (bwid[2] > 0.0f) display_list_add_rect(dl, bx, by + bh - bwid[2], bw, bwid[2], cb[0], cb[1], cb[2], cb[3]);
+                    float mh = fmaxf(0.0f, bh - bwid[0] - bwid[2]);
+                    if (bwid[3] > 0.0f) display_list_add_rect(dl, bx, by + bwid[0], bwid[3], mh, cl[0], cl[1], cl[2], cl[3]);
+                    if (bwid[1] > 0.0f) display_list_add_rect(dl, bx + bw - bwid[1], by + bwid[0], bwid[1], mh, cr[0], cr[1], cr[2], cr[3]);
+                } else {
+                    if (bwid[3] > 0.0f) display_list_add_rect(dl, bx, by, bwid[3], bh, cl[0], cl[1], cl[2], cl[3]);
+                    if (bwid[1] > 0.0f) display_list_add_rect(dl, bx + bw - bwid[1], by, bwid[1], bh, cr[0], cr[1], cr[2], cr[3]);
+                    float mw = fmaxf(0.0f, bw - bwid[1] - bwid[3]);
+                    if (bwid[0] > 0.0f) display_list_add_rect(dl, bx + bwid[3], by, mw, bwid[0], ct[0], ct[1], ct[2], ct[3]);
+                    if (bwid[2] > 0.0f) display_list_add_rect(dl, bx + bwid[3], by + bh - bwid[2], mw, bwid[2], cb[0], cb[1], cb[2], cb[3]);
+                }
             } else if (!border_uniform(box, col, bwid)) {
                 paint_border_sides(dl, box, bx, by, bw, bh, col, bwid);
             } else {
@@ -9963,7 +10516,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         }
         /* (the outline: a border outside the border box, as far out as its offset) */
         int ol_from = dl->count;
-        if (box->s->outline_style >= CSS_BORDER_SOLID && box->s->display != CSS_DISPLAY_NONE && !box->s->border_shape &&
+        if (box->s->outline_style >= CSS_BORDER_SOLID && box->s->display != CSS_DISPLAY_NONE && !box->s->border_shape && !(box->s->outline_auto && box->s->corner_shaped) &&
             box->s->visibility == CSS_VISIBILITY_VISIBLE && box->s->table_role != 6) {
             float ow = box->s->outline_wset ? box->s->outline_w : 3.0f * (box->s->zoom > 0.0f ? box->s->zoom : 1.0f), oo = box->s->outline_off;
             if (box->s->outline_inh & 16) oo = -ow;   /* (outline-offset: inset) */
@@ -9971,16 +10524,69 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             /* (the rectangle it goes around: at least empty, centred, when the offset eats the box) */
             float iw = (float)box->width + 2.0f * oo, ih = (float)box->height + 2.0f * oo;
             float ix = (float)box->x - oo, iy = (float)box->y - oo;
+            /* (auto: round what of its descendants spills out of it too) */
+            if (box->s->outline_auto && box->s->overflow == 0 && ctx->tree.nodes[i].first_child_idx >= 0) {
+                float x0 = (float)box->x, y0 = (float)box->y, x1 = x0 + (float)box->width, y1 = y0 + (float)box->height;
+                int stk[64], sp = 0, seen = 0;
+                for (int q = ctx->tree.nodes[i].first_child_idx; q >= 0 || sp > 0; ) {
+                    if (q < 0) { q = stk[--sp]; continue; }
+                    const LayoutBox *qb = &ctx->boxes[q];
+                    int nx = ctx->tree.nodes[q].next_sibling_idx;
+                    if (++seen > 4096) break;
+                    if (qb->s->display != CSS_DISPLAY_NONE && qb->s->position != CSS_POSITION_ABSOLUTE && qb->s->position != CSS_POSITION_FIXED &&
+                        qb->width > 0.0 && qb->height > 0.0 && css_layout_box_node(ctx, q)) {
+                        if ((float)qb->x < x0) x0 = (float)qb->x;
+                        if ((float)qb->y < y0) y0 = (float)qb->y;
+                        if ((float)(qb->x + qb->width) > x1) x1 = (float)(qb->x + qb->width);
+                        if ((float)(qb->y + qb->height) > y1) y1 = (float)(qb->y + qb->height);
+                    }
+                    if (qb->s->overflow == 0 && ctx->tree.nodes[q].first_child_idx >= 0 && sp < 64) {
+                        stk[sp++] = nx;
+                        q = ctx->tree.nodes[q].first_child_idx;
+                    } else q = nx;
+                }
+                ix = x0 - oo; iy = y0 - oo; iw = x1 - x0 + 2.0f * oo; ih = y1 - y0 + 2.0f * oo;
+            }
             if (iw < 0.0f) { ix += iw * 0.5f; iw = 0.0f; }
             if (ih < 0.0f) { iy += ih * 0.5f; ih = 0.0f; }
             float ox = ix - ow, oy = iy - ow;
             float oww = iw + 2.0f * ow, ohh = ih + 2.0f * ow;
-            if (ow > 0.0f && oww > 0.0f && ohh > 0.0f) {
+            /* (an inline on several lines: round each line's piece) */
+            bool ol_pcs = !box->s->outline_auto && ctx->pieces && i < ctx->pieces_n && ctx->pieces[i].n > 1 && box->s->display == CSS_DISPLAY_INLINE;
+            if (ol_pcs && ow > 0.0f) {
+                float oc2[4];
+                if (box->s->outline_cset) {
+                    uint32_t v = box->s->outline_rgba;
+                    oc2[0] = (float)(v >> 24) / 255.0f; oc2[1] = (float)((v >> 16) & 255) / 255.0f;
+                    oc2[2] = (float)((v >> 8) & 255) / 255.0f; oc2[3] = (float)(v & 255) / 255.0f * op;
+                } else {
+                    oc2[0] = (float)box->s->color_r; oc2[1] = (float)box->s->color_g; oc2[2] = (float)box->s->color_b; oc2[3] = (float)box->s->color_a * op;
+                }
+                const LayoutPieceList *pl_ = &ctx->pieces[i];
+                for (int q = 0; q < pl_->n; q++) {
+                    const LayoutPiece *pc = &pl_->p[q];
+                    const LayoutBox *ab = pc->anchor >= 0 ? &ctx->boxes[pc->anchor] : box;
+                    float qx = (float)(ab->x + pc->dx) - oo, qy = (float)(ab->y + pc->dy) - oo;
+                    float qw = (float)pc->w + 2.0f * oo, qh = (float)pc->h + 2.0f * oo;
+                    if (qw < 0.0f) { qx += qw * 0.5f; qw = 0.0f; }
+                    if (qh < 0.0f) { qy += qh * 0.5f; qh = 0.0f; }
+                    float px = qx - ow, py = qy - ow, pw = qw + 2.0f * ow, ph = qh + 2.0f * ow;
+                    if (pw <= 0.0f || ph <= 0.0f) continue;
+                    snap_rect(&px, &py, &pw, &ph);
+                    display_list_add_rect(dl, px, py, pw, ow, oc2[0], oc2[1], oc2[2], oc2[3]);
+                    display_list_add_rect(dl, px, py + ph - ow, pw, ow, oc2[0], oc2[1], oc2[2], oc2[3]);
+                    display_list_add_rect(dl, px, py + ow, ow, ph - 2.0f * ow, oc2[0], oc2[1], oc2[2], oc2[3]);
+                    display_list_add_rect(dl, px + pw - ow, py + ow, ow, ph - 2.0f * ow, oc2[0], oc2[1], oc2[2], oc2[3]);
+                }
+            }
+            if (!ol_pcs && ow > 0.0f && oww > 0.0f && ohh > 0.0f) {
                 float oc[4];
                 if (box->s->outline_cset) {
                     uint32_t v = box->s->outline_rgba;
                     oc[0] = (float)(v >> 24) / 255.0f; oc[1] = (float)((v >> 16) & 255) / 255.0f;
                     oc[2] = (float)((v >> 8) & 255) / 255.0f; oc[3] = (float)(v & 255) / 255.0f * op;
+                } else if (box->s->outline_auto && box->s->accent_set == 1) {   /* (auto: the accent color) */
+                    oc[0] = box->s->accent[0]; oc[1] = box->s->accent[1]; oc[2] = box->s->accent[2]; oc[3] = op;
                 } else {
                     oc[0] = (float)box->s->color_r; oc[1] = (float)box->s->color_g; oc[2] = (float)box->s->color_b; oc[3] = (float)box->s->color_a * op;
                 }

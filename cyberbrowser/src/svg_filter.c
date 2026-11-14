@@ -103,6 +103,7 @@ static int attr_list(const FCtx *C, HtmlNode *n, const char *name, float *out, i
     return k;
 }
 /* (a length of the filter's: number, or percent of base) */
+static __thread double t_fl_fs = 16.0;   /* (the filter element's font size: its em) */
 static bool frac_or_len(const char *s, double base, bool bbox_units, double *out)
 {
     if (!s) return false;
@@ -110,6 +111,8 @@ static bool frac_or_len(const char *s, double base, bool bbox_units, double *out
     double d = strtod(s, &e);
     if (e == s) return false;
     if (*e == '%') { *out = d / 100.0 * base; return true; }
+    /* (a length with a unit: resolved, then as any number) */
+    if (!strncasecmp(e, "em", 2)) d *= t_fl_fs;
     *out = bbox_units ? d * base : d;
     return true;
 }
@@ -830,6 +833,15 @@ static bool run_filter(FCtx *C0, HtmlNode *flt, const FImg *src, FImg *out)
             int edge = !em ? 0 : !strcasecmp(em, "wrap") ? 1 : !strcasecmp(em, "none") ? 2 : 0;
             if (!hasdiv || div == 0) { div = 0; for (int k = 0; k < kn; k++) div += km[k]; if (div == 0) div = 1; }
             if (ip && kn == ow * oh && ow > 0 && oh > 0) {
+                /* (the input's edges: its subregion's pixels, what duplicate and wrap extend) */
+                int ex0 = (int)ceilf(I.sr[0] - (float)C->ax - 0.5f), ey0 = (int)ceilf(I.sr[1] - (float)C->ay - 0.5f);
+                int ex1 = (int)ceilf(I.sr[2] - (float)C->ax - 0.5f), ey1 = (int)ceilf(I.sr[3] - (float)C->ay - 0.5f);
+                if (ex0 < 0) ex0 = 0;
+                if (ey0 < 0) ey0 = 0;
+                if (ex1 > C->aw) ex1 = C->aw;
+                if (ey1 > C->ah) ey1 = C->ah;
+                if (ex1 <= ex0 || ey1 <= ey0) { ex0 = 0; ey0 = 0; ex1 = C->aw; ey1 = C->ah; }
+                int ew = ex1 - ex0, eh = ey1 - ey0;
                 for (int y = 0; y < C->ah; y++)
                     for (int x = 0; x < C->aw; x++) {
                         float c[4] = { 0, 0, 0, 0 };
@@ -837,8 +849,8 @@ static bool run_filter(FCtx *C0, HtmlNode *flt, const FImg *src, FImg *out)
                             for (int i = 0; i < ow; i++) {
                                 int sx = x - (int)tx + i, sy = y - (int)ty + j;
                                 float v[4] = { 0, 0, 0, 0 };
-                                if (edge == 1) { sx = ((sx % C->aw) + C->aw) % C->aw; sy = ((sy % C->ah) + C->ah) % C->ah; }
-                                else if (edge == 0) { sx = sx < 0 ? 0 : sx >= C->aw ? C->aw - 1 : sx; sy = sy < 0 ? 0 : sy >= C->ah ? C->ah - 1 : sy; }
+                                if (edge == 1) { sx = ex0 + (((sx - ex0) % ew) + ew) % ew; sy = ey0 + (((sy - ey0) % eh) + eh) % eh; }
+                                else if (edge == 0) { sx = sx < ex0 ? ex0 : sx >= ex1 ? ex1 - 1 : sx; sy = sy < ey0 ? ey0 : sy >= ey1 ? ey1 - 1 : sy; }
                                 if (sx >= 0 && sy >= 0 && sx < C->aw && sy < C->ah) {
                                     const float *s = ip + ((size_t)sy * C->aw + sx) * 4;
                                     memcpy(v, s, sizeof v);
@@ -1001,6 +1013,9 @@ void svg_filter_region(const SvgFilterEnv *env, HtmlNode *flt, const float box[4
     char xb[64];
     double v;
     const char *a;
+    t_fl_fs = 16.0;
+    a = attr(&C0, flt, "font-size", xb, sizeof xb);
+    if (a) { double f_ = strtod(a, NULL); if (f_ > 0.0) t_fl_fs = f_; }
     a = attr(&C0, flt, "x", xb, sizeof xb); if (a && frac_or_len(a, box[2], !user, &v)) x = v;
     a = attr(&C0, flt, "y", xb, sizeof xb); if (a && frac_or_len(a, box[3], !user, &v)) y = v;
     a = attr(&C0, flt, "width", xb, sizeof xb); if (a && frac_or_len(a, box[2], !user, &v)) w = v;

@@ -55,13 +55,13 @@ static const char *xslt_js =
 #include "xslt_js.inc"
 ;
 
-static void platform_api_report(JSContextHandle ctx)
+static void platform_api_report(JSContextHandle ctx, const char *name)
 {
     GCValue e = JS_GetException(ctx);
     const char *m = JS_ToCString(ctx, e);
     GCValue st = JS_IsObject(e) ? JS_GetPropertyStr(ctx, e, "stack") : JS_UNDEFINED;
     const char *sm = JS_IsString(st) ? JS_ToCString(ctx, st) : NULL;
-    platform_log(LOG_LEVEL_ERROR, "platform_api", "platform API setup failed: %s %s", m ? m : "?", sm ? sm : "");
+    platform_log(LOG_LEVEL_ERROR, "platform_api", "platform API setup failed (%s): %s %s", name, m ? m : "?", sm ? sm : "");
 }
 
 /* A built-in script (the engine's own, compiled in), run in ctx: compiled
@@ -102,9 +102,9 @@ static void platform_api_run(JSContextHandle ctx, const char *src, const char *n
                              GCValue global, GCValue window)
 {
     GCValue fn = builtin_eval(ctx, src, name);
-    if (JS_IsException(fn)) { platform_api_report(ctx); return; }
+    if (JS_IsException(fn)) { platform_api_report(ctx, name); return; }
     GCValue args[2] = { global, window };
-    if (JS_IsException(JS_Call(ctx, fn, JS_UNDEFINED, 2, args))) platform_api_report(ctx);
+    if (JS_IsException(JS_Call(ctx, fn, JS_UNDEFINED, 2, args))) platform_api_report(ctx, name);
 }
 
 void platform_api_install(JSContextHandle ctx, GCValue global, GCValue window)

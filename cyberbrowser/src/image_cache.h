@@ -112,6 +112,10 @@ uint64_t image_cache_generation(ImageCache *cache, int handle);
  * then or never asked for.  They stay while the cache does. */
 bool image_cache_bytes(ImageCache *cache, const char *url_or_path, const uint8_t **out, size_t *n);
 
+/* An animated GIF's frames: their count (1 a still image, 0 not in yet) and delays in ms; frame k > 0
+ * put in the cache as "cbgif<k>:" + url_or_path. */
+int image_cache_anim_frames(ImageCache *cache, const char *url_or_path, int *delays, int cap);
+
 #ifdef __cplusplus
 }
 #endif

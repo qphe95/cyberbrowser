@@ -1927,6 +1927,11 @@
         return again;
     } });
 
+    /* (document.dir: the root element's dir attribute, a known value or "") */
+    if (global.Document && !('dir' in global.Document.prototype))
+        Object.defineProperty(global.Document.prototype, 'dir', { configurable: true, enumerable: true,
+            get: function () { var e = this.documentElement; var v = e && e.getAttribute ? String(e.getAttribute('dir') || '').toLowerCase() : ''; return v === 'ltr' || v === 'rtl' || v === 'auto' ? v : ''; },
+            set: function (v) { var e = this.documentElement; if (e && e.setAttribute) e.setAttribute('dir', String(v)); } });
     /* (the transition running in a document) */
     if (global.Document && !('activeViewTransition' in global.Document.prototype))
         Object.defineProperty(global.Document.prototype, 'activeViewTransition', { configurable: true, enumerable: true, get: function () {
@@ -4397,8 +4402,8 @@
                 c = c.toLowerCase();
                 if (c === ':first') { if (k !== 0) ok = false; sp += 256; }
                 else if (c === ':blank') { ok = false; }
-                else if (c === ':left') { if (k % 2 === 0) ok = false; sp += 1; }
-                else if (c === ':right') { if (k % 2 === 1) ok = false; sp += 1; }
+                else if (c === ':left') { if (k % 2 === printFirstSide()) ok = false; sp += 1; }
+                else if (c === ':right') { if (k % 2 === 1 - printFirstSide()) ok = false; sp += 1; }
                 else ok = false;
             });
             if (ok && sp > best) best = sp;
@@ -4445,6 +4450,30 @@
         if ((land && h > w) || (port && w > h)) { var q = w; w = h; h = q; }
         if (!(w > 0) || !(h > 0)) return [480, 288];   /* (a page of no size: invalid, the default one) */
         return [w, h];
+    }
+    /* (a width or height with auto margins: they take the rest, half each when both; m.fw / m.fh: so resolved) */
+    function printAutoMargins(rs, m, pw, ph, bl, br, bt, bb) {
+        var wd = printDecl(rs, 'width'), hd = printDecl(rs, 'height');
+        var la = printDecl(rs, 'margin-left') === 'auto', ra = printDecl(rs, 'margin-right') === 'auto';
+        var ta = printDecl(rs, 'margin-top') === 'auto', ba = printDecl(rs, 'margin-bottom') === 'auto';
+        if (wd && wd !== 'auto' && (la || ra)) {
+            var rw = pw - printLen(wd, pw) - bl - br - (la ? 0 : m.left) - (ra ? 0 : m.right);
+            if (la && ra) m.left = m.right = rw / 2; else if (la) m.left = rw; else m.right = rw;
+            m.fw = true;
+        }
+        if (hd && hd !== 'auto' && (ta || ba)) {
+            var rh = ph - printLen(hd, ph) - bt - bb - (ta ? 0 : m.top) - (ba ? 0 : m.bottom);
+            if (ta && ba) m.top = m.bottom = rh / 2; else if (ta) m.top = rh; else m.bottom = rh;
+            m.fh = true;
+        }
+        return m;
+    }
+    /* (page progression right to left (an rtl root across, or vertical-rl): the first page a left one; 0: a right one) */
+    function printFirstSide() {
+        try {
+            var rcs = getComputedStyle(document.documentElement), wm = rcs.writingMode;
+            return (wm === 'vertical-rl' || wm === 'sideways-rl') || (/^horizontal/.test(wm || 'horizontal-tb') && rcs.direction === 'rtl') ? 1 : 0;
+        } catch (e) { return 0; }
     }
     function printMetrics(rs, pw, ph) {
         var side = function (p, base) { var v = printDecl(rs, p); return v === '' ? 48 : v === 'auto' ? 0 : printLen(v, base); };
@@ -4495,6 +4524,7 @@
         for (var i = 0; i < t.length; i++) {
             var name = t[i];
             if (!/^-?[A-Za-z_][\w-]*$/.test(name)) continue;
+            if (name === 'pages') { if (i + 1 < t.length && /^-?\d+$/.test(t[i + 1])) i++; continue; }   /* (pages: not to be changed) */
             var nv = dflt;
             if (i + 1 < t.length && /^-?\d+$/.test(t[i + 1])) { nv = parseInt(t[i + 1], 10); i++; }
             o.push([name, nv]);
@@ -4523,19 +4553,21 @@
         printCtrList(d['counter-set'], 0).forEach(function (p) { loc[p[0]] = p[1]; });
         var content = String(d.content).replace(/\bcounter\(\s*([\w-]+)\s*\)|\bcounters\(\s*([\w-]+)\s*,\s*(?:"[^"]*"|'[^']*')\s*\)/g, function (m0, a, b) {
             var nm = a || b;
-            return nm !== 'page' && nm !== 'pages' && Object.prototype.hasOwnProperty.call(loc, nm) ? '"' + loc[nm] + '"' : m0;
+            if (nm === 'pages') return '"' + n + '"';
+            if (nm === 'page') return '"' + (printPageNo >= 0 ? printPageNo : k + 1) + '"';
+            return Object.prototype.hasOwnProperty.call(loc, nm) ? '"' + loc[nm] + '"' : m0;
         });
         printSheet.appendChild(document.createTextNode('.' + cn + '::before{content:' + content + '}\n'));
         return cell;
     }
-    function printMeasure(host, name, d, k, n) {
-        /* (min and max content widths and heights of its border box) */
-        var mk = function (width) {
+    function printMeasure(host, name, d, k, n, vert) {
+        /* (min and max content widths and heights of its border box; vert: its lines down, the heights by content) */
+        var mk = function (v) {
             var c = printBoxEl(name, d, k, n);
             c.style.display = 'block';
             c.style.position = 'absolute';
             c.style.visibility = 'hidden';
-            c.style.width = width;
+            if (vert) c.style.height = v; else c.style.width = v;
             host.appendChild(c);
             var r = c.getBoundingClientRect();
             c.remove();
@@ -4575,9 +4607,10 @@
             var pr = horizontal ? 'width' : 'height';
             var mar = horizontal ? printMarginSum(d, 'margin-left', 'margin-right', base) : printMarginSum(d, 'margin-top', 'margin-bottom', base);
             outer[i] = mar;
-            var m = printMeasure(host, names[i], d, k, n);
+            var vt = !horizontal && /vertical|sideways/.test(d['writing-mode'] || '');
+            var m = printMeasure(host, names[i], d, k, n, vt);
             ms[i] = horizontal ? { mn: m.minW + mar, mx: m.maxW + mar } : { mn: m.minH + mar, mx: m.maxH + mar };
-            if (!horizontal) ms[i].mn = ms[i].mx;   /* (heights: the content's) */
+            if (!horizontal && !vt) ms[i].mn = ms[i].mx;   /* (heights of lines across: the content's) */
             if (d[pr] !== undefined && d[pr] !== 'auto' && !/content/.test(d[pr])) {
                 var fv = printLen(d[pr], base);
                 var mnv = d['min-' + pr], mxv = d['max-' + pr];
@@ -4595,7 +4628,14 @@
                 var sideMin = 2 * Math.max(A ? A.mn : 0, B ? B.mn : 0), sideMax = 2 * Math.max(A ? A.mx : 0, B ? B.mx : 0);
                 /* (sides all sized: the centre has the rest between them) */
                 if ((A || B) && (!A || fix[0] !== null) && (!B || fix[2] !== null)) sz[1] = Math.max(0, avail - sideMax);
-                else sz[1] = printDistribute(avail, C.mn, C.mx, sideMin, sideMax, 1 / 3);   /* (the centre against two sides) */
+                else {
+                    /* (against each side doubled: the one that takes more room) */
+                    var dl_ = A ? avail - printDistribute(avail, C.mn, C.mx, 2 * A.mn, 2 * A.mx, 1 / 3) : -1;
+                    var dr_ = B ? avail - printDistribute(avail, C.mn, C.mx, 2 * B.mn, 2 * B.mx, 1 / 3) : -1;
+                    var S_ = dl_ >= dr_ ? A : B, Sf_ = dl_ >= dr_ ? fix[0] : fix[2];
+                    if (S_ && Sf_ !== null) sz[1] = Math.max(0, avail - 2 * Sf_);   /* (that side of a fixed size: the rest) */
+                    else sz[1] = S_ ? printDistribute(avail, C.mn, C.mx, 2 * S_.mn, 2 * S_.mx, 1 / 3) : printDistribute(avail, C.mn, C.mx, sideMin, sideMax, 1 / 3);
+                }
             }
             var rest = (avail - sz[1]) / 2;
             if (A) sz[0] = fix[0] !== null ? fix[0] : rest;
@@ -4624,9 +4664,13 @@
         return r - v;
     }
     /* (a margin box placed in its slot (x, y, w, h of its margin box)) */
+    var printClip = null, printOrg = [0, 0];   /* (the page's clipping box the margin boxes go in, and where it is) */
     function printPlace(host, name, d, x, y, w, h, k, n, base) {
-        var ml = printMarginSum(d, 'margin-left', 'margin-left', base) / 2, mr = printMarginSum(d, 'margin-right', 'margin-right', base) / 2;
-        var mt = printMarginSum(d, 'margin-top', 'margin-top', base) / 2, mb = printMarginSum(d, 'margin-bottom', 'margin-bottom', base) / 2;
+        /* (along its row: of the row's length; across: of its slot) */
+        var rowH = /^(top|bottom)-/.test(name) && !/corner/.test(name), rowV = /^(left|right)-/.test(name) && !/corner/.test(name);
+        var hb = rowH ? base : w, vb = rowV ? base : h;
+        var ml = printMarginSum(d, 'margin-left', 'margin-left', hb) / 2, mr = printMarginSum(d, 'margin-right', 'margin-right', hb) / 2;
+        var mt = printMarginSum(d, 'margin-top', 'margin-top', vb) / 2, mb = printMarginSum(d, 'margin-bottom', 'margin-bottom', vb) / 2;
         var aw = printAutos(d, 'margin-left', 'margin-right'), ah = printAutos(d, 'margin-top', 'margin-bottom');
         var bw = w - ml - mr, bh = h - mt - mb;
         var wrap = document.createElement('cyber-pm'), cell = printBoxEl(name, d, k, n);
@@ -4648,11 +4692,16 @@
             else if (ah[0] || (!ah[1] && /^top/.test(name))) by = y + fh + mt;
             bh = ch;
         }
-        wrap.style.cssText = 'position:absolute;display:table;table-layout:fixed;left:' + bx + 'px;top:' + by + 'px;width:' + bw + 'px;height:' + bh + 'px;';
+        wrap.style.cssText = 'position:absolute;display:table;table-layout:fixed;left:' + (bx - printOrg[0]) + 'px;top:' + (by - printOrg[1]) + 'px;width:' + bw + 'px;height:' + bh + 'px;';
         cell.style.width = bw + 'px';
         cell.style.height = bh + 'px';
         wrap.appendChild(cell);
-        host.appendChild(wrap);
+        (printClip || host).appendChild(wrap);
+        /* (content taller than the slot: the box the slot's height, the content past it) */
+        if (cell.getBoundingClientRect().height > bh + 0.5) {
+            wrap.style.display = 'block';
+            cell.style.display = 'block';
+        }
     }
     function printBuild() {
         var rules = [];
@@ -4677,11 +4726,12 @@
         bb = parseFloat(pcs.borderBottomWidth) + parseFloat(pcs.paddingBottom);
         bl = parseFloat(pcs.borderLeftWidth) + parseFloat(pcs.paddingLeft);
         probe.remove();
+        printAutoMargins(first, m0, pw, ph, bl, br, bt, bb);
         var cw = Math.max(1, pw - m0.left - m0.right - bl - br), chh = Math.max(1, ph - m0.top - m0.bottom - bt - bb);
         var wd = printDecl(first, 'width'), hd = printDecl(first, 'height');
         /* (overconstrained: the page box resized to fit it, its margins kept) */
-        if (wd && wd !== 'auto') { var wv = printLen(wd, pw); cw = wv; pw = wv + m0.left + m0.right + bl + br; }
-        if (hd && hd !== 'auto') { var hv = printLen(hd, ph); chh = hv; ph = hv + m0.top + m0.bottom + bt + bb; }
+        if (wd && wd !== 'auto' && !m0.fw) { var wv = printLen(wd, pw); cw = wv; pw = wv + m0.left + m0.right + bl + br; }
+        if (hd && hd !== 'auto' && !m0.fh) { var hv = printLen(hd, ph); chh = hv; ph = hv + m0.top + m0.bottom + bt + bb; }
         /* (reftest-pages: the first page named shown first) */
         var rpm = document.querySelector('meta[name="reftest-pages"]'), skip = 0;
         if (rpm) { var rpv = /^\s*(\d+)/.exec(rpm.getAttribute('content') || ''); if (rpv && +rpv[1] > 1) skip = +rpv[1] - 1; }
@@ -4694,7 +4744,7 @@
             var hostOf = function (z) {
                 var hh = document.createElement('cyber-pm');
                 hh.setAttribute('data-cyber-print', '');
-                hh.style.cssText = 'all:initial;position:fixed;left:0;top:0;width:0;height:0;z-index:' + z + ';';
+                hh.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;z-index:' + z + ';';
                 var inh = {};
                 ['font', 'font-family', 'font-size', 'font-weight', 'font-style', 'line-height', 'color', 'white-space', 'text-align', 'direction', 'letter-spacing', 'word-spacing', 'quotes'].forEach(function (q) {
                     var v = printDecl(first, q);
@@ -4712,17 +4762,22 @@
                 var rs = printPageRules(rules, pnm, k), m = printMetrics(rs, opw, oph);
                 /* (a width or height of the page box: the area that big, the end margin the rest) */
                 var wdk = printDecl(rs, 'width'), hdk = printDecl(rs, 'height');
-                if (wdk && wdk !== 'auto') m.right = pw - m.left - printLen(wdk, opw) - bl - br;
-                if (hdk && hdk !== 'auto') m.bottom = ph - m.top - printLen(hdk, oph) - bt - bb;
+                printAutoMargins(rs, m, pw, ph, bl, br, bt, bb);
+                if (wdk && wdk !== 'auto' && !m.fw) m.right = pw - m.left - printLen(wdk, opw) - bl - br;
+                if (hdk && hdk !== 'auto' && !m.fh) m.bottom = ph - m.top - printLen(hdk, oph) - bt - bb;
                 var pinc = 1;
-                printCtrList(printDecl(rs, 'counter-reset'), 0).forEach(function (p) { if (p[0] === 'page') pno = p[1]; else ctr[p[0]] = p[1]; });
-                printCtrList(printDecl(rs, 'counter-increment'), 1).forEach(function (p) { if (p[0] === 'page') pinc = p[1]; else ctr[p[0]] = (ctr[p[0]] || 0) + p[1]; });
+                /* (a page's counter-reset: an instance of its own, the next page the document's again) */
+                var lc = {};
+                printCtrList(printDecl(rs, 'counter-reset'), 0).forEach(function (p) { if (p[0] === 'page') pno = p[1]; else lc[p[0]] = p[1]; });
+                printCtrList(printDecl(rs, 'counter-increment'), 1).forEach(function (p) { if (p[0] === 'page') pinc = p[1]; else if (Object.prototype.hasOwnProperty.call(lc, p[0])) lc[p[0]] += p[1]; else ctr[p[0]] = (ctr[p[0]] || 0) + p[1]; });
                 pno += pinc;
-                printCtrList(printDecl(rs, 'counter-set'), 0).forEach(function (p) { if (p[0] === 'page') pno = p[1]; else ctr[p[0]] = p[1]; });
+                printCtrList(printDecl(rs, 'counter-set'), 0).forEach(function (p) { if (p[0] === 'page') pno = p[1]; else if (Object.prototype.hasOwnProperty.call(lc, p[0])) lc[p[0]] = p[1]; else ctr[p[0]] = p[1]; });
                 printPageNo = pno;
-                printCtrMap = ctr;
+                printCtrMap = {};
+                for (var cq in ctr) printCtrMap[cq] = ctr[cq];
+                for (var cq2 in lc) printCtrMap[cq2] = lc[cq2];
                 printPageCtr = '';
-                for (var cn0 in ctr) if (cn0 !== 'page' && cn0 !== 'pages') printPageCtr += ' ' + cn0 + ' ' + ctr[cn0];
+                for (var cn0 in printCtrMap) if (cn0 !== 'page' && cn0 !== 'pages') printPageCtr += ' ' + cn0 + ' ' + printCtrMap[cn0];
                 var px = -(m0.left + bl), py = k * ph - (m0.top + bt);
                 if (typeof __cyberPrintPageOff === 'function') __cyberPrintPageOff(k, m.left - m0.left, m.top - m0.top);
                 var box = document.createElement('cyber-pm');
@@ -4744,6 +4799,10 @@
                 }
                 var d = printMarginDecls(rs);
                 var cwm = pw - m.left - m.right, chm = ph - m.top - m.bottom;
+                printClip = document.createElement('cyber-pm');
+                printClip.style.cssText = 'position:absolute;overflow:hidden;left:' + px + 'px;top:' + py + 'px;width:' + pw + 'px;height:' + ph + 'px;';
+                host.appendChild(printClip);
+                printOrg = [px, py];
                 [['top-left-corner', 0, 0, m.left, m.top], ['top-right-corner', pw - m.right, 0, m.right, m.top],
                  ['bottom-left-corner', 0, ph - m.bottom, m.left, m.bottom], ['bottom-right-corner', pw - m.right, ph - m.bottom, m.right, m.bottom]].forEach(function (c) {
                     if (printHasBox(d[c[0]])) printPlace(host, c[0], d[c[0]], px + c[1], py + c[2], c[3], c[4], k, n, pw);
@@ -4763,6 +4822,8 @@
                         else printPlace(host, names[q], d[names[q]], e[1], pos, e[3], s, k, n, chm);
                     }
                 });
+                printClip = null;
+                printOrg = [0, 0];
             }
         }
         requestAnimationFrame(function () { requestAnimationFrame(function () { requestAnimationFrame(function () {

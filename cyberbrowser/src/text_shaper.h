@@ -32,6 +32,8 @@ TextShaper *text_shaper_create_from_mapped(uint8_t *view, size_t size, int font_
 bool text_shaper_is_variable(const TextShaper *shaper);
 /* Does the font itself (no fallback) map this codepoint? */
 bool text_shaper_has_glyph(const TextShaper *shaper, uint32_t codepoint);
+/* (it has the glyph and its unicode-range, if any, takes in the code point) */
+bool text_shaper_covers(const TextShaper *shaper, uint32_t codepoint);
 void        text_shaper_destroy(TextShaper *shaper);
 
 /* Glyphs are drawn from strikes (a font at one size, in quarter pixels)
@@ -52,6 +54,8 @@ void text_shaper_frame_sent(const DisplayList *dl);
  * ex and ch units); 0 when the font has no such glyph. */
 float text_shaper_x_height(const TextShaper *shaper);
 float text_shaper_cap_height(const TextShaper *shaper);
+/* (the face italic or oblique of itself: OS/2 fsSelection, head macStyle, or a post italic angle) */
+bool text_shaper_is_italic(const TextShaper *shaper);
 float text_shaper_zero_advance(const TextShaper *shaper);
 /* (the same glyph's vertical advance, upright in vertical text: of the em, 1 without vertical metrics) */
 float text_shaper_zero_vadvance(const TextShaper *shaper);
@@ -70,6 +74,8 @@ void text_shaper_override_vmetrics(TextShaper *shaper, float ascent, float desce
 void text_shaper_size_adjust(TextShaper *shaper, float f);
 /* (@font-face unicode-range: n [lo, hi] pairs; a code point outside them the font hasn't) */
 void text_shaper_set_ranges(TextShaper *shaper, const uint32_t *pairs, int n);
+/* (the font's own ascent over its size, what glyphs are drawn below an em box's top by, overrides or not) */
+float text_shaper_raw_ascent(const TextShaper *shaper);
 bool text_shaper_vmetrics(const TextShaper *shaper, float *ascent, float *descent,
                           float *line_gap);
 

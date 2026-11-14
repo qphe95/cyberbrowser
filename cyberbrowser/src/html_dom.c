@@ -2704,7 +2704,40 @@ bool slot_has_flattened(NodeId el, int depth)
 }
 
 extern bool (*g_dom_slot_flattened)(NodeId el, int depth);
-__attribute__((constructor)) static void slot_flattened_hook(void) { g_dom_slot_flattened = slot_has_flattened; }
+/* (:has-slotted(sel): a flattened assigned element of slot el matching sel) */
+static bool slot_flattened_match(NodeId el, const char *sel, int depth)
+{
+    if (depth > 32 || !sel) return false;
+    NodeId root = el;
+    while (dom_parent(root)) root = dom_parent(root);
+    if (root == el || !(g_dom.flags[dom_slot(root)] & DOMF_SHADOW_ROOT)) return false;
+    if (dom_kind(el) != DOM_K_ELEMENT || strcmp(dom_tag_name(el), "slot")) return false;
+    uint32_t host = g_dom.host[dom_slot(root)];
+    if (!host) return false;
+    const char *name = dom_attr(el, "name");
+    if (!name) name = "";
+    {
+        uint32_t r = dom_slot(root), self = dom_slot(el);
+        for (uint32_t x = g_dom.first[r]; x; x = dom_next_in_subtree(x, r)) {
+            if (x == self) break;
+            if (g_dom.kind[x] != DOM_K_ELEMENT || strcmp(dom_tag_name(dom_id_of(x)), "slot")) continue;
+            const char *other = dom_attr(dom_id_of(x), "name");
+            if (!strcmp(other ? other : "", name)) return false;
+        }
+    }
+    extern bool dom_query_matches(NodeId el, const char *sel, size_t len);
+    for (NodeId c = dom_first_child(dom_id_of(host)); c; c = dom_next_sibling(c)) {
+        if (dom_kind(c) != DOM_K_ELEMENT) continue;
+        const char *ls = dom_attr(c, "slot");
+        if (strcmp(ls ? ls : "", name)) continue;
+        if (!strcmp(dom_tag_name(c), "slot")) { if (slot_flattened_match(c, sel, depth + 1)) return true; continue; }
+        if (dom_query_matches(c, sel, strlen(sel))) return true;
+    }
+    return false;
+}
+static bool slot_flattened_match0(NodeId el, const char *sel) { return slot_flattened_match(el, sel, 0); }
+extern bool (*g_dom_slot_flattened_match)(NodeId el, const char *sel);
+__attribute__((constructor)) static void slot_flattened_hook(void) { g_dom_slot_flattened = slot_has_flattened; g_dom_slot_flattened_match = slot_flattened_match0; }
 
 /* The nodes element s renders as children, in order (as the serializer
  * composes them); sets the host kind of mirror node m. */

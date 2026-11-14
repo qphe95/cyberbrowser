@@ -646,6 +646,7 @@ static CssPropDef g_props[] = {
     L("hyphenate-character", "auto | <string>", "auto", 1),
     L("hyphenate-limit-chars", "[ auto | <integer [1,inf]> ]{1,3}", "auto", 1),
     L("hyphens", "none | manual | auto", "manual", 1),
+    L("image-animation", "normal | running | paused | stopped", "normal", 1),
     L("image-orientation", "from-image | none", "from-image", 1),
     L("image-rendering", "auto | smooth | high-quality | pixelated | crisp-edges | -webkit-optimize-contrast", "auto", 1),
     L("initial-letter", "normal | [ <number [1,inf]> <integer [1,inf]> | <number [1,inf]> && [ drop | raise ]? ]", "normal", 0),

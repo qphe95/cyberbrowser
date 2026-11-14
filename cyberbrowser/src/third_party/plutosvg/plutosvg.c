@@ -41,6 +41,7 @@ enum {
 
 enum {
     ATTR_UNKNOWN = 0,
+    ATTR_CB_MASK,
     ATTR_CLIP_PATH,
     ATTR_FILTER,
     ATTR_CLIP_PATH_UNITS,
@@ -156,6 +157,7 @@ static int elementid(const char* data, size_t length)
 static int attributeid(const char* data, size_t length)
 {
     static const name_entry_t table[] = {
+        {"cb-mask", ATTR_CB_MASK},
         {"clip-path", ATTR_CLIP_PATH},
         {"clip-rule", ATTR_CLIP_RULE},
         {"clipPathUnits", ATTR_CLIP_PATH_UNITS},
@@ -2912,6 +2914,27 @@ static void render_image(const element_t* element, render_context_t* context, re
 static const char* clip_shape_len(const char* p, const char* end, float ref, float* out)
 {
     while(p < end && (*p == ' ' || *p == '\t')) p++;
+    /* (calc(): terms of % and px, added and taken away) */
+    if(end - p > 5 && !strncmp(p, "calc(", 5)) {
+        const char* q = p + 5;
+        float acc = 0.f, sign = 1.f;
+        int terms = 0;
+        while(q < end) {
+            while(q < end && *q == ' ') q++;
+            if(q < end && *q == ')') { q++; break; }
+            if(q < end && (*q == '+' || *q == '-') && (q + 1 < end && q[1] == ' ')) { sign = *q == '-' ? -1.f : 1.f; q++; continue; }
+            float v;
+            const char* q2 = clip_shape_len(q, end, ref, &v);
+            if(!q2) return NULL;
+            acc += sign * v;
+            sign = 1.f;
+            terms++;
+            q = q2;
+        }
+        if(!terms) return NULL;
+        *out = acc;
+        return q;
+    }
     char* e = NULL;
     char buf[32];
     size_t n = 0;
@@ -2934,9 +2957,17 @@ static bool apply_clip_shape(const element_t* element, render_context_t* context
 {
     while(it < end && *it == ' ') it++;
     bool inset = end - it > 6 && !strncmp(it, "inset(", 6), circle = end - it > 7 && !strncmp(it, "circle(", 7);
-    if(!inset && !circle)
+    bool pathf = end - it > 5 && !strncmp(it, "path(", 5);
+    if(!inset && !circle && !pathf)
         return false;
-    const char* close = memchr(it, ')', (size_t)(end - it));
+    const char* close = NULL;
+    {
+        int depth = 0;
+        for(const char* q = it; q < end && !close; q++) {
+            if(*q == '(') depth++;
+            else if(*q == ')' && --depth == 0) close = q;
+        }
+    }
     if(!close)
         return false;
     bool view_box = false;
@@ -2969,11 +3000,24 @@ static bool apply_clip_shape(const element_t* element, render_context_t* context
         }
         b.x = resolve_length(state, &lx, 'x') - rx; b.y = resolve_length(state, &ly, 'y') - ry; b.w = 2.f * rx; b.h = 2.f * ry;
     } else {
-        /* (a container: its children's boxes in its user space) */
+        /* (a container: its children's boxes in its user space, through their transforms; their strokes in for stroke-box) */
+        bool sbox = false;
+        for(const char* q = close + 1; q + 10 <= end; q++)
+            if(!strncmp(q, "stroke-box", 10) || !strncmp(q, "border-box", 10)) sbox = true;
+        plutovg_matrix_t inv;
+        bool has_inv = plutovg_matrix_invert(&ls.matrix, &inv);
         bool any = false;
         for(const element_t* c = element->first_child; c; c = c->next_sibling) {
             plutovg_rect_t r;
-            if(!element_box(c, &ls, true, &r)) continue;
+            if(!element_box(c, &ls, !sbox, &r)) continue;
+            if(has_inv) {
+                render_state_t cs;
+                render_state_begin(c, &cs, &ls);
+                plutovg_matrix_t m;
+                plutovg_matrix_multiply(&m, &cs.matrix, &inv);
+                plutovg_matrix_map_rect(&m, &r, &r);
+                render_state_end(&cs);
+            }
             if(!any) { b = r; any = true; continue; }
             float x1 = b.x + b.w > r.x + r.w ? b.x + b.w : r.x + r.w, y1 = b.y + b.h > r.y + r.h ? b.y + b.h : r.y + r.h;
             if(r.x < b.x) b.x = r.x;
@@ -2984,8 +3028,20 @@ static bool apply_clip_shape(const element_t* element, render_context_t* context
             return false;
     }
     plutovg_path_t* path = plutovg_path_create();
-    const char* p = it + (inset ? 6 : 7);
-    if(inset) {
+    const char* p = it + (inset ? 6 : pathf ? 5 : 7);
+    if(pathf) {
+        /* (path([fill-rule,] "data"): from the reference box's corner) */
+        const char* q0 = p;
+        while(q0 < close && *q0 != '"' && *q0 != '\'') q0++;
+        if(q0 >= close) { plutovg_path_destroy(path); return false; }
+        char quote = *q0++;
+        const char* q1 = q0;
+        while(q1 < close && *q1 != quote) q1++;
+        if(!plutovg_path_parse(path, q0, (int)(q1 - q0))) { plutovg_path_destroy(path); return false; }
+        plutovg_matrix_t tr;
+        plutovg_matrix_init_translate(&tr, b.x, b.y);
+        plutovg_path_transform(path, &tr);
+    } else if(inset) {
         float v[4];
         int n = 0;
         while(n < 4) {
@@ -3109,12 +3165,16 @@ static bool apply_clip_path(const element_t* element, render_context_t* context,
 /* (cyberbrowser: a filter on an element: it painted on a surface of its own, the hook
  * filtering that, then the surface drawn) */
 __thread plutosvg_filter_hook_t plutosvg_filter_hook;
+__thread plutosvg_mask_hook_t plutosvg_mask_hook;
 static __thread const element_t* t_filter_noclip;
 static void render_element0(const element_t* element, render_context_t* context, render_state_t* state);
 static void render_element(const element_t* element, render_context_t* context, render_state_t* state)
 {
     const string_t* fv = state->mode == render_mode_painting && plutosvg_filter_hook && element->id != TAG_SVG ? find_attribute(element, ATTR_FILTER, false) : NULL;
-    if(!fv || !fv->length || (fv->length == 4 && !strncmp(fv->data, "none", 4))) {
+    if(fv && (!fv->length || (fv->length == 4 && !strncmp(fv->data, "none", 4)))) fv = NULL;
+    const string_t* mv = state->mode == render_mode_painting && plutosvg_mask_hook && element->id != TAG_SVG ? find_attribute(element, ATTR_CB_MASK, false) : NULL;
+    if(mv && !mv->length) mv = NULL;
+    if(!fv && !mv) {
         render_element0(element, context, state);
         return;
     }
@@ -3167,12 +3227,32 @@ static void render_element(const element_t* element, render_context_t* context, 
                 o[3] = (unsigned char)a;
             }
         }
-        char* text = (char*)malloc(fv->length + 1);
+        char* text = fv ? (char*)malloc(fv->length + 1) : NULL;
         if(text) {
             memcpy(text, fv->data, fv->length);
             text[fv->length] = 0;
             plutosvg_filter_hook(text, box, rgba, w, h);
             free(text);
+        }
+        /* (a CSS mask: its boxes on the surface, the stroke's and the viewport's too) */
+        char* mtext = mv ? (char*)malloc(mv->length + 1) : NULL;
+        if(mtext) {
+            memcpy(mtext, mv->data, mv->length);
+            mtext[mv->length] = 0;
+            plutovg_rect_t sb = {0, 0, 0, 0}, sdev, vb = {0, 0, state->view_width, state->view_height}, vdev;
+            float fbx[4] = {box[0], box[1], box[2], box[3]}, sbx[4] = {box[0], box[1], box[2], box[3]}, vbx[4];
+            if(element_box(element, state, false, &sb)) {
+                plutovg_matrix_map_rect(&state->matrix, &sb, &sdev);
+                sbx[0] = sdev.x; sbx[1] = sdev.y; sbx[2] = sdev.w; sbx[3] = sdev.h;
+            }
+            plutovg_matrix_map_rect(&state->matrix, &vb, &vdev);
+            vbx[0] = vdev.x; vbx[1] = vdev.y; vbx[2] = vdev.w; vbx[3] = vdev.h;
+            /* (its user space: a scale and an offset, when that is all it is) */
+            const plutovg_matrix_t* M = &state->matrix;
+            float sp[4] = {1.f, 1.f, 0.f, 0.f};
+            if(fabsf(M->b) < 1e-6f && fabsf(M->c) < 1e-6f && M->a > 1e-6f && M->d > 1e-6f) { sp[0] = M->a; sp[1] = M->d; sp[2] = M->e; sp[3] = M->f; }
+            plutosvg_mask_hook(mtext, fbx, sbx, vbx, sp, rgba, w, h);
+            free(mtext);
         }
         for(int y = 0; y < h; y++) {
             uint32_t* row = (uint32_t*)(data + (size_t)y * stride);

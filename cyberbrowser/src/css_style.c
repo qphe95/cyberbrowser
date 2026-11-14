@@ -621,7 +621,8 @@ typedef struct CComp {
     uint32_t atest_off, natest_off;   /* into CssStyleSet.atests, parallel to attrs */
     uint8_t cls_n, attr_n, ncls_n, nattr_n;
     uint8_t attr_vals, nattr_vals;    /* any value test present */
-    uint8_t root, link, empty, child_pos, type_pos, nth_kind, dir_val;
+    uint8_t root, link, empty, child_pos, type_pos, nth_kind, dir_val, anim_img, ce_defined;
+    const char *hs_sel;        /* (:has-slotted(sel); NULL none) */
     uint32_t node_id;          /* (a shadow host by NodeId; 0 none) */
     uint32_t slotted_id;       /* (assigned to a slot of this host's tree; 0 none) */
     uint8_t tag_upper;         /* (a type selector with capitals: none in an XML document) */
@@ -660,7 +661,34 @@ typedef struct CRule {
     bool shadow;            /* from a shadow tree's sheet */
     int layer_bias;         /* how far below no layer at all its layer is */
     int32_t scope;          /* its @scope root's list, -1 = none */
+    bool visited_only;      /* (every selector of it needs :visited: only the color properties count) */
 } CRule;
+
+/* (a selector list each of whose selectors has :visited, outside :not(), :is() and :has()) */
+static bool sel_visited_only(const char *sel)
+{
+    bool any = false, cur = false;
+    int dep = 0;
+    for (const char *p = sel; *p; p++) {
+        if (*p == '(') dep++;
+        else if (*p == ')') { if (dep) dep--; }
+        else if (*p == ',' && !dep) { if (!cur) return false; cur = false; }
+        else if (*p == ':' && !dep && !strncasecmp(p, ":visited", 8) && !isalnum((unsigned char)p[8]) && p[8] != '-') { cur = true; any = true; }
+    }
+    return any && cur;
+}
+/* (what a :visited rule may set: colors only) */
+static bool visited_prop_ok(const char *p)
+{
+    static const char *const ok[] = { "color", "background-color", "border-color", "border-top-color", "border-right-color",
+        "border-bottom-color", "border-left-color", "border-block-color", "border-inline-color", "border-block-start-color",
+        "border-block-end-color", "border-inline-start-color", "border-inline-end-color", "outline-color",
+        "column-rule-color", "text-decoration-color", "text-emphasis-color", "fill", "stroke", "caret-color", NULL };
+    if (!p) return false;
+    if (p[0] == '-' && p[1] == '-') return true;   /* (custom properties: as written) */
+    for (int i = 0; ok[i]; i++) if (!strcasecmp(p, ok[i])) return true;
+    return false;
+}
 
 /* Cascade layers, as first named across the sheets: a layer's sublayers below
  * its own rules, all below rules in none. */
@@ -773,6 +801,7 @@ typedef struct Builder {
     VEC(CssAtom) atoms;
     VEC(AttrTest) atests;
     CssSelectorPart *parts;   /* scratch for the parser (large structs) */
+    int in_has;               /* (compiling a :has() argument) */
 } Builder;
 
 static uint32_t push_atoms(Builder *b, char (*names)[64], int count)
@@ -817,7 +846,11 @@ static void compile_comp(Builder *b, const CssSimpleSelector *s, int comb, CComp
                                s->attr_count, &c->attr_vals);
     c->root = s->is_root;
     c->link = s->requires_link ? (uint8_t)(1 + s->link_kind) : 0;   /* (1 any, 2 unvisited, 3 visited) */
+    if (b->in_has && c->link == 2) c->link = 1;   /* (in :has(): every link unvisited) */
     c->empty = s->requires_empty;
+    c->anim_img = s->anim_img;
+    c->ce_defined = s->ce_defined;
+    c->hs_sel = s->hs_sel[0] ? css_atom_str(css_atom_intern(s->hs_sel, strlen(s->hs_sel))) : NULL;
     c->child_pos = (uint8_t)s->child_pos;
     c->dir_val = (uint8_t)s->dir_val;
     c->node_id = s->node_id;
@@ -889,7 +922,9 @@ static int32_t compile_chain(Builder *b, const char *text, int32_t owner)
         if (sub[k].n) tmp[i].not_list = compile_list(b, sub[k].nl);
         if (sub[k].o) { tmp[i].nth_of = compile_list(b, sub[k].of); if (tmp[i].nth_of < 0) ch.never = 1; }
         if (sub[k].h) {
+            b->in_has++;
             tmp[i].has = compile_list(b, sub[k].has);
+            b->in_has--;
             tmp[i].has_comb = (uint8_t)sub[k].comb;
             if (tmp[i].has < 0) ch.never = 1;
         }
@@ -1249,6 +1284,18 @@ static bool comp_match(const CssStyleSet *S, const CssStyleDoc *D, const CComp *
             if (!has_atom(attrs, D->attr_n[n], S->atoms[c->attr_off + i])) return false;
     }
     if (c->empty && (D->flags[n] & DF_HAS_CHILD)) return false;
+    if (c->hs_sel) {
+        extern bool (*g_dom_slot_flattened_match)(NodeId el, const char *sel);
+        if (!g_dom_slot_flattened_match || !D->store_id || !g_dom_slot_flattened_match(D->store_id[n], c->hs_sel)) return false;
+    }
+    if (c->anim_img) {
+        extern bool (*g_dom_animated_image)(NodeId el);
+        if (!g_dom_animated_image || !D->store_id || !g_dom_animated_image(D->store_id[n])) return false;
+    }
+    if (c->ce_defined) {
+        extern bool (*g_dom_ce_defined)(NodeId el);
+        if (g_dom_ce_defined && D->store_id && !g_dom_ce_defined(D->store_id[n])) return false;
+    }
     if (c->dir_val && (c->dir_val == 3 || dir_of(D, n) != c->dir_val)) return false;
     if (c->lang_ranges && !lang_match(D, n, c->lang_ranges)) return false;
     if (c->child_pos) {
@@ -1600,6 +1647,7 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
             if (rule->selector_text && strstr(rule->selector_text, "cyber-scope-")) rule->scoped = 1;
             cr->aspect = -1;
             cr->scope = -1;
+            cr->visited_only = rule->selector_text && strstr(rule->selector_text, "visited") && sel_visited_only(rule->selector_text);
             if (!rule->selector_text || !rule->selector_text[0]) continue;
             const char *sel = rule->selector_text;
 
@@ -2073,6 +2121,7 @@ int css_style_match(const CssStyleSet *S, const CssStyleDoc *D, int dom,
             for (int up = dom; up >= 0 && !list_match(S, D, cr->scope, up); up = D->parent[up]) prox++;
         }
         for (int d = 0; d < rule->declaration_count; d++) {
+            if (cr->visited_only && !visited_prop_ok(rule->declarations[d].property)) continue;
             CssAppliedDecl a;
             a.decl = &rule->declarations[d];
             /* (the user agent's sheet below every author rule whatever its

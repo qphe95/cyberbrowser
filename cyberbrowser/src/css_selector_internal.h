@@ -120,6 +120,9 @@ typedef struct CssSimpleSelector {
     bool has_substantive;    /* a tag/id/class/attr/universal was matched */
     bool is_pseudo_element;  /* a ::pseudo-element (::before, ::-webkit-...) is present */
     bool requires_empty;     /* :empty — element must have no element/text children */
+    bool anim_img;           /* :animated-image: its image of more than one frame */
+    bool ce_defined;         /* :defined: not a custom element without a definition */
+    char hs_sel[96];         /* (:has-slotted(sel): what a flattened assigned element must match) */
     bool never_match;        /* dynamic pseudo-class (:visited, :hover, ...) — never true in a static render */
     bool requires_link;
     unsigned char link_kind; /* (with requires_link: 1 :link (not visited), 0 :any-link; 2 :visited) */      /* :link — must be <a>/<area> with an href attribute */

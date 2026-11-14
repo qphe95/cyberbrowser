@@ -1178,6 +1178,8 @@ static TextShaper *ts_create(uint8_t *data, size_t size, int font_index, float s
     s->ascent   = (float)ascent * s->scale;
     s->descent  = (float)descent * s->scale;
     s->line_gap = (float)line_gap * s->scale;
+    if (s->descent > 0.0f) s->descent = 0.0f;   /* (a descender given above the baseline: none, as browsers take it) */
+    if (s->ascent < 0.0f) s->ascent = 0.0f;
     s->baseline = s->ascent;
     return s;
 }
@@ -1218,6 +1220,20 @@ float text_shaper_x_height(const TextShaper *s)
 }
 
 /* The height of "H" as a fraction of the em (the cap height); 0 when none. */
+bool text_shaper_is_italic(const TextShaper *s)
+{
+    if (!s) return false;
+    const stbtt_uint8 *d = s->font.data;
+    stbtt_uint32 at = (stbtt_uint32)s->font.fontstart;
+    stbtt_uint32 os2 = stbtt__find_table((stbtt_uint8 *)d, at, "OS/2");
+    if (os2 && (ttUSHORT(d + os2 + 62) & 0x0201)) return true;   /* (italic, oblique) */
+    stbtt_uint32 head = stbtt__find_table((stbtt_uint8 *)d, at, "head");
+    if (head && (ttUSHORT(d + head + 44) & 2)) return true;
+    stbtt_uint32 post = stbtt__find_table((stbtt_uint8 *)d, at, "post");
+    if (post && ttLONG(d + post + 4) != 0) return true;   /* (italicAngle, 16.16) */
+    return false;
+}
+
 float text_shaper_cap_height(const TextShaper *s)
 {
     int x0, y0, x1, y1;
@@ -1321,6 +1337,11 @@ void text_shaper_override_vmetrics(TextShaper *s, float ascent, float descent, f
     if (ascent >= 0.0f) s->ascent = ascent * s->size_pixels;
     if (descent >= 0.0f) s->descent = -descent * s->size_pixels;
     if (line_gap >= 0.0f) s->line_gap = line_gap * s->size_pixels;
+}
+
+float text_shaper_raw_ascent(const TextShaper *s)
+{
+    return s && s->size_pixels > 0.0f ? s->baseline / s->size_pixels : 0.0f;
 }
 
 bool text_shaper_vmetrics(const TextShaper *s, float *ascent, float *descent, float *line_gap)
@@ -2037,6 +2058,14 @@ bool text_shaper_shape_span(const TextShaper *s, const char *utf8, size_t start,
 bool text_shaper_has_glyph(const TextShaper *s, uint32_t codepoint)
 {
     return s && stbtt_FindGlyphIndex(&s->font, (int)codepoint) != 0;
+}
+
+bool text_shaper_covers(const TextShaper *s, uint32_t cp)
+{
+    if (!text_shaper_has_glyph(s, cp)) return false;
+    if (!s->ur || s->ur_n <= 0) return true;
+    for (int i = 0; i < s->ur_n; i++) if (cp >= s->ur[2 * i] && cp <= s->ur[2 * i + 1]) return true;
+    return false;
 }
 
 bool text_shaper_is_variable(const TextShaper *s)

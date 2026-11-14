@@ -192,6 +192,9 @@ PLUTOSVG_API const void* plutosvg_ft_svg_hooks(void);
  * (w x h, straight RGBA), its fill box x y w h on the layer.  This thread's renders. */
 typedef void (*plutosvg_filter_hook_t)(const char* value, const float box[4], unsigned char* rgba, int w, int h);
 extern __thread plutosvg_filter_hook_t plutosvg_filter_hook;
+/* (cyberbrowser: a CSS mask on an element, its cb-mask attribute's value; boxes x y w h on the surface: fill, stroke, view) */
+typedef void (*plutosvg_mask_hook_t)(const char* value, const float fill[4], const float stroke[4], const float view[4], const float space[4], unsigned char* rgba, int w, int h);
+extern __thread plutosvg_mask_hook_t plutosvg_mask_hook;
 /* (cyberbrowser) an <image>'s href that isn't a data URL: its RGBA pixels, if the host has them */
 typedef bool (*plutosvg_image_hook_t)(const char* href, int len, const unsigned char** rgba, int* w, int* h);
 extern __thread plutosvg_image_hook_t plutosvg_image_hook;

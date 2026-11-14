@@ -1173,6 +1173,72 @@ bool image_cache_intrinsic(ImageCache *c, const char *url_or_path, unsigned *dim
     return !(st == ST_ERROR || st == ST_QUEUED || st == ST_FETCHING);
 }
 
+int image_cache_anim_frames(ImageCache *c, const char *url_or_path, int *delays, int cap)
+{
+    enum { NT = 32, ND = 64 };
+    static struct { char *url; int n; int d[ND]; } tab[NT];
+    static int ntab;
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    if (!c || !url_or_path) return 0;
+    char key[2200];
+    pthread_mutex_lock(&mu);
+    int slot = -1;
+    for (int k = 0; k < ntab && slot < 0; k++)
+        if (!strcmp(tab[k].url, url_or_path)) slot = k;
+    if (slot >= 0) {
+        int n = tab[slot].n;
+        bool have = true;
+        /* (its frames gone from the cache since, another page's: decoded again) */
+        if (n > 1) {
+            snprintf(key, sizeof key, "cbgif1:%s", url_or_path);
+            pthread_mutex_lock(&c->mu);
+            ImageEntry *e = find_locked(c, key, hash_str(key));
+            have = e && atomic_load(&e->state) >= ST_SIZED;
+            pthread_mutex_unlock(&c->mu);
+        }
+        if (have) {
+            for (int q = 0; q < n && q < cap && q < ND; q++) delays[q] = tab[slot].d[q];
+            pthread_mutex_unlock(&mu);
+            return n;
+        }
+    }
+    int n = 0, d[ND] = { 0 };
+    /* (the bytes copied: the entry may go while it decodes) */
+    uint8_t *cb = NULL;
+    size_t nb = 0;
+    pthread_mutex_lock(&c->mu);
+    ImageEntry *e = find_locked(c, url_or_path, hash_str(url_or_path));
+    if (e && atomic_load(&e->state) >= ST_SIZED && e->bytes && e->nbytes > 0 && (cb = (uint8_t *)malloc(e->nbytes)) != NULL) {
+        memcpy(cb, e->bytes, e->nbytes);
+        nb = e->nbytes;
+    }
+    pthread_mutex_unlock(&c->mu);
+    if (!cb) { pthread_mutex_unlock(&mu); return 0; }
+    n = 1;
+    if (nb > 6 && !memcmp(cb, "GIF8", 4)) {
+        int *dl = NULL, w = 0, h = 0, z = 0, comp = 0;
+        stbi_uc *px = stbi_load_gif_from_memory(cb, (int)nb, &dl, &w, &h, &z, &comp, 4);
+        if (px && z > 1 && w > 0 && h > 0) {
+            n = z < ND ? z : ND;
+            for (int k = 0; k < n; k++) {
+                d[k] = dl ? dl[k] : 100;
+                if (d[k] <= 10) d[k] = 100;   /* (browsers: a delay of 10 ms or less as 100) */
+                if (k == 0) continue;
+                snprintf(key, sizeof key, "cbgif%d:%s", k, url_or_path);
+                image_cache_put_rgba(c, key, w, h, px + (size_t)k * (size_t)w * (size_t)h * 4);
+            }
+        }
+        if (px) stbi_image_free(px);
+        if (dl) STBI_FREE(dl);
+    }
+    free(cb);
+    if (slot < 0 && ntab < NT) { slot = ntab++; tab[slot].url = strdup(url_or_path); }
+    if (slot >= 0) { tab[slot].n = n; memcpy(tab[slot].d, d, sizeof d); }
+    pthread_mutex_unlock(&mu);
+    for (int q = 0; q < n && q < cap && q < ND; q++) delays[q] = d[q];
+    return n;
+}
+
 bool image_cache_bytes(ImageCache *c, const char *url_or_path, const uint8_t **out, size_t *n)
 {
     if (!c || !url_or_path || !url_or_path[0]) return false;

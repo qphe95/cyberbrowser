@@ -65,6 +65,7 @@ void anim_reset(void);
 
 /* Whether element el (pseudo ps) has rows. */
 bool anim_has(NodeId el, int ps);
+bool anim_makes_context(NodeId el, int ps);
 /* The writing mode and direction logical property names mean from now on, on this thread. */
 void anim_flow_set(int writing_mode, bool rtl);
 /* el's CSS animations with an effect now: their names and eased progress, in

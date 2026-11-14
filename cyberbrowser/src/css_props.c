@@ -3298,6 +3298,7 @@ static int color_eval(const Toks *ts, int i, Color *out, int depth) {
     }
     if (!strcasecmp(t->str, "light-dark")) {
         int j = t->first;
+        extern _Thread_local int g_css_ld_dark;
         if (j >= t->end) return 0;
         int r = color_eval(ts, j, out, depth + 1);
         int k = tok_next(ts, j);
@@ -3305,6 +3306,7 @@ static int color_eval(const Toks *ts, int i, Color *out, int depth) {
         Color dark;
         int r2 = color_eval(ts, k, &dark, depth + 1);
         if (!r || !r2) return 0;
+        if (g_css_ld_dark) *out = dark;
         out->derived = true;
         return r < 0 || r2 < 0 ? -1 : r;
     }
@@ -3312,6 +3314,8 @@ static int color_eval(const Toks *ts, int i, Color *out, int depth) {
 }
 
 /* A color in its computed form (CSS Color 4 §15). */
+_Thread_local int g_css_ld_dark;
+
 static void color_serialize(Buf *b, const Color *c) {
     if (c->legacy && !c->none) {
         double rgba[4];
@@ -3553,6 +3557,19 @@ bool css_color_parse(const char *value, double rgba[4]) {
     if (!value || !tokenize(value, strlen(value), &ts)) return false;
     bool ok = ts.n > 0 && tok_next(&ts, 0) == ts.n && color_from_tok(&ts, &ts.t[0], rgba);
     toks_free(&ts);
+    return ok;
+}
+
+/* (with currentcolor as cur: 0-255 channels, alpha 0-1) */
+bool css_color_parse_cur(const char *value, double rgba[4], const double cur[4]) {
+    CssComputeEnv e;
+    memset(&e, 0, sizeof e);
+    for (int k = 0; k < 4; k++) e.color[k] = cur[k];
+    e.font_size = 16.0; e.root_font_size = 16.0; e.vw = 800.0; e.vh = 600.0;
+    const CssComputeEnv *h = g_env;
+    g_env = &e;
+    bool ok = css_color_parse(value, rgba);
+    g_env = h;
     return ok;
 }
 

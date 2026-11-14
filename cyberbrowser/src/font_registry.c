@@ -51,6 +51,8 @@ typedef struct {
     bool oblique;                 /* italic from an oblique descriptor: of angles amin..amax */
     float amin, amax;
     float smin, smax;             /* font-stretch, percent */
+    unsigned char autod;          /* (descriptors auto: 1 weight, 2 stretch, 4 style; a variable face's axes then) */
+    char dfvs[64];                /* (its font-variation-settings descriptor, "tag=value;...") */
     uint32_t *ranges;             /* [lo, hi] pairs; NULL = everything */
     int nranges;
     int state;
@@ -59,7 +61,7 @@ typedef struct {
      * (one per weight asked for). */
     uint8_t *var_sfnt;
     size_t var_len;
-    struct { int weight, slot; } inst[16];
+    struct { int weight, slot; float wd, sl; char fvs[64]; } inst[16];
     int ninst;
     size_t bytes;                 /* the file's decoded size (the cache's budget) */
     float ov[3];                  /* ascent-, descent-, line-gap-override, of the em; -1 normal */
@@ -73,6 +75,15 @@ typedef struct {
  * use; synthetic bold over the default instance if instancing fails. */
 static int add_slot_locked(TextShaper *s);
 static int add_web_slot_locked(TextShaper *s);
+static struct { bool oblique; float angle, stretch; bool space, italic; const char *fvs; } g_ask = { false, 0.0f, 100.0f, false, false, NULL };
+/* (descriptors auto: a variable face's axes' ranges) */
+static void web_auto_ranges(WebFace *w)
+{
+    float lo, df, hi;
+    if (!w->var_sfnt) return;
+    if ((w->autod & 1) && font_axis_range(w->var_sfnt, w->var_len, FONT_AXIS_TAG('w', 'g', 'h', 't'), &lo, &df, &hi)) { w->wmin = (int)lo; w->wmax = (int)hi; }
+    if ((w->autod & 2) && font_axis_range(w->var_sfnt, w->var_len, FONT_AXIS_TAG('w', 'd', 't', 'h'), &lo, &df, &hi)) { w->smin = lo; w->smax = hi; }
+}
 static int web_instance_locked(WebFace *w, int weight)
 {
     if (weight < w->wmin) weight = w->wmin;
@@ -83,12 +94,68 @@ static int web_instance_locked(WebFace *w, int weight)
         if (weight < (int)amin) weight = (int)amin;
         if (weight > (int)amax) weight = (int)amax;
     }
-    for (int i = 0; i < w->ninst; i++) if (w->inst[i].weight == weight) return w->inst[i].slot;
+    /* (wdth: the asked stretch in the face's range; slnt: the asked oblique angle, negated, in its range) */
+    float wd = -1e9f, sl = -1e9f, xmin, xdef, xmax;
+    if (font_axis_range(w->var_sfnt, w->var_len, FONT_AXIS_TAG('w', 'd', 't', 'h'), &xmin, &xdef, &xmax)) {
+        float v_ = g_ask.stretch < w->smin ? w->smin : g_ask.stretch > w->smax ? w->smax : g_ask.stretch;
+        wd = v_ < xmin ? xmin : v_ > xmax ? xmax : v_;
+        if (wd == xdef) wd = -1e9f;   /* (the default: left a variable font, for font-variation-settings) */
+    }
+    if (font_axis_range(w->var_sfnt, w->var_len, FONT_AXIS_TAG('s', 'l', 'n', 't'), &xmin, &xdef, &xmax)) {
+        float a = g_ask.oblique ? g_ask.angle : g_ask.italic ? 14.0f : 0.0f;   /* (italic of an oblique face: 14deg, in its range) */
+        if (w->oblique) a = a < w->amin ? w->amin : a > w->amax ? w->amax : a;
+        else if (w->italic) a = 0.0f;   /* (an italic face: its ital axis, not a slant) */
+        else if (!(w->autod & 4)) a = 0.0f;
+        float v_ = -a;
+        sl = v_ < xmin ? xmin : v_ > xmax ? xmax : v_;
+        if (sl == xdef) sl = -1e9f;
+    }
+    /* (ital: 1 for italic asked of an italic face, or of one whose style is auto) */
+    float it = -1e9f;
+    if (font_axis_range(w->var_sfnt, w->var_len, FONT_AXIS_TAG('i', 't', 'a', 'l'), &xmin, &xdef, &xmax)) {
+        float v_ = (g_ask.italic || (g_ask.oblique && !w->oblique && w->italic)) && ((w->italic && !w->oblique) || (w->autod & 4)) ? 1.0f : 0.0f;
+        it = v_ < xmin ? xmin : v_ > xmax ? xmax : v_;
+        if (it == xdef) it = -1e9f;
+    }
+    /* (the face's descriptor settings, then the element's over them) */
+    char comb[64];
+    /* (optical sizing first, "@opsz=n;": the descriptor's and the property's over it) */
+    const char *gf = g_ask.fvs ? g_ask.fvs : "", *rest = gf;
+    char autop[24] = "";
+    if (gf[0] == '@') { const char *sc = strchr(gf, ';'); if (sc && (size_t)(sc - gf) < sizeof autop) { memcpy(autop, gf + 1, (size_t)(sc - gf)); autop[sc - gf] = 0; rest = sc + 1; } }
+    snprintf(comb, sizeof comb, "%s%s%s", autop, w->dfvs, rest);
+    const char *fv = comb;
+    if (strlen(fv) >= sizeof w->inst[0].fvs - 1) fv = w->dfvs;
+    for (int i = 0; i < w->ninst; i++)
+        if (w->inst[i].weight == weight && w->inst[i].wd == wd && w->inst[i].sl == sl && !strcmp(w->inst[i].fvs, fv)) return w->inst[i].slot;
     TextShaper *s = NULL;
     uint8_t *out = NULL;
     size_t olen = 0;
-    FontAxisValue v = { FONT_AXIS_TAG('w', 'g', 'h', 't'), (float)weight };
-    if (has_wght && font_instance(w->var_sfnt, w->var_len, &v, 1, &out, &olen))
+    FontAxisValue av[12];
+    int na = 0;
+    if (has_wght) { av[na].tag = FONT_AXIS_TAG('w', 'g', 'h', 't'); av[na].value = (float)weight; na++; }
+    if (wd > -1e8f) { av[na].tag = FONT_AXIS_TAG('w', 'd', 't', 'h'); av[na].value = wd; na++; }
+    if (sl > -1e8f) { av[na].tag = FONT_AXIS_TAG('s', 'l', 'n', 't'); av[na].value = sl; na++; }
+    if (it > -1e8f) { av[na].tag = FONT_AXIS_TAG('i', 't', 'a', 'l'); av[na].value = it; na++; }
+    /* (font-variation-settings over those: an axis the font has) */
+    for (const char *p = fv; *p && na < 12; ) {
+        const char *eq = strchr(p, '=');
+        if (!eq || eq - p != 4) break;
+        uint32_t tag = FONT_AXIS_TAG(p[0], p[1], p[2], p[3]);
+        float val = (float)strtod(eq + 1, NULL);
+        float lo, df, hi;
+        if (font_axis_range(w->var_sfnt, w->var_len, tag, &lo, &df, &hi)) {
+            int k = 0;
+            while (k < na && av[k].tag != tag) k++;
+            av[k].tag = tag;
+            av[k].value = val < lo ? lo : val > hi ? hi : val;
+            if (k == na) na++;
+        }
+        const char *sc = strchr(eq, ';');
+        if (!sc) break;
+        p = sc + 1;
+    }
+    if (na && font_instance(w->var_sfnt, w->var_len, av, na, &out, &olen))
         s = text_shaper_create_from_memory(out, olen, 0, FONT_PIXELS);
     if (!s) {
         uint8_t *copy = (uint8_t *)malloc(w->var_len);
@@ -100,6 +167,9 @@ static int web_instance_locked(WebFace *w, int weight)
     int slot = s ? add_web_slot_locked(s) : -1;
     if (slot >= 0 && w->ninst < (int)(sizeof(w->inst) / sizeof(w->inst[0]))) {
         w->inst[w->ninst].weight = weight;
+        w->inst[w->ninst].wd = wd;
+        w->inst[w->ninst].sl = sl;
+        snprintf(w->inst[w->ninst].fvs, sizeof w->inst[0].fvs, "%s", fv);
         w->inst[w->ninst].slot = slot;
         w->ninst++;
     }
@@ -565,8 +635,7 @@ static bool range_has(const WebFace *w, uint32_t cp)
     return false;
 }
 
-/* What resolving asks for besides weight and italic (under g_mu). */
-static struct { bool oblique; float angle, stretch; bool space; } g_ask = { false, 0.0f, 100.0f, false };
+/* What resolving asks for besides weight and italic (under g_mu): g_ask, above. */
 
 /* Stretch: within the range, else narrower first up to 100%, wider first above. */
 static double stretch_score(float want, float lo, float hi)
@@ -697,6 +766,34 @@ int font_registry_resolve(const char *family_list, int weight, bool italic)
     return font_registry_resolve_style(family_list, weight, italic, false, 0.0f, 100.0f);
 }
 
+bool font_registry_family_has_axis(const char *family_list, uint32_t tag)
+{
+    if (!family_list) return false;
+    const char *p = family_list;
+    while (*p == ' ' || *p == '"' || *p == '\'' || *p == '\x02') p++;
+    const char *e = p;
+    while (*e && *e != ',' && *e != '"' && *e != '\'') e++;
+    while (e > p && e[-1] == ' ') e--;
+    char fam[FAMILY_MAX];
+    lower_copy(fam, sizeof fam, p, (size_t)(e - p));
+    bool r = false;
+    float lo, df, hi;
+    pthread_mutex_lock(&g_mu);
+    for (int i = 0; i < g_nweb && !r; i++)
+        if (g_web[i].state == WEB_READY && g_web[i].var_sfnt && !strcmp(g_web[i].family, fam) &&
+            font_axis_range(g_web[i].var_sfnt, g_web[i].var_len, tag, &lo, &df, &hi)) r = true;
+    pthread_mutex_unlock(&g_mu);
+    return r;
+}
+static __thread const char *t_resolve_fvs;
+int font_registry_resolve_style_var(const char *family_list, int weight, bool italic, bool oblique, float angle,
+                                    float stretch, const char *fvs)
+{
+    t_resolve_fvs = fvs && fvs[0] ? fvs : NULL;
+    int r = font_registry_resolve_style(family_list, weight, italic, oblique, angle, stretch);
+    t_resolve_fvs = NULL;
+    return r;
+}
 int font_registry_resolve_style(const char *family_list, int weight, bool italic, bool oblique, float angle,
                                 float stretch);
 /* (the first available font: as resolve_style, but a face must cover U+0020) */
@@ -722,6 +819,7 @@ int font_registry_resolve_style(const char *family_list, int weight, bool italic
                  family_list ? family_list : "");
     else
         snprintf(key, sizeof(key), "%d|%d|%s", weight, italic ? 1 : 0, family_list ? family_list : "");
+    if (t_resolve_fvs) { size_t kl = strlen(key); snprintf(key + kl, sizeof key - kl, "|v:%s", t_resolve_fvs); }   /* (its variations, apart) */
     uint32_t h = str_hash(key) & (RESOLVE_CACHE - 1);
     pthread_mutex_lock(&g_mu);
     if (g_override_slot >= 0) { pthread_mutex_unlock(&g_mu); return g_override_slot; }
@@ -731,6 +829,8 @@ int font_registry_resolve_style(const char *family_list, int weight, bool italic
         if (strcmp(e->key, key) == 0) { int s = e->slot; pthread_mutex_unlock(&g_mu); return s; }
     }
     g_ask.oblique = oblique;
+    g_ask.fvs = t_resolve_fvs;
+    g_ask.italic = italic && !oblique;
     g_ask.angle = angle;
     g_ask.stretch = stretch;
     g_ask.space = family_list && family_list[0] == '\x02';
@@ -962,6 +1062,7 @@ static void add_face_rule(const char *body, const char *end, const char *base)
     w.sa = 1.0f;
     w.wmin = w.wmax = 400;
     w.smin = w.smax = 100.0f;
+    w.autod = 7;
     w.slot = -1;
 
     char *src = NULL;
@@ -1002,12 +1103,16 @@ static void add_face_rule(const char *body, const char *end, const char *base)
             free(src);
             src = pick_src(vs, ve, base);
         } else if (nl == 11 && strncasecmp(ns, "font-weight", 11) == 0) {
+            if (ve - vs == 4 && !strncasecmp(vs, "auto", 4)) continue;
+            w.autod &= (unsigned char)~1;
             w.wmin = parse_weight_word(vs, ve);
             const char *sp = vs;
             while (sp < ve && !isspace((unsigned char)*sp)) sp++;
             w.wmax = sp < ve ? parse_weight_word(sp, ve) : w.wmin;
             if (w.wmax < w.wmin) { int t = w.wmin; w.wmin = w.wmax; w.wmax = t; }
         } else if (nl == 10 && strncasecmp(ns, "font-style", 10) == 0) {
+            if (ve - vs == 4 && !strncasecmp(vs, "auto", 4)) continue;
+            w.autod &= (unsigned char)~4;
             w.oblique = ve - vs >= 7 && strncasecmp(vs, "oblique", 7) == 0;
             w.italic = w.oblique || (ve - vs >= 6 && strncasecmp(vs, "italic", 6) == 0);
             if (w.oblique) {
@@ -1025,6 +1130,8 @@ static void add_face_rule(const char *body, const char *end, const char *base)
             }
         } else if ((nl == 12 && strncasecmp(ns, "font-stretch", 12) == 0) ||
                    (nl == 10 && strncasecmp(ns, "font-width", 10) == 0)) {
+            if (ve - vs == 4 && !strncasecmp(vs, "auto", 4)) continue;
+            w.autod &= (unsigned char)~2;
             static const struct { const char *n; float pct; } kw[] = {
                 { "ultra-condensed", 50 }, { "extra-condensed", 62.5f }, { "semi-condensed", 87.5f }, { "condensed", 75 },
                 { "semi-expanded", 112.5f }, { "extra-expanded", 150 }, { "ultra-expanded", 200 }, { "expanded", 125 } };
@@ -1045,6 +1152,24 @@ static void add_face_rule(const char *body, const char *end, const char *base)
                 w.smin = (float)(a < b ? a : b);
                 w.smax = (float)(a < b ? b : a);
             }
+        } else if (nl == 23 && strncasecmp(ns, "font-variation-settings", 23) == 0) {
+            /* ("tag" number, ...: as the property) */
+            size_t o = 0;
+            const char *p = vs;
+            while (p < ve && o + 16 < sizeof w.dfvs) {
+                while (p < ve && (*p == ',' || isspace((unsigned char)*p))) p++;
+                if (p >= ve || (*p != '"' && *p != '\'')) break;
+                char q = *p++;
+                const char *t = p;
+                while (p < ve && *p != q) p++;
+                if (p - t != 4 || p >= ve) break;
+                p++;
+                char *e = NULL;
+                double v = strtod(p, &e);
+                if (e == p) break;
+                p = e;
+                o += (size_t)snprintf(w.dfvs + o, sizeof w.dfvs - o, "%.4s=%g;", t, v);
+            }
         } else if (nl == 13 && strncasecmp(ns, "unicode-range", 13) == 0) {
             parse_unicode_range(&w, vs, ve);
         } else if ((nl == 15 && !strncasecmp(ns, "ascent-override", 15)) || (nl == 16 && !strncasecmp(ns, "descent-override", 16)) ||
@@ -1058,7 +1183,7 @@ static void add_face_rule(const char *body, const char *end, const char *base)
         } else if (nl == 11 && !strncasecmp(ns, "size-adjust", 11)) {
             char *e1 = NULL;
             double v = strtod(vs, &e1);
-            (void)v;   /* (not applied yet: glyphs drawn below the scaled line, and font-size-adjust with it doubles up) */
+            (void)v;   /* (not applied yet: glyphs drawn ~10px below the scaled line though the line box agrees; font-size-adjust with it doubles up) */
         }
     }
     if (!w.family[0] || !src) { free(src); free(w.ranges); return; }
@@ -1584,6 +1709,7 @@ int font_registry_load_pending(void)
             g_web[i].slot = g_web[j].slot;
             g_web[i].var_sfnt = g_web[j].var_sfnt;
             g_web[i].var_len = g_web[j].var_len;
+            web_auto_ranges(&g_web[i]);
             memcpy(g_web[i].inst, g_web[j].inst, sizeof(g_web[i].inst));
             g_web[i].ninst = g_web[j].ninst;
             g_web[i].bytes = g_web[j].bytes;
@@ -1646,6 +1772,7 @@ int font_registry_load_pending(void)
             w->slot = o->slot;
             w->var_sfnt = o->slot >= 0 ? o->var_sfnt : NULL;   /* (a failed one keeps its own, to free) */
             w->var_len = o->var_len;
+            web_auto_ranges(w);
             memcpy(w->inst, o->inst, sizeof(w->inst));
             w->ninst = o->ninst;
         } else if (j->sfnt && font_is_variable(j->sfnt, j->len)) {
@@ -1654,6 +1781,7 @@ int font_registry_load_pending(void)
             if (w->var_sfnt) {
                 memcpy(w->var_sfnt, j->sfnt, j->len);
                 w->var_len = j->len;
+                web_auto_ranges(w);
                 w->slot = web_instance_locked(w, w->wmin <= 400 && w->wmax >= 400 ? 400 : w->wmin);
             }
         } else if (j->sfnt) {

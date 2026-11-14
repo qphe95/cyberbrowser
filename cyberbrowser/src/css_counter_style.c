@@ -9,6 +9,8 @@
  * own (special).  Rows 0..g_npre-1 are the predefined, the page's after.
  */
 #include "css_counter_style.h"
+#include "css_props.h"
+#include <math.h>
 
 #include <ctype.h>
 #include <stdint.h>
@@ -144,10 +146,28 @@ static bool read_symbol(const char **pp, const char *end, char *out, size_t cap)
     return false;
 }
 
+static bool t_int_calc;   /* (the last read_int's a calc()) */
 static bool read_int(const char **pp, const char *end, long long *v)
 {
     const char *p = skip_ws(*pp, end);
+    t_int_calc = false;
     if (p >= end) return false;
+    if (end - p > 5 && !strncasecmp(p, "calc(", 5)) {
+        const char *q = p + 5;
+        int dep = 1;
+        while (q < end && dep > 0) { if (*q == '(') dep++; else if (*q == ')') dep--; q++; }
+        if (dep) return false;
+        char cv[256];
+        size_t cl = (size_t)(q - p) < sizeof cv - 1 ? (size_t)(q - p) : sizeof cv - 1;
+        memcpy(cv, p, cl);
+        cv[cl] = 0;
+        double d;
+        if (!css_calc_number(cv, &d) || !isfinite(d)) return false;
+        *v = (long long)floor(d + 0.5);
+        t_int_calc = true;
+        *pp = q;
+        return true;
+    }
     const char *s = p;
     if (*p == '+' || *p == '-') p++;
     if (p >= end || !isdigit((unsigned char)*p)) return false;
@@ -259,6 +279,7 @@ static void desc(CStyle *c, const char *name, size_t nl, const char *v, const ch
             long long x;
             bool got_w = read_int(&p, end, &x), got_s = read_symbol(&p, end, sym, sizeof sym);
             if (!got_w && got_s) got_w = read_int(&p, end, &x);
+            if (got_w && x < 0 && t_int_calc) x = 0;   /* (a calc() clamped to the range) */
             if (!got_w || !got_s || x < 0) return;
             if (n && x >= w[n - 1]) return;      /* (weights strictly descending) */
             w[n] = x;

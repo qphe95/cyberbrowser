@@ -1547,6 +1547,17 @@ JSClassDef js_custom_element_registry_class_def = {
     .gc_mark   = js_custom_element_registry_mark,
 };
 
+/* (the names defined, for :defined; a custom element is one with a hyphen) */
+static char *g_ce_names[1024];
+static int g_ce_n;
+static bool ce_defined_hook(NodeId el)
+{
+    const char *t = dom_tag_name(el);
+    if (!t || !strchr(t, '-')) return true;
+    for (int k = 0; k < g_ce_n; k++) if (!strcasecmp(g_ce_names[k], t)) return true;
+    return false;
+}
+
 // customElements.define(name, constructor, options)
 GCValue js_custom_elements_define(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 2) {
@@ -1569,6 +1580,18 @@ GCValue js_custom_elements_define(JSContextHandle ctx, GCValue this_val, int arg
     
     // Store in registry (the this_val should be the customElements object)
     JS_SetPropertyStr(ctx, this_val, name, argv[1]);
+    {
+        extern bool (*g_dom_ce_defined)(NodeId el);
+        g_dom_ce_defined = ce_defined_hook;
+        if (g_ce_n < 1024) g_ce_names[g_ce_n++] = strdup(name);
+        /* (the elements of that name: styled again, :defined now theirs) */
+        for (uint32_t sl = 1; sl < g_dom.count; sl++) {
+            if (g_dom.kind[sl] != DOM_K_ELEMENT) continue;
+            NodeId el = dom_id_of(sl);
+            const char *tn = dom_tag_name(el);
+            if (tn && !strcasecmp(tn, name)) dom_mark_dirty(el, DOMF_DIRTY_ATTR);
+        }
+    }
     /* and the name on the constructor, for `new Ctor()` (the definition
      * whose constructor is new.target; HTML 4.13.4 "HTML element constructors") */
     if (JS_IsFunction(ctx, argv[1]))

@@ -49,6 +49,8 @@ enum {
     SS_HEADING,      /* :heading, :heading(levels): a, a bit for each level */
     SS_HOST,         /* :host: only across a combinator out of a shadow tree */
     SS_VALID, SS_INVALID,
+    SS_ANIMIMG,      /* :animated-image: its image more than one frame (g_dom_animated_image) */
+    SS_CEDEF,        /* :defined (g_dom_ce_defined) */
     SS_ANY,          /* unsupported pseudo-class: matches */
     SS_NEVER,        /* pseudo-element: never matches */
 };
@@ -198,7 +200,7 @@ static bool known_name(const char *n, const char *const *list) {
     return false;
 }
 static const char *const k_pseudo_classes[] = {
-    "has-slotted", "active", "any-link", "autofill", "blank", "buffering", "checked", "closed", "current", "default", "defined",
+    "has-slotted", "active", "animated-image", "any-link", "autofill", "blank", "buffering", "checked", "closed", "current", "default", "defined",
     "dir", "disabled", "empty", "enabled", "first", "first-child", "first-of-type", "focus", "focus-visible",
     "focus-within", "fullscreen", "future", "has", "heading", "host", "host-context", "hover", "in-range", "indeterminate",
     "invalid", "is", "lang", "last-child", "last-of-type", "left", "link", "local-link", "matches", "modal", "muted",
@@ -542,6 +544,8 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                          strcmp(name, "target") && strcmp(name, "valid") && strcmp(name, "invalid") &&
                          strcmp(name, "placeholder-shown") && strcmp(name, "default") && strcmp(name, "in-range") && strcmp(name, "out-of-range")) s.kind = SS_STATE;
                 else if (strcmp(name, "target") == 0) s.kind = SS_TARGET;
+                else if (strcmp(name, "animated-image") == 0) s.kind = SS_ANIMIMG;
+                else if (strcmp(name, "defined") == 0) s.kind = SS_CEDEF;
                 else if (strcmp(name, "heading") == 0) {
                     s.kind = SS_HEADING;
                     s.a = args ? 0 : 0x3fe;
@@ -928,6 +932,9 @@ void dom_validity_refresh(void)
 
 /* (a slot: does anything flatten into it? html_dom.c, which knows attributes) */
 bool (*g_dom_slot_flattened)(NodeId el, int depth);
+bool (*g_dom_animated_image)(NodeId el);
+bool (*g_dom_ce_defined)(NodeId el);
+bool (*g_dom_slot_flattened_match)(NodeId el, const char *sel);
 
 uint32_t dom_element_state(NodeId el)
 {
@@ -1236,6 +1243,8 @@ static bool simple_ok(uint32_t s, const SelSimple *ss, uint32_t scope) {
         return g_dom.ns[s] == DOM_NS_HTML && (g_dom.tag[s] == g_t_a || g_dom.tag[s] == g_t_area) &&
                attr_val(s, g_a_href, &n) != NULL;
     }
+    case SS_ANIMIMG: return g_dom_animated_image && g_dom_animated_image(dom_id_of(s));
+    case SS_CEDEF: return !g_dom_ce_defined || g_dom_ce_defined(dom_id_of(s));
     case SS_TARGET: {
         uint32_t n = 0;
         const char *v = g_target.s ? attr_val(s, g_a_id, &n) : NULL;

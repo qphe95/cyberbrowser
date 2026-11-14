@@ -48,6 +48,11 @@ int font_registry_resolve(const char *family_list, int weight, bool italic);
  * rather than italic, at an angle, and a stretch in percent. */
 /* (the first available font for metrics: a web face must cover U+0020) */
 int font_registry_resolve_first(const char *family_list, int weight, bool italic, bool oblique, float angle, float stretch);
+/* Whether a loaded web face of the first family in the list has that variation axis. */
+bool font_registry_family_has_axis(const char *family_list, uint32_t tag);
+/* As font_registry_resolve_style, with font-variation-settings ("tag=value;...", NULL none). */
+int font_registry_resolve_style_var(const char *family_list, int weight, bool italic, bool oblique, float angle,
+                                    float stretch, const char *fvs);
 int font_registry_resolve_style(const char *family_list, int weight, bool italic, bool oblique, float angle,
                                 float stretch);
 

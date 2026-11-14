@@ -403,12 +403,15 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char tds_bits, tds_set;
     /* (image-orientation: none, inherited; img_orient_set when given) */
     unsigned char img_orient_none, img_orient_set;
+    unsigned char img_anim, img_anim_set;   /* (image-animation: 0 normal, 1 running, 2 paused, 3 stopped) */
     /* (font-size-adjust, inherited: the aspect value (0 none) and its metric,
      * 0 ex-height, 1 cap-height, 2 ch-width, 3 ic; fsa_set when given;
      * fs_unadj the font size before the adjustment, 0 not yet made) */
     float fsa;
     unsigned char fsa_metric, fsa_set;
     double fs_unadj;
+    unsigned char fs_vunit;   /* (font-size in vi 1 or vb 2: fs_vval of them, by its own writing mode) */
+    float fs_vval;
     /* (font-variant-* and font-feature-settings, inherited, as written:
      * position, caps, numeric, east-asian, alternates, ligatures, settings;
      * fv_set's bit k when given here; ot_tags the OpenType features they ask for) */
@@ -432,12 +435,15 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * inherited. */
     float text_indent, text_indent_pct;
     unsigned char text_indent_set;
+    unsigned char cs_dark;   /* (color-scheme, inherited: the dark one used) */
+    unsigned char ti_hang;   /* (text-indent: 1 hanging: the lines after the first indented, not it; 2 each-line: after a forced break as the first) */
     unsigned char trim_off, trim_set;   /* (text-spacing-trim: space-all, inherited) */
     unsigned char autospace, autospace_set;   /* (text-autospace, inherited: 1 ideograph-alpha, 2 ideograph-numeric) */
     unsigned char hang, hang_set;
     /* (outline: its style (a CssBorderStyle, 0 none; auto as none), width
      * (px, -1: medium), offset, color (outline_cset 0: currentcolor)) */
     unsigned char outline_style, outline_cset, outline_wset;
+    unsigned char outline_auto;     /* (outline-style: auto, drawn solid) */
     unsigned char outline_inh;      /* (inherit asked of: 1 style, 2 width, 4 color, 8 offset; 16 offset: inset) */
     float outline_w, outline_off;
     uint32_t outline_rgba;
@@ -507,6 +513,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char bg_pos_neg;
     unsigned char bg_size_kind, bg_size_pct, bg_fixed;
     double bg_size_w, bg_size_h;
+    double bg_size_cpx[2];
+    const char *bg_size_raw[2];   /* (a calc() not linear in its percentage, as written: bits 16 / 32 of bg_size_pct) */   /* (a calc() size's length part, with its fraction in bg_size_w/h: bits 4 / 8 of bg_size_pct) */
 
     /* mask-image: an absolute image URL (mask_kind 1) or the text of a
      * linear-gradient(...) (mask_kind 2), interned (lives for the process);
@@ -689,7 +697,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     int md_val, math_depth;
     /* (caret-shape: 0 auto, 1 bar, 2 block, 3 underscore; caret-color as written, NULL auto) */
     unsigned char caret_shape, caret_shape_set, caret_color_set;
-    unsigned char inl_li;   /* (display: inline list-item: an inline box, a list item) */
+    unsigned char inl_li;   /* (display: inline list-item: an inline box, a list item; 2: inline flow-root list-item, an inline-block one) */
     const char *caret_color;
     unsigned char md_kind, math_compact, mc_set, fs_math;
     double font_size_add;   /* (px, with the ratio: calc(1em + 2px)) */
@@ -742,6 +750,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char t3d_preserve, backface_hidden;   /* (transform-style: preserve-3d; backface-visibility: hidden) */
     const char *tf_raw;     /* (transform as written, translations too: for SVG elements) */
     unsigned char tb_trim, tb_over, tb_under;
+    unsigned char tb_edge_set;        /* (text-box-edge its own: else inherited) */
     float h_lh;             /* (height in lh: of the line height the element comes to; 0 none) */
     unsigned char bdb_clone;   /* (box-decoration-break: clone) */
     unsigned char brk_before, brk_after, brk_inside;   /* (break-*: 0 auto, 1 a forced break, 2 avoid) */   /* (text-box-trim: 1 start, 2 end; text-box-edge over 0 text 1 cap 2 ex, under 0 text 1 alphabetic) */
@@ -791,6 +800,10 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     /* display: grid-lanes (CSS Grid 3): lanes_dir 0 column lanes (items
      * stack down), 1 row lanes; lanes_fill_rev, lanes_track_rev */
     unsigned char grid_lanes, lanes_dir, lanes_dir_set, lanes_fill_rev, lanes_track_rev, fit_tol_set;
+    const char *fvs;                  /* (font-variation-settings: "tag=value;..." interned, NULL normal) */
+    unsigned char fvs_set;
+    unsigned char fos_none, fos_set;  /* (font-optical-sizing: none) */
+    double height_pct_neg;            /* (a height calc()'s negative percentage, height_percent then a marker) */
     double fit_tol;                   /* fit-tolerance in px (fit_tol_set: not normal, 1em) */
     /* object-position (obj_pos_set: given, else 50% 50%): fractions of the
      * room left and pixels, by axis, as background-position's */
@@ -1450,4 +1463,6 @@ void css_layout_bench_report(const char *label);
 }
 #endif
 
+/* (a list item: display list-item, or an inline-block one) */
+#define CSS_IS_LI(s) ((s)->display == CSS_DISPLAY_LIST_ITEM || ((s)->inl_li == 2 && (s)->display == CSS_DISPLAY_INLINE_BLOCK))
 #endif /* CSS_LAYOUT_H */

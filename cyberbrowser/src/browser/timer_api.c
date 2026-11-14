@@ -503,7 +503,11 @@ void execute_timer(JSContextHandle ctx, int id) {
     if (JS_IsFunction(ctx, callback)) {
         // For RAF, pass the timestamp as argument
         if (timer->type == TIMER_TYPE_RAF && arg_count == 0) {
-            args[0] = JS_NewFloat64(ctx, (double)page_time_ms());
+            /* (the time origin's timeline, as performance.now(): one frame's callbacks share it) */
+            extern double g_performance_time_origin;
+            extern double performance_get_time_ms(void);
+            double ts = performance_get_time_ms() + (double)JS_time_offset_ms - g_performance_time_origin;
+            args[0] = JS_NewFloat64(ctx, floor(ts * 200.0) / 200.0);
             arg_count = 1;
         }
         
