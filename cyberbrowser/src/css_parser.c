@@ -2207,6 +2207,24 @@ static size_t css_rule_item(const char *s, size_t len, size_t pos, bool nested, 
     if (t_scope_a) {
         char *sw = scope_apply(sel, t_scope_a, t_scope_b, true);
         if (sw) { free(sel); sel = sw; }
+    } else if (!nested && strchr(sel, '&')) {
+        /* (& at the top level: :scope, the root) */
+        size_t sl = strlen(sel), o = 0;
+        char *tw = (char *)malloc(sl * 6 + 1);
+        if (tw) {
+            char qc = 0;
+            for (size_t k = 0; k < sl; k++) {
+                char ch = sel[k];
+                if (ch == '\\' && k + 1 < sl) { tw[o++] = ch; tw[o++] = sel[++k]; continue; }
+                if (qc) { if (ch == qc) qc = 0; tw[o++] = ch; continue; }
+                if (ch == '"' || ch == '\'') { qc = ch; tw[o++] = ch; continue; }
+                if (ch == '&') { memcpy(tw + o, ":scope", 6); o += 6; continue; }
+                tw[o++] = ch;
+            }
+            tw[o] = 0;
+            free(sel);
+            sel = tw;
+        }
     }
     rule->selector_text = sel;
     rule->media_query = cond && cond[0] ? strdup(cond) : NULL; rule->container_query = t_cq_cond ? strdup(t_cq_cond) : NULL;
@@ -3192,6 +3210,13 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
             i++;
             size_t start = i;
             i = css_sel_name_end(s, n, i, ".#[:");
+            /* (a second, different id: no element has both) */
+            if (out->has_id) {
+                char id2[sizeof(out->id)];
+                css_sel_name_copy(id2, s + start, i - start, sizeof(id2));
+                if (strcmp(id2, out->id)) out->never_match = true;
+                continue;
+            }
             css_sel_name_copy(out->id, s + start, i - start, sizeof(out->id));
             out->has_id = out->id[0] != '\0';
             out->has_substantive = out->has_substantive || out->has_id;
@@ -4627,6 +4652,22 @@ static bool css_mem_has_host(const char *s, size_t n)
     return false;
 }
 
+/* (a leading :is(...) worth splitting per argument: two or more, or one that is a bare :host compound) */
+static bool css_is_split_ok(const char *sel, size_t i, size_t len)
+{
+    size_t close = css_match_paren(sel, i + 3, len);
+    int dq = 0, n = 1;
+    for (size_t k = i + 4; k < close; k++) {
+        char c = sel[k];
+        if (c == '(' || c == '[') dq++;
+        else if ((c == ')' || c == ']') && dq) dq--;
+        else if (c == ',' && !dq) n++;
+    }
+    if (n >= 2) return true;
+    size_t a = i + 4;
+    while (a < close && css_is_space(sel[a])) a++;
+    return close - a >= 5 && !strncasecmp(sel + a, ":host", 5);
+}
 /* Transform a single selector string for a given shadow host tag. */
 static char* css_transform_one_selector(const char *sel, size_t len, const char *host_tag) {
     size_t i = 0;
@@ -4771,6 +4812,45 @@ static char* css_transform_one_selector(const char *sel, size_t len, const char 
         /* Drop :host-context rules; we cannot model outer ancestors. */
         free(out);
         return css_strdup("");
+    } else if (host_tag[0] == ':' && i + 4 <= len && !strncasecmp(sel + i, ":is(", 4) &&
+               css_mem_has_host(sel + i + 4, css_match_paren(sel, i + 3, len) - i - 4) && css_is_split_ok(sel, i, len)) {
+        /* (a leading :is() mixing :host with other compounds: one selector per argument, so the
+         * others are scoped to the shadow tree and never match the host or what is outside it) */
+        size_t open = i + 3, close = css_match_paren(sel, open, len);
+        size_t a0 = open + 1;
+        int dq = 0, nargs = 0;
+        bool any = false;
+        for (size_t k = open + 1; k <= close; k++) {
+            char c = k < close ? sel[k] : ',';
+            if (c == '(' || c == '[') dq++;
+            else if ((c == ')' || c == ']') && dq) dq--;
+            else if (c == ',' && !dq) {
+                size_t as = a0, ae = k;
+                while (as < ae && css_is_space(sel[as])) as++;
+                while (ae > as && css_is_space(sel[ae - 1])) ae--;
+                a0 = k + 1;
+                nargs++;
+                if (as == ae) continue;
+                /* (the argument in place of the :is(), a compound kept a compound by :is() unless it is :host) */
+                char *one = NULL;
+                size_t on = 0, oc = 0;
+                bool bare = ae - as >= 5 && !strncasecmp(sel + as, ":host", 5);
+                if (!bare) css_buf_append_cstr(&one, &on, &oc, ":is(");
+                css_buf_append(&one, &on, &oc, sel + as, ae - as);
+                if (!bare) css_buf_append_cstr(&one, &on, &oc, ")");
+                if (close + 1 < len) css_buf_append(&one, &on, &oc, sel + close + 1, len - close - 1);
+                char *t = one ? css_transform_one_selector(one, on, host_tag) : NULL;
+                free(one);
+                if (t && t[0]) {
+                    if (any) css_buf_append_cstr(&out, &out_len, &out_cap, ", ");
+                    css_buf_append_cstr(&out, &out_len, &out_cap, t);
+                    any = true;
+                }
+                free(t);
+            }
+        }
+        (void)nargs;
+        if (!any) { free(out); return css_strdup(""); }
     } else if (host_tag[0] == ':' && css_mem_has_host(sel + i, len - i)) {
         /* (:host inside :is(), :not() and the like: the host's pseudo put there, no scoping prefix) */
         for (size_t k = i; k < len;) {

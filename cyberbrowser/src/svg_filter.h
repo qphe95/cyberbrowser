@@ -22,7 +22,12 @@ typedef struct SvgFilterEnv {
     void *ud;
     double current[4];   /* currentColor */
     bool user_zero;      /* user space from the surface's corner (SVG elements), not the box's */
+    /* another document's, by its URL (the part before '#'): NULL not there (yet) */
+    HtmlDocument *(*ext_doc)(void *ud, const char *url, const char *mods);   /* (mods: the url()'s modifiers after it, "" none) */
 } SvgFilterEnv;
+
+/* (true while a filter of another document runs: its nodes are not the page's) */
+extern _Thread_local bool svg_filter_in_ext;
 
 /* The filter element's region, x0 y0 x1 y1, for a reference box x y w h. */
 void svg_filter_region(const SvgFilterEnv *env, HtmlNode *flt, const float box[4], float out[4]);

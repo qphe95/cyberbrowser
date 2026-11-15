@@ -24,5 +24,7 @@ void cstyle_marker(const char *style, long long v, char *out, size_t cap);
 /* A name some counter style has (list-style-type keeps an unknown one: it
  * is decimal until a rule names it). */
 bool cstyle_known(const char *style);
+/* (the tree scope: a shadow host's selector, "" the document; rules scanned go in it, names resolve from it) */
+void cstyle_set_scope(const char *s);
 
 #endif

@@ -399,6 +399,12 @@ static CssStyleDoc *styledoc_build(HtmlDocument *doc, CssStyleDoc *old, uint32_t
             d->tag[i] = old->tag[j];
             d->id[i] = old->id[j];
             d->flags[i] |= old->flags[j] & (DF_LINK | DF_VISITED);
+            /* (in a shadow tree now: it may have moved into one since) */
+            if (node->store_id) {
+                NodeId r_ = node->store_id;
+                while (dom_parent(r_)) r_ = dom_parent(r_);
+                if (r_ != node->store_id && (dom_flags(r_) & DOMF_SHADOW_ROOT) && g_dom.host[dom_slot(r_)]) d->flags[i] |= DF_SHADOW;
+            }
             d->state[i] = old->state[j];
             if (take) {
                 d->cls_off[i] = old->cls_off[j];
@@ -1111,6 +1117,42 @@ static bool lang_match(const CssStyleDoc *D, int n, const char *ranges)
     return false;
 }
 
+/* (dir=auto: the first strong character of its text, not inside an element with a dir of its own; 0 none) */
+static int dir_auto_of(NodeId el)
+{
+    if (!el) return 0;
+    uint32_t root = dom_slot(el);
+    for (uint32_t s = dom_next_in_subtree(root, root); s && s != root; ) {
+        NodeId id = dom_id_of(s);
+        int k = dom_kind(id);
+        if (k == DOM_K_ELEMENT) {
+            const char *tn = dom_tag_name(id);
+            if (dom_get_attr_str(id, "dir") || (tn && (!strcasecmp(tn, "bdi") || !strcasecmp(tn, "script") || !strcasecmp(tn, "style") || !strcasecmp(tn, "textarea")))) {
+                /* (past its subtree) */
+                uint32_t q = s;
+                while (q && q != root && !g_dom.next[q]) q = g_dom.parent[q];
+                if (!q || q == root) break;
+                s = g_dom.next[q];
+                continue;
+            }
+        } else if (k == DOM_K_TEXT) {
+            uint32_t len = 0;
+            const unsigned char *t = (const unsigned char *)dom_text(id, &len);
+            for (uint32_t i = 0; t && i < len; ) {
+                uint32_t c = t[i];
+                int nb = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+                if (nb == 2 && i + 1 < len) c = ((c & 0x1F) << 6) | (t[i + 1] & 0x3F);
+                else if (nb == 3 && i + 2 < len) c = ((c & 0x0F) << 12) | ((t[i + 1] & 0x3F) << 6) | (t[i + 2] & 0x3F);
+                else if (nb == 4 && i + 3 < len) c = ((c & 0x07) << 18) | ((t[i + 1] & 0x3F) << 12) | ((t[i + 2] & 0x3F) << 6) | (t[i + 3] & 0x3F);
+                i += (uint32_t)nb;
+                if ((c >= 0x0590 && c <= 0x08FF) || (c >= 0xFB1D && c <= 0xFDFF) || (c >= 0xFE70 && c <= 0xFEFF) || (c >= 0x10800 && c <= 0x10FFF) || (c >= 0x1E800 && c <= 0x1EFFF)) return 2;
+                if ((c < 0x80 && isalpha((int)c)) || (c >= 0xC0 && c < 0x0590 && c != 0xD7 && c != 0xF7) || (c >= 0x0900 && c < 0x2000) || (c >= 0x3040 && c < 0xFB00)) return 1;
+            }
+        }
+        s = dom_next_in_subtree(s, root);
+    }
+    return 0;
+}
 static int dir_of(const CssStyleDoc *D, int n)
 {
     static CssAtom a_dir;
@@ -1122,6 +1164,7 @@ static int dir_of(const CssStyleDoc *D, int n)
             const char *v = D->pool_val[D->attr_off[k] + j];
             if (v && !strcasecmp(v, "rtl")) return 2;
             if (v && !strcasecmp(v, "ltr")) return 1;
+            if (v && !strcasecmp(v, "auto")) { int a = dir_auto_of(D->store_id[k]); return a ? a : 1; }
             break;
         }
     }
@@ -1258,6 +1301,8 @@ static bool comp_match(const CssStyleSet *S, const CssStyleDoc *D, const CComp *
     if (c->never) return false;
     if (c->state && (D->state[n] & c->state) != c->state) return false;
     if (c->root && D->tag[n] != S->atom_html) return false;
+    /* (the document's element only: an html element further in is not the root) */
+    if (c->root && D->parent && D->parent[n] >= 0 && D->is_elem[D->parent[n]]) return false;
     if (c->node_id && (!D->store_id || D->store_id[n] != c->node_id)) return false;
     if (c->slotted_id && (!D->store_id || !sd_slotted_in(D->store_id[n], c->slotted_id))) return false;
     if (c->tag_upper && D->store_id && D->store_id[n] && !dom_is_html_document(dom_owner(D->store_id[n]))) {

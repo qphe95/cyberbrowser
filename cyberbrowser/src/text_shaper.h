@@ -77,6 +77,7 @@ void text_shaper_chain_adjust(int metric);
 void text_shaper_set_ranges(TextShaper *shaper, const uint32_t *pairs, int n);
 /* (the font's own ascent over its size, what glyphs are drawn below an em box's top by, overrides or not) */
 float text_shaper_raw_ascent(const TextShaper *shaper);
+float text_shaper_get_size_adjust(const TextShaper *shaper);   /* (@font-face size-adjust, 1 none) */
 bool text_shaper_vmetrics(const TextShaper *shaper, float *ascent, float *descent,
                           float *line_gap);
 

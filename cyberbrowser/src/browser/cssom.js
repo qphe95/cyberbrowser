@@ -3264,7 +3264,7 @@
     getter(StyleSheet.prototype, 'media', function () {
         var st = this[SHEET], self = this;
         if (st.ownerRule) return st.ownerRule.media;
-        return st.media || (st.media = newMediaList(st.mediaText, function () { self.__changed(); }));
+        return st.media || (st.media = newMediaList(st.mediaText, function () { st.mediaChanged = true; self.__changed(); }));
     }, function (v) { this.media.mediaText = v; });
     getter(StyleSheet.prototype, 'disabled', function () { return this[SHEET].disabled; },
         function (v) { this[SHEET].disabled = !!v; this.__changed(); });
@@ -3272,6 +3272,11 @@
         this[SHEET].textCache = undefined;
         if (typeof global.__cyberRelayout === 'function') global.__cyberRelayout();
     });
+    /* (the media layout applies it for, once a script changed its MediaList; null: its owner's attribute) */
+    Object.defineProperty(CSSStyleSheet.prototype, '__cyberMedia', { get: function () {
+        var st = this[SHEET];
+        return st.mediaChanged && st.media ? st.media.mediaText : null;
+    }, configurable: true });
     /* the text layout renders: the serialization once modified */
     define(CSSStyleSheet.prototype, '__cyberText', function () {
         var st = this[SHEET];
@@ -3371,7 +3376,18 @@
             return elementSheet(this);
         }, configurable: true, enumerable: true });
         /* (disabled: its sheet's) */
-        Object.defineProperty(P, 'disabled', {
+        /* (a <link>'s reflects its disabled attribute, and set false makes an alternate sheet explicitly enabled, HTML) */
+        Object.defineProperty(P, 'disabled', n === 'HTMLLinkElement' ? {
+            get: function () { return this.hasAttribute('disabled'); },
+            set: function (v) {
+                if (v) this.setAttribute('disabled', '');
+                else {
+                    Object.defineProperty(this, '__cyberExplicitEnabled', { value: true, writable: true, configurable: true });
+                    this.removeAttribute('disabled');
+                }
+                if (typeof global.__cyberRelayout === 'function') global.__cyberRelayout();
+            },
+            configurable: true, enumerable: true } : {
             get: function () { var s = elementSheet(this); return s ? s.disabled : false; },
             set: function (v) { var s = elementSheet(this); if (s) s.disabled = v; },
             configurable: true, enumerable: true });

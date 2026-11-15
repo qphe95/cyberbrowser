@@ -80,6 +80,8 @@ struct TextShaper *font_registry_fallback(int k);
 /* Path (and collection index) of the regular face of a system family or
  * generic family; false when the system has none. */
 bool font_registry_family_file(const char *family, char *path, size_t cap, int *face_index);
+/* The font-feature-settings descriptor of the first family's web face (as written); false none. */
+bool font_registry_family_ffs(const char *family_list, char *buf, size_t cap);
 
 /* Load a font file directly as the default font (tests, tools). */
 bool font_registry_set_default_file(const char *path);

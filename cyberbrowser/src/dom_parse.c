@@ -243,21 +243,22 @@ static DomStr tok_attr_value(TokChunk *c, const char *s, size_t n) {
 
 /* Raw-text tag atoms, interned before any job runs (dom_tag_flags() keeps an
  * engine-thread cache, so jobs must not call it). */
-static CssAtom g_raw_atoms[4];
+static CssAtom g_raw_atoms[8];   /* (RCDATA: textarea, title; RAWTEXT the rest, noscript as scripting is on) */
 /* The names parsed_ns() looks for. */
 enum { FX_SVG, FX_MATH, FX_FOREIGNOBJECT, FX_DESC, FX_TITLE, FX_MI, FX_MO, FX_MN, FX_MS, FX_MTEXT, FX_ANNOTATION_XML, FX_N };
 static CssAtom g_fx[FX_N];
 static void init_raw_atoms(void) {
     if (g_raw_atoms[0]) return;
-    static const char *const names[4] = { "script", "style", "textarea", "title" };
+    static const char *const names[8] = { "script", "style", "textarea", "title", "xmp", "noembed", "noframes", "noscript" };
     static const char *const fx[FX_N] = { "svg", "math", "foreignobject", "desc", "title", "mi", "mo", "mn", "ms",
                                           "mtext", "annotation-xml" };
-    css_atom_reserve(4 + FX_N);
+    css_atom_reserve(8 + FX_N);
     for (int i = 0; i < FX_N; i++) g_fx[i] = css_atom_intern(fx[i], strlen(fx[i]));
-    for (int i = 0; i < 4; i++) g_raw_atoms[i] = css_atom_intern(names[i], strlen(names[i]));
+    for (int i = 0; i < 8; i++) g_raw_atoms[i] = css_atom_intern(names[i], strlen(names[i]));
 }
 static inline bool is_raw_atom(CssAtom a) {
-    return a == g_raw_atoms[0] || a == g_raw_atoms[1] || a == g_raw_atoms[2] || a == g_raw_atoms[3];
+    for (int i = 0; i < 8; i++) if (a == g_raw_atoms[i]) return true;
+    return false;
 }
 
 static bool is_tag_delim(char ch) {
@@ -496,8 +497,8 @@ static size_t prescan_skip(const char *h, size_t len, size_t p) {
         }
         return e ? (size_t)(e - h) : len;
     }
-    static const char *const raw[] = { "script", "style", "textarea", "title" };
-    for (int i = 0; i < 4; i++) {
+    static const char *const raw[] = { "script", "style", "textarea", "title", "xmp", "noembed", "noframes", "noscript" };
+    for (int i = 0; i < 8; i++) {
         size_t tl = strlen(raw[i]);
         if (p + 1 + tl < len && strncasecmp(h + p + 1, raw[i], tl) == 0 &&
             (h[p + 1 + tl] == '>' || c_isspace((unsigned char)h[p + 1 + tl]) || h[p + 1 + tl] == '/')) {

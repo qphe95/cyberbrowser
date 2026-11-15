@@ -753,6 +753,11 @@ static double grad_calc_factor(const char **p, double len)
     if (*e == '%') { v = v / 100.0 * len; e++; }
     else if (!strncasecmp(e, "px", 2)) e += 2;
     else if (!strncasecmp(e, "em", 2)) { v *= t_grad_em; e += 2; }
+    /* (angles, for conic stops: degrees) */
+    else if (!strncasecmp(e, "deg", 3)) e += 3;
+    else if (!strncasecmp(e, "grad", 4)) { v *= 0.9; e += 4; }
+    else if (!strncasecmp(e, "rad", 3)) { v *= 180.0 / 3.14159265358979; e += 3; }
+    else if (!strncasecmp(e, "turn", 4)) { v *= 360.0; e += 4; }
     else { const char *ce = e; v = grad_unit(v, &ce); e = (char *)ce; }
     *p = e;
     return v;
@@ -1054,10 +1059,10 @@ static uint8_t *grad_raster(const char *g, int w, int h)
         while (*tx == ' ') tx++;
         if (!strncasecmp(tx, "color(", 6) || !strncasecmp(tx, "lab(", 4) || !strncasecmp(tx, "lch(", 4) ||
             !strncasecmp(tx, "oklab(", 6) || !strncasecmp(tx, "oklch(", 6)) modern = true;
-        if (strcasestr_dl(tx, "none")) has_none = true;
+        if (strcasestr_dl(tx, "none")) { has_none = true; if (strchr(tx, '(')) modern = true; }   /* (none: only in the modern syntax) */
     }
     if (!method[0] && modern) snprintf(method, sizeof method, "in oklab");
-    enum { LUTN = 256 };
+    enum { LUTN = 1024 };
     static __thread double lut[63][LUTN + 1][4];
     bool use_lut = method[0] && n <= 64 && (strcasecmp(method, "in srgb") || has_none);   /* (srgb-linear too) */
     if (use_lut)
@@ -1150,6 +1155,14 @@ static bool dl_box_filter_cpu(const LayoutBox *box, bool any_tf)
         if (box->s->filt_t[k] == 9 || (box->s->filt_t[k] == 10 && box->s->filt_ds[2] > 0.0f)) return true;
     return false;
 }
+/* (a GPU filter that moves or spreads what it holds: a drop-shadow, a blur; its output clipped, not what goes in) */
+static bool dl_box_filter_moves_gpu(const LayoutBox *box, bool any_tf)
+{
+    if (!box->s->filt_n || dl_box_filter_cpu(box, any_tf)) return false;
+    for (int k = 0; k < box->s->filt_n && k < 8; k++)
+        if (box->s->filt_t[k] == 9 || box->s->filt_t[k] == 10) return true;
+    return false;
+}
 /* (what clips a CPU filtered box's output, per box; its subtree painted free of that) */
 static __thread float (*t_flt_clip)[4];
 typedef struct { LayoutContext *ctx; const char *want; char *buf; size_t bufn; bool got; } DlFltCasc;
@@ -1181,11 +1194,19 @@ static const char *dl_flt_prop(void *ud, HtmlNode *n, const char *name, char *bu
             buf[l] = 0;
             return buf;
         }
-        if (ctx && ctx->doc) {
+        if (ctx && ctx->doc && !svg_filter_in_ext) {
             DlFltCasc c = { ctx, name, buf, bufn, false };
             int di = po_array_index_from_payload(&ctx->doc->array, n);
             if (di >= 0) css_layout_dom_cascade(ctx, di, -1, dl_flt_casc, &c);
             if (c.got) return buf;
+            /* (color-interpolation-filters inherits: an ancestor's, the <svg>'s say) */
+            if (!v && di >= 0 && !strcmp(name, "color-interpolation-filters")) {
+                int p = n->array_node.parent;
+                if (p >= 0) {
+                    HtmlNode *pn = (HtmlNode *)po_array_payload(&ctx->doc->array, p);
+                    if (pn && pn->type == HTML_NODE_ELEMENT) return dl_flt_prop(ud, pn, name, buf, bufn);
+                }
+            }
         }
     }
     return v;
@@ -1193,6 +1214,85 @@ static const char *dl_flt_prop(void *ud, HtmlNode *n, const char *name, char *bu
 static bool dl_flt_color(void *ud, const char *text, double *rgba) { (void)ud; return css_layout_parse_color_text(text, rgba); }
 static char* dl_resolve_url(const char *base_url, const char *href);
 static __thread bool t_flt_img_pend;
+/* (filter: url(file.svg#id): that document, fetched as an image is, then parsed; kept for the next) */
+static __thread char *t_flt_ext_url;
+static __thread HtmlDocument *t_flt_ext_doc;
+int mbedtls_sha256(const unsigned char *input, size_t ilen, unsigned char *output, int is224);
+/* (the origin of an absolute URL: scheme://host[:port], into o) */
+static void dl_url_origin(const char *u, char *o, size_t cap)
+{
+    const char *s = strstr(u ? u : "", "://");
+    if (!s) { snprintf(o, cap, "%s", u ? u : ""); return; }
+    const char *e = s + 3;
+    while (*e && *e != '/' && *e != '?' && *e != '#') e++;
+    snprintf(o, cap, "%.*s", (int)(e - u), u);
+}
+/* (url() modifiers: cross-origin() needs the response's CORS headers to allow it, integrity() its digest) */
+static bool dl_url_mods_ok(const LayoutContext *fc, const char *key, const char *mods, const uint8_t *by, size_t nb)
+{
+    if (!mods || !*mods) return true;
+    const char *co = strstr(mods, "cross-origin(");
+    if (co) {
+        bool cred = !strncmp(co + 13, "use-credentials", 15);
+        char d[512], r[512], acao[512];
+        bool acac = false;
+        dl_url_origin(fc ? fc->base_url : "", d, sizeof d);
+        dl_url_origin(key, r, sizeof r);
+        if (strcmp(d, r)) {
+            if (!image_cache_cors(g_image_cache, key, acao, sizeof acao, &acac)) return false;
+            if (cred ? !(acac && !strcmp(acao, d)) : !(!strcmp(acao, "*") || !strcmp(acao, d))) return false;
+        }
+    }
+    const char *in = strstr(mods, "integrity(");
+    if (in) {
+        const char *q = in + 10;
+        while (*q == ' ' || *q == '"' || *q == '\'') q++;
+        if (strncmp(q, "sha256-", 7)) return true;   /* (another algorithm: not checked) */
+        q += 7;
+        unsigned char h[32];
+        if (mbedtls_sha256(by, nb, h, 0) != 0) return false;
+        static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        char enc[48];
+        int o = 0;
+        for (int i = 0; i < 32; i += 3) {
+            uint32_t v = (uint32_t)h[i] << 16 | (i + 1 < 32 ? (uint32_t)h[i + 1] << 8 : 0) | (i + 2 < 32 ? h[i + 2] : 0);
+            enc[o++] = b64[v >> 18 & 63]; enc[o++] = b64[v >> 12 & 63];
+            enc[o++] = i + 1 < 32 ? b64[v >> 6 & 63] : '=';
+            enc[o++] = i + 2 < 32 ? b64[v & 63] : '=';
+        }
+        enc[o] = 0;
+        if (strncmp(q, enc, (size_t)o)) return false;
+    }
+    return true;
+}
+static HtmlDocument *dl_flt_ext_doc(void *ud, const char *url, const char *mods)
+{
+    const LayoutContext *fc = (const LayoutContext *)ud;
+    if (!g_image_cache || !url || !url[0]) return NULL;
+    char *abs = dl_resolve_url(fc ? fc->base_url : NULL, url);
+    const char *key = abs ? abs : url;
+    {
+        const uint8_t *by0 = NULL;
+        size_t nb0 = 0;
+        if (mods && *mods && image_cache_bytes(g_image_cache, key, &by0, &nb0) && !dl_url_mods_ok(fc, key, mods, by0, nb0)) { free(abs); return NULL; }
+    }
+    if (!t_flt_ext_url || strcmp(t_flt_ext_url, key)) {
+        const uint8_t *by = NULL;
+        size_t nb = 0;
+        if (!image_cache_bytes(g_image_cache, key, &by, &nb)) {
+            image_cache_request(g_image_cache, key, 0, 0);
+            t_flt_img_pend = true;
+            free(abs);
+            return NULL;
+        }
+        if (t_flt_ext_doc) html_document_free(t_flt_ext_doc);
+        free(t_flt_ext_url);
+        t_flt_ext_doc = html_parse((const char *)by, nb);
+        t_flt_ext_url = strdup(key);
+    }
+    free(abs);
+    return t_flt_ext_doc;
+}
 static bool dl_flt_image(void *ud, const char *href, const uint8_t **px, int *w, int *h, int *ch)
 {
     const LayoutContext *fc = (const LayoutContext *)ud;
@@ -1236,11 +1336,195 @@ static void dl_svg_filter_hook(const char *value, const float box[4], unsigned c
 {
     LayoutContext *ctx = t_flt_ctx;
     if (!ctx || !ctx->doc) return;
-    SvgFilterEnv env = { ctx->doc, dl_flt_prop, dl_flt_color, dl_flt_image, dl_flt_element, (void *)ctx, { t_flt_color[0], t_flt_color[1], t_flt_color[2], t_flt_color[3] }, true };
+    SvgFilterEnv env = { ctx->doc, dl_flt_prop, dl_flt_color, dl_flt_image, dl_flt_element, (void *)ctx, { t_flt_color[0], t_flt_color[1], t_flt_color[2], t_flt_color[3] }, true, dl_flt_ext_doc };
     svg_filter_apply(&env, value, box, 16.0f, rgba, w, h);
 }
 /* The commands since `from` (the box and its subtree) become an image of them filtered. */
 static int mc_owner(const LayoutContext *ctx, int i, int *child);
+/* (background-clip: text with a gradient or an image: the glyph runs of transparent text under it, by command range) */
+static __thread int t_ctm_s[256], t_ctm_e[256], t_ctm_o[256], t_ctm_n;
+/* (rasterizes cmds[0..n) over W x H at (ax, ay): straight RGBA, alpha from white and black grounds) */
+static bool dl_cmds_rgba(DisplayList *dl, const DisplayListCmd *src, int n, int ax, int ay, int W, int H, uint8_t *rgba)
+{
+    uint8_t *rgb_w = (uint8_t *)malloc((size_t)W * H * 3), *rgb_b = (uint8_t *)malloc((size_t)W * H * 3);
+    DisplayListCmd *cmds = (DisplayListCmd *)malloc((size_t)(n + 1) * sizeof(DisplayListCmd));
+    DisplayMask *mcopy = dl->mask_count > 0 ? (DisplayMask *)malloc((size_t)dl->mask_count * sizeof(DisplayMask)) : NULL;
+    bool ok = rgb_w && rgb_b && cmds && (mcopy || !dl->mask_count);
+    if (ok) {
+        memset(&cmds[0], 0, sizeof cmds[0]);
+        cmds[0].type = DL_RECT;
+        cmds[0].w = (float)W; cmds[0].h = (float)H;
+        cmds[0].a = 255;
+        if (n) memcpy(cmds + 1, src, (size_t)n * sizeof(DisplayListCmd));
+        for (int k = 1; k <= n; k++) {
+            cmds[k].x -= (float)ax; cmds[k].y -= (float)ay;
+            if (cmds[k].type == DL_BORDER) { cmds[k].u.border.x -= (float)ax; cmds[k].u.border.y -= (float)ay; }
+        }
+        if (dl->mask_count) {
+            memcpy(mcopy, dl->masks, (size_t)dl->mask_count * sizeof(DisplayMask));
+            for (int k = 0; k < dl->mask_count; k++) {
+                mcopy[k].x -= (float)ax; mcopy[k].y -= (float)ay;
+                if (mcopy[k].kind == 1 || mcopy[k].iw > 0.0f) { mcopy[k].ix -= (float)ax; mcopy[k].iy -= (float)ay; }
+            }
+        }
+        DisplayList tmp = *dl;
+        tmp.masks = mcopy;
+        tmp.cmds = cmds + 1; tmp.count = n; tmp.capacity = n;
+        raster_display_list(&tmp, rgb_w, W, H);
+        tmp.cmds = cmds; tmp.count = n + 1; tmp.capacity = n + 1;
+        raster_display_list(&tmp, rgb_b, W, H);
+        size_t N = (size_t)W * H;
+        for (size_t k = 0; k < N; k++) {
+            int a = 255;
+            for (int c = 0; c < 3; c++) { int v = 255 - (int)rgb_w[k * 3 + c] + (int)rgb_b[k * 3 + c]; if (v < a) a = v; }
+            if (a < 0) a = 0;
+            rgba[k * 4 + 3] = (uint8_t)a;
+            for (int c = 0; c < 3; c++) {
+                int v = a > 0 ? ((int)rgb_b[k * 3 + c] * 255 + a / 2) / a : 0;
+                rgba[k * 4 + c] = (uint8_t)(v > 255 ? 255 : v);
+            }
+        }
+    }
+    free(rgb_w); free(rgb_b); free(cmds); free(mcopy);
+    return ok;
+}
+/* (each background painted at [P, E) shown only through its box's marked glyphs, which go) */
+static void dl_clip_text_all(LayoutContext *ctx, DisplayList *dl, const int *Ps, const int *Es, const int *boxes, int n)
+{
+    int VW = (int)ctx->viewport_width, VH = (int)ctx->viewport_height;
+    if (n <= 0 || !g_image_cache || VW < 1 || VH < 1 || VW > 8192 || VH > 8192) { t_ctm_n = 0; return; }
+    int *img = (int *)malloc((size_t)n * sizeof(int)), *ix = (int *)malloc((size_t)n * 4 * sizeof(int));
+    DisplayListCmd *glyphs = (DisplayListCmd *)malloc((size_t)(dl->count + 1) * sizeof(DisplayListCmd));
+    if (!img || !ix || !glyphs) { free(img); free(ix); free(glyphs); t_ctm_n = 0; return; }
+    for (int e = 0; e < n; e++) {
+        img[e] = -1;
+        int P = Ps[e], E = Es[e];
+        if (P < 0 || E <= P || E > dl->count) continue;
+        int ng = 0;
+        for (int q = 0; q < t_ctm_n; q++) {
+            if (t_ctm_o[q] != boxes[e]) continue;
+            for (int k = t_ctm_s[q]; k < t_ctm_e[q] && k < dl->count; k++) if (k >= E && dl->cmds[k].type != DL_XFORM) glyphs[ng++] = dl->cmds[k];
+        }
+        double x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+        for (int k = P; k < E; k++) {
+            const DisplayListCmd *c = &dl->cmds[k];
+            if (c->type == DL_XFORM || c->type == DL_MASK_BEGIN || c->type == DL_MASK_END || c->w <= 0.0f || c->h <= 0.0f) continue;
+            if (c->x < x0) x0 = c->x;
+            if (c->y < y0) y0 = c->y;
+            if (c->x + c->w > x1) x1 = c->x + c->w;
+            if (c->y + c->h > y1) y1 = c->y + c->h;
+        }
+        int ax = (int)floor(x0 < 0 ? 0 : x0), ay = (int)floor(y0 < 0 ? 0 : y0);
+        int bx = (int)ceil(x1 > VW ? VW : x1), by = (int)ceil(y1 > VH ? VH : y1);
+        int W = bx - ax, H = by - ay;
+        if (W <= 0 || H <= 0 || ng <= 0) continue;
+        uint64_t hs = 1469598103934665603ull;
+        const unsigned char *hp = (const unsigned char *)(dl->cmds + P);
+        for (size_t q = 0; q < (size_t)(E - P) * sizeof(DisplayListCmd); q++) { hs ^= hp[q]; hs *= 1099511628211ull; }
+        hp = (const unsigned char *)glyphs;
+        for (size_t q = 0; q < (size_t)ng * sizeof(DisplayListCmd); q++) { hs ^= hp[q]; hs *= 1099511628211ull; }
+        char key[64];
+        snprintf(key, sizeof key, "cyber-ctext:%016llx:%dx%d", (unsigned long long)hs, W, H);
+        if (image_cache_status(g_image_cache, key) != 1) {
+            uint8_t *a = (uint8_t *)malloc((size_t)W * H * 4), *b = (uint8_t *)malloc((size_t)W * H * 4);
+            if (a && b && dl_cmds_rgba(dl, dl->cmds + P, E - P, ax, ay, W, H, a) && dl_cmds_rgba(dl, glyphs, ng, ax, ay, W, H, b)) {
+                for (size_t q = 0; q < (size_t)W * H; q++) a[q * 4 + 3] = (uint8_t)(((int)a[q * 4 + 3] * b[q * 4 + 3] + 127) / 255);
+                image_cache_put_rgba(g_image_cache, key, W, H, a);
+            }
+            free(a); free(b);
+        }
+        img[e] = image_cache_request(g_image_cache, key, W, H);
+        ix[e * 4] = ax; ix[e * 4 + 1] = ay; ix[e * 4 + 2] = W; ix[e * 4 + 3] = H;
+    }
+    /* (the list again: each background's range as its image, the marked glyphs gone) */
+    int w = 0, N0 = dl->count;
+    for (int k = 0; k < N0; k++) {
+        bool drop = false;
+        for (int e = 0; e < n && !drop; e++) {
+            if (k < Ps[e] || k >= Es[e]) continue;
+            drop = true;
+            if (k == Ps[e] && img[e] >= 0) {
+                DisplayList one = *dl;
+                one.count = 0;
+                /* (the image command, made in place) */
+                DisplayListCmd keep = dl->cmds[k];
+                int c0 = dl->count;
+                if (display_list_reserve(dl, 1)) {
+                    display_list_add_image(dl, (float)ix[e * 4], (float)ix[e * 4 + 1], (float)ix[e * 4 + 2], (float)ix[e * 4 + 3], img[e], 0.0f, 0.0f, 1.0f, 1.0f);
+                    if (dl->count > c0) { DisplayListCmd im = dl->cmds[dl->count - 1]; dl->count = c0; dl->cmds[w++] = im; }
+                }
+                (void)keep; (void)one;
+            }
+        }
+        for (int q = 0; q < t_ctm_n && !drop; q++) {
+            bool own = false;
+            for (int e = 0; e < n && !own; e++) own = boxes[e] == t_ctm_o[q] && img[e] >= 0;
+            drop = own && k >= t_ctm_s[q] && k < t_ctm_e[q] && dl->cmds[k].type != DL_XFORM;
+        }
+        if (!drop) dl->cmds[w++] = dl->cmds[k];
+    }
+    dl->count = w;
+    t_ctm_n = 0;
+    free(img); free(ix); free(glyphs);
+}
+/* (unused: kept for the per-subtree form) */
+static void dl_clip_text_end(LayoutContext *ctx, DisplayList *dl, int P, int E, int m0) __attribute__((unused));
+static void dl_clip_text_end(LayoutContext *ctx, DisplayList *dl, int P, int E, int m0)
+{
+    int VW = (int)ctx->viewport_width, VH = (int)ctx->viewport_height;
+    if (P < 0 || E < P || E > dl->count || !g_image_cache || VW < 1 || VH < 1 || VW > 8192 || VH > 8192) { t_ctm_n = m0; return; }
+    /* (the marked glyph commands; the rest of the subtree kept) */
+    int nall = dl->count - E;
+    DisplayListCmd *glyphs = (DisplayListCmd *)malloc((size_t)(nall + 1) * sizeof(DisplayListCmd));
+    DisplayListCmd *rest = (DisplayListCmd *)malloc((size_t)(nall + 1) * sizeof(DisplayListCmd));
+    int ng = 0, nr = 0;
+    if (!glyphs || !rest) { free(glyphs); free(rest); t_ctm_n = m0; return; }
+    for (int k = E; k < dl->count; k++) {
+        bool mk = false;
+        for (int q = m0; q < t_ctm_n && !mk; q++) mk = k >= t_ctm_s[q] && k < t_ctm_e[q];
+        if (mk && dl->cmds[k].type != DL_XFORM) glyphs[ng++] = dl->cmds[k];
+        else rest[nr++] = dl->cmds[k];
+    }
+    t_ctm_n = m0;
+    /* (the area: the background's, in the viewport) */
+    double x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+    for (int k = P; k < E; k++) {
+        const DisplayListCmd *c = &dl->cmds[k];
+        if (c->type == DL_XFORM || c->type == DL_MASK_BEGIN || c->type == DL_MASK_END || c->w <= 0.0f || c->h <= 0.0f) continue;
+        if (c->x < x0) x0 = c->x;
+        if (c->y < y0) y0 = c->y;
+        if (c->x + c->w > x1) x1 = c->x + c->w;
+        if (c->y + c->h > y1) y1 = c->y + c->h;
+    }
+    int ax = (int)floor(x0 < 0 ? 0 : x0), ay = (int)floor(y0 < 0 ? 0 : y0);
+    int bx = (int)ceil(x1 > VW ? VW : x1), by = (int)ceil(y1 > VH ? VH : y1);
+    int W = bx - ax, H = by - ay;
+    DisplayListCmd *bg = (DisplayListCmd *)malloc((size_t)(E - P + 1) * sizeof(DisplayListCmd));
+    if (bg && E > P) memcpy(bg, dl->cmds + P, (size_t)(E - P) * sizeof(DisplayListCmd));
+    int nbg = E - P;
+    dl->count = P;
+    if (bg && W > 0 && H > 0 && ng > 0) {
+        uint64_t hs = 1469598103934665603ull;
+        const unsigned char *hp = (const unsigned char *)bg;
+        for (size_t q = 0; q < (size_t)nbg * sizeof(DisplayListCmd); q++) { hs ^= hp[q]; hs *= 1099511628211ull; }
+        hp = (const unsigned char *)glyphs;
+        for (size_t q = 0; q < (size_t)ng * sizeof(DisplayListCmd); q++) { hs ^= hp[q]; hs *= 1099511628211ull; }
+        char key[64];
+        snprintf(key, sizeof key, "cyber-ctext:%016llx:%dx%d", (unsigned long long)hs, W, H);
+        if (image_cache_status(g_image_cache, key) != 1) {
+            uint8_t *a = (uint8_t *)malloc((size_t)W * H * 4), *b = (uint8_t *)malloc((size_t)W * H * 4);
+            if (a && b && dl_cmds_rgba(dl, bg, nbg, ax, ay, W, H, a) && dl_cmds_rgba(dl, glyphs, ng, ax, ay, W, H, b)) {
+                for (size_t q = 0; q < (size_t)W * H; q++) a[q * 4 + 3] = (uint8_t)(((int)a[q * 4 + 3] * b[q * 4 + 3] + 127) / 255);
+                image_cache_put_rgba(g_image_cache, key, W, H, a);
+            }
+            free(a); free(b);
+        }
+        int handle = image_cache_request(g_image_cache, key, W, H);
+        if (handle >= 0) display_list_add_image(dl, (float)ax, (float)ay, (float)W, (float)H, handle, 0.0f, 0.0f, 1.0f, 1.0f);
+    }
+    if (display_list_reserve(dl, nr)) { memcpy(dl->cmds + dl->count, rest, (size_t)nr * sizeof(DisplayListCmd)); dl->count += nr; }
+    free(bg); free(glyphs); free(rest);
+}
 static void dl_ref_filter_end(LayoutContext *ctx, DisplayList *dl, int box_i, int from)
 {
     const LayoutBox *box = &ctx->boxes[box_i];
@@ -1361,7 +1645,7 @@ static void dl_ref_filter_end(LayoutContext *ctx, DisplayList *dl, int box_i, in
                 }
             }
             float bx[4] = { (float)box->x - ax, (float)box->y - ay, (float)box->width, (float)box->height };
-            SvgFilterEnv env = { ctx->doc, dl_flt_prop, dl_flt_color, dl_flt_image, dl_flt_element, (void *)ctx, { box->s->color_r, box->s->color_g, box->s->color_b, box->s->color_a }, false };
+            SvgFilterEnv env = { ctx->doc, dl_flt_prop, dl_flt_color, dl_flt_image, dl_flt_element, (void *)ctx, { box->s->color_r, box->s->color_g, box->s->color_b, box->s->color_a }, false, dl_flt_ext_doc };
             t_flt_img_pend = false;
             svg_filter_apply(&env, box->s->filt_text, bx, (float)box->s->font_size, rgba, WM, HM);
             if (t_flt_img_pend) { size_t kl = strlen(key); if (kl + 3 < sizeof key) memcpy(key + kl, ":p", 3); }   /* (an image yet to come: kept apart) */
@@ -3071,7 +3355,7 @@ static bool dl_mask_is_layered(const LayoutBox *box)
      * them in numbers.  Several layers, a composite or mode, a mask element: only here) */
     {
         const char *im = s->mk_text[0] ? s->mk_text[0] : s->mk_text[8];
-        bool hard = !im || mk_top_comma(im) || strstr(im, "url(#") != NULL || s->mk_text[7] || s->mk_text[1] || s->mk_text[4] || s->mk_text[5];
+        bool hard = !im || mk_top_comma(im) || strstr(im, "url(#") != NULL || strstr(im, ".svg#") != NULL || s->mk_text[7] || s->mk_text[1] || s->mk_text[4] || s->mk_text[5];
         if (im && !s->mk_text[0] && (strstr(im, "luminance") || strstr(im, "subtract") || strstr(im, "intersect") || strstr(im, "exclude"))) hard = true;
         /* (a gradient's own commas are not layers) */
         if (im && !s->mk_text[0] && (strstr(im, "-box") || strstr(im, "no-clip"))) hard = true;
@@ -3155,6 +3439,7 @@ static void mk_position(const char *t, double aw, double ah, double tw, double t
     *ox = x; *oy = y;
 }
 /* A mask element's content over w x h (user space from the box's corner), straight RGBA. */
+static __thread bool t_mk_ext;   /* (the mask element in another document) */
 static uint8_t *mk_mask_element(LayoutContext *ctx, HtmlNode *mn, const LayoutBox *box, int w, int h)
 {
     SvgBuf b = { 0 };
@@ -3167,7 +3452,7 @@ static uint8_t *mk_mask_element(LayoutContext *ctx, HtmlNode *mn, const LayoutBo
     }
     sb_puts(&b, head);
     LayoutContext *keep = t_svg_ctx;
-    t_svg_ctx = ctx;
+    t_svg_ctx = t_mk_ext ? NULL : ctx;   /* (another document's: its nodes not the layout's) */
     for (HtmlNode *k = html_node_first_child(ctx->doc, mn); k; k = html_node_next_sibling(ctx->doc, k)) {
         if (k->type != HTML_NODE_ELEMENT) continue;
         svg_serialize(&ctx->doc->array, po_array_index_from_payload(&ctx->doc->array, k), &b, false, w, h, NULL);
@@ -3228,6 +3513,29 @@ static void mk_layer_mask(LayoutContext *ctx, const LayoutBox *box, const MkLaye
     if (!strncasecmp(img, "url(", 4)) {
         const char *q = img + 4;
         while (*q == ' ' || *q == '"' || *q == '\'') q++;
+        /* (url(file.svg#id): that document's mask element) */
+        HtmlDocument *doc0_ = ctx->doc;
+        char extid_[160] = "";
+        {
+            const char *h_ = strchr(q, '#'), *c_ = strchr(q, ')');
+            if (*q != '#' && h_ && (!c_ || h_ < c_) && h_ - q < 900) {
+                char u_[1024];
+                memcpy(u_, q, (size_t)(h_ - q));
+                u_[h_ - q] = 0;
+                HtmlDocument *xd_ = dl_flt_ext_doc((void *)ctx, u_, "");
+                if (!xd_) return;
+                snprintf(extid_, sizeof extid_, "%s", h_);
+                {
+                    /* (only a mask element: anything else, the file as an image) */
+                    char id2_[160];
+                    size_t l2_ = 0;
+                    for (const char *z = extid_ + 1; *z && *z != ')' && *z != '"' && *z != '\'' && *z != ' ' && l2_ + 1 < sizeof id2_; z++) id2_[l2_++] = *z;
+                    id2_[l2_] = 0;
+                    HtmlNode *xm_ = html_document_get_element_by_id(xd_, id2_);
+                    if (xm_ && xm_->tag_name && !strcasecmp(xm_->tag_name, "mask")) { ctx->doc = xd_; q = extid_; }
+                }
+            }
+        }
         if (*q == '#') {
             char id[128];
             size_t l = 0;
@@ -3235,7 +3543,7 @@ static void mk_layer_mask(LayoutContext *ctx, const LayoutBox *box, const MkLaye
             while (*q && *q != ')' && *q != '"' && *q != '\'' && *q != ' ' && l + 1 < sizeof id) id[l++] = *q++;
             id[l] = 0;
             HtmlNode *mn = ctx->doc ? html_document_get_element_by_id(ctx->doc, id) : NULL;
-            if (!mn || !mn->tag_name || strcasecmp(mn->tag_name, "mask")) return;
+            if (!mn || !mn->tag_name || strcasecmp(mn->tag_name, "mask")) { ctx->doc = doc0_; return; }
             int bw = (int)ceil(box->width), bh = (int)ceil(box->height);
             /* (its region: -10%, 120% of the box unless it says, in the box's terms or user space) */
             const char *mu = node_attribute_value(mn, "maskUnits");
@@ -3246,7 +3554,7 @@ static void mk_layer_mask(LayoutContext *ctx, const LayoutBox *box, const MkLaye
             MKR("x", rx, box->width) MKR("y", ry, box->height) MKR("width", rw, box->width) MKR("height", rh, box->height)
             #undef MKR
             int mw = bw + 512, mh = bh + 512;
-            if (mw > 8192 || mh > 8192 || rw <= 0.0 || rh <= 0.0) return;
+            if (mw > 8192 || mh > 8192 || rw <= 0.0 || rh <= 0.0) { ctx->doc = doc0_; return; }
             /* (the texture's name: the element's subtree and the box's size) */
             uint64_t hs = 1469598103934665603ull;
             {
@@ -3272,14 +3580,16 @@ static void mk_layer_mask(LayoutContext *ctx, const LayoutBox *box, const MkLaye
             bool busy = image_cache_has_pending(g_image_cache);
             if (busy) { static unsigned mk_seq; size_t kl = strlen(key); snprintf(key + kl, sizeof key - kl, "p%u", ++mk_seq); }
             if (busy || image_cache_status(g_image_cache, key) != 1) {
+                t_mk_ext = ctx->doc != doc0_;
                 uint8_t *px = mk_mask_element(ctx, mn, box, mw, mh);
-                if (!px) return;
+                t_mk_ext = false;
+                if (!px) { ctx->doc = doc0_; return; }
                 image_cache_put_rgba(g_image_cache, key, mw, mh, px);
                 free(px);
             }
             const char *mt = node_attribute_value(mn, "mask-type");
             char mtc[16] = "";
-            css_layout_dom_cascade(ctx, po_array_index_from_payload(&ctx->doc->array, mn), -1, mk_type_decl, mtc);
+            if (ctx->doc == doc0_) css_layout_dom_cascade(ctx, po_array_index_from_payload(&ctx->doc->array, mn), -1, mk_type_decl, mtc);
             if (mtc[0]) { char *e = mtc + strlen(mtc); while (e > mtc && isspace((unsigned char)e[-1])) *--e = 0; mt = mtc; }
             bool alpha = (mt && !strcasecmp(mt, "alpha")) || !strcasecmp(L->mode, "alpha");
             if (!strcasecmp(L->mode, "luminance")) alpha = false;
@@ -3287,8 +3597,9 @@ static void mk_layer_mask(LayoutContext *ctx, const LayoutBox *box, const MkLaye
             m->ix = (float)(box->x - 256.0); m->iy = (float)(box->y - 256.0); m->iw = (float)mw; m->ih = (float)mh;
             m->x = (float)(box->x + rx); m->y = (float)(box->y + ry); m->w = (float)rw; m->h = (float)rh;
             m->angle_deg = alpha ? 0.0f : 1.0f;
-            return;
+            { ctx->doc = doc0_; return; }
         }
+        ctx->doc = doc0_;
     }
     /* the size: natural, or by mask-size */
     double aw0 = org[2], ah0 = org[3];
@@ -3395,6 +3706,30 @@ static int dl_layered_mask(LayoutContext *ctx, DisplayList *dl, const LayoutBox 
     if (!g_image_cache) return -1;
     int nl = mk_layers(box->s, L);
     if (nl <= 0) return -1;
+    /* (a layer's image still loading: the whole element hidden until it comes, as browsers do) */
+    for (int k = 0; k < nl; k++) {
+        const char *u0 = strstr(L[k].image, "url(");
+        if (!u0 || L[k].image != u0) continue;
+        char u[1024];
+        const char *p = u0 + 4;
+        while (*p == ' ') p++;
+        char qc = (*p == '"' || *p == '\'') ? *p++ : 0;
+        size_t ul = 0;
+        while (p[ul] && (qc ? p[ul] != qc : p[ul] != ')') && ul + 1 < sizeof u) { u[ul] = p[ul]; ul++; }
+        u[ul] = 0;
+        if (!ul || u[0] == '#' || strchr(u, '#')) continue;
+        char *abs = dl_resolve_url(ctx->base_url, u);
+        int st = image_cache_status(g_image_cache, abs ? abs : u);
+        free(abs);
+        if (st == 0) {
+            DisplayMask t;
+            memset(&t, 0, sizeof t);
+            t.kind = 1;
+            t.image_handle = -1;
+            t.x = (float)box->x; t.y = (float)box->y; t.w = (float)box->width; t.h = (float)box->height;
+            return dl_add_mask(dl, &t);
+        }
+    }
     DisplayMask h;
     memset(&h, 0, sizeof h);
     h.kind = 12;
@@ -3862,7 +4197,7 @@ static void dl_text_decorations(DisplayList *dl, const LayoutContext *ctx, int i
             /* (its offset the decorating box's, whatever a box between says) */
             float off = rs->ul_k ? rs->ul_v + (float)(rs->ul_e * fs) : 0.0f;
             if (ctx->boxes[i].s->writing_mode == 2 && ctx->boxes[i].s->text_orient != 2 && !ts->ul_under && !ts->ul_right) off = -off;   /* (vertical-lr: its lines mirrored, the offset toward the left still) */
-            float y = ts->ul_under ? by + d0 * (float)lfs + off : by + (rs->ul_k ? off : ul_pos * (float)lfs);
+            float y = ts->ul_under ? by + d0 * (float)lfs + off : by + (rs->ul_k ? (ts->ul_ff ? ul_pos * (float)lfs + off : off) : ul_pos * (float)lfs);
             dl_deco_line(dl, x0, x1, roundf(y), t, rs->td_style, c);
         }
         float thin = roundf(ul_th * fs);   /* (the font's own thickness: a thicker one grows from it) */
@@ -3935,13 +4270,31 @@ static void dl_fieldset_gap(DisplayList *dl, int from, float gx0, float gx1, flo
     dl_clip_range(dl, to + n, c);
 }
 
+/* (a filter that moves or spreads what it holds: a drop-shadow, a blur) */
+static bool dl_filter_moves(const DisplayMask *fm)
+{
+    if (fm->kind != 9) return false;
+    for (int k = 0; k < fm->nstops && k < 8; k++) {
+        int t = (int)(fm->stop_pos[k] * 32.0f + 0.5f);
+        if (t == 9 || t == 10) return true;
+    }
+    return false;
+}
+
 static void dl_clip_range(DisplayList *dl, int from, const float c[4])
 {
+    int skip = 0;   /* (inside a filter that moves its content: that is clipped after it, by ex_rx, not before) */
     for (int k = from; k < dl->count; k++) {
         DisplayListCmd *cmd = &dl->cmds[k];
+        if (skip > 0) {
+            if (cmd->type == DL_MASK_BEGIN) skip++;
+            else if (cmd->type == DL_MASK_END) skip--;
+            continue;
+        }
         /* (a filter's output is clipped too, not only what goes into it: in ex_rx) */
         if (cmd->type == DL_MASK_BEGIN) {
             DisplayMask *fm = &dl->masks[cmd->u.mask_index];
+            if (dl_filter_moves(fm)) skip = 1;
             if (fm->kind == 9 || fm->kind == 10) {
                 bool had = fm->ex_rx[2] > fm->ex_rx[0] || fm->ex_rx[3] > fm->ex_rx[1];
                 fm->ex_rx[0] = had && fm->ex_rx[0] > c[0] ? fm->ex_rx[0] : c[0];
@@ -5208,6 +5561,16 @@ static bool box_mask(const LayoutBox *box, DisplayMask *m)
         return parse_mask_gradient(box->s->mask_image, m, m->w, m->h);
     }
     if (box->s->mask_kind != 1 || !box->s->mask_image || !g_image_cache) return false;
+    /* (an image that could not be had: a transparent layer, the whole box masked away) */
+    const char *mi_ = box->s->mask_image;
+    bool mi_scheme_ok = !strncasecmp(mi_, "http:", 5) || !strncasecmp(mi_, "https:", 6) || !strncasecmp(mi_, "data:", 5) ||
+                        !strncasecmp(mi_, "file:", 5) || !strncasecmp(mi_, "blob:", 5) || !strncasecmp(mi_, "cyber", 5) || !strncasecmp(mi_, "cbfilter:", 9) ||
+                        !strncasecmp(mi_, "noexif:", 7) || !strstr(mi_, "://");
+    if (mi_[0] != '#' && !strstr(mi_, "#") && (!mi_scheme_ok || image_cache_status(g_image_cache, mi_) < 0)) {
+        m->kind = 1;   /* (an image mask with no image: transparent, the box masked away) */
+        m->image_handle = -1;
+        return true;
+    }
     m->kind = 1;
     m->repeat = ~box->s->mask_no_repeat & 3;
     /* (mask-origin: the box it is placed and sized in) */
@@ -6609,6 +6972,24 @@ static int subtree_end(const LayoutContext *ctx, int i)
     return e + 1;
 }
 
+/* (the boxes of box i's subtree together, its own rect grown to them: what a layer of it holds) */
+static void dl_subtree_union(const LayoutContext *ctx, int i, float *x, float *y, float *w, float *h)
+{
+    int end = subtree_end(ctx, i);
+    if (end - i > 4000) return;
+    double x0 = *x, y0 = *y, x1 = *x + *w, y1 = *y + *h;
+    for (int k = i + 1; k < end; k++) {
+        const LayoutBox *b = &ctx->boxes[k];
+        if (!b->s || b->s->display == CSS_DISPLAY_NONE || !(b->width > 0.0) || !(b->height > 0.0)) continue;
+        if (!isfinite(b->x) || !isfinite(b->y)) continue;
+        if (b->x < x0) x0 = b->x;
+        if (b->y < y0) y0 = b->y;
+        if (b->x + b->width > x1) x1 = b->x + b->width;
+        if (b->y + b->height > y1) y1 = b->y + b->height;
+    }
+    *x = (float)x0; *y = (float)y0; *w = (float)(x1 - x0); *h = (float)(y1 - y0);
+}
+
 /* (opacity on box i over paint that overlaps: two boxes of its subtree with a background or
  * border, or letters pulled together; a big subtree: no) */
 static bool dl_opacity_overlaps(const LayoutContext *ctx, int i, int end)
@@ -7441,6 +7822,7 @@ static void dl_emphasis_marks(DisplayList *dl, TextShaper *font, const LayoutBox
     double ra = round(a * mfs), rd = round(d * mfs), adv = text_shaper_normal_line_height(font, (float)mfs);
     if (!(adv > 0.5 * mfs)) adv = mfs * 1.2;
     double ca = round(a * fs) + round(d * fs);
+    y -= (float)floor((ca - fs) / 4.0);   /* (from the em box's top to the content area's) */
     /* (vertical text, drawn in its line's axes: over the line is right in
      * vertical-rl and in vertical-lr, whose caller mirrors what is drawn;
      * left in sideways-lr; left or right says the side) */
@@ -7772,7 +8154,7 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                 }
             }
             /* (a CPU filter: what clips it clips its result; into it, nothing yet) */
-            if (t_flt_clip && dl_box_filter_cpu(b, flt_tf) && !(c[0] > c[2])) {
+            if (t_flt_clip && (dl_box_filter_cpu(b, flt_tf) || dl_box_filter_moves_gpu(b, flt_tf)) && !(c[0] > c[2])) {
                 memcpy(t_flt_clip[i], c, sizeof(c));
                 c[0] = c[1] = -1e30f;
                 c[2] = c[3] = 1e30f;
@@ -8243,17 +8625,43 @@ static bool dl_box_under(const LayoutContext *ctx, int i, int t)
  * its table t (i outside it, or -1 at the end), then moved to the end. */
 static void dl_cb_flush(const LayoutContext *ctx, DisplayList *dl, int *t, int *a, int *b, int *n, int i)
 {
+    if (*n <= 0) return;
+    int *tofs = (int *)malloc((size_t)(*n + 1) * sizeof(int)), *dep = (int *)malloc((size_t)(*n + 1) * sizeof(int));
+    unsigned char *sel = (unsigned char *)calloc((size_t)*n + 1, 1), *lay = (unsigned char *)calloc((size_t)*n + 1, 1);
+    if (!tofs || !dep || !sel || !lay) { free(tofs); free(dep); free(sel); free(lay); return; }
+    int maxd = 0;
+    for (int k = 0; k < *n; k++) {
+        int d = 0;
+        for (int p = t[k]; p >= 0; p = ctx->tree.nodes[p].parent_idx) d++;
+        /* (a positioned or inline-level table paints as a layer of its own: in order, after its outer table's) */
+        const LayoutStyle *ts_ = ctx->boxes[t[k]].s;
+        if (ts_->position != CSS_POSITION_STATIC || ts_->inline_level || ts_->display == CSS_DISPLAY_INLINE_BLOCK) { d = 0; lay[k] = 1; }
+        dep[k] = d;
+        if (d > maxd) maxd = d;
+        sel[k] = i < 0 || !dl_box_under(ctx, i, t[k]);
+    }
+    /* (a layered table's held while an outer table of its is: they go together, the outer first) */
+    for (int k = 0; k < *n; k++) {
+        if (!sel[k] || !lay[k]) continue;
+        for (int j = 0; j < *n; j++)
+            if (!sel[j] && t[j] != t[k] && dl_box_under(ctx, t[k], t[j])) { sel[k] = 0; break; }
+    }
     int total = 0;
-    for (int k = 0; k < *n; k++) if (i < 0 || !dl_box_under(ctx, i, t[k])) total += b[k] - a[k];
-    if (!total) return;
-    DisplayListCmd *tmp = (DisplayListCmd *)malloc((size_t)total * sizeof(DisplayListCmd));
-    if (!tmp) return;
-    int o = 0, removed = 0, keep = 0;
+    for (int k = 0; k < *n; k++) if (sel[k]) total += b[k] - a[k];
+    DisplayListCmd *tmp = total ? (DisplayListCmd *)malloc((size_t)total * sizeof(DisplayListCmd)) : NULL;
+    if (!total || !tmp) { free(tmp); free(tofs); free(dep); free(sel); free(lay); return; }
+    {
+        /* (an inner table's under its outer one's: the deepest first) */
+        int off = 0;
+        for (int d = maxd; d >= 0; d--)
+            for (int k = 0; k < *n; k++)
+                if (dep[k] == d && sel[k]) { tofs[k] = off; off += b[k] - a[k]; }
+    }
+    int removed = 0, keep = 0;
     for (int k = 0; k < *n; k++) {
         int ka = a[k] - removed, kb = b[k] - removed;
-        if (i < 0 || !dl_box_under(ctx, i, t[k])) {
-            memcpy(tmp + o, &dl->cmds[ka], (size_t)(kb - ka) * sizeof(DisplayListCmd));
-            o += kb - ka;
+        if (sel[k]) {
+            memcpy(tmp + tofs[k], &dl->cmds[ka], (size_t)(kb - ka) * sizeof(DisplayListCmd));
             memmove(&dl->cmds[ka], &dl->cmds[kb], (size_t)(dl->count - kb) * sizeof(DisplayListCmd));
             dl->count -= kb - ka;
             removed += kb - ka;
@@ -8263,7 +8671,7 @@ static void dl_cb_flush(const LayoutContext *ctx, DisplayList *dl, int *t, int *
     }
     memcpy(&dl->cmds[dl->count], tmp, (size_t)total * sizeof(DisplayListCmd));
     dl->count += total;
-    free(tmp);
+    free(tmp); free(tofs); free(dep); free(sel); free(lay);
     *n = keep;
 }
 
@@ -8364,7 +8772,7 @@ static bool paint_is_context(const LayoutContext *ctx, int i)
 {
     const LayoutBox *b = &ctx->boxes[i];
     if (b->s->position == CSS_POSITION_FIXED || b->s->position == CSS_POSITION_STICKY) return true;
-    if (b->s->wc_sc == 1 || b->s->wc_sc == 3) return true;   /* (will-change names what makes one; 3 a transform or opacity animation) */
+    if (b->s->wc_sc == 1 || b->s->wc_sc == 3 || b->s->wc_sc == 4) return true;   /* (4: a view-transition-name) */   /* (will-change names what makes one; 3 a transform or opacity animation) */
     if (b->s->isolate && b->s->display != CSS_DISPLAY_INLINE) return true;   /* (isolation: isolate) */
     if ((b->s->abs_cb & (1 | 2 | 4 | 8 | 16 | 512)) && b->s->display != CSS_DISPLAY_INLINE) return true;   /* (transformed: one, were the transform the identity) */
     if (b->s->z_index_set || b->s->wc_sc == 2) {
@@ -8649,6 +9057,8 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
      * indices.  Every such mask is also noted (reg_*), so a descendant
      * painted after its subtree was left (a positioned one) opens it again. */
     int mask_start[64], mask_end[64], mask_idx[64], nmask = 0;
+    int ct_P[16], ct_E[16], ct_m0[16], ct_box[16], ct_end[16], n_ct = 0;   /* (background-clip: text over gradients and images) */
+    t_ctm_n = 0;
     int grp_s[64], grp_e[64], ngrp = 0;   /* (opacity groups: what they fade, faded once) */
     float grp_o[64];
     enum { REG_MAX = 512 };
@@ -8702,6 +9112,10 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         pending_hidden = false;
         if (pending_box >= 0 && off) dl_scroll_range(dl, pending_from, pending_mask, off[pending_box]);
         if (pending_box >= 0 && clip) dl_clip_range(dl, pending_from, clip[pending_box]);
+        /* (a GPU filter moving its content: what clips it, on its output) */
+        if (pending_box >= 0 && t_flt_clip && t_flt_clip[pending_box][2] > t_flt_clip[pending_box][0] &&
+            dl_box_filter_moves_gpu(&ctx->boxes[pending_box], any_tf))
+            dl_clip_range(dl, pending_from, t_flt_clip[pending_box]);
         if (pending_box >= 0 && any_mc) {
             dl_bdb_clone(ctx, dl, pending_from, pending_box, 1.0f);
             if (!mc_hold) {
@@ -9048,6 +9462,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             m.kind = 9;
             m.image_handle = -1;
             m.x = (float)box->x; m.y = (float)box->y; m.w = (float)box->width; m.h = (float)box->height;
+            dl_subtree_union(ctx, i, &m.x, &m.y, &m.w, &m.h);   /* (descendants past the box: in the layer too) */
             m.nstops = box->s->filt_n;
             for (int k = 0; k < box->s->filt_n && k < 8; k++) {
                 m.stop_pos[k] = box->s->filt_t[k] / 32.0f;
@@ -9186,14 +9601,14 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     bool one_axis = box->s->overflow_clip && box->s->ovf_clip_axes && box->s->ovf_clip_axes != 3;
                     /* (an inline box: overflow does not apply) */
                     bool inl_box = box->s->display == CSS_DISPLAY_INLINE && !is_replaced_tag(node);
-                    mask_end[nmask] = (box->s->overflow != 0 || box->s->overflow_clip || is_replaced_tag(node)) && !one_axis && !inl_box ? subtree_end(ctx, i) : i + 1;
+                    mask_end[nmask] = (box->s->overflow != 0 || box->s->overflow_clip || is_replaced_tag(node) || dl_paint_contained(box)) && !one_axis && !inl_box ? subtree_end(ctx, i) : i + 1;
                     mask_idx[nmask] = mi;
                     /* (overflow clipped by a box with borders: its content by the padding box's inner curve, opened from its first child on) */
                     float bw4[4] = { (float)box->s->border_top, (float)box->s->border_right, (float)box->s->border_bottom, (float)box->s->border_left };
                     /* (overflow: clip with a margin out: the curve at the clip edge, its radii that much bigger) */
                     bool ocb = box->s->overflow_clip && !box->s->border_shape && !is_replaced_tag(node) && mask_end[nmask] > i + 1 && (box->s->overflow_clip_margin > 0.0f || box->s->ocm_box);
                     float ocm = ocb && box->s->overflow_clip_margin > 0.0f ? box->s->overflow_clip_margin : 0.0f;
-                    bool inner = (box->s->overflow != 0 || box->s->overflow_clip) && !box->s->border_shape && !is_replaced_tag(node) && mask_end[nmask] > i + 1 &&
+                    bool inner = (box->s->overflow != 0 || box->s->overflow_clip || dl_paint_contained(box)) && !box->s->border_shape && !is_replaced_tag(node) && mask_end[nmask] > i + 1 &&
                                  (bw4[0] > 0.0f || bw4[1] > 0.0f || bw4[2] > 0.0f || bw4[3] > 0.0f || ocb) && nreg < REG_MAX;
                     if (inner) {
                         DisplayMask im = rm;
@@ -9440,6 +9855,23 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                 if (!bcp || (bca[2] > bca[0] && bca[3] > bca[1]) || box->s->bg_nl > 1) { t_bg_area_clip = 1; t_bg_owner = i; emit_background_image(ctx, dl, ebx, bcp); t_bg_owner = -1; t_bg_area_clip = 0; }
             }
         }
+        /* (background-clip: text, a gradient or an image: painted, then cut to the glyphs after the subtree) */
+        if (g_image_cache && box->s->bg_clip == 3 && box->s->bg_nl <= 1 && (box->s->background_image_url[0] || box->s->bg_grad) && n_ct < 16 &&
+            !pieces && box->width >= 1.0f && box->height >= 1.0f) {
+            float gs_[4];
+            if (!(box->s->bg_grad && !box->s->background_image_url[0] && grad_solid(box->s->bg_grad, gs_))) {
+                int P_ = dl->count;
+                LayoutStyle cs_ = *box->s;
+                cs_.bg_clip = 0;
+                LayoutBox cb_ = *box;
+                cb_.s = &cs_;
+                t_bg_owner = i;
+                emit_background_image(ctx, dl, &cb_, NULL);
+                t_bg_owner = -1;
+                ct_P[n_ct] = P_; ct_E[n_ct] = dl->count; ct_m0[n_ct] = t_ctm_n; ct_box[n_ct] = i; ct_end[n_ct] = subtree_end(ctx, i);
+                n_ct++;
+            }
+        }
         if (ba_mi >= 0) dl_add_mask_cmd(dl, DL_MASK_END, ba_mi, &ba_m);
         if (cr_mi >= 0) dl_add_mask_cmd(dl, DL_MASK_END, cr_mi, &cr_m);
         if (box->s->shadow_multi && !pieces && box->width > 0.0f && box->height > 0.0f) {
@@ -9529,7 +9961,12 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                         if (cmi >= 0 && !dl_add_mask_cmd(dl, DL_MASK_BEGIN, cmi, &cm)) cmi = -1;
                     }
                 }
+                /* (overflow: visible given: the image not clipped by the corners either, CSS Overflow 4) */
+                bool unround = round_mi >= 0 && cmi < 0 && box->s->ovf_visible_given && box->s->overflow == 0 && !box->s->overflow_clip &&
+                               !box->s->border_shape && dl->mask_count > 0 && dl->mask_count - 1 == round_mi;
+                if (unround) dl_add_mask_cmd(dl, DL_MASK_END, round_mi, &dl->masks[round_mi]);
                 emit_image_async(dl, box, url, op);
+                if (unround) dl_add_mask_cmd(dl, DL_MASK_BEGIN, round_mi, &dl->masks[round_mi]);
                 if (cmi >= 0) dl_add_mask_cmd(dl, DL_MASK_END, cmi, &cm);
                 free(url);
             }
@@ -9697,6 +10134,19 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                             } else if (ps->background_color_a > 0.0f && !ps->bg_grad && !ps->background_image_url[0]) {
                                 tr = (float)ps->background_color_r; tg = (float)ps->background_color_g; tb = (float)ps->background_color_b;
                                 ta = (float)ps->background_color_a * op; clip_on = true;
+                            }
+                            break;
+                        }
+                    /* (transparent text under a gradient or image clipped to text: its glyphs marked, the background cut to them) */
+                    bool ct_mark = false;
+                    int ct_owner = -1;
+                    if (!clip_on && ta <= 0.0f && box->s->font_size >= 0.5)
+                        for (int pa = ctx->tree.nodes[i].parent_idx; pa >= 0; pa = ctx->tree.nodes[pa].parent_idx) {
+                            const LayoutStyle *ps = ctx->boxes[pa].s;
+                            if (ps->bg_clip != 3) continue;
+                            float gs[4];
+                            if ((ps->background_image_url[0] || ps->bg_grad) && ps->bg_nl <= 1 && !(ps->bg_grad && !ps->background_image_url[0] && grad_solid(ps->bg_grad, gs))) {
+                                tr = tg = tb = 1.0f; ta = 1.0f; ct_mark = true; ct_owner = pa;
                             }
                             break;
                         }
@@ -10285,6 +10735,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                             k = e + 2;
                         }
                     }
+                    if (ct_mark && t_ctm_n < 256 && dl->count > from_cmd) { t_ctm_s[t_ctm_n] = from_cmd; t_ctm_e[t_ctm_n] = dl->count; t_ctm_o[t_ctm_n] = ct_owner; t_ctm_n++; }
                 }
             }
         }
@@ -10295,7 +10746,8 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
          * left of the first line) */
         bool image_marker = false;
         if (g_image_cache && node && node->type == HTML_NODE_ELEMENT && CSS_IS_LI(box->s) &&
-            box->s->list_image && box->s->list_image[0] && !css_layout_marker_none(ctx, i)) {
+            box->s->list_image && box->s->list_image[0] && !css_layout_marker_none(ctx, i) &&
+            !css_layout_marker_has_content(ctx, i)) {   /* (a ::marker's own content wins over the image) */
             int iw = 0, ih = 0;
             const char *lurl = box->s->list_image;
             char gkey[320];
@@ -10506,7 +10958,8 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             if (!strcmp(marker, "•") || !strcmp(marker, "◦") || !strcmp(marker, "▪") || !strcmp(marker, "◾")) mls = mws = 0.0f;
             text_shaper_set_spacing(mls, mws, mscale);
             static const uint32_t k_tnum[1] = { 0x746e756du };   /* (the UA ::marker's font-variant-numeric: tabular-nums) */
-            text_shaper_set_features(k_tnum, 1);
+            bool mnum_ = css_layout_marker_numeric_given(ctx, i);
+            text_shaper_set_features(mnum_ ? NULL : k_tnum, mnum_ ? 0 : 1);
             text_shaper_measure(mfont, marker, &mw, &mh);
             /* (a <string> type: no suffix, so no gap, and free to overflow to the left) */
             bool mstr = ((box->s->list_style_type == 5 && box->s->list_style && (box->s->list_style[0] == '"' || box->s->list_style[0] == '\'')) || css_layout_marker_has_content(ctx, i)) && !m_trail;
@@ -10572,6 +11025,9 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             text_shaper_shape_to_display_list_scaled(mfont, marker,
                     (float)mx, my, mscale,
                     mc[0], mc[1], mc[2], mc[3] * op, dl);
+            /* (the item's emphasis marks: the marker's too, as text of it) */
+            if (box->s->te_mark[0] && box->s->writing_mode == 0 && fabs(mfs - box->s->font_size) < 0.01)
+                dl_emphasis_marks(dl, mfont, box, marker, 0, strlen(marker), (float)mx, my, mscale, op, 0.0f, css_layout_te_under(ctx, i));
             text_shaper_set_spacing(0.0f, 0.0f, 1.0f);
             text_shaper_set_features(NULL, 0);
         }
@@ -10909,6 +11365,8 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         if (!(mc_hold && pending_box == hold_box)) dl_mc_chain(ctx, dl, pending_from, pending_box, mc_hold ? hold_box : -1, range_xf);
     }
     if (ncb) dl_cb_flush(ctx, dl, cbt, cba, cbb, &ncb, -1);
+    dl_clip_text_all(ctx, dl, ct_P, ct_E, ct_box, n_ct);
+    (void)ct_m0; (void)ct_end;
     while (nmask > 0) {
         nmask--;
         if (mask_idx[nmask] <= -1000) { dl_ref_filter_end(ctx, dl, mask_start[nmask], -1000 - mask_idx[nmask]); }

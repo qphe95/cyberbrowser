@@ -333,7 +333,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     float td_t, td_te, td_in[2];   /* (thickness: td_t px + td_te em) */
     /* (text-underline-offset, inherited: ul_k 0 auto 2 px 3 em (ul_v);
      * text-underline-position: under) */
-    unsigned char ul_k, ul_set, ul_under, ul_pos_set, ul_right;   /* (ul_right: text-underline-position: right, in vertical text the over side) */
+    unsigned char ul_k, ul_set, ul_under, ul_pos_set, ul_right, ul_ff;   /* (ul_ff: from-font, the offset from the font's position) */   /* (ul_right: text-underline-position: right, in vertical text the over side) */
     float ul_v, ul_e;              /* (offset: ul_v px + ul_e em) */
     /* Resolved line-height in px; <= 0 means "normal" (1.5 x font-size). */
     double line_height;
@@ -431,6 +431,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char ot_n;
     unsigned char letter_spacing_set, word_spacing_set;
     unsigned char text_transform, text_transform_set;
+    unsigned char fv_emoji, fv_emoji_set;   /* (font-variant-emoji: 0 normal, 1 text, 2 emoji, 3 unicode) */
     unsigned char wst, wst_set;   /* (word-space-transform: 1 space, 2 ideographic-space) */
     /* text-indent: px plus a fraction of the containing block's width;
      * inherited. */
@@ -865,6 +866,7 @@ double css_layout_marker_baseline(struct LayoutContext *ctx, int idx);
 double css_layout_marker_text_top(struct LayoutContext *ctx, int idx, double *font_size);
 /* An outside marker's tab-size in spaces (its ::marker's, else the item's). */
 int css_layout_marker_tab(const struct LayoutContext *ctx, int idx);
+bool css_layout_marker_numeric_given(const struct LayoutContext *ctx, int idx);
 
 /* A box of the layout tree: its computed style (shared, read-only once the
  * style pass is over) and the geometry the layout passes compute.  The
@@ -926,6 +928,7 @@ typedef struct LayoutBox {
     unsigned char clamp_clip;   /* (a line-clamp container that clamped: what is past clamp_y, its clamp point, not painted) */
     float clamp_y;
     float marker_dx;   /* (an outside marker moved in by floats: its line's start past them) */
+    int fs_legend;   /* (its rendered legend's box + 1, 0 none: not in its content's lines) */
     float fs_off, fs_gx0, fs_gx1;   /* (a fieldset with a rendered legend: its border box this far down; the top border not painted from x + fs_gx0 to x + fs_gx1) */
     double static_dx, static_dy;
     double opacity_eff;

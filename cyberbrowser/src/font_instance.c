@@ -259,6 +259,7 @@ typedef struct {
     int nregions;
 } Hvar;
 
+static bool ivs_regions(Hvar *hv, const VarAxis *axes, int naxes);
 static bool hvar_open(Hvar *hv, const uint8_t *sfnt, size_t len, const VarAxis *axes, int naxes)
 {
     memset(hv, 0, sizeof(*hv));
@@ -267,6 +268,21 @@ static bool hvar_open(Hvar *hv, const uint8_t *sfnt, size_t len, const VarAxis *
     const uint8_t *h = hv->t.p;
     hv->store = get_u32(h + 4);
     hv->map = get_u32(h + 8);
+    return ivs_regions(hv, axes, naxes);
+}
+/* (MVAR: font-wide metric deltas, the store at a 16-bit offset, no map) */
+static bool mvar_open(Hvar *hv, const uint8_t *sfnt, size_t len, const VarAxis *axes, int naxes)
+{
+    memset(hv, 0, sizeof(*hv));
+    hv->t = sfnt_table(sfnt, len, TAG('M', 'V', 'A', 'R'));
+    if (hv->t.len < 12) return false;
+    hv->store = get_u16(hv->t.p + 10);
+    if (!hv->store) return false;
+    return ivs_regions(hv, axes, naxes);
+}
+static bool ivs_regions(Hvar *hv, const VarAxis *axes, int naxes)
+{
+    const uint8_t *h = hv->t.p;
     if (hv->store + 8 > hv->t.len) return false;
     const uint8_t *st = h + hv->store;
     uint32_t rl = get_u32(st + 2);
@@ -292,6 +308,7 @@ static bool hvar_open(Hvar *hv, const uint8_t *sfnt, size_t len, const VarAxis *
     return true;
 }
 
+static float ivs_delta(const Hvar *hv, uint32_t outer, uint32_t inner);
 /* Advance delta of glyph `gid` in font units. */
 static float hvar_advance_delta(const Hvar *hv, int gid)
 {
@@ -314,6 +331,13 @@ static float hvar_advance_delta(const Hvar *hv, int gid)
         outer = entry >> ibits;
         inner = entry & ((1u << ibits) - 1);
     }
+    return ivs_delta(hv, outer, inner);
+}
+static float ivs_delta(const Hvar *hv, uint32_t outer, uint32_t inner)
+{
+    if (!hv->region_scalar) return 0.0f;
+    const uint8_t *h = hv->t.p;
+    uint32_t len = hv->t.len;
     const uint8_t *st = h + hv->store;
     int ndata = get_u16(st + 6);
     if ((int)outer >= ndata || (size_t)hv->store + 8 + (size_t)(outer + 1) * 4 > len) return 0.0f;
@@ -766,7 +790,7 @@ bool font_instance(const uint8_t *sfnt, size_t len, const FontAxisValue *values,
     for (int gid = 0; ok && gid < ng; gid++) inst_glyph(&in, gid, 0);
 
     Buf gbuf = { 0 }, lbuf = { 0 }, hbuf = { 0 };
-    uint8_t *head2 = NULL, *hhea2 = NULL;
+    uint8_t *head2 = NULL, *hhea2 = NULL, *post2 = NULL;
     if (ok) {
         for (int gid = 0; gid < ng; gid++) {
             buf_u32(&lbuf, (uint32_t)gbuf.len);
@@ -797,6 +821,31 @@ bool font_instance(const uint8_t *sfnt, size_t len, const FontAxisValue *values,
             TAG('h', 'd', 'm', 'x'), TAG('L', 'T', 'S', 'H'), TAG('V', 'D', 'M', 'X'),
         };
         int n = get_u16(sfnt + 4);
+        /* (MVAR's underline offset and size, into post) */
+        {
+            Hvar mv;
+            TableRef post = sfnt_table(sfnt, len, TAG('p', 'o', 's', 't'));
+            if (post.len >= 12 && mvar_open(&mv, sfnt, len, axes, naxes)) {
+                const uint8_t *m = mv.t.p;
+                int rs = get_u16(m + 6), rc = get_u16(m + 8);
+                float dpos = 0.0f, dsz = 0.0f;
+                for (int r = 0; r < rc && 12 + (size_t)(r + 1) * rs <= mv.t.len && rs >= 8; r++) {
+                    const uint8_t *rec = m + 12 + (size_t)r * rs;
+                    uint32_t tg = get_u32(rec);
+                    if (tg == TAG('u', 'n', 'd', 'o')) dpos = ivs_delta(&mv, get_u16(rec + 4), get_u16(rec + 6));
+                    else if (tg == TAG('u', 'n', 'd', 's')) dsz = ivs_delta(&mv, get_u16(rec + 4), get_u16(rec + 6));
+                }
+                if (dpos != 0.0f || dsz != 0.0f) {
+                    post2 = (uint8_t *)malloc(post.len);
+                    if (post2) {
+                        memcpy(post2, post.p, post.len);
+                        put_u16(post2 + 8, (uint16_t)(int16_t)lroundf((float)(int16_t)get_u16(post.p + 8) + dpos));
+                        put_u16(post2 + 10, (uint16_t)(int16_t)lroundf((float)(int16_t)get_u16(post.p + 10) + dsz));
+                    }
+                }
+                free(mv.region_scalar);
+            }
+        }
         FontSfntTable *tables = (FontSfntTable *)calloc((size_t)n + 1, sizeof(*tables));
         int k = 0;
         for (int i = 0; tables && i < n && 12 + (size_t)(i + 1) * 16 <= len; i++) {
@@ -811,6 +860,7 @@ bool font_instance(const uint8_t *sfnt, size_t len, const FontAxisValue *values,
             else if (tag == TAG('h', 'm', 't', 'x')) { tables[k].data = hbuf.p; tables[k].len = hbuf.len; }
             else if (tag == TAG('h', 'e', 'a', 'd')) { tables[k].data = head2; tables[k].len = head.len; }
             else if (tag == TAG('h', 'h', 'e', 'a')) { tables[k].data = hhea2; tables[k].len = hhea.len; }
+            else if (tag == TAG('p', 'o', 's', 't') && post2) { tables[k].data = post2; tables[k].len = tl; }
             else { tables[k].data = sfnt + off; tables[k].len = tl; }
             k++;
         }
@@ -819,6 +869,6 @@ bool font_instance(const uint8_t *sfnt, size_t len, const FontAxisValue *values,
     }
     for (int gid = 0; in.g && gid < ng; gid++) vglyph_free(&in.g[gid]);
     free(in.g); free(in.adv); free(in.lsb); free(in.hvar.region_scalar);
-    free(gbuf.p); free(lbuf.p); free(hbuf.p); free(head2); free(hhea2);
+    free(gbuf.p); free(lbuf.p); free(hbuf.p); free(head2); free(hhea2); free(post2);
     return ok;
 }

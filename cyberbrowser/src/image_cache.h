@@ -111,6 +111,8 @@ uint64_t image_cache_generation(ImageCache *cache, int handle);
 /* The fetched bytes of url_or_path (an SVG document's text, say), once in; false before
  * then or never asked for.  They stay while the cache does. */
 bool image_cache_bytes(ImageCache *cache, const char *url_or_path, const uint8_t **out, size_t *n);
+/* (its response's Access-Control-Allow-Origin into acao, "" none, and whether credentials were allowed; false: not loaded) */
+bool image_cache_cors(ImageCache *cache, const char *url_or_path, char *acao, size_t cap, bool *acac);
 
 /* An animated GIF's frames: their count (1 a still image, 0 not in yet) and delays in ms; frame k > 0
  * put in the cache as "cbgif<k>:" + url_or_path. */

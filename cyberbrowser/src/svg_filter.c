@@ -107,6 +107,36 @@ static __thread double t_fl_fs = 16.0;   /* (the filter element's font size: its
 static bool frac_or_len(const char *s, double base, bool bbox_units, double *out)
 {
     if (!s) return false;
+    while (*s == ' ') s++;
+    /* (calc() of a sum: each term as one alone) */
+    if (!strncasecmp(s, "calc(", 5)) {
+        const char *p = s + 5;
+        double sum = 0.0;
+        int sign = 1;
+        for (;;) {
+            while (*p == ' ') p++;
+            char *e2;
+            double d2 = strtod(p, &e2);
+            if (e2 == p) return false;
+            double v2;
+            if (*e2 == '%') { v2 = d2 / 100.0 * base; e2++; }
+            else {
+                if (!strncasecmp(e2, "em", 2)) { d2 *= t_fl_fs; e2 += 2; }
+                else if (!strncasecmp(e2, "px", 2)) e2 += 2;
+                v2 = bbox_units ? d2 * base : d2;
+            }
+            sum += sign * v2;
+            p = e2;
+            while (*p == ' ') p++;
+            if (*p == '+') sign = 1;
+            else if (*p == '-') sign = -1;
+            else break;
+            p++;
+        }
+        if (*p != ')') return false;
+        *out = sum;
+        return true;
+    }
     char *e;
     double d = strtod(s, &e);
     if (e == s) return false;
@@ -117,6 +147,8 @@ static bool frac_or_len(const char *s, double base, bool bbox_units, double *out
     return true;
 }
 
+/* (user space's percentages: of the viewport, an SVG element's surface; 0: the box's) */
+static __thread double t_vpw, t_vph;
 static bool color_interp_linear(const FCtx *C, HtmlNode *n, HtmlNode *filter)
 {
     char b[64];
@@ -575,12 +607,12 @@ static bool run_filter(FCtx *C0, HtmlNode *flt, const FImg *src, FImg *out)
             char xb[64];
             double bx = C->prim_bbox || !env->user_zero ? C->box[0] : 0.0, by = C->prim_bbox || !env->user_zero ? C->box[1] : 0.0, bw = C->box[2], bh = C->box[3], v;
             const char *a;
-            double fw = C->region[2] - C->region[0], fh = C->region[3] - C->region[1];
+            double fw = env->user_zero && t_vpw > 0 ? t_vpw : bw, fh = env->user_zero && t_vph > 0 ? t_vph : bh;   /* (user space's percentages: of the viewport) */
             a = attr(C, n, "x", xb, sizeof xb);
-            if (a && frac_or_len(a, C->prim_bbox ? bw : fw, C->prim_bbox, &v)) sr[0] = (float)(C->prim_bbox || !strchr(a, '%') ? bx + v : C->region[0] + v);
+            if (a && frac_or_len(a, C->prim_bbox ? bw : fw, C->prim_bbox, &v)) sr[0] = (float)(bx + v);
             double x0set = sr[0];
             a = attr(C, n, "y", xb, sizeof xb);
-            if (a && frac_or_len(a, C->prim_bbox ? bh : fh, C->prim_bbox, &v)) sr[1] = (float)(C->prim_bbox || !strchr(a, '%') ? by + v : C->region[1] + v);
+            if (a && frac_or_len(a, C->prim_bbox ? bh : fh, C->prim_bbox, &v)) sr[1] = (float)(by + v);
             double y0set = sr[1];
             a = attr(C, n, "width", xb, sizeof xb);
             if (a && frac_or_len(a, C->prim_bbox ? bw : fw, C->prim_bbox, &v)) sr[2] = (float)(x0set + v);
@@ -834,8 +866,9 @@ static bool run_filter(FCtx *C0, HtmlNode *flt, const FImg *src, FImg *out)
             if (!hasdiv || div == 0) { div = 0; for (int k = 0; k < kn; k++) div += km[k]; if (div == 0) div = 1; }
             if (ip && kn == ow * oh && ow > 0 && oh > 0) {
                 /* (the input's edges: its subregion's pixels, what duplicate and wrap extend) */
-                int ex0 = (int)ceilf(I.sr[0] - (float)C->ax - 0.5f), ey0 = (int)ceilf(I.sr[1] - (float)C->ay - 0.5f);
-                int ex1 = (int)ceilf(I.sr[2] - (float)C->ax - 0.5f), ey1 = (int)ceilf(I.sr[3] - (float)C->ay - 0.5f);
+                /* (edges: of its own subregion, the input transparent past its own there) */
+                int ex0 = (int)ceilf(sr[0] - (float)C->ax - 0.5f), ey0 = (int)ceilf(sr[1] - (float)C->ay - 0.5f);
+                int ex1 = (int)ceilf(sr[2] - (float)C->ax - 0.5f), ey1 = (int)ceilf(sr[3] - (float)C->ay - 0.5f);
                 if (ex0 < 0) ex0 = 0;
                 if (ey0 < 0) ey0 = 0;
                 if (ex1 > C->aw) ex1 = C->aw;
@@ -864,7 +897,7 @@ static bool run_filter(FCtx *C0, HtmlNode *flt, const FImg *src, FImg *out)
                         float oa = preserve ? sa : clamp01((float)(c[3] / div + bias));
                         o[3] = oa;
                         for (int k = 0; k < 3; k++) {
-                            float v = (float)(c[k] / div + bias * (preserve ? 1.0 : oa));
+                            float v = (float)(c[k] / div + bias);   /* (the bias added to the premultiplied values, as browsers do) */
                             v = preserve ? clamp01(v) * oa : (v < 0 ? 0 : v > oa ? oa : v);
                             o[k] = v;
                         }
@@ -874,6 +907,7 @@ static bool run_filter(FCtx *C0, HtmlNode *flt, const FImg *src, FImg *out)
         } else if (!strcasecmp(tag, "feTurbulence")) {
             double fx = 0, fy = 0, oct = 1, seed = 0;
             attr_nums2(C, n, "baseFrequency", &fx, &fy);
+            if (fx < 0 || fy < 0) fx = fy = 0;   /* (a negative one: an error, both as 0) */
             attr_num(C, n, "numOctaves", &oct);
             attr_num(C, n, "seed", &seed);
             char tb[32], sb2[32];
@@ -1016,10 +1050,11 @@ void svg_filter_region(const SvgFilterEnv *env, HtmlNode *flt, const float box[4
     t_fl_fs = 16.0;
     a = attr(&C0, flt, "font-size", xb, sizeof xb);
     if (a) { double f_ = strtod(a, NULL); if (f_ > 0.0) t_fl_fs = f_; }
-    a = attr(&C0, flt, "x", xb, sizeof xb); if (a && frac_or_len(a, box[2], !user, &v)) x = v;
-    a = attr(&C0, flt, "y", xb, sizeof xb); if (a && frac_or_len(a, box[3], !user, &v)) y = v;
-    a = attr(&C0, flt, "width", xb, sizeof xb); if (a && frac_or_len(a, box[2], !user, &v)) w = v;
-    a = attr(&C0, flt, "height", xb, sizeof xb); if (a && frac_or_len(a, box[3], !user, &v)) h = v;
+    double pw = user && env->user_zero && t_vpw > 0 ? t_vpw : box[2], ph = user && env->user_zero && t_vph > 0 ? t_vph : box[3];
+    a = attr(&C0, flt, "x", xb, sizeof xb); if (a && frac_or_len(a, user ? pw : box[2], !user, &v)) x = v;
+    a = attr(&C0, flt, "y", xb, sizeof xb); if (a && frac_or_len(a, user ? ph : box[3], !user, &v)) y = v;
+    a = attr(&C0, flt, "width", xb, sizeof xb); if (a && frac_or_len(a, user ? pw : box[2], !user, &v)) w = v;
+    a = attr(&C0, flt, "height", xb, sizeof xb); if (a && frac_or_len(a, user ? ph : box[3], !user, &v)) h = v;
     /* (lengths in user space: from its origin; fractions of the box from the box) */
     if (user && env->user_zero) { out[0] = (float)x; out[1] = (float)y; }
     else { out[0] = (float)(box[0] + x); out[1] = (float)(box[1] + y); }
@@ -1087,6 +1122,8 @@ static const char *next_fn(const char *p, char *name, size_t nn, char *arg, size
     return *c ? c + 1 : c;
 }
 
+_Thread_local bool svg_filter_in_ext;
+
 bool svg_filter_apply(const SvgFilterEnv *env, const char *list, const float box[4], float fs,
                       uint8_t *layer, int W, int H)
 {
@@ -1096,6 +1133,7 @@ bool svg_filter_apply(const SvgFilterEnv *env, const char *list, const float box
     C.env = env;
     C.ax = 0; C.ay = 0; C.aw = W; C.ah = H;
     memcpy(C.box, box, sizeof C.box);
+    t_vpw = env->user_zero ? W : 0; t_vph = env->user_zero ? H : 0;
     C.fs = fs;
     size_t N = (size_t)W * H;
     FImg cur = { img_new(&C), false, true, { 0, 0, (float)W, (float)H }, true };
@@ -1114,11 +1152,28 @@ bool svg_filter_apply(const SvgFilterEnv *env, const char *list, const float box
             size_t l = strlen(q);
             while (l > 0 && (isspace((unsigned char)q[l - 1]) || q[l - 1] == '"' || q[l - 1] == '\'')) l--;
             q[l] = 0;
+            /* (url modifiers after it: cross-origin(), integrity(), referrer-policy(): the URL alone) */
+            const char *mods = "";
+            for (char *e = q; *e; e++) if (*e == '"' || *e == '\'' || isspace((unsigned char)*e)) { *e = 0; mods = e + 1; break; }
             const char *hash = strchr(q, '#');
-            HtmlNode *flt = hash ? html_document_get_element_by_id(env->doc, hash + 1) : NULL;
+            /* (another document's: url(file.svg#id)) */
+            HtmlDocument *xd = NULL;
+            if (hash && hash != q && env->ext_doc && hash - q < 2000) {
+                char u[2048];
+                memcpy(u, q, (size_t)(hash - q));
+                u[hash - q] = 0;
+                xd = env->ext_doc(env->ud, u, mods);
+                if (!xd) continue;
+            }
+            HtmlNode *flt = hash ? html_document_get_element_by_id(xd ? xd : env->doc, hash + 1) : NULL;
             if (!flt || !flt->tag_name || strcasecmp(flt->tag_name, "filter")) continue;   /* (none such: as if none) */
             FImg o = { 0 };
-            if (run_filter(&C, flt, &cur, &o)) {
+            HtmlDocument *doc0 = env->doc;
+            bool ran;
+            if (xd) { ((SvgFilterEnv *)env)->doc = xd; svg_filter_in_ext = true; }
+            ran = run_filter(&C, flt, &cur, &o);
+            if (xd) { ((SvgFilterEnv *)env)->doc = doc0; svg_filter_in_ext = false; }
+            if (ran) {
                 free(cur.p);
                 cur = o;
                 cur.taint = true;

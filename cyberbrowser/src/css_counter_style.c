@@ -45,7 +45,10 @@ typedef struct CStyle {
     bool has_neg2;
     unsigned short used;
     char buf[CS_BUF];
+    char scope[48];                 /* (a shadow tree's rule: its host's selector; "" the document's) */
 } CStyle;
+static __thread char t_cs_scope[48];   /* (the tree scope rules are read into and names looked up from) */
+void cstyle_set_scope(const char *s) { snprintf(t_cs_scope, sizeof t_cs_scope, "%s", s ? s : ""); }
 
 static CStyle g_cs[CS_MAX];
 static int g_n, g_npre;
@@ -161,6 +164,19 @@ static bool read_int(const char **pp, const char *end, long long *v)
         size_t cl = (size_t)(q - p) < sizeof cv - 1 ? (size_t)(q - p) : sizeof cv - 1;
         memcpy(cv, p, cl);
         cv[cl] = 0;
+        /* (font-relative lengths, as the initial font's: absolute for the math) */
+        {
+            char cx[512];
+            size_t o = 0;
+            for (size_t k = 0; cv[k] && o + 8 < sizeof cx; k++) {
+                bool num = k > 0 && (isdigit((unsigned char)cv[k - 1]) || cv[k - 1] == '.');
+                if (num && !strncasecmp(cv + k, "rem", 3) && !isalpha((unsigned char)cv[k + 3])) { memcpy(cx + o, "*16px", 5); o += 5; k += 2; continue; }
+                if (num && !strncasecmp(cv + k, "em", 2) && !isalpha((unsigned char)cv[k + 2])) { memcpy(cx + o, "*16px", 5); o += 5; k += 1; continue; }
+                cx[o++] = cv[k];
+            }
+            cx[o] = 0;
+            if (o < sizeof cv) memcpy(cv, cx, o + 1);
+        }
         double d;
         if (!css_calc_number(cv, &d) || !isfinite(d)) return false;
         *v = (long long)floor(d + 0.5);
@@ -371,8 +387,12 @@ static bool cs_valid(const CStyle *c)
 
 static int cs_find_exact(const char *name)
 {
+    /* (the scope's own rule first, then the document's) */
+    if (t_cs_scope[0])
+        for (int i = g_n - 1; i >= 0; i--)
+            if (!strcmp(g_cs[i].name, name) && !strcmp(g_cs[i].scope, t_cs_scope)) return i;
     for (int i = g_n - 1; i >= 0; i--)
-        if (!strcmp(g_cs[i].name, name)) return i;
+        if (!strcmp(g_cs[i].name, name) && !g_cs[i].scope[0]) return i;
     return -1;
 }
 
@@ -401,6 +421,7 @@ static void cs_rule(const char *name, const char *body, const char *bend, bool p
     CStyle *c = &g_cs[g_n];
     memset(c, 0, sizeof *c);
     snprintf(c->name, sizeof c->name, "%s", name);
+    if (!predefined) snprintf(c->scope, sizeof c->scope, "%s", t_cs_scope);
     c->system = CS_SYMBOLIC;
     c->range_auto = true;
     c->first = 1;
@@ -921,7 +942,15 @@ static void cs_rep(int si, long long v, Out *o, int depth, int *used)
         }
     }
     /* (the fallback, and decimal when that can't either) */
-    int fb = c->fallback[0] ? cs_lookup(c->fallback) : -1;
+    int fb = -1;
+    if (c->fallback[0]) {
+        /* (the name in the scope of the rule that gives it) */
+        char sv[48];
+        memcpy(sv, t_cs_scope, sizeof sv);
+        snprintf(t_cs_scope, sizeof t_cs_scope, "%s", c->scope);
+        fb = cs_lookup(c->fallback);
+        memcpy(t_cs_scope, sv, sizeof sv);
+    }
     if (fb < 0) fb = cs_lookup("decimal");
     if (depth >= 8 || fb == si) fb = cs_lookup("decimal");
     if (fb == si) { o->n = (size_t)snprintf(o->s, o->cap, "%lld", v); return; }

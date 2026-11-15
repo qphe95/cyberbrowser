@@ -70,7 +70,7 @@ static const char k_html_element_js[] =
 "  function focusState(el, on, visible) {\n"
 "    __cyberElState(el, ST_FOCUS, on);\n"
 "    __cyberElState(el, ST_VISIBLE, !!(on && visible));\n"
-"    for (var a = el; a; a = a.parentNode || a.host) if (a.nodeType === 1) __cyberElState(a, ST_WITHIN, on);\n"
+"    for (var a = el; a; a = a.assignedSlot || a.parentNode || a.host) if (a.nodeType === 1) __cyberElState(a, ST_WITHIN, on);\n"
 "  }\n"
 "  function takesText(el) {\n"
 "    var t = el.localName;\n"

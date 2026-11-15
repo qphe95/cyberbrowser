@@ -97,6 +97,8 @@ typedef struct ImageEntry {
     size_t nbytes;
     ImageFormat fmt;
     unsigned char orient;               /* (its EXIF orientation, 1..8; 0 none) */
+    char *acao;                         /* (its response's Access-Control-Allow-Origin, NULL none) */
+    bool acac;                          /* (and Access-Control-Allow-Credentials: true) */
 
     /* Main-thread notification state (guarded by the cache mutex). */
     ImageLoadCallback callback;
@@ -689,7 +691,25 @@ static bool read_file(const char *path, uint8_t **out, size_t *len)
     return true;
 }
 
-static bool http_fetch(const char *url, uint8_t **out, size_t *len)
+/* (a response header's value, malloc'ed; NULL none) */
+static char *ic_header(const char *h, size_t n, const char *name)
+{
+    size_t nl = strlen(name);
+    for (size_t i = 0; h && i + nl < n; i++) {
+        if ((i == 0 || h[i - 1] == '\n') && !strncasecmp(h + i, name, nl) && h[i + nl] == ':') {
+            const char *v = h + i + nl + 1;
+            while (*v == ' ' || *v == '\t') v++;
+            size_t l = 0;
+            while (v + l < h + n && v[l] != '\r' && v[l] != '\n') l++;
+            char *r = (char *)malloc(l + 1);
+            if (r) { memcpy(r, v, l); r[l] = 0; }
+            return r;
+        }
+    }
+    return NULL;
+}
+
+static bool http_fetch(const char *url, uint8_t **out, size_t *len, ImageEntry *e)
 {
     HttpBuffer buf = { 0 };
     char err[256] = { 0 };
@@ -716,6 +736,13 @@ static bool http_fetch(const char *url, uint8_t **out, size_t *len)
         LOG_ERROR("Failed to download image %s: %s", url, err);
         http_free_buffer(&buf);
         return false;
+    }
+    if (buf.headers && e) {
+        free(e->acao);
+        e->acao = ic_header(buf.headers, buf.headers_size, "access-control-allow-origin");
+        char *cr = ic_header(buf.headers, buf.headers_size, "access-control-allow-credentials");
+        e->acac = cr && !strcasecmp(cr, "true");
+        free(cr);
     }
     if (buf.headers) { free(buf.headers); buf.headers = NULL; }
     *out = (uint8_t *)buf.data;
@@ -792,7 +819,7 @@ static bool fetch_entry(ImageEntry *e)
         e->bytes = data_url_decode(src, &e->nbytes);
         return e->bytes != NULL;
     }
-    if (url_is_network_url(src)) return http_fetch(src, &e->bytes, &e->nbytes);
+    if (url_is_network_url(src)) return http_fetch(src, &e->bytes, &e->nbytes, e);
     return g_local_files && read_file(src, &e->bytes, &e->nbytes);
 }
 
@@ -1099,6 +1126,7 @@ void image_cache_destroy(ImageCache *c)
         ImageEntry *e = c->entries[k];
         pixels_free(atomic_load(&e->pixels));
         free(e->bytes);
+        free(e->acao);
         free(e->source);
         free(e);
     }
@@ -1237,6 +1265,21 @@ int image_cache_anim_frames(ImageCache *c, const char *url_or_path, int *delays,
     pthread_mutex_unlock(&mu);
     for (int q = 0; q < n && q < cap && q < ND; q++) delays[q] = d[q];
     return n;
+}
+
+bool image_cache_cors(ImageCache *c, const char *url_or_path, char *acao, size_t cap, bool *acac)
+{
+    if (!c || !url_or_path || !url_or_path[0]) return false;
+    bool ok = false;
+    pthread_mutex_lock(&c->mu);
+    ImageEntry *e = find_locked(c, url_or_path, hash_str(url_or_path));
+    if (e && atomic_load(&e->state) >= ST_SIZED) {
+        ok = true;
+        snprintf(acao, cap, "%s", e->acao ? e->acao : "");
+        *acac = e->acac;
+    }
+    pthread_mutex_unlock(&c->mu);
+    return ok;
 }
 
 bool image_cache_bytes(ImageCache *c, const char *url_or_path, const uint8_t **out, size_t *n)

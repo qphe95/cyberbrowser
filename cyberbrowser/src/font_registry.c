@@ -53,6 +53,7 @@ typedef struct {
     float smin, smax;             /* font-stretch, percent */
     unsigned char autod;          /* (descriptors auto: 1 weight, 2 stretch, 4 style; a variable face's axes then) */
     char dfvs[64];                /* (its font-variation-settings descriptor, "tag=value;...") */
+    char dffs[128];               /* (its font-feature-settings descriptor, as written) */
     uint32_t *ranges;             /* [lo, hi] pairs; NULL = everything */
     int nranges;
     int state;
@@ -785,6 +786,24 @@ bool font_registry_family_has_axis(const char *family_list, uint32_t tag)
     pthread_mutex_unlock(&g_mu);
     return r;
 }
+/* (the font-feature-settings descriptor of the first family's web face that has one, into buf; false none) */
+bool font_registry_family_ffs(const char *family_list, char *buf, size_t cap)
+{
+    if (!family_list || !cap) return false;
+    const char *p = family_list;
+    while (*p == ' ' || *p == '"' || *p == '\'' || *p == '\x02') p++;
+    const char *e = p;
+    while (*e && *e != ',' && *e != '"' && *e != '\'') e++;
+    while (e > p && e[-1] == ' ') e--;
+    char fam[FAMILY_MAX];
+    lower_copy(fam, sizeof fam, p, (size_t)(e - p));
+    bool r = false;
+    pthread_mutex_lock(&g_mu);
+    for (int i = 0; i < g_nweb && !r; i++)
+        if (g_web[i].dffs[0] && !strcmp(g_web[i].family, fam)) { snprintf(buf, cap, "%s", g_web[i].dffs); r = true; }
+    pthread_mutex_unlock(&g_mu);
+    return r;
+}
 static __thread const char *t_resolve_fvs;
 int font_registry_resolve_style_var(const char *family_list, int weight, bool italic, bool oblique, float angle,
                                     float stretch, const char *fvs)
@@ -1152,6 +1171,10 @@ static void add_face_rule(const char *body, const char *end, const char *base)
                 w.smin = (float)(a < b ? a : b);
                 w.smax = (float)(a < b ? b : a);
             }
+        } else if (nl == 21 && strncasecmp(ns, "font-feature-settings", 21) == 0) {
+            size_t l_ = (size_t)(ve - vs) < sizeof w.dffs - 1 ? (size_t)(ve - vs) : sizeof w.dffs - 1;
+            memcpy(w.dffs, vs, l_);
+            w.dffs[l_] = 0;
         } else if (nl == 23 && strncasecmp(ns, "font-variation-settings", 23) == 0) {
             /* ("tag" number, ...: as the property) */
             size_t o = 0;
@@ -1183,7 +1206,7 @@ static void add_face_rule(const char *body, const char *end, const char *base)
         } else if (nl == 11 && !strncasecmp(ns, "size-adjust", 11)) {
             char *e1 = NULL;
             double v = strtod(vs, &e1);
-            (void)v;   /* (not applied yet: glyphs drawn ~10px below the scaled line though the line box agrees; font-size-adjust with it doubles up) */
+            (void)v;   /* (not applied: with font-size-adjust the glyphs land ~9px low (size-adjust-02); without it the em-box shift in ifc paint is right) */
         }
     }
     if (!w.family[0] || !src) { free(src); free(w.ranges); return; }

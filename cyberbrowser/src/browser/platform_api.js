@@ -2148,7 +2148,8 @@
             if (cs.display === 'none' || cs.display === 'contents') continue;
             seen[n] = true;
             var r = el.getBoundingClientRect();
-            var ent = { name: n, el: el, cls: vtClasses(el), x: r.left, y: r.top, w: r.width, h: r.height, snap: vtSnap(el) };
+            var ent = { name: n, el: el, cls: vtClasses(el), x: r.left, y: r.top, w: r.width, h: r.height, snap: vtSnap(el), vert: /^(vertical|sideways)/.test(String(cs.writingMode || '')),
+                        bw: [cs.borderTopWidth, cs.borderRightWidth, cs.borderBottomWidth, cs.borderLeftWidth].map(function (v) { return parseFloat(v) || 0; }) };
             /* (transformed: the border box's size, placed so its transform takes it where it shows) */
             var tm = /^matrix\(([^)]*)\)$/.exec(String(cs.transform || '').trim());
             if (tm && typeof el.offsetWidth === 'number') {
@@ -2162,6 +2163,15 @@
                     /* (about the group's centre, its transform-origin) */
                     ent.m = 'translate(' + (ox - bw / 2) + 'px,' + (oy - bh / 2) + 'px) matrix(' + mv.join(',') + ') translate(' + (bw / 2 - ox) + 'px,' + (bh / 2 - oy) + 'px)';
                 }
+            } else if (!tm && typeof el.offsetWidth === 'number' && el.offsetWidth > 0 && el.offsetHeight > 0 &&
+                       (Math.abs(r.width - el.offsetWidth) > 0.5 || Math.abs(r.height - el.offsetHeight) > 0.5) &&
+                       (function () { for (var a = el.parentElement; a; a = a.parentElement) { var t = global.getComputedStyle(a).transform; if (t && t !== 'none') return true; } return false; })()) {
+                /* (an ancestor's scale: its border box, scaled about its centre to where it shows) */
+                var bw2 = el.offsetWidth, bh2 = el.offsetHeight, sx2 = r.width / bw2, sy2 = r.height / bh2;
+                ent.x = r.left + r.width / 2 - bw2 / 2;
+                ent.y = r.top + r.height / 2 - bh2 / 2;
+                ent.w = bw2; ent.h = bh2;
+                ent.m = 'matrix(' + sx2 + ',0,0,' + sy2 + ',0,0)';
             }
             out.push(ent);
         }
@@ -2360,7 +2370,15 @@
         });
         var gdivs = {};
         /* (the overlay's elements by their pseudo-elements: what animate() with pseudoElement drives) */
-        var vtEls = {}, vtAnims = [], vtFades = [], vtRunEls = [];
+        var vtEls = {}, vtAnims = [], vtFades = [], vtRunEls = [], vtTracked = [];
+        /* (each pseudo's stand-in: its style before the page's rules, and the rules it took) */
+        var vtTrack = function (el, kind, n, d) {
+            var base = {};
+            for (var i = 0; i < el.style.length; i++) { var p = el.style[i]; base[p] = el.style.getPropertyValue(p); }
+            var last = {};
+            for (var q in d) last[q] = d[q];
+            vtTracked.push({ el: el, kind: kind, n: n, base: base, last: last });
+        };
         /* (the images' UA fades as animations a page can seek: currentTime the opacity along it) */
         Object.defineProperty(global, '__cyberVtFades', { configurable: true, value: function () {
             var out = vtFades.filter(function (f) { return f._live(); });
@@ -2430,12 +2448,71 @@
             var g = doc.createElement('div');
             g.setAttribute('style', 'position:absolute;left:0;top:0;margin:0;padding:0;border:0;box-sizing:content-box;width:' + geo.w + 'px;height:' + geo.h +
                                     'px;transform:translate(' + (geo.x - sr.left) + 'px,' + (geo.y - sr.top) + 'px)' + (geo.m ? ' ' + geo.m : ''));
+            vtTrack(g, 'group', n, f.g);
             vtApply(g, f.g);
+            /* (the group's UA animation, old geometry to new, as one a page can seek: currentTime puts it there) */
+            if (start && e.old && e.nu && f.ga.dur > 0 && !/width|height|transform/.test(Object.keys(f.g).join(' '))) {
+                (function (g, eo, en, durMs, tf, name) {
+                    var cur = 0;
+                    var ease = function (x) {
+                        var m = /steps\(\s*(\d+)\s*(?:,\s*([a-z-]+))?\s*\)/.exec(tf);
+                        if (m) {
+                            var n = +m[1], pos = m[2] || 'end';
+                            if (pos === 'jump-none') return n > 1 ? Math.min(1, Math.floor(x * n) / (n - 1)) : (x >= 1 ? 1 : 0);
+                            if (pos === 'start' || pos === 'jump-start') return Math.min(1, Math.ceil(x * n) / n);
+                            if (pos === 'jump-both') return Math.min(1, (Math.floor(x * n) + 1) / (n + 1));
+                            return Math.min(1, Math.floor(x * n) / n);
+                        }
+                        if (/step-start/.test(tf)) return 1;
+                        if (/step-end/.test(tf)) return x >= 1 ? 1 : 0;
+                        if (/linear/.test(tf)) return x;
+                        var b = /cubic-bezier\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)/.exec(tf);
+                        var p = b ? [+b[1], +b[2], +b[3], +b[4]] : /ease-in-out/.test(tf) ? [0.42, 0, 0.58, 1] : /ease-in/.test(tf) ? [0.42, 0, 1, 1] : /ease-out/.test(tf) ? [0, 0, 0.58, 1] : [0.25, 0.1, 0.25, 1];
+                        var lo = 0, hi = 1, t = x;
+                        for (var it = 0; it < 40; it++) {
+                            t = (lo + hi) / 2;
+                            var bx = 3 * p[0] * t * (1 - t) * (1 - t) + 3 * p[2] * t * t * (1 - t) + t * t * t;
+                            if (bx < x) lo = t; else hi = t;
+                        }
+                        return 3 * p[1] * t * (1 - t) * (1 - t) + 3 * p[3] * t * t * (1 - t) + t * t * t;
+                    };
+                    var put = function (k) {
+                        var mx = function (a, b) { return a + (b - a) * k; };
+                        g.style.setProperty('width', mx(eo.w, en.w) + 'px');
+                        g.style.setProperty('height', mx(eo.h, en.h) + 'px');
+                        var mm = k >= 1 ? en.m : eo.m;
+                        g.style.setProperty('transform', 'translate(' + (mx(eo.x, en.x) - sr.left) + 'px,' + (mx(eo.y, en.y) - sr.top) + 'px)' + (mm ? ' ' + mm : ''));
+                        /* (the images in it: to its width) */
+                        var gwk = mx(eo.w, en.w);
+                        g.querySelectorAll('*').forEach(function (sn) {
+                            if (!sn.__cyberSnapW) return;
+                            var sk = gwk / sn.__cyberSnapW;
+                            if (Math.abs(sk - 1) > 0.001) { sn.style.setProperty('transform', 'scale(' + sk + ')'); sn.style.setProperty('transform-origin', '0 0'); }
+                            else sn.style.removeProperty('transform');
+                        });
+                    };
+                    vtFades.push({
+                        _live: function () { return !!g.isConnected; },
+                        get currentTime() { return cur; },
+                        set currentTime(t) { cur = Math.max(0, Math.min(durMs, +t || 0)); put(ease(cur / durMs)); },
+                        playState: 'paused',
+                        pause: function () { this.playState = 'paused'; },
+                        play: function () { this.playState = 'running'; },
+                        finish: function () { this.currentTime = durMs; this.playState = 'finished'; },
+                        cancel: function () { },
+                        effect: { pseudoElement: '::view-transition-group(' + name + ')', getTiming: function () { return { duration: durMs }; },
+                                  getComputedTiming: function () { return { duration: durMs, progress: cur / durMs }; } }
+                    });
+                })(g, e.old, e.nu, f.ga.dur * 1000, String(f.g['animation-timing-function'] || '') + ' ' + String(f.g['animation'] || ''), n);
+            }
             /* (the group's width after its rules: what the images span) */
             var gw = /px\s*$/.test(g.style.width) ? parseFloat(g.style.width) : geo.w;
             if (!(gw >= 0)) gw = geo.w;
+            var gh = /px\s*$/.test(g.style.height) ? parseFloat(g.style.height) : geo.h;
+            if (!(gh >= 0)) gh = geo.h;
             var ip = doc.createElement('div');
             ip.setAttribute('style', 'position:absolute;left:0;top:0;width:100%;height:100%');
+            vtTrack(ip, 'image-pair', n, f.ip);
             vtApply(ip, f.ip);
             g.appendChild(ip);
             vtEls['group:' + n] = g;
@@ -2447,6 +2524,9 @@
                 w.setAttribute('style', 'position:absolute;left:0;top:0;width:100%;height:100%;overflow:visible');
                 var o = d.opacity != null && d.opacity !== '' ? parseFloat(d.opacity) : 1;
                 if (!a.none && a.long && !a.custom) o = op0;
+                /* (the UA fade already over, the transition going on for others: it fills forwards, the old image out) */
+                else if (!a.none && !a.custom && !a.long && kind === 'old' && !(d.opacity != null && d.opacity !== '')) o = 0;
+                vtTrack(w, kind, n, d);
                 vtApply(w, d);
                 w.style.setProperty('opacity', String(o));
                 /* (its own keyframes, paused: run on it, for the page to seek) */
@@ -2472,12 +2552,39 @@
                     };
                     vtFades.push(fade);
                 }
-                var snap = s.snap.cloneNode(true), sc = s.w > 0 ? gw / s.w : 1;
+                /* (its inline size the group's, in its own writing mode: a vertical one by the height) */
+                var snap = s.snap.cloneNode(true), sc = s.vert && s.h > 0 ? gh / s.h : s.w > 0 ? gw / s.w : 1;
                 /* (hidden with its group, image pair or itself) */
                 var hid = [f.g, f.ip, d].some(function (x) { return x && String(x.visibility || '').trim() === 'hidden'; });
                 if (hid) snap.style.setProperty('visibility', 'hidden');
                 var fit = d['object-fit'] ? String(d['object-fit']).trim() : '';
-                if (fit === 'none' && s.w > 0) {
+                /* (object-view-box: inset(): the part of the snapshot taken as the image, its size the natural one) */
+                var ovbm = d['object-view-box'] ? /^inset\(([^)]*)\)$/.exec(String(d['object-view-box']).trim()) : null;
+                if (ovbm && s.w > 0 && s.h > 0) {
+                    var iv = ovbm[1].trim().split(/\s+/).map(function (t, k) { var v = parseFloat(t); return isNaN(v) ? 0 : /%$/.test(t) ? v / 100 : v; });
+                    var raw = ovbm[1].trim().split(/\s+/);
+                    if (iv.length === 1) iv = [iv[0], iv[0], iv[0], iv[0]], raw = [raw[0], raw[0], raw[0], raw[0]];
+                    else if (iv.length === 2) iv = [iv[0], iv[1], iv[0], iv[1]], raw = [raw[0], raw[1], raw[0], raw[1]];
+                    else if (iv.length === 3) iv = [iv[0], iv[1], iv[2], iv[1]], raw = [raw[0], raw[1], raw[2], raw[1]];
+                    var px = function (k) { return /%$/.test(raw[k]) ? iv[k] * (k % 2 ? s.w : s.h) : iv[k]; };
+                    var vt = px(0), vr = px(1), vb = px(2), vl = px(3), vw = s.w - vl - vr, vh = s.h - vt - vb;
+                    if (vw > 0 && vh > 0) {
+                        var bw = gw, bh2 = w.offsetHeight > 0 ? w.offsetHeight : s.h * gw / s.w;
+                        var ox = 0, oy = 0, kx = 1, ky = 1;
+                        if (fit === 'none') {
+                            var ops2 = d['object-position'] ? String(d['object-position']).trim().split(/\s+/) : [];
+                            var pv = function (t, room) { if (t === 'left' || t === 'top') return 0; if (t === 'right' || t === 'bottom') return room; if (!t || t === 'center') return room / 2; if (/%$/.test(t)) return parseFloat(t) / 100 * room; var v = parseFloat(t); return isNaN(v) ? room / 2 : v; };
+                            ox = pv(ops2[0], bw - vw); oy = pv(ops2[1], bh2 - vh);
+                        } else { kx = bw / vw; ky = bh2 / vh; }
+                        snap.style.setProperty('transform', 'translate(' + (ox - vl * kx) + 'px,' + (oy - vt * ky) + 'px) scale(' + kx + ',' + ky + ')');
+                        snap.style.setProperty('transform-origin', '0 0');
+                        /* (cut to its box only by its own paint containment or overflow) */
+                        if (/paint|strict|content/.test(String(d.contain || '')) || /hidden|clip|scroll|auto/.test(String(d.overflow || ''))) w.style.setProperty('overflow', 'clip');
+                        fit = 'ovb';
+                    }
+                }
+                if (fit === 'ovb') { }
+                else if (fit === 'none' && s.w > 0) {
                     /* (its own size, centred in the box its width gives it) */
                     var bh = s.h * gw / s.w, opx = [0.5, 0], opy = [0.5, 0];
                     var ops = d['object-position'] ? String(d['object-position']).trim().split(/\s+/) : [];
@@ -2493,6 +2600,8 @@
                     if (ops.length >= 2) opy = opv(ops[1]);
                     snap.style.setProperty('transform', 'translate(' + (opx[0] * (gw - s.w) + opx[1]) + 'px,' + (opy[0] * (bh - s.h) + opy[1]) + 'px)');
                 } else if (Math.abs(sc - 1) > 0.001) { snap.style.setProperty('transform', 'scale(' + sc + ')'); snap.style.setProperty('transform-origin', '0 0'); }
+                /* (its own width: scaled again when a seek changes its group's) */
+                if (fit !== 'none' && fit !== 'ovb' && s.w > 0) Object.defineProperty(snap, '__cyberSnapW', { value: s.w, configurable: true });
                 w.appendChild(snap);
                 ip.appendChild(w);
             };
@@ -2504,11 +2613,14 @@
                 /* (inside its parent group's ::view-transition-group-children, placed from that group) */
                 if (!pg.kids) {
                     pg.kids = doc.createElement('div');
-                    pg.kids.setAttribute('style', 'position:absolute;left:0;top:0;width:100%;height:100%');
+                    /* (over its padding box: inside the borders the element had) */
+                    var pbw = ((byName[pn].nu || byName[pn].old) || {}).bw || [0, 0, 0, 0];
+                    pg.kids.setAttribute('style', 'position:absolute;left:' + pbw[3] + 'px;top:' + pbw[0] + 'px;width:calc(100% - ' + (pbw[1] + pbw[3]) + 'px);height:calc(100% - ' + (pbw[0] + pbw[2]) + 'px)');
                     vtApply(pg.kids, vtDecls(rules, 'group-children', pn, (byName[pn].nu || byName[pn].old).cls || []));
                     pg.g.appendChild(pg.kids);
                 }
-                g.style.setProperty('transform', 'translate(' + (geo.x - pg.geo.x) + 'px,' + (geo.y - pg.geo.y) + 'px)' + (geo.m ? ' ' + geo.m : ''));
+                var pbw2 = ((byName[pn].nu || byName[pn].old) || {}).bw || [0, 0, 0, 0];
+                g.style.setProperty('transform', 'translate(' + (geo.x - pg.geo.x - pbw2[3]) + 'px,' + (geo.y - pg.geo.y - pbw2[0]) + 'px)' + (geo.m ? ' ' + geo.m : ''));
                 pg.kids.appendChild(g);
             } else ov.appendChild(g);
         });
@@ -2519,7 +2631,47 @@
         var hostOk = false;
         try { host.attachShadow({ mode: 'closed' }).appendChild(ov); hostOk = true; } catch (e) { hostOk = false; }
         root.appendChild(hostOk ? host : ov);
+        /* (the page's ::view-transition-* rules changing while it shows, by a class on the root: each pseudo's styles follow) */
+        var vtOn = true, vtMo = null;
+        (function () {
+            var sig = function (rl) { return rl.map(function (r) { return r.kind + '|' + r.name + '|' + r.style.cssText; }).join('\n'); };
+            var sig0 = sig(rules);
+            var check = function () {
+                if (!vtOn) return;
+                var r2;
+                try { r2 = vtRules(doc, scope); } catch (e) { return; }
+                var s2 = sig(r2);
+                if (s2 === sig0) return;
+                sig0 = s2;
+                vtTracked.forEach(function (t) {
+                    var e = byName[t.n] || { nu: null, old: null };
+                    var cl = (e.nu || e.old || {}).cls || [], ln = t.n === 'root' ? rootNm : t.n;
+                    var d2 = vtDecls(r2, t.kind, ln, cl);
+                    for (var p in t.last) if (!(p in d2) && !VT_SKIP.test(p)) {
+                        if (p in t.base) t.el.style.setProperty(p, t.base[p]); else t.el.style.removeProperty(p);
+                    }
+                    var ch = {};
+                    for (var q in d2) if (t.last[q] !== d2[q]) ch[q] = d2[q];
+                    vtApply(t.el, ch);
+                    /* (visibility: the snapshots under it carry their own, set the same) */
+                    if ('visibility' in ch || ('visibility' in t.last && !('visibility' in d2))) {
+                        var vv = d2.visibility || 'visible';
+                        t.el.querySelectorAll('*').forEach(function (x) { if (x.style.getPropertyValue('visibility')) x.style.setProperty('visibility', vv); });
+                    }
+                    t.last = d2;
+                });
+            };
+            try {
+                vtMo = new global.MutationObserver(check);
+                vtMo.observe(doc.documentElement, { attributes: true, attributeFilter: ['class', 'style'] });
+            } catch (e) { vtMo = null; }
+            /* (and each frame: a sheet changed through the CSSOM, adopted ones) */
+            var fr = function () { if (!vtOn) return; check(); global.requestAnimationFrame(fr); };
+            global.requestAnimationFrame(fr);
+        })();
         var undo = function () {
+            vtOn = false;
+            if (vtMo) try { vtMo.disconnect(); } catch (e) { }
             if (host.parentNode) host.parentNode.removeChild(host);
             if (ov.parentNode) ov.parentNode.removeChild(ov);
             hidden.forEach(function (h) { if (h[1]) h[0].style.setProperty('visibility', h[1], h[2]); else h[0].style.removeProperty('visibility'); });

@@ -1305,7 +1305,15 @@ static __thread char t_cc_prop[4][48], t_cc_val[4][256];
 static __thread bool t_cc_again;
 static __thread double t_cc_pw, t_cc_vw;
 static __thread const char *t_cc_base;
+static bool css_parse_color0(const char *value, double *r, double *g, double *b, double *a);
+/* (the alpha in 8 bits, as browsers keep colors: blends round as theirs) */
 static bool css_parse_color(const char *value, double *r, double *g, double *b, double *a)
+{
+    bool ok = css_parse_color0(value, r, g, b, a);
+    if (0 && ok && *a > 0.0 && *a < 1.0) *a = round(*a * 255.0) / 255.0;
+    return ok;
+}
+static bool css_parse_color0(const char *value, double *r, double *g, double *b, double *a)
 {
     *r = *g = *b = 0.0; *a = 1.0;
     if (!value || !*value) return false;
@@ -1815,6 +1823,21 @@ static void layout_blockify(LayoutContext *ctx)
         LayoutStyle *ts = ctx->boxes[i].s;
         if (ts && ts->border_collapse && ts->table_role && ts->table_role != 5 && !ts->table_caption)
             { ts->radius[0] = ts->radius[1] = ts->radius[2] = ts->radius[3] = 0.0f; ts->radius_v_set = 0; }
+    }
+    /* (a replaced element with a table-internal display: an atomic inline, in an anonymous cell as any) */
+    for (int i = 0; i < ctx->tree.count; i++) {
+        LayoutStyle *rs_ = ctx->boxes[i].s;
+        if (!rs_ || rs_->table_role < 2 || rs_->float_side || rs_->position == CSS_POSITION_ABSOLUTE || rs_->position == CSS_POSITION_FIXED) continue;
+        HtmlNode *rn_ = css_layout_box_node(ctx, i);
+        if (!rn_ || rn_->type != HTML_NODE_ELEMENT || !rn_->tag_name) continue;
+        static const char *const rep_[] = { "img", "video", "canvas", "iframe", "embed", "object", NULL };
+        bool r_ = false;
+        for (int k = 0; rep_[k] && !r_; k++) r_ = !strcasecmp(rn_->tag_name, rep_[k]);
+        if (!r_) continue;
+        rs_->display = CSS_DISPLAY_INLINE;
+        rs_->table_role = 0;
+        rs_->table_caption = 0;
+        rs_->table_group = 0;
     }
     /* (layout or paint containment: an independent formatting context, so not a subgrid, CSS Grid 2 9) */
     for (int i = 0; i < ctx->tree.count; i++) {
@@ -2843,6 +2866,10 @@ static void layout_parse_mask_image(LayoutBox *box, const char *value, const cha
                 box->s->mask_image = layout_intern(abs, strlen(abs));
                 box->s->mask_kind = box->s->mask_image ? 1 : 0;
                 free(abs);
+            } else if (url[0] != '#') {
+                /* (a URL that resolves to nothing: an image that never comes, the box masked away) */
+                box->s->mask_image = layout_intern(url, strlen(url));
+                box->s->mask_kind = box->s->mask_image ? 1 : 0;
             }
         }
     }
@@ -4287,14 +4314,91 @@ static void layout_td_parts(LayoutStyle *s, const char *value, int which)
     }
 }
 
+/* (cross-fade() of colors only (image(<color>) too): the one color they make, as
+ * rgba into rep; percentages as css-images-4 shares them out, mixed premultiplied,
+ * a sum under 100% fading it. False when an argument isn't a color.) */
+static bool layout_cross_fade_colors(const char *const *args, const size_t *alen, int na, char *rep, size_t cap)
+{
+    double pct[8], col[8][4], given = 0.0;
+    int nun = 0;
+    if (na < 1 || na > 8) return false;
+    for (int k = 0; k < na; k++) {
+        char t[400];
+        if (alen[k] == 0 || alen[k] >= sizeof t) return false;
+        memcpy(t, args[k], alen[k]); t[alen[k]] = 0;
+        /* (a percentage first or last, at depth 0) */
+        pct[k] = -1.0;
+        char *s = t;
+        while (isspace((unsigned char)*s)) s++;
+        char *e;
+        if (isdigit((unsigned char)*s) || *s == '.') {
+            double v = strtod(s, &e);
+            if (*e != '%') return false;
+            pct[k] = v; s = e + 1;
+        } else {
+            size_t L = strlen(s);
+            while (L && isspace((unsigned char)s[L - 1])) s[--L] = 0;
+            if (L && s[L - 1] == '%') {
+                char *q = s + L - 1;
+                while (q > s && (isdigit((unsigned char)q[-1]) || q[-1] == '.')) q--;
+                if (q > s && isspace((unsigned char)q[-1])) { pct[k] = atof(q); *q = 0; }
+            }
+        }
+        while (isspace((unsigned char)*s)) s++;
+        size_t L = strlen(s);
+        while (L && isspace((unsigned char)s[L - 1])) s[--L] = 0;
+        if (!strncasecmp(s, "image(", 6) && L > 7 && s[L - 1] == ')') { s[L - 1] = 0; s += 6; }
+        if (strstr(s, "url(") || strstr(s, "gradient(") || !css_color_parse(s, col[k])) return false;
+        if (pct[k] >= 0.0) given += pct[k]; else nun++;
+    }
+    for (int k = 0; k < na; k++) if (pct[k] < 0.0) pct[k] = nun ? (given < 100.0 ? (100.0 - given) / nun : 0.0) : 0.0;
+    double sum = 0.0;
+    for (int k = 0; k < na; k++) sum += pct[k];
+    if (sum <= 0.0) return snprintf(rep, cap, "linear-gradient(transparent, transparent)") > 0;
+    double norm = sum > 100.0 ? sum : 100.0;
+    double r = 0, g = 0, b = 0, a = 0;
+    for (int k = 0; k < na; k++) {
+        /* (each faded to its share, drawn over the ones before, as browsers composite it) */
+        double w = pct[k] / norm, ak = w * col[k][3];
+        r = col[k][0] * ak + r * (1.0 - ak); g = col[k][1] * ak + g * (1.0 - ak); b = col[k][2] * ak + b * (1.0 - ak);
+        a = ak + a * (1.0 - ak);
+    }
+    if (a > 0.0) { r /= a; g /= a; b /= a; }
+    char c[96];
+    snprintf(c, sizeof c, "rgba(%.4f, %.4f, %.4f, %.5f)", r, g, b, a);   /* (channels 0..255 as css_color_parse gives them) */
+    return snprintf(rep, cap, "linear-gradient(%s, %s)", c, c) > 0;
+}
+
 /* (image(<color>): a gradient of the one color; image("url") alone: the url; light-dark()
- * of images: the light one. Into out; false when there is none of them.) */
+ * of images: the light one; cross-fade() of colors: theirs mixed. Into out; false when there is none of them.) */
 static bool layout_image_fn_rewrite(const char *v, char *out, size_t cap)
 {
     bool changed = false;
     size_t o = 0;
     for (const char *p = v; *p;) {
         bool word_start = p == v || !(isalnum((unsigned char)p[-1]) || p[-1] == '-');
+        if (word_start && !strncasecmp(p, "cross-fade(", 11)) {
+            const char *a = p + 11, *args[8];
+            size_t alen[8];
+            int na = 0, dp = 0;
+            const char *st = a, *q = a;
+            for (; *q; q++) {
+                if (*q == '(') dp++;
+                else if (*q == ')') { if (dp == 0) break; dp--; }
+                else if (*q == ',' && dp == 0 && na < 7) { args[na] = st; alen[na++] = (size_t)(q - st); st = q + 1; }
+            }
+            if (*q == ')') {
+                args[na] = st; alen[na++] = (size_t)(q - st);
+                char rep[256];
+                if (layout_cross_fade_colors(args, alen, na, rep, sizeof rep) && o + strlen(rep) + 1 < cap) {
+                    memcpy(out + o, rep, strlen(rep));
+                    o += strlen(rep);
+                    p = q + 1;
+                    changed = true;
+                    continue;
+                }
+            }
+        }
         bool img = word_start && !strncasecmp(p, "image(", 6);
         bool ld = word_start && !strncasecmp(p, "light-dark(", 11);
         if (img || ld) {
@@ -4365,6 +4469,14 @@ static void layout_apply_declaration_in(LayoutBox *box, const CssDeclaration *de
     const char *prop = decl->property;
     const char *value = decl->value;
     if (!prop || !value) return;
+    /* (font-variant-emoji: text, emoji or unicode presentation for emoji characters) */
+    if ((prop[0] == 'f' || prop[0] == 'F') && !strcasecmp(prop, "font-variant-emoji")) {
+        const char *v = value;
+        while (isspace((unsigned char)*v)) v++;
+        int k = !strncasecmp(v, "normal", 6) ? 0 : !strncasecmp(v, "text", 4) ? 1 : !strncasecmp(v, "emoji", 5) ? 2 : !strncasecmp(v, "unicode", 7) ? 3 : -1;
+        if (k >= 0) { box->s->fv_emoji = (unsigned char)k; box->s->fv_emoji_set = 1; }
+        return;
+    }
     /* (min-size, max-size: width then height, one value both) */
     if ((prop[0] == 'm' || prop[0] == 'M') && (!strcasecmp(prop, "min-size") || !strcasecmp(prop, "max-size"))) {
         char a[256], b[256];
@@ -4388,7 +4500,7 @@ static void layout_apply_declaration_in(LayoutBox *box, const CssDeclaration *de
         return;
     }
     /* (image() and light-dark() of images: as the images they stand for) */
-    if ((prop[0] == 'b' || prop[0] == 'm' || prop[0] == 'l' || prop[0] == '-') && (strstr(value, "image(") || strstr(value, "light-dark(")) &&
+    if ((prop[0] == 'b' || prop[0] == 'm' || prop[0] == 'l' || prop[0] == '-') && (strstr(value, "image(") || strstr(value, "light-dark(") || strstr(value, "cross-fade(")) &&
         (!strncasecmp(prop, "background", 10) || !strncasecmp(prop, "mask", 4) || !strncasecmp(prop, "-webkit-mask", 12) ||
          !strncasecmp(prop, "border-image", 12) || !strcasecmp(prop, "list-style-image") || !strcasecmp(prop, "list-style"))) {
         size_t vl = strlen(value);
@@ -4699,6 +4811,15 @@ static void layout_apply_declaration_in(LayoutBox *box, const CssDeclaration *de
             while (l && isspace((unsigned char)nm[l - 1])) l--;
             box->s->container_name = l && strncasecmp(nm, "none", l) ? layout_intern(nm, l) : NULL;
         } else if (!strcasecmp(prop, "container")) box->s->container_name = NULL;
+    }
+    /* (a view-transition-name: a stacking context of its own) */
+    if ((prop[0] == 'v' || prop[0] == 'V') && !strcasecmp(prop, "view-transition-name")) {
+        const char *v = value;
+        while (isspace((unsigned char)*v)) v++;
+        bool named = *v && strncasecmp(v, "none", 4) && strncasecmp(v, "initial", 7) && strncasecmp(v, "unset", 5);
+        if (named && !box->s->wc_sc) box->s->wc_sc = 4;
+        else if (!named && box->s->wc_sc == 4) box->s->wc_sc = 0;
+        return;
     }
     /* (these make a box the containing block of what is positioned inside it) */
     {
@@ -5412,6 +5533,7 @@ static void layout_apply_declaration_in(LayoutBox *box, const CssDeclaration *de
     }
     if (prop[0] == 't' && !strcasecmp(prop, "text-underline-position")) {
         box->s->ul_under = strstr(value, "under") != NULL;
+        box->s->ul_ff = strstr(value, "from-font") != NULL;
         box->s->ul_right = strstr(value, "right") != NULL;
         box->s->ul_pos_set = strcasecmp(value, "inherit") && strcasecmp(value, "unset");
         return;
@@ -8491,6 +8613,32 @@ static char* css_var_subst(const char *value, const CssCustomProps *props)
             if (!name) break;
         }
 
+        /* (escapes in the name: the characters they stand for, as the declaration's name is kept) */
+        if (name && strchr(name, '\\')) {
+            size_t nl3 = strlen(name);
+            char *un = (char *)malloc(nl3 * 4 + 1);
+            if (un) {
+                size_t o = 0;
+                for (size_t k = 0; k < nl3;) {
+                    if (name[k] != '\\' || k + 1 >= nl3) { un[o++] = name[k++]; continue; }
+                    k++;
+                    if (isxdigit((unsigned char)name[k])) {
+                        uint32_t cp = 0;
+                        int h = 0;
+                        while (h < 6 && k < nl3 && isxdigit((unsigned char)name[k])) { cp = cp * 16 + (uint32_t)(isdigit((unsigned char)name[k]) ? name[k] - '0' : (tolower((unsigned char)name[k]) - 'a' + 10)); k++; h++; }
+                        if (k < nl3 && isspace((unsigned char)name[k])) k++;
+                        if (cp == 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) cp = 0xFFFD;
+                        if (cp < 0x80) un[o++] = (char)cp;
+                        else if (cp < 0x800) { un[o++] = (char)(0xC0 | (cp >> 6)); un[o++] = (char)(0x80 | (cp & 63)); }
+                        else if (cp < 0x10000) { un[o++] = (char)(0xE0 | (cp >> 12)); un[o++] = (char)(0x80 | ((cp >> 6) & 63)); un[o++] = (char)(0x80 | (cp & 63)); }
+                        else { un[o++] = (char)(0xF0 | (cp >> 18)); un[o++] = (char)(0x80 | ((cp >> 12) & 63)); un[o++] = (char)(0x80 | ((cp >> 6) & 63)); un[o++] = (char)(0x80 | (cp & 63)); }
+                    } else un[o++] = name[k++];
+                }
+                un[o] = 0;
+                const char *r_ = fn_prop_lookup(props, un);
+                if (r_) { free(name); name = un; } else free(un);
+            }
+        }
         const char *resolved = fn_prop_lookup(props, name);
         /* (an empty value of an unregistered property is a value: it substitutes nothing) */
         bool empty_val = resolved && !resolved[0] && name[0] == '-' && css_reg_find(name) < 0;
@@ -11413,6 +11561,68 @@ static int g_url_sheet_n, g_url_sheet_next;
 /* The cached sheet for `url`, fetching it on first use (NULL on failure):
  * its text as UTF-8, decoded from its bytes' encoding (fallback_label: the
  * referrer's, when nothing in the response says). */
+/* (text with each relative url(...) made absolute against base; NULL when there is none to change) */
+static char *css_sheet_absolute_urls(const char *t, size_t n, const char *base)
+{
+    bool any = false;
+    for (size_t i = 0; i + 4 <= n && !any; i++) if (!strncasecmp(t + i, "url(", 4)) any = true;
+    if (!any) return NULL;
+    size_t cap = n * 2 + 256, o = 0;
+    char *out = (char *)malloc(cap);
+    if (!out) return NULL;
+    bool changed = false;
+    for (size_t i = 0; i < n;) {
+        /* (comments and strings as they are) */
+        if (t[i] == '/' && i + 1 < n && t[i + 1] == '*') {
+            const char *e = strstr(t + i + 2, "*/");
+            size_t j = e ? (size_t)(e - t) + 2 : n;
+            if (o + (j - i) + 1 > cap) { cap = (o + (j - i)) * 2 + 256; char *g = (char *)realloc(out, cap); if (!g) { free(out); return NULL; } out = g; }
+            memcpy(out + o, t + i, j - i); o += j - i; i = j;
+            continue;
+        }
+        bool ws = i == 0 || !(isalnum((unsigned char)t[i - 1]) || t[i - 1] == '-' || t[i - 1] == '_');
+        if (ws && i + 4 <= n && !strncasecmp(t + i, "url(", 4)) {
+            size_t a = i + 4;
+            while (a < n && isspace((unsigned char)t[a])) a++;
+            char q = (a < n && (t[a] == '"' || t[a] == '\'')) ? t[a] : 0;
+            size_t s = q ? a + 1 : a, e = s;
+            if (q) { while (e < n && t[e] != q && t[e] != '\n') { if (t[e] == '\\' && e + 1 < n) e++; e++; } }
+            else { while (e < n && t[e] != ')' && !isspace((unsigned char)t[e]) && t[e] != '"' && t[e] != '\'') e++; }
+            char u[2048];
+            size_t ul = e - s;
+            bool rel = ul > 0 && ul < sizeof u && t[s] != '#' && !memchr(t + s, '\\', ul);
+            if (rel) {
+                memcpy(u, t + s, ul); u[ul] = 0;
+                /* (a scheme: absolute already) */
+                const char *c = u;
+                while (*c && (isalnum((unsigned char)*c) || *c == '+' || *c == '-' || *c == '.')) c++;
+                if (*c == ':' && c > u) rel = false;
+                if (u[0] == '/' && u[1] == '/') rel = true;
+            }
+            char *abs = rel ? layout_resolve_url(base, u) : NULL;
+            if (abs) {
+                size_t al = strlen(abs);
+                if (o + 3 * al + (s - i) + 16 > cap) { cap = (o + 3 * al + (s - i)) * 2 + 256; char *g = (char *)realloc(out, cap); if (!g) { free(abs); free(out); return NULL; } out = g; }
+                memcpy(out + o, t + i, s - i); o += s - i;   /* (url( and its quote) */
+                for (size_t k = 0; k < al; k++) {
+                    char ch = abs[k];
+                    if (ch == '"' || ch == '\'' || ch == '(' || ch == ')' || isspace((unsigned char)ch)) { o += (size_t)snprintf(out + o, 8, "%%%02X", (unsigned char)ch); }
+                    else out[o++] = ch;
+                }
+                free(abs);
+                i = e;
+                changed = true;
+                continue;
+            }
+        }
+        if (o + 2 > cap) { cap = cap * 2; char *g = (char *)realloc(out, cap); if (!g) { free(out); return NULL; } out = g; }
+        out[o++] = t[i++];
+    }
+    out[o] = 0;
+    if (!changed) { free(out); return NULL; }
+    return out;
+}
+
 static const UrlSheet *url_sheet_get_ex(const char *url, const char *fallback_label) {
     for (int i = 0; i < g_url_sheet_n; i++)
         if (strcmp(g_url_sheets[i].url, url) == 0) {
@@ -11461,6 +11671,11 @@ static const UrlSheet *url_sheet_get_ex(const char *url, const char *fallback_la
                                      &u->len, &u->enc)
                   : NULL;
         if (!u->text) { u->text = strdup(""); u->len = 0; }
+        /* (its relative url()s: of the sheet, not of the document it is used in) */
+        if (u->len && strncasecmp(url, "data:", 5)) {
+            char *ab = css_sheet_absolute_urls(u->text, u->len, url);
+            if (ab) { free(u->text); u->text = ab; u->len = strlen(ab); }
+        }
         u->hash = sheet_hash(u->text, u->len);
         u->has_property = strstr(u->text, "@property") != NULL;
         static uint64_t s_fetches;
@@ -11523,8 +11738,14 @@ static void layout_origin_base(char *out, size_t cap)
 static void layout_realm_base(LayoutContext *ctx)
 {
     if (!SAFE_VALID(ctx->js_ctx) || gc_handle_get_type(ctx->js_ctx) != JS_GC_OBJ_TYPE_JS_CONTEXT) return;
-    GCValue loc = JS_GetPropertyStr(ctx->js_ctx, JS_GetGlobalObject(ctx->js_ctx), "location");
-    GCValue href = JS_IsObject(loc) ? JS_GetPropertyStr(ctx->js_ctx, loc, "href") : JS_UNDEFINED;
+    /* (the document's base URL: a <base href> in it, else its location) */
+    GCValue doc_ = JS_GetPropertyStr(ctx->js_ctx, JS_GetGlobalObject(ctx->js_ctx), "document");
+    GCValue href = JS_IsObject(doc_) ? JS_GetPropertyStr(ctx->js_ctx, doc_, "baseURI") : JS_UNDEFINED;
+    if (JS_IsException(href)) { JS_GetException(ctx->js_ctx); href = JS_UNDEFINED; }
+    if (!JS_IsString(href)) {
+        GCValue loc = JS_GetPropertyStr(ctx->js_ctx, JS_GetGlobalObject(ctx->js_ctx), "location");
+        href = JS_IsObject(loc) ? JS_GetPropertyStr(ctx->js_ctx, loc, "href") : JS_UNDEFINED;
+    }
     if (!JS_IsString(href)) return;
     const char *s = JS_ToCString(ctx->js_ctx, href);
     if (s && url_has_scheme(s) && strncmp(s, "about:", 6) != 0 && strlen(s) < sizeof(ctx->base_url))
@@ -11909,7 +12130,18 @@ static void layout_collect_stylesheets_recursive(LayoutContext *ctx, int dom_idx
     /* (a sheet for another medium or viewport applies nothing) */
     if (strcasecmp(node->tag_name, "style") == 0 || strcasecmp(node->tag_name, "link") == 0) {
         const char *media = layout_node_attribute(node, "media");
-        if (media && !css_media_query_matches(media, g_unit_vw, g_unit_vh)) goto next;
+        /* (a script changed its sheet's media: those) */
+        char *jsm = NULL;
+        if (node->store_id && SAFE_VALID(ctx->js_ctx) && gc_handle_get_type(ctx->js_ctx) == JS_GC_OBJ_TYPE_JS_CONTEXT) {
+            GCValue el = dom_js_existing(node->store_id);
+            GCValue sh = JS_IsObject(el) ? JS_GetPropertyStr(ctx->js_ctx, el, "__cyberSheet") : JS_UNDEFINED;
+            GCValue mv = JS_IsObject(sh) ? JS_GetPropertyStr(ctx->js_ctx, sh, "__cyberMedia") : JS_UNDEFINED;
+            if (JS_IsString(mv)) { const char *ms = JS_ToCString(ctx->js_ctx, mv); jsm = ms ? strdup(ms) : NULL; }
+        }
+        if (jsm) media = jsm[0] ? jsm : NULL;
+        bool mskip = media && !css_media_query_matches(media, g_unit_vw, g_unit_vh);
+        free(jsm);
+        if (mskip) goto next;
     }
 
     char *cssom = (strcasecmp(node->tag_name, "style") == 0 || strcasecmp(node->tag_name, "link") == 0)
@@ -11922,11 +12154,17 @@ static void layout_collect_stylesheets_recursive(LayoutContext *ctx, int dom_idx
         if (strstr(cssom, "@mixin")) css_mx_scan_css(cssom, strlen(cssom));
         char *mx = strstr(cssom, "@apply") ? css_mx_expand(cssom, strlen(cssom)) : NULL;
         if (mx) { free(cssom); cssom = mx; }
+        /* (its @import rules, as a <style>'s: a script's insertRule("@import ...") loads one) */
+        if (strstr(cssom, "@import")) {
+            int n0 = list->nitems;
+            if (!host || by_node) layout_sheet_imports(list, cssom, strlen(cssom), base_url, NULL, 0);
+            for (int k = n0; host && k < list->nitems; k++) if (!list->items[k].host) list->items[k].host = strdup(host);
+        }
         layout_sheet_list_add_text(list, cssom, strlen(cssom), host);
         font_registry_scan_css(cssom, strlen(cssom), base_url);
         if (strstr(cssom, "@property")) css_reg_scan_css(cssom, strlen(cssom));
         if (strstr(cssom, "@function")) css_fn_scan_css(cssom, strlen(cssom));
-        if (strstr(cssom, "@counter-style")) cstyle_scan_css(cssom, strlen(cssom));
+        if (strstr(cssom, "@counter-style")) { cstyle_set_scope(by_node ? hsel : ""); cstyle_scan_css(cssom, strlen(cssom)); cstyle_set_scope(""); }
         free(cssom);
     } else if (strcasecmp(node->tag_name, "style") == 0 && node->text_content && node->text_content[0]) {
         /* If this <style> lives inside a stamped shadow root, scope :host,
@@ -11949,7 +12187,7 @@ static void layout_collect_stylesheets_recursive(LayoutContext *ctx, int dom_idx
         font_registry_scan_css(node->text_content, len, base_url);
         if (strstr(node->text_content, "@property")) css_reg_scan_css(node->text_content, len);
         if (strstr(node->text_content, "@function")) css_fn_scan_css(node->text_content, len);
-        if (strstr(node->text_content, "@counter-style")) cstyle_scan_css(node->text_content, len);
+        if (strstr(node->text_content, "@counter-style")) { cstyle_set_scope(by_node ? hsel : ""); cstyle_scan_css(node->text_content, len); cstyle_set_scope(""); }
     } else if (strcasecmp(node->tag_name, "link") == 0) {
         const char *rel = NULL;
         const char *href = NULL;
@@ -11959,7 +12197,25 @@ static void layout_collect_stylesheets_recursive(LayoutContext *ctx, int dom_idx
             else if (strcasecmp(a->name, "href") == 0) href = a->value;
             else if (strcasecmp(a->name, "charset") == 0) charset = a->value;
         }
-        if (rel && href && strcasecmp(rel, "stylesheet") == 0) {
+        /* (rel's tokens: stylesheet; an alternate one only once a script enabled it; none with disabled) */
+        bool ss_ = false, alt_ = false;
+        for (const char *t = rel; t && *t;) {
+            while (*t && isspace((unsigned char)*t)) t++;
+            const char *e = t;
+            while (*e && !isspace((unsigned char)*e)) e++;
+            if (e - t == 10 && !strncasecmp(t, "stylesheet", 10)) ss_ = true;
+            if (e - t == 9 && !strncasecmp(t, "alternate", 9)) alt_ = true;
+            t = e;
+        }
+        if (ss_ && layout_node_attribute(node, "disabled")) ss_ = false;
+        if (ss_ && alt_) {
+            ss_ = false;
+            if (node->store_id && SAFE_VALID(ctx->js_ctx) && gc_handle_get_type(ctx->js_ctx) == JS_GC_OBJ_TYPE_JS_CONTEXT) {
+                GCValue el = dom_js_existing(node->store_id);
+                if (JS_IsObject(el)) ss_ = JS_ToBool(ctx->js_ctx, JS_GetPropertyStr(ctx->js_ctx, el, "__cyberExplicitEnabled"));
+            }
+        }
+        if (rel && href && ss_) {
             int n0 = list->nitems;
             layout_fetch_stylesheet(list, base_url, href, charset);
             /* (in a shadow tree: its host's sheet) */
@@ -12147,7 +12403,7 @@ static const char *g_ua_stylesheet_css =
     "rb { display: ruby-base; }\n"
     "rtc { display: ruby-text-container; }\n"
     "rt { display: ruby-text; }\n"
-    "rt, rtc { font-size: 50%; line-height: normal; white-space: nowrap; text-emphasis: none; }\n"
+    "rt, rtc { font-size: 50%; line-height: normal; white-space: nowrap; text-emphasis: none; text-indent: 0; }\n"
     "rtc > rt { font-size: 100%; }\n"
     "rp { display: none; }\n"
     "th { font-weight: bold; }\n"
@@ -12210,8 +12466,10 @@ static const char *g_ua_stylesheet_css =
     "sub { vertical-align: sub; font-size: 0.833em; }\n"
     "sup { vertical-align: super; font-size: 0.833em; }\n"
     "big { font-size: 1.17em; }\n"
-    "ul { display: block; margin-block: 1em; margin-inline: 0; padding-inline-start: 40px; list-style-type: disc; }\n"
-    "ol { display: block; margin-block: 1em; margin-inline: 0; padding-inline-start: 40px; list-style-type: decimal; }\n"
+    "ul { display: block; margin-block: 1em; margin-inline: 0; padding-inline-start: 40px; }\n"
+    "ol { display: block; margin-block: 1em; margin-inline: 0; padding-inline-start: 40px; }\n"
+    "ul:where(:not([type])) { list-style-type: disc; }\n"
+    "ol:where(:not([type])) { list-style-type: decimal; }\n"
     "ol, ul, menu { counter-reset: list-item; }\n"
     "ol[reversed] { counter-reset: reversed(list-item); }\n"
     "li { display: list-item; }\n"
@@ -15323,6 +15581,35 @@ static bool layout_apply_wide_keyword(LayoutBox *box, const LayoutBox *parent,
     bool unset = strcasecmp(value, "unset") == 0 || strcasecmp(value, "revert") == 0 ||
                  strcasecmp(value, "revert-layer") == 0 || strcasecmp(value, "revert-rule") == 0;
     if (!inherit && !initial && !unset) return false;
+    /* (an animation or transition longhand: the parent's list, as specified; initial and unset its initial) */
+    {
+        const char *ap = strncasecmp(prop, "-webkit-", 8) ? prop : prop + 8;
+        int af = (ap[0] == 'a' || ap[0] == 't') ? anim_spec_field(ap) : -1;
+        if (af >= 0) {
+            char fv[512];
+            fv[0] = 0;
+            if (inherit && parent && parent->s->anim_spec) {
+                /* (field af of the parent's: the fields between 0x1F separators) */
+                const char *q = parent->s->anim_spec;
+                for (int k = 0; k < af && q; k++) { q = strchr(q, 0x1F); if (q) q++; }
+                if (q) {
+                    const char *e = strchr(q, 0x1F);
+                    size_t l = e ? (size_t)(e - q) : strlen(q);
+                    if (l >= sizeof fv) l = sizeof fv - 1;
+                    memcpy(fv, q, l);
+                    fv[l] = 0;
+                }
+            }
+            char *sp = anim_spec_with(box->s->anim_spec, af, fv);
+            if (sp) {
+                size_t l = strlen(sp), k = 0;
+                while (k < l && sp[k] == 0x1F) k++;
+                box->s->anim_spec = k == l ? NULL : layout_intern(sp, l);
+                free(sp);
+            }
+            return true;
+        }
+    }
     /* (all: the keyword for each longhand but the two that say how text runs) */
     if ((prop[0] == 'a' || prop[0] == 'A') && !strcasecmp(prop, "all")) {
         for (int i = 0; i < css_prop_count(); i++) {
@@ -15794,6 +16081,9 @@ static bool layout_apply_wide_keyword(LayoutBox *box, const LayoutBox *parent,
         }
         if (!strcasecmp(prop, "background-image")) {
             box->s->background_image_url = parent->s->background_image_url; box->s->bg_res = parent->s->bg_res;
+            box->s->bg_grad = parent->s->bg_grad;   /* (a gradient too: its currentcolor this box's) */
+            box->s->bg_raw[1] = parent->s->bg_raw[1];
+            if (parent->s->bg_nl > box->s->bg_nl) box->s->bg_nl = parent->s->bg_nl;
             return true;
         }
         if (!strcasecmp(prop, "background-attachment")) { box->s->bg_fixed = parent->s->bg_fixed; return true; }
@@ -15821,6 +16111,9 @@ static bool layout_apply_wide_keyword(LayoutBox *box, const LayoutBox *parent,
             }
             if (bg_all) {
                 box->s->background_image_url = parent->s->background_image_url; box->s->bg_res = parent->s->bg_res;
+                box->s->bg_grad = parent->s->bg_grad;
+                for (int k_ = 0; k_ < 8; k_++) box->s->bg_raw[k_] = parent->s->bg_raw[k_];
+                box->s->bg_nl = parent->s->bg_nl;
                 box->s->bg_no_repeat_x = parent->s->bg_no_repeat_x;
                 box->s->bg_no_repeat_y = parent->s->bg_no_repeat_y;
                 box->s->bg_space = parent->s->bg_space; box->s->bg_round = parent->s->bg_round;
@@ -16026,7 +16319,8 @@ static void style_presentational_hints(LayoutContext *ctx, LayoutBox *box, int i
     bool embedded = !strcasecmp(tag, "img") || !strcasecmp(tag, "iframe") || !strcasecmp(tag, "video") ||
                     !strcasecmp(tag, "embed") || !strcasecmp(tag, "object");
     if (!role && !body && !embedded && strcasecmp(tag, "font") != 0 && strcasecmp(tag, "div") != 0 &&
-        strcasecmp(tag, "p") != 0 && strncasecmp(tag, "h", 1) != 0 && strcasecmp(tag, "hr") != 0)
+        strcasecmp(tag, "p") != 0 && strncasecmp(tag, "h", 1) != 0 && strcasecmp(tag, "hr") != 0 &&
+        strcasecmp(tag, "ol") != 0 && strcasecmp(tag, "ul") != 0 && strcasecmp(tag, "li") != 0)
         return;
     char buf[64];
     const char *v;
@@ -16048,6 +16342,25 @@ static void style_presentational_hints(LayoutContext *ctx, LayoutBox *box, int i
     }
     if (role == 1 || role == 3 || role == 4) {
         if (hint_dimension(layout_node_attribute(node, "height"), buf, sizeof(buf))) hint_apply(ctx, box, "height", buf);
+    }
+    /* (<ol type>, <ul type>, <li type>: the list style they map to) */
+    if (node->tag_name && (!strcasecmp(node->tag_name, "ol") || !strcasecmp(node->tag_name, "ul") || !strcasecmp(node->tag_name, "li")) &&
+        (v = layout_node_attribute(node, "type")) != NULL) {
+        const char *ls = NULL;
+        if (strcasecmp(node->tag_name, "ul")) {
+            if (!strcmp(v, "1")) ls = "decimal";
+            else if (!strcmp(v, "a")) ls = "lower-alpha";
+            else if (!strcmp(v, "A")) ls = "upper-alpha";
+            else if (!strcmp(v, "i")) ls = "lower-roman";
+            else if (!strcmp(v, "I")) ls = "upper-roman";
+        }
+        if (!ls && strcasecmp(node->tag_name, "ol")) {
+            if (!strcasecmp(v, "disc")) ls = "disc";
+            else if (!strcasecmp(v, "circle")) ls = "circle";
+            else if (!strcasecmp(v, "square")) ls = "square";
+            else if (!strcasecmp(v, "none")) ls = "none";
+        }
+        if (ls) hint_apply(ctx, box, "list-style-type", ls);
     }
     v = layout_node_attribute(node, "align");
     if (role == 1) {
@@ -16643,6 +16956,13 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
         }
         box->s->tcy = ok && nd >= 1 && nd <= lim ? 1 : 0;
     }
+    /* (display: contents on a replaced element or form control: none, CSS Display Appendix B) */
+    if (box->s->disp_contents && node && node->type == HTML_NODE_ELEMENT && node->tag_name && parent) {
+        static const char *const unb[] = { "br", "wbr", "meter", "progress", "canvas", "embed", "object", "audio", "iframe", "img",
+            "video", "frame", "frameset", "input", "textarea", "select", NULL };
+        for (int k = 0; unb[k]; k++)
+            if (!strcasecmp(node->tag_name, unb[k])) { box->s->disp_contents = 0; box->s->display = CSS_DISPLAY_NONE; break; }
+    }
     style_finish_box(P, box, parent, node && node->type == HTML_NODE_ELEMENT);
     /* (image-orientation: none: its background, list, border, content and mask images as stored, same-origin ones) */
     if (box->s->img_orient_none && node && node->type == HTML_NODE_ELEMENT) {   /* (after inheritance: the value it ends with) */
@@ -16758,6 +17078,8 @@ static void style_finish_box_em(bool em_defer, LayoutBox *box, const LayoutBox *
      * paints nothing and takes no room of its own) */
     LayoutStyle *s = box->s;
     if (!s->disp_contents || !element) return;
+    /* (the root element: blockified, contents behaving as block, CSS Display 2.5) */
+    if (!parent) { s->disp_contents = 0; s->display = CSS_DISPLAY_BLOCK; return; }
     s->contents_pd = (unsigned char)(!parent ? CSS_DISPLAY_BLOCK : parent->s->disp_contents ? parent->s->contents_pd : parent->s->display);
     s->display = CSS_DISPLAY_INLINE;
     s->inline_level = 0;
@@ -16901,6 +17223,11 @@ static void style_finish_box_em0(bool em_defer, LayoutBox *box, const LayoutBox 
     if (!box->s->word_break_set && parent) box->s->word_break = parent->s->word_break;
     /* (a min or max height of the content's: with a fixed height, the content's
      * height that height bounds, the one way or the other) */
+    /* (a table: content keywords for its block size's limits, as none, its height a minimum already) */
+    if (box->s->table_role == 1) {
+        if (box->s->writing_mode == 0) { box->s->minmax_content &= (unsigned char)~12; box->s->mm_kw_h = 0; }
+        else box->s->mm_kw_w[0] = box->s->mm_kw_w[1] = 0;
+    }
     if (box->s->minmax_content & 12) {
         if (box->s->height_set && box->s->height_percent <= 0.0 && !box->s->height_stretch) {
             if (box->s->minmax_content & 4) box->s->min_height = box->s->css_height;
@@ -16964,7 +17291,7 @@ static void style_finish_box_em0(bool em_defer, LayoutBox *box, const LayoutBox 
         /* (an item of the legacy box: aligned by the box's -webkit-box-align alone) */
         if (parent->s->webkit_box && box->s->align_self) box->s->align_self = 0;
         if (!box->s->ul_set) { box->s->ul_k = parent->s->ul_k; box->s->ul_v = parent->s->ul_v; box->s->ul_e = parent->s->ul_e; }
-        if (!box->s->ul_pos_set) { box->s->ul_under = parent->s->ul_under; box->s->ul_right = parent->s->ul_right; }
+        if (!box->s->ul_pos_set) { box->s->ul_under = parent->s->ul_under; box->s->ul_right = parent->s->ul_right; box->s->ul_ff = parent->s->ul_ff; }
         if (!box->s->line_height_set) {
             box->s->line_height = parent->s->line_height;
             box->s->line_height_ratio = parent->s->line_height_ratio;
@@ -17012,6 +17339,7 @@ static void style_finish_box_em0(bool em_defer, LayoutBox *box, const LayoutBox 
             box->s->ws_pct = parent->s->ws_pct; box->s->ws_px = parent->s->ws_px; box->s->ws_pct_set = parent->s->ws_pct_set;
         }
         if (!box->s->text_transform_set) box->s->text_transform = parent->s->text_transform;
+        if (!box->s->fv_emoji_set) box->s->fv_emoji = parent->s->fv_emoji;
         if (!box->s->wst_set) box->s->wst = parent->s->wst;
         if (!box->s->caret_shape_set) box->s->caret_shape = parent->s->caret_shape;
         if (!box->s->caret_color_set) box->s->caret_color = parent->s->caret_color;
@@ -17749,6 +18077,22 @@ static bool layout_first_letter_span(const char *t, size_t *from, size_t *to)
             while (*r2) { const char *r3 = r2; c2 = layout_utf8_next(&r3); if (!(fl_zs(c2) && c2 != 0xA0)) break; r2 = r3; }
             if (*r2 && layout_is_punct(c2) && !fl_ps_pd(c2)) { q = r2; continue; }
             break;
+        }
+        /* (a virama linking a consonant after it: one conjunct, one grapheme cluster, UAX 29 GB9c) */
+        if (cp == 0x094D || cp == 0x09CD || cp == 0x0ACD || cp == 0x0B4D || cp == 0x0C4D || cp == 0x0D4D) {
+            const char *r2 = r;
+            while (*r2) { const char *r3 = r2; uint32_t z = layout_utf8_next(&r3); if (z != 0x200D && z != 0x200C) break; r2 = r3; }
+            const char *r3 = r2;
+            uint32_t c2 = *r2 ? layout_utf8_next(&r3) : 0;
+            uint32_t blk = cp & ~0x7Fu;
+            bool cons = (c2 & ~0x7Fu) == blk && (c2 - blk) >= 0x15 && (c2 - blk) <= 0x39;
+            if (blk == 0x0900) cons = cons || (c2 >= 0x0958 && c2 <= 0x095F) || (c2 >= 0x0978 && c2 <= 0x097F);
+            if (cons) { q = r3; continue; }
+        }
+        /* (an Indic script's dependent signs, spacing ones too: the cluster's) */
+        if (cp >= 0x0900 && cp <= 0x0DFF) {
+            uint32_t o = cp & 0x7Fu;
+            if (o <= 0x03 || (o >= 0x3A && o <= 0x4F) || (o >= 0x55 && o <= 0x57) || o == 0x62 || o == 0x63) { q = r; continue; }
         }
         if (fl_mark(cp)) { q = r; continue; }   /* (the letter's or the punctuation's mark) */
         if (!layout_is_punct(cp) || fl_ps_pd(cp)) break;
@@ -19808,6 +20152,15 @@ static void layout_counters_walk(LayoutContext *ctx, int node, int level, Layout
             LayoutCounter *e = ctr_find(cs, "list-item");
             if (!e) e = ctr_push(cs, "list-item", 0, level);
             if (e) e->value = lv;
+        }
+        {
+            /* (counter style names: from the element's tree scope) */
+            char hs_[48] = "";
+            for (int q = c; q >= 0; q = ctx->tree.nodes[q].parent_idx) {
+                HtmlNode *qn = css_layout_box_node(ctx, q);
+                if (qn && qn->store_id && qn->type == HTML_NODE_ELEMENT) { if (!layout_shadow_host_sel(qn, hs_, sizeof hs_)) hs_[0] = 0; break; }
+            }
+            cstyle_set_scope(hs_);
         }
         const PseudoRec *mr = c < base && ctx->pseudo_rec ? (const PseudoRec *)ctx->pseudo_rec[c] : NULL;
         /* (the ::marker's counter properties: reset, increment, set, as its item's first child) */
@@ -22557,6 +22910,17 @@ static void layout_ot_tags(LayoutStyle *s)
             break;
         }
     }
+    /* (on by default, as browsers have them: ligatures, required ones, composition, contextual forms;
+     * font-variant-ligatures turning them off) */
+    {
+        const char *lv = s->fv[5] ? s->fv[5] : "";
+        bool none_ = strstr(lv, "none") != NULL || s->letter_spacing != 0.0 ||   /* (letter spacing: the optional ones off) */
+                     (s->tj_char == 1 && s->text_justify);   /* (and inter-character justification) */
+        if (!none_ && !strstr(lv, "no-common-ligatures")) { OT_ADD("liga"); OT_ADD("clig"); }
+        if (!none_ && !strstr(lv, "no-contextual")) OT_ADD("calt");
+        OT_ADD("rlig");
+        OT_ADD("ccmp");
+    }
     /* (font-variant-alternates: its functions, by the names @font-feature-values gives the family) */
     if (s->fv[4] && strchr(s->fv[4], '(') && s->font_family) {
         static const struct { const char *fn; const char *kind; const char *tag; } alt[] = {
@@ -22620,8 +22984,16 @@ static void layout_ot_tags(LayoutStyle *s)
     }
     /* (font-kerning: normal, the font's kerning on) */
     if (s->fv[7] && s->fv[7][0] == 'n' && s->fv[7][1] == 'o' && s->fv[7][2] == 'r') { OT_ADD("kern"); if (s->writing_mode != 0) OT_ADD("vkrn"); }
-    /* (font-feature-settings: "tag" [on | off | n], after the rest) */
+    /* (font-feature-settings: "tag" [on | off | n], after the rest; the @font-face's descriptor before the property's) */
     const char *f = s->fv[6];
+    char ffs_[512];
+    {
+        char d_[160];
+        if (s->font_family && font_registry_family_ffs(s->font_family, d_, sizeof d_)) {
+            snprintf(ffs_, sizeof ffs_, "%s, %s", d_, f ? f : "");
+            f = ffs_;
+        }
+    }
     for (const char *p = f; p && *p;) {
         while (*p && *p != '"' && *p != '\'') p++;
         if (!*p) break;
@@ -23872,7 +24244,7 @@ static bool layout_replaced_at(LayoutContext *ctx, int idx)
 static bool layout_empty_through(LayoutContext *ctx, int c)
 {
     LayoutBox *b = layout_box(ctx, c);
-    if (!layout_box_is_block_level(b) || b->s->overflow != 0 || !layout_box_collapses_through(b)) return false;
+    if (!layout_box_is_block_level(b) || (b->s->overflow != 0 && !b->s->overflow_clip) || !layout_box_collapses_through(b)) return false;
     if (layout_establishes_bfc(ctx, c) || layout_replaced_at(ctx, c)) return false;
     int f, l;
     layout_sig_children(ctx, c, &f, &l);
@@ -24006,7 +24378,7 @@ static double layout_eff_margin_top_(LayoutContext *ctx, int idx, int depth)
         /* Empty box: margins collapse through only when the box does NOT
          * establish a new block formatting context and has no height,
          * padding or border separating them (CSS 2.1 §8.3.1). */
-        if (box->s->overflow != 0 || !layout_box_collapses_through(box) || layout_establishes_bfc(ctx, idx) || layout_replaced_at(ctx, idx)) return mt;
+        if ((box->s->overflow != 0 && !box->s->overflow_clip) || !layout_box_collapses_through(box) || layout_establishes_bfc(ctx, idx) || layout_replaced_at(ctx, idx)) return mt;
         /* (floats in it: its top where it would be with a bottom border, its own bottom margin below, CSS2 8.3.1) */
         int pa = ctx->tree.nodes[idx].parent_idx;   /* (in a formatting context root: they go no further up) */
         for (int c = pa >= 0 && (pa == ctx->tree.root_idx || layout_establishes_bfc(ctx, pa)) ? ctx->tree.nodes[idx].first_child_idx : -1; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx)
@@ -24064,7 +24436,7 @@ static double layout_eff_margin_bottom(LayoutContext *ctx, int idx, int depth)
     int f, l;
     layout_sig_children(ctx, idx, &f, &l);
     if (f < 0) {
-        if (box->s->overflow != 0 || !layout_box_collapses_through(box) || layout_establishes_bfc(ctx, idx) || layout_replaced_at(ctx, idx)) return mb;
+        if ((box->s->overflow != 0 && !box->s->overflow_clip) || !layout_box_collapses_through(box) || layout_establishes_bfc(ctx, idx) || layout_replaced_at(ctx, idx)) return mb;
         return layout_margin_collapse(mt, mb);
     }
     if (layout_establishes_bfc(ctx, idx) && idx != ctx->tree.root_idx) return mb;   /* (as above) */
@@ -28394,6 +28766,26 @@ static void layout_text_box_trim(LayoutContext *ctx, int idx)
             double mx_ = b->max_height >= 0.0 ? (s->box_sizing == CSS_BOX_SIZING_BORDER_BOX ? b->max_height : b->max_height + vbp_) : -1.0;
             bool at_max = mx_ >= 0.0 && b->height >= mx_ - 0.01 && !s->line_clamp_auto && !s->line_clamp;   /* (clamped by a height: the clamp's own end, trimmed) */
             if (!at_max) b->height -= t;
+            /* (a clearing br in it at the end: its content still past the floats it cleared) */
+            if (side == 1) {
+                int clr = 0;
+                for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+                    const LayoutBox *cb = layout_box(ctx, c);
+                    HtmlNode *cn = css_layout_box_node(ctx, c);
+                    if (cn && cn->type == HTML_NODE_ELEMENT && cn->tag_name && !strcasecmp(cn->tag_name, "br") && cb->s->clear) clr |= cb->s->clear;
+                }
+                if (clr) {
+                    double fb = -1e9;
+                    for (int p = ctx->tree.nodes[idx].prev_sibling_idx; p >= 0; p = ctx->tree.nodes[p].prev_sibling_idx) {
+                        const LayoutBox *pb = layout_box(ctx, p);
+                        if (!pb->s->float_side || !(clr == 3 || clr == pb->s->float_side)) continue;
+                        double e = pb->y + pb->height + pb->margin_bottom;
+                        if (e > fb) fb = e;
+                    }
+                    double cend = b->y + b->height - s->border_bottom - b->padding_bottom;
+                    if (fb > cend) b->height += fb - cend;
+                }
+            }
             double mn_ = b->min_height > 0.0 ? (s->box_sizing == CSS_BOX_SIZING_BORDER_BOX ? b->min_height : b->min_height + vbp_) : 0.0;
             if (b->height < mn_) b->height = mn_;
             if (b->height < 0.0) b->height = 0.0;
@@ -29153,6 +29545,32 @@ static bool ifc_space(char c) { return c == ' ' || c == '\t' || c == '\n' || c =
 
 static double ifc_width(LayoutContext *ctx, int box_idx, const char *text, uint32_t start, uint32_t end);
 static double layout_intrinsic_width(LayoutContext *ctx, int idx, bool want_max);
+/* (the end of the grapheme cluster that starts at byte k of t, at most e: combining
+ * and spacing marks, joiners, an Indic virama linking the next consonant) */
+static uint32_t ifc_cluster_end(const char *t, uint32_t k, uint32_t e)
+{
+    const char *p = t + k, *end = t + e;
+    if (p >= end) return e;
+    uint32_t prev = layout_utf8_next(&p);
+    while (p < end) {
+        const char *r = p;
+        uint32_t c = layout_utf8_next(&r);
+        if (r > end) break;
+        bool join = text_shaper_is_mark(c) || c == 0x200D || (c >= 0xFE00 && c <= 0xFE0F) || (c >= 0x1F3FB && c <= 0x1F3FF);
+        if (!join && c >= 0x0900 && c <= 0x0DFF) {
+            uint32_t o = c & 0x7Fu;
+            join = o <= 0x03 || (o >= 0x3A && o <= 0x4F) || (o >= 0x55 && o <= 0x57) || o == 0x62 || o == 0x63;
+            /* (after a virama: the consonant it links) */
+            if (!join && (prev == 0x094D || prev == 0x09CD || prev == 0x0ACD || prev == 0x0B4D || prev == 0x0C4D || prev == 0x0D4D) &&
+                (c & ~0x7Fu) == (prev & ~0x7Fu) && o >= 0x15 && o <= 0x39) join = true;
+        }
+        if (!join && prev == 0x200D) join = true;
+        if (!join) break;
+        prev = c;
+        p = r;
+    }
+    return (uint32_t)(p - t);
+}
 /* (the bytes of a space character (Zs) at the start of t, or ending at its
  * byte n when n > 0; 0 when none) */
 static uint32_t ruby_space_len(const char *t, uint32_t n)
@@ -29629,6 +30047,20 @@ static bool lb_between(uint32_t a, uint32_t b, const LayoutStyle *s, bool cjk_la
     /* (combining marks stay on their base) */
     if ((b >= 0x0300 && b <= 0x036F) || (b >= 0x3099 && b <= 0x309A) || (b >= 0xFE00 && b <= 0xFE0F) || b == 0x200D || a == 0x200D) return false;
     if (text_shaper_is_mark(b)) return false;   /* (any mark: Indic vowel signs and the like) */
+    /* (Hangul conjoining jamo: a syllable's L, V and T together, UAX 14 LB26) */
+    {
+        bool aL = (a >= 0x1100 && a <= 0x115F) || (a >= 0xA960 && a <= 0xA97C);
+        bool aV = (a >= 0x1160 && a <= 0x11A7) || (a >= 0xD7B0 && a <= 0xD7C6);
+        bool aT = (a >= 0x11A8 && a <= 0x11FF) || (a >= 0xD7CB && a <= 0xD7FB);
+        bool aLV = a >= 0xAC00 && a <= 0xD7A3 && (a - 0xAC00) % 28 == 0, aLVT = a >= 0xAC00 && a <= 0xD7A3 && !aLV;
+        bool bL = (b >= 0x1100 && b <= 0x115F) || (b >= 0xA960 && b <= 0xA97C);
+        bool bV = (b >= 0x1160 && b <= 0x11A7) || (b >= 0xD7B0 && b <= 0xD7C6);
+        bool bT = (b >= 0x11A8 && b <= 0x11FF) || (b >= 0xD7CB && b <= 0xD7FB);
+        bool bSyl = b >= 0xAC00 && b <= 0xD7A3;
+        if (aL && (bL || bV || bSyl)) return false;
+        if ((aV || aLV) && (bV || bT)) return false;
+        if ((aT || aLVT) && bT) return false;
+    }
     /* (an Indic conjunct: a virama and the consonant after it, one cluster) */
     if ((a == 0x94D || a == 0x9CD || a == 0xA4D || a == 0xACD || a == 0xB4D || a == 0xBCD || a == 0xC4D || a == 0xCCD || a == 0xD4D) && b >= 0x900 && b < 0xD80) return false;
     /* (GL and WJ: glued to both sides, break-all or not) */
@@ -29996,6 +30428,7 @@ static void ifc_collect(LayoutContext *ctx, int p, int c0, int stop, IfcItems *I
     for (int c = c0; c >= 0 && c != stop; c = ctx->tree.nodes[c].next_sibling_idx) {
         LayoutBox *cb = layout_box(ctx, c);
         if (cb->s->display == CSS_DISPLAY_NONE) continue;
+        if (p >= 0 && layout_box(ctx, p)->s->is_fieldset && layout_box(ctx, p)->fs_legend == c + 1) continue;   /* (a fieldset's rendered legend: in its border) */
         if (!layout_is_in_flow(cb)) {
             /* (out of the line, the spaces around it collapsing together:
              * where it is, for its static position) */
@@ -30171,10 +30604,7 @@ static void ifc_collect(LayoutContext *ctx, int p, int c0, int stop, IfcItems *I
                             while (s0 < e) {
                                 uint32_t k = s0, last = s0;
                                 while (k < e) {
-                                    uint32_t nk = k + 1;
-                                    while (nk < e && (((unsigned char)t[nk] & 0xC0) == 0x80 ||
-                                                      ((unsigned char)t[nk] == 0xCC || ((unsigned char)t[nk] == 0xCD && (unsigned char)t[nk + 1] < 0xB0))))
-                                        nk++;   /* (whole sequences, combining marks kept on) */
+                                    uint32_t nk = ifc_cluster_end(t, k, e);   /* (a whole grapheme cluster, its marks kept on) */
                                     if (last > s0 && ifc_width(ctx, c, t, s0, nk) + (s0 == a ? pre : 0.0) > avail_width + 0.01) break;
                                     last = nk;
                                     k = nk;
@@ -33482,7 +33912,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
         /* (ended by a br that clears: what follows past those floats) */
         int lbr_ = i - 1;   /* (past what has no width after it: marks, closing edges, dropped spaces) */
         while (lbr_ > t0 && (((I.t[lbr_].kind == IFC_MARK || I.t[lbr_].kind == IFC_CLOSE) && I.t[lbr_].w == 0.0) || (I.t[lbr_].kind == IFC_SPACE && !I.t[lbr_].kept))) lbr_--;
-        if (lbr_ >= t0 && i > t0 && I.t[lbr_].kind == IFC_BR && I.t[lbr_].box >= 0 && (lbr_ == i - 1 || !(blk->s->tb_trim & 2))) {   /* (trimmed at its end: as before, the line itself) */
+        if (lbr_ >= t0 && i > t0 && I.t[lbr_].kind == IFC_BR && I.t[lbr_].box >= 0) {
             int bc = layout_box(ctx, I.t[lbr_].box)->s->clear;
             for (int fi = t_float_base; bc && fi < ctx->float_count; fi++) {
                 const FloatRec *fr = &ctx->float_stack[fi];
@@ -33798,6 +34228,9 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
                 float a_ = 0.0f, d_ = 0.0f, g_ = 0.0f;
                 if (mf_ && text_shaper_vmetrics(mf_, &a_, &d_, &g_) && !bb->s->writing_mode && fabsf(a_ - text_shaper_raw_ascent(mf_)) > 1e-4f)
                     ov_dy = tm.A - text_shaper_raw_ascent(mf_) * tm.fs - (tm.adv - tm.fs) * 0.5;
+                /* (size-adjust: its em box that much bigger, centred the same) */
+                float sa_ = mf_ ? text_shaper_get_size_adjust(mf_) : 1.0f;
+                if (sa_ > 0.0f && fabsf(sa_ - 1.0f) > 1e-4f && !bb->s->writing_mode) ov_dy -= tm.fs * (sa_ - 1.0f) * 0.5;
             }
             int kk0 = -1, kk1 = -1;
             for (int q = k; q < k1; q++)
@@ -34230,7 +34663,7 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
         *any_placed = true;
         /* (ended by a br that clears: the block goes on past those floats, nothing after it) */
         int lt_ = I.n - 1;
-        while (lt_ >= 0 && (I.t[lt_].kind == IFC_CLOSE || (I.t[lt_].kind == IFC_MARK && I.t[lt_].w == 0.0 && !(blk->s->tb_trim & 2)) || (I.t[lt_].kind == IFC_SPACE && !I.t[lt_].kept))) lt_--;
+        while (lt_ >= 0 && (I.t[lt_].kind == IFC_CLOSE || (I.t[lt_].kind == IFC_MARK && I.t[lt_].w == 0.0) || (I.t[lt_].kind == IFC_SPACE && !I.t[lt_].kept))) lt_--;
         if (lt_ >= 0 && I.t[lt_].kind == IFC_BR && I.t[lt_].box >= 0 && layout_box(ctx, I.t[lt_].box)->s->clear && y > cur->y + cur->line_box + 0.01) {
             cur->y = y;
             cur->line_box = 0.0;
@@ -34275,6 +34708,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
 
     /* (a fieldset's rendered legend: in its block-start border, shrink-to-fit; the content starts below it) */
     box->fs_off = box->fs_gx0 = box->fs_gx1 = 0.0f;
+    box->fs_legend = 0;
     if (box->s->is_fieldset && box->s->writing_mode == 0 && kids) {
         for (int k = 0; k < nkids; k++) {
             int L = kids[k];
@@ -34297,6 +34731,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
             content_top = box->y + (lh_ > bt_ ? lh_ : bt_) + box->padding_top;
             box->fs_gx0 = (float)(lb->x - box->x);
             box->fs_gx1 = (float)(lb->x + lb->width - box->x);
+            box->fs_legend = L + 1;
             memmove(kids + k, kids + k + 1, (size_t)(nkids - k - 1) * sizeof(int));
             nkids--;
             break;
@@ -34552,7 +34987,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
             double emt_pos = t_emt_pos, emt_neg = t_emt_neg;   /* (its set) */
             double gap;
             bool cleared = false, absorbed = false;
-            if (!any_placed && box->s->overflow == 0 &&
+            if (!any_placed && (box->s->overflow == 0 || box->s->overflow_clip) &&   /* (overflow: clip: no formatting context of its own) */
                        box->padding_top <= 0.0 && box->s->border_top <= 0.0 &&
                        idx != ctx->tree.root_idx &&
                        box->s->display != CSS_DISPLAY_FLEX && box->s->display != CSS_DISPLAY_GRID &&
@@ -34968,6 +35403,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                 cdn->type == HTML_NODE_ELEMENT && !layout_is_img(cdn) && !layout_is_svg_box(cdn) &&
                 !layout_is_replaced_form_element(cdn->tag_name))
                 continue;
+            bottom += child->margin_bottom;   /* (an atomic inline: its margin box in the line) */
             if (bottom > max_bottom) max_bottom = bottom;
         }
         /* Floats are out of flow: only a box that establishes a block
@@ -36743,6 +37179,14 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
                 double fr = room - size;
                 if (fr > 0.0) off = (it->auto_cs && it->auto_ce) ? fr / 2.0 : (it->auto_cs ? fr : 0.0);
             } else {
+                /* (a multi-line column's item not stretched, its width auto: fit to the line's final width, not the container's) */
+                if (!is_row && do_wrap && it->align != CSS_ALIGN_STRETCH && !it->cross_def && !it->is_text && !it->base_across &&
+                    child->s->writing_mode == ct->s->writing_mode && room > size + 0.5 && !child->s->width_set) {
+                    double mx_ = layout_intrinsic_width(ctx, it->idx, true);
+                    double ns = mx_ < room ? mx_ : room;
+                    ns = flex_clamp(ns, it->min_cross, it->max_cross);
+                    if (ns > size + 0.5) { size = ns; stretched = true; }
+                }
                 switch (it->align) {
                 case CSS_ALIGN_STRETCH:
                     /* (a percentage height that only behaves as auto: not stretched) */
@@ -39390,8 +39834,15 @@ static int grid_rk_kind(LayoutContext *ctx, int idx, int c)
     if (cb->s->height_percent > 0.0) return cb->s->height_pct_px == 0.0 ? 1 : 0;
     if (cb->s->height_set || cb->s->h_kw || (cb->s->margin_auto & 5)) return 0;
     if (!(cb->s->align_self ? cb->s->align_self == CSS_ALIGN_STRETCH + 1 : layout_box(ctx, idx)->s->align_items == CSS_ALIGN_STRETCH)) return 0;
-    for (int q = ctx->tree.nodes[c].first_child_idx; q >= 0; q = ctx->tree.nodes[q].next_sibling_idx)
-        if (layout_box(ctx, q)->s->height_percent > 0.0 && layout_box(ctx, q)->s->display != CSS_DISPLAY_NONE) return 2;
+    for (int q = ctx->tree.nodes[c].first_child_idx; q >= 0; q = ctx->tree.nodes[q].next_sibling_idx) {
+        const LayoutBox *qb = layout_box(ctx, q);
+        if (qb->s->display == CSS_DISPLAY_NONE) continue;
+        if (qb->s->height_percent > 0.0) return 2;
+        /* (inside an inline box: its block container is the item) */
+        if (qb->s->display == CSS_DISPLAY_INLINE)
+            for (int r = ctx->tree.nodes[q].first_child_idx; r >= 0; r = ctx->tree.nodes[r].next_sibling_idx)
+                if (layout_box(ctx, r)->s->height_percent > 0.0 && layout_box(ctx, r)->s->display != CSS_DISPLAY_NONE) return 2;
+    }
     return 0;
 }
 static void layout_grid_container(LayoutContext *ctx, int idx)
@@ -41494,6 +41945,24 @@ static void layout_anim_read(const LayoutStyle *s, AnimVal v[ANIM_NPROP])
         }
         v[k ? ANIM_GTR : ANIM_GTC] = (AnimVal){ 0, 0, 1, 3.0f, 0, gi };
     }
+    {
+        /* (list-style-type: as text, a discrete value) */
+        static const char *const lst_[] = { "none", "disc", "circle", "square", "decimal" };
+        const char *lt = s->list_style_type < 5 ? lst_[s->list_style_type] : s->list_style ? s->list_style : "disc";
+        v[ANIM_LST] = (AnimVal){ 0, 0, 1, 4.0f, 0, lt };
+    }
+    v[ANIM_OFFDIST] = (AnimVal){ s->op_dist, s->op_dist_px, 1, 5.0f, s->op_dist_pct ? 1.0f : 0.0f, NULL };
+    v[ANIM_OFFROT] = (AnimVal){ s->op_rot, 0, 1, 5.0f, s->op_rot_auto == 1 ? 1.0f : 0.0f, NULL };
+    {
+        /* (offset-path: a path() as its text, for the mixing of its numbers) */
+        const char *pt_ = NULL;
+        if (s->op_kind == 2 && s->op_path && strlen(s->op_path) < 900) {
+            char pb_[960];
+            int pn_ = snprintf(pb_, sizeof pb_, "path(\"%s\")", s->op_path);
+            pt_ = layout_intern(pb_, (size_t)pn_);
+        }
+        v[ANIM_OFFPATH] = (AnimVal){ 0, 0, 1, 2.0f, 0, pt_ };
+    }
     v[ANIM_FILTER] = (AnimVal){ 0, 0, 1, 0.0f, 0, s->filt_text };
     v[ANIM_BACKDROP] = (AnimVal){ 0, 0, 1, 0.0f, 0, s->bf_text };
     v[ANIM_SCALE] = (AnimVal){ 1, 1, 1 };
@@ -41589,6 +42058,36 @@ static void layout_anim_write(LayoutStyle *s, int p, const AnimVal *v)
         memset(&d, 0, sizeof d);
         d.property = "backdrop-filter";
         d.value = v->tf ? v->tf : "none";
+        layout_apply_declaration(&fake, &d, 0.0, 0.0, "");
+    } else if (p == ANIM_OFFPATH) {
+        if (v->tf && !strncasecmp(v->tf, "path(", 5)) {
+            unsigned char ra_ = s->op_rot_auto;
+            float rr_ = s->op_rot;
+            LayoutBox fake;
+            memset(&fake, 0, sizeof fake);
+            fake.s = s;
+            CssDeclaration d;
+            memset(&d, 0, sizeof d);
+            d.property = "offset-path";
+            d.value = v->tf;
+            layout_apply_declaration(&fake, &d, 0.0, 0.0, "");
+            s->op_rot_auto = ra_; s->op_rot = rr_;
+        }
+    } else if (p == ANIM_OFFROT) {
+        s->op_rot = v->x;
+        s->op_rot_auto = v->w > 0.5f ? 1 : 0;
+    } else if (p == ANIM_OFFDIST) {
+        s->op_dist = v->x;
+        s->op_dist_px = v->y;
+        s->op_dist_pct = v->w > 0.5f;
+    } else if (p == ANIM_LST) {
+        LayoutBox fake;
+        memset(&fake, 0, sizeof fake);
+        fake.s = s;
+        CssDeclaration d;
+        memset(&d, 0, sizeof d);
+        d.property = "list-style-type";
+        d.value = v->tf ? v->tf : "disc";
         layout_apply_declaration(&fake, &d, 0.0, 0.0, "");
     } else if (p == ANIM_FILTER) {
         /* (as the filter declared, on a stand-in box) */
@@ -41888,6 +42387,19 @@ static void layout_anim_color_down(LayoutContext *ctx, int idx, const LayoutStyl
 }
 
 /* (an animated font size: those that had the old one by inheriting it, the new) */
+/* (an animated list-style-type: to the boxes that inherited the one before) */
+static void layout_anim_lst_down(LayoutContext *ctx, int idx, unsigned char was_t, const char *was_s)
+{
+    const LayoutStyle *ps = ctx->boxes[idx].s;
+    for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+        LayoutStyle *cs = ctx->boxes[c].s;
+        if (!cs || cs->list_style_type_set || cs->list_style_type != was_t || cs->list_style != was_s) continue;
+        cs->list_style_type = ps->list_style_type;
+        cs->list_style = ps->list_style;
+        layout_anim_lst_down(ctx, c, was_t, was_s);
+    }
+}
+
 static void layout_anim_fs_down(LayoutContext *ctx, int idx, double was, double now_fs)
 {
     for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
@@ -41972,6 +42484,8 @@ static void layout_animate(LayoutContext *ctx, const CssStyleSet *set)
         }
         bool wrote = false;
         double fs_was_ = box->s->font_size;
+        unsigned char lst_was_t = box->s->list_style_type;
+        const char *lst_was_s = box->s->list_style;
         for (int p = 0; p < ANIM_NPROP; p++)
             if (set_p[p]) { layout_anim_write(box->s, p, &cur[p]); wrote = true; }
         if (set_p[ANIM_FONT_SIZE] && fabs(box->s->font_size - fs_was_) > 0.001) layout_anim_fs_down(ctx, i, fs_was_, box->s->font_size);
@@ -41981,6 +42495,7 @@ static void layout_animate(LayoutContext *ctx, const CssStyleSet *set)
         }
         /* (an animated color: what inherits it, its text first of all, the same) */
         if (set_p[ANIM_COLOR]) layout_anim_color_down(ctx, i, box->s);
+        if (set_p[ANIM_LST] && (box->s->list_style_type != lst_was_t || box->s->list_style != lst_was_s)) layout_anim_lst_down(ctx, i, lst_was_t, lst_was_s);
         any = anim_any();
     }
     /* (a pseudo-element's box gone, its content cleared: what ran on it stops) */
@@ -44176,6 +44691,31 @@ static void layout_static_position(LayoutContext *ctx, int idx, double *sx, doub
     }
 }
 
+/* (box k's bottom margin as it collapses with its last in-flow block child's, the child's
+ * coming through when nothing separates them: largest positive plus most negative) */
+static void layout_end_margin_set(LayoutContext *ctx, int k, double *pos, double *neg, int depth)
+{
+    const LayoutBox *b = layout_box(ctx, k);
+    double m = b->margin_bottom;
+    if (m > *pos) *pos = m;
+    if (m < *neg) *neg = m;
+    if (depth > 8 || b->s->border_bottom > 0.0 || b->padding_bottom > 0.0 || b->s->height_set || b->s->overflow != 0 ||
+        b->s->display != CSS_DISPLAY_BLOCK || b->s->float_side || !layout_is_in_flow(b) || b->s->contain_any) return;
+    int last = -1;
+    for (int c = ctx->tree.nodes[k].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+        const LayoutBox *cb = layout_box(ctx, c);
+        if (!layout_is_in_flow(cb) || cb->s->float_side || cb->s->display == CSS_DISPLAY_NONE) continue;
+        HtmlNode *cn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
+        if (cn && cn->type == HTML_NODE_TEXT && layout_text_is_whitespace(css_layout_node_text(ctx, cn))) continue;
+        last = c;
+    }
+    if (last < 0 || !layout_box_is_block_level(layout_box(ctx, last))) return;
+    /* (its last child's bottom edge at its own content's end: the margin comes through) */
+    const LayoutBox *lb = layout_box(ctx, last);
+    if (fabs(lb->y + lb->height - (b->y + b->height)) > 0.5) return;
+    layout_end_margin_set(ctx, last, pos, neg, depth + 1);
+}
+
 static void layout_static_position0(LayoutContext *ctx, int idx, double *sx, double *sy)
 {
     t_static_right = t_static_bottom = false;
@@ -44234,7 +44774,11 @@ static void layout_static_position0(LayoutContext *ctx, int idx, double *sx, dou
             /* (an empty block its margins collapse through: where they put
              * it is where a box after it goes) */
             if (kb->height <= 0.0 && layout_box_collapses_through(kb)) *sy = kb->y;
-            else *sy = kb->y + kb->height + kb->margin_bottom;
+            else {
+                double mp_ = 0.0, mn_ = 0.0;
+                layout_end_margin_set(ctx, k, &mp_, &mn_, 0);
+                *sy = kb->y + kb->height + mp_ + mn_;
+            }
             /* (a spanner, put across its columns: the one column goes on from the run after it) */
             if (kb->mc_span) {
                 for (int m = p; m >= 0; m = ctx->tree.nodes[m].parent_idx) {
@@ -44956,6 +45500,16 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
             }
         }
     }
+    /* (an inline split around blocks: from its first piece's top to its last one's bottom, padding edges) */
+    if (anc >= 0 && layout_box(ctx, anc)->s->display == CSS_DISPLAY_INLINE && layout_box(ctx, anc)->s->writing_mode == 0 &&
+        layout_box(ctx, anc)->s->block_in_inline == 2 && ctx->pieces && anc < ctx->tree.count && ctx->pieces[anc].n > 1) {
+        const LayoutBox *a = layout_box(ctx, anc);
+        const LayoutPieceList *pl = &ctx->pieces[anc];
+        const LayoutPiece *p0 = &pl->p[0], *p1 = &pl->p[pl->n - 1];
+        double y0 = (p0->anchor >= 0 ? layout_box(ctx, p0->anchor)->y : a->y) + p0->dy + a->s->border_top;
+        double y1 = (p1->anchor >= 0 ? layout_box(ctx, p1->anchor)->y : a->y) + p1->dy + p1->h - a->s->border_bottom;
+        if (isfinite(y0) && isfinite(y1) && y1 >= y0) { cb_y = y0; cb_h = y1 - y0; }
+    }
     /* (a grid's: the area its lines say) */
     if (anc >= 0 && layout_box(ctx, anc)->s->display == CSS_DISPLAY_GRID)
         grid_area_as_cb(layout_box(ctx, anc), anc, box->s, &cb_x, &cb_y, &cb_w, &cb_h);
@@ -45054,6 +45608,22 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
             cb_h = ey[y[1] + 1] - ey[y[0]];
             if (cb_w < 0.0) cb_w = 0.0;
             if (cb_h < 0.0) cb_h = 0.0;
+            /* (percentages of its insets, margins and padding: of the area, its containing block now) */
+            {
+                LayoutStyle *ps_ = box->s;
+                if (ps_->inset_pct_bits & 1) box->top = ps_->inset_pct[0] * cb_h + ps_->top;
+                if (ps_->inset_pct_bits & 2) box->right = ps_->inset_pct[1] * cb_w + ps_->right;
+                if (ps_->inset_pct_bits & 4) box->bottom = ps_->inset_pct[2] * cb_h + ps_->bottom;
+                if (ps_->inset_pct_bits & 8) box->left = ps_->inset_pct[3] * cb_w + ps_->left;
+                const LayoutBox *wb2 = cbb ? cbb : layout_box(ctx, ctx->tree.root_idx);
+                double ci = wb2->s->writing_mode != 0 ? cb_h : cb_w;
+                double *mm[4] = { &box->margin_top, &box->margin_right, &box->margin_bottom, &box->margin_left };
+                double *pp[4] = { &box->padding_top, &box->padding_right, &box->padding_bottom, &box->padding_left };
+                for (int sd = 0; sd < 4; sd++) {
+                    if (ps_->pct_sides & (1u << sd)) *mm[sd] = ps_->margin_base[sd] + ps_->margin_pct[sd] * ci;
+                    if (ps_->pct_sides & (16u << sd)) *pp[sd] = ps_->padding_base[sd] + ps_->padding_pct[sd] * ci;
+                }
+            }
             /* (a self-alignment of its own: in the area, its auto insets nothing) */
             int xe = cross ? a_self : j_self, ye = cross ? j_self : a_self;
             unsigned char xk = cross ? as->as_kw : as->js_kw, yk = cross ? as->js_kw : as->as_kw;
@@ -46368,6 +46938,48 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
                 }
             }
             o[k] = '\0';
+            ctx->text_norm[i] = o;
+        }
+        /* (font-variant-emoji text / emoji: an emoji character with no presentation selector given one) */
+        for (int i = 0; i < ctx->tree.count; i++) {
+            unsigned char fe = ctx->boxes[i].s ? ctx->boxes[i].s->fv_emoji : 0;
+            if (fe == 0) continue;
+            if (ctx->boxes[i].flags & LAYOUT_STYLE_SKIPPED) continue;
+            HtmlNode *tn = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
+            if (!tn || tn->type != HTML_NODE_TEXT || !css_layout_node_text(ctx, tn)) continue;
+            const char *t = ctx->text_norm[i] ? ctx->text_norm[i] : css_layout_node_text(ctx, tn);
+            size_t L = strlen(t);
+            char *o = (char *)malloc(L * 2 + 16);
+            if (!o) continue;
+            size_t k = 0;
+            bool any = false;
+            for (size_t q = 0; q < L;) {
+                const unsigned char *u = (const unsigned char *)t + q;
+                uint32_t cp = u[0];
+                size_t l = 1;
+                if (cp >= 0xF0 && q + 3 < L) { cp = ((cp & 7u) << 18) | ((u[1] & 63u) << 12) | ((u[2] & 63u) << 6) | (u[3] & 63u); l = 4; }
+                else if (cp >= 0xE0 && q + 2 < L) { cp = ((cp & 15u) << 12) | ((u[1] & 63u) << 6) | (u[2] & 63u); l = 3; }
+                else if (cp >= 0xC0 && q + 1 < L) { cp = ((cp & 31u) << 6) | (u[1] & 63u); l = 2; }
+                memcpy(o + k, t + q, l); k += l; q += l;
+                /* (what follows: a selector already, or a keycap's mark) */
+                const unsigned char *nx = (const unsigned char *)t + q;
+                bool has_vs = q + 2 < L + 1 && nx[0] == 0xEF && nx[1] == 0xB8 && (nx[2] == 0x8E || nx[2] == 0x8F);
+                bool keycap = q + 2 < L + 1 && nx[0] == 0xE2 && nx[1] == 0x83 && nx[2] == 0xA3;
+                bool emo = (cp >= 0x1F000 && cp <= 0x1FAFF) || (cp >= 0x2600 && cp <= 0x27BF) || (cp >= 0x2300 && cp <= 0x23FF) ||
+                           (cp >= 0x2B00 && cp <= 0x2BFF) || (cp >= 0x25A0 && cp <= 0x25FF) || (cp >= 0x2190 && cp <= 0x21FF) ||
+                           cp == 0x203C || cp == 0x2049 || cp == 0x2122 || cp == 0x2139 || cp == 0x24C2 || cp == 0x3030 ||
+                           cp == 0x303D || cp == 0x3297 || cp == 0x3299 || cp == 0xA9 || cp == 0xAE ||
+                           (((cp >= '0' && cp <= '9') || cp == '#' || cp == '*') && keycap);
+                if (emo && !has_vs && !(cp >= 0x1F3FB && cp <= 0x1F3FF)) {
+                    /* (unicode: the character's default presentation, emoji for the pictographs' planes) */
+                    bool as_emoji = fe == 2 || (fe == 3 && cp >= 0x1F000);
+                    o[k++] = (char)0xEF; o[k++] = (char)0xB8; o[k++] = (char)(as_emoji ? 0x8F : 0x8E);
+                    any = true;
+                }
+            }
+            o[k] = 0;
+            if (!any) { free(o); continue; }
+            free(ctx->text_norm[i]);
             ctx->text_norm[i] = o;
         }
     }
@@ -48862,6 +49474,17 @@ void css_layout_marker_spacing(const LayoutContext *ctx, int idx, double fs, flo
         double px = !strncasecmp(v, "normal", 6) ? 0.0 : strchr(v, '%') ? (w_ ? fs * 0.25 * atof(v) / 100.0 : fs * atof(v) / 100.0) : css_parse_length(v, fs, fs, fs);
         if (l_) *ls = (float)px; else *ws = (float)px;
     }
+}
+
+/* (a ::marker rule giving font-variant-numeric (or the font-variant shorthand): the UA's tabular-nums not forced) */
+bool css_layout_marker_numeric_given(const LayoutContext *ctx, int idx)
+{
+    const PseudoRec *mr = ctx->pseudo_rec && idx >= 0 && idx < ctx->marker_text_n && idx < ctx->base_count ? (const PseudoRec *)ctx->pseudo_rec[idx] : NULL;
+    for (int d = 0; mr && d < mr->side[4].n; d++) {
+        const CssDeclaration *dc = mr->side[4].decls[d];
+        if (dc->property && (!strcasecmp(dc->property, "font-variant-numeric") || !strcasecmp(dc->property, "font-variant"))) return true;
+    }
+    return false;
 }
 
 int css_layout_marker_tab(const LayoutContext *ctx, int idx)

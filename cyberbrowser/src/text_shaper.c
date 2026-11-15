@@ -1267,6 +1267,20 @@ static TextShaper *ts_create(uint8_t *data, size_t size, int font_index, float s
     s->scale = stbtt_ScaleForMappingEmToPixels(&s->font, size_pixels);
     int ascent, descent, line_gap;
     stbtt_GetFontVMetrics(&s->font, &ascent, &descent, &line_gap);
+    {
+        /* (as DirectWrite takes them: OS/2's win ascent and descent, or its typo ones when
+         * USE_TYPO_METRICS says so; the line gap what hhea's height has beyond them) */
+        const uint8_t *d = s->ttf_data;
+        stbtt_uint32 os2 = stbtt__find_table((stbtt_uint8 *)d, (stbtt_uint32)offset, "OS/2");
+        if (os2 && os2 + 78 <= s->ttf_size && !getenv("CYBER_HHEA_METRICS")) {
+            int fss = ttUSHORT(d + os2 + 62);
+            int ta = ttSHORT(d + os2 + 68), td = ttSHORT(d + os2 + 70), tg = ttSHORT(d + os2 + 72);
+            int wa = ttUSHORT(d + os2 + 74), wd = ttUSHORT(d + os2 + 76);
+            int hh = ascent - descent + line_gap;
+            if ((fss & 0x80) && ta - td > 0) { ascent = ta; descent = td; line_gap = tg > 0 ? tg : 0; }
+            else if (wa + wd > 0) { ascent = wa; descent = -wd; line_gap = hh - (wa + wd) > 0 ? hh - (wa + wd) : 0; }
+        }
+    }
     s->ascent   = (float)ascent * s->scale;
     s->descent  = (float)descent * s->scale;
     s->line_gap = (float)line_gap * s->scale;
@@ -1430,6 +1444,8 @@ void text_shaper_override_vmetrics(TextShaper *s, float ascent, float descent, f
     if (descent >= 0.0f) s->descent = -descent * s->size_pixels;
     if (line_gap >= 0.0f) s->line_gap = line_gap * s->size_pixels;
 }
+
+float text_shaper_get_size_adjust(const TextShaper *s) { return s && s->adj > 0.0f ? s->adj : 1.0f; }
 
 float text_shaper_raw_ascent(const TextShaper *s)
 {

@@ -223,6 +223,10 @@ vec3 blend3(int mode, vec3 b, vec3 s) {
     return vec3(blend1(mode, b.r, s.r), blend1(mode, b.g, s.g), blend1(mode, b.b, s.b));
 }
 
+// (the layer's own pixels: past them the texture holds nothing of it)
+ivec4 g_lq = ivec4(-1000000, -1000000, 1000000, 1000000);
+bool in_lq(ivec2 q) { return q.x >= g_lq.x && q.y >= g_lq.y && q.x < g_lq.z && q.y < g_lq.w; }
+
 // A Gaussian of deviation sigma around pix, of the layer (or what was under it): every
 // pixel while that's few, else a coarser grid of at most 17 x 17.
 vec4 blur_at(bool from_saved, ivec2 pix, float sigma, vec4 box) {
@@ -252,6 +256,7 @@ vec4 blur_at(bool from_saved, ivec2 pix, float sigma, vec4 box) {
                 if (q.y > y1) q.y = max(2 * y1 - q.y, y0);
             }
             if (q.x < 0 || q.y < 0 || q.x >= sz.x || q.y >= sz.y) continue;
+            if (!from_saved && !in_lq(q)) continue;
             vec4 c = from_saved ? texelFetch(saved, q, 0) : texelFetch(current, q, 0);
             if (from_saved) c = vec4(c.rgb * c.a, c.a);
             sum += c * w;
@@ -269,6 +274,7 @@ void main() {
         // backdrop-filter (10): the functions on old within the box instead, cur over that.
         vec4 old0 = texelFetch(saved, pix, 0);
         bool back = bm.kind.x == 10;
+        if (it.xf1.z == 0.0) g_lq = it.quad;
         // (a clip outside the filter: past it, what was there)
         if (bm.ex_rx[2] > bm.ex_rx[0] || bm.ex_rx[3] > bm.ex_rx[1]) {
             vec2 cp = vec2(pix) + 0.5;
@@ -329,8 +335,8 @@ void main() {
                 continue;
             } else if (t == 10) {
                 // drop-shadow: the alpha moved by the offsets, in its color, under it
-                ivec2 sp = ivec2(vec2(pix) - vec2(bm.img.x, bm.img.y) + 0.5);
-                float sa = (bm.misc.y > 0.0 ? blur_at(false, sp, bm.misc.y, bm.box).a : texelFetch(current, sp, 0).a) * bm.border.a / 255.0;
+                ivec2 sp = ivec2(floor(vec2(pix) - vec2(bm.img.x, bm.img.y) + 0.5));   // (floor: left of 0 is -1, not 0)
+                float sa = (bm.misc.y > 0.0 ? blur_at(false, sp, bm.misc.y, bm.box).a : (in_lq(sp) ? texelFetch(current, sp, 0).a : 0.0)) * bm.border.a / 255.0;
                 vec4 sh = vec4(bm.border.rgb / 255.0 * sa, sa);
                 vec4 pre = vec4(clamp(c, 0.0, 1.0) * src.a, src.a);
                 vec4 o = pre + sh * (1.0 - pre.a);

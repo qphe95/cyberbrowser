@@ -29,7 +29,7 @@ enum { ANIM_LEFT, ANIM_TOP, ANIM_RIGHT, ANIM_BOTTOM, ANIM_OPACITY, ANIM_TRANSFOR
        ANIM_BORDER_TOP, ANIM_BORDER_RIGHT, ANIM_BORDER_BOTTOM, ANIM_BORDER_LEFT,
        ANIM_FONT_SIZE, ANIM_LETTER_SPACING, ANIM_WORD_SPACING, ANIM_FONT_WEIGHT, ANIM_FONT_STYLE,
        ANIM_ROTATE, ANIM_SCALE, ANIM_CLIP_PATH, ANIM_FILTER, ANIM_BACKDROP,
-       ANIM_BC_TOP, ANIM_BC_RIGHT, ANIM_BC_BOTTOM, ANIM_BC_LEFT, ANIM_GTC, ANIM_GTR, ANIM_NPROP };   /* (GTC, GTR: grid track lists, tf "g(list)") */   /* (rotate: x degrees about z; scale: x, y; BC: border colors) */
+       ANIM_BC_TOP, ANIM_BC_RIGHT, ANIM_BC_BOTTOM, ANIM_BC_LEFT, ANIM_GTC, ANIM_GTR, ANIM_LST, ANIM_OFFDIST, ANIM_OFFROT, ANIM_OFFPATH, ANIM_NPROP };   /* (OFFPATH: offset-path path(), its text in tf, z 2 as clip-path) */   /* (OFFROT: offset-rotate, x degrees, w 1 auto: z 5 as OFFDIST) */   /* (OFFDIST: offset-distance, x the fraction or px, y a px beside a fraction, z 5, w 1 a percentage) */   /* (LST: list-style-type, discrete, its value as text in tf, z 4) */   /* (GTC, GTR: grid track lists, tf "g(list)") */   /* (rotate: x degrees about z; scale: x, y; BC: border colors) */
 #define ANIM_IS_COLOR(p) ((p) == ANIM_COLOR || (p) == ANIM_BGCOLOR || ((p) >= ANIM_BC_TOP && (p) <= ANIM_BC_LEFT))
 
 /* A value: px (or a number: opacity; a translation: x, y).  ok 0: one

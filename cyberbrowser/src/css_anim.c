@@ -76,7 +76,7 @@ static const char *const k_props[ANIM_NPROP] = { "left", "top", "right", "bottom
                                                   "border-left-width", "font-size", "letter-spacing", "word-spacing", "font-weight", "font-style",
                                                   "rotate", "scale", "clip-path", "filter", "backdrop-filter",
                                                   "border-top-color", "border-right-color", "border-bottom-color", "border-left-color",
-                                                  "grid-template-columns", "grid-template-rows" };
+                                                  "grid-template-columns", "grid-template-rows", "list-style-type", "offset-distance", "offset-rotate", "offset-path" };
 
 const char *anim_prop_name(int p) { return p >= 0 && p < ANIM_NPROP ? k_props[p] : ""; }
 
@@ -426,6 +426,7 @@ static AnimVal tf_mix(const AnimVal *x, const AnimVal *y, double t)
 {
     /* (a clip-path, z 2: none and a shape don't go between) */
     if ((x->z == 2.0f || y->z == 2.0f || x->z == 3.0f || y->z == 3.0f) && (!x->tf || !y->tf)) return t < 0.5 ? *x : *y;
+    if (x->z == 4.0f || y->z == 4.0f) return t < 0.5 ? *x : *y;   /* (a discrete value: flips halfway) */
     char ba[96], bb[96];
     const char *ta = tf_text_of(x, ba, sizeof ba), *tb = tf_text_of(y, bb, sizeof bb);
     const char *m = tf_mix_text(ta, tb, t);
@@ -465,6 +466,8 @@ static AnimVal val_mix(const AnimVal *x, const AnimVal *y, double t)
 {
     if (x->tf || y->tf) return tf_mix(x, y, t);
     if (!x->ok || !y->ok) return t < 0.5 ? *x : *y;
+    /* (offset-distance: a percentage and a length don't go between here) */
+    if ((x->z == 5.0f || y->z == 5.0f) && x->w != y->w) return t < 0.5 ? *x : *y;
     AnimVal r = { (float)(x->x + (y->x - x->x) * t), (float)(x->y + (y->y - x->y) * t), 1,
                   (float)(x->z + (y->z - x->z) * t), (float)(x->w + (y->w - x->w) * t) };
     return r;
@@ -490,7 +493,18 @@ void anim_val_css(int prop, const AnimVal *v, char *buf, size_t cap)
     /* (what can't be below nothing) */
     bool floor0 = prop == ANIM_WIDTH || prop == ANIM_HEIGHT || prop == ANIM_FONT_SIZE ||
                   (prop >= ANIM_PADDING_TOP && prop <= ANIM_PADDING_LEFT) || (prop >= ANIM_BORDER_TOP && prop <= ANIM_BORDER_LEFT);
-    if (prop == ANIM_CLIP_PATH || prop == ANIM_FILTER || prop == ANIM_BACKDROP) snprintf(buf, cap, "%s", v->tf ? v->tf : "none");
+    if (prop == ANIM_OFFROT) {
+        if (v->w > 0.5f) snprintf(buf, cap, v->x != 0.0f ? "auto %.6gdeg" : "auto", v->x);
+        else snprintf(buf, cap, "%.6gdeg", v->x);
+        return;
+    }
+    if (prop == ANIM_OFFDIST) {
+        if (v->w > 0.5f && v->y != 0.0f) snprintf(buf, cap, "calc(%.6g%% + %.6gpx)", v->x * 100.0, v->y);
+        else if (v->w > 0.5f) snprintf(buf, cap, "%.6g%%", v->x * 100.0);
+        else snprintf(buf, cap, "%.6gpx", v->x);
+        return;
+    }
+    if (prop == ANIM_CLIP_PATH || prop == ANIM_FILTER || prop == ANIM_BACKDROP || prop == ANIM_LST || prop == ANIM_OFFPATH) snprintf(buf, cap, "%s", v->tf ? v->tf : "none");
     else if (prop == ANIM_GTC || prop == ANIM_GTR) {
         /* (the list inside g( )) */
         const char *q = v->tf && !strncmp(v->tf, "g(", 2) ? v->tf + 2 : v->tf ? v->tf : "none";
@@ -966,6 +980,12 @@ static void anim_timing(int r, const SpecList L[ANIM_NFIELD], int j, double now)
     const char *f = list_item(&L[ANIM_F_FILL], j, "none", buf, sizeof buf);
     A.fill[r] = !strcasecmp(f, "forwards") ? F_FORWARDS : !strcasecmp(f, "backwards") ? F_BACKWARDS :
                 !strcasecmp(f, "both") ? F_BOTH : F_NONE;
+    /* (over, and the new timing has it going again: its events begin again, animationstart first) */
+    if (A.kind[r] == K_ANIM && bit(A.ev_end, r)) {
+        double t = row_time(r, now) - A.start[r] - A.delay[r];
+        double active = isinf(A.iters[r]) ? INFINITY : A.dur[r] * A.iters[r];
+        if (t < active) { bset(A.ev_end, r, false); if (t < 0 || t >= 0) bset(A.ev_start, r, false); }
+    }
 }
 
 static void note_cancel(int r, int type, double now)
@@ -1057,6 +1077,10 @@ void anim_box(NodeId el, int ps, const char *spec, const AnimVal base[ANIM_NPROP
                 if (!strcasecmp(nm, "border")) for (int p = ANIM_BC_TOP; p <= ANIM_BC_LEFT; p++) cover[p] = j;   /* (border: its colors too) */
             }
             else if (!strcasecmp(nm, "border-color")) for (int p = ANIM_BC_TOP; p <= ANIM_BC_LEFT; p++) cover[p] = j;
+            else if (!strcasecmp(nm, "background")) cover[ANIM_BGCOLOR] = j;
+            else if (!strcasecmp(nm, "grid-template") || !strcasecmp(nm, "grid")) { cover[ANIM_GTC] = j; cover[ANIM_GTR] = j; }
+            else if (!strcasecmp(nm, "offset")) { cover[ANIM_OFFDIST] = j; cover[ANIM_OFFROT] = j; cover[ANIM_OFFPATH] = j; }
+            else if (!strcasecmp(nm, "list-style")) cover[ANIM_LST] = j;
             else if (!strcasecmp(nm, "inset")) for (int p = ANIM_LEFT; p <= ANIM_BOTTOM; p++) cover[p] = j;
             /* (the logical pairs, in a horizontal flow) */
             else if (!strcasecmp(nm, "margin-block")) { cover[ANIM_MARGIN_TOP] = j; cover[ANIM_MARGIN_BOTTOM] = j; }
@@ -1117,6 +1141,25 @@ void anim_box(NodeId el, int ps, const char *spec, const AnimVal base[ANIM_NPROP
             if (r >= 0) {
                 anim_timing(r, L, j, now);
                 bset(A.seen, r, true);
+                /* (frames with var() in them: their values again, the element's custom properties may have changed) */
+                const float *offs0;
+                const void *const *decls0;
+                const int *counts0;
+                int fn0 = kf && frame ? kf(ud, name, &offs0, &decls0, &counts0) : -1;
+                bool hv = false;
+                for (int i = 0; i < fn0 && !hv; i++) {
+                    const CssDeclaration *fd = (const CssDeclaration *)decls0[i];
+                    for (int q = 0; q < counts0[i] && !hv; q++) hv = fd[q].value && strstr(fd[q].value, "var(");
+                }
+                for (int i = 0; hv && i < fn0; i++) {
+                    AnimVal v[ANIM_NPROP];
+                    bool has[ANIM_NPROP] = { 0 };
+                    frame(ud, decls0[i], counts0[i], v, has);
+                    for (int t = 0; t < A.n; t++) {
+                        if (!bit(A.alive, t) || A.kind[t] != K_TRACK || A.owner[t] != r || !has[A.prop[t]]) continue;
+                        for (int k = 0; k < A.kfn[t]; k++) if (A.kfo[t][k] == offs0[i]) A.kfv[t][k] = v[A.prop[t]];
+                    }
+                }
                 continue;
             }
             const float *offs;

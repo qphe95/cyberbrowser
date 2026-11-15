@@ -5267,6 +5267,8 @@ static bool sup_selector(const char *s)
         else if (*c == ')' || *c == ']') d--;
         else if (*c == ',' && !d) return false;
     }
+    /* (::before::marker and ::after::marker: not styled here) */
+    if (strcasestr_simple(s, "::before::marker") || strcasestr_simple(s, "::after::marker")) return false;
     return sup_selector_one(s, strlen(s), false);
 }
 
