@@ -427,11 +427,16 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char tsh_n, tsh_cur, tsh_set;
     float tsh_x[4], tsh_y[4], tsh_b[4];
     uint32_t tsh_rgba[4];
-    uint32_t ot_tags[16];
+    uint32_t ot_tags[18];   /* (and font-language-override's language: 0x02000000, then its tag) */
     unsigned char ot_n;
+    uint32_t ot_lang;        /* (font-language-override: an OpenType language tag, 0 normal) */
+    uint32_t ot_clang;       /* (the content's language (lang attribute) as one, 0 none known; inherited) */
+    unsigned char ot_lang_set;
     unsigned char letter_spacing_set, word_spacing_set;
     unsigned char text_transform, text_transform_set;
-    unsigned char fv_emoji, fv_emoji_set;   /* (font-variant-emoji: 0 normal, 1 text, 2 emoji, 3 unicode) */
+    unsigned char fv_emoji, fv_emoji_set;
+    unsigned char fsyn_obl_only, fsyn_obl_only_set;
+    unsigned char fsyn_nostyle, fsyn_nostyle_set;   /* (font-synthesis-style: none: no slanted stand-in) */   /* (font-synthesis-style: oblique-only) */   /* (font-variant-emoji: 0 normal, 1 text, 2 emoji, 3 unicode) */
     unsigned char wst, wst_set;   /* (word-space-transform: 1 space, 2 ideographic-space) */
     /* text-indent: px plus a fraction of the containing block's width;
      * inherited. */
@@ -651,6 +656,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     char page_name[24];                /* (page: its name, "" auto) */
     double block_step;                 /* (block-step-size) */
     unsigned char appearance_none;     /* (appearance: none) */
+    float accent_a;                    /* (accent-color's alpha: over the Canvas at paint) */
     unsigned char accent_set;          /* (accent-color: a color) */
     float accent[3];
     /* column-rule (column_rule_style a CssBorderStyle; color currentColor
@@ -666,9 +672,9 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * cap-end, junction-start, junction-end (px plus a fraction of the
      * crossing gap; oj overlap-join); gr_any: some rule has a style. */
     struct {
-        uint32_t rgba[6];
-        unsigned char cset[6], style[6];
-        float w[6];
+        uint32_t rgba[12];
+        unsigned char cset[12], style[12];
+        float w[12];
         unsigned char nc, cas, can, ns, sas, san, nw, was, wan;
         unsigned char brk, vis;
         struct { float px, pct; unsigned char oj; } inset[4];

@@ -281,7 +281,7 @@ const JSCFunctionListEntry js_shadow_root_proto_funcs[] = {
     JS_CGETSET_DEF("parentNode", js_shadow_root_get_parent_node_wrapper, NULL),
     JS_CGETSET_DEF("parentElement", js_shadow_root_get_parent_node_wrapper, NULL),
     JS_CGETSET_DEF("adoptedStyleSheets", js_shadow_root_get_adopted_style_sheets, js_shadow_root_set_adopted_style_sheets),
-    JS_CGETSET_DEF("styleSheets", js_shadow_root_get_style_sheets, NULL),
+    /* (styleSheets: cssom.js's, the <style> and <link> sheets in it, not adoptedStyleSheets) */
     JS_CGETSET_DEF("firstChild", js_shadow_root_get_first_child, NULL),
     JS_CGETSET_DEF("lastChild", js_shadow_root_get_last_child, NULL),
     JS_CGETSET_DEF("childNodes", js_shadow_root_get_child_nodes, NULL),
@@ -310,7 +310,7 @@ const JSCFunctionListEntry js_shadow_root_native_funcs[] = {
     JS_CGETSET_DEF("slotAssignment", js_shadow_root_get_slot_assignment, NULL),
     JS_CGETSET_DEF("innerHTML", js_shadow_root_get_innerHTML, js_shadow_root_set_innerHTML),
     JS_CGETSET_DEF("adoptedStyleSheets", js_shadow_root_get_adopted_style_sheets, js_shadow_root_set_adopted_style_sheets),
-    JS_CGETSET_DEF("styleSheets", js_shadow_root_get_style_sheets, NULL),
+    /* (styleSheets: cssom.js's, the <style> and <link> sheets in it, not adoptedStyleSheets) */
 };
 const size_t js_shadow_root_native_funcs_count = sizeof(js_shadow_root_native_funcs) / sizeof(js_shadow_root_native_funcs[0]);
 

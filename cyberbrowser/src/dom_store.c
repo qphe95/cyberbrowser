@@ -21,8 +21,11 @@ bool dom_scroll_get(NodeId id, float *x, float *y) {
     return false;
 }
 
+bool css_layout_colmark_moved(uint32_t id, float x);
 void dom_scroll_set(NodeId id, float x, float y) {
     DomScrolls *s = &g_dom_scrolls;
+    /* (column markers: another column current, made again) */
+    if (css_layout_colmark_moved(id, x)) dom_mark_dirty(id, DOMF_DIRTY_ATTR);
     if (dom_kind(id) != DOM_K_DOCUMENT || s->fixed) s->paint = true;
     uint32_t i = 0;
     while (i < s->n) {
@@ -338,7 +341,7 @@ static const char *const k_void_tags[] = {
     "area", "base", "br", "col", "embed", "hr", "img", "input",
     "link", "meta", "param", "source", "track", "wbr", NULL
 };
-static const char *const k_raw_tags[] = { "script", "style", "textarea", "title", NULL };
+static const char *const k_raw_tags[] = { "script", "style", "textarea", "title", "xmp", "noembed", "noframes", "noscript", NULL };   /* (as dom_parse.c's tokenizer has them) */
 
 static uint16_t *g_tag_flags;      /* by atom id; bit 15 = computed */
 static uint32_t g_tag_flags_cap;

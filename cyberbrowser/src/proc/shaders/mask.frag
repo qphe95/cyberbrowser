@@ -350,6 +350,8 @@ void main() {
             // (in its rounded corners only)
             float ra = rrect_alpha(bm.box, bm.border, bm.ex_ry, vec2(pix) + 0.5);
             if (ra < 1.0) src = mix(vec4(old0.rgb * old0.a, old0.a), src, ra);
+            // (the box's opacity: the filtered backdrop that much see-through, misc.x 1 - opacity)
+            if (bm.misc.x > 0.0) src = mix(src, vec4(old0.rgb * old0.a, old0.a), clamp(bm.misc.x, 0.0, 1.0));
             // the subtree over the filtered backdrop
             float ab = fg.a + src.a * (1.0 - fg.a);
             vec3 cb2 = fg.rgb + src.rgb * (1.0 - fg.a);

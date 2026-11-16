@@ -32,6 +32,8 @@ TextShaper *text_shaper_create_from_mapped(uint8_t *view, size_t size, int font_
 bool text_shaper_is_variable(const TextShaper *shaper);
 /* Does the font itself (no fallback) map this codepoint? */
 bool text_shaper_has_glyph(const TextShaper *shaper, uint32_t codepoint);
+/* Whether OpenType feature tag substitutes every character of the UTF-8 text (subs / sups: all or none). */
+bool text_shaper_feature_covers(const TextShaper *shaper, uint32_t tag, const char *utf8, size_t n);
 /* (it has the glyph and its unicode-range, if any, takes in the code point) */
 bool text_shaper_covers(const TextShaper *shaper, uint32_t codepoint);
 void        text_shaper_destroy(TextShaper *shaper);
@@ -95,9 +97,12 @@ void text_shaper_set_spacing(float letter_px, float word_px, float scale);
 void text_shaper_set_features(const uint32_t *tags, int n);
 /* (the palette color glyphs use on this thread: kind 0 normal, 1 light, 2 dark, 3 palette index; n overrides) */
 void text_shaper_set_palette(int kind, int index, const int *over_index, const float (*over_rgba)[4], int n);
+void text_shaper_set_palette_font(const TextShaper *f, int kind, int index);   /* (after the above: one font's own) */
 /* The other fonts of the element's font-family list, tried in order for a
  * character the font lacks before the registry's fallbacks (n 0: none). */
 void text_shaper_set_chain(TextShaper *const *fonts, int n);
+extern __thread float text_shaper_base_shift;
+void text_shaper_set_emoji(int mode);   /* (font-variant-emoji after the chain: 1 text, 2 emoji, 3 unicode) */
 /* text-autospace for what's measured and drawn next: 1 ideograph-alpha, 2 ideograph-numeric. */
 void text_shaper_set_autospace(int mode);
 /* (the character before what's measured or drawn next, for text-autospace) */

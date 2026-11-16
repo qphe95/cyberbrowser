@@ -274,9 +274,21 @@ const REFREADY = `<script style="display: none !important">//<![CDATA[
     /* (and, when what was laid out since has not gone to the GPU process yet (a web
      * font's relayout, say), a frame more: __cyberFramePending, the tab's in a reftest run) */
     /* (at most 8 frames more: a running animation lays out every frame, and would keep it pending to the time limit) */
-    var extra = 0;
+    var extra = 0, held = false;
     var settled = function () {
       if (window.__cyberFramePending && window.__cyberFramePending() && extra++ < 8) requestAnimationFrame(function () { setTimeout(settled, 0); });
+      else if (extra > 8 && !held && document.getAnimations) {
+        /* (still animating, without end: each such held 50 ms in (a few frames, as a browser shot after load sees it), so a test and its
+         * reference are shot at the same moment of it, not whenever each got here) */
+        held = true;
+        try {
+          document.getAnimations().forEach(function (a) {
+            var t = a.effect && a.effect.getComputedTiming ? a.effect.getComputedTiming() : null;
+            if (a.playState === 'running' && t && t.iterations === Infinity && !t.delay) { a.pause(); a.currentTime = 50; }
+          });
+        } catch (e) {}
+        requestAnimationFrame(function () { requestAnimationFrame(function () { setTimeout(ready, 0); }); });
+      }
       else ready();
     };
     var go = function () { requestAnimationFrame(function () { requestAnimationFrame(function () { setTimeout(settled, 0); }); }); };

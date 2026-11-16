@@ -88,6 +88,7 @@ enum {
     ATTR_TRANSFORM,
     ATTR_TRANSFORM_BOX,
     ATTR_TRANSFORM_ORIGIN,
+    ATTR_VECTOR_EFFECT,
     ATTR_VIEW_BOX,
     ATTR_VISIBILITY,
     ATTR_WIDTH,
@@ -204,6 +205,7 @@ static int attributeid(const char* data, size_t length)
         {"transform", ATTR_TRANSFORM},
         {"transform-box", ATTR_TRANSFORM_BOX},
         {"transform-origin", ATTR_TRANSFORM_ORIGIN},
+        {"vector-effect", ATTR_VECTOR_EFFECT},
         {"viewBox", ATTR_VIEW_BOX},
         {"visibility", ATTR_VISIBILITY},
         {"width", ATTR_WIDTH},
@@ -243,6 +245,7 @@ static int cssattributeid(const char* data, size_t length)
         {"stroke-width", ATTR_STROKE_WIDTH},
         {"transform-box", ATTR_TRANSFORM_BOX},
         {"transform-origin", ATTR_TRANSFORM_ORIGIN},
+        {"vector-effect", ATTR_VECTOR_EFFECT},
         {"visibility", ATTR_VISIBILITY}
     };
 
@@ -1588,8 +1591,8 @@ typedef struct render_state {
 /* (cyberbrowser) the element's own bounding box, its transform left out:
  * the fill box, or with its stroke the stroke box; while measuring,
  * t_bbox_of's transform is not applied and t_bbox_fill leaves strokes out */
-static const element_t* t_bbox_of;
-static bool t_bbox_fill;
+static __thread const element_t* t_bbox_of;   /* (per thread: SVG images render off the main thread too) */
+static __thread bool t_bbox_fill;
 static bool element_box(const element_t* element, const render_state_t* parent, bool fill, plutovg_rect_t* out);
 
 /* (cyberbrowser) transform-origin: one or two keywords or lengths, a
@@ -2332,8 +2335,11 @@ static void draw_shape(const element_t* element, render_context_t* context, rend
         parse_number(element, ATTR_STROKE_MITERLIMIT, &miter_limit, false, true);
     }
 
+    /* (cyberbrowser) vector-effect: non-scaling-stroke: stroked on the device's pixels */
+    const string_t* ve_ = find_attribute(element, ATTR_VECTOR_EFFECT, false);
+    bool non_scaling = ve_ && ve_->length == 18 && !strncmp(ve_->data, "non-scaling-stroke", 18);
     if(state->mode == render_mode_bounding) {
-        if(stroke.type == paint_type_none || t_bbox_fill)
+        if(stroke.type == paint_type_none || t_bbox_fill || non_scaling)
             return;
         float line_width = resolve_length(state, &stroke_width, 'o');
         float cap_limit = line_width / 2.f;
@@ -2394,6 +2400,18 @@ static void draw_shape(const element_t* element, render_context_t* context, rend
         plutovg_canvas_set_line_join(context->canvas, line_join);
         plutovg_canvas_set_miter_limit(context->canvas, miter_limit);
         plutovg_canvas_set_opacity(context->canvas, stroke_opacity * state->opacity);
+        if(non_scaling) {
+            plutovg_path_t* dp = plutovg_path_clone(context->document->path);
+            if(dp) {
+                plutovg_matrix_t id_;
+                plutovg_matrix_init_identity(&id_);
+                plutovg_path_transform(dp, &state->matrix);
+                plutovg_canvas_set_matrix(context->canvas, &id_);
+                plutovg_canvas_stroke_path(context->canvas, dp);
+                plutovg_path_destroy(dp);
+                return;
+            }
+        }
         plutovg_canvas_set_matrix(context->canvas, &state->matrix);
         plutovg_canvas_stroke_path(context->canvas, context->document->path);
     }
@@ -3332,7 +3350,7 @@ static void render_children(const element_t* element, render_context_t* context,
     }
 }
 
-static render_context_t* t_render_ctx;   /* (cyberbrowser: the render going on, for element_box) */
+static __thread render_context_t* t_render_ctx;   /* (cyberbrowser: the render going on, for element_box) */
 
 static bool element_box(const element_t* element, const render_state_t* parent, bool fill, plutovg_rect_t* out)
 {

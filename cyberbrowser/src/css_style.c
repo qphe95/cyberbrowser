@@ -431,6 +431,20 @@ static CssStyleDoc *styledoc_build(HtmlDocument *doc, CssStyleDoc *old, uint32_t
     if (copied) *copied = reused;
 
     /* Sibling positions, computed the way css_element_index counts them. */
+    /* (a type: the name in its namespace, one other than HTML's apart) */
+    CssAtom *tkey = calloc((size_t)n + 1, sizeof(CssAtom));
+    for (int i = 0; tkey && i < n; i++) {
+        tkey[i] = d->tag[i];
+        if (!d->is_elem[i]) continue;
+        const HtmlNode *tn_ = SD_NODE(i);
+        uint32_t ns_ = tn_ && tn_->store_id ? dom_ns(tn_->store_id) : DOM_NS_HTML;
+        if (ns_ != DOM_NS_HTML) {
+            char kb_[160];
+            int kl_ = snprintf(kb_, sizeof kb_, "%u|%s", (unsigned)ns_, tn_->tag_name ? tn_->tag_name : "");
+            if (kl_ > 0 && kl_ < (int)sizeof kb_) tkey[i] = css_atom_intern(kb_, (size_t)kl_);
+        }
+    }
+    #define TKEY(c) (tkey ? tkey[c] : d->tag[c])
     size_t natoms = css_atom_count() + 1;
     int32_t *tcount = calloc(natoms, sizeof(int32_t));
     VEC(int) kids = {0};
@@ -455,23 +469,25 @@ static CssStyleDoc *styledoc_build(HtmlDocument *doc, CssStyleDoc *old, uint32_t
                 d->next_elem[kids.v[k - 1]] = c;
             }
         }
-        for (int k = 0; k < total; k++) tcount[d->tag[kids.v[k]]]++;
+        for (int k = 0; k < total; k++) tcount[TKEY(kids.v[k])]++;
         for (int k = 0; k < total; k++) {
             int c = kids.v[k];
-            int32_t *cnt = &tcount[d->tag[c]];
+            int32_t *cnt = &tcount[TKEY(c)];
             if (d->parent[c] == i) {
                 d->type_last[c] = *cnt;     /* remaining same-tag siblings incl. this one */
             }
             (*cnt)--;
         }
-        for (int k = 0; k < total; k++) tcount[d->tag[kids.v[k]]] = 0;
+        for (int k = 0; k < total; k++) tcount[TKEY(kids.v[k])] = 0;
         for (int k = 0; k < total; k++) {
             int c = kids.v[k];
-            int32_t v = ++tcount[d->tag[c]];
+            int32_t v = ++tcount[TKEY(c)];
             if (d->parent[c] == i) d->type_first[c] = v;
         }
-        for (int k = 0; k < total; k++) tcount[d->tag[kids.v[k]]] = 0;
+        for (int k = 0; k < total; k++) tcount[TKEY(kids.v[k])] = 0;
     }
+    #undef TKEY
+    free(tkey);
     free(kids.v);
 #undef SD_NODE
     for (int i = n - 1; i >= 0; i--) {
@@ -683,7 +699,20 @@ static bool sel_visited_only(const char *sel)
     }
     return any && cur;
 }
+/* (a comma outside parentheses: a list) */
+static bool top_comma(const char *v)
+{
+    int dep = 0;
+    for (; v && *v; v++) { if (*v == '(') dep++; else if (*v == ')') dep--; else if (*v == ',' && dep <= 0) return true; }
+    return false;
+}
 /* (what a :visited rule may set: colors only) */
+static const char *const g_visited_ok[] = { "color", "background-color", "border-top-color", "border-right-color",
+    "border-bottom-color", "border-left-color", "outline-color", "column-rule-color", "text-decoration-color",
+    "text-emphasis-color", "fill", "stroke", "caret-color", NULL };
+#define VIS_NKW 5
+static const char *const g_vis_kw[VIS_NKW] = { "unset", "revert", "initial", "inherit", "revert-layer" };
+static CssDeclaration g_vis_all[2][VIS_NKW][16];   /* (all: k in a :visited rule, as each color property: k; [important]) */
 static bool visited_prop_ok(const char *p)
 {
     static const char *const ok[] = { "color", "background-color", "border-color", "border-top-color", "border-right-color",
@@ -777,6 +806,7 @@ typedef struct AttrTest {
 } AttrTest;
 
 bool (*g_css_rule_gate)(const char *container_query, int dom);
+bool (*g_css_rule_gate_pseudo)(const char *container_query, int dom);   /* (a pseudo-element's: its element a container too) */
 
 struct CssStyleSet {
     AttrTest *atests; size_t natests;
@@ -2166,9 +2196,40 @@ int css_style_match(const CssStyleSet *S, const CssStyleDoc *D, int dom,
             for (int up = dom; up >= 0 && !list_match(S, D, cr->scope, up); up = D->parent[up]) prox++;
         }
         for (int d = 0; d < rule->declaration_count; d++) {
+            if (cr->visited_only && rule->declarations[d].property && !strcasecmp(rule->declarations[d].property, "all") && rule->declarations[d].value) {
+                /* (all: a keyword, for the color properties only) */
+                const char *v = rule->declarations[d].value;
+                while (*v == ' ') v++;
+                int kw = -1;
+                for (int k = 0; k < VIS_NKW && kw < 0; k++) if (!strncasecmp(v, g_vis_kw[k], strlen(g_vis_kw[k])) && !isalnum((unsigned char)v[strlen(g_vis_kw[k])]) && v[strlen(g_vis_kw[k])] != '-') kw = k;
+                if (kw < 0) continue;
+                int imp = rule->declarations[d].important ? 1 : 0;
+                for (int k = 0; g_visited_ok[k] && k < 16; k++) {
+                    CssDeclaration *sd = &g_vis_all[imp][kw][k];
+                    if (!sd->property) { sd->value = (char *)g_vis_kw[kw]; sd->important = imp != 0; sd->property = (char *)g_visited_ok[k]; }
+                    CssAppliedDecl a;
+                    a.decl = sd;
+                    a.specificity = t->rule_spec[g] - (cr->ua ? (1 << 28) : 0);
+                    if (cr->layer_bias) a.specificity += (imp ? cr->layer_bias : -cr->layer_bias) * (1 << 22);
+                    if (rule->shadow) a.specificity += (imp ? 1 : -1) * (1 << 27);
+                    a.order = (int)((uint32_t)cr->sheet * 1000000u + (uint32_t)cr->index * 1000u + (uint32_t)d);
+                    a.proximity = prox;
+                    a.important = imp != 0;
+                    a.rule = g;
+                    VEC_PUSH(t->applied, a);
+                }
+                continue;
+            }
             if (cr->visited_only && !visited_prop_ok(rule->declarations[d].property)) continue;
             CssAppliedDecl a;
             a.decl = &rule->declarations[d];
+            if (cr->visited_only && rule->declarations[d].value && top_comma(rule->declarations[d].value) &&
+                !strcasecmp(rule->declarations[d].property, "column-rule-color")) {
+                /* (a list of colors where :visited allows one: currentcolor) */
+                static CssDeclaration vcc[2] = { { (char *)"column-rule-color", (char *)"currentcolor", false, 0, 0 },
+                                                 { (char *)"column-rule-color", (char *)"currentcolor", true, 0, 0 } };
+                a.decl = &vcc[rule->declarations[d].important ? 1 : 0];
+            }
             /* (the user agent's sheet below every author rule whatever its
              * specificity: origin before specificity in the cascade) */
             a.specificity = t->rule_spec[g] - (cr->ua ? (1 << 28) : 0);
@@ -2224,7 +2285,7 @@ int css_style_match_after(const CssStyleSet *S, const CssStyleDoc *D, int dom,
         const CAfter *af = &S->afters[t->after_hits.v[i]];
         {
             const CssRule *ar = S->rules[af->rule].rule;
-            if (ar->container_query && g_css_rule_gate && !g_css_rule_gate(ar->container_query, dom)) continue;
+            if (ar->container_query && g_css_rule_gate && !(g_css_rule_gate_pseudo ? g_css_rule_gate_pseudo : g_css_rule_gate)(ar->container_query, dom)) continue;
         }
         if (af->rule != last_rule) kinds = 0;
         last_rule = af->rule;

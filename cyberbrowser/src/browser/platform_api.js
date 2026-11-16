@@ -1590,6 +1590,38 @@
         return { x: /\b(x|inline|both|pair)\b/.test(type), y: /\b(y|block|both|pair)\b/.test(type), proximity: !/mandatory/.test(type) };
     }
     /* Each axis's snap positions, { t: the target, pos: the offset }. */
+    /* (a scroller's columns as snap targets: one token each, the same from call to call) */
+    var colTokens = new WeakMap();
+    function columnToken(el, q) {
+        var a = colTokens.get(el);
+        if (!a) { a = []; colTokens.set(el, a); }
+        while (a.length <= q) a.push({ column: a.length, contains: function () { return false; } });
+        return a[q];
+    }
+    /* (the scroll-snap-align its ::column rules give it, in sheet order; '' none) */
+    function columnSnapAlign(el) {
+        var align = '', doc = el.ownerDocument;
+        var walk = function (rules) {
+            for (var i = 0; rules && i < rules.length; i++) {
+                var r = rules[i];
+                if (r.cssRules && !r.selectorText) { try { walk(r.cssRules); } catch (e) {} continue; }
+                var sel = r.selectorText;
+                if (!sel || sel.indexOf('::column') < 0 || !r.style) continue;
+                var sa = r.style.scrollSnapAlign || r.style.getPropertyValue('scroll-snap-align');
+                if (!sa) continue;
+                var parts = sel.split(',');
+                for (var k = 0; k < parts.length; k++) {
+                    var p = parts[k].trim();
+                    if (!/::column$/.test(p)) continue;
+                    var base = p.slice(0, -8).trim() || '*';
+                    try { if (el.matches(base)) align = sa; } catch (e) {}
+                }
+            }
+        };
+        var sheets = doc.styleSheets;
+        for (var s = 0; sheets && s < sheets.length; s++) { try { walk(sheets[s].cssRules); } catch (e) {} }
+        return align === 'none' ? '' : align;
+    }
     function snapLists(el, axes) {
         /* (the root's scrollport is the viewport, which its box moves in) */
         var isRoot = el === el.ownerDocument.documentElement;
@@ -1643,6 +1675,22 @@
             if (axes.y && ay_ !== 'none') {
                 var ylo = b.top - top + sy - elPx(tcs.scrollMarginTop, 0, tz), yhi = b.bottom - top + sy + elPx(tcs.scrollMarginBottom, 0, tz);
                 out.y.push({ t: c, pos: Math.max(minY, Math.min(hiY, at(ay_, ylo, yhi, ch, padT, padB))), lo: ylo - padT, hi: yhi + padB });
+            }
+        }
+        /* (its columns, as ::column says) */
+        var cAlign = axes.x && !vert_ && !rtl_ && (ecs.columnCount !== 'auto' || ecs.columnWidth !== 'auto') ? columnSnapAlign(el) : '';
+        if (cAlign) {
+            var cps = cAlign.split(' '), cInline = cps[1] || cps[0];
+            var pL = elPx(ecs.paddingLeft, 0, ez), pR = elPx(ecs.paddingRight, 0, ez);
+            var W = cw - pL - pR, gap = ecs.columnGap === 'normal' ? elPx(ecs.fontSize, 0, ez) : elPx(ecs.columnGap, W, ez);
+            var cc = parseInt(ecs.columnCount, 10), cwd = elPx(ecs.columnWidth, 0, ez), n = 1;
+            if (cwd > 0) { n = Math.max(1, Math.floor((W + gap) / (cwd + gap))); if (cc > 0 && cc < n) n = cc; }
+            else if (cc > 0) n = cc;
+            var colw = (W - (n - 1) * gap) / n, stride = colw + gap;
+            var total = stride > 0 ? Math.ceil((el.scrollWidth * ez - pL - pR + gap) / stride - 1e-6) : 0;
+            for (var q = 0; cInline !== 'none' && q < total && q < 1000; q++) {
+                var clo = pL + q * stride, chi = clo + colw;
+                out.x.push({ t: columnToken(el, q), pos: Math.max(minX, Math.min(hiX, at(cInline, clo, chi, cw, padL, padR))), lo: clo - padL, hi: chi + padR });
             }
         }
         return out;
@@ -1826,11 +1874,18 @@
         var left = isRoot ? 0 : b.left + sc.clientLeft, top = isRoot ? 0 : b.top + sc.clientTop;
         return { x: r.left - left + sc.scrollLeft, y: r.top - top + sc.scrollTop };
     }
+    /* (where scrolling to t leaves it: its scroll-snap-align, start when none) */
+    function alignedOffsetOf(sc, t) {
+        var o = scrollOffsetOf(sc, t), a = String(global.getComputedStyle(t).scrollSnapAlign || 'none').split(/\s+/);
+        var block = a[0], inline = a[1] || a[0], r = t.getBoundingClientRect();
+        var at = function (v, size, view) { return v === 'center' ? (size - view) / 2 : v === 'end' ? size - view : 0; };
+        return { x: o.x + at(inline, r.width, sc.clientWidth), y: o.y + at(block, r.height, sc.clientHeight) };
+    }
     function markersUpdate(el) {
         var sc = scrollerSubject(el), list = global.__cyberScrollMarkerTargets(el);
         var maxX = sc.scrollWidth - sc.clientWidth, maxY = sc.scrollHeight - sc.clientHeight, best = null, bestD = Infinity;
         for (var i = 0; i < list.length; i++) {
-            var o = scrollOffsetOf(sc, list[i]);
+            var o = alignedOffsetOf(sc, list[i]);
             var d = Math.abs(Math.max(0, Math.min(maxX, o.x)) - sc.scrollLeft) + Math.abs(Math.max(0, Math.min(maxY, o.y)) - sc.scrollTop);
             if (d < bestD) { bestD = d; best = list[i]; }
         }
@@ -1868,6 +1923,17 @@
         var hit = global.__cyberScrollPseudoAt(x, y);
         if (!hit) return false;
         var el = hit[0], kind = hit[1];
+        if (kind >= 38) {
+            /* (a column's: the scroller to that column, as its ::column's scroll-snap-align has it) */
+            var cs = global.getComputedStyle(el), n = parseInt(cs.columnCount, 10), gap = parseFloat(cs.columnGap) || 0;
+            var pl = parseFloat(cs.paddingLeft) || 0, pr = parseFloat(cs.paddingRight) || 0, inner = el.clientWidth - pl - pr;
+            if (!(n > 0)) { var cw0 = parseFloat(cs.columnWidth); n = cw0 > 0 ? Math.max(1, Math.floor((inner + gap) / (cw0 + gap))) : 1; }
+            var colW = (inner - (n - 1) * gap) / n, at = hit[2] * (colW + gap), al = 'none';
+            try { al = String(global.getComputedStyle(el, '::column').scrollSnapAlign || 'none').split(/\s+/); al = al[1] || al[0]; } catch (e) { }
+            var x = al === 'center' ? at + colW / 2 - inner / 2 : al === 'end' ? at + colW - inner : at;
+            el.scrollLeft = Math.max(0, Math.min(el.scrollWidth - el.clientWidth, x));
+            return true;
+        }
         if (kind === 5) {
             var sc = scrollerAround(el), o = scrollOffsetOf(sc, el);
             if (sc.scrollWidth > sc.clientWidth) sc.scrollLeft = o.x;
@@ -2084,12 +2150,12 @@
         to.removeAttribute('id');
     };
     /* (a deep clone of el as it looks now, named descendants left out) */
-    var vtSnap = function (el, isRoot) {
+    var vtSnap = function (el, isRoot, keepNamed) {
         var c = el.cloneNode(true);
         var walk = function (a, b, top) {
             if (a.nodeType !== 1 || b.nodeType !== 1) return;
             vtInline(a, b);
-            if (!top && vtName(a)) { b.style.setProperty('visibility', 'hidden'); }
+            if (!top && !keepNamed && vtName(a)) { b.style.setProperty('visibility', 'hidden'); }
             /* (a fixed descendant: where it is on screen, from the nearest positioned box of the clone) */
             var apos = !top && !isRoot ? global.getComputedStyle(a).position : '';
             if (apos === 'fixed' || apos === 'absolute') {
@@ -2152,6 +2218,12 @@
                         bw: [cs.borderTopWidth, cs.borderRightWidth, cs.borderBottomWidth, cs.borderLeftWidth].map(function (v) { return parseFloat(v) || 0; }) };
             /* (transformed: the border box's size, placed so its transform takes it where it shows) */
             var tm = /^matrix\(([^)]*)\)$/.exec(String(cs.transform || '').trim());
+            if (tm) {
+                /* (a translation only, a transformed ancestor: as if none, the rect where it shows) */
+                var tv = tm[1].split(',').map(parseFloat);
+                if (tv.length === 6 && tv[0] === 1 && tv[1] === 0 && tv[2] === 0 && tv[3] === 1 &&
+                    (function () { for (var a = el.parentElement; a; a = a.parentElement) { var t = global.getComputedStyle(a).transform; if (t && t !== 'none') return true; } return false; })()) tm = null;
+            }
             if (tm && typeof el.offsetWidth === 'number') {
                 var mv = tm[1].split(',').map(parseFloat), bw = el.offsetWidth, bh = el.offsetHeight;
                 var to = String(cs.transformOrigin || '').split(/\s+/).map(parseFloat), ox = to[0] || 0, oy = to[1] || 0;
@@ -2294,6 +2366,7 @@
         return !none;
     };
     var vtShow = function (doc, old, onDone, scope) {
+        var vtNewLive = [];
         scope = scope || doc.documentElement;
         var scoped = scope !== doc.documentElement;
         var nu = vtCaptureState(doc, scope), rules = vtRules(doc, scope);
@@ -2599,10 +2672,18 @@
                     if (ops.length >= 1) opx = opv(ops[0]);
                     if (ops.length >= 2) opy = opv(ops[1]);
                     snap.style.setProperty('transform', 'translate(' + (opx[0] * (gw - s.w) + opx[1]) + 'px,' + (opy[0] * (bh - s.h) + opy[1]) + 'px)');
+                } else if ((fit === 'contain' || fit === 'cover') && s.w > 0 && s.h > 0 && gw > 0 && gh > 0 && Math.abs(gw / s.w - gh / s.h) > 0.001) {
+                    /* (the whole of it in the box, or the box all covered; centred) */
+                    var kc = fit === 'contain' ? Math.min(gw / s.w, gh / s.h) : Math.max(gw / s.w, gh / s.h);
+                    snap.style.setProperty('transform', 'translate(' + (gw - s.w * kc) / 2 + 'px,' + (gh - s.h * kc) / 2 + 'px) scale(' + kc + ')');
+                    snap.style.setProperty('transform-origin', '0 0');
+                    if (fit === 'cover') w.style.setProperty('overflow', 'clip');
+                    fit = 'ovb';
                 } else if (Math.abs(sc - 1) > 0.001) { snap.style.setProperty('transform', 'scale(' + sc + ')'); snap.style.setProperty('transform-origin', '0 0'); }
                 /* (its own width: scaled again when a seek changes its group's) */
                 if (fit !== 'none' && fit !== 'ovb' && s.w > 0) Object.defineProperty(snap, '__cyberSnapW', { value: s.w, configurable: true });
                 w.appendChild(snap);
+                if (kind === 'new' && s.el && n !== 'root') vtNewLive.push({ el: s.el, snap: snap, sig: null, g: !start && !parentOf[n] ? g : null, n: n, s: s });
                 ip.appendChild(w);
             };
             put(e.old, f.od, f.oa, 1, 'old');
@@ -2633,6 +2714,37 @@
         root.appendChild(hostOk ? host : ov);
         /* (the page's ::view-transition-* rules changing while it shows, by a class on the root: each pseudo's styles follow) */
         var vtOn = true, vtMo = null;
+        /* (the new images: the live elements, taken again when they change) */
+        var vtSig = function (el) { var r = el.getBoundingClientRect(); return el.outerHTML.replace(/visibility:\s*hidden\s*!important;?/g, '') + '|' + r.width + 'x' + r.height; };
+        vtNewLive.forEach(function (t) { try { t.sig = vtSig(t.el); } catch (e) { t.sig = null; } });
+        var vtNewCheck = function () {
+            vtNewLive.forEach(function (t) {
+                if (!t.el.isConnected || !t.snap.parentNode || t.sig === null) return;
+                var sg;
+                try { sg = vtSig(t.el); } catch (e) { return; }
+                if (sg === t.sig) return;
+                t.sig = sg;
+                try {
+                    var hv = t.el.style.getPropertyValue('visibility'), hp = t.el.style.getPropertyPriority('visibility');
+                    var hold = null;
+                    for (var hk = 0; hk < hidden.length; hk++) if (hidden[hk][0] === t.el) hold = hidden[hk];
+                    t.el.style.setProperty('visibility', hold && hold[1] && !/hidden/.test(hold[1]) ? hold[1] : 'visible', 'important');
+                    var ns;
+                    try { ns = vtSnap(t.el); } finally { if (hv) t.el.style.setProperty('visibility', hv, hp); else t.el.style.removeProperty('visibility'); }
+                    ['transform', 'transform-origin', 'visibility'].forEach(function (p) { var v = t.snap.style.getPropertyValue(p); if (v) ns.style.setProperty(p, v); });
+                    if (t.snap.__cyberSnapW) Object.defineProperty(ns, '__cyberSnapW', { value: t.snap.__cyberSnapW, configurable: true });
+                    t.snap.parentNode.replaceChild(ns, t.snap);
+                    t.snap = ns;
+                    if (t.g) {
+                        /* (its group where the element now is) */
+                        var cs2 = vtCaptureState(doc, scope).filter(function (x) { return x.name === t.n; })[0];
+                        if (cs2 && Math.abs(cs2.w - t.s.w) < 0.5 && Math.abs(cs2.h - t.s.h) < 0.5) {
+                            t.g.style.setProperty('transform', 'translate(' + (cs2.x - sr.left) + 'px,' + (cs2.y - sr.top) + 'px)' + (cs2.m ? ' ' + cs2.m : ''));
+                        }
+                    }
+                } catch (e) { }
+            });
+        };
         (function () {
             var sig = function (rl) { return rl.map(function (r) { return r.kind + '|' + r.name + '|' + r.style.cssText; }).join('\n'); };
             var sig0 = sig(rules);
@@ -2666,7 +2778,7 @@
                 vtMo.observe(doc.documentElement, { attributes: true, attributeFilter: ['class', 'style'] });
             } catch (e) { vtMo = null; }
             /* (and each frame: a sheet changed through the CSSOM, adopted ones) */
-            var fr = function () { if (!vtOn) return; check(); global.requestAnimationFrame(fr); };
+            var fr = function () { if (!vtOn) return; check(); vtNewCheck(); global.requestAnimationFrame(fr); };
             global.requestAnimationFrame(fr);
         })();
         var undo = function () {
@@ -2679,13 +2791,13 @@
         };
         /* (while animations started on its pseudo-elements run: held) */
         var vtLive = function () { return vtAnims.some(function (a) { try { return a.playState === 'running' || a.playState === 'paused'; } catch (e) { return false; } }); };
-        if (brief) { var bleft = 6, btick = function () { if (vtLive()) { global.requestAnimationFrame(btick); return; } if (--bleft > 0) global.requestAnimationFrame(btick); else { undo(); onDone(); } }; global.requestAnimationFrame(btick); }
+        if (brief) { var bleft = 6, btick = function () { if (vtLive() || (onDone.__held && onDone.__held())) { global.requestAnimationFrame(btick); return; } if (--bleft > 0) global.requestAnimationFrame(btick); else { undo(); onDone(); } }; global.requestAnimationFrame(btick); }
         return undo;
     };
     var VT_ACTIVE = { cur: null };
     var newViewTransition = function (update, types, doc, root) {
         var vt = Object.create(ViewTransition.prototype), resolveReady, rejectReady, resolveFinished, rejectFinished,
-            resolveDone, rejectDone, skipped = false, timedOut = false;
+            resolveDone, rejectDone, skipped = false, timedOut = false, vtWaits = 0;
         var ready = new Promise(function (a, b) { resolveReady = a; rejectReady = b; });
         var finished = new Promise(function (a, b) { resolveFinished = a; rejectFinished = b; });
         var done = new Promise(function (a, b) { resolveDone = a; rejectDone = b; });
@@ -2701,6 +2813,29 @@
         var avtSet = function (list) { if (doc && doc.documentElement) doc.documentElement.setAttribute('data-cyber-avt', list.filter(function (t) { return !/^(none$|-ua-)/i.test(t); }).join(' ')); };
         if (doc) { var tl = []; try { if (types) for (var ti of types) tl.push(String(ti)); } catch (e) { } avtSet(tl); }
         var vdoc = root && root.ownerDocument;
+        var vtFrozen = null;
+        var vtThaw = function () {
+            if (!vtFrozen) return;
+            try { if (vtFrozen.c.parentNode) vtFrozen.c.parentNode.removeChild(vtFrozen.c); } catch (e) { }
+            try { if (vtFrozen.op) root.style.setProperty('opacity', vtFrozen.op, vtFrozen.pr); else root.style.removeProperty('opacity'); } catch (e) { }
+            vtFrozen = null;
+        };
+        var vtFreeze = function () {
+            /* (scoped: the scope as it is now, over it, while the update runs) */
+            if (doc || !root || !root.parentNode || !root.getBoundingClientRect) return;
+            try {
+                var r = root.getBoundingClientRect();
+                var c = vtSnap(root, false, true);
+                c.removeAttribute('id');
+                Object.defineProperty(c, '__cyberVtOverlay', { value: true });
+                [['position', 'fixed'], ['left', r.left + 'px'], ['top', r.top + 'px'], ['pointer-events', 'none']].forEach(function (d) { c.style.setProperty(d[0], d[1]); });
+                var zi = global.getComputedStyle(root).zIndex;
+                if (zi && zi !== 'auto') c.style.setProperty('z-index', zi);
+                vtFrozen = { c: c, op: root.style.getPropertyValue('opacity'), pr: root.style.getPropertyPriority('opacity') };
+                root.parentNode.insertBefore(c, root.nextSibling);
+                root.style.setProperty('opacity', '0', 'important');
+            } catch (e) { vtThaw(); }
+        };
         var vtCapOld = function () {
             if (skipped) return;
             if (vdoc && (!doc || root === doc.documentElement)) {
@@ -2709,7 +2844,8 @@
                 if (vtOld && doc) { try { vtOld.rootIn = vtRootNamed(doc); vtOld.rootName = vtName(doc.documentElement) || 'root'; } catch (e) { vtOld.rootIn = false; } }
             }
         };
-        Promise.resolve().then(function () { vtCapOld(); return update(); }).then(function (v) {
+        Promise.resolve().then(function () { vtCapOld(); if (!skipped) vtFreeze(); return update(); }).then(function (v) {
+            vtThaw();
             global.clearTimeout(timer);
             if (timedOut) return;
             resolveDone(v);
@@ -2720,9 +2856,11 @@
             }
             if (!skipped && vtOld) {
                 var fin = false, finish = function () { if (!fin) { fin = true; resolveFinished(); } };
+                finish.__held = function () { return vtWaits > 0; };   /* (waitUntil promises not settled) */
                 try { vtUndo = vtShow(vdoc, vtOld, finish, root); } catch (e) { finish(); }
             } else resolveFinished();
         }, function (reason) {
+            vtThaw();
             global.clearTimeout(timer);
             if (timedOut) return;
             rejectDone(reason);
@@ -2731,7 +2869,8 @@
         });
         VT_STATE.set(vt, { done: done, ready: ready, finished: finished, types: newTypeSet(types),
                            root: root || (doc && doc.documentElement) || null,
-                           skip: function () { skipped = true; if (vtUndo) { vtUndo(); vtUndo = null; resolveFinished(); } } });
+                           wait: function (p) { vtWaits++; var dec = function () { vtWaits--; }; Promise.resolve(p).then(dec, dec); },
+                           skip: function () { skipped = true; vtThaw(); if (vtUndo) { vtUndo(); vtUndo = null; resolveFinished(); } } });
         Object.defineProperty(vt, '__skipped', { get: function () { return skipped; } });
         if (doc) {
             var ts = VT_STATE.get(vt).types;
@@ -2763,8 +2902,9 @@
         value: function skipTransition() { vtOf(this).skip(); } });
     Object.defineProperty(ViewTransition.prototype, 'waitUntil', { configurable: true, enumerable: true, writable: true,
         value: function waitUntil(p) {
-            vtOf(this);
+            var st = vtOf(this);
             if (arguments.length < 1) throw new TypeError("Failed to execute 'waitUntil' on 'ViewTransition': 1 argument required, but only 0 present.");
+            if (st.wait) st.wait(p);
             return undefined;
         } });
     /* (ViewTransitionTypeSet: a setlike of strings) */
@@ -3479,7 +3619,17 @@
             /* (one made in another window: through its own methods) */
             var own = hlState.get(h);
             prios.push(own ? own.priority : (Number(h.priority) | 0));
-            (HL.get(h) || h).forEach(function (r) { try { hlRange(r, hi, flat); } catch (e) {} });
+            (HL.get(h) || h).forEach(function (r) {
+                try {
+                    /* (a range in another document: not this registry's to paint) */
+                    var sc = r.startContainer, od = sc && (sc.nodeType === 9 ? sc : sc.ownerDocument);
+                    if (od && global.document && od !== global.document) {
+                        var ow = od.defaultView, oreg = ow && ow.CSS && ow.CSS.highlights;   /* (unless that document registers it too) */
+                        if (!oreg || typeof oreg.get !== "function" || oreg.get(name) !== h) return;
+                    }
+                    hlRange(r, hi, flat);
+                } catch (e) {}
+            });
         });
         /* (the URL's text fragment: ::target-text, under the selection) */
         try { hlTargetText(names, prios, flat); } catch (e) {}
@@ -4883,6 +5033,10 @@
         br = parseFloat(pcs.borderRightWidth) + parseFloat(pcs.paddingRight);
         bb = parseFloat(pcs.borderBottomWidth) + parseFloat(pcs.paddingBottom);
         bl = parseFloat(pcs.borderLeftWidth) + parseFloat(pcs.paddingLeft);
+        /* (percentage padding: of the page box's height for top and bottom, its width across) */
+        var ppct = function (p, base, got) { var v = printDecl(first, 'padding-' + p); return v && /%/.test(v) ? printLen(v, base) - (parseFloat(got) || 0) : 0; };
+        bt += ppct('top', ph, pcs.paddingTop); bb += ppct('bottom', ph, pcs.paddingBottom);
+        bl += ppct('left', pw, pcs.paddingLeft); br += ppct('right', pw, pcs.paddingRight);
         probe.remove();
         printAutoMargins(first, m0, pw, ph, bl, br, bt, bb);
         var cw = Math.max(1, pw - m0.left - m0.right - bl - br), chh = Math.max(1, ph - m0.top - m0.bottom - bt - bb);

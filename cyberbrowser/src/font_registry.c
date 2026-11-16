@@ -76,7 +76,9 @@ typedef struct {
  * use; synthetic bold over the default instance if instancing fails. */
 static int add_slot_locked(TextShaper *s);
 static int add_web_slot_locked(TextShaper *s);
-static struct { bool oblique; float angle, stretch; bool space, italic; const char *fvs; } g_ask = { false, 0.0f, 100.0f, false, false, NULL };
+static struct { bool oblique; float angle, stretch; bool space, italic; const char *fvs; bool noobl; } g_ask = { false, 0.0f, 100.0f, false, false, NULL, false };
+static __thread bool t_resolve_noobl;
+void font_registry_set_no_oblique(bool on) { t_resolve_noobl = on; }
 /* (descriptors auto: a variable face's axes' ranges) */
 static void web_auto_ranges(WebFace *w)
 {
@@ -230,6 +232,7 @@ typedef struct { const char *generic; const char *const *names; } GenericMap;
 #ifdef _WIN32
 static const char *const k_sans[] = { "arial", "segoe ui", NULL };
 static const char *const k_serif[] = { "times new roman", "cambria", NULL };
+static const char *const k_uiserif[] = { "cambria", "georgia", "times new roman", NULL };
 static const char *const k_mono[] = { "consolas", "courier new", NULL };
 static const char *const k_cursive[] = { "comic sans ms", NULL };
 static const char *const k_fantasy[] = { "impact", NULL };
@@ -245,6 +248,7 @@ static const char *const k_font_dirs[] = { NULL };   /* filled at run time */
 #elif defined(__APPLE__)
 static const char *const k_sans[] = { "helvetica", "helvetica neue", "arial", NULL };
 static const char *const k_serif[] = { "times", "times new roman", NULL };
+static const char *const k_uiserif[] = { "new york", "times", NULL };
 static const char *const k_mono[] = { "menlo", "courier", "courier new", NULL };
 static const char *const k_cursive[] = { "apple chancery", NULL };
 static const char *const k_fantasy[] = { "papyrus", NULL };
@@ -258,6 +262,7 @@ static const char *const k_font_dirs[] = { "/System/Library/Fonts", "/Library/Fo
 #else
 static const char *const k_sans[] = { "dejavu sans", "liberation sans", "noto sans", "freesans", "arial", NULL };
 static const char *const k_serif[] = { "dejavu serif", "liberation serif", "noto serif", "freeserif", "times new roman", NULL };
+static const char *const k_uiserif[] = { "noto serif", "dejavu serif", "liberation serif", NULL };
 static const char *const k_mono[] = { "dejavu sans mono", "liberation mono", "noto sans mono", "freemono", "courier new", NULL };
 static const char *const k_cursive[] = { "comic neue", NULL };
 static const char *const k_fantasy[] = { NULL };
@@ -275,7 +280,7 @@ static const GenericMap k_generics[] = {
     { "sans-serif", k_sans }, { "serif", k_serif }, { "monospace", k_mono },
     { "cursive", k_cursive }, { "fantasy", k_fantasy }, { "system-ui", k_system },
     { "ui-sans-serif", k_system }, { "-apple-system", k_system }, { "blinkmacsystemfont", k_system },
-    { "ui-serif", k_serif }, { "ui-monospace", k_mono }, { "ui-rounded", k_system },
+    { "ui-serif", k_uiserif }, { "ui-monospace", k_mono }, { "ui-rounded", k_system },
     { "emoji", k_emoji }, { "math", k_math },
 };
 
@@ -670,6 +675,7 @@ static double style_score(const WebFace *w, bool italic)
     bool face_italic = w->italic && !w->oblique, face_normal = !w->italic;
     float lo = w->oblique ? w->amin : 0.0f, hi = w->oblique ? w->amax : 0.0f;
     if (g_ask.oblique) return face_italic ? 8000.0 : angle_score(g_ask.angle, lo, hi);
+    if (italic && g_ask.noobl && w->oblique) return 1e6;   /* (no oblique stand-in) */
     if (italic) return face_italic ? 0.0 : 1000.0 + angle_score(20.0f, lo, hi);
     if (face_normal) return 0.0;
     return face_italic ? 8000.0 : 1000.0 + angle_score(0.0f, lo, hi);
@@ -701,9 +707,19 @@ static int match_web_locked(const char *family, int weight, bool italic)
     return -2;
 }
 
+/* (@font-face families whose src is local() first: the font they stand for) */
+static struct { char family[FAMILY_MAX], local[FAMILY_MAX]; } g_local[64];
+static int g_nlocal;
 static bool g_name_quoted;   /* (the name being resolved was quoted: no generic) */
 static int resolve_name_locked(const char *name, int weight, bool italic, bool *pending)
 {
+    for (int i = 0; i < g_nlocal; i++)
+        if (!strcmp(g_local[i].family, name) && strcmp(g_local[i].local, name)) {
+            g_name_quoted = false;
+            int r = resolve_name_locked(g_local[i].local, weight, italic, pending);
+            if (r >= 0 || *pending) return r;
+            break;
+        }
     int s = match_web_locked(name, weight, italic);
     if (s >= 0) return s;
     if (s == -2) { *pending = true; return -1; }
@@ -839,6 +855,7 @@ int font_registry_resolve_style(const char *family_list, int weight, bool italic
     else
         snprintf(key, sizeof(key), "%d|%d|%s", weight, italic ? 1 : 0, family_list ? family_list : "");
     if (t_resolve_fvs) { size_t kl = strlen(key); snprintf(key + kl, sizeof key - kl, "|v:%s", t_resolve_fvs); }   /* (its variations, apart) */
+    if (t_resolve_noobl && italic) { size_t kl = strlen(key); snprintf(key + kl, sizeof key - kl, "|noobl"); }
     uint32_t h = str_hash(key) & (RESOLVE_CACHE - 1);
     pthread_mutex_lock(&g_mu);
     if (g_override_slot >= 0) { pthread_mutex_unlock(&g_mu); return g_override_slot; }
@@ -849,6 +866,7 @@ int font_registry_resolve_style(const char *family_list, int weight, bool italic
     }
     g_ask.oblique = oblique;
     g_ask.fvs = t_resolve_fvs;
+    g_ask.noobl = t_resolve_noobl && italic;
     g_ask.italic = italic && !oblique;
     g_ask.angle = angle;
     g_ask.stretch = stretch;
@@ -915,6 +933,22 @@ int font_registry_resolve_style(const char *family_list, int weight, bool italic
 int font_registry_default_slot(void)
 {
     return font_registry_resolve("sans-serif", 400, false);
+}
+
+/* (a web face slanted by its @font-face style, or variable: no synthetic slant for it) */
+bool font_registry_shaper_slanted(const struct TextShaper *s)
+{
+    if (!s) return false;
+    bool r = false;
+    pthread_mutex_lock(&g_mu);
+    for (int i = 0; i < g_nweb && !r; i++) {
+        const WebFace *w = &g_web[i];
+        bool mine = w->slot >= 0 && w->slot < FONT_SLOTS_MAX && atomic_load(&g_slots[w->slot]) == s;
+        for (int k = 0; k < w->ninst && !mine; k++) mine = w->inst[k].slot >= 0 && w->inst[k].slot < FONT_SLOTS_MAX && atomic_load(&g_slots[w->inst[k].slot]) == s;
+        if (mine) r = w->italic || w->var_sfnt != NULL;
+    }
+    pthread_mutex_unlock(&g_mu);
+    return r;
 }
 
 TextShaper *font_registry_slot(int slot)
@@ -1085,6 +1119,7 @@ static void add_face_rule(const char *body, const char *end, const char *base)
     w.slot = -1;
 
     char *src = NULL;
+    char local_[FAMILY_MAX] = "";
     const char *p = body;
     while (p < end) {
         for (;;) {
@@ -1121,6 +1156,14 @@ static void add_face_rule(const char *body, const char *end, const char *base)
         } else if (nl == 3 && strncasecmp(ns, "src", 3) == 0) {
             free(src);
             src = pick_src(vs, ve, base);
+            /* (local() first: its name) */
+            if (ve - vs > 6 && !strncasecmp(vs, "local(", 6)) {
+                const char *a = vs + 6, *b = a;
+                while (a < ve && (isspace((unsigned char)*a) || *a == '"' || *a == '\'')) a++;
+                b = a;
+                while (b < ve && *b != ')' && *b != '"' && *b != '\'') b++;
+                lower_copy(local_, sizeof local_, a, (size_t)(b - a));
+            }
         } else if (nl == 11 && strncasecmp(ns, "font-weight", 11) == 0) {
             if (ve - vs == 4 && !strncasecmp(vs, "auto", 4)) continue;
             w.autod &= (unsigned char)~1;
@@ -1209,6 +1252,22 @@ static void add_face_rule(const char *body, const char *end, const char *base)
             (void)v;   /* (not applied: with font-size-adjust the glyphs land ~9px low (size-adjust-02); without it the em-box shift in ifc paint is right) */
         }
     }
+    /* (local() first: the family stands for that font, when it is one there is) */
+    /* (only the standard font families ui-*: local() names a full font name, which the rest are left to) */
+    if (w.family[0] && local_[0] && !strncmp(local_, "ui-", 3) && !w.has_ov) {
+        bool pend_ = false, have_ = false;
+        pthread_mutex_lock(&g_mu);
+        for (int i = 0; i < g_nlocal && !have_; i++) have_ = !strcmp(g_local[i].family, w.family);
+        bool is_ = have_ || resolve_name_locked(local_, 400, false, &pend_) >= 0;
+        if (is_ && !have_ && g_nlocal < 64) {
+            snprintf(g_local[g_nlocal].family, sizeof g_local[0].family, "%s", w.family);
+            snprintf(g_local[g_nlocal].local, sizeof g_local[0].local, "%s", local_);
+            g_nlocal++;
+            cache_clear_locked();
+        }
+        pthread_mutex_unlock(&g_mu);
+        if (is_) { free(src); free(w.ranges); return; }
+    }
     if (!w.family[0] || !src) { free(src); free(w.ranges); return; }
     pthread_mutex_lock(&g_mu);
     for (int i = 0; i < g_nweb; i++) {
@@ -1264,6 +1323,7 @@ static int web_used_desc(const void *a, const void *b)
 void font_registry_forget_faces(void)
 {
     pthread_mutex_lock(&g_mu);
+    g_nlocal = 0;   /* (the page's local() families with its faces) */
     int n = 0;
     for (int i = 0; i < g_nweb; i++) {
         WebFace *w = &g_web[i];
@@ -1372,7 +1432,7 @@ void font_registry_forget_faces(void)
 }
 
 /* ---- @font-feature-values ---- */
-typedef struct { char family[64], kind[24], name[48]; int vals[4], n; } FfvEntry;
+typedef struct { char family[64], kind[24], name[48]; int vals[4], n, rank; } FfvEntry;   /* (rank: its cascade layer's place, unlayered highest) */
 static FfvEntry *g_ffv;
 static int g_ffv_n, g_ffv_cap;
 static pthread_mutex_t g_ffv_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -1476,16 +1536,71 @@ void font_feature_values_reset(void)
 }
 int font_feature_values_get(const char *family, const char *kind, const char *name, int *vals, int cap)
 {
-    int got = 0;
+    int got = 0, best = -1;
     pthread_mutex_lock(&g_ffv_mu);
-    for (int i = g_ffv_n - 1; i >= 0 && !got; i--) {
+    for (int i = g_ffv_n - 1; i >= 0; i--) {
         FfvEntry *e = &g_ffv[i];
         if (strcasecmp(e->family, family) || strcasecmp(e->kind, kind) || strcmp(e->name, name)) continue;
+        if (best >= 0 && g_ffv[best].rank >= e->rank) continue;   /* (the highest layer's, the last of those) */
+        best = i;
+    }
+    if (best >= 0) {
+        FfvEntry *e = &g_ffv[best];
         got = e->n < cap ? e->n : cap;
         for (int k = 0; k < got; k++) vals[k] = e->vals[k];
     }
     pthread_mutex_unlock(&g_ffv_mu);
     return got;
+}
+/* (the cascade layer around css[pos]: its place in the order the sheet gives its layers, 1 on; 1000000 none) */
+static int ffv_layer_rank(const char *css, size_t pos)
+{
+    char order[32][64];
+    int no = 0;
+    char stack[32][64];
+    int sp = 0;
+    for (size_t i = 0; i < pos && css[i];) {
+        char c = css[i];
+        if (c == '/' && css[i + 1] == '*') { const char *e = strstr(css + i + 2, "*/"); if (!e) break; i = (size_t)(e + 2 - css); continue; }
+        if (c == '@' && !strncasecmp(css + i, "@layer", 6) && !isalnum((unsigned char)css[i + 6]) && css[i + 6] != '-') {
+            size_t j = i + 6;
+            char names[8][64];
+            int nn = 0;
+            for (;;) {
+                while (css[j] && isspace((unsigned char)css[j])) j++;
+                size_t a = j;
+                while (css[j] && !isspace((unsigned char)css[j]) && css[j] != ',' && css[j] != ';' && css[j] != '{') j++;
+                if (j > a && nn < 8) snprintf(names[nn++], 64, "%.*s", (int)(j - a), css + a);
+                while (css[j] && isspace((unsigned char)css[j])) j++;
+                if (css[j] == ',') { j++; continue; }
+                break;
+            }
+            for (int k = 0; k < nn; k++) {
+                char full[64];
+                if (sp > 0 && stack[sp - 1][0]) snprintf(full, sizeof full, "%s.%s", stack[sp - 1], names[k]); else snprintf(full, sizeof full, "%s", names[k]);
+                bool have = false;
+                for (int q = 0; q < no && !have; q++) have = !strcmp(order[q], full);
+                if (!have && no < 32) snprintf(order[no++], 64, "%s", full);
+            }
+            if (css[j] == '{') {
+                if (sp < 32) {
+                    if (nn > 0 && sp > 0 && stack[sp - 1][0]) snprintf(stack[sp], 64, "%s.%s", stack[sp - 1], names[0]);
+                    else snprintf(stack[sp], 64, "%s", nn > 0 ? names[0] : "");
+                    sp++;
+                }
+                i = j + 1;
+                continue;
+            }
+            i = j + 1;
+            continue;
+        }
+        if (c == '{') { if (sp < 32) { snprintf(stack[sp], 64, "%s", sp > 0 ? stack[sp - 1] : ""); sp++; } }
+        else if (c == '}') { if (sp > 0) sp--; }
+        i++;
+    }
+    if (sp == 0 || !stack[sp - 1][0]) return 1000000;
+    for (int q = 0; q < no; q++) if (!strcmp(order[q], stack[sp - 1])) return q + 1;
+    return 1;
 }
 static void ffv_scan(const char *css, size_t len)
 {
@@ -1512,6 +1627,7 @@ static void ffv_scan(const char *css, size_t len)
             nf++;
             f = fe;
         }
+        int rank_ = ffv_layer_rank(css, (size_t)(p - css));
         int depth = 1;
         const char *b = ob + 1;
         while (b < end && depth > 0) {
@@ -1566,6 +1682,7 @@ static void ffv_scan(const char *css, size_t len)
                     snprintf(e->kind, sizeof e->kind, "%s", kind);
                     snprintf(e->name, sizeof e->name, "%s", name);
                     e->n = nv;
+                    e->rank = rank_;
                     memcpy(e->vals, vals, sizeof(int) * (size_t)nv);
                 }
                 pthread_mutex_unlock(&g_ffv_mu);
@@ -1576,6 +1693,11 @@ static void ffv_scan(const char *css, size_t len)
     }
 }
 
+void font_registry_scan_rules(const char *css, size_t len)
+{
+    ffv_scan(css, len);
+    ppv_scan(css, len);
+}
 void font_registry_scan_css(const char *css, size_t len, const char *base_url)
 {
     ffv_scan(css, len);

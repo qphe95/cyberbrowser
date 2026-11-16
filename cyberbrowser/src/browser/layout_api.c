@@ -1609,9 +1609,16 @@ bool layout_query_cascade(JSContextHandle ctx, GCValue element, LayoutCascadeFn 
         int pi = g_lq_layout.tree.nodes[idx].parent_idx;
         if (b->s->margin_auto && pi >= 0 && (g_lq_layout.boxes[pi].s->display == CSS_DISPLAY_FLEX || g_lq_layout.boxes[pi].s->display == CSS_DISPLAY_GRID)) {
             int others = 0;
-            for (int c = g_lq_layout.tree.nodes[pi].first_child_idx; c >= 0; c = g_lq_layout.tree.nodes[c].next_sibling_idx)
+            for (int c = g_lq_layout.tree.nodes[pi].first_child_idx; c >= 0; c = g_lq_layout.tree.nodes[c].next_sibling_idx) {
+                const HtmlNode *tn_ = css_layout_box_node(&g_lq_layout, c);
+                if (tn_ && tn_->type == HTML_NODE_TEXT) {   /* (whitespace alone: no item) */
+                    bool ws_ = true;
+                    for (uint32_t q = 0; q < tn_->text_len && ws_; q++) ws_ = strchr(" \t\n\r\f", tn_->text_content[q]) != NULL;
+                    if (ws_) continue;
+                }
                 if (c != idx && g_lq_layout.boxes[c].s->display != CSS_DISPLAY_NONE && g_lq_layout.boxes[c].s->display != CSS_DISPLAY_INLINE && g_lq_layout.boxes[c].s->position != CSS_POSITION_ABSOLUTE &&
                     g_lq_layout.boxes[c].s->position != CSS_POSITION_FIXED && g_lq_layout.tree.nodes[c].dom_node_idx < LAYOUT_PSEUDO_DOM0) others++;
+            }
             if (!others) {
                 const LayoutBox *P = &g_lq_layout.boxes[pi];
                 double cx = P->x + P->s->border_left + P->padding_left, cy = P->y + P->s->border_top + P->padding_top;
@@ -1772,6 +1779,32 @@ int layout_query_clip_rects(JSContextHandle ctx, GCValue element, uint32_t stop,
     return n;
 }
 
+/* (a box inside multicol containers: moved to the column it is painted in; one cut across columns, the bounds of its pieces) */
+static void lq_column_place(int idx, double *x, double *y, double *w, double *h)
+{
+    for (int a = g_lq_layout.tree.nodes[idx].parent_idx; a >= 0; a = g_lq_layout.tree.nodes[a].parent_idx) {
+        const LayoutBox *m = &g_lq_layout.boxes[a];
+        if (m->mc_n <= 0 || m->mc_vert || m->s->writing_mode != 0 || m->mc_nseg > 0 || m->mc_rgap >= 0.0f || m->mc_h <= 0.0f) continue;
+        double top = m->y + m->s->border_top + m->padding_top, H = m->mc_h, step = (double)m->mc_w + m->mc_gap;
+        int used = m->mc_used > m->mc_n ? m->mc_used : m->mc_n;
+        double o0 = *y - top, o1 = *y + *h - top;
+        if (o0 < 0.0) continue;
+        int c0 = (int)floor(o0 / H), c1 = (int)floor((o1 - 0.01) / H);
+        if (c0 >= used) c0 = used - 1;
+        if (c1 >= used) c1 = used - 1;
+        if (c1 < c0) c1 = c0;
+        double dir = m->s->direction == 1 ? -1.0 : 1.0;
+        if (c1 == c0) { *x += dir * c0 * step; *y -= c0 * H; continue; }
+        if (c1 != c0) continue;   /* (cut across columns: as laid out, which what treats fragmented boxes apart relies on) */
+        /* (cut: from its first piece's top in the first column to its last piece's bottom, across) */
+        double xa = *x + dir * c0 * step, xb = *x + dir * c1 * step;
+        double ya = *y - c0 * H, yb = *y + *h - c1 * H;
+        double lx = xa < xb ? xa : xb, rx = (xa < xb ? xb : xa) + *w;
+        double ty = ya < top ? ya : top, by = top + H > yb ? top + H : yb;
+        *x = lx; *w = rx - lx; *y = ty; *h = by - ty;
+    }
+}
+
 bool layout_query_element_box(JSContextHandle ctx, GCValue element, LayoutQueryBox *out)
 {
     memset(out, 0, sizeof(*out));
@@ -1787,6 +1820,7 @@ bool layout_query_element_box(JSContextHandle ctx, GCValue element, LayoutQueryB
     out->border_bottom = b->s->border_bottom;
     out->border_left = b->s->border_left;
     out->inline_level = b->s->display == CSS_DISPLAY_INLINE;
+    lq_column_place(idx, &out->x, &out->y, &out->width, &out->height);
     double tm[6];
     if (css_layout_box_map(&g_lq_layout, idx, -1, tm)) css_layout_map_bounds(tm, &out->x, &out->y, &out->width, &out->height);
     double dx, dy;
@@ -2662,6 +2696,15 @@ static GCValue js_scroll_pseudo_at(JSContextHandle ctx, GCValue this_val, int ar
         GCValue out = JS_NewArray(ctx);
         JS_SetPropertyUint32(ctx, out, 0, dom_js(ctx, on->store_id));
         JS_SetPropertyUint32(ctx, out, 1, JS_NewInt32(ctx, side));
+        /* (a column's marker: which column, its owner's earlier ones counted) */
+        if (side >= 38) {
+            int nth = 0;
+            for (int q = 0; q < j; q++) {
+                int qb, qo, qs;
+                if (css_layout_scroll_pseudo(&g_lq_layout, q, &qb, &qo, &qs) && qo == owner && qs >= 38) nth++;
+            }
+            JS_SetPropertyUint32(ctx, out, 2, JS_NewInt32(ctx, nth));
+        }
         return out;
     }
     return JS_NULL;

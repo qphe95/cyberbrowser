@@ -1534,8 +1534,9 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
         static const char *const sides[] = { "top", "right", "bottom", "left" };
         bool size = !strcmp(n, "width") || !strcmp(n, "height");
         bool inline_box = size && !strcmp(computed_of(ctx, cs, "display"), "inline");
-        if (!strcmp(n, "width") && !inline_box) { free(r); r = px(cs->used.content_width); }
-        else if (!strcmp(n, "height") && !inline_box) { free(r); r = px(cs->used.content_height); }
+        bool bbx = size && !inline_box && !strcmp(computed_of(ctx, cs, "box-sizing"), "border-box");   /* (border-box: the border box's) */
+        if (!strcmp(n, "width") && !inline_box) { free(r); r = px(cs->used.content_width + (bbx ? cs->used.padding[1] + cs->used.padding[3] + cs->used.border[1] + cs->used.border[3] : 0.0)); }
+        else if (!strcmp(n, "height") && !inline_box) { free(r); r = px(cs->used.content_height + (bbx ? cs->used.padding[0] + cs->used.padding[2] + cs->used.border[0] + cs->used.border[2] : 0.0)); }
         for (int k = 0; k < 4; k++) {
             char m[32], pd[32];
             snprintf(m, sizeof m, "margin-%s", sides[k]);

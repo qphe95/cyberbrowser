@@ -2034,6 +2034,37 @@ static size_t css_at_rule(const char *s, size_t len, size_t pos, bool nested, Cs
         extern bool css_supports_condition(const char *cond);
         char *c = css_strndup_trim(s + pre, pre_end - pre);
         if (c && strstr(c, "/*")) css_strip_comments(c);
+        /* (a namespace prefix in it the sheet didn't declare: that part invalid, as # makes it) */
+        for (size_t k = 0; c && c[k]; k++) {
+            if (c[k] != '|' || c[k + 1] == '|' || c[k + 1] == '=' || (k > 0 && c[k - 1] == '|')) continue;
+            size_t b = k;
+            while (b > 0 && (isalnum((unsigned char)c[b - 1]) || c[b - 1] == '-' || c[b - 1] == '_')) b--;
+            if (b == k || (b > 0 && c[b - 1] == '*')) continue;
+            bool known = false;
+            for (int q = 0; q < t_nns && !known; q++) known = strlen(t_ns[q].p) == k - b && !strncasecmp(t_ns[q].p, c + b, k - b);
+            if (known) continue;
+            /* (the feature: out past functions in a declaration (attr()) to its parentheses; selector() itself) */
+            long o = (long)b - 1;
+            for (;;) {
+                int d = 0;
+                while (o >= 0 && !(c[o] == '(' && d == 0)) { if (c[o] == ')') d++; else if (c[o] == '(') d--; o--; }
+                if (o < 0) break;
+                long fs_ = o;
+                while (fs_ > 0 && (isalnum((unsigned char)c[fs_ - 1]) || c[fs_ - 1] == '-' || c[fs_ - 1] == '_')) fs_--;
+                if (fs_ < o && !(o - fs_ == 8 && !strncasecmp(c + fs_, "selector", 8))) { o = fs_ - 1; continue; }   /* (a function in a value: out past it) */
+                size_t e = (size_t)o + 1;
+                int d2 = 1;
+                while (c[e] && d2 > 0) { if (c[e] == '(') d2++; else if (c[e] == ')') d2--; e++; }
+                static const char no_[] = "(-cb-no:0)";
+                size_t gl = e - (size_t)fs_;
+                if (gl >= sizeof no_ - 1) {
+                    memcpy(c + fs_, no_, sizeof no_ - 1);
+                    memset(c + fs_ + sizeof no_ - 1, ' ', gl - (sizeof no_ - 1));
+                }
+                break;
+            }
+            k = b;
+        }
         bool on = c && c[0] && css_supports_condition(c);
         free(c);
         if (!on) {
@@ -4712,6 +4743,19 @@ static char* css_transform_one_selector(const char *sel, size_t len, const char 
         if (sel[i + 5] == '(') {
             size_t open = i + 5;
             size_t close = css_match_paren(sel, open, len);
+            {
+                /* (its argument a compound: a combinator at its top level, invalid) */
+                size_t a0 = open + 1, a1 = close;
+                while (a0 < a1 && css_is_space(sel[a0])) a0++;
+                while (a1 > a0 && css_is_space(sel[a1 - 1])) a1--;
+                int qd = 0;
+                for (size_t q = a0; q < a1; q++) {
+                    char c = sel[q];
+                    if (c == '(' || c == '[') qd++;
+                    else if ((c == ')' || c == ']') && qd) qd--;
+                    else if (!qd && (css_is_space(c) || c == '>' || c == '+' || c == '~' || c == ',')) { free(out); return css_strdup(""); }
+                }
+            }
             if (close > open + 1) css_buf_append(&out, &out_len, &out_cap, sel + open + 1, close - open - 1);
             css_buf_append_cstr(&out, &out_len, &out_cap, host_tag);
             i = close + 1;

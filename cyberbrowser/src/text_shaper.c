@@ -264,8 +264,13 @@ static bool strike_place(Strike *k, StrikeGlyph *g, GaRect *r)
 static __thread TextShaper *t_chain[6];
 static __thread int t_chain_n;
 static __thread float t_chain_k[6];   /* (font-size-adjust: each list font's size against the first's) */
+static __thread int t_emo;          /* (font-variant-emoji: 1 text, 2 emoji, 3 unicode) */
+static __thread uint32_t t_vs;      /* (the variation selector after the code point: FE0E, FE0F, else 0) */
+void text_shaper_set_emoji(int mode) { t_emo = mode; }
 void text_shaper_set_chain(TextShaper *const *fonts, int n)
 {
+    t_emo = 0;
+    t_vs = 0;
     if (n < 0 || !fonts) n = 0;
     if (n > 6) n = 6;
     for (int i = 0; i < n; i++) { t_chain[i] = fonts[i]; t_chain_k[i] = 1.0f; }
@@ -320,6 +325,8 @@ static void ts_metric_owned(const TextShaper *s, uint32_t cp, int *glyph_index, 
         const TextShaper *f = s;
         int owner = 0;
         int gi = ts_in(s, cp) ? stbtt_FindGlyphIndex(&s->font, (int)cp) : 0;
+        bool alias_ = false;
+        if (gi == 0 && cp == 0x2011 && ts_in(s, 0x2010)) { gi = stbtt_FindGlyphIndex(&s->font, 0x2010); alias_ = gi != 0; }   /* (a non-breaking hyphen: the font's hyphen) */
         if (gi == 0 && cp >= ' ' && cp != 0xFFFD) {   /* (a font with no space: the next one's) */
             int n = font_registry_fallback_count();
             for (int k = 0; k < n && n <= 254; k++) {
@@ -337,7 +344,7 @@ static void ts_metric_owned(const TextShaper *s, uint32_t cp, int *glyph_index, 
         memcpy(&bits, &xa, sizeof(bits));
         v = ((uint64_t)owner << 56) | ((uint64_t)((uint32_t)(gi + 1) & 0xFFFFFF) << 32) | bits;
         /* (bit 55: the font itself lacks it) */
-        if (owner != 0 || !ts_in(s, cp) || stbtt_FindGlyphIndex(&s->font, (int)cp) == 0) v |= (uint64_t)1 << 55;
+        if (!alias_ && (owner != 0 || !ts_in(s, cp) || stbtt_FindGlyphIndex(&s->font, (int)cp) == 0)) v |= (uint64_t)1 << 55;
         atomic_store_explicit(&page[cp & 255], v, memory_order_relaxed);
     }
     if (t_chain_n > 0 && (v >> 55 & 1) && cp >= ' ') {
@@ -367,14 +374,35 @@ static __thread uint32_t t_ot_tags[24];
 static __thread int t_ot_n;
 static __thread uint64_t t_ot_key;   /* (the tags' hash) */
 
+static __thread bool t_no_kern;   /* (the features asked for have no kerning) */
 void text_shaper_set_features(const uint32_t *tags, int n)
 {
     if (n < 0) n = 0;
     if (n > 24) n = 24;
     uint64_t key = 1469598103934665603ull;
-    for (int i = 0; i < n; i++) { t_ot_tags[i] = tags[i]; key = (key ^ tags[i]) * 1099511628211ull; }
+    bool kern_ = n == 0;
+    for (int i = 0; i < n; i++) {
+        t_ot_tags[i] = tags[i]; key = (key ^ tags[i]) * 1099511628211ull;
+        if (tags[i] == 0x6B65726Eu || tags[i] == 0x766B726Eu) kern_ = true;   /* (kern, vkrn) */
+    }
+    t_no_kern = !kern_;
     t_ot_n = n;
     t_ot_key = key;
+}
+
+/* (the next code point of [*p, e)) */
+static uint32_t ts_utf8_next_(const char **p, const char *e)
+{
+    const unsigned char *u = (const unsigned char *)*p;
+    if (u >= (const unsigned char *)e) return 0;
+    uint32_t c = u[0];
+    int n = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+    if ((const char *)u + n > e) { *p = e; return 0xFFFD; }
+    if (n == 2) c = ((c & 0x1F) << 6) | (u[1] & 0x3F);
+    else if (n == 3) c = ((c & 0x0F) << 12) | ((u[1] & 0x3F) << 6) | (u[2] & 0x3F);
+    else if (n == 4) c = ((c & 0x07) << 18) | ((u[1] & 0x3F) << 12) | ((u[2] & 0x3F) << 6) | (u[3] & 0x3F);
+    *p = (const char *)u + n;
+    return c;
 }
 
 /* (a ligature: its first glyph, the others, the glyph they make) */
@@ -441,13 +469,45 @@ static uint16_t *ot_build(const TextShaper *s, const uint32_t *tags, int ntags)
     uint8_t *use = (uint8_t *)calloc(nl, 1);
     if (!use) return NULL;
     uint32_t nf = ot_rd16(d, sz, fl);
+    /* (the features a language system has: each script's for the language asked (0x02 then its tag), else its default one,
+     * else all its own; every one when the font lists no scripts) */
+    uint32_t lang = 0;
+    for (int k = 0; k + 1 < ntags; k++) if (tags[k] == 0x02000000u) lang = tags[k + 1];
+    uint8_t *fok = nf ? (uint8_t *)calloc(nf, 1) : NULL;
+    size_t sl = gsub + ot_rd16(d, sz, gsub + 4);
+    uint32_t nsc = ot_rd16(d, sz, sl);
+    bool by_ls = fok && nsc > 0 && nsc < 512;
+    /* (a language asked for that some script has: only the scripts that have it) */
+    bool lang_any = false;
+    for (uint32_t i = 0; by_ls && lang && i < nsc && !lang_any; i++) {
+        size_t so = sl + ot_rd16(d, sz, sl + 2 + 6 * (size_t)i + 4);
+        uint32_t nls = ot_rd16(d, sz, so + 2);
+        for (uint32_t j = 0; j < nls && j < 512; j++) if (ot_rd32(d, sz, so + 4 + 6 * (size_t)j) == lang) lang_any = true;
+    }
+    for (uint32_t i = 0; by_ls && i < nsc; i++) {
+        size_t so = sl + ot_rd16(d, sz, sl + 2 + 6 * (size_t)i + 4);
+        uint32_t dls = ot_rd16(d, sz, so), nls = ot_rd16(d, sz, so + 2);
+        size_t pick = 0;
+        for (uint32_t j = 0; lang && j < nls && j < 512; j++)
+            if (ot_rd32(d, sz, so + 4 + 6 * (size_t)j) == lang) pick = so + ot_rd16(d, sz, so + 4 + 6 * (size_t)j + 4);
+        if (!pick && lang_any) continue;
+        if (!pick && dls) pick = so + dls;
+        for (uint32_t j = 0; j <= (pick ? 0u : nls) && j < 512; j++) {
+            size_t ls = pick ? pick : j < nls ? so + ot_rd16(d, sz, so + 4 + 6 * (size_t)j + 4) : 0;
+            if (!ls) break;
+            uint32_t req = ot_rd16(d, sz, ls + 2), nfi = ot_rd16(d, sz, ls + 4);
+            if (req < nf) fok[req] = 1;
+            for (uint32_t q = 0; q < nfi && q < 4096; q++) { uint32_t fi = ot_rd16(d, sz, ls + 6 + 2 * (size_t)q); if (fi < nf) fok[fi] = 1; }
+        }
+    }
     for (uint32_t i = 0; i < nf && i < 4096; i++) {
         size_t fr = fl + 2 + 6 * (size_t)i;
         uint32_t tag = ot_rd32(d, sz, fr);
         bool want = false;
         int fval = 1;
+        if (by_ls && !fok[i]) continue;
         for (int k = 0; k < ntags && !want; k++)
-            if (tags[k] == tag) {
+            if (tags[k] == tag && !(k > 0 && tags[k - 1] == 0x02000000u)) {
                 want = true;
                 /* (a value of its own: the pseudo tag after it, 0x01 then the value) */
                 if (k + 1 < ntags && (tags[k + 1] >> 24) == 0x01) fval = (int)(tags[k + 1] & 0xFF);
@@ -461,7 +521,7 @@ static uint16_t *ot_build(const TextShaper *s, const uint32_t *tags, int ntags)
         }
     }
     uint16_t *map = (uint16_t *)malloc((size_t)N * sizeof(uint16_t));
-    if (!map) { free(use); return NULL; }
+    if (!map) { free(use); free(fok); return NULL; }
     for (int g = 0; g < N; g++) map[g] = (uint16_t)g;
     bool any = false;
     for (uint32_t li = 0; li < nl; li++) {
@@ -530,7 +590,7 @@ static uint16_t *ot_build(const TextShaper *s, const uint32_t *tags, int ntags)
             }
         }
     }
-    free(use);
+    free(use); free(fok);
     if (!any && !t_build_nlig) { free(map); return NULL; }
     return map;
 }
@@ -641,6 +701,32 @@ static const uint16_t *ot_map_for(const TextShaper *s, int *n)
     return built;
 }
 
+/* (whether feature tag gives every character of the text a glyph of its own: subs / sups, all or none) */
+bool text_shaper_feature_covers(const TextShaper *s, uint32_t tag, const char *utf8, size_t n)
+{
+    if (!s || !utf8) return false;
+    uint32_t sv[24];
+    memcpy(sv, t_ot_tags, sizeof sv);
+    int sn = t_ot_n;
+    uint64_t sk = t_ot_key;
+    text_shaper_set_features(&tag, 1);
+    int mn = 0;
+    const uint16_t *map = ot_map_for(s, &mn);
+    bool ok = map != NULL;
+    for (const char *p = utf8, *e = utf8 + n; ok && p < e;) {
+        const char *at = p;
+        uint32_t cp = ts_utf8_next_(&p, e);
+        if (p == at) break;
+        if (cp == '\n' || cp == '\r' || cp == '\t') continue;
+        int g = stbtt_FindGlyphIndex(&s->font, (int)cp);
+        if (!g || g >= mn || map[g] == g) ok = false;
+    }
+    memcpy(t_ot_tags, sv, sizeof sv);
+    t_ot_n = sn;
+    t_ot_key = sk;
+    return ok;
+}
+
 /* (the ligatures for font s and the features now, by first glyph) */
 static const OtLig *ot_ligs_for(const TextShaper *s, int *n)
 {
@@ -690,10 +776,44 @@ static __thread int t_force_gi = -1;   /* (the glyph ts_emit_glyph draws next, a
 static __thread float t_force_xa;
 
 /* (a code point's glyph and advance, the features' substitutions applied) */
+/* (Emoji_Presentation=Yes, roughly: the BMP's few, most of the astral pictographs) */
+static bool ts_emoji_default(uint32_t c)
+{
+    static const uint32_t r[] = { 0x231A,0x231B, 0x23E9,0x23EC, 0x23F0,0x23F0, 0x23F3,0x23F3, 0x25FD,0x25FE, 0x2614,0x2615, 0x2648,0x2653,
+        0x267F,0x267F, 0x2693,0x2693, 0x26A1,0x26A1, 0x26AA,0x26AB, 0x26BD,0x26BE, 0x26C4,0x26C5, 0x26CE,0x26CE, 0x26D4,0x26D4, 0x26EA,0x26EA,
+        0x26F2,0x26F3, 0x26F5,0x26F5, 0x26FA,0x26FA, 0x26FD,0x26FD, 0x2705,0x2705, 0x270A,0x270B, 0x2728,0x2728, 0x274C,0x274C, 0x274E,0x274E,
+        0x2753,0x2755, 0x2757,0x2757, 0x2795,0x2797, 0x27B0,0x27B0, 0x27BF,0x27BF, 0x2B1B,0x2B1C, 0x2B50,0x2B50, 0x2B55,0x2B55,
+        0x1F004,0x1F004, 0x1F0CF,0x1F0CF, 0x1F18E,0x1F18E, 0x1F191,0x1F19A, 0x1F300,0x1F320, 0x1F32D,0x1F335, 0x1F337,0x1F37C, 0x1F37E,0x1F393,
+        0x1F3A0,0x1F3CA, 0x1F3CF,0x1F3D3, 0x1F3E0,0x1F3F0, 0x1F3F4,0x1F3F4, 0x1F3F8,0x1F43E, 0x1F440,0x1F440, 0x1F442,0x1F4FC, 0x1F4FF,0x1F53D,
+        0x1F54B,0x1F54E, 0x1F550,0x1F567, 0x1F57A,0x1F57A, 0x1F595,0x1F596, 0x1F5A4,0x1F5A4, 0x1F5FB,0x1F64F, 0x1F680,0x1F6C5, 0x1F6CC,0x1F6CC,
+        0x1F6D0,0x1F6D2, 0x1F6D5,0x1F6DF, 0x1F6EB,0x1F6EC, 0x1F6F4,0x1F6FC, 0x1F7E0,0x1F7F0, 0x1F90C,0x1F93A, 0x1F93C,0x1F945, 0x1F947,0x1F9FF,
+        0x1FA70,0x1FAFF };
+    for (size_t i = 0; i < sizeof r / sizeof r[0]; i += 2) if (c >= r[i] && c <= r[i + 1]) return true;
+    return false;
+}
+
 static void ts_metric(const TextShaper *s, uint32_t cp, int *glyph_index, float *xadvance, int *owner_out)
 {
     int owner = 0;
     if (t_force_gi >= 0) { *glyph_index = t_force_gi; *xadvance = t_force_xa; if (owner_out) *owner_out = 0; t_force_gi = -1; return; }
+    /* (an emoji's presentation: the list's first font that draws it so, color or not) */
+    if ((t_emo || t_vs) && t_chain_n > 1 && (cp >= 0x2000 || cp == 0xA9 || cp == 0xAE) && cp != 0xFE0E && cp != 0xFE0F) {
+        int want = t_vs == 0xFE0F ? 2 : t_vs == 0xFE0E ? 1 : t_emo == 3 ? (ts_emoji_default(cp) ? 2 : 1) : t_emo;
+        for (int k = 0; k < t_chain_n && (want == 1 || want == 2); k++) {
+            const TextShaper *cf = t_chain[k];
+            if (!cf || !ts_in(cf, cp) || (cf->colr != NULL) != (want == 2)) continue;
+            int g2 = stbtt_FindGlyphIndex(&cf->font, (int)cp);
+            if (!g2) continue;
+            if (cf == s) break;   /* (the font itself: as ever) */
+            int adv2, lsb2;
+            stbtt_GetGlyphHMetrics(&cf->font, g2, &adv2, &lsb2);
+            *glyph_index = g2;
+            if (owner_out) *owner_out = 240 + k;
+            *xadvance = ((float)adv2 * cf->scale + (float)cf->embolden) * t_chain_k[k];
+            t_gp_dx = 0.0f;
+            return;
+        }
+    }
     ts_metric_owned(s, cp, glyph_index, xadvance, &owner);
     if (owner_out) *owner_out = owner;
     t_gp_dx = 0.0f;
@@ -716,6 +836,7 @@ static void ts_metric(const TextShaper *s, uint32_t cp, int *glyph_index, float 
 /* Kerning between two glyphs in font units, cached.  Safe from any thread. */
 static int ts_kern(const TextShaper *s, int g1, int g2)
 {
+    if (t_no_kern) return 0;   /* (font-kerning: none) */
     if (g1 < 0 || g2 < 0 || g1 > 0xFFFF || g2 > 0xFFFF)
         return stbtt_GetGlyphKernAdvance(&s->font, g1, g2);
     uint32_t key = (((uint32_t)g1 << 16) | (uint32_t)g2) + 1u;
@@ -787,8 +908,17 @@ static __thread int t_pal_n;
 static __thread int t_pal_over_i[16];
 static __thread float t_pal_over[16][4];
 
+static __thread struct { const TextShaper *f; int kind, index; } t_pal_font[8];   /* (a font's own palette, by its family's rule) */
+static __thread int t_pal_nf;
+void text_shaper_set_palette_font(const TextShaper *f, int kind, int index)
+{
+    if (!f || t_pal_nf >= 8) return;
+    t_pal_font[t_pal_nf].f = f; t_pal_font[t_pal_nf].kind = kind; t_pal_font[t_pal_nf].index = index;
+    t_pal_nf++;
+}
 void text_shaper_set_palette(int kind, int index, const int *over_index, const float (*over_rgba)[4], int n)
 {
+    t_pal_nf = 0;
     t_pal_kind = kind;
     t_pal_index = index;
     t_pal_n = n > 16 ? 16 : n < 0 ? 0 : n;
@@ -803,6 +933,8 @@ static int ts_palette_pick(const TextShaper *o)
 {
     const uint8_t *c = o->cpal;
     uint32_t len = o->cpal_len, np = ts_be16(c + 4);
+    for (int i = 0; i < t_pal_nf; i++)
+        if (t_pal_font[i].f == o && t_pal_font[i].kind == 3) return t_pal_font[i].index >= 0 && (uint32_t)t_pal_font[i].index < np ? t_pal_font[i].index : 0;
     if (t_pal_kind == 3) return t_pal_index >= 0 && (uint32_t)t_pal_index < np ? t_pal_index : 0;
     if (t_pal_kind == 0 || ts_be16(c) < 1) return 0;
     uint32_t after = 12 + 2 * np;
@@ -950,7 +1082,8 @@ static inline float ts_autospace(const TextShaper *s, uint32_t cp)
 static inline bool ts_invisible(uint32_t cp)
 {
     return cp == 0x00AD || cp == 0x061C || cp == 0x200B || cp == 0xFEFF || cp == 0x200C || cp == 0x200D || cp == 0x200E || cp == 0x200F || cp == 0x2060 || (cp >= 0x202A && cp <= 0x202E) ||
-           (cp >= 0x2066 && cp <= 0x2069) || cp == 0x034F || (cp >= 0x180B && cp <= 0x180F) || (cp >= 0x2061 && cp <= 0x2064);
+           (cp >= 0x2066 && cp <= 0x2069) || cp == 0x034F || (cp >= 0x180B && cp <= 0x180F) || (cp >= 0x2061 && cp <= 0x2064) ||
+           (cp >= 0xFE00 && cp <= 0xFE0F) || (cp >= 0xE0100 && cp <= 0xE01EF);
 }
 
 /* (a combining mark: in its base's cluster, no letter-spacing between them) */
@@ -986,6 +1119,17 @@ static inline bool ts_is_mark(uint32_t cp)
 bool text_shaper_is_mark(uint32_t cp) { return ts_is_mark(cp); }
 
 /* The spacing after codepoint cp (at the loaded size). */
+/* (in the cluster before it: a mark, a letter after a virama, what a ZWJ joins) */
+static __thread uint32_t t_sp_prev;
+static inline bool ts_is_mark(uint32_t cp);
+static inline bool ts_cluster_cont(uint32_t cp)
+{
+    uint32_t p = t_sp_prev;
+    t_sp_prev = cp;
+    bool vir = p == 0x094D || p == 0x09CD || p == 0x0A4D || p == 0x0ACD || p == 0x0B4D || p == 0x0BCD || p == 0x0C4D || p == 0x0CCD ||
+               p == 0x0D4D || p == 0x0DCA || p == 0x1039 || p == 0x17D2;
+    return ts_is_mark(cp) || cp == 0x200D || p == 0x200D || (vir && cp >= 0x0900 && cp <= 0x1100);
+}
 static inline float ts_spacing(uint32_t cp)
 {
     if (t_letter_sp == 0.0f && t_word_sp == 0.0f) return 0.0f;
@@ -1131,7 +1275,7 @@ static bool ts_emit_glyph(const TextShaper *s, uint32_t cp, float *pen_x, float 
     float pre = gpdx, xh = xa;
     bool upr = ts_upright_adv(gs, cp, gi, &xa, &pre);
     if (*prev_glyph >= 0 && owner == 0 && !upr) *pen_x += (float)ts_kern(s, *prev_glyph, gi) * s->scale * scale;
-    if (ts_is_mark(cp)) *pen_x -= t_emit_last_sp * scale;   /* (on its base: the cluster's spacing after it instead) */
+    if (ts_cluster_cont(cp)) *pen_x -= t_emit_last_sp * scale;   /* (on its base: the cluster's spacing after it instead) */
     *pen_x += ts_autospace(s, cp) * scale;
     int c0 = dl->count;
     (void)xh;
@@ -1546,7 +1690,7 @@ bool text_shaper_measure(const TextShaper *s, const char *utf8,
         if (prev_glyph >= 0 && owner == 0 && !upr) {
             x += (float)ts_kern(s, prev_glyph, gi) * s->scale;
         }
-        if (ts_is_mark(cp)) x -= last_sp;
+        if (ts_cluster_cont(cp)) x -= last_sp;
         last_sp = ts_spacing(cp);
         x += xa + last_sp + ts_autospace(s, cp);
         prev_glyph = owner == 0 ? gi : -1;
@@ -1662,7 +1806,9 @@ static float ts_measure_span(const TextShaper *s, const char *start, const char 
         if (ts_invisible(cp)) continue;
         int gi, owner;
         float xa;
+        if (t_chain_n > 1 && p < end) { const char *q_ = p; uint32_t nx = utf8_decode(&q_); t_vs = nx == 0xFE0E || nx == 0xFE0F ? nx : 0; }
         ts_metric(s, cp, &gi, &xa, &owner);
+        t_vs = 0;
         if (t_ot_n > 0 && owner == 0) {
             int lg;
             float lx;
@@ -1674,7 +1820,7 @@ static float ts_measure_span(const TextShaper *s, const char *start, const char 
         }
         bool trim_shift;
         x -= ts_trim_of(s, cp, save, p, xa, &trim_shift);
-        if (ts_is_mark(cp)) x -= last_sp;
+        if (ts_cluster_cont(cp)) x -= last_sp;
         last_sp = ts_spacing(cp);
         x += xa + last_sp + ts_autospace(s, cp);
         prev_glyph = owner == 0 ? gi : -1;
@@ -1764,8 +1910,10 @@ static bool ts_emit_span_glyphs(const TextShaper *s, const char *gp,
             ts_metric(s, gc, &gi0, &xa0, &ow0);
             if (ow0 == 0 && ts_ligature(s, gi0, &gp, gend, &lg, &lx)) { t_force_gi = lg; t_force_xa = lx; }
         }
-        if (!ts_emit_glyph(s, gc, pen_x, gy, scale, prev_glyph, r, g, b, a, dl))
-            return false;
+        if (t_chain_n > 1 && gp < gend) { const char *q_ = gp; uint32_t nx = utf8_decode(&q_); t_vs = nx == 0xFE0E || nx == 0xFE0F ? nx : 0; }
+        bool ok_ = ts_emit_glyph(s, gc, pen_x, gy, scale, prev_glyph, r, g, b, a, dl);
+        t_vs = 0;
+        if (!ok_) return false;
         t_force_gi = -1;
         if (trim > 0.0f && !shift) *pen_x -= trim;
     }
@@ -2145,13 +2293,14 @@ float text_shaper_span_width(const TextShaper *s, const char *utf8, size_t start
     return w;
 }
 
+__thread float text_shaper_base_shift;   /* (px: the first available font's baseline under the shaper's) */
 bool text_shaper_shape_span(const TextShaper *s, const char *utf8, size_t start, size_t end,
                             float x, float y, float scale, bool rtl,
                             float r, float g, float b, float a, DisplayList *dl)
 {
     if (!s || !utf8 || !dl || end <= start) return s && utf8 && dl;
     if (scale <= 0.0f) scale = 1.0f;
-    float pen_x = x, gy = y + s->baseline * scale;
+    float pen_x = x, gy = y + s->baseline * scale + text_shaper_base_shift;
     int prev_glyph = -1;
     t_as_prev = t_as_seed;
     t_as_seed = 0;

@@ -584,8 +584,8 @@ static bool vk_render(GpuTarget **tp, uint32_t w, uint32_t h, const DisplayList 
             o->info[3] = c->u.glyph.rot;   /* (turned a quarter: 1 clockwise, 2 the other way) */
             break;
         case DL_IMAGE:
-            x1 = floor(c->x + c->w);
-            y1 = floor(c->y + c->h);
+            x1 = floor(c->x + c->w + 0.5);   /* (the pixels whose centres it covers) */
+            y1 = floor(c->y + c->h + 0.5);
             tex = c->u.image.image_handle >= 0 && c->u.image.image_handle < GPU_MAX_IMAGES
                       ? images[c->u.image.image_handle] : NULL;
             o->uv[0] = c->u.image.u0; o->uv[1] = c->u.image.v0; o->uv[2] = c->u.image.u1; o->uv[3] = c->u.image.v1;
