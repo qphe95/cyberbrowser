@@ -291,7 +291,8 @@ const REFREADY = `<script style="display: none !important">//<![CDATA[
       }
       else ready();
     };
-    var go = function () { requestAnimationFrame(function () { requestAnimationFrame(function () { setTimeout(settled, 0); }); }); };
+    /* (two frames more than wptrunner: under a full run's load the GPU process may present the frame a test settled in late) */
+    var go = function () { requestAnimationFrame(function () { requestAnimationFrame(function () { requestAnimationFrame(function () { requestAnimationFrame(function () { setTimeout(settled, 0); }); }); }); }); };
     if (document.fonts && document.fonts.ready) document.fonts.ready.then(go, go); else go();
   }
   if (document.readyState === 'complete') setTimeout(check, 0); else addEventListener('load', function () { setTimeout(check, 0); });

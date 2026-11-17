@@ -553,6 +553,8 @@
 "        return true;\n"
 "    }\n"
 "    var REGISTERED = Object.create(null);\n"
+"    /* (a registered custom property's syntax, for what animates it) */\n"
+"    Object.defineProperty(global, '__cyberRegisteredSyntax', { configurable: true, value: function (n) { return REGISTERED[String(n)] || null; } });\n"
 "    /* CSS.registerProperty (css-properties-values-api 3.) */\n"
 "    if (global.CSS && global.CSS.__register) {\n"
 "        var hidden = {};\n"

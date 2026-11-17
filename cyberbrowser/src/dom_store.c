@@ -242,6 +242,7 @@ void dom_store_reserve(uint32_t extra) {
 
 uint8_t *g_dom_top;
 uint32_t g_dom_top_cap;
+static uint32_t *g_dom_top_seq_v, g_dom_top_seq_cap, g_dom_top_seq_n;
 
 void dom_top_state_set(uint32_t slot, uint8_t bits, bool on) {
     if (slot >= g_dom_top_cap) {
@@ -254,7 +255,27 @@ void dom_top_state_set(uint32_t slot, uint8_t bits, bool on) {
         g_dom_top = nt;
         g_dom_top_cap = nc;
     }
+    /* (going in: its place in the top layer's order, last) */
+    if (on && !g_dom_top[slot]) {
+        if (slot >= g_dom_top_seq_cap) {
+            uint32_t nc = g_dom_top_seq_cap ? g_dom_top_seq_cap : 1024;
+            while (nc <= slot) nc *= 2;
+            uint32_t *nv = (uint32_t *)realloc(g_dom_top_seq_v, nc * sizeof(uint32_t));
+            if (nv) {
+                memset(nv + g_dom_top_seq_cap, 0, (nc - g_dom_top_seq_cap) * sizeof(uint32_t));
+                g_dom_top_seq_v = nv;
+                g_dom_top_seq_cap = nc;
+            }
+        }
+        if (slot < g_dom_top_seq_cap) g_dom_top_seq_v[slot] = ++g_dom_top_seq_n;
+    }
     g_dom_top[slot] = on ? (uint8_t)(g_dom_top[slot] | bits) : (uint8_t)(g_dom_top[slot] & ~bits);
+}
+
+uint32_t dom_top_seq(NodeId id) {
+    if (!dom_valid(id)) return 0;
+    uint32_t s = dom_slot(id);
+    return s < g_dom_top_seq_cap ? g_dom_top_seq_v[s] : 0;
 }
 
 uint32_t dom_alloc_slot(int kind, NodeId owner) {
@@ -902,6 +923,12 @@ void dom_unlink(NodeId child) {
         for (uint32_t x = c; x; x = dom_next_in_subtree(x, c)) if (g_dom.state[x] & fb) { g_dom.state[x] &= (uint16_t)~fb; dom_mark_dirty(dom_id_of(x), DOMF_DIRTY_ATTR); }
         for (uint32_t a = p; a; a = g_dom.parent[a] ? g_dom.parent[a] : g_dom.host[a])
             if (g_dom.state[a] & DOM_ST_FOCUS_WITHIN) { g_dom.state[a] &= (uint16_t)~DOM_ST_FOCUS_WITHIN; dom_mark_dirty(dom_id_of(a), DOMF_DIRTY_ATTR); }
+    }
+    if (g_dom.state[c] & DOM_ST_HOVER) {
+        /* (the hovered element going: :hover off it and what held it, till the pointer moves again) */
+        for (uint32_t x = c; x; x = dom_next_in_subtree(x, c)) if (g_dom.state[x] & DOM_ST_HOVER) { g_dom.state[x] &= (uint16_t)~DOM_ST_HOVER; dom_mark_dirty(dom_id_of(x), DOMF_DIRTY_ATTR); }
+        for (uint32_t a = p; a; a = g_dom.parent[a] ? g_dom.parent[a] : g_dom.host[a])
+            if (g_dom.state[a] & DOM_ST_HOVER) { g_dom.state[a] &= (uint16_t)~DOM_ST_HOVER; dom_mark_dirty(dom_id_of(a), DOMF_DIRTY_ATTR); }
     }
     uint32_t index = 0;
     if (g_dom_ranges_live)

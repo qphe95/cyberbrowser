@@ -110,7 +110,12 @@
         return g;
     }
     function CanvasPattern() { illegal(); }
-    define(CanvasPattern.prototype, 'setTransform', function setTransform() {});
+    /* (its matrix: a translation and scale only are drawn) */
+    define(CanvasPattern.prototype, 'setTransform', function setTransform(mt) {
+        var a = 1, b = 0, c = 0, d = 1, e = 0, f = 0;
+        if (mt && typeof mt === 'object') { a = num(mt.a, 1); b = num(mt.b, 0); c = num(mt.c, 0); d = num(mt.d, 1); e = num(mt.e, 0); f = num(mt.f, 0); }
+        this._mt = [a, b, c, d, e, f];
+    });
 
     function ImageData(a, b, c) {
         if (!new.target) throw new TypeError("Failed to construct 'ImageData': Please use the 'new' operator");
@@ -384,6 +389,20 @@
             gimg(cv, 'cyber-cvgrad:' + css, X, Y, W, H);
             return;
         }
+        /* (an image pattern, not repeated: the image where the pattern's matrix puts it, cut to the rectangle) */
+        if (!c && fg instanceof CanvasPattern && fg._rep === 'no-repeat' && typeof gimg === 'function' && s.globalAlpha >= 1 &&
+            s.globalCompositeOperation === 'source-over' && W > 0 && H > 0) {
+            var im = fg._img, pm = fg._mt || [1, 0, 0, 1, 0, 0];
+            if (!im || typeof im.src !== 'string' || !im.src || pm[1] !== 0 || pm[2] !== 0) return;
+            var nw = im.naturalWidth || 0, nh = im.naturalHeight || 0;
+            if (!nw || !nh) return;
+            var u = im.src, io = '';
+            try { io = global.getComputedStyle(cv).imageOrientation; } catch (e) { }
+            try { if (io === 'none' && new URL(u, global.location.href).origin === global.location.origin) u = 'noexif:' + u; } catch (e) { }
+            var ix = m[0] * pm[4] + m[4], iy = m[3] * pm[5] + m[5];
+            gimg(cv, 'cyber-cvclip:' + [X, Y, W, H].join(',') + '|' + u, ix, iy, m[0] * pm[0] * nw, m[3] * pm[3] * nh);
+            return;
+        }
         if (!c || s.globalCompositeOperation !== 'source-over') return;
         f(cv, X, Y, W, H, c[0], c[1], c[2], c[3] * s.globalAlpha, 0);
     }
@@ -439,6 +458,22 @@
             f(this._canvas, abs, m[0] * xw + m[4], m[3] * yw + m[5], m[0] * ww, m[3] * hw);
             return;
         }
+        if (typeof f === 'function' && n === 9 && m[1] === 0 && m[2] === 0 && typeof image.src === 'string' && image.src) {
+            /* (a part of it: the whole placed so the part lands on the destination, cut there) */
+            var a9 = [];
+            for (var q9 = 1; q9 < 9; q9++) a9.push(num(arguments[q9], NaN));
+            var nw9 = image.naturalWidth || 0, nh9 = image.naturalHeight || 0;
+            if (!a9.every(isFinite) || !nw9 || !nh9 || !a9[2] || !a9[3] || !a9[6] || !a9[7]) return;
+            var kx = a9[6] / a9[2], ky = a9[7] / a9[3];
+            var cx0 = m[0] * a9[4] + m[4], cy0 = m[3] * a9[5] + m[5], cw0 = m[0] * a9[6], ch0 = m[3] * a9[7];
+            /* (image-orientation: none of the canvas, a same-origin image: its bytes unturned) */
+            var u9 = image.src, io9 = '';
+            try { io9 = global.getComputedStyle(this._canvas).imageOrientation; } catch (e) { }
+            try { if (io9 === 'none' && new URL(u9, global.location.href).origin === global.location.origin) u9 = 'noexif:' + u9; } catch (e) { }
+            f(this._canvas, 'cyber-cvclip:' + [cx0, cy0, cw0, ch0].join(',') + '|' + u9,
+              cx0 - m[0] * a9[0] * kx, cy0 - m[3] * a9[1] * ky, m[0] * nw9 * kx, m[3] * nh9 * ky);
+            return;
+        }
         if (typeof f !== 'function' || n === 9 || m[1] !== 0 || m[2] !== 0 || typeof image.src !== 'string' || !image.src) return;
         var w = n === 5 ? num(arguments[3], NaN) : (image.naturalWidth || image.width || 0);
         var h = n === 5 ? num(arguments[4], NaN) : (image.naturalHeight || image.height || 0);
@@ -468,6 +503,8 @@
         if (image === null || typeof image !== 'object') throw new TypeError("parameter 1 is not of type 'CanvasImageSource'.");
         var p = Object.create(CanvasPattern.prototype);
         define(p, '_rep', repetition == null || repetition === '' ? 'repeat' : String(repetition));
+        define(p, '_img', image);
+        p._mt = [1, 0, 0, 1, 0, 0];
         return p;
     });
     Object.defineProperty(CP, Symbol.toStringTag, { value: 'CanvasRenderingContext2D', configurable: true });

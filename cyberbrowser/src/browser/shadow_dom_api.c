@@ -360,6 +360,8 @@ static GCValue shadow_root_wrap(JSContextHandle ctx, GCValue this_val, ShadowRoo
 
     // Store shadowRoot reference on the element.
     JS_SetPropertyStr(ctx, this_val, "__shadowRoot", shadow_root);
+    /* (a shadow tree exists: custom element definitions look into them for elements to upgrade) */
+    JS_SetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyber_any_shadow", JS_TRUE);
     return shadow_root;
 }
 

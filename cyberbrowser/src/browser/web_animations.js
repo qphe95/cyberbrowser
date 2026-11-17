@@ -263,8 +263,8 @@
             case 'rotatey': out.push(tfAxis(0, 1, 0, tfAng(a[0]))); break;
             case 'rotate3d': out.push(tfAxis(parseFloat(a[0]), parseFloat(a[1]), parseFloat(a[2]), tfAng(a[3]))); break;
             case 'skew': out.push({ k: 'skew', a: [tfAng(a[0]), a.length > 1 ? tfAng(a[1]) : 0] }); break;
-            case 'skewx': out.push({ k: 'skew', a: [tfAng(a[0]), 0] }); break;
-            case 'skewy': out.push({ k: 'skew', a: [0, tfAng(a[0])] }); break;
+            case 'skewx': out.push({ k: 'skew', a: [tfAng(a[0]), 0], o: 'x' }); break;
+            case 'skewy': out.push({ k: 'skew', a: [0, tfAng(a[0])], o: 'y' }); break;
             case 'perspective': out.push({ k: 'perspective', a: [a[0] === 'none' ? Infinity : parseFloat(a[0])] }); break;
             case 'matrix': out.push({ k: 'matrix', m: [+a[0], +a[1], 0, 0, +a[2], +a[3], 0, 0, 0, 0, 1, 0, +a[4], +a[5], 0, 1] }); break;
             case 'matrix3d': out.push({ k: 'matrix', m: a.map(Number) }); break;
@@ -488,6 +488,7 @@
     function tfSameAxis(a, b) { return !a.a[3] || !b.a[3] || (a.a[0] === b.a[0] && a.a[1] === b.a[1] && a.a[2] === b.a[2]); }
     function tfPair(a, b, how, box, matrixHow) {
         if (a.k !== b.k) return null;
+        if (a.k === 'skew' && a.o && b.o && a.o !== b.o) return null;   /* (skewX and skewY: not one another) */
         switch (a.k) {
         case 'translate':
             return { k: a.k, a: a.a.map(function (v, i) { return { px: how(v.px, b.a[i].px), pct: how(v.pct, b.a[i].pct) }; }) };
@@ -1476,6 +1477,19 @@
         if (!m) return null;
         return /infinity/i.test(m[1]) ? (m[1][0] === '-' ? -Infinity : Infinity) : parseFloat(m[1]);
     }
+    /* (a color in any form as rgb(), through a 2D context's fillStyle) */
+    var colorCtx = null;
+    function anyColorRgb(v) {
+        try {
+            if (!colorCtx) colorCtx = global.document.createElement('canvas').getContext('2d');
+            colorCtx.fillStyle = '#010203';
+            colorCtx.fillStyle = String(v);
+            var h = String(colorCtx.fillStyle);
+            if (h === '#010203' && !/^s*#010203s*$/i.test(String(v))) return null;
+            var m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(h);
+            return m ? 'rgb(' + parseInt(m[1], 16) + ', ' + parseInt(m[2], 16) + ', ' + parseInt(m[3], 16) + ')' : h;
+        } catch (e) { return null; }
+    }
     function rgbaOf(v) {
         var m = /^\s*rgba?\(\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)(?:,\s*([-\d.]+))?\s*\)\s*$/.exec(String(v));
         return m ? [+m[1], +m[2], +m[3], m[4] === undefined ? 1 : +m[4]] : null;
@@ -1713,9 +1727,11 @@
             if (rl !== null) return rl;
         }
         if (a === b) return a;
-        /* (one color and another, premultiplied; alpha then kept to what alpha can be) */
-        if (/(^|-)color$/.test(prop)) {
+        /* (one color and another, premultiplied; alpha then kept to what alpha can be; a custom property registered as a color too) */
+        var regColor = prop.indexOf('--') === 0 && typeof global.__cyberRegisteredSyntax === 'function' && /<color>/.test(global.__cyberRegisteredSyntax(prop) || '');
+        if (/(^|-)color$/.test(prop) || regColor) {
             var ca = rgbaOf(a), cb = rgbaOf(b);
+            if (regColor) { ca = ca || rgbaOf(anyColorRgb(a)); cb = cb || rgbaOf(anyColorRgb(b)); }
             if (ca && cb) {
                 var alpha = ca[3] + (cb[3] - ca[3]) * t, kept = alpha > 1 ? 1 : alpha;
                 if (kept <= 0) return 'rgba(0, 0, 0, 0)';
@@ -2832,6 +2848,11 @@
         if (!effect._values) effect._values = { base: {}, read: {} };
         if (!needsResolving(prop, value)) return value;
         var key = prop + ':' + value, read = effect._values.read;
+        /* (relative to its font or its box: what those are now part of it) */
+        if (/\d(r?em|ex|ch|r?lh|cap|ic)\b|%/.test(String(value))) {
+            var cs_ = global.getComputedStyle(el);
+            key += '|' + cs_.fontSize + '|' + cs_.lineHeight + '|' + el.offsetWidth + 'x' + el.offsetHeight;
+        }
         if (!(key in read)) {
             var v = readWith(el, prop, value);
             read[key] = v || value;
@@ -2867,6 +2888,22 @@
         var text = '';
         values.forEach(function (v, p) { text += p + ': ' + v + '; '; });
         setStyle(el, text || null);
+        /* (its ::marker's: a style of the marker's own) */
+        var mk = [];
+        animations.forEach(function (a) { if (a._effect && a._effect._target === el && a._effect._pseudo === '::marker') mk.push(a); });
+        if (!mk.length && !el.__cyberMkAnim) return;
+        mk.sort(function (x, y) { return x._seq - y._seq; });
+        var mv = new Map();
+        mk.forEach(function (a) { if (!a._effect._values) a._effect._values = { base: {}, read: {} }; });
+        mk.forEach(function (a) {
+            var c = computedTiming(a._effect);
+            if (c.progress === null) return;
+            sampleEffect(a._effect, c.progress, mv, el);
+        });
+        var mt = '';
+        mv.forEach(function (v, p) { mt += p + ': ' + v + '; '; });
+        hide(el, '__cyberMkAnim', !!mt);
+        setStyle(el, mt || null, 5);
     }
     function applyDirty() {
         if (!dirtyTargets.size) return;
@@ -3371,7 +3408,15 @@
             kept.fill = FILLS[v[7]] || 'none';
             kept.direction = DIRECTIONS[v[8]] || 'normal';
             return kept;
-        }, set: function (t) { kept = t; } });
+        }, set: function (t) {
+            /* (updateTiming: what changed, to the engine's row) */
+            var was = kept;
+            kept = t;
+            if (!t || a._gone || isTransition) return;
+            if (typeof t.duration === 'number' && t.duration !== was.duration) rowOp(5, rec.row, rec.gen, t.duration);
+            if (typeof t.delay === 'number' && t.delay !== was.delay) rowOp(6, rec.row, rec.gen, t.delay);
+            if (typeof t.iterations === 'number' && t.iterations !== was.iterations) rowOp(7, rec.row, rec.gen, t.iterations);
+        } });
         hide(a, '_cssEffect', effect);
         wrappers.set(key, a);
         return a;

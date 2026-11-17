@@ -88,15 +88,24 @@ void anim_api_reset(void)
     g_web_realm_n = 0;
 }
 
-/* __cyberAnimStyle(el, text or null) */
+/* (an element's ::marker's: keyed apart, by the top bit) */
+const char *anim_api_web_marker_style(uint32_t el)
+{
+    return el ? anim_api_web_style(el | 0x80000000u) : NULL;
+}
+
+/* __cyberAnimStyle(el, text or null[, 5: its ::marker's]) */
 static GCValue js_anim_style(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
 {
     (void)this_val;
     NodeId el = argc > 0 ? dom_node_of(argv[0]) : DOM_NULL;
     if (!el) return JS_UNDEFINED;
     const char *text = argc > 1 && JS_IsString(argv[1]) ? JS_ToCString(ctx, argv[1]) : NULL;
+    int32_t ps_ = 0;
+    if (argc > 2) JS_ToInt32(ctx, &ps_, argv[2]);
+    NodeId key = ps_ == 5 ? (el | 0x80000000u) : el;
     uint32_t i = 0;
-    while (i < g_web_styles.n && g_web_styles.el[i] != el) i++;
+    while (i < g_web_styles.n && g_web_styles.el[i] != key) i++;
     bool had = i < g_web_styles.n;
     if (!text && !had) return JS_UNDEFINED;
     if (text && had && !strcmp(text, g_web_styles.text[i])) return JS_UNDEFINED;
@@ -112,7 +121,7 @@ static GCValue js_anim_style(JSContextHandle ctx, GCValue this_val, int argc, GC
                 g_web_styles.el = realloc(g_web_styles.el, g_web_styles.cap * sizeof(NodeId));
                 g_web_styles.text = realloc(g_web_styles.text, g_web_styles.cap * sizeof(char *));
             }
-            g_web_styles.el[i] = el;
+            g_web_styles.el[i] = key;
             g_web_styles.n++;
         }
         g_web_styles.text[i] = strdup(text);
@@ -146,6 +155,7 @@ static GCValue js_anim_row(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     else if (op == 2) anim_row_set_start(r, (uint32_t)g, v);
     else if (op == 3) anim_row_pause(r, (uint32_t)g, now, true);
     else if (op == 4) anim_row_pause(r, (uint32_t)g, now, false);
+    else if (op >= 5 && op <= 7) anim_row_set_timing(r, (uint32_t)g, op - 5, v);   /* (5 duration, 6 delay, 7 iterations) */
     g_anim_frame++;
     dom_request_relayout();
     timer_anim_wake(ctx);
@@ -247,8 +257,9 @@ extern void page_set_viewport(int width, int height);
 static GCValue js_print_set(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
 {
     (void)this_val;
-    double v[7] = { 0 };
-    for (int i = 0; i < 7 && i < argc; i++) JS_ToFloat64(ctx, &v[i], argv[i]);
+    double v[11] = { 0 };
+    for (int i = 0; i < 11 && i < argc; i++) JS_ToFloat64(ctx, &v[i], argv[i]);
+    for (int k = 0; k < 4; k++) g_css_print.pad[k] = v[7 + k] > 0.0 ? v[7 + k] : 0.0;
     g_css_print.skip = v[6] > 0.0 && v[6] < 1000.0 ? (int)v[6] : 0;   /* (pages before the first one shown) */
     g_css_print.rot = 0;
     memset(g_css_print.pdx, 0, sizeof g_css_print.pdx);
@@ -317,9 +328,11 @@ static GCValue js_media_pref(JSContextHandle ctx, GCValue this_val, int argc, GC
 }
 
 /* __cyberAnimWake(): this realm's animations want turns. */
+static JSContextHandle g_anim_woke;   /* (a realm that asked for turns while its turn's microtasks ran) */
 static GCValue js_anim_wake(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
 {
     (void)this_val; (void)argc; (void)argv;
+    g_anim_woke = ctx;
     int i = 0;
     while (i < g_web_realm_n && g_web_realms[i] != ctx) i++;
     if (i == g_web_realm_n && g_web_realm_n < WEB_REALMS) g_web_realms[g_web_realm_n++] = ctx;
@@ -329,7 +342,7 @@ static GCValue js_anim_wake(JSContextHandle ctx, GCValue this_val, int argc, GCV
 
 void anim_api_install(JSContextHandle ctx, GCValue global)
 {
-    JS_DefinePropertyValueStr(ctx, global, "__cyberAnimStyle", JS_NewCFunction(ctx, js_anim_style, "__cyberAnimStyle", 2), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberAnimStyle", JS_NewCFunction(ctx, js_anim_style, "__cyberAnimStyle", 3), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberAnimWake", JS_NewCFunction(ctx, js_anim_wake, "__cyberAnimWake", 0), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberCssIsShorthand", JS_NewCFunction(ctx, js_css_is_shorthand, "__cyberCssIsShorthand", 1), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberCssLonghands", JS_NewCFunction(ctx, js_css_longhands, "__cyberCssLonghands", 1), JS_PROP_CONFIGURABLE);
@@ -357,7 +370,9 @@ static void web_animations_tick(JSContextHandle ctx)
             GCValue r = JS_Call(realm, fn, JS_UNDEFINED, 0, NULL);
             if (JS_IsException(r)) JS_GetException(realm);
             else more = JS_ToBool(realm, r) > 0;
+            g_anim_woke = NULL;
             timer_microtask_checkpoint(ctx);
+            if (g_anim_woke == realm) more = true;   /* (what its finishing started: animations of its own) */
         }
         if (more) { i++; continue; }
         g_web_realms[i] = g_web_realms[--g_web_realm_n];

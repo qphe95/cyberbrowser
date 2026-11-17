@@ -217,7 +217,6 @@ uint8_t *data_url_decode(const char *url, size_t *out_len)
     size_t header_len = (size_t)(comma - header);
     bool base64 = header_len >= 7 && strncasecmp(header + header_len - 7, ";base64", 7) == 0;
     const char *payload = comma + 1;
-    if (base64) return base64_decode(payload, strlen(payload), out_len);
     size_t n = strlen(payload);
     uint8_t *out = (uint8_t *)malloc(n + 1);
     if (!out) return NULL;
@@ -232,6 +231,12 @@ uint8_t *data_url_decode(const char *url, size_t *out_len)
     }
     out[j] = 0;
     *out_len = j;
+    /* (base64: its percent-escapes undone first, then decoded, as fetch does) */
+    if (base64) {
+        uint8_t *dec = base64_decode((const char *)out, j, out_len);
+        free(out);
+        return dec;
+    }
     return out;
 }
 
@@ -810,6 +815,36 @@ static ImagePixels *pixels_filter(ImagePixels *px, const char *source, int tw, i
     return px;
 }
 
+/* (blob: URLs' bytes, registered by URL.createObjectURL) */
+typedef struct { char *url; uint8_t *bytes; size_t n; } BlobBytes;
+static BlobBytes g_blobs[64];
+static int g_nblobs;
+static pthread_mutex_t g_blob_mu = PTHREAD_MUTEX_INITIALIZER;
+void image_cache_blob_register(const char *url, const uint8_t *bytes, size_t n)
+{
+    if (!url || !bytes) return;
+    pthread_mutex_lock(&g_blob_mu);
+    BlobBytes *b = &g_blobs[g_nblobs < 64 ? g_nblobs++ : (int)(n % 64)];
+    free(b->url); free(b->bytes);
+    b->url = strdup(url);
+    b->bytes = (uint8_t *)malloc(n ? n : 1);
+    if (b->bytes) memcpy(b->bytes, bytes, n);
+    b->n = n;
+    pthread_mutex_unlock(&g_blob_mu);
+}
+static bool blob_fetch(const char *url, uint8_t **out, size_t *n)
+{
+    bool ok = false;
+    pthread_mutex_lock(&g_blob_mu);
+    for (int i = 0; i < g_nblobs && !ok; i++)
+        if (g_blobs[i].url && !strcmp(g_blobs[i].url, url) && g_blobs[i].bytes) {
+            *out = (uint8_t *)malloc(g_blobs[i].n ? g_blobs[i].n : 1);
+            if (*out) { memcpy(*out, g_blobs[i].bytes, g_blobs[i].n); *n = g_blobs[i].n; ok = true; }
+        }
+    pthread_mutex_unlock(&g_blob_mu);
+    return ok;
+}
+
 static bool fetch_entry(ImageEntry *e)
 {
     const char *src = e->source;
@@ -819,6 +854,7 @@ static bool fetch_entry(ImageEntry *e)
         e->bytes = data_url_decode(src, &e->nbytes);
         return e->bytes != NULL;
     }
+    if (!strncmp(src, "blob:", 5)) return blob_fetch(src, &e->bytes, &e->nbytes);
     if (url_is_network_url(src)) return http_fetch(src, &e->bytes, &e->nbytes, e);
     return g_local_files && read_file(src, &e->bytes, &e->nbytes);
 }

@@ -94,6 +94,8 @@ void image_cache_stats(ImageCache *cache, ImageCacheStats *out);
 /* Insert or replace pixels the caller decoded itself (video frames) under
  * `key`; returns its handle, or -1. */
 int image_cache_put_rgba(ImageCache *cache, const char *key, int w, int h, const uint8_t *rgba);
+/* (a blob: URL's bytes, copied, for images fetched from it) */
+void image_cache_blob_register(const char *url, const uint8_t *bytes, size_t n);
 
 /* Get decoded RGBA pixels (top-left origin).  Width and height are those of
  * the decoded pixels (possibly smaller than the natural size).  Returns

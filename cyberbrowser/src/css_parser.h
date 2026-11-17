@@ -37,7 +37,7 @@ bool css_logical_shorthand(const char *prop, char start[64], char end[64]);
 unsigned char css_note_property(const char *prop);
 /* A page's <meta name=color-scheme> asking for one: prefers-color-scheme says
  * so ("light", "dark", static strings; NULL: as usual).  True if it changed. */
-typedef struct CssPrintMode { bool on; double w, h, gap, ml, mt, pw; int pages, skip; float pdx[64], pdy[64]; char pname[64][24]; int rot; } CssPrintMode;   /* (rot: the page shown turned, 1 clockwise, -1 back) */
+typedef struct CssPrintMode { bool on; double w, h, gap, ml, mt, pw; int pages, skip; float pdx[64], pdy[64]; char pname[64][24]; int rot; double pad[4]; } CssPrintMode;   /* (pad: the page box's padding, top right bottom left) */   /* (rot: the page shown turned, 1 clockwise, -1 back) */
 extern __thread CssPrintMode g_css_print;
 bool css_media_set_color_scheme(const char *scheme);
 const char *css_media_color_scheme(void);   /* (the scheme set, NULL the user's) */
@@ -177,7 +177,7 @@ bool css_media_query_matches(const char *query, double viewport_width, double vi
  * Used by both the JS CSS applier and the layout-engine collector. */
 void css_scope_stylesheet(CssStylesheet *sheet, const char *host_tag);
 /* ::part() selectors as the flattened tree's descendants with the part names. */
-void css_rewrite_parts(CssStylesheet *sheet);
+void css_rewrite_parts(CssStylesheet *sheet, bool doc);
 
 /* One matched declaration with specificity/order for cascading. */
 typedef struct CssAppliedDecl {

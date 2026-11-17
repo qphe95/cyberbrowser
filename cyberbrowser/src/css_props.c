@@ -5118,6 +5118,8 @@ bool css_value_invalid(const char *prop, const char *value)
     ValueKind k = value_kind(prop);
     while (isspace((unsigned char)*value)) value++;
     if (css_is_wide_keyword(value, strlen(value)) || has_substitution(value)) return false;
+    /* (border widths: lengths only, no percentages, no auto) */
+    if (!strncmp(prop, "border", 6) && strstr(prop, "width") && strncmp(prop, "border-image", 12) && (strchr(value, '%') || strstr(value, "auto"))) return true;
     double rgba[4];
     if (k == VK_COLOR && css_color_parse(value, rgba)) return false;
     if (k == VK_LEN1 || k == VK_LEN4) {
@@ -5267,8 +5269,6 @@ static bool sup_selector(const char *s)
         else if (*c == ')' || *c == ']') d--;
         else if (*c == ',' && !d) return false;
     }
-    /* (::before::marker and ::after::marker: not styled here) */
-    if (strcasestr_simple(s, "::before::marker") || strcasestr_simple(s, "::after::marker")) return false;
     return sup_selector_one(s, strlen(s), false);
 }
 
@@ -10473,6 +10473,24 @@ bool css_calc_number(const char *v, double *out) {
     char *e = NULL;
     *out = strtod(n, &e);
     bool ok = e != n && (*e == 0 || *e == ')');
+    free(t);
+    return ok;
+}
+
+/* An angle with math in it, in degrees (false: not one that resolves). */
+bool css_calc_angle(const char *v, double *deg) {
+    const CssPropDef *p = css_prop_find("rotate", 6);
+    char *t = p ? prop_parse_raw(p, v) : NULL;
+    if (!t) return false;
+    const char *n = !strncasecmp(t, "calc(", 5) ? t + 5 : t;
+    char *e = NULL;
+    double d = strtod(n, &e);
+    bool ok = e != n;
+    if (ok && !strncasecmp(e, "deg", 3)) *deg = d;
+    else if (ok && !strncasecmp(e, "grad", 4)) *deg = d * 0.9;
+    else if (ok && !strncasecmp(e, "rad", 3)) *deg = d * 180.0 / M_PI;
+    else if (ok && !strncasecmp(e, "turn", 4)) *deg = d * 360.0;
+    else ok = false;
     free(t);
     return ok;
 }

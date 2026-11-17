@@ -927,6 +927,12 @@
             var pt = 'popoverTargetElement' in el ? el.popoverTargetElement : el.ownerDocument.getElementById(el.getAttribute('popovertarget'));
             if (pt && pt.hasAttribute('popover') && typeof pt.togglePopover === 'function') {
                 var act = String(el.getAttribute('popovertargetaction') || 'toggle').toLowerCase();
+                /* (the invoker: the popover's implicit anchor, for layout) */
+                try {
+                    var ik = el.getAttribute('data-cyber-iasrc') || String(++global.__cyberIaSeq || (global.__cyberIaSeq = 1));
+                    el.setAttribute('data-cyber-iasrc', ik);
+                    pt.setAttribute('data-cyber-ia', ik);
+                } catch (e) { }
                 try {
                     if (act === 'show') pt.showPopover(); else if (act === 'hide') pt.hidePopover(); else pt.togglePopover();
                 } catch (e) { /* (not shown: as if not asked) */ }

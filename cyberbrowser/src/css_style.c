@@ -1325,6 +1325,7 @@ static bool has_scan(const CssStyleSet *S, const CssStyleDoc *D, const CComp *c,
     }
 }
 
+static __thread int t_vis_link = -2;   /* (the element being styled's innermost link, itself or up: :visited there alone; -2 any) */
 static bool comp_match(const CssStyleSet *S, const CssStyleDoc *D, const CComp *c, int n)
 {
     if (n < 0 || !D->is_elem[n]) return false;
@@ -1333,7 +1334,14 @@ static bool comp_match(const CssStyleSet *S, const CssStyleDoc *D, const CComp *
     if (c->root && D->tag[n] != S->atom_html) return false;
     /* (the document's element only: an html element further in is not the root) */
     if (c->root && D->parent && D->parent[n] >= 0 && D->is_elem[D->parent[n]]) return false;
-    if (c->node_id && (!D->store_id || D->store_id[n] != c->node_id)) return false;
+    if (c->node_id == 0xFFFFFFFFu) {
+        /* (in no shadow tree) */
+        if (D->store_id && D->store_id[n]) {
+            NodeId r_ = D->store_id[n];
+            while (dom_parent(r_)) r_ = dom_parent(r_);
+            if (r_ != D->store_id[n] && (dom_flags(r_) & DOMF_SHADOW_ROOT)) return false;
+        }
+    } else if (c->node_id && (!D->store_id || D->store_id[n] != c->node_id)) return false;
     if (c->slotted_id && (!D->store_id || !sd_slotted_in(D->store_id[n], c->slotted_id))) return false;
     if (c->tag_upper && D->store_id && D->store_id[n] && !dom_is_html_document(dom_owner(D->store_id[n]))) {
         /* (XML names are case-sensitive: capitals in the selector, none in the name) */
@@ -1345,6 +1353,7 @@ static bool comp_match(const CssStyleSet *S, const CssStyleDoc *D, const CComp *
     if (c->link && !(D->flags[n] & DF_LINK)) return false;
     if (c->link == 2 && (D->flags[n] & DF_VISITED)) return false;
     if (c->link == 3 && !(D->flags[n] & DF_VISITED)) return false;
+    if (c->link == 3 && t_vis_link != -2 && n != t_vis_link) return false;
     if (c->id && D->id[n] != c->id) return false;
     const CssAtom *cls = D->pool + D->cls_off[n];
     for (uint32_t i = 0; i < c->cls_n; i++)
@@ -1607,7 +1616,9 @@ static int32_t after_base_list(Builder *b, const char *branch, size_t blen, int 
         "::slider-track", "::slider-fill", "::slider-thumb",
         /* (a button's :enabled, :disabled: (*), up, down, left, right, then the logical ones) */
         "::scroll-button(*):enabled", "::scroll-button(up):enabled", "::scroll-button(down):enabled", "::scroll-button(left):enabled", "::scroll-button(right):enabled", "::scroll-button(block-start):enabled", "::scroll-button(block-end):enabled", "::scroll-button(inline-start):enabled", "::scroll-button(inline-end):enabled", "::scroll-button(*):disabled", "::scroll-button(up):disabled", "::scroll-button(down):disabled", "::scroll-button(left):disabled", "::scroll-button(right):disabled", "::scroll-button(block-start):disabled", "::scroll-button(block-end):disabled", "::scroll-button(inline-start):disabled", "::scroll-button(inline-end):disabled",
-        "::column::scroll-marker", "::column::scroll-marker:target-current" };
+        "::column::scroll-marker", "::column::scroll-marker:target-current",
+        /* (a ::before's or ::after's own ::marker) */
+        "::after::marker", "::before::marker" };
     char buf[512];
     if (blen == 0 || blen >= sizeof(buf)) return -1;
     memcpy(buf, branch, blen);
@@ -1776,7 +1787,7 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
                     if (blen > 0) {
                         /* (logical buttons as physical: horizontal flow, all layout has) */
                         static const unsigned char k_after_kind[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 6, 26, 27, 28, 29, 13, 14, 15,
-                                                                      16, 17, 18, 19, 20, 30, 31, 32, 33, 21, 22, 23, 24, 25, 34, 35, 36, 37, 38, 39 };
+                                                                      16, 17, 18, 19, 20, 30, 31, 32, 33, 21, 22, 23, 24, 25, 34, 35, 36, 37, 38, 39, 40, 41 };
                         int32_t is_before = 0, li = -1;
                         for (int kk = 0; li < 0 && kk < (int)sizeof k_after_kind; kk++) {
                             /* (only those whose kind of name is in it) */
@@ -1784,7 +1795,10 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
                             if ((kk == 5 || kk == 6 || kk == 13) && ci_strstr((char *)sel, "::column::")) continue;   /* (a column's, not the element's) */
                             if (kk >= 18 && kk < 21 && !ci_strstr((char *)sel, ":slider-")) continue;
                             if (kk >= 21 && kk < 39 && !ci_strstr((char *)sel, ":scroll-button")) continue;
-                            if (kk >= 39 && !ci_strstr((char *)sel, "::column::scroll-marker")) continue;
+                            if (kk >= 39 && kk < 41 && !ci_strstr((char *)sel, "::column::scroll-marker")) continue;
+                            bool pm_ = ci_strstr((char *)sel, "::after::marker") || ci_strstr((char *)sel, "::before::marker");
+                            if (kk >= 41 && !pm_) continue;
+                            if (kk == 4 && pm_) continue;   /* (the pseudo-element's marker, not the element's) */
                             li = after_base_list(&b, bp, blen, kk);
                             is_before = k_after_kind[kk];
                         }
@@ -2066,6 +2080,9 @@ static void for_candidates(const CssStyleSet *S, const CssStyleDoc *D, const Buc
                            int n, CssStyleScratch *t, int dom, CandFn fn)
 {
     (void)dom;
+    int vis_held = t_vis_link;
+    t_vis_link = n;
+    while (t_vis_link >= 0 && !(D->is_elem[t_vis_link] && (D->flags[t_vis_link] & DF_LINK))) t_vis_link = D->parent[t_vis_link];
 #define VISIT_SLOT(slot) do { const BucketSlot *_s = (slot); if (_s) { \
         for (uint32_t _i = 0; _i < _s->n; _i++) { uint32_t ci = m->items[_s->off + _i]; \
             const CChain *ch = &S->chains[ci]; t->stats.candidates++; \
@@ -2096,6 +2113,7 @@ static void for_candidates(const CssStyleSet *S, const CssStyleDoc *D, const Buc
         if (chain_match(S, D, ch, n)) fn(t, ch, (int32_t)ci);
     }
 #undef VISIT_SLOT
+    t_vis_link = vis_held;
 }
 
 /* revert and revert-layer: what an author (or its layer) said before them is gone, the
@@ -2142,6 +2160,7 @@ static void cascade_reverts(const CssStyleSet *S, CssStyleScratch *t)
             const CRule *br = &S->rules[b->rule];
             /* (revert-layer: its layer and those after it gone, an important one past the later layers' important ones too) */
             if (br->ua || (layer && br->layer_bias > ar->layer_bias)) continue;   /* (bias: how far below no layer; earlier layers more) */
+            if (layer && (br->rule->shadow != 0) != (ar->rule->shadow != 0)) continue;   /* (another cascade context's, a shadow tree's for its host: not this one's layers) */
             const char *bp = b->decl->property;
             size_t bl = strlen(bp);
             if (all || (bl == pl && !strcmp(bp, prop)) || (bl > pl && !strncmp(bp, prop, pl) && bp[pl] == '-')) b->decl = NULL;

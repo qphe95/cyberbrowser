@@ -409,6 +409,8 @@
         return new global.ReadableStream({ start: function (c) { if (by.length) c.enqueue(by.slice()); c.close(); } });
     }]].forEach(function (m) { Object.defineProperty(Blob.prototype, m[0], { configurable: true, enumerable: true, writable: true, value: m[1] }); });
     Object.defineProperty(Blob.prototype, Symbol.toStringTag, { value: 'Blob', configurable: true });
+    /* (a Blob's bytes for the engine: blob: URLs of images; undefined for anything else) */
+    Object.defineProperty(global, '__cyberBlobBytes', { configurable: true, value: function (b) { return b !== null && typeof b === 'object' ? blobBytes.get(b) : undefined; } });
     function File(bits, name, options) {
         if (!new.target) throw new TypeError("Failed to construct 'File': Please use the 'new' operator");
         if (arguments.length < 2) throw new TypeError("Failed to construct 'File': 2 arguments required.");
@@ -833,6 +835,7 @@
             ascentOverride: ['normal', ffOverride],
             descentOverride: ['normal', ffOverride],
             lineGapOverride: ['normal', ffOverride],
+            sizeAdjust: ['100%', function (v) { v = String(v).trim(); return /^\d*\.?\d+%$/.test(v) ? v : null; }],
         };
         var ffHeld = new WeakMap(), ffOf = function (f) {
             if (!(f instanceof global.FontFace)) throw new TypeError('Illegal invocation');
@@ -848,6 +851,7 @@
                     var h = ffOf(this), ok = check(v);
                     if (ok === null) throw new global.DOMException("'" + v + "' is not a valid value for " + k, 'SyntaxError');
                     h[k] = ok;
+                    if (h.refresh) h.refresh();
                 } });
         });
         /* (a name that isn't one, as a string) */
@@ -860,7 +864,16 @@
         var ffFam = Object.getOwnPropertyDescriptor(global.FontFace.prototype, 'family');
         if (ffFam && ffFam.get) Object.defineProperty(global.FontFace.prototype, 'family', { enumerable: true, configurable: true,
             get: function () { var h = ffOf(this); return 'family' in h ? h.family : ffFamily(ffFam.get.call(this)); },
-            set: function (v) { ffOf(this).family = ffFamily(v); if (ffFam.set) ffFam.set.call(this, v); } });
+            set: function (v) { var h = ffOf(this); h.family = ffFamily(v); if (ffFam.set) ffFam.set.call(this, v); if (h.refresh) h.refresh(); } });
+        /* (weight, style and stretch set after it was added: its rule made again) */
+        ['weight', 'style', 'stretch'].forEach(function (k) {
+            var pd = Object.getOwnPropertyDescriptor(global.FontFace.prototype, k);
+            if (pd && pd.set) Object.defineProperty(global.FontFace.prototype, k, { enumerable: true, configurable: true, get: pd.get,
+                set: function (v) { pd.set.call(this, v); var h = ffOf(this); if (h.refresh) h.refresh(); } });
+            else if (!pd) Object.defineProperty(global.FontFace.prototype, k, { enumerable: true, configurable: true,
+                get: function () { var h = ffOf(this); return '_' + k in h ? h['_' + k] : 'normal'; },
+                set: function (v) { var h = ffOf(this); h['_' + k] = String(v); if (h.refresh) h.refresh(); } });
+        });
         var ffOrig = global.FontFace, ffCtor = function FontFace(family, source) {
             if (!new.target) throw new TypeError("Failed to construct 'FontFace': Please use the 'new' operator");
             if (arguments.length < 2) throw new TypeError("Failed to construct 'FontFace': 2 arguments required");
@@ -871,6 +884,7 @@
             }
             var f = Reflect.construct(ffOrig, arguments, new.target === ffCtor ? ffOrig : new.target), init = arguments[2];
             if (srcBad) ffOf(f).badSrc = true;
+            if (typeof source === 'string') ffOf(f).src = source;   /* (its sources as written: an @font-face of it once added) */
             if (init && typeof init === 'object') Object.keys(ffMore).forEach(function (k) {
                 if (init[k] === undefined) return;
                 var ok = ffMore[k][1](init[k]);
@@ -941,6 +955,42 @@
             Object.defineProperty(fn, 'length', { configurable: true, value: 1 });
             Object.defineProperty(FP, name, { configurable: true, enumerable: true, writable: true, value: fn });
         });
+        /* (a face added by script: an @font-face of its sources and descriptors, in a sheet of the document's the page doesn't see) */
+        var ffSheet = function (f) {
+            if (typeof ffOf !== 'function') return;
+            var h = ffOf(f), doc = global.document;
+            if (!h.src || !doc || !global.CSSStyleSheet) return;
+            var d = ['font-family: ' + f.family, 'src: ' + h.src];
+            var put = function (n, v, def) { if (v !== undefined && v !== null && String(v) !== '' && String(v) !== def) d.push(n + ': ' + v); };
+            put('font-weight', f.weight, 'normal');
+            put('font-style', f.style, 'normal');
+            put('font-stretch', f.stretch, 'normal');
+            var names = { unicodeRange: 'unicode-range', featureSettings: 'font-feature-settings', variationSettings: 'font-variation-settings',
+                          display: 'font-display', ascentOverride: 'ascent-override', descentOverride: 'descent-override',
+                          lineGapOverride: 'line-gap-override', sizeAdjust: 'size-adjust' };
+            Object.keys(names).forEach(function (k) { if (k in h) put(names[k], h[k], ''); });
+            var text = '@font-face { ' + d.join('; ') + ' }';
+            /* (its descriptors changed after: the rule made again) */
+            if (h.sheet) {
+                if (h.sheetText !== text) { try { h.sheet.replaceSync(text); h.sheetText = text; doc.adoptedStyleSheets = doc.adoptedStyleSheets; } catch (e) { } }
+                return;
+            }
+            var sh;
+            try { sh = new global.CSSStyleSheet(); sh.replaceSync(text); } catch (e) { return; }
+            h.sheetText = text;
+            h.refresh = function () { ffSheet(f); };
+            var arr = doc.__cyberFontSheets;
+            if (!arr) Object.defineProperty(doc, '__cyberFontSheets', { configurable: true, value: arr = [] });
+            arr.push(sh);
+            h.sheet = sh;
+            try { doc.adoptedStyleSheets = doc.adoptedStyleSheets; } catch (e) { }   /* (laid out again with it) */
+        };
+        var ffAdd = FP.add;
+        if (typeof ffAdd === 'function') Object.defineProperty(FP, 'add', { configurable: true, enumerable: true, writable: true, value: function add(font) {
+            var r = ffAdd.apply(this, arguments);
+            try { if (global.document && this === global.document.fonts && font instanceof global.FontFace) ffSheet(font); } catch (e) { }
+            return r;
+        } });
         if (!('size' in FP)) Object.defineProperty(FP, 'size', { configurable: true, enumerable: true, get: function () {
             var n = 0;
             if (typeof this.forEach === 'function') this.forEach(function () { n++; });
@@ -1535,6 +1585,26 @@
                 return e;
             } });
             def('getEnclosureList', function getEnclosureList(r, ref) { return listOf(this, r, ref, true); });
+            /* (SVGAnimatedTransformList: the transform attribute's functions, each its name and text; the CSS property's not among them) */
+            if (!Object.prototype.hasOwnProperty.call(SvgP, 'transform')) {   /* (over HTMLElement's legacy transform() helper) */
+                var TYPES = { matrix: 1, translate: 2, scale: 3, rotate: 4, skewx: 5, skewy: 6 };
+                var tfList = function (el) {
+                    var items = [], src = el.getAttribute('transform') || '', re = /([a-zA-Z]+)\s*\(([^)]*)\)/g, m;
+                    while ((m = re.exec(src))) {
+                        var nums = m[2].split(/[\s,]+/).filter(function (x) { return x !== ''; }).map(Number);
+                        items.push({ type: TYPES[m[1].toLowerCase()] || 0, angle: m[1].toLowerCase() === 'rotate' ? nums[0] || 0 : 0, args: nums });
+                    }
+                    var list = { get length() { return items.length; }, get numberOfItems() { return items.length; },
+                                 getItem: function (i) { if (i < 0 || i >= items.length) throw new global.DOMException('Index out of range', 'IndexSizeError'); return items[i]; } };
+                    return list;
+                };
+                Object.defineProperty(SvgP, 'transform', { enumerable: true, configurable: true, get: function () {
+                    var el = this, o = {};
+                    Object.defineProperty(o, 'baseVal', { enumerable: true, get: function () { return tfList(el); } });
+                    Object.defineProperty(o, 'animVal', { enumerable: true, get: function () { return tfList(el); } });
+                    return o;
+                } });
+            }
         })();
         var ElP = global.Element && global.Element.prototype;
         if (ElP && !('currentCSSZoom' in ElP)) Object.defineProperty(ElP, 'currentCSSZoom', { enumerable: true, configurable: true,
@@ -1883,11 +1953,14 @@
     }
     function markersUpdate(el) {
         var sc = scrollerSubject(el), list = global.__cyberScrollMarkerTargets(el);
-        var maxX = sc.scrollWidth - sc.clientWidth, maxY = sc.scrollHeight - sc.clientHeight, best = null, bestD = Infinity;
+        var maxX = sc.scrollWidth - sc.clientWidth, maxY = sc.scrollHeight - sc.clientHeight, best = null, bestD = Infinity, bestI = Infinity;
+        /* (by the block axis first, then the inline one) */
+        var vert_ = /^(vertical|sideways)/.test(global.getComputedStyle(sc).writingMode || '');
         for (var i = 0; i < list.length; i++) {
             var o = alignedOffsetOf(sc, list[i]);
-            var d = Math.abs(Math.max(0, Math.min(maxX, o.x)) - sc.scrollLeft) + Math.abs(Math.max(0, Math.min(maxY, o.y)) - sc.scrollTop);
-            if (d < bestD) { bestD = d; best = list[i]; }
+            var dx = Math.abs(Math.max(0, Math.min(maxX, o.x)) - sc.scrollLeft), dy = Math.abs(Math.max(0, Math.min(maxY, o.y)) - sc.scrollTop);
+            var db = vert_ ? dx : dy, di = vert_ ? dy : dx;
+            if (db < bestD - 0.5 || (Math.abs(db - bestD) <= 0.5 && di < bestI)) { bestD = db; bestI = di; best = list[i]; }
         }
         for (var k = 0; k < list.length; k++) global.__cyberElState(list[k], ST_TARGET_CURRENT, list[k] === best);
     }
@@ -1929,7 +2002,20 @@
             var pl = parseFloat(cs.paddingLeft) || 0, pr = parseFloat(cs.paddingRight) || 0, inner = el.clientWidth - pl - pr;
             if (!(n > 0)) { var cw0 = parseFloat(cs.columnWidth); n = cw0 > 0 ? Math.max(1, Math.floor((inner + gap) / (cw0 + gap))) : 1; }
             var colW = (inner - (n - 1) * gap) / n, at = hit[2] * (colW + gap), al = 'none';
-            try { al = String(global.getComputedStyle(el, '::column').scrollSnapAlign || 'none').split(/\s+/); al = al[1] || al[0]; } catch (e) { }
+            /* (its ::column rules' scroll-snap-align: the last that matches it) */
+            var colRules = function (list) {
+                for (var ri = 0; list && ri < list.length; ri++) {
+                    var rr = list[ri];
+                    if (rr.cssRules && !rr.selectorText) colRules(rr.cssRules);
+                    if (!rr.selectorText || !rr.style) continue;
+                    rr.selectorText.split(',').forEach(function (sel) {
+                        var m = /^(.*)::column\s*$/.exec(sel.trim());
+                        try { if (m && el.matches(m[1] || '*')) { var v = rr.style.getPropertyValue('scroll-snap-align'); if (v) al = v.trim(); } } catch (e) { }
+                    });
+                }
+            };
+            try { for (var si = 0; si < el.ownerDocument.styleSheets.length; si++) colRules(el.ownerDocument.styleSheets[si].cssRules); } catch (e) { }
+            al = String(al).split(/\s+/); al = al[1] || al[0];
             var x = al === 'center' ? at + colW / 2 - inner / 2 : al === 'end' ? at + colW - inner : at;
             el.scrollLeft = Math.max(0, Math.min(el.scrollWidth - el.clientWidth, x));
             return true;
@@ -2140,7 +2226,7 @@
             var p = cs[i];
             /* (physical properties only: logical ones and prefixed aliases say the same) */
             if (!p || p.indexOf('view-transition') >= 0 || /^(animation|transition|-webkit-|inset|contain-intrinsic)/.test(p) ||
-                /(^|-)(block|inline)(-|$)/.test(p)) continue;
+                /(^|-)(block|inline)(-|$)/.test(p) || /-(start|end)-(start|end)-/.test(p)) continue;
             var v = cs.getPropertyValue(p);
             if (v !== '' && v != null) parts.push(p + ':' + v);
         }
@@ -2174,7 +2260,7 @@
         };
         walk(el, c, true);
         ['position:absolute', 'left:0', 'top:0', 'right:auto', 'bottom:auto', 'margin:0', 'transform:none', 'translate:none',
-         'rotate:none', 'scale:none', 'float:none', 'visibility:visible'].forEach(function (d) {
+         'rotate:none', 'scale:none', 'float:none', 'visibility:visible', 'transform-style:flat'].forEach(function (d) {
             var k = d.indexOf(':');
             c.style.setProperty(d.slice(0, k), d.slice(k + 1));
         });
@@ -2215,7 +2301,11 @@
             seen[n] = true;
             var r = el.getBoundingClientRect();
             var ent = { name: n, el: el, cls: vtClasses(el), x: r.left, y: r.top, w: r.width, h: r.height, snap: vtSnap(el), vert: /^(vertical|sideways)/.test(String(cs.writingMode || '')),
-                        bw: [cs.borderTopWidth, cs.borderRightWidth, cs.borderBottomWidth, cs.borderLeftWidth].map(function (v) { return parseFloat(v) || 0; }) };
+                        bw: [cs.borderTopWidth, cs.borderRightWidth, cs.borderBottomWidth, cs.borderLeftWidth].map(function (v) { return parseFloat(v) || 0; }),
+                        /* (its corners: what its group-children clip keeps) */
+                        rad: ['top-left', 'top-right', 'bottom-right', 'bottom-left'].map(function (k) {
+                            return 'border-' + k + '-radius:' + cs.getPropertyValue('border-' + k + '-radius') + ';corner-' + k + '-shape:' + (cs.getPropertyValue('corner-' + k + '-shape') || 'round');
+                        }).join(';') };
             /* (transformed: the border box's size, placed so its transform takes it where it shows) */
             var tm = /^matrix\(([^)]*)\)$/.exec(String(cs.transform || '').trim());
             if (tm) {
@@ -2492,6 +2582,10 @@
         /* (the old page drawn only when the page's rules set the root's images still; mid crossfade the live page stands in) */
         var oldRoot = rootIn && old.root && ((ri.oa.none && ri.na.none) || (ri.oa.custom && ri.oa.long && oOp >= 0.99)) && gOp * oOp > 0.01 && (ri.od.visibility || ri.ip.visibility || ri.g.visibility) !== 'hidden';
         var rootShown = !rootIn || gOp * nOp > 0.01 || (!oldRoot && gOp * oOp > 0.01);
+        /* (a root image the rules place and size: its box from them) */
+        var VT_GEO = ['position', 'left', 'top', 'right', 'bottom', 'width', 'height'];
+        var geoOf = function (d) { return VT_GEO.some(function (k) { return d[k] != null && d[k] !== ''; }); };
+        var geoSet = function (el, d) { VT_GEO.forEach(function (k) { if (d[k]) { try { el.style.setProperty(k, d[k]); } catch (e) { } } }); };
         if (oldRoot) {
             /* (the old page, as captured, under the groups) */
             var rg = doc.createElement('div');
@@ -2502,6 +2596,24 @@
             bs.style.setProperty('margin', old.root.margin);
             rg.appendChild(bs);
             ov.appendChild(rg);
+            /* (the old root's image: its transform from the rules, followed as they change) */
+            vtEls['old:root'] = rg;
+            if (ri.od.transform) rg.style.setProperty('transform', ri.od.transform);
+            vtTrack(rg, 'old', 'root', ri.od);
+            if (geoOf(ri.od)) geoSet(rg, ri.od);
+        }
+        /* (the new root placed elsewhere: the page as it is now, as an image there, the live page hidden) */
+        var newRootSnap = rootIn && !scoped && oldRoot && geoOf(ri.nd) && gOp * nOp > 0.01 && (ri.nd.visibility || ri.ip.visibility || ri.g.visibility) !== 'hidden' ? vtRootSnap(doc) : null;
+        if (newRootSnap) {
+            var ng = doc.createElement('div');
+            ng.setAttribute('style', 'position:absolute;left:0;top:0;width:100vw;height:100vh;overflow:hidden;background:' + newRootSnap.bg + ';opacity:' + (gOp * nOp));
+            var nbs = newRootSnap.snap;
+            nbs.style.setProperty('position', 'static');
+            nbs.style.setProperty('margin', newRootSnap.margin);
+            ng.appendChild(nbs);
+            ov.appendChild(ng);
+            geoSet(ng, ri.nd);
+            rootShown = false;
         }
         if (!rootShown) {
             for (var c = scoped ? scope.firstChild : doc.body ? doc.body.firstChild : null; c; c = c.nextSibling)
@@ -2694,9 +2806,9 @@
                 /* (inside its parent group's ::view-transition-group-children, placed from that group) */
                 if (!pg.kids) {
                     pg.kids = doc.createElement('div');
-                    /* (over its padding box: inside the borders the element had) */
+                    /* (over the group, with the element's border widths, solid and transparent: its children placed from the padding box) */
                     var pbw = ((byName[pn].nu || byName[pn].old) || {}).bw || [0, 0, 0, 0];
-                    pg.kids.setAttribute('style', 'position:absolute;left:' + pbw[3] + 'px;top:' + pbw[0] + 'px;width:calc(100% - ' + (pbw[1] + pbw[3]) + 'px);height:calc(100% - ' + (pbw[0] + pbw[2]) + 'px)');
+                    pg.kids.setAttribute('style', 'position:absolute;left:0;top:0;width:100%;height:100%;box-sizing:border-box;border-style:solid;border-color:transparent;border-width:' + pbw.map(function (v) { return v + 'px'; }).join(' ') + ';' + (((byName[pn].nu || byName[pn].old) || {}).rad || ''));
                     vtApply(pg.kids, vtDecls(rules, 'group-children', pn, (byName[pn].nu || byName[pn].old).cls || []));
                     pg.g.appendChild(pg.kids);
                 }
@@ -2795,7 +2907,7 @@
         return undo;
     };
     var VT_ACTIVE = { cur: null };
-    var newViewTransition = function (update, types, doc, root) {
+    var newViewTransition = function (update, types, doc, root, pre) {
         var vt = Object.create(ViewTransition.prototype), resolveReady, rejectReady, resolveFinished, rejectFinished,
             resolveDone, rejectDone, skipped = false, timedOut = false, vtWaits = 0;
         var ready = new Promise(function (a, b) { resolveReady = a; rejectReady = b; });
@@ -2838,6 +2950,7 @@
         };
         var vtCapOld = function () {
             if (skipped) return;
+            if (pre) { vtOld = pre; return; }   /* (a navigation's: the old document's, carried) */
             if (vdoc && (!doc || root === doc.documentElement)) {
                 try { vtOld = vtCaptureState(vdoc, root); } catch (e) { vtOld = null; }
                 if (vtOld && doc) { try { vtOld.root = vtRootSnap(doc); } catch (e) { vtOld.root = null; } }
@@ -2993,19 +3106,62 @@
     if (global.Event && global.addEventListener) {
         var PageSwapEvent = pageTransitionEvent('PageSwapEvent'), PageRevealEvent = pageTransitionEvent('PageRevealEvent');
         var nothing = function () {};
+        /* (the old state as text, for the next document: a snapshot is its tag, attributes and markup) */
+        var vtSer = function (el) {
+            var a = [];
+            for (var i = 0; i < el.attributes.length; i++) a.push([el.attributes[i].name, el.attributes[i].value]);
+            return { t: el.localName, ns: el.namespaceURI, a: a, h: el.innerHTML };
+        };
+        var vtDeser = function (d, s) {
+            if (!s) return null;
+            var html = s.ns === 'http://www.w3.org/1999/xhtml';
+            /* (body and html: a div stands in, as a body in a div isn't parsed) */
+            var el = html ? d.createElement(/^(body|html|head)$/.test(s.t) ? 'div' : s.t) : d.createElementNS(s.ns, s.t);
+            s.a.forEach(function (p) { try { el.setAttribute(p[0], p[1]); } catch (e) { } });
+            el.innerHTML = s.h;
+            return el;
+        };
+        var vtCarryOut = function () {
+            var d = global.document, st = vtCaptureState(d, d.documentElement);
+            var o = { ents: st.map(function (e) {
+                var c = {};
+                for (var k in e) if (k !== 'el' && k !== 'snap') c[k] = e[k];
+                c.snap = vtSer(e.snap);
+                return c;
+            }) };
+            var rs = vtRootSnap(d);
+            if (rs) o.root = { bg: rs.bg, x: rs.x, y: rs.y, margin: rs.margin, snap: vtSer(rs.snap) };
+            o.rootIn = vtRootNamed(d);
+            o.rootName = vtName(d.documentElement) || 'root';
+            return JSON.stringify(o);
+        };
+        var vtCarryIn = function (json) {
+            var o = JSON.parse(json), d = global.document;
+            var old = o.ents.map(function (c) { c.snap = vtDeser(d, c.snap); c.el = d.documentElement; return c; }).filter(function (c) { return c.snap; });
+            if (o.root) o.root.snap = vtDeser(d, o.root.snap);
+            old.root = o.root && o.root.snap ? o.root : null;
+            old.rootIn = o.rootIn;
+            old.rootName = o.rootName;
+            return old;
+        };
         Object.defineProperty(global, '__cyberPageSwap', { configurable: true, value: function (url, same, how) {
             var rule = viewTransitionRule();
             var vt = same && rule && rule.navigation === 'auto' ? newViewTransition(nothing, rule.types) : null;
             var activation = { entry: { url: url }, from: { url: global.location.href }, navigationType: how || 'replace' };
             global.__cyberOutboundVT = vt;
             global.__cyberDispatchTrusted(global, new PageSwapEvent('pageswap', { viewTransition: vt, activation: activation }));
-            return !!vt && !vt.__skipped;
+            if (!vt || vt.__skipped) return false;
+            try { return vtCarryOut(); } catch (e) { return true; }
         } });
         /* (before the load event: this engine has no first frame to wait for) */
         Object.defineProperty(global, '__cyberPageReveal', { configurable: true, value: function () {
             /* (only after a document that opted in: reading every sheet's rules isn't free) */
             var rule = global.__cyberOldOptIn ? viewTransitionRule() : null;
-            var vt = rule && rule.navigation === 'auto' ? newViewTransition(nothing, rule.types) : null;
+            var carry = global.__cyberVtCarry, pre = null;
+            global.__cyberVtCarry = null;
+            if (carry && rule && rule.navigation === 'auto') { try { pre = vtCarryIn(carry); } catch (e) { pre = null; } }
+            var d = global.document;
+            var vt = rule && rule.navigation === 'auto' ? (pre ? newViewTransition(nothing, rule.types, d, d.documentElement, pre) : newViewTransition(nothing, rule.types)) : null;
             global.__cyberDispatchTrusted(global, new PageRevealEvent('pagereveal', { viewTransition: vt }));
         } });
     }
@@ -3291,7 +3447,9 @@
         for (var mi = 0; mi < marked.length; mi++)
             if (marked[mi] !== el && marked[mi].contains(el) && global.getComputedStyle(marked[mi]).contentVisibility === 'auto') cvActivated.add(marked[mi]);
         for (var a = el.assignedSlot || el.parentNode || el.host; a && a !== d; a = a.assignedSlot || a.parentNode || a.host) {
-            if (a.nodeType !== 1 || a === root || a === d.body) continue;
+            if (a.nodeType !== 1 || a === root) continue;
+            /* (the body: the viewport's overflow, unless containment on it or the root keeps its own) */
+            if (a === d.body) { try { var cb0 = global.getComputedStyle(a).contain, cr0 = global.getComputedStyle(root).contain; if ((!cb0 || cb0 === "none") && (!cr0 || cr0 === "none")) continue; } catch (e) { continue; } }
             if (a.scrollHeight <= a.clientHeight && a.scrollWidth <= a.clientWidth) continue;
             /* (overflow: clip and visible: no scrolling box) */
             if (!isScrollBox(global.getComputedStyle(a))) continue;
@@ -3500,7 +3658,15 @@
             });
         });
         Object.defineProperty(ELP, 'scrollIntoViewIfNeeded', { configurable: true, enumerable: true, writable: true, value: function () {
-            scrollIntoViewOf(this, 'nearest', 'nearest');
+            /* (a scroll-snap-align of its own: where a targeted scroll puts it) */
+            var b0 = 'nearest', i0 = 'nearest';
+            try {
+                var sa0 = String(global.getComputedStyle(this).scrollSnapAlign || '').trim().split(/\s+/);
+                if (/^(start|end|center)$/.test(sa0[0])) b0 = sa0[0];
+                var si0 = sa0.length > 1 ? sa0[1] : sa0[0];
+                if (/^(start|end|center)$/.test(si0)) i0 = si0;
+            } catch (e) { /* (nearest) */ }
+            scrollIntoViewOf(this, b0, i0);
         } });
     }
     /* ---- CSS Custom Highlight API: the sets and their registry, sent to be
@@ -5037,6 +5203,9 @@
         var ppct = function (p, base, got) { var v = printDecl(first, 'padding-' + p); return v && /%/.test(v) ? printLen(v, base) - (parseFloat(got) || 0) : 0; };
         bt += ppct('top', ph, pcs.paddingTop); bb += ppct('bottom', ph, pcs.paddingBottom);
         bl += ppct('left', pw, pcs.paddingLeft); br += ppct('right', pw, pcs.paddingRight);
+        /* (the padding alone: the canvas's background over it too) */
+        var padT = parseFloat(pcs.paddingTop) + ppct('top', ph, pcs.paddingTop), padR = parseFloat(pcs.paddingRight) + ppct('right', pw, pcs.paddingRight);
+        var padB = parseFloat(pcs.paddingBottom) + ppct('bottom', ph, pcs.paddingBottom), padL = parseFloat(pcs.paddingLeft) + ppct('left', pw, pcs.paddingLeft);
         probe.remove();
         printAutoMargins(first, m0, pw, ph, bl, br, bt, bb);
         var cw = Math.max(1, pw - m0.left - m0.right - bl - br), chh = Math.max(1, ph - m0.top - m0.bottom - bt - bb);
@@ -5047,7 +5216,7 @@
         /* (reftest-pages: the first page named shown first) */
         var rpm = document.querySelector('meta[name="reftest-pages"]'), skip = 0;
         if (rpm) { var rpv = /^\s*(\d+)/.exec(rpm.getAttribute('content') || ''); if (rpv && +rpv[1] > 1) skip = +rpv[1] - 1; }
-        __cyberPrintSet(cw, chh, m0.top + m0.bottom + bt + bb, m0.left + bl, m0.top + bt, pw, skip);
+        __cyberPrintSet(cw, chh, m0.top + m0.bottom + bt + bb, m0.left + bl, m0.top + bt, pw, skip, padT || 0, padR || 0, padB || 0, padL || 0);
         var tries = 0;
         function pages() {
             /* (from the root's height, once laid out as pages) */

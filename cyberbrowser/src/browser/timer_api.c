@@ -846,20 +846,21 @@ static unsigned long long raf_frame_ms(void) {
     return ms;
 }
 
+static unsigned long long g_anim_wake_at;   /* (the frame a wake is set for: none once it has come) */
 static GCValue anim_wake_noop(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)ctx; (void)this_val; (void)argc; (void)argv;
+    g_anim_wake_at = 0;
     return JS_UNDEFINED;
 }
 
 /* A frame for running transitions and animations (anim_api.c): a turn at
  * the next frame time, which virtual time skips to when the page is idle. */
 void timer_anim_wake(JSContextHandle ctx) {
-    static unsigned long long wake_at;
     unsigned long long now = page_time_ms();
-    if (wake_at > now) return;
+    if (g_anim_wake_at > now) return;
     unsigned long long frame = (now / raf_frame_ms() + 1) * raf_frame_ms();
     if (add_timer(ctx, TIMER_TYPE_RAF, JS_NewCFunction(ctx, anim_wake_noop, "", 0), frame - now, 0, NULL))
-        wake_at = frame;
+        g_anim_wake_at = frame;
 }
 
 // requestAnimationFrame(callback)

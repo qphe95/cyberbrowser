@@ -205,7 +205,14 @@ static char *css_ns_rewrite(const char *sel)
             i++; start = false;
             continue;
         }
-        if (start && in_sel && (isalpha((unsigned char)c) || c == '_' || c == '\\' || (unsigned char)c >= 0x80 ||
+        /* (a prefix that was escaped, a digit first now: one when a | follows) */
+        bool dig_pfx = false;
+        if (start && in_sel && isdigit((unsigned char)c)) {
+            size_t j = i;
+            while (j < n && (isalnum((unsigned char)sel[j]) || sel[j] == '-' || sel[j] == '_')) j++;
+            dig_pfx = j < n && sel[j] == '|' && (j + 1 >= n || (sel[j + 1] != '=' && sel[j + 1] != '|'));
+        }
+        if (start && in_sel && (dig_pfx || isalpha((unsigned char)c) || c == '_' || c == '\\' || (unsigned char)c >= 0x80 ||
                                 (c == '-' && i + 1 < n && sel[i + 1] != '-' && !isdigit((unsigned char)sel[i + 1])))) {
             char id[64];
             size_t e = css_ns_ident(sel, n, i, id, sizeof id);
@@ -213,6 +220,14 @@ static char *css_ns_rewrite(const char *sel)
                 /* (a prefix: the sheet's URI for it, else left to be invalid) */
                 const char *uri = NULL;
                 for (int k = t_nns - 1; k >= 0 && !uri; k--) if (!strcmp(t_ns[k].p, id)) uri = t_ns[k].uri;
+                if (!uri) {
+                    /* (the token text's own escapes: a backslash and the character itself, as backslash-2 for a leading 2) */
+                    char lit[64];
+                    size_t lo = 0;
+                    for (size_t q = i; q < e && lo + 1 < sizeof lit; q++) { if (sel[q] == '\\' && q + 1 < e) q++; lit[lo++] = sel[q]; }
+                    lit[lo] = 0;
+                    for (int k = t_nns - 1; k >= 0 && !uri; k--) if (!strcmp(t_ns[k].p, lit)) uri = t_ns[k].uri;
+                }
                 if (uri) css_ns_put_uri(&o, &on, &ocap, uri);
                 else { css_ns_put(&o, &on, &ocap, sel + i, e + 1 - i); if (depth == 0) t_ns_bad = true; }
                 i = e + 1;
@@ -1916,6 +1931,7 @@ static size_t css_at_rule(const char *s, size_t len, size_t pos, bool nested, Cs
                 }
                 uri[ul] = 0;
                 if (q && e < un && u[e] == '\n') ok = false;   /* (a bad string) */
+                if (q && e >= un && pre_end < len) ok = false;   /* (unclosed before the statement's end, not the sheet's: a bad string, its line ended) */
                 has_uri = true;
             }
         }
@@ -2764,6 +2780,12 @@ static void css_apply_pseudo(CssSimpleSelector *out,
         out->has_substantive = true;
         return;
     }
+    /* (in no shadow tree: a page ::part() rule's host) */
+    if (css_pseudo_name_is(name, nl, "-webkit-cyber-light")) {
+        out->node_id = 0xFFFFFFFFu;
+        out->has_substantive = true;
+        return;
+    }
     if (css_pseudo_name_is(name, nl, "-webkit-cyber-slotted")) {
         out->slotted_id = arg ? (uint32_t)strtoul(arg, NULL, 10) : 0;
         out->slotted_host = arg && memchr(arg, 'h', al) != NULL;
@@ -3101,6 +3123,9 @@ static void css_apply_pseudo(CssSimpleSelector *out,
         if (arg && al > 0) {
             for (size_t q = 0; q + 8 <= al; q++)
                 if (!strncasecmp(arg + q, ":visited", 8)) { out->never_match = true; return; }
+            /* (:has() inside :has(): not a valid selector) */
+            for (size_t q = 0; q + 5 <= al; q++)
+                if (!strncasecmp(arg + q, ":has(", 5)) { out->never_match = true; return; }
         }
         if (arg && al > 0) {
             size_t k = 0;
@@ -3468,7 +3493,7 @@ static int css_specificity_from_simple(const CssSimpleSelector *simple) {
     if (simple->hs_sel[0]) b++;   /* (:has-slotted(), a pseudo-class) */
     if (simple->anim_img) b++;
     if (simple->ce_defined) b++;
-    if (simple->node_id) b++;   /* (:host) */
+    if (simple->node_id && simple->node_id != 0xFFFFFFFFu) b++;   /* (:host) */
     if (simple->slotted_host) b++;
     if (simple->not_active) {
         a += simple->not_has_id ? 1 : 0;
@@ -4621,6 +4646,25 @@ static void css_buf_append_cstr(char **buf, size_t *len, size_t *cap, const char
 }
 
 static bool css_mem_has_host(const char *s, size_t n);
+/* (in a list [s, s + n) ("(...)" with its parens): one selector whose subject, its last compound, names :host) */
+static bool css_mem_subject_host(const char *s, size_t n)
+{
+    size_t a = 1, e = n > 0 ? n - 1 : 0;   /* (inside the parens) */
+    while (a < e) {
+        size_t b = a, last = a;
+        int d = 0;
+        for (; b < e; b++) {
+            char c = s[b];
+            if (c == '(' || c == '[') d++;
+            else if ((c == ')' || c == ']') && d) d--;
+            else if (!d && c == ',') break;
+            else if (!d && (css_is_space(c) || c == '>' || c == '+' || c == '~')) last = b + 1;
+        }
+        if (b > last && css_mem_has_host(s + last, b - last)) return true;
+        a = b + 1;
+    }
+    return false;
+}
 /* (the compound around a :host at k in sel [0, len): only :host, :host()
  * and :has() beside it, the host being featureless; false: it matches nothing) */
 static bool css_host_compound_ok(const char *sel, size_t len, size_t k)
@@ -4663,7 +4707,7 @@ static bool css_host_compound_ok(const char *sel, size_t len, size_t k)
                      (nl == 2 && !strncasecmp(sel + p + 1, "is", 2)) || (nl == 5 && !strncasecmp(sel + p + 1, "where", 5));
         if (logic && q < e && sel[q] == '(') {
             size_t c2 = css_match_paren(sel, q, e);
-            if (!css_mem_has_host(sel + q, c2 - q)) return false;
+            if (!css_mem_subject_host(sel + q, c2 - q + 1)) return false;   /* (its subject the host) */
             p = c2 + 1;
             continue;
         }
@@ -4675,6 +4719,30 @@ static bool css_host_compound_ok(const char *sel, size_t len, size_t k)
     return true;
 }
 
+/* (a :host somewhere in [s, s + n) that is a subject: bare, or in the subject of a :not(), :is() or :where() argument;
+ * one only inside arguments' other compounds can't be the featureless host) */
+static bool css_host_in_subject(const char *s, size_t n)
+{
+    int depth = 0;
+    for (size_t k = 0; k < n; k++) {
+        char c = s[k];
+        if (c == '(') depth++;
+        else if (c == ')') depth--;
+        else if (!depth && c == ':' && k + 5 <= n && !strncasecmp(s + k, ":host", 5) && (k + 13 > n || strncasecmp(s + k, ":host-context", 13))) return true;
+        else if (!depth && c == ':' && k + 1 < n) {
+            size_t q = k + 1;
+            while (q < n && s[q] != '(' && s[q] != ':' && !css_is_space(s[q])) q++;
+            size_t nl = q - k - 1;
+            bool logic = (nl == 3 && !strncasecmp(s + k + 1, "not", 3)) || (nl == 2 && !strncasecmp(s + k + 1, "is", 2)) || (nl == 5 && !strncasecmp(s + k + 1, "where", 5));
+            if (logic && q < n && s[q] == '(') {
+                size_t c2 = css_match_paren(s, q, n);
+                if (css_mem_has_host(s + q, c2 - q) && css_mem_subject_host(s + q, c2 - q + 1)) return true;
+                k = c2;
+            }
+        }
+    }
+    return false;
+}
 /* (whether [s, s + n) names :host, not :host-context) */
 static bool css_mem_has_host(const char *s, size_t n)
 {
@@ -4810,7 +4878,7 @@ static char* css_transform_one_selector(const char *sel, size_t len, const char 
         }
         i = close + 1;
         css_buf_append(&out, &out_len, &out_cap, sel + i, len - i);
-    } else if (i + 5 <= len && strncasecmp(sel + i, ":host", 5) == 0) {
+    } else if (i + 5 <= len && strncasecmp(sel + i, ":host", 5) == 0 && (i + 13 > len || strncasecmp(sel + i, ":host-context", 13))) {
         /* :host ...  ->  host_tag ... */
         css_buf_append_cstr(&out, &out_len, &out_cap, host_tag);
         i += 5;
@@ -4895,7 +4963,7 @@ static char* css_transform_one_selector(const char *sel, size_t len, const char 
         }
         (void)nargs;
         if (!any) { free(out); return css_strdup(""); }
-    } else if (host_tag[0] == ':' && css_mem_has_host(sel + i, len - i)) {
+    } else if (host_tag[0] == ':' && css_mem_has_host(sel + i, len - i) && css_host_in_subject(sel + i, len - i)) {
         /* (:host inside :is(), :not() and the like: the host's pseudo put there, no scoping prefix) */
         for (size_t k = i; k < len;) {
             if (k + 5 <= len && !strncasecmp(sel + k, ":host", 5) && (k + 13 > len || strncasecmp(sel + k, ":host-context", 13))) {
@@ -4983,7 +5051,7 @@ static char* css_transform_selectors_for_host(const char *selector_text, const c
 
 /* ::part(a b): in the flattened tree a shadow tree's elements are its host's
  * descendants, so a part is a descendant whose part attribute has each name. */
-void css_rewrite_parts(CssStylesheet *sheet) {
+void css_rewrite_parts(CssStylesheet *sheet, bool doc) {
     if (!sheet) return;
     for (int r = 0; r < sheet->rule_count; r++) {
         CssRule *rule = &sheet->rules[r];
@@ -4994,6 +5062,8 @@ void css_rewrite_parts(CssStylesheet *sheet) {
         while (i < len) {
             if (i + 7 <= len && !strncmp(s + i, "::part(", 7)) {
                 size_t open = i + 6, close = css_match_paren(s, open, len);
+                /* (the page's: its host in the page's tree, not one in a shadow tree) */
+                if (doc) css_buf_append_cstr(&out, &out_len, &out_cap, ":-webkit-cyber-light");
                 css_buf_append_cstr(&out, &out_len, &out_cap, " ");
                 size_t k = open + 1;
                 bool any = false;
@@ -5061,7 +5131,8 @@ void css_scope_stylesheet(CssStylesheet *sheet, const char *host_tag) {
         /* (a rule for the host: the shadow tree's context in the cascade, the
          * rest match only in the tree, the page's rules there as well) */
         rule->shadow = css_host_subject(rule->selector_text);
-        rule->scoped = host_tag[0] == ':';
+        bool was_part = rule->scoped;   /* (a ::part() rule, rewritten: it reaches the trees in this one) */
+        rule->scoped = host_tag[0] == ':' || was_part;
         char *new_sel = css_transform_selectors_for_host(rule->selector_text, host_tag);
         free(rule->selector_text);
         rule->selector_text = new_sel;

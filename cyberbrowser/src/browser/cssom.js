@@ -755,10 +755,11 @@
         }
         var TYPE = '(?:<(?:length|number|percentage|length-percentage|color|image|url|integer|angle|time|resolution|transform-function|custom-ident|transform-list|string)>|[-_a-zA-Z][-_a-zA-Z0-9]*)[+#]?';
         var SYNTAX = new RegExp('^\\s*(?:\\*|' + TYPE + '(?:\\s*\\|\\s*' + TYPE + ')*)\\s*$');
+        var secondScope = false, sigs = Object.create(null), invalid = Object.create(null);
         function registerPaint(name, cls) {
             name = String(name);
             if (!name) throw new TypeError("Failed to execute 'registerPaint': The empty string is not a valid name.");
-            if (defs[name]) throw new global.DOMException("A class with name:'" + name + "' is already registered.", 'InvalidModificationError');
+            if (defs[name] && !secondScope) throw new global.DOMException("A class with name:'" + name + "' is already registered.", 'InvalidModificationError');
             var c = cls !== null && (typeof cls === 'object' || typeof cls === 'function') ? cls : {};
             var ip = seqOfStrings(c.inputProperties, 'inputProperties');
             seqOfStrings(c.inputArguments, 'inputArguments').forEach(function (t) {
@@ -769,6 +770,10 @@
             var proto = cls.prototype;
             if (proto === null || typeof proto !== 'object') throw new TypeError("Failed to execute 'registerPaint': The 'prototype' object on the class does not exist.");
             if (typeof proto.paint !== 'function') throw new TypeError("Failed to execute 'registerPaint': The 'paint' function on the prototype does not exist.");
+            /* (a second global scope: the same definition, or none valid) */
+            var sig = JSON.stringify([ip, seqOfStrings(c.inputArguments, 'inputArguments')]);
+            if (secondScope) { if (name in sigs && sigs[name] !== sig) invalid[name] = true; return; }
+            sigs[name] = sig;
             defs[name] = cls;
             inprops[name] = ip;
         }
@@ -940,7 +945,19 @@
             var reg = global.__blobRegistry, b = reg && reg[url];
             var p = b && typeof b.text === 'function' ? b.text() : global.fetch(url).then(function (r) { return r.text(); });
             return p.then(function (code) {
-                (new Function('registerPaint', code))(registerPaint);
+                /* (a module: top-level await allowed; import() in a worklet rejects) */
+                code = String(code).replace(/\bimport\s*\(/g, '__cyberWorkletImport(');
+                var AF = Object.getPrototypeOf(async function () {}).constructor;
+                var noImport = function () { return Promise.reject(new TypeError('import() is not allowed in worklets')); };
+                return (new AF('registerPaint', '__cyberWorkletImport', code))(registerPaint, noImport).then(function () {
+                    /* (and again, as the second of two global scopes a worklet has) */
+                    secondScope = true;
+                    return (new AF('registerPaint', '__cyberWorkletImport', code))(registerPaint, noImport).catch(function () {});
+                }).then(function () {
+                    secondScope = false;
+                    Object.keys(invalid).forEach(function (n) { delete defs[n]; });
+                }, function (e) { secondScope = false; throw e; });
+            }).then(function () {
                 paintAll();
                 /* (painted again each frame for a while: animations and later style changes) */
                 var left = 120;

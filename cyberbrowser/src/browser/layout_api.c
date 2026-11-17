@@ -1937,13 +1937,14 @@ static void lq_scroll_size(int idx, bool root, double *cw, double *ch, double *s
     css_layout_extent(&g_lq_layout, idx, &right, &bottom);
     *sw = right - left;
     *sh = bottom - top;
-    if (root) return;
     /* (the scroll origin is where the flow starts: on the far side, the area
      * runs back from that side instead) */
     const LayoutStyle *s = b->s;
     bool vertical = s->writing_mode != 0, rtl = s->direction == 1, rl = s->writing_mode == 1 || s->writing_mode == 3;
     bool to_top = vertical && rtl, to_left = (!vertical && rtl) || rl;
-    if (s->display == CSS_DISPLAY_FLEX) {
+    if (root) to_top = false;   /* (the viewport: by the root's writing mode, its block start only) */
+    if (root) to_left = rl;
+    if (!root && s->display == CSS_DISPLAY_FLEX) {
         bool row = s->flex_direction == CSS_FLEX_DIRECTION_ROW || s->flex_direction == CSS_FLEX_DIRECTION_ROW_REVERSE;
         bool reverse = s->flex_direction == CSS_FLEX_DIRECTION_ROW_REVERSE || s->flex_direction == CSS_FLEX_DIRECTION_COLUMN_REVERSE;
         bool main_vertical = row == vertical;
@@ -1955,7 +1956,7 @@ static void lq_scroll_size(int idx, bool root, double *cw, double *ch, double *s
     if (to_left || to_top) {
         double l = left, t = top;
         css_layout_extent_start(&g_lq_layout, idx, &l, &t);
-        if (to_left) *sw = left + *cw - l;
+        if (to_left) *sw = root ? *cw - (l < 0.0 ? l : 0.0) : left + *cw - l;   /* (the viewport: from its own right edge) */
         if (to_top) *sh = top + *ch - t;
     }
 }

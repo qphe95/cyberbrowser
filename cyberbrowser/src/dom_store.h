@@ -124,6 +124,7 @@ enum {
 extern uint8_t *g_dom_top;
 extern uint32_t g_dom_top_cap;
 void dom_top_state_set(uint32_t slot, uint8_t bits, bool on);
+uint32_t dom_top_seq(NodeId id);   /* (when it last went into the top layer: later ones above; 0 never) */
 
 typedef struct DomStore {
     uint32_t cap;           /* slots allocated (slot 0 is never used) */

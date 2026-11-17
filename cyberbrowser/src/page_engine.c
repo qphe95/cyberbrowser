@@ -921,7 +921,10 @@ static void page_frames_build(void) {
                     if (ms) css_media_set_color_scheme(ms);
                 }
             }
-            bool frame_laid = css_layout_run(lc, fd, NULL, ws[k], hs[k]);
+            extern double frame_api_frame_zoom(NodeId iframe);
+            double fz = frame_api_frame_zoom(iframes[k]);   /* (a zoomed iframe: its document in CSS pixels, scaled when painted) */
+            if (!(fz > 0.0)) fz = 1.0;
+            bool frame_laid = css_layout_run(lc, fd, NULL, ws[k] / fz, hs[k] / fz);
             css_media_set_color_scheme(held_cs);
             g_css_print.on = held_print;
             if (frame_laid) {
@@ -934,10 +937,10 @@ static void page_frames_build(void) {
                     GCValue fg = JS_GetGlobalObject(ctxs[k]);
                     JS_ToFloat64(ctxs[k], &fsx, JS_GetPropertyStr(ctxs[k], fg, "scrollX"));
                     JS_ToFloat64(ctxs[k], &fsy, JS_GetPropertyStr(ctxs[k], fg, "scrollY"));
-                    if (!(fsx == fsx) || fsx < 0.0) fsx = 0.0;
+                    if (!(fsx == fsx)) fsx = 0.0;   /* (negative: a right-to-left or vertical-rl document) */
                     if (!(fsy == fsy) || fsy < 0.0) fsy = 0.0;
                 }
-                if (css_layout_build_display_list(lc, &dl)) display_list_frame_set((uint32_t)iframes[k], &dl, (float)fsx, (float)fsy);
+                if (css_layout_build_display_list(lc, &dl)) display_list_frame_set((uint32_t)iframes[k], &dl, (float)fsx, (float)fsy, (float)fz);
                 display_list_free(&dl);
             }
             css_layout_tree_free(lc);
@@ -981,7 +984,7 @@ void page_frame_build(PageFrame *f, HtmlDocument *doc, ImageCache *images, int w
     /* (the frames at the sizes this layout gives their elements: once more if that's new) */
     {
         extern int frame_api_paint_list(NodeId *iframes, NodeId *docs, JSContextHandle *ctxs, double *ws, double *hs, int cap);
-        extern void frame_api_note_box(NodeId iframe, double w, double h);
+        extern void frame_api_note_box(NodeId iframe, double w, double h, double zoom);
         static int depth;
         bool moved = false;
         for (int i = 0; i < f->layout.tree.count && depth == 0; i++) {
@@ -991,7 +994,7 @@ void page_frame_build(PageFrame *f, HtmlDocument *doc, ImageCache *images, int w
             const LayoutBox *b = &f->layout.boxes[i];
             if (b->s->display == CSS_DISPLAY_NONE) continue;
             if (page_frame_size_changed((uint32_t)n->store_id, b->content_width, b->content_height)) {
-                frame_api_note_box((NodeId)n->store_id, b->content_width, b->content_height);
+                frame_api_note_box((NodeId)n->store_id, b->content_width, b->content_height, b->s->zoom > 0.0f ? b->s->zoom : 1.0);
                 moved = true;
             }
         }

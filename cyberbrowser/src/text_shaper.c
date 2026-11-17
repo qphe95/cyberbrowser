@@ -266,6 +266,7 @@ static __thread int t_chain_n;
 static __thread float t_chain_k[6];   /* (font-size-adjust: each list font's size against the first's) */
 static __thread int t_emo;          /* (font-variant-emoji: 1 text, 2 emoji, 3 unicode) */
 static __thread uint32_t t_vs;      /* (the variation selector after the code point: FE0E, FE0F, else 0) */
+static __thread bool t_zwj;         /* (the code point follows a ZWJ: in a sequence) */
 void text_shaper_set_emoji(int mode) { t_emo = mode; }
 void text_shaper_set_chain(TextShaper *const *fonts, int n)
 {
@@ -295,8 +296,27 @@ static bool ts_in(const TextShaper *s, uint32_t cp)
     for (int i = 0; i < s->ur_n; i++) if (cp >= s->ur[2 * i] && cp <= s->ur[2 * i + 1]) return true;
     return false;
 }
+struct TextShaper *font_registry_slot(int slot);
+int font_registry_resolve_chain(const char *family_list, int weight, bool italic, int *out, int max);
+uint32_t font_registry_face_generation(void);
+/* (the system's color emoji font, by the generic family "emoji"; NULL none) */
+static TextShaper *ts_emoji_font(void)
+{
+    static __thread TextShaper *f;
+    static __thread uint32_t gen = 0xFFFFFFFFu;
+    uint32_t g = font_registry_face_generation();
+    if (gen != g) {
+        gen = g;
+        f = NULL;
+        int slots[6];
+        int n = font_registry_resolve_chain("emoji", 400, false, slots, 6);
+        for (int k = 0; k < n && !f; k++) { TextShaper *c = font_registry_slot(slots[k]); if (c && c->colr) f = c; }
+    }
+    return f;
+}
 static TextShaper *ts_owner_shaper(const TextShaper *s, int owner)
 {
+    if (owner == 239) { TextShaper *e = ts_emoji_font(); return e ? e : (TextShaper *)s; }   /* (emoji presentation, the system's emoji font) */
     if (owner >= 240) return owner - 240 < t_chain_n ? t_chain[owner - 240] : (TextShaper *)s;   /* (the font-family list's) */
     return owner == 0 ? (TextShaper *)s : font_registry_fallback(owner - 1);
 }
@@ -814,6 +834,22 @@ static void ts_metric(const TextShaper *s, uint32_t cp, int *glyph_index, float 
             return;
         }
     }
+    /* (emoji presentation asked for, the list with no color font for it: the system's) */
+    if ((t_vs == 0xFE0F || t_emo == 2) && t_vs != 0xFE0E && !t_zwj && (cp >= 0x2000 || cp == 0xA9 || cp == 0xAE) && cp != 0xFE0F && !s->colr && !((stbtt__find_table(s->font.data, (stbtt_uint32)s->font.fontstart, "CBDT") || stbtt__find_table(s->font.data, (stbtt_uint32)s->font.fontstart, "sbix")) && ts_in(s, cp) && stbtt_FindGlyphIndex(&s->font, (int)cp))) {   /* (a bitmap color font of its own drawing it: as ever) */
+        bool listed = false;
+        for (int k = 0; k < t_chain_n && !listed; k++) listed = t_chain[k] && t_chain[k]->colr && ts_in(t_chain[k], cp) && stbtt_FindGlyphIndex(&t_chain[k]->font, (int)cp);
+        TextShaper *ef = listed ? NULL : ts_emoji_font();
+        int g2 = ef ? stbtt_FindGlyphIndex(&ef->font, (int)cp) : 0;
+        if (g2) {
+            int adv2, lsb2;
+            stbtt_GetGlyphHMetrics(&ef->font, g2, &adv2, &lsb2);
+            *glyph_index = g2;
+            if (owner_out) *owner_out = 239;
+            *xadvance = (float)adv2 * ef->scale + (float)ef->embolden;
+            t_gp_dx = 0.0f;
+            return;
+        }
+    }
     ts_metric_owned(s, cp, glyph_index, xadvance, &owner);
     if (owner_out) *owner_out = owner;
     t_gp_dx = 0.0f;
@@ -1058,8 +1094,10 @@ static inline int ts_as_class(uint32_t cp)
         return 1;
     if (cp >= '0' && cp <= '9') return 3;
     if ((cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z') || (cp >= 0xC0 && cp <= 0x24F && cp != 0xD7 && cp != 0xF7) ||
-        (cp >= 0x370 && cp <= 0x3FF) || (cp >= 0x400 && cp <= 0x4FF))
+        (cp >= 0x370 && cp <= 0x3FF) || (cp >= 0x400 && cp <= 0x4FF) ||
+        (cp >= 0x5D0 && cp <= 0x5EA) || (cp >= 0x620 && cp <= 0x64A) || (cp >= 0x66E && cp <= 0x6D3))   /* (Hebrew and Arabic letters too) */
         return 2;
+    if (cp > 0x20 && cp < 0x7F) return 2;   /* (other ASCII: narrow, not ideographic) */
     return 0;
 }
 
@@ -1806,9 +1844,11 @@ static float ts_measure_span(const TextShaper *s, const char *start, const char 
         if (ts_invisible(cp)) continue;
         int gi, owner;
         float xa;
-        if (t_chain_n > 1 && p < end) { const char *q_ = p; uint32_t nx = utf8_decode(&q_); t_vs = nx == 0xFE0E || nx == 0xFE0F ? nx : 0; }
+        if (p < end) { const char *q_ = p; uint32_t nx = utf8_decode(&q_); t_vs = nx == 0xFE0E || nx == 0xFE0F ? nx : 0; }
+        { const char *zb_ = start; t_zwj = save - 3 >= zb_ && (unsigned char)save[-3] == 0xE2 && (unsigned char)save[-2] == 0x80 && (unsigned char)save[-1] == 0x8D; }
         ts_metric(s, cp, &gi, &xa, &owner);
         t_vs = 0;
+        t_zwj = false;
         if (t_ot_n > 0 && owner == 0) {
             int lg;
             float lx;
@@ -1880,6 +1920,7 @@ static bool ts_emit_span_glyphs(const TextShaper *s, const char *gp,
                                 float r, float g, float b, float a,
                                 DisplayList *dl)
 {
+    const char *zb_ = gp;
     while (gp < gend) {
         const char *at = gp;
         uint32_t gc = utf8_decode(&gp);
@@ -1910,9 +1951,11 @@ static bool ts_emit_span_glyphs(const TextShaper *s, const char *gp,
             ts_metric(s, gc, &gi0, &xa0, &ow0);
             if (ow0 == 0 && ts_ligature(s, gi0, &gp, gend, &lg, &lx)) { t_force_gi = lg; t_force_xa = lx; }
         }
-        if (t_chain_n > 1 && gp < gend) { const char *q_ = gp; uint32_t nx = utf8_decode(&q_); t_vs = nx == 0xFE0E || nx == 0xFE0F ? nx : 0; }
+        if (gp < gend) { const char *q_ = gp; uint32_t nx = utf8_decode(&q_); t_vs = nx == 0xFE0E || nx == 0xFE0F ? nx : 0; }
+        t_zwj = at - 3 >= zb_ && (unsigned char)at[-3] == 0xE2 && (unsigned char)at[-2] == 0x80 && (unsigned char)at[-1] == 0x8D;
         bool ok_ = ts_emit_glyph(s, gc, pen_x, gy, scale, prev_glyph, r, g, b, a, dl);
         t_vs = 0;
+        t_zwj = false;
         if (!ok_) return false;
         t_force_gi = -1;
         if (trim > 0.0f && !shift) *pen_x -= trim;
@@ -2322,10 +2365,19 @@ bool text_shaper_shape_span(const TextShaper *s, const char *utf8, size_t start,
         cps[n++] = c;
     }
     bool ok = true;
+    /* (letter-spacing: cluster by cluster, a base then its marks, so the spacing goes after the whole cluster and the marks sit on their own base) */
+    bool by_cluster = t_letter_sp != 0.0f;
     for (size_t i = n; i-- > 0 && ok;) {
-        uint32_t c = cps[i];
-        if (c < 0x20 && c != ' ') continue;
-        ok = ts_emit_glyph(s, bidi_mirror(c), &pen_x, gy, scale, &prev_glyph, r, g, b, a, dl);
+        size_t j = i;
+        if (by_cluster) while (j > 0 && ts_is_mark(cps[j])) j--;
+        bool fwd = j < i && ts_spacing(cps[j]) != 0.0f;   /* (a base that takes none, as a cursive script's: as drawn without) */
+        if (!fwd) j = i;
+        for (size_t k = j; k <= i && ok; k++) {
+            uint32_t c = cps[k];
+            if (c < 0x20 && c != ' ') continue;
+            ok = ts_emit_glyph(s, bidi_mirror(c), &pen_x, gy, scale, &prev_glyph, r, g, b, a, dl);
+        }
+        i = j;
     }
     if (cps != stackbuf) free(cps);
     return ok;

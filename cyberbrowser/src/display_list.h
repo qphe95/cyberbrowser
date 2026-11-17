@@ -148,6 +148,7 @@ double display_list_image_density(void);   /* (the srcset candidate display_list
 /* (image-orientation: none: url as the cache's unturned variant, when the
  * image is of the page's own origin; url freed or returned) */
 char *display_list_noexif(char *url, const char *base_url);
+char *display_list_noexif_node(char *url, const char *base_url, HtmlNode *node);   /* (a crossorigin attribute: as same-origin) */
 
 /* The srcset candidate (malloc'd URL text) for a layout width; NULL if none. */
 char *display_list_pick_srcset(const char *srcset, float css_width);
@@ -188,7 +189,7 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl);
 
 /* The display list of the frame in an <iframe> (its node store id), kept (a copy) for
  * the parent's list to splice in; NULL drops it.  display_list_frames_clear drops all. */
-void display_list_frame_set(uint32_t node, const DisplayList *dl, float sx, float sy);
+void display_list_frame_set(uint32_t node, const DisplayList *dl, float sx, float sy, float zoom);
 void display_list_frames_clear(void);
 
 #ifdef __cplusplus

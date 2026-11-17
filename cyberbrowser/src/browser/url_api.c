@@ -53,6 +53,24 @@ GCValue js_url_create_object_url(JSContextHandle ctx, GCValue this_val, int argc
                  is_media_source ? "ms-" : "", ++blob_counter);
     }
 
+    /* (a Blob's bytes: for an image from this URL) */
+    {
+        GCValue fn = JS_GetPropertyStr(ctx, global_obj, "__cyberBlobBytes");
+        if (JS_IsFunction(ctx, fn)) {
+            GCValue ta = JS_Call(ctx, fn, JS_UNDEFINED, 1, &obj);
+            if (JS_IsException(ta)) JS_GetException(ctx);
+            else if (JS_IsObject(ta)) {
+                size_t off = 0, len = 0, bpe = 0, bsz = 0;
+                GCValue buf = JS_GetTypedArrayBuffer(ctx, ta, &off, &len, &bpe);
+                if (JS_IsException(buf)) JS_GetException(ctx);
+                else {
+                    uint8_t *data = JS_GetArrayBuffer(ctx, &bsz, buf);
+                    extern void image_cache_blob_register(const char *url, const uint8_t *bytes, size_t n);
+                    if (data && off + len <= bsz) image_cache_blob_register(blob_url, data + off, len);
+                }
+            }
+        }
+    }
     GCValue registry = JS_GetPropertyStr(ctx, global_obj, "__blobRegistry");
     if (!JS_IsUndefined(registry) && !JS_IsNull(registry)) {
         JS_SetPropertyStr(ctx, registry, blob_url, obj);

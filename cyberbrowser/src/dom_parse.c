@@ -397,6 +397,7 @@ static void tokenize(TokChunk *c, bool serial) {
                         if (!d) { data_end = pos = len; break; }
                         pos = (size_t)(d - h);
                         if (pos + 3 <= len && d[1] == '-' && d[2] == '>') { data_end = pos; pos += 3; break; }
+                        if (pos + 4 <= len && d[1] == '-' && d[2] == '!' && d[3] == '>') { data_end = pos; pos += 4; break; }   /* (--!>: an end too, HTML 13.2.5.52) */
                         pos++;
                     }
                 }
@@ -1215,8 +1216,8 @@ static void close_end_tag(Builder *b, const DomTok *t) {
         }
         if (k >= 0) pop_to(b, (uint32_t)k);
         /* (a </p> with no p open makes an empty one, HTML 13.2.6.4.7) */
-        else if (tag == g_t.p && b->sp) {
-            implied(b, g_t.p, b->stack[b->sp - 1]);
+        else if (tag == g_t.p && (b->sp || b->frag)) {   /* (nothing open in a fragment: the fragment its parent) */
+            implied(b, g_t.p, b->sp ? b->stack[b->sp - 1] : b->frag);
             b->sp--;
         }
         return;
@@ -1298,7 +1299,7 @@ static bool build_tokens(Builder *b, TokChunk *c, size_t *pi, size_t *detour) {
             break;
         }
         case TK_END:
-            if (top && b->html_rules) {
+            if ((top || (b->frag && !b->doc_mode && end_tag_is(b, t, "p"))) && b->html_rules) {
                 close_end_tag(b, t);
             } else if (top) {
                 const char *tn = css_atom_str(g_dom.tag[top]);

@@ -83,6 +83,7 @@ typedef struct Frame {
     double zoom;                /* its zoom then */
     bool closing;               /* window.close(): gone at the next turn */
     bool view_transition;       /* the document it had opted into one to the next */
+    char *vt_carry;             /* (its old state then, serialized, for the next document's transition) */
     char fallback_base[2048];   /* an about: frame: its base URL when it has no <base> */
     bool dead;                  /* its document is no longer fully active */
 } Frame;
@@ -469,6 +470,7 @@ void frame_api_reset(void) {
         Frame *f = g_frames;
         g_frames = f->next;
         free(f->hist);
+        free(f->vt_carry);
         free(f);
     }
     while (g_messages) {
@@ -703,6 +705,11 @@ static void frame_setup_window(Frame *f) {
                             JS_EVAL_TYPE_GLOBAL);
     /* (what the last document here opted into, for pagereveal) */
     JS_DefinePropertyValueStr(ctx, win, "__cyberOldOptIn", JS_NewBool(ctx, f->view_transition), JS_PROP_CONFIGURABLE);
+    if (f->vt_carry) {
+        JS_DefinePropertyValueStr(ctx, win, "__cyberVtCarry", JS_NewString(ctx, f->vt_carry), JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE);
+        free(f->vt_carry);
+        f->vt_carry = NULL;
+    }
     if (JS_IsFunction(ctx, setup)) {
         GCValue args[5] = { JS_NewString(ctx, f->url), parent_win, top, iframe, f->popup ? parent_win : JS_NULL };
         GCValue r = JS_Call(ctx, setup, JS_UNDEFINED, 5, args);
@@ -858,6 +865,12 @@ static void frame_load(Frame *f) {
         if (JS_IsFunction(f->ctx, swap)) sr = JS_Call(f->ctx, swap, JS_UNDEFINED, 3, sa);
         if (JS_IsException(sr)) { JS_GetException(f->ctx); sr = JS_FALSE; }
         f->view_transition = same && JS_ToBool(f->ctx, sr) > 0;
+        free(f->vt_carry);
+        f->vt_carry = NULL;
+        if (f->view_transition && JS_IsString(sr)) {
+            const char *cs = JS_ToCString(f->ctx, sr);
+            if (cs) f->vt_carry = strdup(cs);
+        }
         frame_fire(f->ctx, was, "beforeunload");
         frame_fire_transition(f->ctx, "pagehide", keep);
         if (!keep) frame_fire(f->ctx, was, "unload");
@@ -1147,10 +1160,16 @@ static bool g_frames_held;
 void frame_api_hold(bool hold) { g_frames_held = hold; }
 
 /* The frame's content box and whether it's rendered, as a layout has found them. */
-void frame_api_note_box(NodeId iframe, double w, double h)
+void frame_api_note_box(NodeId iframe, double w, double h, double zoom)
 {
     Frame *f = frame_of_iframe(iframe);
-    if (f) { f->box_w = w; f->box_h = h; f->hidden = false; }
+    if (f) { f->box_w = w; f->box_h = h; f->hidden = false; if (zoom > 0.0) f->zoom = zoom; }
+}
+/* (its element's zoom: its document laid out that much smaller, painted that much bigger) */
+double frame_api_frame_zoom(NodeId iframe)
+{
+    Frame *f = frame_of_iframe(iframe);
+    return f && f->zoom > 0.0 ? f->zoom : 1.0;
 }
 
 /* The frames to paint, deepest first (a parent's list holds its children's): their
@@ -1261,6 +1280,7 @@ int frame_api_process(void) {
             frame_discard_realm(f);
             frame_history_free(f);
             *pp = f->next;
+            free(f->vt_carry);
             free(f);
             continue;
         }
@@ -1639,6 +1659,9 @@ void frame_api_install(JSContextHandle ctx, GCValue global) {
     /* (<frame> has them too) */
     GCValue fctor = JS_GetPropertyStr(ctx, global, "HTMLFrameElement");
     GCValue fproto = JS_IsObject(fctor) ? JS_GetPropertyStr(ctx, fctor, "prototype") : JS_UNDEFINED;
+    /* (and <object>, a document of its own when its data is one) */
+    GCValue octor = JS_GetPropertyStr(ctx, global, "HTMLObjectElement");
+    GCValue oproto = JS_IsObject(octor) ? JS_GetPropertyStr(ctx, octor, "prototype") : JS_UNDEFINED;
     GCValue ctor = JS_GetPropertyStr(ctx, global, "HTMLIFrameElement");
     GCValue proto = JS_IsObject(ctor) ? JS_GetPropertyStr(ctx, ctor, "prototype") : JS_UNDEFINED;
     if (!JS_IsObject(proto)) return;
@@ -1648,6 +1671,9 @@ void frame_api_install(JSContextHandle ctx, GCValue global) {
                                 JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
         if (JS_IsObject(fproto))
             JS_DefinePropertyGetSet(ctx, fproto, a, JS_NewCFunction(ctx, getters[i].get, getters[i].name, 0),
+                                    JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+        if (JS_IsObject(oproto))
+            JS_DefinePropertyGetSet(ctx, oproto, a, JS_NewCFunction(ctx, getters[i].get, getters[i].name, 0),
                                     JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
         JS_FreeAtom(ctx, a);
     }

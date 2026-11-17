@@ -243,6 +243,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * clear: 0=none, 1=left, 2=right, 3=both. */
     unsigned char float_side;
     unsigned char clear;
+    unsigned char float_logical, clear_logical;   /* (inline-start 1, inline-end 2: sides by the containing block's direction, once known) */
 
     /* overflow/overflow-x/overflow-y: 0=visible, 1=hidden, 2=auto, 3=scroll.
      * Any value other than visible makes the box establish a new block
@@ -252,6 +253,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     /* overflow: clip (overflow is 1), and how far out it clips. */
     unsigned char overflow_clip;
     unsigned char ovf_clip_axes;   /* (overflow clip on its own: bit 1 the x axis, 2 the y; 0 both) */
+    unsigned char ovf_cs_axes;     /* (clip beside a scrolling axis: bit 1 x, 2 y; that axis doesn't scroll) */
     /* What makes it a containing block for absolute and fixed descendants without
      * being positioned: a bit per property (contain, transform, filter...). */
     unsigned short abs_cb;         /* (1024: will-change: position, for absolute descendants only) */
@@ -496,6 +498,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * size, repeat, origin, clip, attachment set after it; bg_nl: how many layers) */
     const char *bg_raw[8];
     unsigned char bg_nl;
+    unsigned char bgb[8];   /* (background-blend-mode, per layer: as blend's numbers; the list repeated) */
+    unsigned char bgb_n;
     const char *shape_outside;      /* shape-outside: a basic shape or a box, as written (NULL none) */
     double shape_margin;
     float shape_margin_pct;   /* (a percentage: of the containing block's inline size, at layout) */
@@ -547,6 +551,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char ruby_role, ruby_lvl, ruby_align;
     int repl_disp;             /* (inside an element content: url() replaces: its display before it was hidden, plus 1; 0 not hidden) */
     unsigned char mask_kind;
+    unsigned char mask_multi;   /* (mask-image of more than one layer) */
     unsigned char mask_size_kind;
     unsigned char mask_size_pct;
     unsigned char mask_pos_pct;
@@ -928,6 +933,7 @@ typedef struct LayoutBox {
      * on (inline layout on items), relative to its parent's box; used and
      * cleared by the absolute positioning pass. */
     unsigned char has_static;
+    float ac_dy;                /* (align-content on a block container: how far its content moved; an absolute child's static position with it) */
     unsigned char clamp_gone;   /* (after a line-clamp's last line: not painted) */
     unsigned char clamp_keep;   /* (a box of a height of its own before the clamp point: what overflows it stays) */
     int run_in_prev;            /* (a block a run-in goes into: its index + 1) */

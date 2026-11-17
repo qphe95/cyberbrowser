@@ -139,6 +139,7 @@ char *css_syntax_parse(const char *syntax, const char *value);
 bool css_syntax_component(const char *syntax, const char *value, char *type, size_t cap, char *mult);
 bool css_value_depends_on_context(const char *v);
 bool css_calc_number(const char *v, double *out);
+bool css_calc_angle(const char *v, double *deg);
 /* A time with math in it, in ms. */
 bool css_calc_time(const char *v, double *ms);
 /* clip-path's or shape-outside's value in its computed form; NULL if it already is. */

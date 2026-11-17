@@ -37,7 +37,7 @@ enum { F_NONE = 0, F_FORWARDS = 1, F_BACKWARDS = 2, F_BOTH = 3 };
 static struct {
     int n, cap, free_head;  /* rows used (high water), allocated, first free + 1 */
     NodeId *el;
-    uint8_t *ps, *kind, *prop, *ease, *dir, *fill, *kfn;
+    uint8_t *ps, *kind, *prop, *ease, *dir, *fill, *kfn, *comp;   /* (comp: animation-composition, 0 replace, 1 add, 2 accumulate) */
     float (*ep)[4];         /* the timing function's parameters */
     double *start, *delay, *dur, *iters, *pause_at;
     char (*name)[64];
@@ -48,7 +48,8 @@ static struct {
     AnimVal (*kfv)[ANIM_KF];
     uint8_t (*kfe)[ANIM_KF];          /* (a keyframe's own timing function: kind + 1, 0 the animation's) */
     float (*kfp)[ANIM_KF][4];
-    uint64_t *alive, *ev_run, *ev_start, *ev_end, *seen, *paused, *held;
+    uint64_t *alive, *ev_run, *ev_start, *ev_end, *seen, *paused, *held, *killed;   /* (killed: cancelled by script) */
+    uint64_t *t_dur, *t_delay, *t_iter;   /* (set by script's updateTiming: the style's not over it) */
     int *head;              /* per store slot */
     uint32_t head_n;
     int live_n;             /* rows alive */
@@ -331,6 +332,19 @@ static bool path_as_shape(const char *s, char *o, size_t cap)
     return !first;
 }
 
+/* (a matrix() or matrix3d() that can't be inverted) */
+static bool tf_singular(const TfFn *f)
+{
+    if (!strcmp(f->name, "matrix") && f->n == 6) return fabs(f->v[0] * f->v[3] - f->v[1] * f->v[2]) < 1e-12;
+    if (strcmp(f->name, "matrix3d") || f->n != 16) return false;
+    const double *a = f->v;
+    double s0 = a[0] * a[5] - a[4] * a[1], s1 = a[0] * a[6] - a[4] * a[2], s2 = a[0] * a[7] - a[4] * a[3];
+    double s3 = a[1] * a[6] - a[5] * a[2], s4 = a[1] * a[7] - a[5] * a[3], s5 = a[2] * a[7] - a[6] * a[3];
+    double c5 = a[10] * a[15] - a[14] * a[11], c4 = a[9] * a[15] - a[13] * a[11], c3 = a[9] * a[14] - a[13] * a[10];
+    double c2 = a[8] * a[15] - a[12] * a[11], c1 = a[8] * a[14] - a[12] * a[10], c0 = a[8] * a[13] - a[12] * a[9];
+    return fabs(s0 * c5 - s1 * c4 + s2 * c3 + s3 * c2 - s4 * c1 + s5 * c0) < 1e-12;
+}
+
 /* a's and b's lists at t, or NULL when they don't go between */
 static const char *tf_mix_text(const char *a, const char *b, double t)
 {
@@ -342,6 +356,8 @@ static const char *tf_mix_text(const char *a, const char *b, double t)
     static __thread TfFn A[12], B[12], I[12];
     int na = tf_fns(a, A, 12), nb = tf_fns(b, B, 12);
     if (na < 0 || nb < 0) return NULL;
+    for (int i = 0; i < na; i++) if (tf_singular(&A[i])) return NULL;
+    for (int i = 0; i < nb; i++) if (tf_singular(&B[i])) return NULL;
     if (na == 0 && nb == 0) return NULL;
     if (na == 0) { for (int i = 0; i < nb; i++) tf_identity(&B[i], &I[i]); memcpy(A, I, sizeof(TfFn) * (size_t)nb); na = nb; }
     if (nb == 0) { for (int i = 0; i < na; i++) tf_identity(&A[i], &I[i]); memcpy(B, I, sizeof(TfFn) * (size_t)na); nb = na; }
@@ -514,6 +530,7 @@ void anim_val_css(int prop, const AnimVal *v, char *buf, size_t cap)
     }
     else if (prop == ANIM_TRANSFORM && v->tf) snprintf(buf, cap, "%s", v->tf);
     else if (prop == ANIM_TRANSFORM) snprintf(buf, cap, "matrix(1, 0, 0, 1, %.6g, %.6g)", v->x, v->y);
+    else if (prop == ANIM_ROTATE && (v->y != 0.0f || v->z != 0.0f || v->w != 0.0f)) snprintf(buf, cap, "%.6g %.6g %.6g %.6gdeg", v->y, v->z, v->w, v->x);   /* (about an axis) */
     else if (prop == ANIM_ROTATE) snprintf(buf, cap, "%.6gdeg", v->x);
     else if (prop == ANIM_SCALE) snprintf(buf, cap, "%.6g %.6g", v->x, v->y);
     else if (floor0 && v->x < 0) snprintf(buf, cap, "0px");
@@ -528,6 +545,7 @@ static const char *const k_fields[ANIM_NFIELD] = {
     "transition-property", "transition-duration", "transition-timing-function", "transition-delay",
     "animation-name", "animation-duration", "animation-timing-function", "animation-delay",
     "animation-iteration-count", "animation-direction", "animation-fill-mode", "animation-play-state",
+    "animation-composition",
 };
 
 int anim_spec_field(const char *prop)
@@ -704,11 +722,11 @@ static bool rows_grow(void)
 {
     int cap = A.cap ? A.cap * 2 : 64;
 #define G(f) do { void *q = realloc((void *)A.f, (size_t)cap * sizeof(*A.f)); if (!q) return false; A.f = q; } while (0)
-    G(el); G(ps); G(kind); G(prop); G(ease); G(dir); G(fill); G(kfn); G(ep); G(start); G(delay); G(dur);
+    G(el); G(ps); G(kind); G(prop); G(ease); G(dir); G(fill); G(kfn); G(comp); G(ep); G(start); G(delay); G(dur);
     G(iters); G(pause_at); G(name); G(owner); G(next); G(iter); G(gen); G(a); G(b); G(kfo); G(kfv); G(kfe); G(kfp);
 #undef G
     size_t words = (size_t)cap / 64, old = (size_t)A.cap / 64;
-    uint64_t **bits[] = { &A.alive, &A.ev_run, &A.ev_start, &A.ev_end, &A.seen, &A.paused, &A.held };
+    uint64_t **bits[] = { &A.alive, &A.ev_run, &A.ev_start, &A.ev_end, &A.seen, &A.paused, &A.held, &A.killed, &A.t_dur, &A.t_delay, &A.t_iter };
     for (size_t i = 0; i < sizeof bits / sizeof bits[0]; i++) {
         uint64_t *q = (uint64_t *)realloc(*bits[i], words * sizeof(uint64_t));
         if (!q) return false;
@@ -746,6 +764,7 @@ static int row_new(NodeId el, int ps, int kind, int prop)
     A.prop[r] = (uint8_t)prop;
     A.ease[r] = E_LINEAR;
     A.dir[r] = D_NORMAL;
+    A.comp[r] = 0;
     A.fill[r] = F_NONE;
     A.kfn[r] = 0;
     A.start[r] = A.delay[r] = A.dur[r] = 0;
@@ -761,6 +780,8 @@ static int row_new(NodeId el, int ps, int kind, int prop)
     bset(A.seen, r, false);
     bset(A.paused, r, false);
     bset(A.held, r, false);
+    bset(A.killed, r, false);
+    bset(A.t_dur, r, false); bset(A.t_delay, r, false); bset(A.t_iter, r, false);
     A.next[r] = A.head[s];
     A.head[s] = r + 1;
     A.live_n++;
@@ -851,6 +872,7 @@ static bool anim_progress(int r, double now, double *out) { return anim_progress
 /* (eased false: the progress itself, for keyframes to ease each interval) */
 static bool anim_progress_x(int r, double now, double *out, bool eased)
 {
+    if (bit(A.killed, r)) return false;
     double t = row_time(r, now) - A.start[r] - A.delay[r];
     double dur = A.dur[r], iters = A.iters[r];
     double active = isinf(iters) ? INFINITY : dur * iters;
@@ -921,12 +943,24 @@ static bool track_value(int r, double now, AnimVal *out)
     /* (italic doesn't go between) */
     if (A.prop[r] == ANIM_FONT_STYLE && (v[i].y > 0.5f) != (v[i + 1].y > 0.5f)) *out = local < 0.5 ? v[i] : v[i + 1];
     else *out = ANIM_IS_COLOR(A.prop[r]) ? color_mix(&v[i], &v[i + 1], local) : val_mix(&v[i], &v[i + 1], local);
+    /* (composited onto the underlying value: a transform list after it) */
+    if (out->ok && A.comp[o] && A.prop[r] == ANIM_TRANSFORM && out->tf && strcasecmp(out->tf, "none") && out->tf != A.a[r].tf) {
+        static __thread char ring[16][512];
+        static __thread unsigned ri;
+        char bt[96] = "";
+        const char *base = A.a[r].tf;
+        if (!base && (A.a[r].x != 0.0f || A.a[r].y != 0.0f)) { snprintf(bt, sizeof bt, "translate(%gpx, %gpx)", A.a[r].x, A.a[r].y); base = bt; }   /* (a translation alone: kept as its lengths) */
+        char *w = ring[ri++ & 15];
+        if (base && strcasecmp(base, "none") && strlen(base) + strlen(out->tf) + 2 < 512) { snprintf(w, 512, "%s %s", base, out->tf); out->tf = w; }
+    }
     return out->ok;
 }
 
 /* The parent's transition of a property that is going where this box's value is. */
 static int inherited_run(NodeId el, int ps, int p, const AnimVal *v)
 {
+    /* (only what is inherited) */
+    if (p != ANIM_COLOR && !(p >= ANIM_FONT_SIZE && p <= ANIM_FONT_STYLE) && p != ANIM_LST) return -1;
     NodeId up = ps ? el : dom_parent(el);
     if (!up) return -1;
     int r = row_find(up, 0, K_TRANS, p, NULL);
@@ -968,20 +1002,24 @@ static void anim_timing(int r, const SpecList L[ANIM_NFIELD], int j, double now)
         else if (!paused && bit(A.paused, r)) A.start[r] += now - A.pause_at[r];
         bset(A.paused, r, paused);
     }
-    A.dur[r] = parse_time(list_item(&L[ANIM_F_DUR], j, "0s", buf, sizeof buf));
-    A.delay[r] = parse_time(list_item(&L[ANIM_F_DELAY], j, "0s", buf, sizeof buf));
+    if (!bit(A.t_dur, r)) A.dur[r] = parse_time(list_item(&L[ANIM_F_DUR], j, "0s", buf, sizeof buf));
+    if (!bit(A.t_delay, r)) A.delay[r] = parse_time(list_item(&L[ANIM_F_DELAY], j, "0s", buf, sizeof buf));
     parse_ease(list_item(&L[ANIM_F_EASE], j, "ease", buf, sizeof buf), &A.ease[r], A.ep[r]);
     const char *it = list_item(&L[ANIM_F_ITER], j, "1", buf, sizeof buf);
-    A.iters[r] = !strcasecmp(it, "infinite") ? INFINITY : atof(it);
-    if (A.iters[r] < 0) A.iters[r] = 1;
+    if (!bit(A.t_iter, r)) {
+        A.iters[r] = !strcasecmp(it, "infinite") ? INFINITY : atof(it);
+        if (A.iters[r] < 0) A.iters[r] = 1;
+    }
     const char *d = list_item(&L[ANIM_F_DIR], j, "normal", buf, sizeof buf);
     A.dir[r] = !strcasecmp(d, "reverse") ? D_REVERSE : !strcasecmp(d, "alternate") ? D_ALTERNATE :
                !strcasecmp(d, "alternate-reverse") ? D_ALT_REVERSE : D_NORMAL;
+    const char *cm = list_item(&L[ANIM_F_COMP], j, "replace", buf, sizeof buf);
+    A.comp[r] = !strcasecmp(cm, "add") ? 1 : !strcasecmp(cm, "accumulate") ? 2 : 0;
     const char *f = list_item(&L[ANIM_F_FILL], j, "none", buf, sizeof buf);
     A.fill[r] = !strcasecmp(f, "forwards") ? F_FORWARDS : !strcasecmp(f, "backwards") ? F_BACKWARDS :
                 !strcasecmp(f, "both") ? F_BOTH : F_NONE;
     /* (over, and the new timing has it going again: its events begin again, animationstart first) */
-    if (A.kind[r] == K_ANIM && bit(A.ev_end, r)) {
+    if (A.kind[r] == K_ANIM && bit(A.ev_end, r) && !bit(A.killed, r)) {
         double t = row_time(r, now) - A.start[r] - A.delay[r];
         double active = isinf(A.iters[r]) ? INFINITY : A.dur[r] * A.iters[r];
         if (t < active) { bset(A.ev_end, r, false); if (t < 0 || t >= 0) bset(A.ev_start, r, false); }
@@ -1328,7 +1366,7 @@ int anim_list(NodeId el, int *rows, int cap)
      * composite order) */
     for (int kind = K_TRANS; kind <= K_ANIM; kind++)
         FOR_ROWS(r, el)
-            if (A.kind[r] == kind && !(kind == K_ANIM && bit(A.ev_end, r) && !(A.fill[r] & F_FORWARDS)) && n < cap)
+            if (A.kind[r] == kind && !(kind == K_ANIM && bit(A.ev_end, r) && (!(A.fill[r] & F_FORWARDS) || bit(A.killed, r))) && n < cap)
                 rows[n++] = r;
     /* (the list runs newest first) */
     for (int i = 0, j = n - 1; i < j; i++, j--) {
@@ -1399,6 +1437,14 @@ void anim_row_set_time(int r, uint32_t gen, double now, double t)
     }
 }
 
+void anim_row_set_timing(int r, uint32_t gen, int which, double v)
+{
+    if (!anim_row_info(r, gen, NULL, NULL, NULL, NULL) || A.kind[r] != K_ANIM) return;
+    if (which == 0 && v >= 0.0) { A.dur[r] = v; bset(A.t_dur, r, true); }
+    else if (which == 1) { A.delay[r] = v; bset(A.t_delay, r, true); }
+    else if (which == 2 && v >= 0.0) { A.iters[r] = v; bset(A.t_iter, r, true); }
+}
+
 void anim_row_set_start(int r, uint32_t gen, double start)
 {
     if (anim_row_info(r, gen, NULL, NULL, NULL, NULL)) A.start[r] = start;
@@ -1416,6 +1462,10 @@ void anim_row_pause(int r, uint32_t gen, double now, bool paused)
 void anim_row_cancel(int r)
 {
     if (r < 0 || r >= A.n || !bit(A.alive, r)) return;
-    if (A.kind[r] == K_ANIM) anim_free(r);
-    else row_free(r);
+    if (A.kind[r] == K_ANIM) {
+        /* (kept, inert: the style naming it doesn't start it again) */
+        bset(A.killed, r, true);
+        bset(A.ev_run, r, true); bset(A.ev_start, r, true); bset(A.ev_end, r, true);
+        dom_mark_dirty(A.el[r], DOMF_DIRTY_ATTR);
+    } else row_free(r);
 }

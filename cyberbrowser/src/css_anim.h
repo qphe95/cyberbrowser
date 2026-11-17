@@ -45,7 +45,7 @@ typedef struct AnimVal {
  * one string per style (fields separated by 0x1F, "" the initial value) ---- */
 enum {
     ANIM_F_TPROP, ANIM_F_TDUR, ANIM_F_TEASE, ANIM_F_TDELAY,
-    ANIM_F_NAME, ANIM_F_DUR, ANIM_F_EASE, ANIM_F_DELAY, ANIM_F_ITER, ANIM_F_DIR, ANIM_F_FILL, ANIM_F_PLAY,
+    ANIM_F_NAME, ANIM_F_DUR, ANIM_F_EASE, ANIM_F_DELAY, ANIM_F_ITER, ANIM_F_DIR, ANIM_F_FILL, ANIM_F_PLAY, ANIM_F_COMP,
     ANIM_NFIELD
 };
 /* The field of longhand prop (-1: not one). */
@@ -142,6 +142,7 @@ typedef struct AnimRowTiming {
 bool anim_row_timing(int r, uint32_t gen, double now, AnimRowTiming *out);
 void anim_row_set_time(int r, uint32_t gen, double now, double t);
 void anim_row_set_start(int r, uint32_t gen, double start);
+void anim_row_set_timing(int r, uint32_t gen, int which, double v);   /* (which 0 duration, 1 delay, 2 iterations; ms) */
 void anim_row_pause(int r, uint32_t gen, double now, bool paused);
 /* A value as CSS text for prop (buf of cap). */
 void anim_val_css(int prop, const AnimVal *v, char *buf, size_t cap);
