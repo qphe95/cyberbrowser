@@ -8814,6 +8814,7 @@ static char* css_var_subst(const char *value, const CssCustomProps *props)
             /* (nothing in its place) */
         } else if (resolved && resolved[0]) {
             size_t rlen = strlen(resolved);
+            if (out_len + rlen > ((size_t)2 << 20)) { t_var_failed = true; break; }   /* (too long: invalid, as browsers cap it) */
             char *grown = (char*)realloc(out, out_len + rlen + strlen(p) + 9);
             if (!grown) break;
             out = grown;
@@ -10189,7 +10190,14 @@ static bool cq_value(const char *t, const CqBox *b, bool ratio, double *out)
     double held_w = t_cq_w, held_h = t_cq_h;
     if (g_cq_ctx) cq_unit_bases(g_cq_ctx, b->dom, &t_cq_w, &t_cq_h);
     else t_cq_w = t_cq_h = 0.0;
+    /* (ex, ch: the query container's font) */
+    const LayoutBox *ub_ = t_unit_box, *up_ = t_unit_parent;
+    t_unit_box = NULL; t_unit_parent = NULL;
+    if (g_cq_ctx && g_cq_ctx->boxes && t_cq_idx >= 0 && t_cq_idx < g_cq_ctx->tree.count)
+        for (int i = t_cq_idx; i >= 0; i = g_cq_ctx->tree.nodes[i].parent_idx)
+            if (g_cq_ctx->tree.nodes[i].dom_node_idx == b->dom) { if (g_cq_ctx->boxes[i].s) t_unit_box = &g_cq_ctx->boxes[i]; break; }
     *out = css_parse_length(t, 0.0, g_unit_vw, b->fs > 0.0 ? b->fs : 16.0);
+    t_unit_box = ub_; t_unit_parent = up_;
     t_cq_w = held_w;
     t_cq_h = held_h;
     return true;
@@ -16715,6 +16723,8 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
     int dom = ctx->tree.nodes[idx].dom_node_idx;
     HtmlNode *node = layout_node_dom(ctx, dom);
     box->s = ctx->slot[idx];   /* (a kept tree's text box may hold a shared style) */
+    t_unit_box = box;      /* (ex, ch: this node's, never a box of an earlier pass on this thread) */
+    t_unit_parent = NULL;
 
     /* Custom properties inherit; the map is shared until this node sets one. */
     const CssCustomProps *pv = (p >= 0) ? ctx->custom_props[p] : NULL;
@@ -18035,6 +18045,7 @@ static void style_job(Job *j)
 {
     StylePass *P = (StylePass *)j->ctx;
     style_subtree(P, style_thread(P), j, (int)j->a);
+    t_unit_box = NULL; t_unit_parent = NULL;   /* (its boxes may go before this thread styles again) */
 }
 
 /* Top-level subtrees with little to restyle run here, without waking the
@@ -18050,6 +18061,7 @@ static void style_root_job(Job *j)
         else
             job_spawn(job_new(style_job, j, P, (uint32_t)pos, 0));
     }
+    t_unit_box = NULL; t_unit_parent = NULL;
 }
 
 static const CssStyleSet *styleset_cached(uint64_t gen, double vw, double vh);
@@ -36278,11 +36290,12 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
     if (ifc_done)
         ifc_layout(ctx, idx, ctx->tree.nodes[idx].first_child_idx, -1, NULL, content_left, avail_width, indent0,
                    &cur, &any_placed, floats, &nfloats, (int)(sizeof(floats) / sizeof(floats[0])), fl_in, fl_in_rgba);
+    int norun_ = -1;   /* (a run found without content: its items one by one, up to here) */
     for (int i = 0; !ifc_done && i < nkids; i++) {
         int c = kids[i];
         LayoutBox *child = layout_box(ctx, c);
 #define IFC_ITEM_BLOCK(k) (!(piece_of && piece_of[k] >= 0) && ifc_is_block_child(layout_box(ctx, kids[k])))
-        if (!IFC_ITEM_BLOCK(i) && !(!(piece_of && piece_of[i] >= 0) && ifc_is_float(child))) {
+        if (i >= norun_ && !IFC_ITEM_BLOCK(i) && !(!(piece_of && piece_of[i] >= 0) && ifc_is_float(child))) {
             /* A run of inline content up to the next block (a child, or one
              * inside an inline split around it): on items when it makes a
              * line box (else nowhere, below) */
@@ -36319,6 +36332,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                 i = j - 1;
                 continue;
             }
+            norun_ = j;
         }
 #undef IFC_ITEM_BLOCK
         if (piece_of && piece_of[i] >= 0) {
