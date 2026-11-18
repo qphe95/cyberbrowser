@@ -1854,8 +1854,10 @@
                 out.push({ text: p, local: true });
                 return;
             }
-            var um = /^url\(\s*("[^"]*"|'[^']*'|[^\s"'()]*)\s*\)\s*/i.exec(p);
+            var um = /^url\(\s*("[^"]*"|'[^']*'|[^\s"'()]*)\s*((?:(?:cross-origin|integrity|referrer-policy)\((?:[^()"']|"[^"]*"|'[^']*')*\)\s*)*)\)\s*/i.exec(p);
             if (!um) return;
+            /* (request modifiers: each once) */
+            if (um[2]) { var ms = um[2].match(/[a-z-]+(?=\()/gi) || []; if (ms.some(function (m, i) { return ms.indexOf(m) !== i; })) return; }
             var rest = p.slice(um[0].length), fmt = null;
             var fm = /^format\(\s*("[^"]*"|'[^']*'|[-\w]+)\s*\)\s*/i.exec(rest);
             if (fm) {
@@ -1936,13 +1938,33 @@
         if (v === 'normal') return v;
         return /^\+?[\d.]+(e[-+]?\d+)?%$/.test(v) ? v.replace(/^\+/, '') : null;
     }
+    /* (a descriptor block without the declarations that use sibling-index() or sibling-count(): no element to count, so invalid) */
+    function noTreeCount(block) {
+        if (!block || !/sibling-(index|count)\(/i.test(block)) return block;
+        var out = '', seg = '', d = 0, b = 0, q = '';
+        var flush = function () { if (b > 0 || seg.indexOf('{') >= 0 || !/sibling-(index|count)\(/i.test(seg)) out += seg; seg = ''; };
+        for (var i = 0; i < block.length; i++) {
+            var c = block[i];
+            seg += c;
+            if (q) { if (c === '\\') { seg += block[++i] || ''; } else if (c === q) q = ''; continue; }
+            if (c === '"' || c === "'") q = c;
+            else if (c === '(') d++;
+            else if (c === ')') d--;
+            else if (c === '{') b++;
+            else if (c === '}') { b--; if (b === 0) { out += seg; seg = ''; } }
+            else if (c === ';' && !d && !b) flush();
+        }
+        flush();
+        return out;
+    }
     /* A @font-face rule's style, with its unicode-range. */
     function fontFaceStyle(style, block) {
         var range = null, desc = {};
         var m = /(?:^|;)\s*unicode-range\s*:\s*([^;]*)/i.exec(block);
         if (m) range = urangeCanon(m[1]);
         Object.keys(FACE_DESC).forEach(function (k) {
-            var re = new RegExp('(?:^|;)\\s*' + k + '\\s*:\\s*((?:[^;"\'()]|"[^"]*"|\'[^\']*\'|\\([^)]*\\))*)', 'gi'), dm;
+            /* (parentheses one deep inside: url() with its request modifiers) */
+            var re = new RegExp('(?:^|;)\\s*' + k + '\\s*:\\s*((?:[^;"\'()]|"[^"]*"|\'[^\']*\'|\\((?:[^()"\']|"[^"]*"|\'[^\']*\'|\\([^()]*\\))*\\))*)', 'gi'), dm;
             while ((dm = re.exec(block))) {
                 var ok = FACE_DESC[k](dm[1]);
                 if (ok !== null) desc[k] = ok;
@@ -2437,7 +2459,7 @@
     getter(CSSImportRule.prototype, 'layerName', function () { return this.__layer === undefined ? null : this.__layer; });
     getter(CSSImportRule.prototype, 'supportsText', function () { return this.__supports || null; });
     CSSImportRule.prototype.__text = function () {
-        var s = '@import url(' + serString(this.__href) + ')';
+        var s = '@import url(' + serString(this.__href) + (this.__mods ? ' ' + this.__mods : '') + ')';
         if (this.__layer !== undefined) s += this.__layer === '' ? ' layer' : ' layer(' + this.__layer + ')';
         if (this.__supports) s += ' supports(' + this.__supports + ')';
         var m = this.__media ? this.__media.mediaText : splitMedia(this.__mediaText).join(', ');
@@ -2993,7 +3015,7 @@
                 });
                 break;
             case 'starting-style':
-                if (p.block === null) return null;
+                if (p.block === null || (p.prelude && p.prelude.trim())) return null;   /* (no prelude at all) */
                 r = makeRule(CSSStartingStyleRule, 'starting-style', { __rules: [] });
                 r.__rules = groupBody(p.block, r, ctx);
                 break;
@@ -3008,6 +3030,27 @@
                 break;
             case 'import':
                 if (ctx !== 'top' || p.block !== null) return null;
+                /* (url() request modifiers, css-values-5: each once, in their canonical order when written out) */
+                var mods = '';
+                var um = /^url\(\s*("[^"]*"|'[^']*'|[^)\s"']+)\s+((?:[a-z-]+\((?:[^()"']|"[^"]*"|'[^']*')*\)\s*)+)\)\s*([\s\S]*)$/i.exec(p.prelude);
+                if (um) {
+                    var seen = {}, list = [], mre = /([a-z-]+)\(((?:[^()"']|"[^"]*"|'[^']*')*)\)/gi, mm;
+                    while ((mm = mre.exec(um[2]))) {
+                        var mn = mm[1].toLowerCase(), mv = mm[2].trim();
+                        if (seen[mn]) return null;
+                        seen[mn] = true;
+                        if (mn === 'cross-origin' && !/^(anonymous|use-credentials)$/i.test(mv)) return null;
+                        else if (mn === 'integrity' && !/^("[^"]*"|'[^']*')$/.test(mv)) return null;
+                        else if (mn === 'referrer-policy' && !/^(no-referrer|no-referrer-when-downgrade|same-origin|origin|strict-origin|origin-when-cross-origin|strict-origin-when-cross-origin|unsafe-url)$/i.test(mv)) return null;
+                        else if (!/^(cross-origin|integrity|referrer-policy)$/.test(mn)) return null;
+                        list.push({ n: mn, v: mn === 'integrity' ? '"' + mv.slice(1, -1) + '"' : mv.toLowerCase() });
+                    }
+                    var order = { 'cross-origin': 0, integrity: 1, 'referrer-policy': 2 };
+                    list.sort(function (a, b) { return order[a.n] - order[b.n]; });
+                    mods = list.map(function (x) { return x.n + '(' + x.v + ')'; }).join(' ');
+                    var u0 = um[1];
+                    p = Object.assign({}, p, { prelude: 'url(' + u0 + ')' + (um[3] ? ' ' + um[3] : '') });
+                }
                 var im = /^(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)|"([^"]*)"|'([^']*)')\s*(.*)$/i.exec(p.prelude);
                 if (!im) return null;
                 var href = im[1] !== undefined ? im[1] : im[2] !== undefined ? im[2] : im[3] !== undefined ? im[3] : im[4] !== undefined ? im[4] : im[5];
@@ -3025,7 +3068,7 @@
                     }
                     if (se > 0) { supports = rest.slice(9, se).trim(); rest = rest.slice(se + 1).replace(/^\s+/, ''); }
                 }
-                r = makeRule(CSSImportRule, 'import', { __href: href, __mediaText: rest.trim(), __media: null, __layer: layer, __supports: supports });
+                r = makeRule(CSSImportRule, 'import', { __href: href, __mediaText: rest.trim(), __media: null, __layer: layer, __supports: supports, __mods: mods });
                 break;
             case 'namespace':
                 if (ctx !== 'top' || p.block !== null) return null;
@@ -3041,7 +3084,8 @@
             case 'font-face':
                 if (p.block === null || p.prelude) return null;
                 r = makeRule(CSSFontFaceRule, 'font-face', { __style: null });
-                r.__style = fontFaceStyle(decls(p.block, r), p.block);
+                var ffb = noTreeCount(p.block);
+                r.__style = fontFaceStyle(decls(ffb, r), ffb);
                 break;
             case 'font-feature-values':
                 if (p.block === null) return null;
@@ -3053,7 +3097,7 @@
             case 'font-palette-values':
                 if (p.block === null || !/^--(?:[\w-]|[^\x00-\x7f]|\\.)*$/.test(p.prelude)) return null;
                 r = makeRule(CSSFontPaletteValuesRule, 'font-palette-values', { __name: p.prelude, __family: '', __base: '', __colors: '' });
-                paletteBlock(r, p.block);
+                paletteBlock(r, noTreeCount(p.block));
                 break;
             case 'function':
                 if (p.block === null) return null;
@@ -3097,7 +3141,7 @@
                 if (!pageSelectorOk(p.prelude)) return null;
                 r = makeRule(CSSPageRule, 'page', { __selector: pageSelectorCanon(p.prelude), __style: null, __rules: [] });
                 /* (the margin at-rules in it: rules of their own; the rest its declarations) */
-                var pdecl = '', pi2 = 0, pb = noComments(p.block);
+                var pdecl = '', pi2 = 0, pb = noTreeCount(noComments(p.block));
                 while (pi2 < pb.length) {
                     var pit = blockItem(pb, pi2), seg = pb.slice(pi2, pit.end);
                     var mm = pit.rule && /^\s*@([a-z-]+)\s*\{([\s\S]*)\}\s*$/i.exec(seg);
@@ -3148,7 +3192,7 @@
             case 'counter-style':
                 if (p.block === null) return null;
                 if (!csName(p.prelude)) return null;
-                r = makeRule(CSSCounterStyleRule, 'counter-style', { __name: p.prelude.trim(), __descs: csParse(p.block) });
+                r = makeRule(CSSCounterStyleRule, 'counter-style', { __name: p.prelude.trim(), __descs: csParse(noTreeCount(p.block)) });
                 break;
             default:
                 return null;    /* unknown at-rules are dropped */

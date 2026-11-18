@@ -150,6 +150,7 @@ void css_layout_bench_report(const char *label)
 typedef struct CssCustomProp {
     char *name;
     char *value;
+    unsigned char tainted;   /* (what attr() gave it: no URL may come of it, css-values-5 attr() security) */
 } CssCustomProp;
 
 typedef struct CssCustomProps {
@@ -776,13 +777,20 @@ static double css_parse_length(const char *value, double parent_value, double vi
 /* Per-layout unit context: viewport size for vw/vh/vmin/vmax and the root
  * element's font size for rem (set when the root box is styled). */
 static double g_unit_vw = 1024.0, g_unit_vh = 768.0, g_unit_rem = 16.0;
+static double g_unit_gutter;   /* (a frame's root scrolls, overflow: scroll: a classic scrollbar's 15px off the viewport units) */
+static bool g_unit_in_frame;   /* (laying out a frame's document, not the page's: its scrollbars take room) */
 static double g_unit_rr[4] = { 0.7, 0.5, 0.5, 1.0 };   /* (the root font's cap, ex, ch, ic over its size) */
+/* (the root's font size and ratios moved in this style pass: no cached style is kept, what
+ * an element's rem, rex, ... come to has changed though nothing above it has) */
+static volatile int g_root_units_moved;
+static double g_root_units_prev[5] = { -1.0 };
 /* The element whose declarations are being applied (layout_apply_declaration):
  * its font gives ex and ch. */
 static __thread const LayoutBox *t_unit_box;
 /* (its parent, during the style pass: the font it inherits until then) */
 static __thread const LayoutBox *t_unit_parent;
 static __thread bool t_unit_lh_parent;   /* (line-height's own value: lh is the parent's) */
+static __thread bool t_unit_is_root;   /* (styling the root element's own declarations) */
 
 /* ex (the font's x-height) or ch (the advance of "0") in ems, for the
  * element t_unit_box with its font as styled so far; 0.5 without one. */
@@ -916,6 +924,9 @@ static double css_unit_factor(const char *unit, double parent_value, double font
     *known = true;
     if (strcasecmp(unit, "ex") == 0) return font_size * unit_font_ratio(false);
     if (strcasecmp(unit, "ch") == 0) return font_size * unit_font_ratio(true);
+    /* (lh and rlh in the root's own font-size or line-height: the initial font's line height, css-values-4) */
+    if (t_unit_lh_parent && t_unit_is_root && (strcasecmp(unit, "lh") == 0 || strcasecmp(unit, "rlh") == 0))
+        return 18.4;   /* (normal at the initial 16px, as css_parser has it) */
     /* (lh: the element's line height, as it has come to) */
     if (strcasecmp(unit, "lh") == 0) {
         if (t_unit_lh_parent && t_unit_parent) return layout_line_advance_box(t_unit_parent);
@@ -943,12 +954,15 @@ static double css_unit_factor(const char *unit, double parent_value, double font
         if (vu[0] == 'v' || vu[0] == 'V') {
             /* (inline and block: by the writing mode of the flow being laid out) */
             extern __thread bool t_wm_across_ext;
-            if (!strcasecmp(vu, "vw")) return g_unit_vw / 100.0;
-            if (!strcasecmp(vu, "vh")) return g_unit_vh / 100.0;
-            if (!strcasecmp(vu, "vi")) return (t_wm_across_ext ? g_unit_vh : g_unit_vw) / 100.0;
-            if (!strcasecmp(vu, "vb")) return (t_wm_across_ext ? g_unit_vw : g_unit_vh) / 100.0;
-            if (!strcasecmp(vu, "vmin")) return (g_unit_vw < g_unit_vh ? g_unit_vw : g_unit_vh) / 100.0;
-            if (!strcasecmp(vu, "vmax")) return (g_unit_vw > g_unit_vh ? g_unit_vw : g_unit_vh) / 100.0;
+            double uvw_ = g_unit_vw - g_unit_gutter, uvh_ = g_unit_vh - g_unit_gutter;
+            if (!strcasecmp(vu, "vw")) return uvw_ / 100.0;
+            if (!strcasecmp(vu, "vh")) return uvh_ / 100.0;
+            /* (while styling a box: by its own writing mode, set before its lengths are read) */
+            bool vert_ = t_unit_box && t_unit_box->s ? t_unit_box->s->writing_mode != 0 : t_wm_across_ext;
+            if (!strcasecmp(vu, "vi")) return (vert_ ? uvh_ : uvw_) / 100.0;
+            if (!strcasecmp(vu, "vb")) return (vert_ ? uvw_ : uvh_) / 100.0;
+            if (!strcasecmp(vu, "vmin")) return (uvw_ < uvh_ ? uvw_ : uvh_) / 100.0;
+            if (!strcasecmp(vu, "vmax")) return (uvw_ > uvh_ ? uvw_ : uvh_) / 100.0;
         }
     }
     if (strcasecmp(unit, "q") == 0) return 96.0 / 101.6;
@@ -996,8 +1010,10 @@ static CssLen calc_parse_expr(CalcParser *p);
 
 /* Comparing px + pct operands needs a percentage basis the value parser
  * does not have; the viewport width stands in for the containing block. */
+static __thread int t_csz_off = -1;   /* (a box sizing itself by its keyword: its calc-size() applied after, not in its intrinsic size too) */
 static double g_calc_pct_hint = 1024.0;   /* viewport width of the running layout */
-static double calc_pct_hint(void) { return g_calc_pct_hint; }
+static __thread double t_pct_hint;   /* (this thread's percentage base for now, when not 0) */
+static double calc_pct_hint(void) { return t_pct_hint > 0.0 ? t_pct_hint : g_calc_pct_hint; }
 static double calc_cmp_value(CssLen v) { return v.px + v.pct * calc_pct_hint(); }
 
 /* min() / max() / clamp() / round() / mod() / rem() / abs() (CSS Values 4).
@@ -1069,11 +1085,11 @@ static CssLen calc_parse_function(CalcParser *p)
         else if (!strcmp(name, "pow")) m = pow(a0, a1);
         else if (!strcmp(name, "sqrt")) m = sqrt(a0);
         else if (!strcmp(name, "exp")) m = exp(a0);
-        else if (!strcmp(name, "log")) m = n > 1 ? log(a0) / log(a1) : log(a0);
+        else if (!strcmp(name, "log")) m = n > 1 ? (a1 == 1.0 ? NAN : a0 == 1.0 ? 0.0 : log(a0) / log(a1)) : log(a0);   /* (base 1: no logarithm; of 1: +0) */
         else if (!strcmp(name, "sign")) m = a0 > 0.0 ? 1.0 : a0 < 0.0 ? -1.0 : 0.0;
         else if (!strcmp(name, "progress") && n >= 3) {
             double a2 = calc_cmp_value(args[2]);
-            m = (a0 - a1) / (a2 - a1);
+            m = a2 == a1 ? (no_clamp && a0 != a1 ? (a0 > a1 ? INFINITY : -INFINITY) : 0.0) : (a0 - a1) / (a2 - a1);   /* (no distance between the ends: 0, unclamped an infinity) */
             if (!no_clamp) m = m < 0.0 ? 0.0 : m > 1.0 ? 1.0 : m;
         }
         else if (!strcmp(name, "hypot")) {
@@ -1202,8 +1218,9 @@ static CssLen calc_parse_term(CalcParser *p)
             /* number * length or length * number */
             double k = rhs.pct == 0.0 ? rhs.px : lhs.px;
             CssLen l = rhs.pct == 0.0 ? lhs : rhs;
-            lhs.px = l.px * k;
-            lhs.pct = l.pct * k;
+            /* (a part that isn't there stays not there: 0 by infinity isn't NaN here) */
+            lhs.px = l.px == 0.0 && l.pct != 0.0 ? 0.0 : l.px * k;
+            lhs.pct = l.pct == 0.0 ? 0.0 : l.pct * k;
         } else {
             /* (by nothing: no end to it, or not a number) */
             lhs.px = lhs.px == 0.0 && lhs.pct != 0.0 ? 0.0 : lhs.px / rhs.px;
@@ -1244,6 +1261,13 @@ static CssLen calc_sane(CssLen v)
     if (isinf(v.px)) { v.px = v.px > 0 ? most : -most; v.pct = 0.0; }
     if (isinf(v.pct)) { v.px = v.pct > 0 ? most : -most; v.pct = 0.0; }
     return v;
+}
+
+static const char *strcasestr_(const char *h, const char *n);
+/* (infinity or NaN in a calc(): its percentages came to a length, or nothing, not cancelled) */
+static bool calc_nonfinite(const char *v)
+{
+    return v && (strcasestr_(v, "infinity") || strcasestr_(v, "nan"));
 }
 
 static CssLen css_parse_len(const char *value, double font_size)
@@ -1505,8 +1529,30 @@ static void css_side_indexes(int count, int idx[4])
  * part, for resolution against the containing block width at layout time.
  * `side` is 0..3 for a longhand, -1 for the shorthand.  The side fields get
  * the px part meanwhile. */
+static __thread double t_style_pw;   /* (while styling: the parent's content width, when its width is a length; else 0) */
+/* (a percentage in a function that doesn't keep it a part of its own: min(), round(), a % over a %) */
+static bool pct_nonlinear(const char *v)
+{
+    if (!v || !strchr(v, '%')) return false;
+    static const char *const fn[] = { "min(", "max(", "clamp(", "round(", "mod(", "rem(", "abs(", "sign(", "pow(", "sqrt(", "hypot(", "log(", "exp(", NULL };
+    for (int k = 0; fn[k]; k++) if (strstr(v, fn[k])) return true;
+    return false;
+}
 static void layout_note_side_pcts(LayoutBox *box, const char *value, bool padding, int side)
 {
+    /* (worked out now against what the parent is wide, when that is known: layout keeps only a length and a part) */
+    if (side >= 0 && t_style_pw > 0.0 && pct_nonlinear(value)) {
+        double *fl[4] = {
+            padding ? &box->s->padding_top : &box->s->margin_top, padding ? &box->s->padding_right : &box->s->margin_right,
+            padding ? &box->s->padding_bottom : &box->s->margin_bottom, padding ? &box->s->padding_left : &box->s->margin_left,
+        };
+        double h0_ = t_pct_hint;
+        t_pct_hint = t_style_pw;   /* (the percentages inside the functions too) */
+        *fl[side] = css_parse_length(value, t_style_pw, g_unit_vw, box->s->font_size);
+        t_pct_hint = h0_;
+        box->s->pct_sides &= (unsigned char)~(1u << ((padding ? 4u : 0u) + (unsigned)side));
+        return;
+    }
     double *fields[4] = {
         padding ? &box->s->padding_top : &box->s->margin_top,
         padding ? &box->s->padding_right : &box->s->margin_right,
@@ -1538,6 +1584,7 @@ static void layout_note_side_pcts(LayoutBox *box, const char *value, bool paddin
             box->s->pct_sides |= (unsigned char)bit;
         } else {
             box->s->pct_sides &= (unsigned char)~bit;
+            if (side >= 0 && calc_nonfinite(value)) *fields[i] = len4[i].px;   /* (an infinite percentage: the most there is, not 0) */
         }
     }
 }
@@ -4315,7 +4362,7 @@ static bool csz_parts(const char *v, char **basis, char **expr)
 static double csz_eval(const char *expr, double size, double pct_base, double viewport, double font_size)
 {
     char num[48];
-    snprintf(num, sizeof num, "%.6fpx", size);
+    snprintf(num, sizeof num, "%.17gpx", size);   /* (all of it: what it is measured against has all of it too) */
     char *t = csz_subst(expr, num);
     if (!t) return size;
     size_t l = strlen(t) + 8;
@@ -4842,7 +4889,7 @@ static void layout_apply_declaration_in(LayoutBox *box, const CssDeclaration *de
             if (csz_parts(value, &bas, &ex)) {
                 bool any = !strcasecmp(bas, "any");
                 bool kw = !strcasecmp(bas, "auto") || !strcasecmp(bas, "min-content") || !strcasecmp(bas, "max-content") ||
-                          !strcasecmp(bas, "fit-content") || !strcasecmp(bas, "stretch");
+                          !strcasecmp(bas, "fit-content") || !strcasecmp(bas, "stretch") || (prop[0] == 'f' && !strcasecmp(bas, "content"));
                 CssDeclaration d = *decl;
                 char *text = NULL;
                 if (kw) d.value = !strncasecmp(prop, "max-", 4) && strcasecmp(bas, "auto") ? (char *)"none" : bas;   /* (a maximum of an intrinsic size through an expression: not kept, so none) */
@@ -6787,7 +6834,7 @@ static void layout_apply_declaration_in(LayoutBox *box, const CssDeclaration *de
              * the containing block at layout time. */
             CssLen l = css_parse_len(value, box->s->font_size);
             /* (a calc() whose percentages cancel is a percentage still) */
-            if (l.pct == 0.0 && strchr(value, '%') && strchr(value, '(')) l.pct = 1e-9;
+            if (l.pct == 0.0 && strchr(value, '%') && strchr(value, '(') && !calc_nonfinite(value)) l.pct = 1e-9;
             box->s->width_percent = l.pct > 0.0 ? l.pct : 0.0;
             box->s->width_pct_px = l.pct > 0.0 ? l.px : 0.0;
             box->s->css_width = l.pct > 0.0 ? 0.0 : l.px;
@@ -6813,7 +6860,7 @@ static void layout_apply_declaration_in(LayoutBox *box, const CssDeclaration *de
         {
             CssLen l = css_parse_len(value, box->s->font_size);
             /* (a calc() whose percentages cancel is a percentage still: auto under an indefinite height) */
-            if (l.pct == 0.0 && strchr(value, '%') && strchr(value, '(')) l.pct = 1e-9;
+            if (l.pct == 0.0 && strchr(value, '%') && strchr(value, '(') && !calc_nonfinite(value)) l.pct = 1e-9;
             /* (a negative one: a percentage too, its fraction apart) */
             box->s->height_pct_neg = l.pct < 0.0 ? l.pct : 0.0;
             if (l.pct < 0.0) l.pct = 1e-9;
@@ -7102,6 +7149,8 @@ static void layout_apply_declaration_in(LayoutBox *box, const CssDeclaration *de
                         !strcasecmp(value, "stretch") || !strcasecmp(value, "-webkit-fill-available") ? 5 : 0;
         css_parse_flex_basis(value, &box->s->flex_basis, &box->s->flex_basis_percent,
                              &box->s->flex_basis_pct_px, box->s->font_size);
+        /* (by content: no length of its own) */
+        if (box->s->fb_kw >= 1 && box->s->fb_kw <= 4) { box->s->flex_basis = -1.0; box->s->flex_basis_percent = 0.0; box->s->flex_basis_pct_px = 0.0; }
     } else if (PK(59)) {
         box->s->flex_grow = !strcasecmp(value, "calc(infinity)") ? 1e30 : strtod(value, NULL);
     } else if (PK(60)) {
@@ -7118,7 +7167,7 @@ static void layout_apply_declaration_in(LayoutBox *box, const CssDeclaration *de
             if ((cw == value || isspace((unsigned char)cw[-1])) && (!cw[7] || isspace((unsigned char)cw[7]))) box->s->fb_kw = 4;
         css_parse_flex_shorthand(value, &box->s->flex_grow, &box->s->flex_shrink, &box->s->flex_basis,
                                  &box->s->flex_basis_percent, &box->s->flex_basis_pct_px, box->s->font_size);
-        if (box->s->fb_kw == 4) { box->s->flex_basis = -1.0; box->s->flex_basis_percent = 0.0; box->s->flex_basis_pct_px = 0.0; }
+        if (box->s->fb_kw >= 1 && box->s->fb_kw <= 4) { box->s->flex_basis = -1.0; box->s->flex_basis_percent = 0.0; box->s->flex_basis_pct_px = 0.0; }
     } else if (PK(62)) {
         css_parse_shorthand_1_or_2(value, parent_width, viewport_width,
                                    box->s->font_size, &box->s->gap_row, &box->s->gap_col);
@@ -8610,17 +8659,21 @@ static CssCustomProps *css_custom_props_fork(FrameArena *a, const CssCustomProps
     return m;
 }
 
+/* (attr() substituted into the value being worked out, directly or by a var() of a value it was) */
+static __thread bool t_attr_hit, t_put_taint;
 /* Replace or append (legacy css_custom_props_set semantics). */
 static void css_custom_props_put(FrameArena *a, CssCustomProps *m, const char *name, const char *value)
 {
     int i = cp_find(m, name);
     if (i >= 0) {
         m->props[i].value = frame_arena_strdup(a, value);
+        m->props[i].tainted = t_put_taint;
         return;
     }
     if (m->count >= m->capacity) return;   /* capacity = number of custom declarations */
     m->props[m->count].name = frame_arena_strdup(a, name);
     m->props[m->count].value = frame_arena_strdup(a, value);
+    m->props[m->count].tainted = t_put_taint;
     if (m->index) cp_index_insert(m, m->count);
     m->count++;
 }
@@ -8690,6 +8743,14 @@ static bool var_tokens_merge(char a, char b)
     return false;
 }
 
+static const char *subst_close(const char *s);
+/* (an if() at p's level, as a token of its own: where it starts, or NULL) */
+static const char *var_subst_if_at(const char *p, const char *before)
+{
+    for (const char *q = p; (q = strstr(q, "if(")) != NULL && (!before || q < before); q += 3)
+        if (q == p || !(isalnum((unsigned char)q[-1]) || q[-1] == '-' || q[-1] == '_')) return q;
+    return NULL;
+}
 static char* css_var_subst(const char *value, const CssCustomProps *props)
 {
     if (!value || !strchr(value, '(')) return NULL;
@@ -8703,6 +8764,18 @@ static char* css_var_subst(const char *value, const CssCustomProps *props)
 
     while (*p) {
         var = strstr(p, "var(");
+        /* (an if(): left whole, its conditions and branches its own to work out, var()s in them too) */
+        const char *iff = var ? var_subst_if_at(p, var) : NULL;
+        if (iff) {
+            const char *c = subst_close(iff + 3);
+            if (c) {
+                size_t l = (size_t)(c + 1 - p);
+                memcpy(out + out_len, p, l);
+                out_len += l;
+                p = c + 1;
+                continue;
+            }
+        }
         if (!var) {
             size_t rest = strlen(p);
             memcpy(out + out_len, p, rest);
@@ -8806,6 +8879,7 @@ static char* css_var_subst(const char *value, const CssCustomProps *props)
             }
         }
         const char *resolved = fn_prop_lookup(props, name);
+        if (resolved && props) { int ti_ = cp_find(props, name); if (ti_ >= 0 && props->props[ti_].tainted) t_attr_hit = true; }
         /* (an empty value of an unregistered property is a value: it substitutes nothing) */
         bool empty_val = resolved && !resolved[0] && name[0] == '-' && css_reg_find(name) < 0;
         free(name);
@@ -8853,6 +8927,14 @@ static char* css_var_subst(const char *value, const CssCustomProps *props)
 
 /* The element and its parent's custom properties, while one is being styled. */
 static __thread HtmlNode *t_subst_node;
+static char *tree_fn_subst(const char *value);
+static __thread const char *t_subst_prop;   /* (the property whose value is being resolved: random()'s key) */
+static __thread int t_rand_idx, t_tfs_depth;   /* (which random() of that value this is) */
+/* (in an @function: a typed result's random() keyed by the function, not where it is used;
+ * an untyped one's left for the value it lands in) */
+static __thread const char *t_rand_fn_key;
+static __thread bool t_rand_defer;
+static __thread bool t_cq_styleq;   /* (asking a container's style(): random() makes it false) */
 static __thread const CssCustomProps *t_subst_parent;
 /* (attr() in use: what an element's attributes say is part of its style) */
 static volatile int g_css_attr_fn;
@@ -8949,6 +9031,24 @@ static bool subst_number(const char *s, double *v, char *unit, size_t cap)
 }
 
 /* Whether two values are the same: numbers by what they measure, colors by color. */
+/* (two values as tokens: the same but for whitespace between them) */
+static bool subst_tokens_same(const char *x, const char *y)
+{
+    for (;;) {
+        while (isspace((unsigned char)*x)) x++;
+        while (isspace((unsigned char)*y)) y++;
+        if (!*x || !*y) return !*x && !*y;
+        bool sx = false, sy = false;
+        while (*x && !isspace((unsigned char)*x) && *y && !isspace((unsigned char)*y)) {
+            if (*x != *y) return false;
+            x++; y++;
+        }
+        sx = !*x || isspace((unsigned char)*x);
+        sy = !*y || isspace((unsigned char)*y);
+        if (sx != sy) return false;
+    }
+}
+
 static bool subst_same(const char *x, const char *y)
 {
     if (!strcmp(x, y)) return true;
@@ -8979,6 +9079,15 @@ static int subst_style_query(const char *a, const char *b, const CssCustomProps 
         int r = css_reg_count() ? css_reg_find(name) : -1;
         const char *init = r >= 0 ? css_reg_initial(r) : NULL;
         int yes = v && v[0] && !(init && !strcmp(v, init));
+        /* (one whose var()s go round in a cycle has no value: guaranteed-invalid) */
+        if (yes && strstr(v, "var(")) {
+            bool held_failed = t_var_failed;
+            t_var_failed = false;
+            char *rv = css_var_subst(v, props);
+            if (t_var_failed || (rv && !rv[0])) yes = 0;
+            free(rv);
+            t_var_failed = held_failed;
+        }
         free(name);
         return yes;
     }
@@ -9020,9 +9129,14 @@ static int subst_style_query(const char *a, const char *b, const CssCustomProps 
             char *s1 = NULL, *s2 = NULL;
             if (!strncmp(t, "--", 2)) src = fn_prop_lookup(props, t);
             else {
+                bool hf_ = t_var_failed;
+                t_var_failed = false;
                 s1 = css_var_subst(t, props);
                 s2 = css_fn_subst(s1 ? s1 : t, props, depth + 1);
-                src = s2 ? s2 : s1 ? s1 : t;
+                src = t_var_failed ? NULL : s2 ? s2 : s1 ? s1 : t;
+                t_var_failed = hf_;
+                if (src && t_cq_styleq && strstr(src, "random(")) src = NULL;   /* (a container's style(): no random() in it) */
+                if (src && (strstr(src, "sibling-") || strstr(src, "random("))) { bool hd_ = t_rand_defer; t_rand_defer = false; char *tw = tree_fn_subst(src); t_rand_defer = hd_; if (tw) { free(s2); s2 = tw; src = tw; } }
             }
             bool ok = src && subst_number(src, &v[i], u[i], sizeof u[i]);
             free(s1); free(s2); free(t);
@@ -9047,10 +9161,18 @@ static int subst_style_query(const char *a, const char *b, const CssCustomProps 
     bool orequal = false;
     if ((kind == '<' || kind == '>') && vs < b && *vs == '=') { orequal = true; vs++; }
     char *want0 = subst_trim(vs, b);
+    /* (a var() in the value asked after with nothing to give: the query false, the declaration as it is) */
+    bool held_failed = t_var_failed;
+    t_var_failed = false;
     char *sub = want0 ? css_var_subst(want0, props) : NULL;
     char *sub2 = css_fn_subst(sub ? sub : want0, props, depth + 1);
     char *want = sub2 ? subst_trim(sub2, sub2 + strlen(sub2)) : subst_trim(sub ? sub : want0, (sub ? sub : want0) + strlen(sub ? sub : want0));
     free(want0); free(sub); free(sub2);
+    bool want_failed = t_var_failed;
+    t_var_failed = held_failed;
+    if (want_failed) { free(want); free(name); return 0; }
+    if (want && t_cq_styleq && strstr(want, "random(")) { free(want); free(name); return 0; }
+    if (want && (strstr(want, "sibling-") || strstr(want, "random("))) { bool hd_ = t_rand_defer; t_rand_defer = false; char *tw = tree_fn_subst(want); t_rand_defer = hd_; if (tw) { free(want); want = tw; } }
     const char *v = fn_prop_lookup(props, name);
     int r = css_reg_count() ? css_reg_find(name) : -1;
     const char *init = r >= 0 ? css_reg_initial(r) : NULL;
@@ -9062,14 +9184,15 @@ static int subst_style_query(const char *a, const char *b, const CssCustomProps 
         bool none = false;
         if (!strcasecmp(want, "initial")) { cmp = init; none = !init; }
         else if (!strcasecmp(want, "inherit")) { cmp = up ? up : init; none = !cmp; }
-        else if (!strcasecmp(want, "unset") || !strcasecmp(want, "revert") || !strcasecmp(want, "revert-layer")) {
+        else if (!strcasecmp(want, "revert") || !strcasecmp(want, "revert-layer")) { free(want); free(name); return 0; }   /* (no cascade to roll back to in a query) */
+        else if (!strcasecmp(want, "unset")) {
             cmp = inherits ? (up ? up : init) : init;
             none = !cmp;
         }
         char *have = v ? subst_trim(v, v + strlen(v)) : NULL;
         if (kind == ':' ) {
             if (none) yes = !have || !have[0];
-            else if (have && cmp) yes = subst_same(have, cmp);
+            else if (have && cmp) yes = r < 0 && cmp == want ? subst_tokens_same(have, cmp) : subst_same(have, cmp);
         }
         (void)orequal;
         free(have);
@@ -9089,11 +9212,23 @@ static int subst_condition(const char *a, const char *b, const CssCustomProps *p
     while (b > a && isspace((unsigned char)b[-1])) b--;
     if (a >= b) return -1;
     if (!strncasecmp(a, "not", 3) && (isspace((unsigned char)a[3]) || a[3] == '(')) {
+        /* (not takes one term: "not A or B" is no condition, so false) */
+        const char *q = a + 3;
+        while (q < b && isspace((unsigned char)*q)) q++;
+        const char *qo = q;
+        while (qo < b && *qo != '(' && !isspace((unsigned char)*qo)) qo++;
+        const char *qc = qo < b && *qo == '(' ? subst_close(qo + 1) : NULL;
+        if (qc && qc < b) {
+            const char *after = qc + 1;
+            while (after < b && isspace((unsigned char)*after)) after++;
+            if (after < b) return 0;
+        }
         int r = subst_condition(a + 3, b, props, depth);
         return r < 0 ? -1 : !r;
     }
     /* (one term, then and or or) */
     int result = -1, join = 0;
+    bool poison = false;   /* (a bare word in it: the whole of it false) */
     const char *p = a;
     while (p < b) {
         while (p < b && isspace((unsigned char)*p)) p++;
@@ -9107,6 +9242,7 @@ static int subst_condition(const char *a, const char *b, const CssCustomProps *p
             strncasecmp(ts, "and", 3) && strncasecmp(ts, "or", 2)) {
             close = open - 1;
             t = 0;
+            poison = true;
             goto joined;
         }
         if (open >= b || *open != '(') return -1;
@@ -9176,7 +9312,7 @@ static int subst_condition(const char *a, const char *b, const CssCustomProps *p
         join = j;
         p += j == 1 ? 3 : 2;
     }
-    return result;
+    return poison && result >= 0 ? 0 : result;
 }
 
 /* What if(args) comes to (malloc'd); NULL when it is invalid. */
@@ -9202,11 +9338,26 @@ static char *subst_if(const char *a, const char *b, const CssCustomProps *props,
         const char *ce = colon;
         while (ce > t && isspace((unsigned char)ce[-1])) ce--;
         int yes;
-        if (ce - t == 4 && !strncasecmp(t, "else", 4)) yes = 1;
+        /* (a var() as the whole condition: what it comes to, else as well) */
+        char *cv_ = NULL;
+        if (ce - t > 4 && !strncasecmp(t, "var(", 4) && subst_close(t + 4) == ce - 1) {
+            char *ct = subst_trim(t, ce);
+            bool hf_ = t_var_failed;
+            t_var_failed = false;
+            cv_ = ct ? css_var_subst(ct, props) : NULL;
+            if (t_var_failed) { free(cv_); cv_ = NULL; }
+            t_var_failed = hf_;
+            free(ct);
+            if (cv_) { char *tr = subst_trim(cv_, cv_ + strlen(cv_)); free(cv_); cv_ = tr; }
+        }
+        if (cv_ && !strcasecmp(cv_, "else")) yes = 1;
+        else if (cv_) { yes = subst_condition(cv_, cv_ + strlen(cv_), props, depth); if (yes < 0) { free(cv_); return NULL; } }
+        else if (ce - t == 4 && !strncasecmp(t, "else", 4)) yes = 1;
         else {
             yes = subst_condition(t, ce, props, depth);
             if (yes < 0) return NULL;
         }
+        free(cv_);
         if (yes) return subst_trim(colon + 1, end);
         if (!semi) break;
         p = semi + 1;
@@ -9216,7 +9367,10 @@ static char *subst_if(const char *a, const char *b, const CssCustomProps *props,
 
 static bool css_unit_known(const char *u)
 {
-    static const char *const more[] = { "vw", "vh", "vmin", "vmax", "vi", "vb", "ex", "ch", "cap", "ic", "lh", "rlh", "fr", "hz", "khz" };
+    static const char *const more[] = { "vw", "vh", "vmin", "vmax", "vi", "vb", "ex", "ch", "cap", "ic", "lh", "rlh", "fr", "hz", "khz",
+        /* (the canonical ones, kept as they are) */
+        "px", "em", "rem", "s", "ms", "deg", "rad", "grad", "turn", "dpi", "dpcm", "dppx", "x", "cm", "mm", "q", "in", "pt", "pc",
+        "svw", "svh", "lvw", "lvh", "dvw", "dvh", "cqw", "cqh", "cqi", "cqb", "cqmin", "cqmax" };
     for (size_t i = 0; i < sizeof more / sizeof more[0]; i++) if (!strcasecmp(u, more[i])) return true;
     return false;
 }
@@ -9229,6 +9383,7 @@ static __thread int t_attr_depth;
 static __thread bool t_attr_cycle;
 
 static __thread const HtmlNode *t_subst_owner;   /* (the box's parent's element: a pseudo-element's originating one) */
+static bool dashed_in(const char *s, const char *name);
 static char *subst_attr(const char *a, const char *b, const CssCustomProps *props, int depth)
 {
     g_css_attr_fn = 1;
@@ -9278,6 +9433,12 @@ static char *subst_attr(const char *a, const char *b, const CssCustomProps *prop
             }
         } else if (!strncasecmp(kind, "type(", 5)) {
             const char *close = subst_close(kind + 5);
+            /* (an attribute that names the property being worked out, through var(): a cycle, no fallback for it) */
+            if (close && t_subst_prop && t_subst_prop[0] == '-' && t_subst_prop[1] == '-' && strstr(val, "var(") && dashed_in(val, t_subst_prop)) {
+                t_var_failed = true;
+                free(kind);
+                return NULL;
+            }
             if (close) {
                 char *syn = subst_trim(kind + 5, close);
                 /* (what's in it may use var() and the rest itself) */
@@ -9316,7 +9477,7 @@ static char *subst_attr(const char *a, const char *b, const CssCustomProps *prop
         }
     }
     free(kind);
-    if (out) return out;
+    if (out) { t_attr_hit = true; return out; }
     return comma ? subst_trim(comma + 1, b) : NULL;
 }
 
@@ -9783,6 +9944,23 @@ static bool fn_wide_keyword(const char *v)
     return !strcasecmp(v, "unset") || !strcasecmp(v, "revert") || !strcasecmp(v, "revert-layer") || !strcasecmp(v, "revert-rule");
 }
 
+/* (a parameter's or local's random(): typed, keyed by the function and its name; untyped, left for where it lands) */
+static char *fn_eval_keyed(const char *v, const CssCustomProps *props, const FnFrame *fr, int i)
+{
+    static __thread char key[192];
+    const char *held_key = t_rand_fn_key;
+    bool held_defer = t_rand_defer;
+    if (fr->type[i] && fr->type[i][0] && strcmp(fr->type[i], "*")) {
+        snprintf(key, sizeof key, "%s/%s", fr->fn >= 0 && fr->fn < g_fn_n ? g_fn_name[fr->fn] : "", fr->name[i] ? fr->name[i] : "");
+        t_rand_fn_key = key;
+        t_rand_defer = false;
+    } else t_rand_defer = true;
+    char *out = fn_eval(v, props);
+    t_rand_fn_key = held_key;
+    t_rand_defer = held_defer;
+    return out;
+}
+
 static const char *fn_value(const CssCustomProps *props, int f, int i)
 {
     FnFrame *fr = &t_fn_fr[f];
@@ -9791,13 +9969,13 @@ static const char *fn_value(const CssCustomProps *props, int f, int i)
     fr->state[i] = 1;
     int cur = t_fn_cur;
     t_fn_cur = f;
-    char *out = fr->decl[i] ? fn_eval(fr->decl[i], props) : NULL;
+    char *out = fr->decl[i] ? fn_eval_keyed(fr->decl[i], props, fr, i) : NULL;
     bool from_param = !fr->decl[i];
     if (out && !strcasecmp(out, "initial")) { free(out); out = NULL; from_param = true; }
     if (from_param) {
         if (fr->arg[i]) out = strdup(fr->arg[i]);
         else if (fr->def[i]) {
-            out = fn_eval(fr->def[i], props);
+            out = fn_eval_keyed(fr->def[i], props, fr, i);
             if (out && !strcasecmp(out, "initial")) { free(out); out = NULL; }
             else if (out && strcasecmp(out, "inherit")) out = fn_typed(fr->type[i], out);
         }
@@ -9905,7 +10083,7 @@ static char *css_fn_call(int f, const char *a, const char *b, const CssCustomPro
                         size_t vl = strlen(raw);
                         if (vl >= 2 && raw[vl - 1] == '}') { char *in = subst_trim(raw + 1, raw + vl - 1); free(raw); raw = in; }
                     }
-                    if (raw) fr->arg[i] = fn_typed(fr->type[i], fn_eval(raw, props));
+                    if (raw) fr->arg[i] = fn_typed(fr->type[i], fn_eval_keyed(raw, props, fr, i));
                     free(raw);
                     if (ae) ap = ae + 1; else args_left = false;
                 } else if (!colon) missing = true;
@@ -9923,7 +10101,13 @@ static char *css_fn_call(int f, const char *a, const char *b, const CssCustomPro
         if (fr->result) {
             int cur = t_fn_cur;
             t_fn_cur = t_fn_top;
+            const char *held_key = t_rand_fn_key;
+            bool held_defer = t_rand_defer;
+            if (g_fn_returns[f]) { t_rand_fn_key = g_fn_name[f]; t_rand_defer = false; }
+            else t_rand_defer = true;
             result = fn_eval(fr->result, props);
+            t_rand_fn_key = held_key;
+            t_rand_defer = held_defer;
             t_fn_cur = cur;
             if (result && (!strcasecmp(result, "initial") || !strcasecmp(result, "inherit") || fn_wide_keyword(result))) { free(result); result = NULL; }
             if (result && g_fn_returns[f]) {
@@ -9982,7 +10166,26 @@ static char *css_fn_subst(const char *value, const CssCustomProps *props, int de
     bool is_if = first[-1] == 'f' || first[-1] == 'F';
     const char *fn = first - (is_if ? 2 : 4);
     const char *close = subst_close(first + 1);
-    if (!close) { t_var_failed = true; return strdup(""); }
+    if (!close) {
+        /* (the value's end closes what's still open: css-syntax) */
+        int open_n = 0;
+        char q = 0;
+        for (const char *s = value; *s; s++) {
+            if (q) { if (*s == '\\' && s[1]) s++; else if (*s == q) q = 0; continue; }
+            if (*s == '"' || *s == '\'') q = *s;
+            else if (*s == '(') open_n++;
+            else if (*s == ')' && open_n > 0) open_n--;
+        }
+        size_t vl = strlen(value);
+        char *closed = open_n > 0 && open_n < 64 ? (char *)malloc(vl + (size_t)open_n + 1) : NULL;
+        if (!closed) { t_var_failed = true; return strdup(""); }
+        memcpy(closed, value, vl);
+        memset(closed + vl, ')', (size_t)open_n);
+        closed[vl + (size_t)open_n] = 0;
+        char *got = css_fn_subst(closed, props, depth + 1);
+        free(closed);
+        return got;
+    }
     char *mid = is_if ? subst_if(first + 1, close, props, depth) : subst_attr(first + 1, close, props, depth);
     if (!mid) { t_var_failed = true; mid = strdup(""); }
     size_t pre = (size_t)(fn - value), ml = mid ? strlen(mid) : 0, post = strlen(close + 1);
@@ -10174,7 +10377,20 @@ static bool cq_known_feature(const char *n)
 }
 
 /* A value for a feature: a length, or a ratio; false if it isn't of that kind. */
+static bool cq_value0(const char *t, const CqBox *b, bool ratio, double *out);
 static bool cq_value(const char *t, const CqBox *b, bool ratio, double *out)
+{
+    /* (sibling-index() and the like: the container's) */
+    if (t && strstr(t, "sibling-") && g_cq_ctx && b) {
+        HtmlNode *held = t_subst_node;
+        t_subst_node = layout_node_dom((LayoutContext *)g_cq_ctx, b->dom);
+        char *tw = tree_fn_subst(t);
+        t_subst_node = held;
+        if (tw) { bool ok = cq_value0(tw, b, ratio, out); free(tw); return ok; }
+    }
+    return cq_value0(t, b, ratio, out);
+}
+static bool cq_value0(const char *t, const CqBox *b, bool ratio, double *out)
 {
     while (isspace((unsigned char)*t)) t++;
     if (ratio) {
@@ -10396,7 +10612,13 @@ static int cq_term(const LayoutContext *ctx, int dom, const char *cname, size_t 
             t_cq_style_on = held_on;
             return r;
         }
+        HtmlNode *held_node = t_subst_node;
+        t_subst_node = layout_node_dom((LayoutContext *)ctx, at);   /* (sibling-index() and the like: the container's) */
+        bool held_cq = t_cq_styleq;
+        t_cq_styleq = true;
         r = subst_style_query(open + 1, close, pr, depth + 1);
+        t_cq_styleq = held_cq;
+        t_subst_node = held_node;
         return r < 0 ? -1 : r;
     }
     /* (states known, none of them on: nothing scrolls or sticks here that we'd say) */
@@ -10480,12 +10702,20 @@ static int cq_cond(const LayoutContext *ctx, int dom, const char *cname, size_t 
 }
 
 /* Whether the @container preludes around a rule hold for the element at dom. */
+static __thread bool t_starting_on;
+static const void *volatile g_starting_doc;   /* (the document whose elements matched @starting-style rules) */   /* (an element's starting style: @starting-style's rules in its cascade) */
 static bool cq_gate(const char *query, int dom)
 {
     const LayoutContext *ctx = g_cq_ctx;
     if (!ctx || !ctx->doc) return false;
     for (const char *one = query; one; ) {
         const char *next = strchr(one, 1);
+        if (one[0] == 2) {   /* (@starting-style's) */
+            g_starting_doc = ctx->doc;   /* (this document has them for its elements) */
+            if (!t_starting_on) return false;
+            one = next ? next + 1 : NULL;
+            continue;
+        }
         const char *e = next ? next : one + strlen(one);
         /* (each prelude a list: any of its comma-separated queries) */
         bool any = false;
@@ -10597,19 +10827,29 @@ static char *subst_random(const char *a, const char *b)
     static uint64_t seed;
     if (!seed) seed = (uint64_t)time(NULL) * 2654435761ull + 1;
     h ^= seed;
-    bool shared = false;
+    bool shared = false, named = false, by_prop = true, by_idx = true, es_bare = false;
     const char *args = a;
     double fixed = -1.0;
+    int my_idx = t_rand_idx++;
     if (has_opts) {
         char *o = subst_trim(a, c0);
-        h = tree_hash(h, o, strlen(o));
-        /* (a name alone: the same for every element; element-scoped: each element its own) */
-        shared = strstr(o, "--") != NULL && strstr(o, "element-scoped") == NULL;
+        /* (a name: that name's draw, the same for every element; element-scoped: each element its own;
+         * property-scoped: the property's, on every element; property-index-scoped: and this one's place in it) */
+        named = strstr(o, "--") != NULL;
+        bool pis = strstr(o, "property-index-scoped") != NULL, ps = !pis && strstr(o, "property-scoped") != NULL;
+        shared = (named && strstr(o, "element-scoped") == NULL) || pis || ps;
+        if (named) { by_prop = by_idx = false; h = tree_hash(h, o, strlen(o)); }
+        if (ps) by_idx = false;
+        es_bare = !named && strstr(o, "element-scoped") != NULL;   /* (element-scoped alone: the element's one draw) */
+        if (es_bare && !t_rand_fn_key) by_prop = by_idx = false;
         const char *fx = strstr(o, "fixed");
         if (fx) fixed = strtod(fx + 5, NULL);
         free(o);
         args = c0 + 1;
-    } else h = tree_hash(h, a, (size_t)(b - a));
+    }
+    if (t_rand_fn_key && !named && !es_bare) { by_prop = by_idx = false; h = tree_hash(h, t_rand_fn_key, strlen(t_rand_fn_key)); h = tree_hash(h, "result", 6); }
+    if (by_prop && t_subst_prop) h = tree_hash(h, t_subst_prop, strlen(t_subst_prop));
+    if (by_idx) h = tree_hash(h, (const char *)&my_idx, sizeof my_idx);
     if (!shared && t_subst_node) h = tree_hash(h, (const char *)&t_subst_node, sizeof t_subst_node);
     if (g_cq_ctx) h = tree_hash(h, (const char *)&g_cq_ctx->doc, sizeof g_cq_ctx->doc);
     h ^= h >> 33; h *= 0xff51afd7ed558ccdull; h ^= h >> 33;
@@ -10761,7 +11001,17 @@ static char *subst_random_item(const char *a, const char *b)
 
 /* value with those worked out; NULL when it has none. */
 extern char *css_calc_mix_expand(const char *value);
+static char *tree_fn_subst_in(const char *value);
+/* (the random()s of one value counted from its first) */
 static char *tree_fn_subst(const char *value)
+{
+    if (!t_tfs_depth) t_rand_idx = 0;
+    t_tfs_depth++;
+    char *r = tree_fn_subst_in(value);
+    t_tfs_depth--;
+    return r;
+}
+static char *tree_fn_subst_in(const char *value)
 {
     if (strstr(value, "calc-mix(")) {
         char *sum = css_calc_mix_expand(value);
@@ -10803,7 +11053,7 @@ static char *tree_fn_subst(const char *value)
                 rep = owned;
                 next = c + 1;
             }
-        } else if (edge && !strncasecmp(p, "random(", 7)) {
+        } else if (edge && !strncasecmp(p, "random(", 7) && !t_rand_defer) {
             const char *c = subst_close(p + 7);
             if (c) {
                 owned = subst_random(p + 7, c);
@@ -10839,7 +11089,21 @@ static char *tree_fn_subst(const char *value)
 }
 
 /* value with var(), if() and attr() substituted; NULL when it needs none. */
+static char *css_var_resolve_in(const char *value, const CssCustomProps *props);
+static __thread int t_resolve_depth;
+/* (the random()s of one value counted from its first, however deep) */
 static char *css_var_resolve(const char *value, const CssCustomProps *props)
+{
+    if (!t_resolve_depth) t_rand_idx = 0;
+    t_resolve_depth++;
+    int held_tfs = t_tfs_depth;
+    t_tfs_depth++;   /* (tree_fn_subst inside: not to count afresh) */
+    char *r = css_var_resolve_in(value, props);
+    t_tfs_depth = held_tfs;
+    t_resolve_depth--;
+    return r;
+}
+static char *css_var_resolve_in(const char *value, const CssCustomProps *props)
 {
     /* (calls first: an argument's failure is its own, not the whole value's) */
     if (g_fn_n && value && strstr(value, "--")) {
@@ -10862,9 +11126,14 @@ static char *ident_subst(const char *v)
     size_t cap = strlen(v) * 2 + 16, o = 0;
     char *out = (char *)malloc(cap);
     if (!out) return NULL;
-    bool any = false;
+    bool any = false, nested = false;
     for (const char *p = v; *p; ) {
         if (strncasecmp(p, "ident(", 6) || (p > v && (isalnum((unsigned char)p[-1]) || p[-1] == '-' || p[-1] == '_'))) { out[o++] = *p++; continue; }
+        {
+            /* (an ident() in its argument: that one first, this one on the next round) */
+            const char *ce = subst_close(p + 6), *in = strcasestr_(p + 6, "ident(");
+            if (ce && in && in < ce) { out[o++] = *p++; nested = true; continue; }
+        }
         const char *a = p + 6;
         char id[512];
         size_t il = 0;
@@ -10940,6 +11209,11 @@ static char *ident_subst(const char *v)
     }
     out[o] = 0;
     if (!any) { free(out); return NULL; }
+    if (nested) {
+        char *again = ident_subst(out);
+        if (again) { free(out); return again; }
+        if (t_var_failed) { free(out); return NULL; }
+    }
     return out;
 }
 
@@ -11062,6 +11336,18 @@ static char *env_subst(const char *v)
     return cur;
 }
 
+/* (a value attr() made a part of, for a property that loads what it names: invalid) */
+static bool attr_taint_blocks(const char *prop, const char *v)
+{
+    if (!prop || !v) return false;
+    static const char *const up[] = { "background", "background-image", "list-style", "list-style-image", "border-image", "border-image-source",
+                                      "mask", "mask-image", "mask-border", "mask-border-source", "cursor", "content", "shape-outside", NULL };
+    bool hit = false;
+    for (int k = 0; up[k] && !hit; k++) hit = !strcasecmp(prop, up[k]);
+    if (!hit) return false;
+    return strstr(v, "url(") || strstr(v, "image-set(") || strstr(v, "src(") || strstr(v, "image(") || strstr(v, "URL(");
+}
+static bool css_var_is_self_reference(const char *prop, const char *val);
 static char *css_var_resolve_rest(const char *value, const CssCustomProps *props)
 {
     char *r = css_var_subst(value, props);
@@ -11076,18 +11362,32 @@ static char *css_var_resolve_rest(const char *value, const CssCustomProps *props
         if (t) { free(r); r = t; v = r; }
         else if (t_var_failed) return r;
     }
-    if (v && strchr(v, '(') && (strstr(v, "ident(") || strstr(v, "IDENT("))) {
-        char *t = ident_subst(v);
-        if (t) { free(r); r = t; v = r; }
-    }
     if (v && strchr(v, '(') && (strstr(v, "sibling-") || strstr(v, "random(") || strstr(v, "random-item("))) {
         char *t = tree_fn_subst(v);
+        if (t) { free(r); r = t; v = r; }
+        else if (t_var_failed) return r;
+    }
+    /* (ident(): over what the tree-counting functions came to; with an attr() in it, after that) */
+    if (v && strchr(v, '(') && (strstr(v, "ident(") || strstr(v, "IDENT(")) && !strstr(v, "attr(")) {
+        char *t = ident_subst(v);
         if (t) { free(r); r = t; v = r; }
         else if (t_var_failed) return r;
     }
     if (v && strchr(v, '(') && (strstr(v, "if(") || strstr(v, "attr(") || strstr(v, "IF(") || strstr(v, "ATTR("))) {
         /* (content's attr() is content's own to read) */
         char *f = css_fn_subst(v, props, 0);
+        /* (the branch taken: its var()s now; one of the property itself a cycle) */
+        if (f && t_subst_prop && t_subst_prop[0] == '-' && t_subst_prop[1] == '-' && css_var_is_self_reference(t_subst_prop, f)) {
+            free(f);
+            t_var_failed = true;
+            return r;
+        }
+        if (f && strstr(f, "var(")) { char *g = css_var_subst(f, props); if (g) { free(f); f = g; } }
+        if (f && strchr(f, '(') && strstr(f, "ident(")) {
+            char *g = ident_subst(f);
+            if (g) { free(f); f = g; }
+            else if (t_var_failed) { free(f); return r; }
+        }
         if (f) { free(r); return f; }
     }
     return r;
@@ -12791,12 +13091,72 @@ static bool layout_collect_document_stylesheets(LayoutContext *ctx, LayoutStyleS
 
 /* True when the value's var() references the property being set: per spec
  * that makes the declaration invalid (the property is left unset). */
+/* (name, a custom property's, in s as a whole word) */
+static bool dashed_in(const char *s, const char *name)
+{
+    size_t l = strlen(name);
+    for (const char *p = s; (p = strstr(p, name)) != NULL; p += l) {
+        bool before = p == s || !(isalnum((unsigned char)p[-1]) || p[-1] == '-' || p[-1] == '_');
+        bool after = !(isalnum((unsigned char)p[l]) || p[l] == '-' || p[l] == '_');
+        if (before && after) return true;
+    }
+    return false;
+}
+
+/* Whether prop's value val asks in an if()'s style() after prop itself, or after
+ * a property whose value (in m) comes back to prop: a cycle (css-values-5). */
+static bool style_query_cycle(const char *prop, const char *val, const CssCustomProps *m)
+{
+    if (!prop || !val || !strstr(val, "style(")) return false;
+    for (const char *p = val; (p = strstr(p, "style(")) != NULL; ) {
+        /* (a condition after an if()'s first: asked only when those before it are false, which isn't known here) */
+        const char *ifp = NULL;
+        for (const char *t = val; t < p && (t = strstr(t, "if(")) != NULL && t < p; t += 3)
+            if (t == val || !(isalnum((unsigned char)t[-1]) || t[-1] == '-' || t[-1] == '_')) ifp = t;
+        if (ifp) {
+            int dd = 0;
+            bool later = false;
+            for (const char *t = ifp + 3; t < p; t++) {
+                if (*t == '(') dd++;
+                else if (*t == ')') dd--;
+                else if (*t == ';' && dd == 0) later = true;
+            }
+            if (later) { p += 6; continue; }
+        }
+        const char *q = p + 6;
+        int d = 1;
+        const char *e = q;
+        while (*e && d > 0) { if (*e == '(') d++; else if (*e == ')') d--; if (d > 0) e++; }
+        for (const char *r = q; r < e; r++) {
+            if (r[0] != '-' || r[1] != '-' || (r > q && (isalnum((unsigned char)r[-1]) || r[-1] == '-'))) continue;
+            char nm[128];
+            size_t k = 0;
+            while (r + k < e && k + 1 < sizeof nm && (isalnum((unsigned char)r[k]) || r[k] == '-' || r[k] == '_')) { nm[k] = r[k]; k++; }
+            nm[k] = 0;
+            if (!strcmp(nm, prop)) return true;
+            const char *v = m ? css_custom_props_get(m, nm) : NULL;
+            if (v && (strstr(v, "var(") || strstr(v, "style(")) && dashed_in(v, prop)) return true;
+            r += k ? k - 1 : 0;
+        }
+        p = e;
+    }
+    return false;
+}
+
 static bool css_var_is_self_reference(const char *prop, const char *val)
 {
     if (!prop || !val) return false;
     size_t plen = strlen(prop);
     const char *p = val;
     while ((p = strstr(p, "var(")) != NULL) {
+        /* (inside an if(): only the branch it takes counts, once it has) */
+        bool in_if = false;
+        for (const char *q = val; (q = var_subst_if_at(q, p)) != NULL; ) {
+            const char *c = subst_close(q + 3);
+            if (c && c > p) { in_if = true; break; }
+            q = c ? c + 1 : q + 3;
+        }
+        if (in_if) { p += 4; continue; }
         p += 4;
         while (*p && isspace((unsigned char)*p)) p++;
         if (strncasecmp(p, prop, plen) == 0) {
@@ -15939,6 +16299,7 @@ static bool layout_apply_wide_keyword(LayoutBox *box, const LayoutBox *parent,
         LayoutStyle *s = box->s;
         if (!strcasecmp(prop, "background-clip")) { s->bg_clip = ps->bg_clip; s->bg_clip_col = ps->bg_clip_col; return true; }
         if (!strcasecmp(prop, "background-origin")) { s->bg_origin = ps->bg_origin; return true; }
+        if (!strcasecmp(prop, "opacity")) { s->opacity = ps->opacity; s->opacity_set = ps->opacity_set; return true; }
         if (!strcasecmp(prop, "box-shadow")) {
             s->shadow_set = ps->shadow_set; s->shadow_raw = ps->shadow_raw; s->shadow_n = ps->shadow_n;
             s->shadow_multi = ps->shadow_multi; s->shadow_inset = ps->shadow_inset; s->shadow_cc = ps->shadow_cc;
@@ -16725,6 +17086,12 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
     box->s = ctx->slot[idx];   /* (a kept tree's text box may hold a shared style) */
     t_unit_box = box;      /* (ex, ch: this node's, never a box of an earlier pass on this thread) */
     t_unit_parent = NULL;
+    t_style_pw = 0.0;
+    if (parent && parent->s && parent->s->width_set && !(parent->s->width_percent > 0.0) && !parent->s->width_keyword && !parent->s->csz_w &&
+        parent->s->writing_mode == 0 && parent->s->css_width > 0.0)
+        t_style_pw = parent->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX
+                   ? parent->s->css_width - parent->s->border_left - parent->s->border_right - parent->s->padding_left - parent->s->padding_right
+                   : parent->s->css_width;
 
     /* Custom properties inherit; the map is shared until this node sets one. */
     const CssCustomProps *pv = (p >= 0) ? ctx->custom_props[p] : NULL;
@@ -16736,7 +17103,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
     bool bits_ready = false;
     int parent_cls = (p >= 0) ? P->cls[p] : -1;
     const StyleCacheEntry *ce = P->inc ? sc_cached(P, idx) : NULL;
-    bool can_reuse = ce && !ce->stale && P->key_ok[idx] && !P->force[idx] && (p < 0 || !P->out_changed[p]);
+    bool can_reuse = ce && !ce->stale && P->key_ok[idx] && !P->force[idx] && (p < 0 || !P->out_changed[p]) && !g_root_units_moved;
     bool mpc_would = false;   /* CYBER_STYLE_VERIFY: the matched-properties cache would take ce */
     if (P->inc && !can_reuse && g_css_log > 1 && node && node->type == HTML_NODE_ELEMENT) {
         int why = !ce ? 0 : !P->key_ok[idx] ? 1 : P->force[idx] == 2 ? 2 : P->force[idx] == 1 ? 3 : 4;
@@ -16940,8 +17307,18 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
                     for (int q_ = 0; q_ < nlate; q_++) if (!strcmp(late[q_], (PROP))) seen_ = true; \
                     if (!seen_ && nlate < 64) late[nlate++] = (PROP); \
                 } else { \
+                    t_subst_prop = (PROP); \
+                    t_attr_hit = false; \
+                    bool held_defer_ = t_rand_defer; \
+                    t_rand_defer = css_reg_find(PROP) < 0;   /* (an unregistered one: its random() drawn where it is used) */ \
+                    t_var_failed = false; \
                     char *resolved_ = css_var_resolve((VAL), m); \
+                    t_rand_defer = held_defer_; \
+                    t_put_taint = t_attr_hit; \
                     css_custom_prop_declare(ma, m, pv, (PROP), resolved_ ? resolved_ : (VAL)); \
+                    t_put_taint = false; \
+                    /* (an ident() of what isn't an identifier's makings: guaranteed-invalid) */ \
+                    if (!resolved_ && t_var_failed && strstr((VAL), "ident(")) { int i_ = cp_find(m, (PROP)); if (i_ >= 0) m->props[i_].value = NULL; } \
                     free(resolved_); \
                 } \
             } while (0)
@@ -16951,7 +17328,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
                 const char *val = applied[d].decl->value;
                 if (!(prop && prop[0] == '-' && prop[1] == '-')) continue;
                 if ((int)applied[d].decl->important != pass) continue;
-                if (css_var_is_self_reference(prop, val)) { int i_ = cp_find(m, prop); if (i_ >= 0) m->props[i_].value = NULL; continue; }   /* (a cycle: no value, an earlier declaration's gone too) */
+                if (css_var_is_self_reference(prop, val) || style_query_cycle(prop, val, m)) { int i_ = cp_find(m, prop); if (i_ >= 0) m->props[i_].value = NULL; continue; }   /* (a cycle: no value, an earlier declaration's gone too) */
                 CP_DECL(prop, val);
             }
             for (int b = 0; b < ninl; b++) {
@@ -16959,7 +17336,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
                     const char *prop = inl[b].decls[i].property;
                     if (!(prop && prop[0] == '-' && prop[1] == '-')) continue;
                     if ((int)inl[b].decls[i].important != pass) continue;
-                    if (css_var_is_self_reference(prop, inl[b].decls[i].value)) { int i_ = cp_find(m, prop); if (i_ >= 0) m->props[i_].value = NULL; continue; }
+                    if (css_var_is_self_reference(prop, inl[b].decls[i].value) || style_query_cycle(prop, inl[b].decls[i].value, m)) { int i_ = cp_find(m, prop); if (i_ >= 0) m->props[i_].value = NULL; continue; }
                     CP_DECL(prop, inl[b].decls[i].value);
                 }
             }
@@ -16973,14 +17350,20 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
                     if (!v || !strstr(v, "var(")) continue;
                     bool held_f = t_var_failed;
                     t_var_failed = false;
+                    t_subst_prop = late[q];
+                    t_attr_hit = false;
+                    bool held_defer_ = t_rand_defer;
+                    t_rand_defer = css_reg_find(late[q]) < 0;
                     char *r = css_var_resolve(v, m);
+                    t_rand_defer = held_defer_;
+                    bool tainted_ = t_attr_hit;
                     bool failed = t_var_failed;
                     t_var_failed = held_f;
                     if (failed && css_reg_find(late[q]) < 0) {
                         /* (a var() with no value and no fallback: guaranteed-invalid, no value at all) */
                         int i_ = cp_find(m, late[q]);
                         if (i_ >= 0) { m->props[i_].value = NULL; any = true; }
-                    } else if (r && strcmp(r, v)) { css_custom_prop_declare(ma, m, pv, late[q], r); any = true; }
+                    } else if (r && strcmp(r, v)) { t_put_taint = tainted_; css_custom_prop_declare(ma, m, pv, late[q], r); t_put_taint = false; any = true; }
                     free(r);
                 }
                 if (!any) break;
@@ -17034,8 +17417,10 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
                 h = style_mix(h, &node, sizeof node);
             }
             if (g_css_attr_fn)
-                for (HtmlAttribute *ha = node->attributes; ha; ha = ha->next)
-                    if (ha->value) h = style_mix(h, ha->value, strlen(ha->value));
+                for (HtmlAttribute *ha = node->attributes; ha; ha = ha->next) {
+                    if (ha->name) h = style_mix(h, ha->name, strlen(ha->name) + 1);   /* (which attribute, as well as what it says) */
+                    if (ha->value) h = style_mix(h, ha->value, strlen(ha->value) + 1);
+                }
             for (int d = 0; d < count; d++) {
                 h = style_mix(h, &applied[d].decl, sizeof(applied[d].decl));
                 h = style_mix(h, &applied[d].rule, sizeof(applied[d].rule));
@@ -17054,6 +17439,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
             h = style_mix(h, &dir_auto, sizeof(dir_auto));
             h = style_mix(h, &box->s->aspect_ratio, sizeof(box->s->aspect_ratio));
             h = style_mix(h, &g_unit_rem, sizeof(g_unit_rem));
+            h = style_mix(h, g_unit_rr, sizeof(g_unit_rr));   /* (rcap, rex, rch, ric: the root font's) */
             if (h == 0) h = 1;
             P->match_hash[idx] = h;
             /* The key covers the attributes, which presentational hints read.
@@ -17092,6 +17478,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
          * it (as the computed font-size is what they mean); then all, in
          * order. */
         t_unit_parent = parent;
+        t_unit_is_root = !parent && node && node->type == HTML_NODE_ELEMENT && node->tag_name && node->tag_name[0] != ':';
         /* Its writing mode and direction first: its logical properties' meaning. */
         if (parent) {
             if (!box->s->direction_set) box->s->direction = parent->s->wm_own_set ? parent->s->dir_own : parent->s->direction;
@@ -17108,7 +17495,8 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
                     layout_color_scheme(box, parent, inl[b].decls[i].value);
         for (int d = 0; d < count; d++) {
             const CssDeclaration *fd = applied[d].decl;
-            if (fd->property && (!strcasecmp(fd->property, "writing-mode") || !strcasecmp(fd->property, "direction") || !strcasecmp(fd->property, "text-orientation")))
+            if (fd->property && (!strcasecmp(fd->property, "writing-mode") || !strcasecmp(fd->property, "direction") || !strcasecmp(fd->property, "text-orientation")) &&
+                !(fd->value && layout_apply_wide_keyword(box, parent, fd->property, fd->value, ctx->viewport_width, ctx->base_url)))
                 layout_apply_declaration(box, fd, ctx->viewport_width, ctx->viewport_width, ctx->base_url);
         }
         for (int b = 0; b < ninl; b++)
@@ -17130,8 +17518,13 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
             if (prop && prop[0] == '-' && prop[1] == '-') continue;
             if ((applied[d].decl->important != 0) != (imp == 1)) continue;
             if (phase == 0 && !style_is_font_size_prop(prop)) continue;
+            /* (a plain writing-mode: settled before the rest, vi and vb by it; not set again in between) */
+            if (prop && !applied[d].decl->important && !strcasecmp(prop, "writing-mode") && applied[d].decl->value && !strchr(applied[d].decl->value, '(')) continue;
             t_var_failed = false;
+            t_subst_prop = prop;
+            t_attr_hit = false;
             char *resolved = css_var_resolve(applied[d].decl->value, props);
+            if (resolved && t_attr_hit && attr_taint_blocks(prop, resolved)) t_var_failed = true;
             CssDeclaration decl = *applied[d].decl;
             decl.value = resolved ? resolved : applied[d].decl->value;
             layout_decl_copy_validity(&decl, applied[d].decl, resolved != NULL);
@@ -17164,7 +17557,10 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
                     if (gone) continue;
                 }
                 t_var_failed = false;
+                t_subst_prop = inl[b].decls[i].property;
+                t_attr_hit = false;
                 char *resolved = css_var_resolve(inl[b].decls[i].value, props);
+                if (resolved && t_attr_hit && attr_taint_blocks(inl[b].decls[i].property, resolved)) t_var_failed = true;
                 CssDeclaration decl = inl[b].decls[i];
                 decl.value = resolved ? resolved : inl[b].decls[i].value;
                 if (resolved) decl.invalid = 0;
@@ -17194,6 +17590,8 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
         }
         }
         t_unit_parent = NULL;
+        if (t_unit_is_root) g_unit_gutter = g_unit_in_frame && box->s->overflow == 3 && !box->s->overflow_clip ? 15.0 : 0.0;   /* (the root's own overflow, now known) */
+        t_unit_is_root = false;
         for (int b = 0; b < ninl; b++) css_declarations_free(inl[b].decls, inl[b].count);
         if (pseudo_aspect > box->s->aspect_ratio) box->s->aspect_ratio = pseudo_aspect;
 
@@ -17528,6 +17926,9 @@ static void style_finish_box_em0(bool em_defer, LayoutBox *box, const LayoutBox 
         g_unit_rr[3] = unit_ic_cap_ratio(false);
         t_unit_box = ob;
         t_unit_parent = op;
+        double now_[5] = { g_unit_rem, g_unit_rr[0], g_unit_rr[1], g_unit_rr[2], g_unit_rr[3] };
+        if (g_root_units_prev[0] >= 0.0 && memcmp(now_, g_root_units_prev, sizeof now_)) g_root_units_moved = 1;
+        memcpy(g_root_units_prev, now_, sizeof now_);
     }
     if (!parent) t_style_root = box;
     if (!box->s->fill_set && parent) {
@@ -18026,7 +18427,7 @@ static void style_subtree(StylePass *P, StyleThread *T, Job *self, int pos)
         if (pos + 1 < end) style_skip_descendants(P, pos, P->inc && !P->out_changed[idx]);
         return;
     }
-    bool by_dirty = P->dirty_n && !P->out_changed[idx];
+    bool by_dirty = P->dirty_n && !P->out_changed[idx] && !g_root_units_moved;   /* (the root's units moved: every element's rem may have) */
     for (int c = pos + 1; c < end; c = P->pre_end[c]) {
         int work = P->pre_end[c] - c;
         if (by_dirty) {
@@ -18119,7 +18520,9 @@ bool css_layout_style_unchanged(LayoutContext *ctx, int idx, int dom_now)
         ctx->custom_props[p] = pe->props;
     }
     ctx->tree.nodes[idx].dom_node_idx = dom_now;
-    double rem = g_unit_rem;
+    double rem = g_unit_rem, rprev_[5];
+    memcpy(rprev_, g_root_units_prev, sizeof rprev_);   /* (a look at one element: the pass's record of the root kept) */
+    int rmoved_ = g_root_units_moved;
     StyleThread *T = style_thread(&P);
     style_node(&P, T, 0, idx);
     bool after = T->gen_n > 0;
@@ -18127,6 +18530,8 @@ bool css_layout_style_unchanged(LayoutContext *ctx, int idx, int dom_now)
                 after == (ce->has_after != 0) &&
                 (!after || strncmp(T->gen[0].text, sc_after(ce), 256) == 0);
     g_unit_rem = rem;
+    memcpy(g_root_units_prev, rprev_, sizeof rprev_);
+    g_root_units_moved = rmoved_;
     ctx->tree.nodes[idx].dom_node_idx = kept_dom;
     layout_style_set(box, &kept_style);
     ctx->custom_props[idx] = kept_props;
@@ -18668,6 +19073,7 @@ static void layout_pseudo_style(LayoutContext *ctx, int pe, int owner, const Pse
     /* (its font-size first, as an element's: what its em lengths are of) */
     double fs_final = 0.0;
     t_unit_parent = ob;
+    t_subst_node = layout_node_dom(ctx, ctx->tree.nodes[owner].dom_node_idx);   /* (sibling-index(), attr(): the element's) */
     for (int phase = 0; phase < 2; phase++) {
     for (int d = 0; d < ps->n; d++) {
         const CssDeclaration *src = ps->decls[d];
@@ -18675,6 +19081,7 @@ static void layout_pseudo_style(LayoutContext *ctx, int pe, int owner, const Pse
         if (!prop || (prop[0] == '-' && prop[1] == '-')) continue;
         if (phase == 0 && !style_is_font_size_prop(prop)) continue;
         t_var_failed = false;
+        t_subst_prop = prop;
         char *resolved = css_var_resolve(src->value, props);
         CssDeclaration decl = *src;
         decl.value = resolved ? resolved : src->value;
@@ -19218,6 +19625,27 @@ int css_layout_pseudo_decls(const LayoutContext *ctx, int idx, int ps, const Css
     if (!r || ps < 1 || ps > PSEUDO_SIDES) return 0;
     *decls = r->side[ps - 1].decls;
     return r->side[ps - 1].n;
+}
+
+/* A pseudo-element's declaration of element idx with its var(), attr(), sibling-index() and the
+ * rest worked out as the element has them; NULL when there is nothing to work out. */
+char *css_layout_pseudo_resolve(const LayoutContext *ctx, int idx, const char *prop, const char *value)
+{
+    if (!value || !strchr(value, '(') || idx < 0 || idx >= ctx->tree.count) return NULL;
+    HtmlNode *held_node = t_subst_node;
+    const char *held_prop = t_subst_prop;
+    const LayoutContext *held_cq = g_cq_ctx;
+    bool held_failed = t_var_failed;
+    t_subst_node = layout_node_dom((LayoutContext *)ctx, ctx->tree.nodes[idx].dom_node_idx);
+    t_subst_prop = prop;
+    g_cq_ctx = ctx;
+    t_var_failed = false;
+    char *r = css_var_resolve(value, ctx->custom_props ? ctx->custom_props[idx] : NULL);
+    t_var_failed = held_failed;
+    g_cq_ctx = held_cq;
+    t_subst_node = held_node;
+    t_subst_prop = held_prop;
+    return r;
 }
 
 int css_layout_pseudo_pair_count(const LayoutContext *ctx) { return ctx->pseudo_pairs ? ctx->pseudo_nodes_n / 2 : 0; }
@@ -22363,6 +22791,7 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
             sc_global = style_mix(sc_global, &g_cq_gen, sizeof(g_cq_gen));
             sc_global = style_mix(sc_global, &g_unit_font_gen, sizeof(g_unit_font_gen));
             if (sc_global == 0) sc_global = 1;
+            g_root_units_moved = 0;
             static StyleCtxFeatures cf;
             mentions_build(P.set, set_gen);
             if (g_has_gen != set_gen) {
@@ -23114,6 +23543,8 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
     if (width_auto && box->s->width_keyword && g_layout_ctx &&
         box >= g_layout_ctx->boxes && box < g_layout_ctx->boxes + g_layout_ctx->tree.count) {
         int bidx = (int)(box - g_layout_ctx->boxes);
+        int held_off = t_csz_off;
+        if (box->s->csz_w) t_csz_off = bidx;   /* (applied below, once) */
         double mx = layout_intrinsic_width(g_layout_ctx, bidx, true);
         if (box->s->width_keyword == 4) {
             used_total_width = parent_content_width - ((box->s->stretch_drop & 8) ? 0.0 : box->margin_left) - ((box->s->stretch_drop & 2) ? 0.0 : box->margin_right);
@@ -23132,6 +23563,7 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
                 used_total_width = mx < avail ? mx : (mn > avail ? mn : avail);
             }
         }
+        t_csz_off = held_off;
         width_auto = false;
         /* used_total_width is already a border-box size */
         if (box->s->box_sizing == CSS_BOX_SIZING_CONTENT_BOX)
@@ -23175,6 +23607,14 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
             } else {
                 ch_spec = layout_clamp_size(ch_spec, box->min_height, box->max_height);
             }
+        }
+        /* (a calc-size() height of an intrinsic basis: the expression over its natural height, the width by the ratio from that) */
+        if (h_auto && box->s->csz_h && !CSS_CONTAIN_SIZE_OF(box->s)) {
+            double cw0 = 0.0, ch0 = 0.0;
+            layout_img_size_box(g_layout_ctx, box, node, 0.0, true, 0.0, true, &cw0, &ch0, parent_content_width);
+            ch_spec = csz_eval(box->s->csz_h, ch0, parent_content_height, parent_content_width, box->s->font_size);
+            if (ch_spec < 0.0) ch_spec = 0.0;
+            h_auto = false;
         }
         double cw = 0.0, ch = 0.0;
         layout_img_size_box(g_layout_ctx, box, node, 0.0, true, ch_spec, h_auto, &cw, &ch, parent_content_width);
@@ -25917,6 +26357,7 @@ static double layout_def_height(LayoutContext *ctx, int idx, int depth)
 }
 
 static double layout_intrinsic_width0(LayoutContext *ctx, int idx, bool want_max);
+
 /* (width: calc-size(keyword, ...): the expression of the keyword's size) */
 static double layout_intrinsic_width(LayoutContext *ctx, int idx, bool want_max)
 {
@@ -26029,7 +26470,7 @@ static double layout_intrinsic_width(LayoutContext *ctx, int idx, bool want_max)
         }
         w = inner + hbp;
     }
-    if (b->s->csz_w && b->s->display != CSS_DISPLAY_INLINE) {
+    if (b->s->csz_w && b->s->display != CSS_DISPLAY_INLINE && idx != t_csz_off) {
         double hbp = layout_horizontal_border_padding(b);
         bool bb = b->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX;
         double was = bb ? w : w - hbp;
@@ -37655,6 +38096,7 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
                 double bp = is_row ? layout_horizontal_border_padding(child) : layout_vertical_border_padding(child);
                 basis = avail_main - it->mm_s - it->mm_e;
                 if (basis < bp) basis = bp;
+                if (child->s->fb_csz) basis = csz_eval(child->s->fb_csz, basis - bp, avail_main, ctx->viewport_width, child->s->font_size) + bp;   /* (calc-size(stretch, ...)) */
             }
         }
         /* (by its content, whatever its width says) */
@@ -37700,6 +38142,10 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
         }
         if (basis < 0.0 && main_def_item && (!child->s->fb_kw || child->s->fb_kw == 5)) {
             basis = is_row ? child->width : child->height;
+            if (child->s->fb_csz) {   /* (calc-size(auto, ...): of that) */
+                double bw_ = is_row ? layout_horizontal_border_padding(child) : layout_vertical_border_padding(child);
+                basis = csz_eval(child->s->fb_csz, basis - bw_, avail_main, ctx->viewport_width, child->s->font_size) + bw_;
+            }
             /* (a plain length: the base size is it, min and max not yet in) */
             if (is_row && child->s->width_set && child->s->width_percent <= 0.0 && !child->s->width_keyword && (child->min_width > 0.0 || child->max_width >= 0.0))
                 basis = layout_flex_main_total(child, child->s->css_width, true);
@@ -38036,7 +38482,7 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
         for (int k = 0; k < nmeasure && fbh && fbp; k++) {
             LayoutStyle *fs_ = layout_box(ctx, list[k])->s;
             FlexItem *fi_ = &items[measure[k]];
-            if (fs_->fb_kw != 4 && !(fi_->spec_min > 0.0)) continue;
+            if (!(fs_->fb_kw >= 1 && fs_->fb_kw <= 4) && !(fi_->spec_min > 0.0)) continue;   /* (down a column the content keywords are all its content's height) */
             fbh[k] = 1 + fs_->height_set; fbp[k] = fs_->height_percent;
             fs_->height_set = 0; fs_->height_percent = 0.0;
         }
@@ -43693,6 +44139,8 @@ static void layout_anim_read(const LayoutStyle *s, AnimVal v[ANIM_NPROP])
             v[ANIM_BC_TOP + k] = (s->border_color_set & (1u << q))
                 ? (AnimVal){ (float)((c >> 24) & 255) / 255.0f, (float)((c >> 16) & 255) / 255.0f, 1, (float)((c >> 8) & 255) / 255.0f, (float)(c & 255) / 255.0f }
                 : v[ANIM_COLOR];
+            /* (currentcolor, marked: when it is so at both ends the color's own transition carries it) */
+            if (!(s->border_color_set & (1u << q))) v[ANIM_BC_TOP + k].ok = 3;
         }
     }
     /* (pct_sides: bits 0-3 margin T/R/B/L, 4-7 padding; those with a
@@ -43705,7 +44153,7 @@ static void layout_anim_read(const LayoutStyle *s, AnimVal v[ANIM_NPROP])
         v[ANIM_MARGIN_TOP + k] = (AnimVal){ (float)mar[k], 0, !(s->pct_sides & (1 << k)) && !s->margin_auto };
         v[ANIM_BORDER_TOP + k] = (AnimVal){ (float)bor[k], 0, 1 };
     }
-    v[ANIM_FONT_SIZE] = (AnimVal){ (float)s->font_size, 0, 1 };
+    v[ANIM_FONT_SIZE] = (AnimVal){ (float)(s->fs_unadj > 0.0 ? s->fs_unadj : s->font_size), 0, 1 };   /* (before font-size-adjust: the computed size) */
     v[ANIM_FONT_WEIGHT] = (AnimVal){ (float)s->font_weight, 0, 1 };
     /* (italic flips over at the middle; the others are angles, normal's 0) */
     bool italic = s->font_italic && !s->font_is_oblique;
@@ -43823,7 +44271,9 @@ static void layout_anim_write(LayoutStyle *s, int p, const AnimVal *v)
         s->font_italic = italic || s->font_is_oblique;
         s->font_italic_set = 1;
     } else if (p == ANIM_FONT_SIZE) {
-        s->font_size = v->x < 0 ? 0 : v->x;
+        double nv_ = v->x < 0 ? 0 : v->x;
+        if (s->fs_unadj > 0.0) { s->font_size = s->font_size * nv_ / s->fs_unadj; s->fs_unadj = nv_; }   /* (the adjustment kept over it) */
+        else s->font_size = nv_;
     } else if (p == ANIM_LETTER_SPACING) {
         s->letter_spacing = v->x;
         s->letter_spacing_set = 1;
@@ -43949,6 +44399,53 @@ static int layout_anim_keyframes(void *ud, const char *name, const float **offs,
 
 static void layout_anim_frame_in(void *ud, const void *decls, int n, AnimVal out[ANIM_NPROP], bool has[ANIM_NPROP]);
 
+/* An element's starting style (CSS Transitions 2): its cascade with @starting-style's rules in,
+ * over its style; what its transitions start from, as base rows of the store. */
+static bool cascade_at(LayoutContext *ctx, int dom, const CssCustomProps *props, CssCascadeFn fn, void *ud);
+typedef struct { const char *prop[256]; char *val[256]; bool imp[256]; int n; } StartDecls;
+static void starting_collect(void *ud, const char *prop, const char *value, bool important)
+{
+    StartDecls *L = (StartDecls *)ud;
+    if (L->n >= 256 || !prop || !value || (prop[0] == '-' && prop[1] == '-')) return;
+    L->prop[L->n] = prop;
+    L->val[L->n] = strdup(value);
+    L->imp[L->n] = important;
+    if (L->val[L->n]) L->n++;
+}
+static void layout_starting_seed(LayoutContext *ctx, int i, NodeId el)
+{
+    StartDecls *L = (StartDecls *)calloc(1, sizeof *L);
+    if (!L) return;
+    t_starting_on = true;
+    cascade_at(ctx, ctx->tree.nodes[i].dom_node_idx, ctx->custom_props ? ctx->custom_props[i] : NULL, starting_collect, L);
+    t_starting_on = false;
+    LayoutStyle tmp = *ctx->boxes[i].s;
+    LayoutBox tb = ctx->boxes[i];
+    tb.s = &tmp;
+    int pi = ctx->tree.nodes[i].parent_idx;
+    const LayoutBox *pb = pi >= 0 ? &ctx->boxes[pi] : NULL;
+    for (int imp = 0; imp < 2; imp++)
+        for (int k = 0; k < L->n; k++) {
+            if ((int)L->imp[k] != imp) continue;
+            /* (only what transitions read, and the font sizes lengths are of: nothing a shallow copy shares) */
+            if (anim_prop_of(L->prop[k]) < 0) continue;
+            CssDeclaration d;
+            memset(&d, 0, sizeof d);
+            d.property = L->prop[k];
+            d.value = layout_intern(L->val[k], strlen(L->val[k]));   /* (kept as long as what keeps it) */
+            if (!layout_apply_wide_keyword(&tb, pb, d.property, d.value, ctx->viewport_width, ctx->base_url))
+                layout_apply_declaration(&tb, &d, ctx->viewport_width, ctx->viewport_width, ctx->base_url);
+        }
+    /* (a starting style of display: none: none to start from) */
+    if (tmp.display != CSS_DISPLAY_NONE) {
+        AnimVal sv[ANIM_NPROP];
+        layout_anim_read(&tmp, sv);
+        anim_seed(el, 0, sv);
+    }
+    for (int k = 0; k < L->n; k++) free(L->val[k]);
+    free(L);
+}
+
 /* A keyframe's values, its container units of the box's containers. */
 static void layout_anim_frame(void *ud, const void *decls, int n, AnimVal out[ANIM_NPROP], bool has[ANIM_NPROP])
 {
@@ -43981,18 +44478,27 @@ static void layout_anim_frame_in(void *ud, const void *decls, int n, AnimVal out
     {
         ptrdiff_t vbi = u->box - u->ctx->boxes;
         const CssCustomProps *vp = vbi >= 0 && vbi < u->ctx->tree.count && u->ctx->custom_props ? u->ctx->custom_props[vbi] : NULL;
+        /* (and what depends on the element: sibling-index(), sibling-count(), random()) */
+#define KF_SUBST(v_) ((v_) && (strstr((v_), "var(") || strstr((v_), "sibling-") || strstr((v_), "random(")))
         bool any = false;
-        for (int i = 0; i < n && !any; i++) any = d[i].value && strstr(d[i].value, "var(");
+        for (int i = 0; i < n && !any; i++) any = KF_SUBST(d[i].value);
         if (any && n > 0 && (dsub = (CssDeclaration *)malloc((size_t)n * sizeof *dsub)) && (dfree = (char **)calloc((size_t)n, sizeof *dfree))) {
+            HtmlNode *held_node = t_subst_node;
+            const char *held_prop = t_subst_prop;
+            if (vbi >= 0 && vbi < u->ctx->tree.count) t_subst_node = layout_node_dom((LayoutContext *)u->ctx, u->ctx->tree.nodes[vbi].dom_node_idx);
             for (int i = 0; i < n; i++) {
                 dsub[i] = d[i];
-                if (d[i].value && strstr(d[i].value, "var(")) {
+                if (KF_SUBST(d[i].value)) {
+                    t_subst_prop = d[i].property;
                     char *rv = css_var_resolve(d[i].value, vp);
                     if (rv) { dsub[i].value = rv; dsub[i].invalid = 0; dfree[i] = rv; }
                 }
             }
+            t_subst_node = held_node;
+            t_subst_prop = held_prop;
             d = dsub;
         } else if (dsub) { free(dsub); dsub = NULL; }
+#undef KF_SUBST
     }
     bool script[ANIM_NPROP] = { 0 }, modern_[ANIM_NPROP] = { 0 };   /* (modern_: a color in a syntax past the legacy ones) */
     /* (inherit: what the parent has now) */
@@ -44234,6 +44740,7 @@ static void layout_animate(LayoutContext *ctx, const CssStyleSet *set)
     LayoutAnimUd u;
     u.ctx = ctx;
     u.set = set;
+    extern bool g_css_saw_starting;
     for (int i = 0; i < base && ctx->pseudo_rec; i++) {
         if (!layout_marker_rule(ctx, i)) continue;
         NodeId el = ctx->ids[i];
@@ -44270,6 +44777,8 @@ static void layout_animate(LayoutContext *ctx, const CssStyleSet *set)
         u.box = box;
         anim_flow_set(box->s->writing_mode, box->s->direction == 1);
         const char *spec = unrendered ? NULL : box->s->anim_spec;
+        /* (its first style, or the first since display: none: its transitions from its starting style) */
+        if (g_css_saw_starting && g_starting_doc == ctx->doc && !rows && spec && ps == 0 && i < base && !ctx->cache_readonly) layout_starting_seed(ctx, i, el);
         anim_box(el, ps, spec, was, !ctx->cache_readonly, now, layout_anim_keyframes, layout_anim_frame, &u, cur, set_p);
         if (!unrendered && !box->s->wc_sc && anim_makes_context(el, ps)) box->s->wc_sc = 3;   /* (a transform or opacity animation, waiting too: a stacking context) */
         /* (what its rules say !important: kept, animations under it) */
@@ -47786,6 +48295,12 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
         if (box->s->width_keyword == 4) {
             box->width = cb_w - used_w - ml - mr;
             if (box->width < bpw) box->width = bpw;
+            if (box->s->csz_w) {   /* (calc-size(stretch, ...): its expression of that) */
+                bool bb_ = box->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX;
+                double now_ = csz_eval(box->s->csz_w, bb_ ? box->width : box->width - bpw, cb_w, cb_w, box->s->font_size);
+                box->width = bb_ ? now_ : now_ + bpw;
+                if (box->width < bpw) box->width = bpw;
+            }
             layout_update_content_sizes(box);
             width_auto = false;
         }
@@ -48214,9 +48729,10 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
             int as = a_self ? a_self - 1 : (int)spb->s->align_items;
             int ck = (a_self ? box->s->as_kw : spb->s->ai_kw) & 0x7f;
             double kc = as == CSS_ALIGN_CENTER ? 0.5 : as == CSS_ALIGN_FLEX_END ? 1.0 : 0.0;
-            if (ck == ALIGN_KW_START) kc = wrap_rev ? 1.0 : 0.0;
-            else if (ck == ALIGN_KW_END) kc = wrap_rev ? 0.0 : 1.0;
-            else if (ck == ALIGN_KW_LAST_BASELINE) kc = 1.0;
+            /* (normal as stretch: at flex-start; a baseline, with none to share, at start, a last one at end) */
+            if (a_self == 0 && (box->s->self_normal & 1)) kc = 0.0;
+            if (ck == ALIGN_KW_START || ck == ALIGN_KW_BASELINE) kc = wrap_rev ? 1.0 : 0.0;
+            else if (ck == ALIGN_KW_END || ck == ALIGN_KW_LAST_BASELINE) kc = wrap_rev ? 0.0 : 1.0;
             /* (safe, overflowing across: its start) */
             if (anc == sp && ((a_self ? box->s->as_kw : spb->s->ai_kw) & ALIGN_KW_SAFE) && (main_h ? fy : fx) < -0.01) kc = wrap_rev ? 1.0 : 0.0;
             double kc_p = (cross_flow != wrap_rev) ? 1.0 - kc : kc;
@@ -48253,12 +48769,12 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
             }
         }
         /* (wider than its container, centred or at the end, but fitting its containing block: inside that) */
-        if (spb->s->display == CSS_DISPLAY_FLEX && !has_left && !has_right && fx < 0.0 && kx > 0.0 && box->width + ml + mr <= cb_w + 0.01) {
+        if (0 && spb->s->display == CSS_DISPLAY_FLEX && !has_left && !has_right && fx < 0.0 && kx > 0.0 && box->width + ml + mr <= cb_w + 0.01) {
             double lo = cb_x + ml, hi = cb_x + cb_w - mr - box->width;
             if (nx < lo) nx = lo;
             if (nx > hi) nx = hi;
         }
-        if (spb->s->display == CSS_DISPLAY_FLEX && !has_top && !has_bottom && fy < 0.0 && ky > 0.0 && box->height + mt + mb <= cb_h + 0.01) {
+        if (0 && spb->s->display == CSS_DISPLAY_FLEX && !has_top && !has_bottom && fy < 0.0 && ky > 0.0 && box->height + mt + mb <= cb_h + 0.01) {
             double lo = cb_y + mt, hi = cb_y + cb_h - mb - box->height;
             if (ny < lo) ny = lo;
             if (ny > hi) ny = hi;
@@ -49566,9 +50082,9 @@ static bool cascade_at(LayoutContext *ctx, int dom, const CssCustomProps *props,
             const CssDeclaration *dl = applied[d].decl;
             if (applied[d].important != imp || !dl->property || !dl->value || (dl->property[0] == '-' && dl->property[1] == '-')) continue;
             t_subst_failed = false;
-            char *r = strchr(dl->value, '(') ? css_var_resolve(dl->value, props) : NULL;
+            t_attr_hit = false; char *r = strchr(dl->value, '(') ? css_var_resolve(dl->value, props) : NULL;
             /* (what it comes to isn't one of its values, or nothing: as unset) */
-            fn(ud, dl->property, t_subst_failed || (r && css_value_invalid(dl->property, r)) ? "unset" : r ? r : dl->value, imp);
+            fn(ud, dl->property, t_subst_failed || (r && css_value_invalid(dl->property, r)) || (r && t_attr_hit && attr_taint_blocks(dl->property, r)) ? "unset" : r ? r : dl->value, imp);
             t_var_failed = false;
             free(r);
         }
@@ -49577,9 +50093,9 @@ static bool cascade_at(LayoutContext *ctx, int dom, const CssCustomProps *props,
                 const CssDeclaration *dl = &inl[b].decls[i];
                 if (dl->important != imp || !dl->property || !dl->value || (dl->property[0] == '-' && dl->property[1] == '-')) continue;
                 t_subst_failed = false;
-                char *r = strchr(dl->value, '(') ? css_var_resolve(dl->value, props) : NULL;
+                t_attr_hit = false; char *r = strchr(dl->value, '(') ? css_var_resolve(dl->value, props) : NULL;
                 /* (what it comes to isn't one of its values, or nothing: as unset) */
-                fn(ud, dl->property, t_subst_failed || (r && css_value_invalid(dl->property, r)) ? "unset" : r ? r : dl->value, imp);
+                fn(ud, dl->property, t_subst_failed || (r && css_value_invalid(dl->property, r)) || (r && t_attr_hit && attr_taint_blocks(dl->property, r)) ? "unset" : r ? r : dl->value, imp);
                 t_var_failed = false;
                 free(r);
             }
@@ -50011,6 +50527,15 @@ again:
     g_unit_vw = viewport_width >= 0.0 ? viewport_width : 1024.0;
     g_unit_vh = viewport_height >= 0.0 ? viewport_height : 768.0;
     g_unit_rem = 16.0;
+    /* (as the root last came to: a restyle below it keeps its scrollbars) */
+    extern NodeId frame_api_main_doc(void);
+    {
+        const HtmlNode *rn_ = ctx->tree.root_idx >= 0 && ctx->tree.root_idx < ctx->tree.count ? layout_node_dom(ctx, ctx->tree.nodes[ctx->tree.root_idx].dom_node_idx) : NULL;
+        NodeId rd_ = rn_ && rn_->store_id ? dom_owner(rn_->store_id) : 0, md_ = frame_api_main_doc();
+        g_unit_in_frame = rd_ && md_ && rd_ != md_;
+    }
+    g_unit_gutter = g_unit_in_frame && ctx->tree.root_idx >= 0 && ctx->tree.root_idx < ctx->tree.count && ctx->boxes && ctx->boxes[ctx->tree.root_idx].s &&
+                    ctx->boxes[ctx->tree.root_idx].s->overflow == 3 && !ctx->boxes[ctx->tree.root_idx].s->overflow_clip ? 15.0 : 0.0;
     /* Base URL for resolving relative stylesheet/image URLs: the URL of the
      * document's realm (a frame's page has its own), else the start URL. */
     layout_origin_base(ctx->base_url, sizeof(ctx->base_url));
@@ -51767,8 +52292,14 @@ void css_layout_marker_font(const LayoutContext *ctx, int idx, double *fs, int *
             static const struct { const char *k; double px; } aks[] = { { "xx-small", 9 }, { "x-small", 10 }, { "small", 13 }, { "medium", 16 }, { "large", 18 }, { "x-large", 24 }, { "xx-large", 32 }, { "xxx-large", 48 } };
             double akp = 0.0;
             for (size_t q = 0; q < sizeof aks / sizeof aks[0]; q++) if (!strcasecmp(v, aks[q].k)) akp = aks[q].px;
+            /* (ex and ch of the item's font; never a box an earlier style pass left behind) */
+            const LayoutBox *held_ub = t_unit_box, *held_up = t_unit_parent;
+            t_unit_box = idx >= 0 && idx < ctx->tree.count ? &ctx->boxes[idx] : NULL;
+            t_unit_parent = NULL;
             double px = akp > 0.0 ? akp : !strcasecmp(v, "larger") ? base * 1.2 : !strcasecmp(v, "smaller") ? base / 1.2 :
                         strchr(v, '%') ? base * atof(v) / 100.0 : css_parse_length(v, base, base, base);
+            t_unit_box = held_ub;
+            t_unit_parent = held_up;
             if (px > 0.0) *fs = px;
         } else if (!strcasecmp(dc->property, "font-weight")) {
             int w = !strncasecmp(v, "bold", 4) ? 700 : !strncasecmp(v, "normal", 6) ? 400 : atoi(v);

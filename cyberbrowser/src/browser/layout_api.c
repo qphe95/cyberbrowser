@@ -1543,6 +1543,15 @@ int layout_highlight_code(const char *name)
     return 20 + g_hl_n++;
 }
 
+/* An unregistered custom property's value as read from element: its random() drawn for that name. */
+char *layout_query_custom_resolve(JSContextHandle ctx, GCValue element, const char *name, const char *value)
+{
+    NodeId id = dom_node_of(element);
+    if (!lq_style_ready(ctx, id)) return NULL;
+    int idx = lq_box_index(id);
+    return idx < 0 ? NULL : css_layout_pseudo_resolve(&g_lq_layout, idx, name, value);
+}
+
 bool layout_query_pseudo_cascade(JSContextHandle ctx, GCValue element, int ps, LayoutCascadeFn fn, void *ud)
 {
     NodeId id = dom_node_of(element);
@@ -1559,8 +1568,13 @@ bool layout_query_pseudo_cascade(JSContextHandle ctx, GCValue element, int ps, L
         if (pass && !(ps == 6 && (g_dom.state[dom_slot(id)] & DOM_ST_TARGET_CURRENT))) break;
         const CssDeclaration *const *ds = NULL;
         int n = css_layout_pseudo_decls(&g_lq_layout, idx, side, &ds);
-        for (int d = 0; d < n; d++)
-            if (ds[d]->property && ds[d]->value) fn(ud, ds[d]->property, ds[d]->value, ds[d]->important);
+        for (int d = 0; d < n; d++) {
+            if (!ds[d]->property || !ds[d]->value) continue;
+            /* (as the element has what its values depend on) */
+            char *rv = ds[d]->property[0] == '-' && ds[d]->property[1] == '-' ? NULL : css_layout_pseudo_resolve(&g_lq_layout, idx, ds[d]->property, ds[d]->value);
+            fn(ud, ds[d]->property, rv ? rv : ds[d]->value, ds[d]->important);
+            free(rv);
+        }
     }
     return true;
 }
@@ -1941,7 +1955,7 @@ static void lq_scroll_size(int idx, bool root, double *cw, double *ch, double *s
      * runs back from that side instead) */
     const LayoutStyle *s = b->s;
     bool vertical = s->writing_mode != 0, rtl = s->direction == 1, rl = s->writing_mode == 1 || s->writing_mode == 3;
-    bool to_top = vertical && rtl, to_left = (!vertical && rtl) || rl;
+    bool to_top = vertical && (s->writing_mode == 4 ? !rtl : rtl), to_left = (!vertical && rtl) || rl;
     if (root) to_top = false;   /* (the viewport: by the root's writing mode, its block start only) */
     if (root) to_left = rl;
     if (!root && s->display == CSS_DISPLAY_FLEX) {

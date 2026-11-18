@@ -112,6 +112,8 @@ typedef struct AnimEvent {
     uint8_t ps, type;
     char name[64];      /* the property (transitions) or the animation */
     double elapsed;     /* s */
+    int row;            /* (its row and generation: the script's CSSTransition or CSSAnimation of it) */
+    uint32_t gen;
 } AnimEvent;
 /* Up to cap events due at now, each once; the rows of elements no longer
  * in a document dropped.  *live: whether anything still runs. */
@@ -140,6 +142,8 @@ typedef struct AnimRowTiming {
     int fill, direction;        /* (bit 0 forwards, bit 1 backwards); normal, reverse, alternate, alternate-reverse */
 } AnimRowTiming;
 bool anim_row_timing(int r, uint32_t gen, double now, AnimRowTiming *out);
+/* A transition row's two ends as CSS text, and its property. */
+bool anim_row_ends(int r, uint32_t gen, char *from, char *to, size_t cap, const char **prop);
 void anim_row_set_time(int r, uint32_t gen, double now, double t);
 void anim_row_set_start(int r, uint32_t gen, double start);
 void anim_row_set_timing(int r, uint32_t gen, int which, double v);   /* (which 0 duration, 1 delay, 2 iterations; ms) */

@@ -437,6 +437,9 @@ static const char *computed_of(JSContextHandle ctx, ComputedStyle *cs, const cha
 
 static char *px(double v) {
     char tmp[64];
+    /* (a hair off a 64th, as unit conversions leave it: the 64th) */
+    double sn = round(v * 64.0) / 64.0;
+    if (fabs(v - sn) < 2e-6 && fabs(v - sn) > 0.0) v = sn;
     if (v == (long long)v) snprintf(tmp, sizeof tmp, "%lldpx", (long long)v);
     else {
         snprintf(tmp, sizeof tmp, "%.6f", v);
@@ -478,8 +481,8 @@ static void env_of(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p, 
         if (fc && fc->styled && !strcmp(computed_of(ctx, fc, "font-size"), "0px")) env->font_size = 0.0;
     }
     env->root_font_size = cs->root_font_size;
-    /* (ch and ex: of the font it has) */
-    if (v && (strstr(v, "ch") || strstr(v, "ex")) && (!is_fs || strchr(v, '('))) {
+    /* (ch and ex: of the font it has; in font-size, of the parent's, a pseudo-element's its originating element's) */
+    if (v && (strstr(v, "ch") || strstr(v, "ex")) && (!is_fs || strchr(v, '(') || cs->pseudo)) {
         const char *fam = computed_of(ctx, is_fs && par ? par : cs, "font-family");
         TextShaper *f = fam && fam[0] ? font_registry_slot(font_registry_resolve(fam, 400, false)) : NULL;
         if (f) {
@@ -952,6 +955,22 @@ static bool before_color_wide(NodeId el, const CssPropDef *p)
 }
 
 /* Whether what el's size was last read as was such a size. */
+/* (an animation of an inset to or from a percentage or auto: what script makes of it is one) */
+static int g_in_hook;   /* (and g_in_calc below) */
+static bool inset_anim_pct(JSContextHandle ctx, NodeId el, const char *n, const char *under)
+{
+    GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberGenericAnim");
+    if (!JS_IsFunction(ctx, fn)) return false;
+    GCValue args[7] = { dom_js(ctx, el), JS_NewString(ctx, n), JS_NewString(ctx, under ? under : "auto"), JS_UNDEFINED, JS_FALSE, JS_NULL, JS_NULL };
+    g_in_hook++;
+    GCValue got = JS_Call(ctx, fn, JS_UNDEFINED, 7, args);
+    g_in_hook--;
+    bool pct = false;
+    if (JS_IsException(got)) JS_GetException(ctx);
+    else if (JS_IsString(got)) { const char *t = JS_ToCString(ctx, got); { double sp_ = 0.0; pct = t && (strchr(t, '%') || ((!strcmp(t, "auto") || !strcmp(t, "initial") || !strcmp(t, "unset")) && layout_query_used_inset(el, 4, false, false, &sp_))); } }   /* (auto: only on a box it positions) */
+    return pct;
+}
+
 static bool before_pct(NodeId el, const CssPropDef *p)
 {
     size_t k = (((size_t)el * 2654435761u) ^ ((size_t)p >> 4)) % BEFORE_N;
@@ -965,7 +984,7 @@ static bool before_size_special(NodeId el, const CssPropDef *p)
     return g_before[k].el == el && g_before[k].p == p && size_spec_special(g_before[k].spec);
 }
 
-static int g_in_hook, g_in_calc;
+static int g_in_calc;
 
 /* A new document: nothing read of the last one's elements counts. */
 void computed_style_reset(void)
@@ -1558,8 +1577,26 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
             }
         }
     }
+    /* (a length in em of a font size that is moving, a parent's transition or animation carrying it: of that size, not the laid-out one) */
+    bool em_moving = false;
+    if (cs->used.rendered && s && anim_any() && (!strncmp(n, "margin-", 7) || !strncmp(n, "padding-", 8) || !strcmp(n, "width") || !strcmp(n, "height"))) {
+        char *e_ = NULL;
+        double num_ = strtod(s, &e_);
+        /* (rem: of the root's, moving) */
+        AnimVal rav_;
+        NodeId rt_ = cs->el;
+        while (rt_ && dom_parent(rt_) && dom_kind(dom_parent(rt_)) == DOM_K_ELEMENT) rt_ = dom_parent(rt_);
+        if (e_ && e_ != s && !strcmp(e_, "rem") && rt_ && anim_value(rt_, 0, ANIM_FONT_SIZE, (double)anim_time_ms(), &rav_) && rav_.x > 0.0f) { free(r); r = px(num_ * rav_.x); em_moving = true; }
+        else if (e_ && e_ != s && !strcmp(e_, "em")) {
+            double fs_ = atof(computed_of(ctx, cs, "font-size"));
+            AnimVal fav_;
+            bool mv_ = false;
+            for (NodeId up_ = cs->el; up_ && !mv_ && dom_kind(up_) == DOM_K_ELEMENT; up_ = dom_parent(up_)) mv_ = anim_value(up_, 0, ANIM_FONT_SIZE, (double)anim_time_ms(), &fav_);
+            if (fs_ > 0.0 && !cs->pseudo && mv_) { free(r); r = px(num_ * fs_); em_moving = true; }
+        }
+    }
     /* resolved values: a rendered box's used sizes, margins and paddings */
-    if (cs->used.rendered) {
+    if (cs->used.rendered && !em_moving) {
         static const char *const sides[] = { "top", "right", "bottom", "left" };
         bool size = !strcmp(n, "width") || !strcmp(n, "height");
         bool inline_box = size && !strcmp(computed_of(ctx, cs, "display"), "inline");
@@ -1897,11 +1934,19 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
     bool wide_color = color_prop && !cs->pseudo && ((s && color_spec_wide(s)) || before_color_wide(cs->el, p));
     /* (a margin, padding or inset by percentage: the store has no length for it) */
     bool box_prop = !strncmp(n, "margin-", 7) || !strncmp(n, "padding-", 8) || !strcmp(n, "top") || !strcmp(n, "right") || !strcmp(n, "bottom") || !strcmp(n, "left");
-    bool box_pct = box_prop && !cs->pseudo && ((s && (strchr(s, '%') || !strcasecmp(s, "auto"))) || before_pct(cs->el, p) || before_held(cs->el, p));
-    bool generic_size = sized_prop && !cs->pseudo && (has_calc_size || before_held(cs->el, p) || (s && (size_spec_special(s) || before_size_special(cs->el, p))) ||
+    bool inset_ = !strcmp(n, "top") || !strcmp(n, "right") || !strcmp(n, "bottom") || !strcmp(n, "left");
+    /* (inherit, of a parent's percentage: a percentage here too, the engine not running it) */
+    const char *s_inh = NULL;
+    if (s && (sized_prop || box_prop) && !cs->pseudo && !strcasecmp(s, "inherit")) {
+        ComputedStyle *pp_ = parent_of(ctx, cs);
+        const char *ps_ = pp_ && pp_->spec ? pp_->spec[prop_idx(p)] : NULL;
+        if (ps_ && strchr(ps_, '%')) s_inh = ps_;
+    }
+    bool box_pct = box_prop && !cs->pseudo && (s_inh || (s && (strchr(s, '%') || !strcasecmp(s, "auto"))) || (inset_ && anim_has(cs->el, 0) && !g_in_hook && !g_in_calc && inset_anim_pct(ctx, cs->el, n, r)) || before_pct(cs->el, p) || before_held(cs->el, p));   /* (an inset not set, animated: auto) */
+    bool generic_size = sized_prop && !cs->pseudo && (has_calc_size || s_inh || before_held(cs->el, p) || (s && (size_spec_special(s) || before_size_special(cs->el, p))) ||
                         !strcmp(computed_of(ctx, cs, "interpolate-size"), "allow-keywords"));
     /* (script working out what a declaration comes to: the declaration alone) */
-    int ap = is_transform || individual || generic_size || box_pct || wide_color || (sized_prop && (g_in_calc || g_in_hook)) ? -1 : anim_prop_of(n);
+    int ap = is_transform || individual || !strncmp(n, "offset-", 7) || !strcmp(n, "clip-path") || !strcmp(n, "filter") || !strcmp(n, "backdrop-filter") || !strncmp(n, "grid-template-", 14) || generic_size || box_pct || wide_color || (sized_prop && (g_in_calc || g_in_hook)) ? -1 : anim_prop_of(n);
     AnimVal av;
     /* (what composition builds on is the value under the animation; the script works it out) */
     extern bool g_css_saw_composition;
@@ -1930,7 +1975,9 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
         }
         free(under);
     }
-    if (!g_comp_base && !comp_used && ap >= 0 && anim_value(cs->el, cs->pseudo, ap, (double)anim_time_ms(), &av)) {
+    /* (one mixed in oklab: script writes it out, over the value under it) */
+    if (!g_comp_base && !comp_used && ap >= 0 && anim_value(cs->el, cs->pseudo, ap, (double)anim_time_ms(), &av) &&
+        !(color_prop && av.ok == 2 && !g_in_hook && !g_in_calc && !cs->pseudo && anim_has(cs->el, 0))) {
         char b[96];
         anim_val_css(ap, &av, b, sizeof b);
         /* (translate: its numbers on their own) */
@@ -1950,12 +1997,12 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
     /* (one the engine animates, with nothing of its own on it: keyframes it can't read) */
     bool keyframes_only = false;
     if (!generic && (sized_prop || color_prop) && !in_hook && !g_in_calc && !cs->pseudo && anim_has(cs->el, 0) &&
-        !anim_value(cs->el, cs->pseudo, ap, (double)anim_time_ms(), &av)) {
+        (!anim_value(cs->el, cs->pseudo, ap, (double)anim_time_ms(), &av) || (color_prop && av.ok == 2))) {
         generic = true;
         keyframes_only = true;
     }
     char *before_spec = NULL;
-    char *now_spec = (sized_prop || color_prop || box_prop) && s ? strdup(s) : NULL;
+    char *now_spec = (sized_prop || color_prop || box_prop) && s ? strdup(s_inh ? s_inh : s) : NULL;
     char *before = generic && !keyframes_only ? before_swap(cs->el, p, r, now_spec, &before_spec) : NULL;
     /* (a size read now may be what a later change transitions from) */
     if (!generic && (sized_prop || color_prop || box_prop) && !in_hook && !g_in_calc && !g_comp_base && !cs->pseudo) {
@@ -1977,7 +2024,10 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
             }
         }
     }
-    if (generic && (anim_has(cs->el, 0) || layout_query_has_anim_spec(cs->el))) {
+    /* (a size with a transition declared, the layout's record of it not caught up: by its computed style) */
+    bool tr_decl_ = generic && sized_prop && !anim_has(cs->el, 0) && !layout_query_has_anim_spec(cs->el) && cs->styled &&
+                    strcmp(computed_of(ctx, cs, "transition-property"), "none") && strcmp(computed_of(ctx, cs, "transition-duration"), "0s");
+    if (generic && (anim_has(cs->el, 0) || layout_query_has_anim_spec(cs->el) || tr_decl_)) {
         GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberGenericAnim");
         if (JS_IsFunction(ctx, fn)) {
             GCValue args[7] = { dom_js(ctx, cs->el), JS_NewString(ctx, n), JS_NewString(ctx, r ? r : ""),
@@ -2043,6 +2093,20 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
             else { char *e = NULL; a = strtod(r, &e); if (e && e != r && e[0] == '%' && !e[1]) { v = a * base / 100.0; ok = true; } }
             if (ok && par->used.rendered) { free(r); r = px(v); }
         }
+    }
+    /* (an inset a script-run animation left at a percentage: in px, of the containing block) */
+    if (r && generic && strchr(r, '%') && !cs->pseudo && !in_hook) {
+        int side = !strcmp(n, "top") ? 0 : !strcmp(n, "right") ? 1 : !strcmp(n, "bottom") ? 2 : !strcmp(n, "left") ? 3 : -1;
+        double base = 0.0, a = 0.0, b = 0.0, v = 0.0;
+        char op = 0;
+        bool ok = false;
+        if (side >= 0) layout_query_flush(ctx);
+        if (side >= 0 && layout_query_used_inset(cs->el, side + 4, false, false, &base)) {
+            if (sscanf(r, "calc(%lf%% %c %lfpx)", &a, &op, &b) == 3 && (op == '+' || op == '-')) { v = a * base / 100.0 + (op == '-' ? -b : b); ok = true; }
+            else if (sscanf(r, "calc(%lfpx %c %lf%%)", &b, &op, &a) == 3 && (op == '+' || op == '-')) { v = b + (op == '-' ? -a : a) * base / 100.0; ok = true; }
+            else { char *e = NULL; a = strtod(r, &e); if (e && e != r && e[0] == '%' && !e[1]) { v = a * base / 100.0; ok = true; } }
+        }
+        if (ok) { free(r); r = px(v); }
     }
     /* (an inset an animation left at auto: what it comes to on the box, as unanimated) */
     if (r && !strcmp(r, "auto") && cs->used.rendered && !cs->pseudo && !in_hook) {
@@ -2306,7 +2370,7 @@ char *computed_style_value(JSContextHandle ctx, ComputedStyle *cs, const char *p
         char *name = strndup(prop, len);
         char *v = JS_IsObject(el) ? layout_query_custom(ctx, el, name) : NULL;
         free(name);
-        if (!v) return strdup("");
+        if (!v) v = strdup("");   /* (none: what a transition from or to it starts with) */
         /* (the computed value: without leading and trailing white space) */
         char *b = v;
         while (*b && isspace((unsigned char)*b)) b++;
@@ -2317,18 +2381,28 @@ char *computed_style_value(JSContextHandle ctx, ComputedStyle *cs, const char *p
         name = strndup(prop, len);
         int reg = css_reg_count() ? css_reg_find(name) : -1;
         free(name);
-        if (reg >= 0) {
+        if (reg >= 0 && r[0]) {
             char *c = registered_computed(ctx, cs, reg, r);
             if (c) { free(r); r = c; }
         }
+        /* (an unregistered one's random(): drawn for its own name, read here) */
+        if (reg < 0 && strstr(r, "random(")) {
+            extern char *layout_query_custom_resolve(JSContextHandle ctx, GCValue element, const char *name, const char *value);
+            char nm_[128] = "";
+            if (len < sizeof nm_) { memcpy(nm_, prop, len); nm_[len] = 0; }
+            char *rr = nm_[0] ? layout_query_custom_resolve(ctx, el, nm_, r) : NULL;
+            if (rr) { free(r); r = rr; }
+        }
         /* (a registered one under a transition: the transition's value) */
-        if (reg >= 0 && !g_in_hook) {
+        if (!g_in_hook && (reg >= 0 || anim_any() || layout_query_has_anim_spec(cs->el))) {
             /* (the element's own computed values, ready to be read) */
             refresh(ctx, cs);
             const char *tp = cs->styled && cs->spec && cs->comp ? computed_of(ctx, cs, "transition-property") : NULL;
             char pn[128] = "";
             if (len < sizeof pn) { memcpy(pn, prop, len); pn[len] = 0; }
             bool covered = tp && (strstr(tp, "all") || (pn[0] && strstr(tp, pn)));
+            /* (an unregistered one: only as a discrete flip, allowed) */
+            if (covered && reg < 0) { const char *tb_ = computed_of(ctx, cs, "transition-behavior"); covered = tb_ && strstr(tb_, "allow-discrete"); }
             if (covered) {
                 GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberCustomTransition");
                 if (JS_IsFunction(ctx, fn)) {

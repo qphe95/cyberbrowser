@@ -120,7 +120,7 @@
         return { lits: lits, nums: nums };
     }
     function fmt(v) { return String(Math.round(v * 1e5) / 1e5); }
-    var NONNEG = /^(background-size|mask-size|border-image-(slice|width|outset)|mask-border-(slice|width|outset)|font-stretch|font-width|tab-size|hyphenate-limit-|width|height|min-|max-|padding|border(-[a-z]+)*-(width|radius)|font-size|line-height|flex-grow|flex-shrink|flex-basis|outline-width|column-width|column-height|column-rule-width|row-rule-width|column-gap|row-gap|gap$|perspective$|border-spacing|shape-margin|letter-spacing-none)/;
+    var NONNEG = /^(background-size|mask-size|border-image-(slice|width|outset)|mask-border-(slice|width|outset)|font-stretch|font-width|tab-size|hyphenate-limit-|width|height|min-|max-|padding|border(-[a-z]+)*-(width|radius)|font-size|line-height|flex-grow|flex-shrink|flex-basis|outline-width|column-width|column-height|column-rule-width|row-rule-width|column-gap|row-gap|gap$|perspective$|border-spacing|shape-margin|fit-tolerance|letter-spacing-none)/;
     var INTEGER = /^(z-index|order|orphans|widows|column-count|flood-none)$/;
     function finish(prop, v) {
         /* (a gap rule's width snaps as a border's does) */
@@ -129,7 +129,7 @@
         if (prop === 'zoom') return v <= 0 ? 1 : v;
         if (prop === 'opacity' || /-opacity$/.test(prop) || prop === 'shape-image-threshold') v = Math.max(0, Math.min(1, v));
         else if (INTEGER.test(prop)) {
-            v = Math.round(v);
+            v = Math.round(v + 1e-3);   /* (a half reached through an easing's rounding: up) */
             /* (never under one of these) */
             if (v < 1 && (prop === 'widows' || prop === 'orphans' || prop === 'column-count')) v = 1;
         }
@@ -848,6 +848,21 @@
             /* (rgb() against rgba(): the same count of numbers) */
             var withAlpha = function (s) { return s.replace(/rgb\(([^()]*)\)/, 'rgba($1, 1)'); };
             if (/rgba\(/.test(x) !== /rgba\(/.test(y)) { x = withAlpha(x); y = withAlpha(y); }
+            /* (between two colors: premultiplied by their alphas, the same mix then on both) */
+            var cre = /^rgba\(([^()]*)\)/, cx = cre.exec(x), cy = cre.exec(y);
+            if (cx && cy && how(1, 1) === 1 && how(0, 0) === 0) {
+                var px = cx[1].split(',').map(parseFloat), py = cy[1].split(',').map(parseFloat);
+                if (px.length === 4 && py.length === 4) {
+                    /* (the alpha clamped first, the channels over it) */
+                    var al = Math.max(0, Math.min(1, how(px[3], py[3]))), ch = [0, 1, 2].map(function (k) {
+                        var v = how(px[k] * px[3], py[k] * py[3]);
+                        return al > 0 ? Math.max(0, Math.min(255, Math.round(v / al))) : 0;
+                    });
+                    var mixed = al >= 1 ? 'rgb(' + ch.join(', ') + ')' : 'rgba(' + ch.join(', ') + ', ' + fmt(al) + ')';
+                    x = x.replace(cre, mixed);
+                    y = y.replace(cre, mixed);
+                }
+            }
             if (prop === 'text-shadow') { x = x.replace(' 0px 0px 0px 0px', ' 0px 0px 0px'); y = y.replace(' 0px 0px 0px 0px', ' 0px 0px 0px'); }
             var v = combine(prop, x, y, how);
             if (v === null) return null;
@@ -876,11 +891,12 @@
                 if (hm) arg = fmt(+hm[1] * (hm[2].toLowerCase() === 'grad' ? 0.9 : hm[2].toLowerCase() === 'turn' ? 360 : 180 / Math.PI)) + 'deg';
             }
             /* (a shadow with no blur: of none, to go against one with) */
+            var nob = false;
             if (name === 'drop-shadow') {
                 var lens = arg.match(/-?[\d.]+(?:e[-+]?\d+)?px/g);
-                if (lens && lens.length === 2) arg = arg.replace(lens[1], lens[1] + ' 0px');
+                if (lens && lens.length === 2) { arg = arg.replace(lens[1], lens[1] + ' 0px'); nob = true; }
             }
-            out.push({ n: name, a: arg });
+            out.push({ n: name, a: arg, nob: nob });
         }
         return out;
     }
@@ -897,12 +913,31 @@
                 var fAlpha = function (s) { return s.replace(/rgb\(([^()]*)\)/, 'rgba($1, 1)'); };
                 fa = fAlpha(fa); fb = fAlpha(fb);
             }
+            /* (two shadow colors: premultiplied by their alphas, as box-shadow's) */
+            if (name === 'drop-shadow' && typeof how === 'function' && how(1, 1) === 1 && how(0, 0) === 0) {
+                var dre = /^rgba\(([^()]*)\)/, dx = dre.exec(fa), dy = dre.exec(fb);
+                if (dx && dy) {
+                    var qx = dx[1].split(',').map(parseFloat), qy = dy[1].split(',').map(parseFloat);
+                    if (qx.length === 4 && qy.length === 4) {
+                        var dal = Math.max(0, Math.min(1, how(qx[3], qy[3]))), dch = [0, 1, 2].map(function (k) {
+                            var dv = how(qx[k] * qx[3], qy[k] * qy[3]);
+                            return dal > 0 ? Math.max(0, Math.min(255, Math.round(dv / dal))) : 0;
+                        });
+                        var dmix = dal >= 1 ? 'rgb(' + dch.join(', ') + ')' : 'rgba(' + dch.join(', ') + ', ' + fmt(dal) + ')';
+                        fa = fa.replace(dre, dmix);
+                        fb = fb.replace(dre, dmix);
+                    }
+                }
+            }
             var v = combine(prop, fa, fb, how);
             if (v === null) return null;
             /* (a blur is never negative, and none needn't be said) */
             if (name === 'drop-shadow') {
-                v = v.replace(/^((?:rgba?\([^()]*\)\s+)?-?[\d.e-]+px\s+-?[\d.e-]+px\s+)-[\d.e-]+px/, '$10px')
-                     .replace(/^((?:rgba?\([^()]*\)\s+)?-?[\d.e-]+px\s+-?[\d.e-]+px)\s+0px$/, '$1');
+                v = v.replace(/^((?:rgba?\([^()]*\)\s+)?-?[\d.e-]+px\s+-?[\d.e-]+px\s+)-[\d.e-]+px/, '$10px');
+                /* (a zero blur goes unsaid, but at an end that said it) */
+                var tt_ = typeof how === 'function' ? how(0, 1) : 0.5;
+                var keep_ = (tt_ === 0 && (!x || !x.nob)) || (tt_ === 1 && (!y || !y.nob));
+                if (!keep_) v = v.replace(/^((?:rgba?\([^()]*\)\s+)?-?[\d.e-]+px\s+-?[\d.e-]+px)\s+0px$/, '$1');
             }
             if (name !== 'hue-rotate' && name !== 'drop-shadow') {
                 var fn = parseFloat(v);
@@ -984,7 +1019,16 @@
         if (!v.px) return fmt(v.pct) + '%';
         return 'calc(' + fmt(v.pct) + '% ' + (v.px < 0 ? '- ' : '+ ') + fmt(Math.abs(v.px)) + 'px)';
     }
-    function from100(v) { return { px: -v.px, pct: 100 - v.pct }; }
+    function from100(v) { return { px: -v.px, pct: 100 - v.pct, has: true }; }
+    /* (an inset's side: a percentage that came to 0 kept as 0%; at an end, as
+     * the value computes, beside its length too) */
+    function sideText(v, keep) {
+        if (!v.pct && (v.has || v.zeroPct)) {
+            if (!v.px) return '0%';
+            if (keep) return 'calc(0% ' + (v.px < 0 ? '- ' : '+ ') + fmt(Math.abs(v.px)) + 'px)';
+        }
+        return lpText(v);
+    }
     var BOX_AFTER = /\s+(border-box|padding-box|content-box|margin-box|fill-box|stroke-box|view-box)\s*$/;
     function insetParts(text) {
         var m = /^\s*(inset|rect|xywh)\(((?:[^()]|\([^()]*\))*)\)\s*$/i.exec(text);
@@ -1003,7 +1047,9 @@
             box = [auto(a[0], Z), from100(auto(a[1], F)), from100(auto(a[2], F)), auto(a[3], Z)];
         } else {
             var x = lpParse(a[0]), y = lpParse(a[1]), w = lpParse(a[2]), h = lpParse(a[3]);
-            box = [y, { px: -x.px - w.px, pct: 100 - x.pct - w.pct }, { px: -y.px - h.px, pct: 100 - y.pct - h.pct }, x];
+            var rr = 100 - x.pct - w.pct, bb = 100 - y.pct - h.pct;
+            /* (percentages that cancel: a length alone, as simplified) */
+            box = [y, { px: -x.px - w.px, pct: rr, has: Math.abs(rr) > 1e-9 }, { px: -y.px - h.px, pct: bb, has: Math.abs(bb) > 1e-9 }, x];
         }
         return { box: box, round: round };
     }
@@ -1052,7 +1098,7 @@
         }
         var pa = insetParts(a), pb = insetParts(b);
         if (!pa || !pb) return null;
-        var l = function (x, y) { return { px: x.px + (y.px - x.px) * t, pct: x.pct + (y.pct - x.pct) * t }; };
+        var l = function (x, y) { return { px: x.px + (y.px - x.px) * t, pct: x.pct + (y.pct - x.pct) * t, has: x.has || x.zeroPct || y.has || y.zeroPct }; };
         /* (rect() and xywh() stay what they are, against their own kind) */
         var fa = /^\s*(rect|xywh)\(/i.exec(a), fb = /^\s*(rect|xywh)\(/i.exec(b);
         if (prop !== 'shape-outside' && fa && fb && fa[1].toLowerCase() === fb[1].toLowerCase() && !/\bauto\b/i.test(a + b)) {
@@ -1066,7 +1112,8 @@
             }
             return fa[1].toLowerCase() + '(' + xa.map(function (x, i) { return lpMixText(lpMix(lpParse(x), lpParse(xb[i]), t)); }).join(' ') + rr + ')';
         }
-        var v = pa.box.map(function (x, i) { return lpText(l(x, pb.box[i])); });
+        /* (at an end: that end's own sides, as it computes) */
+        var v = pa.box.map(function (x, i) { return t === 0 ? sideText(x, true) : t === 1 ? sideText(pb.box[i], true) : sideText(l(x, pb.box[i]), false); });
         var txt = v[1] === v[0] && v[2] === v[0] && v[3] === v[0] ? v[0] : v.join(' ');
         var rv = '';
         if (pa.round || pb.round) {
@@ -1869,6 +1916,17 @@
         });
     }
     function addValues(prop, under, value, how) {
+        /* (a size keyword and a length: the keyword's size with the length added; two keywords
+         * don't add, the one added is what there is) */
+        if (SIZE_PROP.test(prop) && typeof under === 'string' && typeof value === 'string') {
+            var sk = function (x) { return SIZE_KEYWORD.test(x) && !/^\s*none\s*$/i.test(x); };
+            var lp = function (x) { return /^\s*(-?[\d.]+(px|%)|calc\([^]*\))\s*$/i.test(x); };
+            if (sk(under) && sk(value)) return value;
+            if (sk(under) && lp(value)) return 'calc-size(' + under.trim() + ', ' + value.trim() + ' + size)';
+            /* (a keyword added onto a length: of the block axis, or auto as a minimum or maximum, the keyword alone) */
+            if (sk(value) && lp(under) && (/height|block-size/.test(prop) || (/^(min|max)-/.test(prop) && /^\s*auto\s*$/i.test(value)))) return value;
+            if (sk(value) && lp(under)) return 'calc-size(' + value.trim() + ', ' + under.trim() + ' + size)';
+        }
         /* (two insets: side by side and corner by corner) */
         if (SHAPE_PROP.test(prop) && /^\s*inset\(/i.test(under) && /^\s*inset\(/i.test(value) && !BOX_AFTER.test(under) && !BOX_AFTER.test(value)) {
             var iu = insetParts(under), iv = insetParts(value), eu = roundEight(iu && iu.round), ev = roundEight(iv && iv.round);
@@ -1991,6 +2049,8 @@
         if ((prop === 'filter' || prop === 'backdrop-filter') && /%|\(\s*\)|drop-shadow\(/.test(value)) return true;
         if (/^(min-|max-)?(width|height)$/.test(prop) && /calc-size\(|^\s*(auto|min-content|max-content|fit-content|stretch)\s*$/i.test(value)) return true;
         if (RELATIVE.test(value)) return true;
+        /* (what depends on the element's place among its siblings) */
+        if (/sibling-(index|count)\(|random\(/i.test(value)) return true;
         if (COLORISH.test(prop) && !/^\s*[-+\d.]/.test(value) && value !== 'none') return true;
         return false;
     }
@@ -2175,17 +2235,29 @@
             var under = v;
             /* (a keyword without allow-keywords: it doesn't interpolate) */
             if (SIZE_PROP.test(prop)) {
-                if (!sizesInterpolate(el, prop, a.value === null ? specBase : a.value, b.value === null ? specBase : b.value)) { a = local < 0.5 ? a : b; b = a; local = 0; }
+                /* (as composited onto what's declared under it: a keyword added to is a calc-size() of it) */
+                var specOf = function (pt) {
+                    if (pt.value === null) return specBase;
+                    return (pt.composite === 'add' || pt.composite === 'accumulate') && typeof specBase === 'string' ? addValues(prop, specBase, pt.value, pt.composite) : pt.value;
+                };
+                if (!sizesInterpolate(el, prop, specOf(a), specOf(b))) { a = local < 0.5 ? a : b; b = a; local = 0; }
             }
             var at = function (pt) {
                 if (pt.value === null) return under;
-                var u = computedInContext(el, prop, pt.value, under);
-                return pt.composite === 'add' || pt.composite === 'accumulate' ? addValues(prop, under, u, pt.composite) : u;
+                var comp = pt.composite === 'add' || pt.composite === 'accumulate';
+                /* (a size keyword under it: added onto the keyword, not the length the box came to) */
+                var base_ = comp && SIZE_PROP.test(prop) && typeof specBase === 'string' && SIZE_KEYWORD.test(specBase) ? specBase.trim() : under;
+                var u = computedInContext(el, prop, pt.value, base_);
+                return comp ? addValues(prop, base_, u, pt.composite) : u;
             };
             var atA = at(a), atB = at(b);
             /* (a keyword, between sizes: what it comes to) */
-            if (atA !== atB) { atA = sizeResolved(el, prop, atA); atB = sizeResolved(el, prop, atB); }
+            var spi = atA !== atB ? sizePctIndefinite(el, prop, atA, atB, a.value === null ? specBase : a.value, b.value === null ? specBase : b.value) : null;
+            if (spi) { atA = spi[0]; atB = spi[1]; }
+            else if (atA !== atB) { atA = sizeResolved(el, prop, atA); atB = sizeResolved(el, prop, atB); }
             v = interpolate(prop, atA, atB, local);
+            /* (a calc-size() composited: the length it comes to here) */
+            if (SIZE_PROP.test(prop) && typeof v === 'string' && /^\s*calc-size\(/i.test(v)) v = sizeResolved(el, prop, v);
         }
         return v;
     }
@@ -2227,6 +2299,8 @@
         var moving = global.__cyberAnimRunning(el).length > 0 || parseFloat(global.getComputedStyle(el).transitionDuration) > 0;
         if (moving && key in memo) return memo[key];
         var v = calcSizePx(el, axis, spec);
+        /* (a size is never under nothing) */
+        if (typeof v === 'string' && /^\s*-[\d.]/.test(v)) v = '0px';
         /* (while the effects are being sampled, what was being read stays) */
         if (!applying) {
             setStyle(el, null);
@@ -2250,6 +2324,16 @@
         }
         return SIZE_KEYWORD.test(v) ? v.toLowerCase() : 'any';
     }
+    /* (how many copies of its innermost basis a calc-size() comes to: each level's
+     * uses of size times its basis's) */
+    function sizeExpansion(v) {
+        var m = /^\s*calc-size\(([\s\S]*)\)\s*$/i.exec(String(v));
+        if (!m) return 1;
+        var c = firstComma(m[1]);
+        if (c < 0) return 1;
+        var uses = (m[1].slice(c + 1).match(/\bsize\b/g) || []).length;
+        return Math.max(uses, 1) * sizeExpansion(m[1].slice(0, c));
+    }
     /* Whether two declared sizes interpolate (css-values-5 calc-size, css-sizing-4
      * interpolate-size); null: what the property starts as. */
     function sizesInterpolate(el, prop, a, b) {
@@ -2264,6 +2348,8 @@
             if (ka && kb) return false;
             if (global.getComputedStyle(el).interpolateSize !== 'allow-keywords') return false;
         }
+        /* (not where going between would expand too far: csswg-drafts 10369) */
+        if (sizeExpansion(a) > 10000 || sizeExpansion(b) > 10000) return false;
         var ba = sizeBasis(a), bb = sizeBasis(b);
         return ba === bb || ba === 'any' || bb === 'any';
     }
@@ -2279,12 +2365,46 @@
     }
     /* A size's keyword as a length, what the box would have by it (a minimum's
      * or maximum's too: as width or height have it).  'none' has none. */
+    /* (a calc-size() of a keyword and a percentage of a height that isn't definite:
+     * the percentage, in the calc-size() they go between, comes to 0) */
+    function sizePctIndefinite(el, prop, a, b, ra, rb) {
+        /* (as declared, when that's known: what they are computed to has lost the calc-size()) */
+        if (typeof ra === 'string' && typeof rb === 'string') { a = ra; b = rb; }
+        if (!/height|block-size/.test(prop) || typeof a !== 'string' || typeof b !== 'string') return null;
+        var kw = /^\s*calc-size\(\s*(auto|min-content|max-content|fit-content)\s*,/i;
+        var plain = function (x) { return x.indexOf('%') >= 0 && !/calc-size\(/i.test(x) && !SIZE_KEYWORD.test(x); };
+        /* (two calc-size()s of lengths, one a percentage: the basis they go between has one, so it's auto) */
+        var lb = /^\s*calc-size\(\s*([^,]*?)\s*,/i, ma = lb.exec(a), mb = lb.exec(b);
+        var lens = ma && mb && !SIZE_KEYWORD.test(ma[1]) && !SIZE_KEYWORD.test(mb[1]) && !/calc-size|any/i.test(ma[1] + mb[1]) &&
+                   (ma[1] + mb[1]).indexOf('%') >= 0 && ma[1].toLowerCase() !== mb[1].toLowerCase();
+        if (!lens && !((kw.test(a) && plain(b)) || (kw.test(b) && plain(a)))) return null;
+        var probe = readWith(el, 'height', 'calc(100% + 54321px)');
+        setStyle(el, null);
+        if (!applying) applyTarget(el);
+        if (!probe || parseFloat(probe) >= 54321) return null;
+        if (lens) {
+            var auto = function (x, m) { return 'calc-size(auto' + x.slice(m[0].length - 1); };
+            return [sizeResolved(el, prop, auto(a, ma)), sizeResolved(el, prop, auto(b, mb))];
+        }
+        var zero = function (x) { return plain(x) ? x.replace(/[-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?%/gi, '0px') : x; };
+        return [sizeResolved(el, prop, zero(a)), sizeResolved(el, prop, zero(b))];
+    }
     function sizeResolved(el, prop, v) {
-        if (!SIZE_PROP.test(prop) || typeof v !== 'string' || !SIZE_KEYWORD.test(v) || /^\s*none\s*$/i.test(v)) return v;
+        if (!SIZE_PROP.test(prop) || typeof v !== 'string' || /^\s*none\s*$/i.test(v)) return v;
         /* (a logical size: the physical one it is in this writing mode) */
         var horiz = /^horizontal/.test(global.getComputedStyle(el).writingMode || 'horizontal-tb');
         var wide = /width/.test(prop) || (/inline-size/.test(prop) && horiz) || (/block-size/.test(prop) && !horiz);
-        var got = readWith(el, wide ? 'width' : 'height', v);
+        /* (a calc-size() that adding made: its length on this box) */
+        if (/^\s*calc-size\(/i.test(v)) {
+            var cz = calcSizePx(el, wide ? 'width' : 'height', v);
+            setStyle(el, null);
+            if (!applying) applyTarget(el);
+            return cz === null ? v : /^\s*-[\d.]/.test(cz) ? '0px' : cz;
+        }
+        if (!SIZE_KEYWORD.test(v)) return v;
+        /* (a minimum's or maximum's keyword: the size it names, not held by the limits in force now) */
+        var lift = /^(min|max)-/.test(prop) ? (wide ? '; min-width: 0px; max-width: none' : '; min-height: 0px; max-height: none') : '';
+        var got = readWith(el, wide ? 'width' : 'height', v + lift);
         setStyle(el, null);
         if (!applying) applyTarget(el);
         return got || v;
@@ -2313,6 +2433,9 @@
         if (!rec) { state.set(prop, rec = { last: before === undefined ? base : before, lastSpec: specBefore, run: null }); }
         var now = global.__cyberAnimNow();
         var fromSpec = rec.lastSpec;
+        /* (the same length but for its rounding: no change) */
+        var pxa_ = /^\s*(-?[\d.]+(?:e[-+]?\d+)?)px\s*$/i.exec(String(base)), pxb_ = /^\s*(-?[\d.]+(?:e[-+]?\d+)?)px\s*$/i.exec(String(rec.last));
+        if (pxa_ && pxb_ && base !== rec.last && Math.abs(+pxa_[1] - +pxb_[1]) < 1e-4) base = rec.last;
         if (base === rec.last) rec.lastSpec = specNow;
         /* (what comes down from a parent that is transitioning it doesn't start one) */
         var pe = el.parentElement, up = null, prec = null;
@@ -2337,6 +2460,13 @@
             rec.last = base;
             rec.lastSpec = specNow;
             rec.run = null;
+            /* (inherited from a parent that transitions it too: the parent's transition, none here) */
+            var upDecl_ = false;
+            if (at >= 0 && !up && (specNow === null || specNow === undefined || /^\s*inherit\s*$/i.test(String(specNow))) && pe && global.__cyberHasAnimSpec(pe)) {
+                var pcs_ = global.getComputedStyle(pe), pn_ = String(pcs_.transitionProperty).split(',').map(function (x) { return x.trim(); });
+                var pi_ = transitionItem(pn_, prop, sizeLogical(pe, prop));
+                upDecl_ = pi_ >= 0 && seconds(listItem(pcs_.transitionDuration, pi_)) + Math.max(0, seconds(listItem(pcs_.transitionDelay, pi_))) > 0;
+            }
             if (at >= 0 && !up) {
                 var dur = seconds(listItem(cs.transitionDuration, at)), delay = seconds(listItem(cs.transitionDelay, at));
                 var discrete = listItem(cs.transitionBehavior || 'normal', at) === 'allow-discrete';
@@ -2375,9 +2505,18 @@
                 if (dur + delay > 0 && (can || discrete)) {
                     var easing;
                     try { easing = parseEasing(listItem(cs.transitionTimingFunction, at)); } catch (e) { easing = LINEAR; }
-                    rec.run = { from: can ? sizeResolved(el, prop, from) : from, to: can ? sizeResolved(el, prop, base) : base, start: now, dur: dur, delay: delay, easing: easing, flip: !can };
+                    var spt = can ? sizePctIndefinite(el, prop, from, base, fromSpec, specNow) : null;
+                    rec.run = { from: spt ? spt[0] : can ? sizeResolved(el, prop, from) : from, to: spt ? spt[1] : can ? sizeResolved(el, prop, base) : base, start: now, dur: dur, delay: delay, easing: easing, flip: !can };
                     /* (one the engine runs too has its events and its animation there) */
-                    if (ENGINE_RUNS.test(prop) && !/%/.test(String(specNow) + String(fromSpec)) && !wideColorPairs(from, base) && !(SIZE_PROP.test(prop) && /calc-size\(|^\s*(auto|none|min-content|max-content|fit-content|stretch)\s*$/i.test(String(specNow) + ' ' === ' ' ? '' : String(specNow)))) rec.run.quiet = true;
+                    /* (inherited, of a parent's percentage: the engine has no length to go between, so script's) */
+                    var inhPct_ = function (sp) {
+                        if (sp && !/^\s*inherit\s*$/i.test(sp)) return false;
+                        var pe_ = el.parentElement, pv_ = pe_ && global.__cyberComputedValue ? global.__cyberComputedValue(pe_, prop) : null;
+                        return typeof pv_ === 'string' && pv_.indexOf('%') >= 0;
+                    };
+                    /* (the parent transitions it as well: its events are the parent's, none here) */
+                    if (upDecl_) rec.run.quiet = true;
+                    else if (ENGINE_RUNS.test(prop) && !/%/.test(String(specNow) + String(fromSpec)) && !inhPct_(specNow) && !inhPct_(fromSpec) && !wideColorPairs(from, base) && !(SIZE_PROP.test(prop) && /calc-size\(|^\s*(auto|none|min-content|max-content|fit-content|stretch)\s*$/i.test(String(specNow) + ' ' === ' ' ? '' : String(specNow)))) rec.run.quiet = true;
                     else transitionEvents(el, prop, rec.run);
                 }
             }
@@ -2388,7 +2527,8 @@
     /* (these don't animate at all) */
     var NOT_ANIMATABLE = /^(interpolate-size|transition(-[a-z-]+)?|animation(-[a-z-]+)?)$/;
     var ENGINE_RUNS = /^(left|top|right|bottom|opacity|transform|width|height|color|background-color|(padding|margin)-(top|right|bottom|left)|border-(top|right|bottom|left)-width|font-size|letter-spacing|word-spacing|font-weight)$/;
-    function transitionDone(run, now) { return now - run.start - run.delay >= run.dur; }
+    /* (filling forwards, as script can ask: in effect still) */
+    function transitionDone(run, now) { return run.fill !== 'forwards' && run.fill !== 'both' && now - run.start - run.delay >= run.dur; }
     function transitionFire(el, type, prop, secs) {
         if (el.isConnected) el.dispatchEvent(new global.TransitionEvent(type, { bubbles: true, propertyName: prop, elapsedTime: secs, pseudoElement: '' }));
     }
@@ -2427,7 +2567,7 @@
         var total = function () { return run.delay + run.dur; };
         var val = function (name, v) { Object.defineProperty(a, name, { configurable: true, enumerable: true, writable: true, value: v }); };
         val('id', '');
-        val('transitionProperty', prop);
+        hide(a, '_tp', prop);
         val('onfinish', null);
         val('oncancel', null);
         val('onremove', null);
@@ -2436,6 +2576,8 @@
             var now = global.__cyberAnimNow();
             run.start = now - Number(t);
             if (!run.over) transitionArm(el, prop, run, now);
+            /* (style read after this: as it is at that time, the element marked changed) */
+            if (!applying) { setStyle(el, '--cyber-seek: 1'); setStyle(el, null); applyTarget(el); }
         });
         own('startTime', function () { return run.start; }, function (t) {
             run.start = Number(t);
@@ -2446,15 +2588,20 @@
         own('playbackRate', function () { return 1; }, function () {});
         own('timeline', function () { return defaultTimeline; });
         own('replaceState', function () { return 'active'; });
-        var timing = function () { return { delay: run.delay, endDelay: 0, fill: 'backwards', iterationStart: 0, iterations: 1, duration: run.dur, direction: 'normal', easing: 'ease' }; };
-        val('effect', { target: el, pseudoElement: null, getTiming: timing, getKeyframes: function () { return []; },
+        var timing = function () { return { delay: run.delay, endDelay: 0, fill: run.fill || 'backwards', iterationStart: 0, iterations: 1, duration: run.dur, direction: 'normal', easing: 'ease' }; };
+        val('effect', { target: el, pseudoElement: null, getTiming: timing, getKeyframes: function () {
+                            var f0 = { offset: 0, computedOffset: 0, easing: 'linear', composite: 'auto' }, f1 = { offset: 1, computedOffset: 1, easing: 'linear', composite: 'auto' };
+                            f0[prop.lastIndexOf('--', 0) === 0 ? prop : idlName(prop)] = String(run.from); f1[prop.lastIndexOf('--', 0) === 0 ? prop : idlName(prop)] = String(run.to);
+                            return [f0, f1];
+                        },
                         getComputedTiming: function () {
                             var t = timing(), c = a.currentTime;
                             t.endTime = total(); t.activeDuration = run.dur; t.localTime = c;
                             t.progress = run.dur > 0 ? Math.max(0, Math.min(1, (c - run.delay) / run.dur)) : 1;
                             t.currentIteration = 0;
                             return t;
-                        } });
+                        },
+                        updateTiming: function (o) { if (o && o.fill !== undefined) run.fill = String(o.fill); } });
         val('cancel', function () { if (!run.over) transitionCancel(el, prop, run, global.__cyberAnimNow()); });
         val('finish', function () { a.currentTime = total(); });
         ['pause', 'play', 'reverse', 'persist', 'commitStyles', 'updatePlaybackRate', 'addEventListener', 'removeEventListener'].forEach(function (n) { val(n, function () {}); });
@@ -2465,7 +2612,7 @@
         var x = run.dur > 0 ? (now - run.start - run.delay) / run.dur : 1;
         /* (colors in oklab are in it at their ends too) */
         if (x <= 0) return wideColorPairs(run.from, run.to) ? interpolate(prop, run.from, run.to, 0) : run.from;
-        if (x >= 1) return run.to;
+        if (x >= 1) return wideColorPairs(run.from, run.to) && (run.fill === 'forwards' || run.fill === 'both') ? interpolate(prop, run.from, run.to, 1) : run.to;
         if (run.flip) return run.easing.fn(x) < 0.5 ? run.from : run.to;
         return interpolate(prop, run.from, run.to, run.easing.fn(x));
     }
@@ -2491,6 +2638,7 @@
         if (NOT_ANIMATABLE.test(prop)) return base;
         var v = keyframesOnly ? base : cssTransitionOver(el, prop, base, before, specNow, specBefore);
         v = cssAnimationsOver(el, prop, v, specNow);
+        if ((prop === 'clip-path' || prop === 'offset-path') && typeof v === 'string') v = v.replace(/\)\s+border-box\s*$/, ')');
         /* (a border of no style has no width, however it's animated) */
         if (/^border-(top|right|bottom|left)-width$/.test(prop) && typeof v === 'string' && v !== '0px' &&
             /^(none|hidden)$/.test(global.getComputedStyle(el).getPropertyValue(prop.replace('width', 'style')))) v = '0px';
@@ -2742,7 +2890,16 @@
     KeyframeEffect.prototype = Object.create(AnimationEffect.prototype, { constructor: { value: KeyframeEffect, writable: true, configurable: true } });
     setMethods(KeyframeEffect.prototype, {
         getKeyframes: function () {
-            if (this._anim && this._anim.animationName !== undefined && !this._frames.length) return cssKeyframes(this._target, this._anim.animationName);
+            if (this._anim && this._anim._an !== undefined && !this._frames.length) return cssKeyframes(this._target, this._anim._an);
+            /* (a transition's: its two ends, linear) */
+            if (this._anim && this._anim._tp !== undefined && !this._frames.length && this._anim._rec) {
+                var ends = rowOp(8, this._anim._rec.row, this._anim._rec.gen);
+                if (!ends) return [];
+                var nm = idlName(this._anim._tp);
+                var f0 = { offset: 0, computedOffset: 0, easing: 'linear', composite: 'auto' }, f1 = { offset: 1, computedOffset: 1, easing: 'linear', composite: 'auto' };
+                f0[nm] = ends[1]; f1[nm] = ends[2];
+                return [f0, f1];
+            }
             var comp = this._composite;
             return this._frames.map(function (f) {
                 var o = { offset: f.offset, computedOffset: f.computed, easing: f.easing.text, composite: f.composite };
@@ -2820,7 +2977,8 @@
                 if (p.value !== null && (p.composite === 'add' || p.composite === 'accumulate')) u = addValues(prop, under(), u, p.composite);
                 return u;
             };
-            var ends = /color/.test(prop) && !!wideColorPairs(a.value === null ? under() : resolve(a), b.value === null ? under() : resolve(b)) || (prop === 'transform' && a.value !== b.value) || prop === 'translate' || prop === 'rotate' || prop === 'scale' || prop === 'offset-rotate' || prop === 'aspect-ratio' || prop === 'border-spacing' || (RULE_LIST.test(prop) && /,/.test(String(a.value) + String(b.value))) || prop === 'border-shape' || /^(border-image|mask-border)-(slice|width|outset)$/.test(prop) || prop === 'filter' || prop === 'backdrop-filter' || REPEATABLE.test(prop) || prop === 'box-shadow' || prop === 'text-shadow' || SHAPE_PROP.test(prop);
+            var ends = /color/.test(prop) && !!wideColorPairs(a.value === null ? under() : resolve(a), b.value === null ? under() : resolve(b)) || (prop === 'transform' && a.value !== b.value) || prop === 'translate' || prop === 'rotate' || prop === 'scale' || prop === 'offset-rotate' || prop === 'aspect-ratio' || prop === 'border-spacing' || (RULE_LIST.test(prop) && /,/.test(String(a.value) + String(b.value))) || prop === 'border-shape' || /^(border-image|mask-border)-(slice|width|outset)$/.test(prop) || prop === 'filter' || prop === 'backdrop-filter' || REPEATABLE.test(prop) || prop === 'box-shadow' || prop === 'text-shadow' || SHAPE_PROP.test(prop) || prop === 'vertical-align' ||
+                       (SIZE_PROP.test(prop) && (/calc-size\(|^\s*(auto|min-content|max-content|fit-content|stretch|initial|unset)\s*$/i.test(String(a.value)) || /calc-size\(|^\s*(auto|min-content|max-content|fit-content|stretch|initial|unset)\s*$/i.test(String(b.value))) && !/^\s*none\s*$/i.test(String(a.value)) && !/^\s*none\s*$/i.test(String(b.value)));
             /* (an inset that's auto doesn't go between) */
             var autoish = function (v) { return v !== null && /^\s*(auto|initial|unset|revert|revert-layer)\s*$/i.test(v); };
             if (/^(top|right|bottom|left)$/.test(prop) && (autoish(a.value) || autoish(b.value))) {
@@ -2828,12 +2986,15 @@
                 return;
             }
             /* (sizes that don't interpolate: the nearer keyframe) */
-            if (SIZE_PROP.test(prop) && !sizesInterpolate(el, prop, a.value === null ? under() : a.value,
-                                                           b.value === null ? under() : b.value)) {
+            /* (a keyframe added to what is under it: as that sum) */
+            var sized = function (p) { return p.value === null ? under() : p.composite === 'add' || p.composite === 'accumulate' ? resolve(p) : p.value; };
+            if (SIZE_PROP.test(prop) && !sizesInterpolate(el, prop, sized(a), sized(b))) {
                 out.set(prop, eased < 0.5 ? resolve(a) : resolve(b));
                 return;
             }
-            out.set(prop, eased === 0 && !ends ? resolve(a) : eased === 1 && !ends ? resolve(b) : interpolate(prop, sizeResolved(el, prop, resolve(a)), sizeResolved(el, prop, resolve(b)), eased));
+            var spw = SIZE_PROP.test(prop) ? sizePctIndefinite(el, prop, resolve(a), resolve(b), a.value, b.value) : null;
+            if (spw) out.set(prop, interpolate(prop, spw[0], spw[1], eased));
+            else out.set(prop, eased === 0 && !ends ? resolve(a) : eased === 1 && !ends ? resolve(b) : interpolate(prop, sizeResolved(el, prop, resolve(a)), sizeResolved(el, prop, resolve(b)), eased));
         });
     }
     function baseValue(effect, el, prop) {
@@ -3294,7 +3455,12 @@
 
     /* ---- CSSAnimation, CSSTransition: Animation objects over css_anim.c's rows ---- */
     var rowOp = global.__cyberAnimRow, wrappers = new Map(), awaitingEnd = new Set();
-    function rowTiming(a) { return a._gone ? null : rowOp(0, a._rec.row, a._rec.gen); }
+    function rowTiming(a) {
+        if (a._gone) return null;
+        var v = rowOp(0, a._rec.row, a._rec.gen);
+        if (v) { hide(a, '_lastV', v); hide(a, '_lastAt', global.performance.now()); }
+        return v;
+    }
     /* (the store's clock, on the timeline's) */
     function clockDelta(v) { return global.performance.now() - v[9]; }
     function CSSAnimation() { throw new TypeError('Illegal constructor'); }
@@ -3303,19 +3469,52 @@
     CSSTransition.prototype = Object.create(Animation.prototype, { constructor: { value: CSSTransition, writable: true, configurable: true } });
     Object.defineProperty(CSSAnimation.prototype, Symbol.toStringTag, { value: 'CSSAnimation', configurable: true });
     Object.defineProperty(CSSTransition.prototype, Symbol.toStringTag, { value: 'CSSTransition', configurable: true });
+    /* (as Web IDL has them: interfaces of Animation, their prototypes fixed, the names on them) */
+    [CSSAnimation, CSSTransition].forEach(function (C) {
+        Object.setPrototypeOf(C, Animation);
+        Object.defineProperty(C, 'prototype', { writable: false, enumerable: false, configurable: false });
+    });
+    Object.defineProperty(CSSTransition.prototype, 'transitionProperty', { configurable: true, enumerable: true, get: function () { if (!this || !Object.prototype.hasOwnProperty.call(this, '_tp')) throw new TypeError('Illegal invocation'); return this._tp; } });
+    Object.defineProperty(CSSAnimation.prototype, 'animationName', { configurable: true, enumerable: true, get: function () { if (!this || !Object.prototype.hasOwnProperty.call(this, '_an')) throw new TypeError('Illegal invocation'); return this._an; } });
+    /* (an event's animation: the wrapper of the row it is for) */
+    hide(global, '__cyberAnimEventWrap', function (el, row, gen, trans, name, pseudo) {
+        var rec = { row: row, gen: gen, pseudo: pseudo || '' };
+        if (trans) rec.transitionProperty = name; else rec.animationName = name;
+        return wrapRow(rec, el);
+    });
     /* What's left once its row has gone. */
     function settleRow(a) {
         if (a._gone) return;
         var v = rowTiming(a);
         if (v) { if (v[6]) hide(a, '_ended', true); return; }
         a._gone = true;
-        /* (gone before it ended: cancelled, by a change of style) */
+        /* (gone after its end time, as last read: it ended; before: cancelled, by a change of style) */
+        var lv = a._lastV;
+        if (!a._ended && lv && !a._cancelled && lv[9] + (global.performance.now() - a._lastAt) >= lv[0] + lv[1] + lv[2] * lv[3] - 1) hide(a, '_ended', true);
         a._state = a._ended ? 'finished' : 'idle';
+    }
+    /* (what a script change to one of them does to style read next: the element marked changed) */
+    function touchRow(a) {
+        var t = a._cssEffect && a._cssEffect._target;
+        if (t && !applying) { setStyle(t, '--cyber-seek: 1'); setStyle(t, null); applyTarget(t); }
     }
     [CSSAnimation.prototype, CSSTransition.prototype].forEach(function (P) {
         setAccessors(P, {
-            effect: [function () { return this._cssEffect; }, noop],
-            timeline: [function () { return defaultTimeline; }, noop],
+            effect: [function () { return this._cssEffect; }, function (v) {
+                /* (no effect: finished at once, the style as it is after the change) */
+                if (v === null) {
+                    settleRow(this);
+                    var tv = rowTiming(this);
+                    if (tv) rowOp(1, this._rec.row, this._rec.gen, tv[1] + tv[2] * tv[3]);
+                    touchRow(this);
+                    hide(this, '_cssEffect', null);
+                } else if (v instanceof KeyframeEffect) hide(this, '_cssEffect', v);
+            }],
+            timeline: [function () { return this._noTimeline ? null : defaultTimeline; }, function (v) {
+                /* (no timeline: it stops running, cancelled) */
+                if (v === null) { if (!this._gone) this.cancel(); hide(this, '_noTimeline', true); }
+                else hide(this, '_noTimeline', false);
+            }],
             pending: [function () { return false; }, undefined],
             ready: [function () { return Promise.resolve(this); }, undefined],
             finished: [function () {
@@ -3341,8 +3540,10 @@
                 return v[4];
             }, function (t) {
                 settleRow(this);
+                if ((t === null || t === undefined) && !this._gone) throw new TypeError('currentTime may not be changed from resolved to unresolved');
                 if (this._gone || t === null || t === undefined) return;
                 rowOp(1, this._rec.row, this._rec.gen, Number(t));
+                touchRow(this);
             }],
             startTime: [function () {
                 settleRow(this);
@@ -3351,15 +3552,15 @@
             }, function (t) {
                 settleRow(this);
                 var v = rowTiming(this);
-                if (v && t !== null && t !== undefined) rowOp(2, this._rec.row, this._rec.gen, Number(t) - clockDelta(v));
+                if (v && t !== null && t !== undefined) { rowOp(2, this._rec.row, this._rec.gen, Number(t) - clockDelta(v)); touchRow(this); }
             }]
         });
         setMethods(P, {
-            play: function () { settleRow(this); if (!this._gone) rowOp(4, this._rec.row, this._rec.gen); },
-            pause: function () { settleRow(this); if (!this._gone) rowOp(3, this._rec.row, this._rec.gen); },
+            play: function () { settleRow(this); if (!this._gone) { rowOp(4, this._rec.row, this._rec.gen); touchRow(this); } },
+            pause: function () { settleRow(this); if (!this._gone) { rowOp(3, this._rec.row, this._rec.gen); touchRow(this); } },
             cancel: function () {
                 settleRow(this);
-                if (!this._gone) { this._rec.cancel(); this._gone = true; }
+                if (!this._gone) { this._rec.cancel(); this._gone = true; hide(this, '_cancelled', true); touchRow(this); }
                 this._state = 'idle';
                 awaitingEnd.delete(this);
             },
@@ -3369,6 +3570,7 @@
                 if (!v) return;
                 if (!isFinite(v[3])) throw new global.DOMException('Cannot finish an infinite animation', 'InvalidStateError');
                 rowOp(1, this._rec.row, this._rec.gen, v[1] + v[2] * v[3]);
+                touchRow(this);
             },
             reverse: noop,
             updatePlaybackRate: noop,
@@ -3391,8 +3593,8 @@
         hide(a, '_listeners', {});
         a.id = '';
         a.onfinish = a.oncancel = a.onremove = null;
-        if (isTransition) a.transitionProperty = rec.transitionProperty;
-        else a.animationName = rec.animationName;
+        if (isTransition) hide(a, '_tp', rec.transitionProperty);
+        else hide(a, '_an', rec.animationName);
         var effect = Object.create(KeyframeEffect.prototype);
         hide(effect, '_target', el);
         hide(effect, '_pseudo', rec.pseudo || null);
@@ -3407,6 +3609,15 @@
             kept = timingOf({ delay: v[1], duration: v[2], iterations: v[3] });
             kept.fill = FILLS[v[7]] || 'none';
             kept.direction = DIRECTIONS[v[8]] || 'normal';
+            /* (a transition's effect: filling backwards, eased by its transition-timing-function) */
+            if (isTransition) {
+                kept.fill = 'backwards';
+                try {
+                    var tcs = global.getComputedStyle(el), tn = String(tcs.transitionProperty).split(',').map(function (x) { return x.trim(); });
+                    var ti = transitionItem(tn, rec.transitionProperty, sizeLogical(el, rec.transitionProperty));
+                    if (ti >= 0) { var pe = parseEasing(listItem(tcs.transitionTimingFunction, ti)); kept.easing = pe.text; kept.fn = pe.fn; }
+                } catch (e) { /* (as it was) */ }
+            }
             return kept;
         }, set: function (t) {
             /* (updateTiming: what changed, to the engine's row) */
@@ -3491,10 +3702,16 @@
             var tp = String(gcs.transitionProperty || '');
             if (tp.indexOf('--') >= 0) tp.split(',').forEach(function (n) { n = n.trim(); if (n.slice(0, 2) === '--') gcs.getPropertyValue(n); });
         }
-        var got = Array.from(rowsOf.call(el)).map(function (rec) { return wrapRow(rec, el); });
-        var st = transitionsOf.get(el);
-        if (st) st.forEach(function (rec, prop) { if (rec.run && !rec.run.over && !rec.run.quiet) got.push(transitionAnimation(el, prop, rec.run)); });
-        return got;
+        var got = Array.from(rowsOf.call(el)).map(function (rec) { var w = wrapRow(rec, el); rowTiming(w); return w; });
+        /* (transitions started together: by property name) */
+        got.sort(function (x, y) {
+            if (x._tp === undefined || y._tp === undefined || !x._lastV || !y._lastV || Math.abs(x._lastV[0] - y._lastV[0]) > 0.5) return 0;
+            return x._tp < y._tp ? -1 : x._tp > y._tp ? 1 : 0;
+        });
+        var st = transitionsOf.get(el), mine = {};
+        if (st) st.forEach(function (rec, prop) { if (rec.run && !rec.run.over && !rec.run.quiet) { got.push(transitionAnimation(el, prop, rec.run)); mine[prop] = true; } });
+        /* (one the script runs: not the engine's of the same property too) */
+        return got.filter(function (x) { return !(x._rec && x._tp !== undefined && mine[x._tp]); });
     }
     var nativeGet = rowsOf ? { call: nativeGetOf_ } : null;
     function nativeGetOf_(el) { return nativeGetOf(el); }

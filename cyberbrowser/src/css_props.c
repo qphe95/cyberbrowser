@@ -901,7 +901,7 @@ static int calc_value(const Toks *ts, int i, int pct) {
         }
         if (!na) return -1;
         if (strcasecmp(f, "progress") == 0) {
-            if (na != 3 || !args[0] || (args[0] & ~args[1]) || (args[1] & ~args[2]) || (args[2] & ~args[0])) return -1;
+            if (na != 3 || !args[0] || (args[0] & (1 << 30)) || (args[0] & ~args[1]) || (args[1] & ~args[2]) || (args[2] & ~args[0])) return -1;   /* (1 << 30: CALC_COMPOSITE, a product of units: not a progress) */
             return D_NUMBER;
         }
         /* (one argument each; a percentage only where there's something it's of) */
@@ -937,9 +937,32 @@ static int calc_value(const Toks *ts, int i, int pct) {
     }
 }
 
+/* Typed arithmetic (css-values-4 10.9): a type that isn't one of the base
+ * flags is a product of them, its powers packed three bits each (offset 4) above bit 8
+ * under CALC_COMPOSITE. */
+#define CALC_COMPOSITE (1 << 30)
+static const int k_calc_base[7] = { D_LENGTH, D_ANGLE, D_TIME, D_FREQ, D_RES, D_FLEX, D_PERCENT };
+static void calc_type_powers(int v, int pw[7], int sign) {
+    if (v & CALC_COMPOSITE) {
+        for (int k = 0; k < 7; k++) pw[k] += sign * (((v >> (8 + 3 * k)) & 7) - 4);
+        return;
+    }
+    int base = v & ~D_PERCENT;
+    for (int k = 0; k < 6; k++) if (base & k_calc_base[k]) { pw[k] += sign; return; }
+    if (v & D_PERCENT) pw[6] += sign;
+}
+static int calc_type_of_powers(const int pw[7], bool pct_seen) {
+    int nz = 0, one = -1;
+    for (int k = 0; k < 7; k++) { if (pw[k]) { nz++; if (pw[k] == 1) one = k; } if (pw[k] < -3 || pw[k] > 3) return -1; }
+    if (!nz) return D_NUMBER;
+    if (nz == 1 && one >= 0) return k_calc_base[one] | (pct_seen && one < 6 ? D_PERCENT : 0);
+    int code = CALC_COMPOSITE;
+    for (int k = 0; k < 7; k++) code |= (pw[k] + 4) << (8 + 3 * k);
+    return code;
+}
 static int calc_product(const Toks *ts, int b, int e, int pct) {
-    int d = -1;
-    bool divide = false, first = true;
+    int pw[7] = { 0 };
+    bool divide = false, first = true, pct_seen = false, raw_pct = false;
     for (int i = b; i < e; ) {
         if (!first) {
             const Tok *op = &ts->t[i];
@@ -950,22 +973,14 @@ static int calc_product(const Toks *ts, int b, int e, int pct) {
         }
         int v = calc_value(ts, i, pct);
         if (v < 0) return -1;
-        if (first) d = v;
-        else if (divide) {
-            /* (of the same kind: a number) */
-            if (v != D_NUMBER) {
-                if (((d | v) & D_PERCENT) && !pct) return -1;
-                if ((d & ~D_PERCENT) != (v & ~D_PERCENT) && !((d & D_PERCENT) && (v & D_PERCENT))) return -1;
-                if (d == D_NUMBER) return -1;
-                d = D_NUMBER;
-            }
-        }
-        else if (d == D_NUMBER) d = v;
-        else if (v != D_NUMBER) return -1;
+        if (!(v & CALC_COMPOSITE) && (v & D_PERCENT) && (v & ~D_PERCENT)) pct_seen = true;
+        if (!pct && !(v & CALC_COMPOSITE) && (v & D_PERCENT)) raw_pct = true;
+        calc_type_powers(v, pw, divide ? -1 : 1);
         first = false;
         i = tok_next(ts, i);
     }
-    return d;
+    int ty = calc_type_of_powers(pw, pct_seen);
+    return ty;
 }
 
 static int calc_sum(const Toks *ts, int b, int e, int pct) {
@@ -980,6 +995,8 @@ static int calc_sum(const Toks *ts, int b, int e, int pct) {
             if (v < 0) return -1;
             if (d < 0) d = v;
             else {
+                /* (a product of types: only the same product beside it) */
+                if ((d | v) & CALC_COMPOSITE) { if (d != v) return -1; s = i + 1; if (i == e) break; continue; }
                 int a = d & ~D_PERCENT, c = v & ~D_PERCENT;
                 if (a && c && a != c) return -1;
                 if ((d == D_NUMBER) != (v == D_NUMBER)) return -1;
@@ -1069,7 +1086,7 @@ static int builtin_type(const GNode *g, const Toks *ts, int i) {
     bool range = g->has_range;
     if (t->type == T_FUNC && is_math_fn(t->str)) {
         int want = 0, pct = 0;
-        if (!strcmp(n, "number") || !strcmp(n, "integer") || !strcmp(n, "alpha-value")) want = D_NUMBER;
+        if (!strcmp(n, "number") || !strcmp(n, "integer") || !strcmp(n, "nonzero-integer") || !strcmp(n, "alpha-value")) want = D_NUMBER;   /* (a grid line's integer by math: rounded, css-values-4) */
         else if (!strcmp(n, "length")) want = D_LENGTH;
         else if (!strcmp(n, "percentage")) want = D_PERCENT;
         else if (!strcmp(n, "length-percentage")) { want = D_LENGTH; pct = D_LENGTH; }
@@ -1084,6 +1101,9 @@ static int builtin_type(const GNode *g, const Toks *ts, int i) {
         else return -1;
         int d = calc_value(ts, i, pct);
         if (d < 0) return 0;
+        /* (an integer takes no percentage, even one that cancels out) */
+        if (!strcmp(n, "integer") || !strcmp(n, "nonzero-integer"))
+            for (int j = t->first; j < t->end; j++) if (ts->t[j].type == T_PERCENT) return 0;
         if (!strcmp(n, "alpha-value") && d == D_PERCENT) return 1;
         return d == want || (pct && d == (want | pct)) ? 1 : 0;
     }
@@ -1128,6 +1148,12 @@ static int builtin_type(const GNode *g, const Toks *ts, int i) {
     if (!strcmp(n, "zero")) return (t->type == T_NUMBER && v == 0) ? 1 : 0;   /* a unitless 0 (as an <angle> in transforms) */
     if (!strcmp(n, "ident")) return t->type == T_IDENT;
     if (!strcmp(n, "custom-ident")) return custom_ident_ok(t);
+    if (!strcmp(n, "transition-ident")) {   /* (in the shorthand: an easing keyword is the easing) */
+        static const char *const ek[] = { "ease", "linear", "ease-in", "ease-out", "ease-in-out", "step-start", "step-end", "all", NULL };
+        if (!custom_ident_ok(t)) return 0;
+        for (int k = 0; ek[k]; k++) if (!strcasecmp(t->str, ek[k])) return 0;
+        return 1;
+    }
     if (!strcmp(n, "counter-style-ident")) return custom_ident_ok(t) && strcasecmp(t->str, "none") != 0;   /* (a counter style's name: not none) */
     if (!strcmp(n, "dashed-ident")) return t->type == T_IDENT && t->str[0] == '-' && t->str[1] == '-';
     if (!strcmp(n, "string")) return t->type == T_STRING;
@@ -1865,17 +1891,19 @@ static bool calc_math_function(const Toks *ts, const Tok *f, CalcSum *out) {
         if (na != 3) return false;
         SAME_UNITS();
         if (!strcmp(unit, "%") && !clamp_none && !t_pct_numbers) return false;
-        r = v[1] < v[0] ? v[0] : v[1];
-        if (r == 0.0 && v[0] == 0.0 && v[1] == 0.0) r = signbit(v[0]) && signbit(v[1]) ? -0.0 : 0.0;
-        if (r > v[2]) r = v[2];
-        else if (r == 0.0 && v[2] == 0.0) r = signbit(r) || signbit(v[2]) ? -0.0 : 0.0;
-        if (v[0] > v[2]) r = v[0];
+        /* (max(MIN, min(VAL, MAX)), each with its signed zeros: min's -0 if either, max's +0 if either) */
+        r = v[1] > v[2] ? v[2] : v[1];
+        if (r == 0.0 && v[1] == 0.0 && v[2] == 0.0) r = signbit(v[1]) || signbit(v[2]) ? -0.0 : 0.0;
+        if (r < v[0]) r = v[0];
+        else if (r == 0.0 && v[0] == 0.0) r = signbit(r) && signbit(v[0]) ? -0.0 : 0.0;
         if (isnan(v[0]) || isnan(v[1]) || isnan(v[2])) r = NAN;
     } else if (!strcasecmp(name, "progress")) {
         if (na != 3) return false;
         SAME_UNITS();
-        r = (v[0] - v[1]) / (v[2] - v[1]);
-        if (!(f->first < f->end && tok_ident(&ts->t[f->first], "no-clamp"))) r = isnan(r) ? r : r < 0 ? 0 : r > 1 ? 1 : r;
+        bool nc_ = f->first < f->end && tok_ident(&ts->t[f->first], "no-clamp");
+        /* (no distance between the ends: 0, or unclamped, an infinity off to its side) */
+        r = v[2] == v[1] ? (nc_ && v[0] != v[1] ? (v[0] > v[1] ? INFINITY : -INFINITY) : 0.0) : (v[0] - v[1]) / (v[2] - v[1]);
+        if (!nc_) r = isnan(r) ? r : r < 0 ? 0 : r > 1 ? 1 : r;
         unit = "";
     } else if (!strcasecmp(name, "abs")) {
         if (na != 1) return false;
@@ -1948,7 +1976,7 @@ static bool calc_math_function(const Toks *ts, const Tok *f, CalcSum *out) {
         for (int i = 0; i < na; i++) if (isnan(v[i])) r = NAN;
     } else if (!strcasecmp(name, "log")) {
         if (na > 2 || u[0][0] || (na == 2 && u[1][0])) return false;
-        r = na == 2 ? log(v[0]) / log(v[1]) : log(v[0]);
+        r = na == 2 ? (v[1] == 1.0 ? NAN : v[0] == 1.0 ? 0.0 : log(v[0]) / log(v[1])) : log(v[0]);   /* (base 1: none; of 1: +0) */
     } else if (!strcasecmp(name, "exp")) {
         if (na != 1 || u[0][0]) return false;
         r = exp(v[0]);
@@ -1963,7 +1991,52 @@ static bool calc_math_function(const Toks *ts, const Tok *f, CalcSum *out) {
     return true;
 }
 
+/* (a product of single terms whose units cancel to one or none: 1px * 2deg / 1deg is 2px) */
+static bool calc_product_cancel(const Toks *ts, int b, int e, CalcSum *out) {
+    char unit[8][16];
+    int pw[8], nu = 0;
+    double k = 1.0;
+    bool first = true;
+    for (int i = b; i < e; ) {
+        bool divide = false;
+        if (!first) {
+            const Tok *op = &ts->t[i];
+            if (op->type != T_DELIM || (op->delim != '*' && op->delim != '/')) return false;
+            divide = op->delim == '/';
+            if (++i >= e) return false;
+        }
+        CalcSum v;
+        if (!calc_simplify_value(ts, i, &v) || v.n != 1) return false;
+        k = divide ? k / v.t[0].v : k * v.t[0].v;
+        if (v.t[0].unit[0]) {
+            int u = 0;
+            while (u < nu && strcmp(unit[u], v.t[0].unit)) u++;
+            if (u == nu) { if (nu == 8) return false; snprintf(unit[nu], sizeof unit[nu], "%s", v.t[0].unit); pw[nu++] = 0; }
+            pw[u] += divide ? -1 : 1;
+        }
+        first = false;
+        i = tok_next(ts, i);
+    }
+    int left = -1;
+    for (int u = 0; u < nu; u++) {
+        if (!pw[u]) continue;
+        if (left >= 0 || pw[u] != 1) return false;
+        left = u;
+    }
+    memset(out, 0, sizeof *out);
+    out->n = 1;
+    out->t[0].v = k;
+    if (left >= 0) snprintf(out->t[0].unit, sizeof out->t[0].unit, "%s", unit[left]);
+    return !first;
+}
+
 static bool calc_simplify_product(const Toks *ts, int b, int e, CalcSum *out) {
+    /* (units cancelling across factors first; otherwise one side a number) */
+    {
+        int nf = 0;
+        for (int j = b; j < e; j = tok_next(ts, j)) if (ts->t[j].type == T_DIM) nf++;
+        if (nf >= 2 && calc_product_cancel(ts, b, e, out)) return true;
+    }
     bool first = true;
     for (int i = b; i < e; ) {
         bool divide = false;
@@ -2033,13 +2106,16 @@ static int calc_term_cmp(const void *a, const void *b) {
 static bool calc_serialize(const Toks *ts, int i, Buf *b) {
     CalcSum s;
     if (!calc_simplify_value(ts, i, &s)) return false;
-    /* (zero terms of a sum with others go) */
+    /* (zero terms of a sum with others go; a zero percentage, or a zero length beside a percentage, stays: the type it gives) */
     int n = 0;
-    for (int k = 0; k < s.n; k++) if (s.t[k].v != 0 || s.n == 1) s.t[n++] = s.t[k];
+    bool has_pct = false;
+    for (int k = 0; k < s.n; k++) if (!strcmp(s.t[k].unit, "%")) has_pct = true;
+    for (int k = 0; k < s.n; k++)
+        if (s.t[k].v != 0 || s.n == 1 || (!g_env && (!strcmp(s.t[k].unit, "%") || (has_pct && !strcmp(s.t[k].unit, "px"))))) s.t[n++] = s.t[k];   /* (as specified only) */
     if (!n) { s.n = 1; n = 1; }
     s.n = n;
     qsort(s.t, (size_t)s.n, sizeof s.t[0], calc_term_cmp);
-    if (g_env && s.n == 1 && strcmp(s.t[0].unit, "%")) {
+    if (g_env && s.n == 1) {   /* (a percentage alone too: 50%, as computed) */
         /* a computed calc() of one term is that value; NaN is censored to
          * 0 and infinities clamped to the largest finite values */
         double v = s.t[0].v;
@@ -2393,7 +2469,8 @@ static void math_sum_tokens(const Toks *ts, int b, int e, MathSum *out, bool neg
 static int math_term_cmp(const void *a, const void *b)
 {
     const MathTerm *x = (const MathTerm *)a, *y = (const MathTerm *)b;
-    return x->kind - y->kind;
+    if (x->kind != y->kind) return x->kind - y->kind;
+    return x->kind == 2 ? strcasecmp(x->unit, y->unit) : 0;   /* (dimensions by their units, css-values-4 sort a calculation's children) */
 }
 
 /* The terms of a sum as text, sorted (stable by insertion), brackets round products. */
@@ -10216,24 +10293,44 @@ char *css_calc_mix_expand(const char *value)
         int n = mix_args(in, in + strlen(in), m);
         if (n <= 0) { mix_free(m, n < -1 ? -n - 1 : 0); free(in); free(o.s); return NULL; }
         buf_add(&o, q, (size_t)(g - q));
-        buf_str(&o, "calc(");
+        /* (each weight from 0 to 1; all of them more than 1: as fractions of their sum) */
+        Buf wt[MIX_MAX];
+        bool any_w = false;
         for (int i = 0; i < n; i++) {
             char num[48];
+            memset(&wt[i], 0, sizeof wt[i]);
+            if (m[i].wtext) {
+                any_w = true;
+                buf_str(&wt[i], "clamp(0, ");
+                for (const char *w = m[i].wtext; *w; w++) {
+                    if (*w == '%') buf_str(&wt[i], " / 100");
+                    else buf_ch(&wt[i], *w);
+                }
+                buf_str(&wt[i], ", 1)");
+            } else {
+                double wv = m[i].has ? m[i].w / 100.0 : 1.0 / n;
+                if (m[i].has) any_w = true;
+                if (wv < 0.0) wv = 0.0;
+                if (wv > 1.0) wv = 1.0;
+                snprintf(num, sizeof num, "%.6g", wv);
+                buf_str(&wt[i], num);
+            }
+            buf_ch(&wt[i], 0);
+        }
+        buf_str(&o, any_w ? "calc((" : "calc(");
+        for (int i = 0; i < n; i++) {
             if (i) buf_str(&o, " + ");
             buf_ch(&o, '(');
             buf_str(&o, m[i].item);
             buf_str(&o, ") * ");
-            if (m[i].wtext) {
-                /* (a weight's percentages, as fractions) */
-                for (const char *w = m[i].wtext; *w; w++) {
-                    if (*w == '%') buf_str(&o, " / 100");
-                    else buf_ch(&o, *w);
-                }
-            } else {
-                snprintf(num, sizeof num, "%.6g", m[i].has ? m[i].w / 100.0 : 1.0 / n);
-                buf_str(&o, num);
-            }
+            buf_str(&o, wt[i].s);
         }
+        if (any_w) {
+            buf_str(&o, ") / max(1, ");
+            for (int i = 0; i < n; i++) { if (i) buf_str(&o, " + "); buf_str(&o, wt[i].s); }
+            buf_ch(&o, ')');
+        }
+        for (int i = 0; i < n; i++) free(wt[i].s);
         buf_ch(&o, ')');
         mix_free(m, n);
         free(in);

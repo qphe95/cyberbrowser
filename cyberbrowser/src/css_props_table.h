@@ -186,6 +186,7 @@ static const CssTypeDef g_types[] = {
     { "calc-size-basis", "auto | min-content | max-content | fit-content | stretch | any | <length-percentage> | <calc-size-fn>" },
     { "calc-size-basis-max", "min-content | max-content | fit-content | stretch | any | <length-percentage> | <calc-size-fn>" },
     { "calc-size-fn", "calc-size( <calc-size-basis> , <any-value>+ )" },
+    { "calc-size-content-fn", "calc-size( content , <any-value>+ )" },
     { "calc-size-max-fn", "calc-size( <calc-size-basis-max> , <any-value>+ )" },
     { "size-value", "auto | <length-percentage [0,inf]> | min-content | max-content | fit-content | "
               "fit-content( <length-percentage [0,inf]> ) | stretch | -webkit-fill-available | -webkit-min-content | "
@@ -251,7 +252,7 @@ static const CssTypeDef g_types[] = {
     { "gap-break", "none | normal | intersection" },
     { "gap-visibility", "all | around | between | normal" },
     { "gap-insets", "<gap-inset> <gap-inset>? [ / <gap-inset> <gap-inset>? ]?" },
-    { "single-transition", "[ none | <single-transition-property> ] || <time> || <easing-function> || <time> || [ normal | allow-discrete ]" },
+    { "single-transition", "[ none | all | <transition-ident> ] || <time [0,inf]> || <easing-function> || <time> || [ normal | allow-discrete ]" },
     { "single-animation", "[ auto | <time [0,inf]> ] || <easing-function> || <time> || <single-animation-iteration-count> || "
                           "<single-animation-direction> || <single-animation-fill-mode> || <single-animation-play-state> || "
                           "[ none | <keyframes-name> ]" },
@@ -550,7 +551,7 @@ static CssPropDef g_props[] = {
     L("fill-rule", "nonzero | evenodd", "nonzero", 1),
     L("filter", "none | <filter-value-list>", "none", 0),
     S("flex", "none | [ <'flex-grow'> <'flex-shrink'>? || <'flex-basis'> ]", "flex-grow flex-shrink flex-basis", CSS_SH_SPECIAL),
-    L("flex-basis", "auto | content | <size-value>", "auto", 0),
+    L("flex-basis", "auto | content | <size-value> | <calc-size-content-fn>", "auto", 0),
     L("flex-direction", "row | row-reverse | column | column-reverse", "row", 0),
     S("flex-flow", "<'flex-direction'> || <'flex-wrap'>", "flex-direction flex-wrap", CSS_SH_GRAMMAR),
     L("flex-grow", "<number [0,inf]>", "0", 0),

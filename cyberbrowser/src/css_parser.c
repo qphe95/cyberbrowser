@@ -1649,6 +1649,7 @@ static size_t css_prelude_tokens(const char *s, size_t len, size_t pos, bool nes
 /* The @container preludes around what's being parsed. */
 static __thread char *t_cq_cond;
 bool g_css_saw_container;
+bool g_css_saw_starting;   /* (a sheet had @starting-style) */
 
 static void css_parse_rule_block(const char *s, size_t len, size_t *pos, CssRule *rule, CssStylesheet *sheet, const char *cond);
 typedef enum { AT_SKIP, AT_MEDIA, AT_NEST } AtKind;
@@ -2175,6 +2176,29 @@ static size_t css_at_rule(const char *s, size_t len, size_t pos, bool nested, Cs
     }
     char *held_cq = t_cq_cond;
     char *cq_here = NULL;
+    /* (@starting-style: its style rules only in an element's starting style, behind a gate
+     * (\x02) the cascade opens for that alone; its @keyframes, @font-face and @layer as anywhere) */
+    if (nl == 14 && !strncasecmp(name, "starting-style", 14)) {
+        /* (a prelude makes it invalid: the whole block goes) */
+        bool pre_ = false;
+        for (size_t q_ = pre; q_ < pre_end; q_++) if (!css_is_space(s[q_])) pre_ = true;
+        if (pre_) {
+            free(eff); free(layer_here);
+            CssTz tz;
+            css_tz_init(&tz, s, len, end);
+            end = css_tokens_skip_block(&tz);
+            css_tz_free(&tz);
+            return end;
+        }
+        size_t n = (held_cq ? strlen(held_cq) : 0) + 3;
+        cq_here = (char *)malloc(n);
+        if (cq_here) {
+            if (held_cq) snprintf(cq_here, n, "%s\x01\x02", held_cq);
+            else snprintf(cq_here, n, "\x02");
+            t_cq_cond = cq_here;
+            g_css_saw_starting = true;
+        }
+    }
     if (nl == 9 && !strncasecmp(name, "container", 9)) {
         char *c = css_strndup_trim(s + pre, pre_end - pre);
         if (c && strstr(c, "/*")) css_strip_comments(c);

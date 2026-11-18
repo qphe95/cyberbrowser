@@ -889,7 +889,7 @@ static double row_time(int r, double now);
 static AnimVal trans_value(int r, double now)
 {
     double t = row_time(r, now) - A.start[r] - A.delay[r];
-    double x = A.dur[r] > 0 ? t / A.dur[r] : 1;
+    double x = A.dur[r] > 0 ? t / A.dur[r] : t < 0 ? 0 : 1;   /* (no duration: the old value through the delay) */
     if (x < 0) x = 0;
     if (x > 1) x = 1;
     t_anim_before = false;
@@ -981,6 +981,7 @@ static bool track_value(int r, double now, AnimVal *out)
     /* (italic doesn't go between) */
     if (A.prop[r] == ANIM_FONT_STYLE && (v[i].y > 0.5f) != (v[i + 1].y > 0.5f)) *out = local < 0.5 ? v[i] : v[i + 1];
     else *out = ANIM_IS_COLOR(A.prop[r]) ? color_mix(&v[i], &v[i + 1], local) : val_mix(&v[i], &v[i + 1], local);
+    if (ANIM_IS_COLOR(A.prop[r]) && out->ok && (v[i].ok == 2 || v[i + 1].ok == 2)) out->ok = 2;   /* (keyframes mixed in oklab: written out that way, by script) */
     /* (composited onto the underlying value: a transform list after it) */
     if (out->ok && A.comp[o] && A.prop[r] == ANIM_TRANSFORM && out->tf && strcasecmp(out->tf, "none") && out->tf != A.a[r].tf) {
         static __thread char ring[16][512];
@@ -995,14 +996,29 @@ static bool track_value(int r, double now, AnimVal *out)
 }
 
 /* The parent's transition of a property that is going where this box's value is. */
-static int inherited_run(NodeId el, int ps, int p, const AnimVal *v)
+/* (two values the same but for the rounding of a frame's) */
+static bool val_near(const AnimVal *x, const AnimVal *y)
 {
-    /* (only what is inherited) */
-    if (p != ANIM_COLOR && !(p >= ANIM_FONT_SIZE && p <= ANIM_FONT_STYLE) && p != ANIM_LST) return -1;
+    if (x->tf || y->tf) return val_same(x, y);
+    if (x->ok != y->ok) return false;
+    const float a[4] = { x->x, x->y, x->z, x->w }, b[4] = { y->x, y->y, y->z, y->w };
+    for (int k = 0; k < 4; k++) if (fabsf(a[k] - b[k]) > 1e-3f * (1.0f + fabsf(a[k]))) return false;
+    return true;
+}
+
+static AnimVal trans_value(int r, double now);
+static int inherited_run(NodeId el, int ps, int p, const AnimVal *v, double now)
+{
+    /* (a property not inherited: only an explicit inherit of a child's, not a pseudo-element's own) */
+    if (ps && p != ANIM_COLOR && !(p >= ANIM_FONT_SIZE && p <= ANIM_FONT_STYLE) && p != ANIM_LST) return -1;
     NodeId up = ps ? el : dom_parent(el);
     if (!up) return -1;
     int r = row_find(up, 0, K_TRANS, p, NULL);
-    return r >= 0 && val_same(&A.b[r], v) ? r : -1;
+    if (r < 0) return -1;
+    /* (going where it is, or where it is now: what this box got from it while it moved) */
+    if (val_same(&A.b[r], v)) return r;
+    AnimVal at = trans_value(r, now);
+    return val_near(&at, v) ? r : -1;
 }
 
 extern bool g_anim_no_transitions;
@@ -1021,7 +1037,7 @@ bool anim_value(NodeId el, int ps, int prop, double now, AnimVal *out)
     /* (what it inherits is moving) */
     if (!got) {
         int b = row_find(el, ps, K_BASE, prop, NULL);
-        int up = b >= 0 ? inherited_run(el, ps, prop, &A.a[b]) : -1;
+        int up = b >= 0 ? inherited_run(el, ps, prop, &A.a[b], now) : -1;
         if (up >= 0) { *out = trans_value(up, now); return true; }
     }
     return got;
@@ -1184,13 +1200,18 @@ void anim_box(NodeId el, int ps, const char *spec, const AnimVal base[ANIM_NPROP
             }
             if (val_same(&A.a[b], &base[p])) continue;
             AnimVal from = t >= 0 ? trans_value(t, now) : A.a[b];
+            bool cur_both = A.a[b].ok == 3 && base[p].ok == 3;   /* (a border color that is currentcolor before and after: the color's transition, not one of its own) */
             if (t >= 0) { note_cancel(t, ANIM_EV_TCANCEL, now); row_free(t); }
             A.a[b] = base[p];
-            if (dur <= 0 || !from.ok || !base[p].ok || val_same(&from, &base[p])) continue;
+            if (cur_both && t < 0) continue;
+            if ((dur <= 0 && delay <= 0) || !from.ok || !base[p].ok || val_same(&from, &base[p])) continue;
             /* (italic doesn't transition) */
             if (p == ANIM_FONT_STYLE && (from.y > 0.5f || base[p].y > 0.5f)) continue;
             /* (what comes down from a parent that is transitioning it doesn't start one) */
-            if (inherited_run(el, ps, p, &base[p]) >= 0) continue;
+            if (inherited_run(el, ps, p, &base[p], now) >= 0) continue;
+            /* (nor a length in em that moves with the font size a parent is transitioning) */
+            bool len_ = p <= ANIM_BOTTOM || p == ANIM_WIDTH || p == ANIM_HEIGHT || (p >= ANIM_PADDING_TOP && p <= ANIM_BORDER_LEFT) || p == ANIM_LETTER_SPACING || p == ANIM_WORD_SPACING;
+            if (len_ && !ps && dom_parent(el) && row_find(dom_parent(el), 0, K_TRANS, ANIM_FONT_SIZE, NULL) >= 0) continue;
             t = row_new(el, ps, K_TRANS, p);
             if (t < 0) continue;
             A.a[t] = from;
@@ -1319,6 +1340,8 @@ static int emit(AnimEvent *out, int n, int r, int type, double elapsed_ms)
     e->type = (uint8_t)type;
     snprintf(e->name, sizeof e->name, "%s", A.name[r]);
     e->elapsed = elapsed_ms / 1000.0;
+    e->row = r;
+    e->gen = A.gen[r];
     return n + 1;
 }
 
@@ -1446,6 +1469,15 @@ void anim_row_values(int r, double now, void (*fn)(void *ud, const char *prop, c
     }
 }
 
+bool anim_row_ends(int r, uint32_t gen, char *from, char *to, size_t cap, const char **prop)
+{
+    if (r < 0 || r >= A.n || !bit(A.alive, r) || A.gen[r] != gen || A.kind[r] != K_TRANS) return false;
+    anim_val_css(A.prop[r], &A.a[r], from, cap);
+    anim_val_css(A.prop[r], &A.b[r], to, cap);
+    *prop = k_props[A.prop[r]];
+    return true;
+}
+
 bool anim_row_timing(int r, uint32_t gen, double now, AnimRowTiming *out)
 {
     if (!anim_row_info(r, gen, NULL, NULL, NULL, NULL)) return false;
@@ -1507,5 +1539,9 @@ void anim_row_cancel(int r)
         bset(A.killed, r, true);
         bset(A.ev_run, r, true); bset(A.ev_start, r, true); bset(A.ev_end, r, true);
         dom_mark_dirty(A.el[r], DOMF_DIRTY_ATTR);
-    } else row_free(r);
+    } else {
+        /* (a transition cancelled by script: its transitioncancel) */
+        if (A.kind[r] == K_TRANS) note_cancel(r, ANIM_EV_TCANCEL, anim_now());
+        row_free(r);
+    }
 }

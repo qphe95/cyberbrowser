@@ -55,6 +55,16 @@ static void anim_dispatch(JSContextHandle ctx, const AnimEvent *e)
     JS_SetPropertyStr(realm, init, "elapsedTime", JS_NewFloat64(realm, e->elapsed));
     JS_SetPropertyStr(realm, init, "pseudoElement",
                       JS_NewString(realm, e->ps == 1 ? "::before" : e->ps == 2 ? "::after" : e->ps == 3 ? "::marker" : ""));
+    /* (its animation: the CSSTransition or CSSAnimation script has for the row) */
+    GCValue wrap = JS_GetPropertyStr(realm, JS_GetGlobalObject(realm), "__cyberAnimEventWrap");
+    if (JS_IsFunction(realm, wrap)) {
+        GCValue wa[6] = { target, JS_NewInt32(realm, e->row), JS_NewInt32(realm, (int32_t)e->gen), JS_NewBool(realm, trans),
+                          JS_NewString(realm, e->name),
+                          JS_NewString(realm, e->ps == 1 ? "::before" : e->ps == 2 ? "::after" : e->ps == 3 ? "::marker" : "") };
+        GCValue got = JS_Call(realm, wrap, JS_UNDEFINED, 6, wa);
+        if (JS_IsException(got)) JS_GetException(realm);
+        else if (JS_IsObject(got)) JS_SetPropertyStr(realm, init, "animation", got);
+    }
     GCValue args[2] = { JS_NewString(realm, k_types[e->type]), init };
     GCValue ev = JS_CallConstructor(realm, ctor, 2, args);
     if (JS_IsException(ev)) { JS_GetException(realm); return; }
@@ -149,6 +159,16 @@ static GCValue js_anim_row(JSContextHandle ctx, GCValue this_val, int argc, GCVa
         double values[] = { t.start, t.delay, t.duration, t.iterations, t.current, t.paused, t.ended, t.fill, t.direction, now };
         GCValue a = JS_NewArray(ctx);
         for (uint32_t i = 0; i < sizeof values / sizeof values[0]; i++) JS_SetPropertyUint32(ctx, a, i, JS_NewFloat64(ctx, values[i]));
+        return a;
+    }
+    if (op == 8) {   /* (a transition's ends: [property, from, to]) */
+        char fa[256], ta[256];
+        const char *pn = NULL;
+        if (!anim_row_ends(r, (uint32_t)g, fa, ta, sizeof fa, &pn)) return JS_NULL;
+        GCValue a = JS_NewArray(ctx);
+        JS_SetPropertyUint32(ctx, a, 0, JS_NewString(ctx, pn));
+        JS_SetPropertyUint32(ctx, a, 1, JS_NewString(ctx, fa));
+        JS_SetPropertyUint32(ctx, a, 2, JS_NewString(ctx, ta));
         return a;
     }
     if (op == 1) anim_row_set_time(r, (uint32_t)g, now, v);

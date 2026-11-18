@@ -1315,6 +1315,7 @@ bool css_layout_box_clips(const LayoutContext *ctx, int idx);
 /* A pseudo-element's declarations (ps: 1 ::before, 2 ::after, 6 ::scroll-marker,
  * 7 its current ones, 8 ::scroll-marker-group), in cascade order; their count. */
 int css_layout_pseudo_decls(const LayoutContext *ctx, int idx, int ps, const CssDeclaration *const **decls);
+char *css_layout_pseudo_resolve(const LayoutContext *ctx, int idx, const char *prop, const char *value);
 /* (::marker { content: none } on list item idx: no marker of any kind) */
 bool css_layout_marker_none(const LayoutContext *ctx, int idx);
 /* (the last character of the text before text box idx in its paragraph, through inline boxes; 0 none) */
