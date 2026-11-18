@@ -2300,7 +2300,9 @@ GCValue js_font_face_set_get_ready(JSContextHandle ctx, GCValue this_val) {
 
 // FontFaceSet.status getter
 GCValue js_font_face_set_get_status(JSContextHandle ctx, GCValue this_val) {
-    return JS_NewString(ctx, "loaded");
+    extern int font_registry_queued_count(void);
+    (void)this_val;
+    return JS_NewString(ctx, font_registry_queued_count() > 0 ? "loading" : "loaded");   /* (a web face asked for still loading) */
 }
 
 // FontFaceSet.add(fontFace)

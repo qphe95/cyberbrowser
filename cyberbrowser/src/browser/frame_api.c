@@ -830,6 +830,7 @@ static void frame_freeze_children(JSContextHandle ctx, bool frozen) {
         if (c->parent == ctx && SAFE_VALID(c->ctx)) frame_freeze_children(c->ctx, frozen);
 }
 
+static bool parent_scripts_pending(const Frame *f);
 static void frame_load(Frame *f) {
     JSContextHandle first_ctx = GC_HANDLE_NULL;
     GCValue first_win = JS_UNDEFINED;
@@ -1007,6 +1008,15 @@ static void frame_load(Frame *f) {
     }
     http_free_buffer(&buf);
     if (!SAFE_VALID(f->ctx)) return;    /* (a script removed the frame) */
+    /* (its own frames waiting to load: loaded first, so its load event comes after theirs) */
+    for (int guard_ = 0; guard_ < 64 && SAFE_VALID(f->ctx); guard_++) {
+        Frame *c = g_frames;
+        while (c && !(c->parent == f->ctx && c->state == FRAME_PENDING && dom_valid(c->iframe) && dom_is_connected(c->iframe) &&
+                      !c->closing && !parent_scripts_pending(c))) c = c->next;
+        if (!c) break;
+        frame_load(c);
+    }
+    if (!SAFE_VALID(f->ctx)) return;
     static const char lifecycle_js[] =
         "document.readyState = 'interactive';"
         "__cyberDispatchTrusted(document, new Event('DOMContentLoaded', { bubbles: true }));"
@@ -1027,7 +1037,21 @@ static void frame_load(Frame *f) {
         root_value(first_win, false);
         gc_remove_root((GCHandle)first_ctx);
     }
-    if (!g_frame_initial_only) frame_fire(f->parent, dom_js(f->parent, f->iframe), "load");
+    if (!g_frame_initial_only) {
+        /* (its parent still being parsed: the frame's load event when the parse ends, the scripts after it run first) */
+        static const char later_js[] =
+            "(function (fr) { if (document.readyState !== 'loading') return false;"
+            " document.addEventListener('DOMContentLoaded', function () { fr.dispatchEvent(new Event('load')); }, { once: true }); return true; })";
+        bool queued = false;
+        GCValue fn = JS_Eval(f->parent, later_js, sizeof later_js - 1, "<frame_load_later>", JS_EVAL_TYPE_GLOBAL);
+        GCValue fr = dom_js(f->parent, f->iframe);
+        if (JS_IsFunction(f->parent, fn) && JS_IsObject(fr)) {
+            GCValue q = JS_Call(f->parent, fn, JS_UNDEFINED, 1, &fr);
+            if (JS_IsException(q)) JS_GetException(f->parent);
+            else queued = JS_ToBool(f->parent, q);
+        } else if (JS_IsException(fn)) JS_GetException(f->parent);
+        if (!queued) frame_fire(f->parent, fr, "load");
+    }
 }
 
 /* A frame's document written from outside (document.open, write, close): the parser

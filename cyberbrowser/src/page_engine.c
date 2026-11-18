@@ -465,6 +465,7 @@ static void page_observe(void *user, const char *data, size_t len) {
         /* (Before its scripts make requests of their own on this thread.) */
         o->url_set = true;
         set_document_url(http_last_url());
+        http_set_doc_language(http_last_content_language());
         /* An XML document (XHTML, SVG, ...) is parsed whole, as XML. */
         const char *type = http_last_content_type();
         size_t tl = strlen(type);

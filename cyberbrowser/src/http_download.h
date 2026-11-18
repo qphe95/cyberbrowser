@@ -156,6 +156,9 @@ const char *http_last_url(void);
  * was observed on this thread, or set (a tab gets it with each part). */
 const char *http_last_content_type(void);
 void http_set_last_content_type(const char *type);
+const char *http_last_content_language(void);
+const char *http_doc_language(void);
+void http_set_doc_language(const char *l);
 void http_set_last_url(const char *url);
 
 /* Redirects on this thread go to filter first (NULL: none): false and the

@@ -3029,7 +3029,10 @@
                 break;
             case 'namespace':
                 if (ctx !== 'top' || p.block !== null) return null;
-                var nm = /^(?:([A-Za-z_-][\w-]*)\s+)?(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)|"([^"]*)"|'([^']*)')$/i.exec(p.prelude);
+                /* (a string the sheet's end closed: no quote after it, no newline in it) */
+                var nm = /^(?:([A-Za-z_-][\w-]*)\s+)?(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)|"([^"]*)"|'([^']*)'|"([^"\n]*)$|'([^'\n]*)$)$/i.exec(p.prelude);
+                if (nm && nm[7] !== undefined) nm[5] = nm[7];
+                if (nm && nm[8] !== undefined) nm[6] = nm[8];
                 if (!nm) return null;
                 r = makeRule(CSSNamespaceRule, 'namespace', { __prefix: nm[1] || '',
                     __uri: nm[2] !== undefined ? nm[2] : nm[3] !== undefined ? nm[3] : nm[4] !== undefined ? nm[4] : nm[5] !== undefined ? nm[5] : nm[6] });

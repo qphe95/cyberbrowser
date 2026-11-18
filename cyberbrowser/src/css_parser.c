@@ -883,7 +883,7 @@ static size_t css_consume_declarations(const char *s, size_t len, size_t pos, bo
             if (t.type == CT_LBRACE && !item_brace) item_brace = t.start;
             /* (an at-rule ends with its block, and so does anything else
              * that is not a declaration: it is read as a nested rule) */
-            if ((mode == AT || mode == SKIP) && depth == 0 && t.type == CT_RBRACE) {
+            if ((mode == AT || (mode == SKIP && in_block)) && depth == 0 && t.type == CT_RBRACE) {   /* (a declaration list's own junk: to its ';') */
                 if (nesting && item_brace) css_nest_push(item_start, item_brace, ((CssRule *)ctx)->declaration_count);
                 mode = NONE;
             }
@@ -1724,10 +1724,14 @@ static size_t css_keyframes_rule(const char *s, size_t len, size_t pre, size_t p
 {
     char *name = css_strndup_trim(s + pre, pre_end - pre);
     if (name && strstr(name, "/*")) css_strip_comments(name);
+    bool kq_ = false;   /* (a string: any name, none too) */
     if (name && (name[0] == '"' || name[0] == '\'')) {
         size_t l = strlen(name);
-        if (l >= 2 && name[l - 1] == name[0]) { memmove(name, name + 1, l - 2); name[l - 2] = 0; }
+        if (l >= 2 && name[l - 1] == name[0]) { memmove(name, name + 1, l - 2); name[l - 2] = 0; kq_ = true; }
     }
+    /* (the identifiers no keyframes can be called) */
+    if (name && !kq_ && (!strcasecmp(name, "default") || !strcasecmp(name, "initial") || !strcasecmp(name, "inherit") || !strcasecmp(name, "unset") ||
+                         !strcasecmp(name, "revert") || !strcasecmp(name, "revert-layer") || !strcasecmp(name, "revert-rule"))) name[0] = 0;
     size_t pos = body;
     int first = sheet->frame_n;
     while (pos < len) {
@@ -1770,7 +1774,7 @@ static size_t css_keyframes_rule(const char *s, size_t len, size_t pre, size_t p
         for (int i = 0; i < k; i++)
             sheet->frames[sheet->frame_n++] = (CssKeyframe){ off[i], i == 0, r.declarations, r.declaration_count };
     }
-    if (!name || !name[0] || !strcasecmp(name, "none")) {
+    if (!name || !name[0] || (!kq_ && !strcasecmp(name, "none"))) {
         for (int i = first; i < sheet->frame_n; i++)
             if (sheet->frames[i].owns) css_declarations_free(sheet->frames[i].decls, sheet->frames[i].n);
         sheet->frame_n = first;

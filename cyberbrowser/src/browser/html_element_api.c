@@ -95,7 +95,8 @@ static const char k_html_element_js[] =
 "    if (prev && prev !== doc.body && prev.dispatchEvent) { focusState(prev, false); fire(prev, 'blur', false, this); fire(prev, 'focusout', true, this); }\n"
 "    doc.activeElement = this;\n"
 "    focusState(this, true, visible);\n"
-"    if (!(options && options.preventScroll) && this.scrollIntoViewIfNeeded) this.scrollIntoViewIfNeeded();\n"
+"    var boxless = false; try { boxless = getComputedStyle(this).display === 'contents'; } catch (e) {}   /* (no box: nothing to scroll to) */\n"
+"    if (!(options && options.preventScroll) && !boxless && this.scrollIntoViewIfNeeded) this.scrollIntoViewIfNeeded();\n"
 "    fire(this, 'focus', false, prev); fire(this, 'focusin', true, prev);\n"
 "  });\n"
 "  method('blur', function(){\n"
@@ -434,6 +435,20 @@ static GCValue js_canvas_image(JSContextHandle ctx, GCValue this_val, int argc, 
 }
 
 /* __cyberElState(el, mask[, on]): whether el has the state; with on, sets it. */
+void dom_live_value_set(NodeId id, const char *v);
+/* (__cyberLiveValue(el, v): a form control's value as script set it, to paint; null: none) */
+static GCValue js_live_value(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    NodeId el = argc > 0 ? dom_node_of(argv[0]) : 0;
+    if (!el) return JS_UNDEFINED;
+    const char *v = argc > 1 && !JS_IsNull(argv[1]) && !JS_IsUndefined(argv[1]) ? JS_ToCString(ctx, argv[1]) : NULL;
+    dom_live_value_set(el, v);
+    (void)0;   /* (the string is the collector's) */
+    dom_mark_dirty(el, DOMF_DIRTY_ATTR);
+    dom_request_layout();
+    return JS_UNDEFINED;
+}
 static GCValue js_el_state(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
 {
     (void)this_val;
@@ -518,6 +533,7 @@ void html_element_api_install(JSContextHandle ctx, GCValue element_proto)
     JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberInnerText",
                               JS_NewCFunction(ctx, js_inner_text, "__cyberInnerText", 1), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberElState", JS_NewCFunction(ctx, js_el_state, "__cyberElState", 3), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberLiveValue", JS_NewCFunction(ctx, js_live_value, "__cyberLiveValue", 2), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberCanvasRect", JS_NewCFunction(ctx, js_canvas_rect, "__cyberCanvasRect", 10), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberCanvasImage", JS_NewCFunction(ctx, js_canvas_image, "__cyberCanvasImage", 6), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberOptions",

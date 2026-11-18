@@ -520,13 +520,34 @@ const char *http_last_content_type(void) {
     return t_last_type;
 }
 
+/* (the response's Content-Language, its first tag; and the document's, kept from its own response) */
+static __thread char t_last_lang[64];
+static char g_doc_lang[64];
+const char *http_last_content_language(void) { return t_last_lang; }
+const char *http_doc_language(void) { return g_doc_lang; }
+void http_set_doc_language(const char *l) { snprintf(g_doc_lang, sizeof g_doc_lang, "%s", l ? l : ""); }
+
+/* (from another process: "type", or "type<TAB>language") */
 void http_set_last_content_type(const char *type) {
     snprintf(t_last_type, sizeof(t_last_type), "%s", type ? type : "");
+    char *tb = strchr(t_last_type, '\t');
+    t_last_lang[0] = 0;
+    if (tb) { *tb = 0; snprintf(t_last_lang, sizeof t_last_lang, "%s", tb + 1); }
 }
 
 /* t_last_type from a response's header block. */
 static void note_content_type(const char *hdrs, size_t len) {
     t_last_type[0] = 0;
+    t_last_lang[0] = 0;
+    for (size_t i = 0; i + 17 <= len; i++) {
+        if ((i && hdrs[i - 1] != '\n') || strncasecmp(hdrs + i, "content-language:", 17)) continue;
+        const char *p = hdrs + i + 17, *e = hdrs + len;
+        while (p < e && (*p == ' ' || *p == '\t')) p++;
+        size_t n = 0;
+        while (p + n < e && (isalnum((unsigned char)p[n]) || p[n] == '-') && n + 1 < sizeof t_last_lang) { t_last_lang[n] = p[n]; n++; }
+        t_last_lang[n] = 0;
+        break;
+    }
     for (size_t i = 0; i + 13 <= len; i++) {
         if ((i && hdrs[i - 1] != '\n') || strncasecmp(hdrs + i, "content-type:", 13)) continue;
         const char *p = hdrs + i + 13, *e = hdrs + len;

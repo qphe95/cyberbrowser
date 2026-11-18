@@ -794,6 +794,12 @@ void dom_set_inner_html(JSContextHandle ctx, NodeId target, const char *html, si
     NodeId frag = dom_parse_html_fragment(html, len, owner);
     dom_adopt_template_contents(frag);
     NodeId start = dom_parse_fragment_source(frag);
+    /* (the html element: a head and a body, as its context parses them) */
+    if (dom_kind(target) == DOM_K_ELEMENT && dom_tag_name(target) && !strcmp(dom_tag_name(target), "html")) {
+        DomParseRoots pr = dom_parse_roots(frag);
+        if (pr.head && pr.body && dom_parent(pr.head) == dom_parent(pr.body)) start = pr.head;
+        else if (pr.body) start = pr.body;
+    }
     if (!start) {
         NodeId t = dom_create_chardata(DOM_K_TEXT, html, len, owner);
         dom_api_insert(ctx, target, t, DOM_NULL);
@@ -2447,11 +2453,57 @@ static void mir_store_extras(NodeId s, MirStoreAttrs *a) {
     }
 }
 
+const char *http_doc_language(void);
+/* (form controls' values set by script, by node: what is painted instead of the value attribute) */
+static struct { NodeId id; char *v; } *g_live_val;
+static int g_live_val_n, g_live_val_cap;
+const char *dom_live_value(NodeId id)
+{
+    for (int i = 0; i < g_live_val_n; i++) if (g_live_val[i].id == id) return g_live_val[i].v;
+    return NULL;
+}
+void dom_live_value_set(NodeId id, const char *v)
+{
+    int at = -1;
+    for (int i = 0; i < g_live_val_n; i++) if (g_live_val[i].id == id) at = i;
+    if (!v) {
+        if (at >= 0) { free(g_live_val[at].v); g_live_val[at] = g_live_val[--g_live_val_n]; }
+        return;
+    }
+    if (at < 0) {
+        if (g_live_val_n == g_live_val_cap) {
+            int nc = g_live_val_cap ? g_live_val_cap * 2 : 16;
+            void *nv = realloc(g_live_val, (size_t)nc * sizeof *g_live_val);
+            if (!nv) return;
+            g_live_val = nv; g_live_val_cap = nc;
+        }
+        at = g_live_val_n++;
+        g_live_val[at].id = id; g_live_val[at].v = NULL;
+    }
+    free(g_live_val[at].v);
+    g_live_val[at].v = strdup(v);
+}
 static void mir_store_attrs(NodeId s, MirStoreAttrs *a) {
     a->n = 0;
     a->style = NULL;
     a->nowned = 0;
+    {
+        const char *lv_ = g_live_val_n ? dom_live_value(s) : NULL;
+        if (lv_) { a->names[a->n] = "-cb-value"; a->values[a->n] = lv_; a->lens[a->n] = (uint32_t)strlen(lv_); a->n++; }
+    }
     int na = dom_attr_count(s), style_at = -1;
+    /* (the root, no language of its own: the one its response's Content-Language gave, as an inherited one) */
+    bool hl_ = dom_kind(dom_parent(s)) == DOM_K_DOCUMENT && http_doc_language()[0];
+    for (int i = 0; i < na && hl_; i++) {
+        const char *nm = css_atom_str(dom_attr_at(s, i)->name);
+        if (nm && (!strcmp(nm, "lang") || !strcmp(nm, "xml:lang"))) hl_ = false;
+    }
+    if (hl_) {
+        a->names[a->n] = "-cb-xmllang";
+        a->values[a->n] = http_doc_language();
+        a->lens[a->n] = (uint32_t)strlen(http_doc_language());
+        a->n++;
+    }
     for (int i = 0; i < na && a->n < 64; i++) {
         const DomAttr *at = dom_attr_at(s, i);
         const char *nm = css_atom_str(at->name);
@@ -2519,6 +2571,7 @@ static bool mir_read_attrs(NodeId s, int idx, const char *tag_lower, bool in_svg
     } else {
         LooseAttrs loose = {0};
         ser_element_attrs(g_mir.ctx, ser_of_node(s), tag_lower, &loose, mir_attr_sink, &a);
+        { const char *lv_ = g_live_val_n ? dom_live_value(s) : NULL; if (lv_) mir_attr_sink(&a, "-cb-value", lv_); }   /* (as script set it: painted) */
         names = a.names;
         values = (const char *const *)a.values;
         n = a.n;

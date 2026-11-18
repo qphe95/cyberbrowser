@@ -338,6 +338,9 @@ static void part(void *user, const char *data, size_t len) {
     }
     if (t->verdict != NET_DOC_OK) return;
     const char *at = http_last_url(), *type = http_last_content_type();
+    /* (its language with it, after a tab) */
+    char tl_[200];
+    if (http_last_content_language()[0]) { snprintf(tl_, sizeof tl_, "%s\t%s", type, http_last_content_language()); if (strlen(tl_) < 120) type = tl_; }
     uint32_t ulen = (uint32_t)strnlen(at, PROTO_URL_MAX), tlen = (uint32_t)strlen(type);
     Out *o = (Out *)calloc(1, sizeof(Out));
     if (o) o->head = (uint8_t *)malloc(12 + ulen + tlen);

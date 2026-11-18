@@ -252,7 +252,7 @@ static const CssTypeDef g_types[] = {
     { "gap-visibility", "all | around | between | normal" },
     { "gap-insets", "<gap-inset> <gap-inset>? [ / <gap-inset> <gap-inset>? ]?" },
     { "single-transition", "[ none | <single-transition-property> ] || <time> || <easing-function> || <time> || [ normal | allow-discrete ]" },
-    { "single-animation", "<time [0,inf]> || <easing-function> || <time> || <single-animation-iteration-count> || "
+    { "single-animation", "[ auto | <time [0,inf]> ] || <easing-function> || <time> || <single-animation-iteration-count> || "
                           "<single-animation-direction> || <single-animation-fill-mode> || <single-animation-play-state> || "
                           "[ none | <keyframes-name> ]" },
     { "font-syntax", "[ [ <'font-style'> || <font-variant-css2> || <'font-weight'> || <font-stretch-css3> ]? <'font-size'> "

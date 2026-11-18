@@ -461,10 +461,48 @@ static bool val_same(const AnimVal *x, const AnimVal *y)
                                          fabsf(x->z - y->z) < 1e-4f && fabsf(x->w - y->w) < 1e-4f));
 }
 
-/* (colors: premultiplied, the alpha then kept to what alpha can be) */
+/* (sRGB 0..1 to oklab and back) */
+static double srgb_lin(double c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
+static double srgb_gam(double c) { return c <= 0.0031308 ? 12.92 * c : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
+static void to_oklab(double r, double g, double b, double o[3])
+{
+    r = srgb_lin(r); g = srgb_lin(g); b = srgb_lin(b);
+    double l = cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+    double m = cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+    double s = cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+    o[0] = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s;
+    o[1] = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s;
+    o[2] = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s;
+}
+static void from_oklab(const double c[3], double o[3])
+{
+    double l = c[0] + 0.3963377774 * c[1] + 0.2158037573 * c[2];
+    double m = c[0] - 0.1055613458 * c[1] - 0.0638541728 * c[2];
+    double s = c[0] - 0.0894841775 * c[1] - 1.2914855480 * c[2];
+    l = l * l * l; m = m * m * m; s = s * s * s;
+    double r = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s;
+    double g = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s;
+    double b = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s;
+    o[0] = srgb_gam(r); o[1] = srgb_gam(g); o[2] = srgb_gam(b);
+    for (int k = 0; k < 3; k++) o[k] = o[k] < 0.0 ? 0.0 : o[k] > 1.0 ? 1.0 : o[k];
+}
+
+/* (colors: premultiplied, the alpha then kept to what alpha can be; ok 2: one in a modern syntax, so in oklab) */
 static AnimVal color_mix(const AnimVal *x, const AnimVal *y, double t)
 {
     if (!x->ok || !y->ok) return t < 0.5 ? *x : *y;
+    if (x->ok == 2 || y->ok == 2) {
+        double p[3], q[3], m[3], c[3];
+        to_oklab(x->x, x->y, x->z, p);
+        to_oklab(y->x, y->y, y->z, q);
+        double a = x->w + (y->w - x->w) * t;
+        AnimVal o = { 0, 0, 1, 0, 0 };
+        if (a <= 0) return o;
+        for (int k = 0; k < 3; k++) m[k] = (p[k] * x->w + (q[k] * y->w - p[k] * x->w) * t) / a;
+        from_oklab(m, c);
+        o.x = (float)c[0]; o.y = (float)c[1]; o.z = (float)c[2]; o.w = (float)(a > 1 ? 1 : a);
+        return o;
+    }
     double a = x->w + (y->w - x->w) * t;
     double r = x->x * x->w + (y->x * y->w - x->x * x->w) * t;
     double g = x->y * x->w + (y->y * y->w - x->y * x->w) * t;
@@ -1170,11 +1208,13 @@ void anim_box(NodeId el, int ps, const char *spec, const AnimVal base[ANIM_NPROP
             char name[64];
             snprintf(name, sizeof name, "%s", nm);
             size_t nl = strlen(name);
+            bool quoted_ = false;   /* (a string: whatever it says, a name) */
             if (nl >= 2 && (name[0] == '"' || name[0] == '\'') && name[nl - 1] == name[0]) {
                 memmove(name, name + 1, nl - 2);
                 name[nl - 2] = 0;
+                quoted_ = true;
             }
-            if (!name[0] || !strcasecmp(name, "none")) continue;
+            if (!name[0] || (!quoted_ && !strcasecmp(name, "none"))) continue;
             int r = row_find(el, ps, K_ANIM, -1, name);
             if (r >= 0) {
                 anim_timing(r, L, j, now);

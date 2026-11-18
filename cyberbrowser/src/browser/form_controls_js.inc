@@ -118,6 +118,7 @@
 "            if (mode === 'value') {\n"
 "                s.value = sanitize(t, v); s.dirtyValue = true;\n"
 "                s.selStart = s.selEnd = s.value.length;\n"
+"                if (global.__cyberLiveValue) global.__cyberLiveValue(this, s.value);   /* (painted as set) */\n"
 "            } else if (mode !== 'filename') {\n"
 "                this.setAttribute('value', v);\n"
 "            }\n"

@@ -740,7 +740,20 @@ static bool display_blockified(JSContextHandle ctx, ComputedStyle *cs) {
     if (!strcmp(pos, "absolute") || !strcmp(pos, "fixed")) return true;
     if (strcmp(computed_of(ctx, cs, "float"), "none")) return true;
     NodeId p = dom_parent(cs->el);
-    return p && dom_kind(p) == DOM_K_DOCUMENT;     /* the root element */
+    if (p && dom_kind(p) == DOM_K_DOCUMENT) return true;     /* the root element */
+    /* (a flex or grid container's item; display: contents ones see through to theirs) */
+    for (int d = 0; p && dom_kind(p) == DOM_K_ELEMENT && d < 8; d++, p = dom_parent(p)) {
+        ComputedStyle *ps = computed_style_new(p);
+        if (!ps) return false;
+        refresh(ctx, ps);
+        const char *pd = ps->styled ? computed_of(ctx, ps, "display") : NULL;
+        bool contents = pd && !strcmp(pd, "contents");
+        bool fg = pd && (strstr(pd, "flex") || strstr(pd, "grid")) && !strstr(pd, "-webkit");
+        computed_style_free(ps);
+        if (contents) continue;
+        return fg;
+    }
+    return false;
 }
 
 /* ---- a transform list as the matrix it comes to (CSSOM: its resolved value) ---- */
@@ -1458,6 +1471,22 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
                 free(r);
                 r = strdup(b);
             }
+        }
+    }
+    /* (a block ruby inside a ruby or one of its internal boxes: inlinified) */
+    if (r && !strcmp(n, "display") && !strcmp(r, "block ruby")) {
+        NodeId p = dom_parent(cs->el);
+        for (int d = 0; p && dom_kind(p) == DOM_K_ELEMENT && d < 8; d++, p = dom_parent(p)) {
+            ComputedStyle *ps = computed_style_new(p);
+            if (!ps) break;
+            refresh(ctx, ps);
+            const char *pd = ps->styled ? computed_of(ctx, ps, "display") : NULL;
+            bool contents = pd && !strcmp(pd, "contents");
+            bool rb = pd && (!strcmp(pd, "ruby") || !strncmp(pd, "ruby-", 5));
+            computed_style_free(ps);
+            if (contents) continue;
+            if (rb) { free(r); r = strdup("ruby"); }
+            break;
         }
     }
     if (0) {

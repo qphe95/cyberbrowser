@@ -3408,6 +3408,8 @@
     var scrollWith, scrollLast;
     function scrollIntoViewOf(el, block, inline, inner) {
         var d = el.ownerDocument, root = d.documentElement;
+        /* (no box of its own: nothing to scroll to) */
+        try { if (!inner && global.getComputedStyle(el).display === "contents") return; } catch (e) {}
         /* (inside a content-visibility: hidden subtree: nothing to scroll to) */
         try {
             for (var a0 = el.parentElement; a0; a0 = a0.parentElement)
@@ -3768,7 +3770,7 @@
         if (!v) { v = hlNextId++; hlIds.set(n, v); }
         return v;
     };
-    var hlInFlush = false;
+    var hlInFlush = false, hlMo = null;
     var hlFlush = function () {
         if (hlInFlush) return;
         hlInFlush = true;
@@ -3778,6 +3780,11 @@
         hlDirty = false;
         if (typeof global.__cyberHighlightSet !== 'function') return;
         var names = [], prios = [], flat = [];
+        /* (highlights registered: the DOM's changes move their ranges, painted again then) */
+        if (!hlMo && theRegistry && HL.get(theRegistry).size && typeof global.MutationObserver === 'function' && global.document) {
+            hlMo = new global.MutationObserver(function () { try { if (!hlInFlush && HL.get(theRegistry).size) hlTouch(); } catch (e) { } });
+            try { hlMo.observe(global.document, { childList: true, characterData: true, subtree: true }); } catch (e) { }
+        }
         /* (no registry yet: the text fragment and the selection still) */
         if (theRegistry) HL.get(theRegistry).forEach(function (h, name) {
             var hi = names.length;

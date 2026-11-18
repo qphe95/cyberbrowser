@@ -2119,6 +2119,7 @@ static void for_candidates(const CssStyleSet *S, const CssStyleDoc *D, const Buc
 /* revert and revert-layer: what an author (or its layer) said before them is gone, the
  * user agent's stands. A longhand under an earlier shorthand stays as it was: it
  * acts as unset. */
+static void vis_alpha_clamp(const CssStyleSet *S, CssStyleScratch *t);
 static void cascade_reverts(const CssStyleSet *S, CssStyleScratch *t)
 {
     bool any = false;
@@ -2266,8 +2267,56 @@ int css_style_match(const CssStyleSet *S, const CssStyleDoc *D, int dom,
     if (t->applied.n > 1)
         qsort(t->applied.v, t->applied.n, sizeof(CssAppliedDecl), css_applied_decl_compare);
     cascade_reverts(S, t);
+    vis_alpha_clamp(S, t);
     *out = t->applied.v;
     return (int)t->applied.n;
+}
+
+/* (a :visited rule's color with the unvisited one's alpha: declarations made once, kept (few distinct)) */
+static CssDeclaration g_vis_syn[64];
+static int g_vis_nsyn;
+static atomic_flag g_vis_lock = ATOMIC_FLAG_INIT;
+static const CssDeclaration *vis_syn_decl(const char *prop, const char *val, bool imp)
+{
+    const CssDeclaration *r = NULL;
+    while (atomic_flag_test_and_set(&g_vis_lock)) {}
+    for (int i = 0; i < g_vis_nsyn && !r; i++)
+        if (g_vis_syn[i].important == imp && !strcmp(g_vis_syn[i].property, prop) && !strcmp(g_vis_syn[i].value, val)) r = &g_vis_syn[i];
+    if (!r && g_vis_nsyn < 64) {
+        char *p_ = strdup(prop), *v_ = strdup(val);
+        if (p_ && v_) {
+            CssDeclaration *d = &g_vis_syn[g_vis_nsyn++];
+            memset(d, 0, sizeof *d);
+            d->property = p_; d->value = v_; d->important = imp;
+            r = d;
+        } else { free(p_); free(v_); }
+    }
+    atomic_flag_clear(&g_vis_lock);
+    return r;
+}
+static void vis_alpha_clamp(const CssStyleSet *S, CssStyleScratch *t)
+{
+    extern bool css_color_parse(const char *value, double rgba[4]);
+    for (size_t i = 0; i < t->applied.n; i++) {
+        CssAppliedDecl *a = &t->applied.v[i];
+        if (a->rule < 0 || !S->rules[a->rule].visited_only || !a->decl->property || !a->decl->value) continue;
+        if (a->decl->property[0] == '-') continue;
+        double vc[4], uc[4];
+        if (!css_color_parse(a->decl->value, vc)) continue;
+        /* (the unvisited value: the last other rule's for it) */
+        int u = -1;
+        for (size_t j = 0; j < t->applied.n; j++) {
+            const CssAppliedDecl *b = &t->applied.v[j];
+            if (b->rule >= 0 && S->rules[b->rule].visited_only) continue;
+            if (b->decl->property && !strcasecmp(b->decl->property, a->decl->property)) u = (int)j;
+        }
+        if (u < 0 || !t->applied.v[u].decl->value || !css_color_parse(t->applied.v[u].decl->value, uc)) continue;
+        if (uc[3] - vc[3] < 1e-6 && vc[3] - uc[3] < 1e-6) continue;
+        char buf[96];
+        snprintf(buf, sizeof buf, "rgba(%d, %d, %d, %.6g)", (int)(vc[0] + 0.5), (int)(vc[1] + 0.5), (int)(vc[2] + 0.5), uc[3]);
+        const CssDeclaration *d = vis_syn_decl(a->decl->property, buf, a->decl->important);
+        if (d) a->decl = d;
+    }
 }
 
 static void on_after_hit(CssStyleScratch *t, const CChain *ch, int32_t ci)

@@ -511,6 +511,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char bg_no_repeat_x, bg_no_repeat_y;
     unsigned char bg_space, bg_round;   /* (background-repeat space / round: bit 1 across, 2 down) */
     unsigned char bg_clip, bg_origin;
+    unsigned char coll_oth;   /* (collapsed: the sides (1 left 2 right 4 top 8 bottom) another box's border won) */
+    unsigned char bg_clip_txt;   /* (border-area with text: its text too) */
     unsigned char bg_clip_col;   /* (the last layer's clip, the color's: 1 + as bg_clip; 0 as bg_clip) */   /* (clip: 0 border-box, 1 padding-box, 2 content-box; origin: 0 padding-box, 1 border-box, 2 content-box) */
     /* border-image: bi_src the image (NULL none); slices top right bottom
      * left (bit k of bi_slice_pct: a percent) and fill; widths by bi_w_kind
@@ -895,7 +897,7 @@ typedef struct LayoutBox {
     unsigned char mc_nested;
     double bs_added;            /* (block-step-size: what was added to the end margin) */
     unsigned char mc_vert;      /* (its flow across: 1 block axis along +x, 2 along -x; its children's mc_src, mc_dst from its content start) */
-    unsigned char mc_hang;      /* (in columns: 1 can't break and passes its column's end, whole there; 2 a box around such a one) */
+    unsigned char mc_hang;      /* (in columns: 1 can't break and passes its column's end, whole there; 2 a box around such a one; 4 above the next column's top, whole there) */
     float mc_cut;               /* (2: how much of it went with what hangs, painted past the column's end) */
     int rep_h, rep_f;           /* (a table in columns: its header and footer groups repeated at its breaks, -1 none) */
     unsigned char clr_empty;    /* (an empty box placed with clearance: the margins collapsed through it stay in its parent) */
