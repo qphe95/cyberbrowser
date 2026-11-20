@@ -3985,16 +3985,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // TextEncoder, TextDecoder (encoding.c)
     encoding_install(ctx, global);
     
-    // WebAssembly
-    GCValue webassembly = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, webassembly, "instantiate",
-        JS_NewCFunction(ctx, js_promise_reject, "instantiate", 2));
-    JS_SetPropertyStr(ctx, webassembly, "instantiateStreaming",
-        JS_NewCFunction(ctx, js_promise_reject, "instantiateStreaming", 2));
-    JS_SetPropertyStr(ctx, webassembly, "compile",
-        JS_NewCFunction(ctx, js_promise_reject, "compile", 1));
-    JS_SetPropertyStr(ctx, global, "WebAssembly", webassembly);
-    JS_SetPropertyStr(ctx, window, "WebAssembly", webassembly);
+    /* (WebAssembly: browser/wasm.js, installed by platform_api_install) */
     
     // ReadableStream
     GCValue readable_stream_ctor = JS_NewCFunction2(ctx, js_readable_stream_constructor, "ReadableStream",
