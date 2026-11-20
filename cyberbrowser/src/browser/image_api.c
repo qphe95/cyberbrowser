@@ -36,13 +36,14 @@ void dom_request_relayout(void);
 
 /* Resolved URL an <img> node shows (its <picture>'s source, its srcset
  * candidate, else src). */
+extern char *display_list_pick_source(NodeId id, double *dens_out);
+static double g_img_dens = 1.0;   /* (the last img_url_of's candidate density) */
 static char *img_url_of(NodeId id)
 {
-    const char *src = dom_get_attr_str(id, "src");
-    const char *srcset = display_list_picture_srcset(id);
-    if (!srcset) srcset = dom_get_attr_str(id, "srcset");
-    char *picked = srcset && srcset[0] ? display_list_pick_srcset(srcset, 0.0f) : NULL;
-    if (picked) src = picked;
+    double dens = 1.0;
+    char *picked = display_list_pick_source(id, &dens);
+    g_img_dens = dens;
+    const char *src = picked;
     char *url = NULL;
     if (src && src[0]) {
         const char *base = (g_cyber_start_url && g_cyber_start_url[0]) ? g_cyber_start_url : NULL;
@@ -68,7 +69,33 @@ static GCValue img_natural(JSContextHandle ctx, GCValue this_val, bool height)
     char *url = img_url_of(id);
     int w = 0, h = 0;
     if (url) image_cache_natural_size(ic, url, &w, &h);
+    /* (an image without a natural width or height of its own, an SVG's: 300 by 150, or by its ratio; a zero one, 0) */
+    unsigned dims = 0;
+    float ratio = 0.0f;
+    double dens = g_img_dens > 0.0 ? g_img_dens : 1.0;
+    if (url && (w || h) && image_cache_intrinsic(ic, url, &dims, &ratio)) {
+        bool has_w = dims & 1u, has_h = dims & 2u, zw = dims & 16u, zh = dims & 32u;
+        if (zw) w = 0;
+        if (zh) h = 0;
+        /* (its own sizes over the candidate's density; the 300 by 150 default as it is) */
+        if (dens != 1.0) {
+            if (has_w) w = (int)((double)w / dens + 0.5);
+            if (has_h) h = (int)((double)h / dens + 0.5);
+            dens = 1.0;
+        }
+        if ((dims & 3u) == 3u) { /* (both its own) */ }
+        else if (!has_w && !has_h) {
+            w = 300;
+            h = (dims & 4u) && ratio > 0.0f ? (int)(300.0f / ratio + 0.5f) : 150;
+        } else if (has_w && !has_h) {
+            h = (dims & 4u) && ratio > 0.0f ? (int)((float)w / ratio + 0.5f) : 150;
+        } else if (has_h && !has_w) {
+            w = (dims & 4u) && ratio > 0.0f ? (int)((float)h * ratio + 0.5f) : 300;
+        }
+    }
     free(url);
+    /* (in CSS pixels: over the chosen candidate's density) */
+    if (dens != 1.0) { w = (int)((double)w / dens + 0.5); h = (int)((double)h / dens + 0.5); }
     return JS_NewInt32(ctx, height ? h : w);
 }
 
@@ -202,9 +229,13 @@ void image_api_install(JSContextHandle ctx, GCValue img_proto)
         "  ['width', 'height'].forEach(function(n){ if (n in P) return;"
         "    var natural = n === 'width' ? 'naturalWidth' : 'naturalHeight', offset = n === 'width' ? 'offsetWidth' : 'offsetHeight';"
         "    Object.defineProperty(P, n, {configurable:true, enumerable:true,"
-        "      get: function(){ if (this.isConnected && this.getClientRects().length) return this[offset];"
+        "      get: function(){ if (this.isConnected && this.getClientRects().length) {"
+        "          var cs = getComputedStyle(this), a = n === 'width' ? ['Left', 'Right'] : ['Top', 'Bottom'];"
+        "          var v = this[offset] - (parseFloat(cs['border' + a[0] + 'Width']) || 0) - (parseFloat(cs['border' + a[1] + 'Width']) || 0)"
+        "                  - (parseFloat(cs['padding' + a[0]]) || 0) - (parseFloat(cs['padding' + a[1]]) || 0);"
+        "          return Math.max(0, Math.round(v)); }"
         "        var a = parseInt(this.getAttribute(n), 10); return a >= 0 ? a : this[natural]; },"
-        "      set: function(v){ this.setAttribute(n, String(v >>> 0)); }}); });"
+        "      set: function(v){ v = v >>> 0; this.setAttribute(n, String(v > 2147483647 ? 0 : v)); }}); });"
         "  var I = function Image(w, h){ var e = document.createElement('img');"
         "    if (w !== undefined) e.setAttribute('width', String(w));"
         "    if (h !== undefined) e.setAttribute('height', String(h)); return e; };"
@@ -300,6 +331,35 @@ void image_api_picture_changed(uint32_t picture)
 {
     for (NodeId c = dom_first_child(picture); c; c = dom_next_sibling(c))
         if (is_img(c)) image_api_relevant(c);
+}
+
+/* (a <source> of a <picture> changed, inserted or removed: the <img>s after it, from the one given on) */
+void image_api_source_changed(uint32_t from)
+{
+    for (NodeId c = from; c; c = dom_next_sibling(c))
+        if (is_img(c)) image_api_relevant(c);
+}
+
+/* (HTML 4.8.4.3.3 "relevant mutations": an attribute of an <img>, or of a <source> before one in a <picture>) */
+static int cors_state(const char *v) { return !v ? 0 : !strcasecmp(v, "use-credentials") ? 2 : 1; }
+static int refpol_state(const char *v) {
+    static const char *const k[] = { "no-referrer", "no-referrer-when-downgrade", "same-origin", "origin", "strict-origin",
+                                     "origin-when-cross-origin", "strict-origin-when-cross-origin", "unsafe-url" };
+    for (int i = 0; v && i < 8; i++) if (!strcasecmp(v, k[i])) return i + 1;
+    return 0;
+}
+void image_api_attr_changed(uint32_t n, const char *name, const char *old_value, const char *new_value)
+{
+    if (is_img(n)) {
+        bool rel = !strcasecmp(name, "src") || !strcasecmp(name, "srcset") || !strcasecmp(name, "sizes") || !strcasecmp(name, "width");
+        if (!strcasecmp(name, "crossorigin")) rel = cors_state(old_value) != cors_state(new_value);
+        if (!strcasecmp(name, "referrerpolicy")) rel = refpol_state(old_value) != refpol_state(new_value);
+        if (rel) image_api_relevant(n);
+        return;
+    }
+    if (dom_kind(n) == DOM_K_ELEMENT && !strcmp(dom_tag_name(n), "source") && dom_parent(n) && !strcmp(dom_tag_name(dom_parent(n)), "picture") &&
+        (!strcasecmp(name, "srcset") || !strcasecmp(name, "sizes") || !strcasecmp(name, "media") || !strcasecmp(name, "type")))
+        image_api_source_changed(dom_next_sibling(n));
 }
 
 int image_api_tick(JSContextHandle ctx)

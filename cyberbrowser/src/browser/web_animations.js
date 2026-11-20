@@ -120,7 +120,7 @@
         return { lits: lits, nums: nums };
     }
     function fmt(v) { return String(Math.round(v * 1e5) / 1e5); }
-    var NONNEG = /^(background-size|mask-size|border-image-(slice|width|outset)|mask-border-(slice|width|outset)|font-stretch|font-width|tab-size|hyphenate-limit-|width|height|min-|max-|padding|border(-[a-z]+)*-(width|radius)|font-size|line-height|flex-grow|flex-shrink|flex-basis|outline-width|column-width|column-height|column-rule-width|row-rule-width|column-gap|row-gap|gap$|perspective$|border-spacing|shape-margin|fit-tolerance|letter-spacing-none)/;
+    var NONNEG = /^(background-size|mask-size|border-image-(slice|width|outset)|mask-border-(slice|width|outset)|font-stretch|font-width|tab-size|hyphenate-limit-|width|height|min-|max-|padding|border(-[a-z]+)*-(width|radius)|font-size|line-height|flex-grow|flex-shrink|flex-basis|outline-width|column-width|column-height|column-rule-width|row-rule-width|column-gap|row-gap|gap$|perspective$|border-spacing|shape-margin|fit-tolerance|letter-spacing-none|interest-delay)/;
     var INTEGER = /^(z-index|order|orphans|widows|column-count|flood-none)$/;
     function finish(prop, v) {
         /* (a gap rule's width snaps as a border's does) */
@@ -171,6 +171,9 @@
                 else if (!pcv) out += fmt(finish(prop, pxv)) + 'px';
                 else if (!pxv) out += fmt(finish(prop, pcv)) + '%';
                 else out += 'calc(' + fmt(pcv) + '%' + (pxv < 0 ? ' - ' : ' + ') + fmt(Math.abs(pxv)) + 'px)';
+            } else if (/^m?s$/.test(ux) && /^m?s$/.test(uy)) {
+                /* (times: in seconds, whatever each was given in) */
+                out += fmt(finish(prop, how(ux === 'ms' ? x.v / 1000 : x.v, uy === 'ms' ? y.v / 1000 : y.v))) + 's';
             } else if (ux === uy) {
                 out += fmt(finish(prop, how(x.v, y.v))) + ux;
             } else if (/^(%|px|em|rem|vw|vh|ch|ex)$/.test(ux) && /^(%|px|em|rem|vw|vh|ch|ex)$/.test(uy)) {
@@ -2617,6 +2620,11 @@
         return interpolate(prop, run.from, run.to, run.easing.fn(x));
     }
     Object.defineProperty(global, '__cyberGenericAnim', { configurable: true, value: function (el, prop, base, before, keyframesOnly, specNow, specBefore) {
+        /* (a view transition's snapshot reading every property: a running transition's value as it stands, none started) */
+        if (global.__cyberVtSnapping) {
+            var vst = transitionsOf.get(el), vrec = vst && vst.get(prop);
+            if (!vrec || !vrec.run || transitionDone(vrec.run, global.__cyberAnimNow())) return base;
+        }
         tfEl = el;
         /* (a transition script started, of what the engine can't go between: its value) */
         if (keyframesOnly) {
@@ -2833,7 +2841,7 @@
     function pseudoOf(v) {
         if (v === null || v === undefined) return null;
         v = String(v);
-        if (!/^::?(before|after|marker|first-line|first-letter|selection|view-transition)/.test(v))
+        if (!/^::?(before|after|marker|first-line|first-letter|selection|view-transition|checkmark)/.test(v))
             throw new global.DOMException('Invalid pseudo-element: ' + v, 'SyntaxError');
         return v === ':before' ? '::before' : v === ':after' ? '::after' : v;
     }
@@ -3049,6 +3057,8 @@
         var text = '';
         values.forEach(function (v, p) { text += p + ': ' + v + '; '; });
         setStyle(el, text || null);
+        applyPseudoBox(el, ['::before', '::checkmark'], 1, '__cyberBfAnim');
+        applyPseudoBox(el, ['::after'], 2, '__cyberAfAnim');
         /* (its ::marker's: a style of the marker's own) */
         var mk = [];
         animations.forEach(function (a) { if (a._effect && a._effect._target === el && a._effect._pseudo === '::marker') mk.push(a); });
@@ -3065,6 +3075,24 @@
         mv.forEach(function (v, p) { mt += p + ': ' + v + '; '; });
         hide(el, '__cyberMkAnim', !!mt);
         setStyle(el, mt || null, 5);
+    }
+    /* (its ::before's (::checkmark's, an option's ::before here) or ::after's: a style of that box's own) */
+    function applyPseudoBox(el, names, ch, flag) {
+        var pl = [];
+        animations.forEach(function (a) { if (a._effect && a._effect._target === el && names.indexOf(a._effect._pseudo) >= 0) pl.push(a); });
+        if (!pl.length && !el[flag]) return;
+        pl.sort(function (x, y) { return x._seq - y._seq; });
+        var pv = new Map();
+        pl.forEach(function (a) { if (!a._effect._values) a._effect._values = { base: {}, read: {} }; });
+        pl.forEach(function (a) {
+            var c = computedTiming(a._effect);
+            if (c.progress === null) return;
+            sampleEffect(a._effect, c.progress, pv, el);
+        });
+        var pt = '';
+        pv.forEach(function (v, p) { pt += p + ': ' + v + '; '; });
+        hide(el, flag, !!pt);
+        setStyle(el, pt || null, ch);
     }
     function applyDirty() {
         if (!dirtyTargets.size) return;

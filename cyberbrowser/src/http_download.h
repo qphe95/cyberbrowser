@@ -157,6 +157,8 @@ const char *http_last_url(void);
 const char *http_last_content_type(void);
 void http_set_last_content_type(const char *type);
 const char *http_last_content_language(void);
+/* The last response's Content-Type charset parameter, as written ("" none). */
+const char *http_last_content_charset(void);
 const char *http_doc_language(void);
 void http_set_doc_language(const char *l);
 void http_set_last_url(const char *url);

@@ -1184,15 +1184,15 @@ static bool css_pseudo_known(const char *n, size_t nl, bool elem)
         "focus-visible", "focus-within", "fullscreen", "future", "has", "has-slotted", "heading", "host", "host-context", "hover",
         "in-range", "indeterminate", "invalid", "is", "lang", "last-child", "last-of-type", "left", "link",
         "local-link", "matches", "modal", "muted", "not", "nth-child", "nth-last-child", "nth-last-of-type",
-        "nth-of-type", "only-child", "only-of-type", "open", "optional", "out-of-range", "past", "paused",
+        "nth-of-type", "only-child", "only-of-type", "open", "interest-source", "interest-target", "optional", "out-of-range", "past", "paused",
         "picture-in-picture", "placeholder-shown", "playing", "popover-open", "read-only", "read-write",
         "required", "right", "root", "scope", "seeking", "stalled", "state", "target", "target-after", "target-before",
         "target-current", "target-within",
         "user-invalid", "user-valid", "valid", "visited", "volume-locked", "where", "xr-overlay", NULL };
     static const char *const elements[] = {
         "after", "backdrop", "before", "checkmark", "column", "cue", "cue-region", "details-content",
-        "file-selector-button", "first-letter", "first-line", "grammar-error", "highlight", "marker", "part",
-        "picker", "picker-icon", "placeholder", "scroll-button", "scroll-marker", "scroll-marker-group",
+        "file-selector-button", "first-letter", "first-line", "grammar-error", "highlight", "interest-button", "marker", "part",
+        "permission-icon", "picker", "picker-icon", "placeholder", "scroll-button", "scroll-marker", "scroll-marker-group",
         "search-text", "selection", "slider-fill", "slider-thumb", "slider-track", "slotted", "spelling-error", "target-text", "view-transition",
         "view-transition-group", "view-transition-group-children", "view-transition-image-pair", "view-transition-new", "view-transition-old",
         NULL };
@@ -2279,6 +2279,24 @@ static size_t css_rule_item(const char *s, size_t len, size_t pos, bool nested, 
         css_skip_rule_block(s, len, &pos);
         return pos;
     }
+    /* (a customizable select's parts: its UA shadow tree's (browser/form_controls.js)) */
+    if (strstr(sel, "::picker") || strstr(sel, "::checkmark") || strstr(sel, "::details-content") || strstr(sel, "::permission-icon")) {
+        static const char *const from[] = { "::picker(select)", "::picker-icon", "::checkmark", "::details-content", "::permission-icon" };
+        static const char *const to[] = { "::part(cbpicker)", "::part(cbpickericon)", ":is(option)::before", "::part(cbdetailscontent)", "::part(cbpermicon)" };
+        for (int q = 0; q < 5; q++) {
+            char *hit;
+            while ((hit = strstr(sel, from[q])) != NULL) {
+                size_t fl = strlen(from[q]), tl = strlen(to[q]), sl = strlen(sel);
+                char *nw = (char *)malloc(sl - fl + tl + 1);
+                if (!nw) break;
+                memcpy(nw, sel, (size_t)(hit - sel));
+                memcpy(nw + (hit - sel), to[q], tl);
+                strcpy(nw + (hit - sel) + tl, hit + fl);
+                free(sel);
+                sel = nw;
+            }
+        }
+    }
     if (t_scope_a) {
         char *sw = scope_apply(sel, t_scope_a, t_scope_b, true);
         if (sw) { free(sel); sel = sw; }
@@ -2855,9 +2873,17 @@ static void css_apply_pseudo(CssSimpleSelector *out,
         out->has_substantive = true;
         return;
     }
+    /* (:interest-source / :interest-target: the attribute the interest invokers' script keeps) */
+    if ((css_pseudo_name_is(name, nl, "interest-source") || css_pseudo_name_is(name, nl, "interest-target")) && !out->where_active) {
+        snprintf(out->where_arg, sizeof(out->where_arg), "[data-cyber-interest-%s]", name[9] == 's' || name[9] == 'S' ? "source" : "target");
+        out->where_active = true;
+        out->is_weighted = true;
+        out->has_substantive = true;
+        return;
+    }
     /* (:open: a details or a dialog with the attribute) */
     if (css_pseudo_name_is(name, nl, "open") && !out->where_active) {
-        snprintf(out->where_arg, sizeof(out->where_arg), "[open]:is(details, dialog)");
+        snprintf(out->where_arg, sizeof(out->where_arg), ":is(details[open], dialog[open], select[data-cyber-open])");
         out->where_active = true;
         out->is_weighted = true;
         out->has_substantive = true;
@@ -3021,9 +3047,9 @@ static void css_apply_pseudo(CssSimpleSelector *out,
     }
     if (css_pseudo_name_is(name, nl, "heading") && !out->where_active) {
         /* (as a test of those tags: none, or the levels asked for) */
-        char list[64] = "";
+        char list[480] = "";
         size_t used = 0;
-        for (int level = 1; level <= 6; level++) {
+        for (int level = 1; level <= 9; level++) {
             bool want = al == 0;
             for (size_t k = 0; k < al && !want; k++) {
                 if (arg[k] < '0' || arg[k] > '9') continue;
@@ -3033,9 +3059,12 @@ static void css_apply_pseudo(CssSimpleSelector *out,
                 if (v == level) want = true;
                 k = j;
             }
-            if (want) used += (size_t)snprintf(list + used, sizeof(list) - used, "%sh%d", used ? ", " : "", level);
+            /* (its tag's level unless headingoffset moved it: data-cyber-hl, form_controls.js) */
+            if (want && level <= 6) used += (size_t)snprintf(list + used, sizeof(list) - used, "%sh%d:not([data-cyber-hl]), [data-cyber-hl=\"%d\"]", used ? ", " : "", level, level);
+            else if (want) used += (size_t)snprintf(list + used, sizeof(list) - used, "%s[data-cyber-hl=\"%d\"]", used ? ", " : "", level);
         }
-        snprintf(out->where_arg, sizeof(out->where_arg), "%s", used ? list : "h0:not(*)");
+        if (al == 0) snprintf(list, sizeof list, "h1, h2, h3, h4, h5, h6");   /* (every level: the six tags) */
+        snprintf(out->where_arg, sizeof(out->where_arg), "%s", (used || al == 0) ? list : "h0:not(*)");
         out->where_active = true;
         out->has_substantive = true;
         return;
@@ -4820,6 +4849,15 @@ static char* css_transform_one_selector(const char *sel, size_t len, const char 
                 size_t open = k + 9, close = css_match_paren(sel, open, len);
                 bool lead = !strncasecmp(sel + i, ":host", 5);
                 const char *hid = strchr(host_tag, '(');
+                /* (:host(q) ::slotted(x): x's parent, the host, q as well) */
+                if (lead && i + 5 < len && sel[i + 5] == '(') {
+                    size_t ho = i + 5, hc = css_match_paren(sel, ho, len);
+                    if (hc > ho + 1 && hc < k) {
+                        css_buf_append_cstr(&out, &out_len, &out_cap, ":is(");
+                        css_buf_append(&out, &out_len, &out_cap, sel + ho + 1, hc - ho - 1);
+                        css_buf_append_cstr(&out, &out_len, &out_cap, ") > ");
+                    }
+                }
                 if (close > open + 1) css_buf_append(&out, &out_len, &out_cap, sel + open + 1, close - open - 1);
                 else css_buf_append_cstr(&out, &out_len, &out_cap, "*");
                 css_buf_append_cstr(&out, &out_len, &out_cap, ":-webkit-cyber-slotted(");
@@ -5119,6 +5157,7 @@ void css_rewrite_parts(CssStylesheet *sheet, bool doc) {
         rule->selector_text = out;
         rule->specificity = 0;
         rule->scoped = 1;
+        rule->part = 1;
         css_rule_compiled_free(rule);
     }
 }

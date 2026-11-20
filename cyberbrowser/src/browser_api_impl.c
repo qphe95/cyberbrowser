@@ -27,6 +27,7 @@
 #include "js_quickjs.h"
 
 // mbedtls includes (used by throw_dom_exception helper in this file)
+#include "url_whatwg.h"
 #include "mbedtls/md.h"
 #define MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS 1
 #include "mbedtls/private/gcm.h"
@@ -285,6 +286,13 @@ JSClassDef js_window_properties_class_def = {
     .class_name = "WindowProperties",
     .exotic = &js_window_properties_exotic,
 };
+
+/* __cyberMarkHTMLDDA(o): o is [[IsHTMLDDA]] (typeof "undefined", falsy), as document.all is */
+static GCValue js_mark_htmldda(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc > 0 && JS_IsObject(argv[0])) JS_SetIsHTMLDDA(ctx, argv[0]);
+    return JS_UNDEFINED;
+}
 
 // Media-query evaluator for window.matchMedia.
 static int js_match_media_get_viewport_width(JSContextHandle ctx) {
@@ -712,6 +720,26 @@ static void set_origin(LocationData *loc) {
 static void parse_url(const char *url, LocationData *loc) {
     // Start with empty components
     memset(loc, 0, sizeof(LocationData));
+    /* (an absolute URL: its parts as the URL Standard has them, about:blank and data: among them) */
+    {
+        WUrl w;
+        if (url && wurl_parse(url, strlen(url), NULL, &w) == 0) {
+            char *pr = wurl_protocol(&w), *ho = wurl_host(&w), *hn = wurl_hostname(&w), *po = wurl_port(&w),
+                 *pa = wurl_pathname(&w), *se = wurl_search(&w), *ha = wurl_hash(&w), *orr = wurl_origin(&w), *hr = wurl_href(&w);
+            snprintf(loc->protocol, sizeof loc->protocol, "%s", pr ? pr : "");
+            snprintf(loc->host, sizeof loc->host, "%s", ho ? ho : "");
+            snprintf(loc->hostname, sizeof loc->hostname, "%s", hn ? hn : "");
+            snprintf(loc->port, sizeof loc->port, "%s", po ? po : "");
+            snprintf(loc->pathname, sizeof loc->pathname, "%s", pa ? pa : "");
+            snprintf(loc->search, sizeof loc->search, "%s", se ? se : "");
+            snprintf(loc->hash, sizeof loc->hash, "%s", ha ? ha : "");
+            snprintf(loc->href, sizeof loc->href, "%s", hr ? hr : url);
+            snprintf(loc->origin, sizeof loc->origin, "%s", orr ? orr : "null");
+            free(pr); free(ho); free(hn); free(po); free(pa); free(se); free(ha); free(orr); free(hr);
+            wurl_free(&w);
+            return;
+        }
+    }
     
     // Default values (neutral fallback when no URL is provided)
     strncpy(loc->protocol, "https:", sizeof(loc->protocol) - 1);
@@ -825,6 +853,14 @@ static void rebuild_href(LocationData *loc) {
     
     // Rebuild origin
     set_origin(loc);
+    /* (the parts as the URL parser has them: what was set percent-encoded, a query in UTF-8) */
+    if (loc->protocol[0] && strcmp(loc->protocol, "about:")) {
+        char tmp[sizeof loc->href];
+        snprintf(tmp, sizeof tmp, "%s", loc->href);
+        LocationData keep = *loc;
+        parse_url(tmp, loc);
+        if (!loc->href[0]) *loc = keep;
+    }
 }
 
 // Get LocationData from JS object
@@ -1600,7 +1636,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     GCValue svg_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "SVGElement", 0, JS_CFUNC_constructor_or_func, 0);
     GCValue svg_element_proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, svg_element_proto, "constructor", svg_element_ctor);
-    JS_SetPrototype(ctx, svg_element_proto, html_element_proto);
+    JS_SetPrototype(ctx, svg_element_proto, element_proto);   /* (SVGElement : Element, not HTMLElement) */
     JS_SetPropertyStr(ctx, svg_element_ctor, "prototype", svg_element_proto);
     JS_SetPropertyStr(ctx, global, "SVGElement", svg_element_ctor);
     JS_SetPropertyStr(ctx, window, "SVGElement", svg_element_ctor);
@@ -2165,7 +2201,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     DEF_PROP_FLOAT(ctx, window, "devicePixelRatio", 1.0);
     DEF_PROP_INT(ctx, window, "length", 0);
     DEF_PROP_BOOL(ctx, window, "closed", 0);
-    DEF_PROP_STR(ctx, window, "name", "bgmdwnldr");
+    DEF_PROP_STR(ctx, window, "name", "");
     JS_SetPropertyStr(ctx, window, "opener", JS_NULL);
     DEF_FUNC(ctx, window, "setTimeout", js_zero, 2);
     DEF_FUNC(ctx, window, "setInterval", js_zero, 2);
@@ -2221,7 +2257,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_DefinePropertyGetSet(ctx, document, JS_NewAtom(ctx, "cookie"),
         doc_cookie_getter, doc_cookie_setter, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     DEF_PROP_STR(ctx, document, "domain", "");
-    DEF_PROP_STR(ctx, document, "title", "");
+    /* (title: Document.prototype's accessor, document_api.c) */
     DEF_PROP_STR(ctx, document, "baseURI", "");
     DEF_PROP_BOOL(ctx, document, "hidden", 0);
     DEF_PROP_STR(ctx, document, "visibilityState", "visible");
@@ -2272,6 +2308,8 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         GCValue document_proto = JS_GetPrototype(ctx, document);
         if (JS_IsObject(document_proto)) JS_SetPropertyStr(ctx, document_proto, "all", all);
         JS_SetPropertyStr(ctx, global, "__cyber_document_all", all);
+        /* (platform_api.js's HTMLAllCollection: marked the same way) */
+        JS_DefinePropertyValueStr(ctx, global, "__cyberMarkHTMLDDA", JS_NewCFunction(ctx, js_mark_htmldda, "__cyberMarkHTMLDDA", 1), JS_PROP_CONFIGURABLE);
     }
     DEF_FUNC(ctx, document, "getElementsByName", js_empty_array, 1);
     GCValue doc_style_sheets_getter = JS_NewCFunction(ctx, js_document_get_style_sheets, "get styleSheets", 0);
@@ -4061,32 +4099,35 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     const char *fetch_polyfill = "\n"
         "\n"
         "(function(){\n"
+        "  /* (names case-insensitive: kept lowercased, listed sorted, as Fetch's header list sort-and-combine has them) */\n"
+        "  function hname(n) { return String(n).toLowerCase(); }\n"
         "  function normalizeHeaders(init) {\n"
         "    var h = {};\n"
+        "    var add = function(k, v) { k = hname(k); v = String(v); h[k] = Object.prototype.hasOwnProperty.call(h, k) ? h[k] + ', ' + v : v; };\n"
         "    if (init instanceof Headers) {\n"
-        "      init.forEach(function(v,k){ h[k] = v; });\n"
+        "      init.forEach(function(v,k){ h[hname(k)] = v; });\n"
         "    } else if (Array.isArray(init)) {\n"
-        "      for (var i=0;i<init.length;i++) h[init[i][0]] = init[i][1];\n"
+        "      for (var i=0;i<init.length;i++) add(init[i][0], init[i][1]);\n"
         "    } else if (init) {\n"
-        "      for (var k in init) h[k] = init[k];\n"
+        "      for (var k in init) add(k, init[k]);\n"
         "    }\n"
         "    return h;\n"
         "  }\n"
         "\n"
         "  function Headers(init) { this._h = normalizeHeaders(init); }\n"
         "  Headers.prototype.append = function(name, value) {\n"
-        "    name = String(name); value = String(value);\n"
+        "    name = hname(name); value = String(value);\n"
         "    if (this.has(name)) this._h[name] += ', ' + value;\n"
         "    else this._h[name] = value;\n"
         "  };\n"
-        "  Headers.prototype.delete = function(name) { delete this._h[String(name)]; };\n"
-        "  Headers.prototype.get = function(name) { var v = this._h[String(name)]; return v === undefined ? null : v; };\n"
-        "  Headers.prototype.has = function(name) { return Object.prototype.hasOwnProperty.call(this._h, String(name)); };\n"
-        "  Headers.prototype.set = function(name, value) { this._h[String(name)] = String(value); };\n"
-        "  Headers.prototype.forEach = function(cb, thisArg) { for (var k in this._h) cb.call(thisArg, this._h[k], k, this); };\n"
-        "  Headers.prototype.keys = function() { return Object.keys(this._h)[Symbol.iterator](); };\n"
-        "  Headers.prototype.values = function() { var self=this; return Object.keys(this._h).map(function(k){return self._h[k];})[Symbol.iterator](); };\n"
-        "  Headers.prototype.entries = function() { var self=this; return Object.keys(this._h).map(function(k){return [k, self._h[k]];})[Symbol.iterator](); };\n"
+        "  Headers.prototype.delete = function(name) { delete this._h[hname(name)]; };\n"
+        "  Headers.prototype.get = function(name) { var k = hname(name); return Object.prototype.hasOwnProperty.call(this._h, k) ? this._h[k] : null; };\n"
+        "  Headers.prototype.has = function(name) { return Object.prototype.hasOwnProperty.call(this._h, hname(name)); };\n"
+        "  Headers.prototype.set = function(name, value) { this._h[hname(name)] = String(value); };\n"
+        "  Headers.prototype.forEach = function(cb, thisArg) { var ks = Object.keys(this._h).sort(); for (var i = 0; i < ks.length; i++) cb.call(thisArg, this._h[ks[i]], ks[i], this); };\n"
+        "  Headers.prototype.keys = function() { return Object.keys(this._h).sort()[Symbol.iterator](); };\n"
+        "  Headers.prototype.values = function() { var self=this; return Object.keys(this._h).sort().map(function(k){return self._h[k];})[Symbol.iterator](); };\n"
+        "  Headers.prototype.entries = function() { var self=this; return Object.keys(this._h).sort().map(function(k){return [k, self._h[k]];})[Symbol.iterator](); };\n"
         "  Headers.prototype[Symbol.iterator] = Headers.prototype.entries;\n"
         "\n"
         "  // Each Request's internal state (the spec's \"request\"), kept out of reach\n"
@@ -4213,10 +4254,13 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         "\n"
         "    var docUrl = (typeof document !== 'undefined' && document.URL) ||\n"
         "                 (typeof location !== 'undefined' && location.href) || 'about:blank';\n"
+        "    /* (an about:blank or srcdoc document: its creator's origin, as its base URL has it) */\n"
+        "    if (/^about:/.test(docUrl) && typeof document !== 'undefined' && document.baseURI && !/^about:/.test(document.baseURI)) docUrl = document.baseURI;\n"
         "    var origin = '';\n"
         "    try { origin = new URL(docUrl).origin; } catch(e){}\n"
         "\n"
-        "    if (req.mode !== 'no-cors' && !headers['Origin']) headers['Origin'] = origin;\n"
+        "    /* (the Origin header, as Fetch has it: across origins in cors mode, or a method not GET or HEAD) */\n"
+        "    if (!headers['Origin'] && ((req.mode !== 'no-cors' && !sameOrigin(req.url, docUrl)) || !/^(GET|HEAD)$/i.test(req.method))) headers['Origin'] = origin;\n"
         "    if (req.referrer && req.referrer !== 'no-referrer' && req.referrer !== 'about:client' && !headers['Referer']) {\n"
         "      headers['Referer'] = req.referrer;\n"
         "    }\n"

@@ -4,6 +4,9 @@
 #include "css_props.h"
 
 #include <plutosvg.h>
+#include "html_dom.h"
+#include "svg_filter.h"
+#include "css_layout.h"
 #include <ctype.h>
 #include <strings.h>
 #include <stdlib.h>
@@ -107,6 +110,49 @@ static bool root_viewbox_empty(const char *data, size_t len)
     return false;
 }
 
+/* ---- filters in an SVG image: its own document's <filter>s, attributes only ---- */
+static __thread HtmlDocument *t_img_doc;
+static __thread char t_img_cif[16];   /* (the root <svg>'s color-interpolation-filters: inherited) */
+static bool svg_has(const char *d, size_t n, const char *needle)
+{
+    size_t k = strlen(needle);
+    for (size_t i = 0; i + k <= n; i++) if (d[i] == needle[0] && !memcmp(d + i, needle, k)) return true;
+    return false;
+}
+static const char *img_flt_prop(void *ud, HtmlNode *n, const char *name, char *buf, size_t bufn)
+{
+    (void)ud;
+    if (!n) return NULL;
+    const char *v = NULL, *style = NULL;
+    for (const HtmlAttribute *a = n->attributes; a; a = a->next) {
+        if (!strcasecmp(a->name, name)) v = a->value;
+        else if (!strcasecmp(a->name, "style")) style = a->value;
+    }
+    size_t nl = strlen(name);
+    for (const char *q = style; q && (q = strstr(q, name)) != NULL; q += nl) {
+        const char *r = q + nl;
+        while (*r == ' ') r++;
+        if (*r != ':') continue;
+        r++;
+        while (*r == ' ') r++;
+        size_t l = strcspn(r, ";");
+        while (l > 0 && r[l - 1] == ' ') l--;
+        if (l >= bufn) l = bufn - 1;
+        memcpy(buf, r, l);
+        buf[l] = 0;
+        return buf;
+    }
+    if (!v && !strcmp(name, "color-interpolation-filters") && t_img_cif[0]) v = t_img_cif;
+    return v;
+}
+static bool img_flt_color(void *ud, const char *text, double *rgba) { (void)ud; return css_layout_parse_color_text(text, rgba); }
+static void img_filter_hook(const char *value, const float box[4], unsigned char *rgba, int w, int h)
+{
+    if (!t_img_doc) return;
+    SvgFilterEnv env = { t_img_doc, img_flt_prop, img_flt_color, NULL, NULL, NULL, { 0, 0, 0, 1 }, true, NULL, { plutosvg_filter_origin[0], plutosvg_filter_origin[1] } };
+    svg_filter_apply(&env, value, box, 16.0f, rgba, w, h);
+}
+
 bool svg_render_rgba(const char *data, size_t len, int w, int h, uint32_t current_color,
                      uint8_t **out, int *out_w, int *out_h)
 {
@@ -119,8 +165,31 @@ bool svg_render_rgba(const char *data, size_t len, int w, int h, uint32_t curren
     plutovg_color_t cc;
     plutovg_color_init_rgba8(&cc, (int)(current_color >> 24), (int)(current_color >> 16 & 0xFF),
                              (int)(current_color >> 8 & 0xFF), (int)(current_color & 0xFF));
+    /* (filters: the hook runs them against the image's own document) */
+    plutosvg_filter_hook_t keep_hook = plutosvg_filter_hook;
+    HtmlDocument *fdoc = NULL;
+    if (!keep_hook && len < (4u << 20) && svg_has(data, len, "<filter")) fdoc = html_parse(data, len);   /* (a hook already set: the document's own, for inline SVG) */
+    if (fdoc) {
+        t_img_doc = fdoc;
+        plutosvg_filter_hook = img_filter_hook;
+        plutosvg_filter_margin = 128;   /* (an image: what is drawn past its edges can blur in, as browsers draw it) */
+        t_img_cif[0] = 0;
+        const char *rt = NULL;
+        for (size_t i = 0; i + 4 < len; i++) if (data[i] == '<' && !strncmp(data + i + 1, "svg", 3)) { rt = data + i; break; }
+        const char *gt = rt ? memchr(rt, '>', len - (size_t)(rt - data)) : NULL;
+        for (const char *q = rt; q && gt && q + 27 < gt; q++) {
+            if (strncmp(q, "color-interpolation-filters", 27)) continue;
+            const char *v = q + 27;
+            while (v < gt && (*v == '=' || *v == '"' || *v == '\'' || *v == ' ')) v++;
+            size_t k = 0;
+            while (v + k < gt && k + 1 < sizeof t_img_cif && isalnum((unsigned char)v[k])) { t_img_cif[k] = v[k]; k++; }
+            t_img_cif[k] = 0;
+            break;
+        }
+    }
     plutovg_surface_t *s = plutosvg_document_render_to_surface(doc, NULL, w > 0 ? w : -1, h > 0 ? h : -1,
                                                                &cc, NULL, NULL);
+    if (fdoc) { plutosvg_filter_hook = keep_hook; plutosvg_filter_margin = 0; t_img_doc = NULL; html_document_free(fdoc); }
     plutosvg_document_destroy(doc);
     if (!s) return false;
     int sw = plutovg_surface_get_width(s), sh = plutovg_surface_get_height(s);

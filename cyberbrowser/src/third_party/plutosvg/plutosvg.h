@@ -192,6 +192,10 @@ PLUTOSVG_API const void* plutosvg_ft_svg_hooks(void);
  * (w x h, straight RGBA), its fill box x y w h on the layer.  This thread's renders. */
 typedef void (*plutosvg_filter_hook_t)(const char* value, const float box[4], unsigned char* rgba, int w, int h);
 extern __thread plutosvg_filter_hook_t plutosvg_filter_hook;
+/* (while the hook runs: where the SVG's surface origin is in rgba, a margin round it) */
+extern __thread float plutosvg_filter_origin[2];
+/* (the margin a filtered element's layer gets round the surface; 0 none) */
+extern __thread int plutosvg_filter_margin;
 /* (cyberbrowser: a CSS mask on an element, its cb-mask attribute's value; boxes x y w h on the surface: fill, stroke, view) */
 typedef void (*plutosvg_mask_hook_t)(const char* value, const float fill[4], const float stroke[4], const float view[4], const float space[4], unsigned char* rgba, int w, int h);
 extern __thread plutosvg_mask_hook_t plutosvg_mask_hook;

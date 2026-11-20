@@ -7969,6 +7969,23 @@ void gc_cleanup_shape_hash_table(JSRuntimeHandle rt)
         }
     }
 
+    /* Linear probing walks past tombstones to an empty bucket: a table that
+     * filled with them (shapes of realms gone: frames come and go) makes every
+     * miss scan most of it.  Many of them: the live ones in a fresh table. */
+    {
+        uint32_t tomb = 0, live = 0;
+        for (i = 0; i < t->bucket_count; i++) {
+            uint32_t st = atomic_load_u32(&t->buckets[i].state);
+            if (st == LF_HASH_TOMBSTONE) tomb++;
+            else if (st == LF_HASH_OCCUPIED) live++;
+        }
+        if (tomb > t->bucket_count / 4) {
+            uint32_t want = 256;
+            while (want < live * 4) want <<= 1;
+            js_shape_hash_resize(rt, want);
+        }
+    }
+
     QJS_LOGI("gc_cleanup_shape_hash_table: DONE");
 }
 
@@ -38230,6 +38247,23 @@ static JSModuleDefHandle js_host_resolve_imported_module(JSContextHandle ctx,
     if (!cname)
         return (JSModuleDefHandle)(GC_HANDLE_NULL);
 
+    /* (HTML's module map is keyed by URL and type: an import with a type attribute other than JavaScript's
+     * is its own entry, named URL \x01 type; the loader gets that name) */
+    if (JS_IsObject(attributes) && SAFE_GET_OR(rt, JSRuntimeHandle, module_loader_has_attr, FALSE)) {
+        GCValue tv = JS_GetPropertyStr(ctx, attributes, "type");
+        const char *ts = JS_IsString(tv) ? JS_ToCString(ctx, tv) : NULL;
+        if (ts && ts[0] && strcmp(ts, "javascript")) {
+            size_t cl = strlen(cname), tl = strlen(ts);
+            static __thread char kn[8192];   /* (a typed module loads nothing more: no nested use) */
+            if (cl + tl + 2 > sizeof kn) goto plain_name;
+            memcpy(kn, cname, cl);
+            kn[cl] = '\x01';
+            memcpy(kn + cl + 1, ts, tl + 1);
+            cname = kn;
+        }
+    }
+
+plain_name:
     module_name = JS_NewAtom(ctx, cname);
     if (module_name == JS_ATOM_NULL) {
         /* GC frees automatically */;
@@ -38255,7 +38289,13 @@ static JSModuleDefHandle js_host_resolve_imported_module(JSContextHandle ctx,
         return (JSModuleDefHandle)(GC_HANDLE_NULL);
     }
     if (SAFE_GET_OR(rt, JSRuntimeHandle, module_loader_has_attr, FALSE)) {
-        const char *attr_str = JS_ToCString(ctx, attributes);
+        /* (the attributes as JSON: an object, or none) */
+        const char *attr_str = NULL;
+        if (JS_IsObject(attributes)) {
+            GCValue aj = JS_JSONStringify(ctx, attributes, JS_UNDEFINED, JS_UNDEFINED);
+            if (JS_IsException(aj)) return (JSModuleDefHandle)(GC_HANDLE_NULL);
+            attr_str = JS_IsString(aj) ? JS_ToCString(ctx, aj) : NULL;
+        }
         m = SAFE_GET_OR(rt, JSRuntimeHandle, u.module_loader_func2, NULL)(ctx, cname, attr_str, SAFE_GET_OR(rt, JSRuntimeHandle, module_loader_opaque, NULL));
     } else {
         m = SAFE_GET_OR(rt, JSRuntimeHandle, u.module_loader_func, NULL)(ctx, cname, SAFE_GET_OR(rt, JSRuntimeHandle, module_loader_opaque, NULL));
@@ -39377,8 +39417,21 @@ static GCValue js_dynamic_import_job(JSContextHandle ctx,
     GCValue ret = GC_UNDEFINED, err = GC_UNDEFINED;
 
     if (!JS_IsString(basename_val)) {
-        JS_ThrowTypeError(ctx, "no function filename for import()");
-        goto exception;
+        /* (no script to take a base from (eval'd or timer string code): the realm's, its document's base URL, else its
+         * location, HTML 8.1.5.5 "host load imported module" with no active script) */
+        GCValue g = JS_GetGlobalObject(ctx);
+        GCValue doc = JS_GetPropertyStr(ctx, g, "document");
+        GCValue b = JS_IsObject(doc) ? JS_GetPropertyStr(ctx, doc, "baseURI") : JS_UNDEFINED;
+        if (!JS_IsString(b)) {
+            GCValue loc = JS_GetPropertyStr(ctx, g, "location");
+            b = JS_IsObject(loc) ? JS_GetPropertyStr(ctx, loc, "href") : JS_UNDEFINED;
+        }
+        if (JS_IsException(b)) JS_GetException(ctx);
+        if (!JS_IsString(b)) {
+            JS_ThrowTypeError(ctx, "no function filename for import()");
+            goto exception;
+        }
+        basename_val = b;
     }
     basename = JS_ToCString(ctx, basename_val);
     if (!basename)

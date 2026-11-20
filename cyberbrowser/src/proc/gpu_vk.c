@@ -505,15 +505,17 @@ static bool vk_render(GpuTarget **tp, uint32_t w, uint32_t h, const DisplayList 
             if ((m->kind == 3 || m->kind == 7) && m->iw > 0.0f && m->ih > 0.0f) {
                 mb[0] = floor(m->ix); mb[1] = floor(m->iy); mb[2] = ceil(m->ix + m->iw); mb[3] = ceil(m->iy + m->ih);
             }
+            double g = 0.0;
             if (m->kind == 9) {
                 /* (a filter's drop-shadow reaches past the box) */
-                double g = fabs(m->ix) + fabs(m->iy) + 3.0 * m->blur + 2.0;
+                g = fabs(m->ix) + fabs(m->iy) + 3.0 * m->blur + 2.0;
                 /* (and a blur() by three deviations) */
                 for (int k = 0; k < m->nstops && k < 8; k++)
                     if ((int)(m->stop_pos[k] * 32.0f + 0.5f) == 9) g += 3.0 * (k < 4 ? m->rx[k] : m->ry[k - 4]);
                 mb[0] -= g; mb[1] -= g; mb[2] += g; mb[3] += g;
             }
-            if (xf_on) xf_bounds(xfm, m->x, m->y, m->x + m->w, m->y + m->h, mb);
+            /* (under a transform: the box's bounds through it, with the filter's reach in its space) */
+            if (xf_on) xf_bounds(xfm, m->x - g, m->y - g, m->x + m->w + g, m->y + m->h + g, mb);
             Op op = { OP_SAVE, 0, 0, NULL, level,
                       { clampi(mb[0], 0, W), clampi(mb[1], 0, H), clampi(mb[2], 0, W), clampi(mb[3], 0, H) }, m->kind == 8 || m->kind == 9 || m->kind == 10 };
             if (level >= GPU_MAX_DEPTH || !op_push(&nops, op)) return false;

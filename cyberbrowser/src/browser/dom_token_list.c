@@ -361,6 +361,12 @@ static const char *const SANDBOX[] = {
     "allow-scripts", "allow-top-navigation", "allow-top-navigation-by-user-activation",
     "allow-top-navigation-to-custom-protocols", "allow-storage-access-by-user-activation", NULL };
 
+static const char *const BLOCKING[] = { "render", NULL };
+/* (focusgroup's tokens, tentative) */
+static const char *const FOCUSGROUP[] = { "toolbar", "tablist", "radiogroup", "listbox", "menu", "menubar", "wrap", "nowrap",
+    "inline", "block", "nomemory", "none", "feed", "grid", "itemcontrols", "noitemcontrols", "manual",
+    "rowwrap", "colwrap", "flow", "rowflow", "colflow", NULL };
+
 static const struct { const char *iface, *prop, *attr; const char *const *supported; } g_lists[] = {
     { "Element", "classList", "class", NULL },
     { "HTMLLinkElement", "relList", "rel", REL_LINK },
@@ -371,7 +377,11 @@ static const struct { const char *iface, *prop, *attr; const char *const *suppor
     { "HTMLIFrameElement", "sandbox", "sandbox", SANDBOX },
     { "HTMLOutputElement", "htmlFor", "for", NULL },
     { "HTMLLinkElement", "sizes", "sizes", NULL },
+    { "HTMLLinkElement", "blocking", "blocking", BLOCKING },
+    { "HTMLStyleElement", "blocking", "blocking", BLOCKING },
+    { "HTMLScriptElement", "blocking", "blocking", BLOCKING },
     { "Element", "part", "part", NULL },
+    { "HTMLElement", "focusGroup", "focusgroup", FOCUSGROUP },   /* (focusgroup, tentative: [PutForwards=value]) */
 };
 
 /* The element's list for g_lists[magic], made once and kept on it under a

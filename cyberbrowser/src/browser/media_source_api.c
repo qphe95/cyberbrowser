@@ -581,6 +581,7 @@ typedef struct MediaPlayer {
     GCValue video, ms;          /* rooted while attached */
     NodeId node;
     bool paused, waiting, seeking, ended;
+    bool poster_off;            /* (the show-poster flag unset: played or seeked since its load) */
     double t;                   /* current time at base_ms */
     unsigned long long base_ms;
     double rate;
@@ -597,6 +598,7 @@ typedef struct MediaPlayer {
     int net;                    /* networkState */
     bool select_pending;        /* resource selection, at the next turn */
     bool fetching, complete, defer_fetch;
+    bool lazy_wait;             /* (loading=lazy: its fetch held until its document has loaded) */
     bool can_autoplay;
     bool stalled, stalled_sent;
     uintptr_t load_id;          /* the current fetch's: a stale one is ignored */
@@ -766,7 +768,20 @@ static void player_seek(MediaPlayer *p, double t) {
     player_sync_state(p);
 }
 
+static void player_fetch(MediaPlayer *p);
 static void player_update(JSContextHandle ctx, MediaPlayer *p) {
+    /* (a lazy one: fetched once its document's load event is past) */
+    if (p->lazy_wait) {
+        bool done = false;
+        GCValue d = JS_GetPropertyStr(ctx, p->video, "ownerDocument");
+        if (JS_IsObject(d)) {
+            GCValue rs = JS_GetPropertyStr(ctx, d, "readyState");
+            const char *r = JS_IsString(rs) ? JS_ToCString(ctx, rs) : NULL;
+            done = r && !strcmp(r, "complete");
+            if (r) JS_FreeCString(ctx, r);
+        }
+        if (done) { p->lazy_wait = false; if (p->defer_fetch) player_fetch(p); }
+    }
     if (p->plain && !p->mb) {
         /* (loading, or nothing to do) */
         if (p->fetching && !p->stalled_sent &&
@@ -801,6 +816,7 @@ static void player_update(JSContextHandle ctx, MediaPlayer *p) {
 
     if (ready >= HAVE_METADATA && !p->sent_metadata) {
         p->sent_metadata = true;
+        if (p->node) { dom_mark_dirty(p->node, DOMF_DIRTY_ATTR); dom_request_relayout(); }   /* (its natural size known now) */
         media_queue_event(p->video, "durationchange", false);
         media_queue_event(p->video, "loadedmetadata", false);
         media_queue_event(p->video, "resize", false);
@@ -833,6 +849,7 @@ static void player_update(JSContextHandle ctx, MediaPlayer *p) {
         if (p->plain && p->paused && p->can_autoplay && dom_get_attr_str(p->node, "autoplay")) {
             p->can_autoplay = false;
             p->paused = false;
+            p->poster_off = true;
             media_queue_event(p->video, "play", false);
         }
         if (!p->paused) {
@@ -1007,6 +1024,14 @@ static void player_select(JSContextHandle ctx, MediaPlayer *p) {
         media_queue_event(p->video, "suspend", false);
         return;
     }
+    /* (loading=lazy: not before the load event, which it doesn't delay) */
+    const char *lz = dom_get_attr_str(p->node, "loading");
+    if (lz && !strcasecmp(lz, "lazy") && !dom_get_attr_str(p->node, "autoplay")) {
+        p->defer_fetch = true;
+        p->lazy_wait = true;
+        p->net = NET_IDLE;
+        return;
+    }
     player_fetch(p);
 }
 
@@ -1020,12 +1045,14 @@ void media_element_load(JSContextHandle ctx, GCValue video) {
     if (p->t != 0.0) media_queue_event(video, "timeupdate", false);
     player_queue_settle(p, "", SETTLE_ABORT);
     p->fetching = p->complete = p->defer_fetch = false;
+    p->lazy_wait = false;
     p->load_id = 0;
     p->paused = true;
     p->waiting = p->seeking = p->ended = false;
     p->stalled = p->stalled_sent = false;
     p->seek_wait = 0;
     p->t = p->default_start = 0.0;
+    p->poster_off = false;
     p->rate = 1.0;
     p->ready = HAVE_NOTHING;
     p->sent_metadata = p->sent_loadeddata = false;
@@ -1070,6 +1097,7 @@ GCValue media_element_play_resource(JSContextHandle ctx, GCValue video) {
     JS_SetPropertyUint32(ctx, p->waiters, (uint32_t)len, funcs[0]);
     JS_SetPropertyUint32(ctx, p->waiters, (uint32_t)len + 1, funcs[1]);
     p->can_autoplay = false;
+    p->poster_off = true;
     if (p->paused) {
         p->paused = false;
         p->base_ms = (unsigned long long)page_clock_now_ms();
@@ -1269,6 +1297,7 @@ void media_element_seek(JSContextHandle ctx, GCValue video, double t) {
     if (isnan(t)) return;
     MediaPlayer *p = player_ensure(ctx, video);
     if (!p) return;
+    p->poster_off = true;
     if (p->plain) {
         /* (nothing to seek in yet: it starts there) */
         if (p->ready == HAVE_NOTHING) { p->default_start = t; return; }
@@ -1311,6 +1340,7 @@ void media_element_play(GCValue video) {
     if (!p || !p->paused) return;
     if (p->ended) { p->t = 0.0; p->ended = false; }
     p->paused = false;
+    p->poster_off = true;
     p->base_ms = (unsigned long long)page_clock_now_ms();
     media_queue_event(p->video, "play", false);
     if (p->ready >= HAVE_FUTURE_DATA) media_queue_event(p->video, "playing", false);
@@ -1356,6 +1386,19 @@ void media_element_video_size(JSContextHandle ctx, GCValue video, int *w, int *h
     if (mb) media_buffer_video_size(mb, w, h);
 }
 
+/* (a video element's natural size: its video's, once its metadata is in; false none yet) */
+bool media_video_natural_size(NodeId node, int *w, int *h) {
+    *w = *h = 0;
+    for (int i = 0; i < g_nplayers; i++) {
+        MediaPlayer *p = g_players[i];
+        if (p->node != node || p->ready < HAVE_METADATA) continue;
+        MediaBuffer *mb = player_video_buffer(g_media_ctx, p);
+        if (mb) media_buffer_video_size(mb, w, h);
+        return *w > 0 && *h > 0;
+    }
+    return false;
+}
+
 bool media_refresh_video_frames(ImageCache *cache) {
     g_refreshing = true;
     bool any = false;
@@ -1391,6 +1434,21 @@ bool media_video_playing(void) {
         if (!p->paused && !p->waiting && p->ready >= HAVE_FUTURE_DATA) return true;
     }
     return false;
+}
+
+/* (a plain resource being fetched with no frame yet: its delaying-the-load-event flag) */
+bool media_delays_load(void) {
+    for (int i = 0; i < g_nplayers; i++) {
+        MediaPlayer *p = g_players[i];
+        if (p->plain && (p->fetching || p->select_pending) && !p->error && p->ready < HAVE_CURRENT_DATA) return true;
+    }
+    return false;
+}
+
+/* (its show-poster flag: set until it plays or seeks; no player yet, set) */
+bool media_poster_shown(NodeId node) {
+    for (int i = 0; i < g_nplayers; i++) if (g_players[i]->node == node) return !g_players[i]->poster_off;
+    return true;
 }
 
 bool media_video_frame_for_node(NodeId node, const uint8_t **rgba,

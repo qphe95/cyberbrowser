@@ -113,7 +113,7 @@ static GCValue js_anim_style(JSContextHandle ctx, GCValue this_val, int argc, GC
     const char *text = argc > 1 && JS_IsString(argv[1]) ? JS_ToCString(ctx, argv[1]) : NULL;
     int32_t ps_ = 0;
     if (argc > 2) JS_ToInt32(ctx, &ps_, argv[2]);
-    NodeId key = ps_ == 5 ? (el | 0x80000000u) : el;
+    NodeId key = ps_ == 5 ? (el | 0x80000000u) : ps_ == 1 ? (el | 0x40000000u) : ps_ == 2 ? (el | 0x20000000u) : el;
     uint32_t i = 0;
     while (i < g_web_styles.n && g_web_styles.el[i] != key) i++;
     bool had = i < g_web_styles.n;

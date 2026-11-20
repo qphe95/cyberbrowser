@@ -499,6 +499,7 @@ static void lighting(const FCtx *C, HtmlNode *n, const float *in, float *dst, bo
     double dl[3] = { cos(az * M_PI / 180) * cos(el * M_PI / 180), sin(az * M_PI / 180) * cos(el * M_PI / 180), sin(el * M_PI / 180) };
     /* (user space: from the box's corner) */
     if (!C->env->user_zero) { lx += C->box[0]; ly += C->box[1]; px += C->box[0]; py += C->box[1]; }
+    else { lx += C->env->origin[0]; ly += C->env->origin[1]; px += C->env->origin[0]; py += C->env->origin[1]; }
     int W = C->aw, H = C->ah;
 #define AT(xx, yy) (in[((size_t)(yy) * W + (xx)) * 4 + 3])
     for (int y = 0; y < H; y++)
@@ -605,7 +606,7 @@ static bool run_filter(FCtx *C0, HtmlNode *flt, const FImg *src, FImg *out)
         float sr[4] = { C->region[0], C->region[1], C->region[2], C->region[3] };
         {
             char xb[64];
-            double bx = C->prim_bbox || !env->user_zero ? C->box[0] : 0.0, by = C->prim_bbox || !env->user_zero ? C->box[1] : 0.0, bw = C->box[2], bh = C->box[3], v;
+            double bx = C->prim_bbox || !env->user_zero ? C->box[0] : env->origin[0], by = C->prim_bbox || !env->user_zero ? C->box[1] : env->origin[1], bw = C->box[2], bh = C->box[3], v;
             const char *a;
             double fw = env->user_zero && t_vpw > 0 ? t_vpw : bw, fh = env->user_zero && t_vph > 0 ? t_vph : bh;   /* (user space's percentages: of the viewport) */
             a = attr(C, n, "x", xb, sizeof xb);
@@ -943,7 +944,7 @@ static bool run_filter(FCtx *C0, HtmlNode *flt, const FImg *src, FImg *out)
             int iw = 0, ih = 0, ich = 0;
             if (h && h[0] == '#' && env->element) {
                 /* (an element: as if used, in user space) */
-                float ux = env->user_zero ? 0.0f : C->box[0], uy = env->user_zero ? 0.0f : C->box[1];
+                float ux = env->user_zero ? env->origin[0] : C->box[0], uy = env->user_zero ? env->origin[1] : C->box[1];
                 if (env->element(env->ud, h + 1, C->aw, C->ah, &ipx, &ich)) {
                     int ox = (int)floorf(ux) - C->ax, oy = (int)floorf(uy) - C->ay;
                     for (int y = 0; y < C->ah; y++)
@@ -1056,7 +1057,7 @@ void svg_filter_region(const SvgFilterEnv *env, HtmlNode *flt, const float box[4
     a = attr(&C0, flt, "width", xb, sizeof xb); if (a && frac_or_len(a, user ? pw : box[2], !user, &v)) w = v;
     a = attr(&C0, flt, "height", xb, sizeof xb); if (a && frac_or_len(a, user ? ph : box[3], !user, &v)) h = v;
     /* (lengths in user space: from its origin; fractions of the box from the box) */
-    if (user && env->user_zero) { out[0] = (float)x; out[1] = (float)y; }
+    if (user && env->user_zero) { out[0] = (float)x + env->origin[0]; out[1] = (float)y + env->origin[1]; }
     else { out[0] = (float)(box[0] + x); out[1] = (float)(box[1] + y); }
     out[2] = out[0] + (float)w; out[3] = out[1] + (float)h;
 }
@@ -1133,7 +1134,7 @@ bool svg_filter_apply(const SvgFilterEnv *env, const char *list, const float box
     C.env = env;
     C.ax = 0; C.ay = 0; C.aw = W; C.ah = H;
     memcpy(C.box, box, sizeof C.box);
-    t_vpw = env->user_zero ? W : 0; t_vph = env->user_zero ? H : 0;
+    t_vpw = env->user_zero ? W - 2 * env->origin[0] : 0; t_vph = env->user_zero ? H - 2 * env->origin[1] : 0;
     C.fs = fs;
     size_t N = (size_t)W * H;
     FImg cur = { img_new(&C), false, true, { 0, 0, (float)W, (float)H }, true };

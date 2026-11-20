@@ -3183,6 +3183,8 @@ static bool apply_clip_path(const element_t* element, render_context_t* context,
 /* (cyberbrowser: a filter on an element: it painted on a surface of its own, the hook
  * filtering that, then the surface drawn) */
 __thread plutosvg_filter_hook_t plutosvg_filter_hook;
+__thread float plutosvg_filter_origin[2];
+__thread int plutosvg_filter_margin;
 __thread plutosvg_mask_hook_t plutosvg_mask_hook;
 static __thread const element_t* t_filter_noclip;
 static void render_element0(const element_t* element, render_context_t* context, render_state_t* state);
@@ -3203,7 +3205,11 @@ static void render_element(const element_t* element, render_context_t* context, 
             return;
     }
     plutovg_surface_t* target = plutovg_canvas_get_surface(context->canvas);
-    int w = plutovg_surface_get_width(target), h = plutovg_surface_get_height(target);
+    int w0 = plutovg_surface_get_width(target), h0 = plutovg_surface_get_height(target);
+    /* (a filter: a margin round the surface, so what is drawn past its edges can blur or shadow in) */
+    int M = fv && !mv ? plutosvg_filter_margin : 0;
+    if((long long)(w0 + 2 * M) * (h0 + 2 * M) > 16LL * 1024 * 1024) M = 0;
+    int w = w0 + 2 * M, h = h0 + 2 * M;
     plutovg_surface_t* layer = plutovg_surface_create(w, h);
     plutovg_canvas_t* lc = layer ? plutovg_canvas_create(layer) : NULL;
     if(!lc) {
@@ -3213,12 +3219,15 @@ static void render_element(const element_t* element, render_context_t* context, 
     }
     plutovg_matrix_t m;
     plutovg_canvas_get_matrix(context->canvas, &m);
+    plutovg_matrix_t keep_sm = state->matrix;
+    if(M) { plutovg_matrix_t t; plutovg_matrix_init_translate(&t, (float)M, (float)M); plutovg_matrix_multiply(&m, &m, &t); plutovg_matrix_multiply(&state->matrix, &state->matrix, &t); }
     plutovg_canvas_set_matrix(lc, &m);
     plutovg_canvas_t* keep = context->canvas;
     context->canvas = lc;
     t_filter_noclip = element;
     render_element0(element, context, state);
     t_filter_noclip = NULL;
+    state->matrix = keep_sm;
     context->canvas = keep;
     /* the reference box: its fill box, where it is on the surface */
     plutovg_rect_t bb = {0, 0, 0, 0}, dev;
@@ -3226,7 +3235,7 @@ static void render_element(const element_t* element, render_context_t* context, 
     if(element_box(element, state, true, &bb)) {
         /* (cyberbrowser: by the state's matrix, the viewBox's scale in it; the canvas's may not be set yet) */
         plutovg_matrix_map_rect(&state->matrix, &bb, &dev);
-        box[0] = dev.x; box[1] = dev.y; box[2] = dev.w; box[3] = dev.h;
+        box[0] = dev.x + M; box[1] = dev.y + M; box[2] = dev.w; box[3] = dev.h;
     }
     unsigned char* data = plutovg_surface_get_data(layer);
     int stride = plutovg_surface_get_stride(layer);
@@ -3249,7 +3258,9 @@ static void render_element(const element_t* element, render_context_t* context, 
         if(text) {
             memcpy(text, fv->data, fv->length);
             text[fv->length] = 0;
+            plutosvg_filter_origin[0] = plutosvg_filter_origin[1] = (float)M;
             plutosvg_filter_hook(text, box, rgba, w, h);
+            plutosvg_filter_origin[0] = plutosvg_filter_origin[1] = 0.f;
             free(text);
         }
         /* (a CSS mask: its boxes on the surface, the stroke's and the viewport's too) */
@@ -3287,8 +3298,9 @@ static void render_element(const element_t* element, render_context_t* context, 
     bool fclip = apply_clip_path(element, context, state);
     plutovg_canvas_save(keep);
     plutovg_canvas_reset_matrix(keep);
-    plutovg_canvas_set_texture(keep, layer, PLUTOVG_TEXTURE_TYPE_PLAIN, 1.0f, NULL);
-    plutovg_canvas_fill_rect(keep, 0.0f, 0.0f, (float)w, (float)h);
+    { plutovg_matrix_t tm; plutovg_matrix_init_translate(&tm, (float)-M, (float)-M);
+      plutovg_canvas_set_texture(keep, layer, PLUTOVG_TEXTURE_TYPE_PLAIN, 1.0f, &tm); }
+    plutovg_canvas_fill_rect(keep, 0.0f, 0.0f, (float)w0, (float)h0);
     plutovg_canvas_restore(keep);
     if(fclip)
         plutovg_canvas_restore(keep);

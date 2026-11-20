@@ -514,6 +514,12 @@ static int lq_change_reach(const HtmlMirrorChange *c, char *why, size_t cap, boo
         int reach;
         unsigned sides;
         lq_attrs_reach(c->old_attrs, c->new_attrs, &other, &self, &reach, &sides, why, cap, tag);
+        /* (the same attributes: a state the browser set changed, :focus or :popover-open, which any rule may read) */
+        {
+            const HtmlAttribute *oa = c->old_attrs, *na = c->new_attrs;
+            while (oa && na && oa->name == na->name && oa->value && na->value && !strcmp(oa->value, na->value)) { oa = oa->next; na = na->next; }
+            if (!oa && !na) { other = true; snprintf(why, cap, "element state"); }
+        }
         if (!other && reach == 0) return -2;
         if (idx < 0) return -1;
         /* An attribute can restyle earlier siblings through :nth-last-child(of S). */

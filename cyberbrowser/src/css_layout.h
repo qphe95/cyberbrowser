@@ -133,6 +133,8 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char width_set, height_set;
     /* Set when visibility was explicitly assigned (for inheritance). */
     unsigned char visibility_set;
+    /* (pointer-events: none, inherited; pe_set its own) */
+    unsigned char pe_none, pe_set;
     /* A clip: rect() of no area hid the box (clip_vis*: what visibility was
      * before, for a later clip declaration that does not). */
     unsigned char clip_hid, clip_vis, clip_vis_set;
@@ -663,6 +665,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     char page_name[24];                /* (page: its name, "" auto) */
     double block_step;                 /* (block-step-size) */
     unsigned char appearance_none;     /* (appearance: none) */
+    unsigned char field_sizing;        /* (field-sizing: content, 1: a control as wide as what it holds) */
     float accent_a;                    /* (accent-color's alpha: over the Canvas at paint) */
     unsigned char accent_set;          /* (accent-color: a color) */
     float accent[3];
@@ -722,6 +725,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * (inline-flex / inline-grid / inline-table; inline-block uses
      * CSS_DISPLAY_INLINE_BLOCK).  Cleared by blockification. */
     unsigned char inline_level;
+    unsigned char inl_ctl;   /* (a form control given display: inline, laid out as an inline-block: decorations still reach in) */
     /* Absolutely positioned (or fixed) and inline-level before
      * blockification: its static position is where it would be on its line
      * (CSS 2.1 section 10.3.7), not below it. */
@@ -943,7 +947,8 @@ typedef struct LayoutBox {
     float clamp_y;
     float marker_dx;   /* (an outside marker moved in by floats: its line's start past them) */
     int fs_legend;   /* (its rendered legend's box + 1, 0 none: not in its content's lines) */
-    float fs_off, fs_gx0, fs_gx1;   /* (a fieldset with a rendered legend: its border box this far down; the top border not painted from x + fs_gx0 to x + fs_gx1) */
+    float fs_off, fs_gx0, fs_gx1;
+    float fs_cofs;   /* (a fieldset with a rendered legend: its anonymous content box this far below its border and padding top) */   /* (a fieldset with a rendered legend: its border box this far down; the top border not painted from x + fs_gx0 to x + fs_gx1) */
     double static_dx, static_dy;
     double opacity_eff;
     double ell_start;           /* (right to left: how far before the content edge the furthest would have begun; negative, 0 none) */

@@ -42,6 +42,7 @@
 #include "code_cache.h"
 #include "image_api.h"
 #include "dom_range.h"
+extern void dom_doc_set(JSContextHandle ctx, GCValue doc, const char *k, GCValue v);
 
 /* A CharacterData method's part of the data its next set replaces
  * (dom_api_note_replace_data). */
@@ -394,8 +395,39 @@ NodeId template_contents_owner(NodeId doc) {
 static const char *element_interface_name(NodeId id) {
     /* (other namespaces' elements: SVG's are SVGElements, the rest Elements) */
     if (dom_ns(id) != DOM_NS_HTML) {
+        if (dom_ns(id) == DOM_NS_MATHML) return !strcmp(dom_tag_name(id), "a") ? "MathMLAnchorElement" : "MathMLElement";
         if (dom_ns(id) != DOM_NS_SVG) return "Element";
-        return !strcmp(dom_local_name(id), "a") ? "SVGAElement" : "SVGElement";
+        /* (SVG 2's element interfaces, by local name; the rest SVGElements) */
+        static const struct { const char *tag, *iface; } svg_map[] = {
+            { "a", "SVGAElement" }, { "svg", "SVGSVGElement" }, { "g", "SVGGElement" }, { "defs", "SVGDefsElement" },
+            { "symbol", "SVGSymbolElement" }, { "use", "SVGUseElement" }, { "image", "SVGImageElement" },
+            { "switch", "SVGSwitchElement" }, { "foreignObject", "SVGForeignObjectElement" }, { "rect", "SVGRectElement" },
+            { "circle", "SVGCircleElement" }, { "ellipse", "SVGEllipseElement" }, { "line", "SVGLineElement" },
+            { "polyline", "SVGPolylineElement" }, { "polygon", "SVGPolygonElement" }, { "path", "SVGPathElement" },
+            { "text", "SVGTextElement" }, { "tspan", "SVGTSpanElement" }, { "textPath", "SVGTextPathElement" },
+            { "title", "SVGTitleElement" }, { "desc", "SVGDescElement" }, { "metadata", "SVGMetadataElement" },
+            { "style", "SVGStyleElement" }, { "script", "SVGScriptElement" }, { "marker", "SVGMarkerElement" },
+            { "pattern", "SVGPatternElement" }, { "linearGradient", "SVGLinearGradientElement" },
+            { "radialGradient", "SVGRadialGradientElement" }, { "stop", "SVGStopElement" }, { "clipPath", "SVGClipPathElement" },
+            { "mask", "SVGMaskElement" }, { "view", "SVGViewElement" }, { "animate", "SVGAnimateElement" }, { "set", "SVGSetElement" },
+            { "animateMotion", "SVGAnimateMotionElement" }, { "animateTransform", "SVGAnimateTransformElement" },
+            { "mpath", "SVGMPathElement" }, { "filter", "SVGFilterElement" }, { "feBlend", "SVGFEBlendElement" },
+            { "feColorMatrix", "SVGFEColorMatrixElement" }, { "feComponentTransfer", "SVGFEComponentTransferElement" },
+            { "feFuncR", "SVGFEFuncRElement" }, { "feFuncG", "SVGFEFuncGElement" }, { "feFuncB", "SVGFEFuncBElement" },
+            { "feFuncA", "SVGFEFuncAElement" }, { "feComposite", "SVGFECompositeElement" },
+            { "feConvolveMatrix", "SVGFEConvolveMatrixElement" }, { "feDiffuseLighting", "SVGFEDiffuseLightingElement" },
+            { "feDistantLight", "SVGFEDistantLightElement" }, { "fePointLight", "SVGFEPointLightElement" },
+            { "feSpotLight", "SVGFESpotLightElement" }, { "feDisplacementMap", "SVGFEDisplacementMapElement" },
+            { "feDropShadow", "SVGFEDropShadowElement" }, { "feFlood", "SVGFEFloodElement" },
+            { "feGaussianBlur", "SVGFEGaussianBlurElement" }, { "feImage", "SVGFEImageElement" }, { "feMerge", "SVGFEMergeElement" },
+            { "feMergeNode", "SVGFEMergeNodeElement" }, { "feMorphology", "SVGFEMorphologyElement" }, { "feOffset", "SVGFEOffsetElement" },
+            { "feSpecularLighting", "SVGFESpecularLightingElement" }, { "feTile", "SVGFETileElement" },
+            { "feTurbulence", "SVGFETurbulenceElement" },
+        };
+        const char *ln = dom_local_name(id);
+        for (size_t q = 0; ln && q < sizeof svg_map / sizeof svg_map[0]; q++)
+            if (!strcmp(ln, svg_map[q].tag)) return svg_map[q].iface;
+        return "SVGElement";
     }
     /* (HTML's element names are lower-case: an upper-case local name, as
      * createElementNS makes, is no HTML element's) */
@@ -429,6 +461,12 @@ static const char *element_interface_name(NodeId id) {
         { "legend", "HTMLLegendElement" },  { "li", "HTMLLIElement" },
         { "link", "HTMLLinkElement" },      { "map", "HTMLMapElement" },
         { "menu", "HTMLMenuElement" },      { "meta", "HTMLMetaElement" },
+        { "menubar", "HTMLMenuBarElement" }, { "menulist", "HTMLMenuListElement" },
+        { "usermedia", "HTMLUserMediaElement" }, { "geolocation", "HTMLGeolocationElement" },
+        { "camera", "HTMLCameraElement" }, { "microphone", "HTMLMicrophoneElement" }, { "install", "HTMLInstallElement" },
+        { "persistentwidget", "HTMLPersistentWidgetElement" },
+        { "submenu", "HTMLSubMenuElement" }, { "menuitem", "HTMLMenuItemElement" },
+        { "menuitemcheckbox", "HTMLMenuItemCheckboxElement" }, { "menuitemradio", "HTMLMenuItemRadioElement" },
         { "meter", "HTMLMeterElement" },    { "object", "HTMLObjectElement" },
         { "ol", "HTMLOListElement" },       { "optgroup", "HTMLOptGroupElement" },
         { "option", "HTMLOptionElement" },  { "output", "HTMLOutputElement" },
@@ -495,6 +533,7 @@ GCValue dom_create_wrapper(JSContextHandle ctx, NodeId id) {
             if (JS_IsException(obj)) return JS_NULL;
             const char *proto_name = element_interface_name(id);
             GCValue proto = global_proto(ctx, proto_name);
+            if (!JS_IsObject(proto) && dom_ns(id) == DOM_NS_SVG) proto = global_proto(ctx, "SVGElement");
             if (!JS_IsObject(proto)) proto = global_proto(ctx, "HTMLElement");
             if (JS_IsObject(proto)) JS_SetPrototype(ctx, obj, proto);
             dom_bind(ctx, id, obj);
@@ -1208,21 +1247,47 @@ static void dom_dispatch_script_event(JSContextHandle ctx, GCValue script, const
  * element"): DOM_SCRIPT_NONE, DOM_SCRIPT_CLASSIC (but not with nomodule,
  * which only browsers without modules run) or DOM_SCRIPT_MODULE. */
 enum { DOM_SCRIPT_NONE, DOM_SCRIPT_CLASSIC, DOM_SCRIPT_MODULE };
+/* (a classic script with for and event attributes: run only for="window" event="onload" / "onload()", HTML 4.12.1.1 prepare step 18) */
+static bool script_for_event_skips(NodeId n) {
+    const char *fo = dom_get_attr_str(n, "for"), *ev = dom_get_attr_str(n, "event");
+    if (!fo || !ev) return false;
+    const char *a = fo, *b = ev;
+    while (*a == ' ' || *a == '\t' || *a == '\n' || *a == '\f' || *a == '\r') a++;
+    while (*b == ' ' || *b == '\t' || *b == '\n' || *b == '\f' || *b == '\r') b++;
+    size_t la = strlen(a), lb = strlen(b);
+    while (la && (a[la - 1] == ' ' || a[la - 1] == '\t' || a[la - 1] == '\n' || a[la - 1] == '\f' || a[la - 1] == '\r')) la--;
+    while (lb && (b[lb - 1] == ' ' || b[lb - 1] == '\t' || b[lb - 1] == '\n' || b[lb - 1] == '\f' || b[lb - 1] == '\r')) lb--;
+    if (!(la == 6 && !strncasecmp(a, "window", 6))) return true;
+    if (!((lb == 6 && !strncasecmp(b, "onload", 6)) || (lb == 8 && !strncasecmp(b, "onload()", 8)))) return true;
+    return false;
+}
+
 static int dom_script_kind(JSContextHandle ctx, GCValue script) {
     NodeId n = dom_node_of(script);
     const char *type = n ? dom_get_attr_str(n, "type") : NULL;
-    /* (script.type = x may have set the object's property only) */
-    if (!type) {
+    /* (script.type = x may have set the object's property only: a script with no node) */
+    if (!type && !n) {
         GCValue typev = JS_GetPropertyStr(ctx, script, "type");
         type = JS_IsString(typev) ? JS_ToCString(ctx, typev) : NULL;
     }
-    if (type && type[0]) {
-        if (strcasecmp(type, "module") == 0) return DOM_SCRIPT_MODULE;
-        if (strstr(type, "importmap") || (!strstr(type, "javascript") && !strstr(type, "ecmascript") &&
-                                         strcasecmp(type, "text/jscript") != 0))
-            return DOM_SCRIPT_NONE;
+    {
+        extern int html_script_type_kind(const char *type, const char *lang);
+        int k_ = html_script_type_kind(n && dom_get_attr_str(n, "type") ? dom_get_attr_str(n, "type") : type, n && dom_ns(n) == DOM_NS_HTML ? dom_get_attr_str(n, "language") : NULL);
+        if (k_ == 2) return DOM_SCRIPT_MODULE;
+        if (k_ == 0) return DOM_SCRIPT_NONE;
+    }
+    /* (a NUL inside the type or language: no JavaScript MIME type) */
+    if (n) {
+        const char *an[2] = { "type", "language" };
+        for (int i = 0; i < (dom_ns(n) == DOM_NS_HTML ? 2 : 1); i++) {
+            CssAtom at = css_atom_find(an[i], strlen(an[i]));
+            uint32_t L = 0;
+            const char *v = at ? dom_get_attr(n, at, &L) : NULL;
+            if (v && strlen(v) < L && L) return DOM_SCRIPT_NONE;
+        }
     }
     if (n && dom_get_attr_str(n, "nomodule")) return DOM_SCRIPT_NONE;
+    if (n && script_for_event_skips(n)) return DOM_SCRIPT_NONE;
     return DOM_SCRIPT_CLASSIC;
 }
 
@@ -1318,12 +1383,12 @@ static void dom_run_fetched_script(JSContextHandle ctx, GCValue script, const ch
         }
         GCValue doc = JS_GetPropertyStr(ctx, global, "document");
         GCValue prev_current = JS_GetPropertyStr(ctx, doc, "currentScript");
-        JS_SetPropertyStr(ctx, doc, "currentScript", script);
+        dom_doc_set(ctx, doc, "currentScript", script);
         JS_SetPropertyStr(ctx, script, "readyState", JS_NewString(ctx, "loaded"));
 
         /* (a module is named by its URL; its imports load as it is linked) */
         bool module = dom_script_kind(ctx, script) == DOM_SCRIPT_MODULE;
-        if (module) JS_SetPropertyStr(ctx, doc, "currentScript", JS_NULL);
+        if (module) dom_doc_set(ctx, doc, "currentScript", JS_NULL);
         cp_profile_begin("eval-dynamic-script", "js");
         /* (A classic script compiled before runs from its bytecode: code_cache.h.) */
         GCValue cached = module ? JS_UNDEFINED : code_cache_lookup(ctx, buffer.data, buffer.size);
@@ -1333,7 +1398,7 @@ static void dom_run_fetched_script(JSContextHandle ctx, GCValue script, const ch
         cp_profile_end("eval-dynamic-script");
 
         JS_SetPropertyStr(ctx, script, "readyState", JS_NewString(ctx, "complete"));
-        JS_SetPropertyStr(ctx, doc, "currentScript", prev_current);
+        dom_doc_set(ctx, doc, "currentScript", prev_current);
         if (JS_IsException(result)) {
             GCValue exc = JS_GetException(ctx);
             const char *estr = JS_ToCString(ctx, exc);
@@ -1374,12 +1439,17 @@ static void dyn_root(GCValue v, bool add) {
     if (add) gc_add_root(h); else gc_remove_root(h);
 }
 
+bool frame_document_discarded(NodeId doc);
 static void dyn_drain(JSContextHandle ctx) {
     while (g_dyn_head && g_dyn_head->done) {
         DynScript *d = g_dyn_head;
         g_dyn_head = d->next;
         if (!g_dyn_head) g_dyn_tail = NULL;
-        dom_run_fetched_script(ctx, d->script, d->url, d->ok, d->data, d->size, d->err);
+        /* (a script of a document whose frame was removed meanwhile: not run, HTML 4.12.1.1 "prepare the script element"'s
+         * node document has no browsing context) */
+        NodeId odn = dom_owner(dom_node_of(d->script));
+        if (!(odn && frame_document_discarded(odn)))
+            dom_run_fetched_script(ctx, d->script, d->url, d->ok, d->data, d->size, d->err);
         dyn_root(d->script, false);
         free(d->url);
         free(d->data);
@@ -1465,14 +1535,14 @@ static void dom_run_inline_script(JSContextHandle ctx, GCValue script) {
     GCValue doc = JS_GetPropertyStr(ctx, global, "document");
     GCValue prev_current = JS_GetPropertyStr(ctx, doc, "currentScript");
     bool module = dom_script_kind(ctx, script) == DOM_SCRIPT_MODULE;
-    JS_SetPropertyStr(ctx, doc, "currentScript", module ? JS_NULL : script);
+    dom_doc_set(ctx, doc, "currentScript", module ? JS_NULL : script);
     GCValue href = JS_GetPropertyStr(ctx, JS_GetPropertyStr(ctx, global, "location"), "href");
     const char *url = JS_IsString(href) ? JS_ToCString(ctx, href) : NULL;
     GCValue result = module ? js_quickjs_eval_module(ctx, text, k, url ? url : "", 0)
                             : JS_Eval(ctx, text, k, url ? url : "<inline>", JS_EVAL_TYPE_GLOBAL);
     if (url) JS_FreeCString(ctx, url);
     free(text);
-    JS_SetPropertyStr(ctx, doc, "currentScript", prev_current);
+    dom_doc_set(ctx, doc, "currentScript", prev_current);
     if (JS_IsException(result)) {
         GCValue exc = JS_GetException(ctx);
         GCValue report = JS_GetPropertyStr(ctx, global, "reportError");
@@ -1511,7 +1581,7 @@ static void post_insert_queue(NodeId id) {
 }
 
 static CssAtom g_meta_tag;
-static CssAtom g_script_tag, g_iframe_tag, g_frame_tag, g_link_tag, g_style_tag;
+static CssAtom g_script_tag, g_iframe_tag, g_frame_tag, g_link_tag, g_style_tag, g_option_tag;
 /* (a shadow tree comes along: it's connected with its host) */
 static void post_insert_subtree(uint32_t r) {
     for (uint32_t s = r; s; s = dom_next_in_subtree(s, r)) {
@@ -1538,7 +1608,8 @@ static void post_insert_collect(NodeId parent, NodeId child) {
         return;
     }
     if (!g_script_tag) {
-        css_atom_reserve(6);
+        css_atom_reserve(7);
+        g_option_tag = css_atom_intern("option", 6);
         g_link_tag = css_atom_intern("link", 4);
         g_style_tag = css_atom_intern("style", 5);
         g_meta_tag = css_atom_intern("meta", 4);
@@ -1659,7 +1730,17 @@ static void dom_maybe_load_stylesheet(JSContextHandle ctx, GCValue node) {
     if (!dom_tag_is(n, "link") || !dom_node_is_connected(ctx, node)) return;
     const char *rel = dom_attr(n, "rel");
     const char *href = dom_attr(n, "href");
-    if (!rel || !href || !href[0]) return;
+    /* (a preload of an image with an imagesrcset: its pick, as an <img>'s, over href) */
+    char *isrc = NULL;
+    {
+        const char *iss = dom_attr(n, "imagesrcset"), *as = dom_attr(n, "as");
+        if (rel && iss && iss[0] && as && !strcasecmp(as, "image") && (strstr(rel, "preload") || strstr(rel, "PRELOAD") || strstr(rel, "Preload"))) {
+            extern char *display_list_select_srcset(const char *srcset, const char *sizes);
+            isrc = display_list_select_srcset(iss, dom_attr(n, "imagesizes"));
+            if (isrc) href = isrc;
+        }
+    }
+    if (!rel || !href || !href[0]) { free(isrc); return; }
     /* rel is a token list: "stylesheet", "preload stylesheet", ... */
     bool sheet = false, preload = false;
     for (const char *p = rel; *p; ) {
@@ -1673,7 +1754,7 @@ static void dom_maybe_load_stylesheet(JSContextHandle ctx, GCValue node) {
     /* (a preload: fetched for later, and load once it's asked for) */
     if (!sheet && preload) {
         GCValue pdone = JS_GetPropertyStr(ctx, node, "__cyber_sheet_loaded");
-        if (JS_ToBool(ctx, pdone)) return;
+        if (JS_ToBool(ctx, pdone)) { free(isrc); return; }
         JS_SetPropertyStr(ctx, node, "__cyber_sheet_loaded", JS_TRUE);
         GCValue powner = JS_GetPropertyStr(ctx, node, "ownerDocument");
         GCValue hv = JS_IsObject(powner) ? JS_GetPropertyStr(ctx, powner, "baseURI") : JS_UNDEFINED;
@@ -1682,10 +1763,13 @@ static void dom_maybe_load_stylesheet(JSContextHandle ctx, GCValue node) {
         if (pbase) JS_FreeCString(ctx, pbase);
         if (purl && url_is_network_url(purl)) dom_fetch_prefetch_first(purl);
         free(purl);
+        free(isrc);
         dom_dispatch_script_event(ctx, node, "load");
         return;
     }
-    if (!sheet) return;
+    free(isrc);
+    href = dom_attr(n, "href");
+    if (!sheet || !href || !href[0]) return;
     GCValue done = JS_GetPropertyStr(ctx, node, "__cyber_sheet_loaded");
     if (JS_ToBool(ctx, done)) return;
     JS_SetPropertyStr(ctx, node, "__cyber_sheet_loaded", JS_TRUE);
@@ -1794,8 +1878,17 @@ bool dom_api_insert(JSContextHandle ctx, NodeId parent, NodeId child, NodeId ref
     if (pdoc && dom_owner(child) != pdoc) dom_api_adopt(ctx, child, pdoc);
     dom_attach(parent, child, ref);
     dom_request_layout();
-    /* (an <img>'s <picture> changed: it picks its source again) */
-    if (dom_tag_is(parent, "picture")) image_api_picture_changed(parent);
+    /* (a <track> into a media element: its text track's selection and loading, platform_api.js) */
+    if (dom_tag_is(child, "track") && (dom_tag_is(parent, "video") || dom_tag_is(parent, "audio"))) {
+        GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberTrackInserted");
+        if (JS_IsFunction(ctx, fn)) { GCValue cj = dom_js(ctx, child); if (JS_IsException(JS_Call(ctx, fn, JS_UNDEFINED, 1, &cj))) JS_GetException(ctx); }
+    }
+    /* (an <img>'s <picture> changed: an img inserted picks its source, as do those after a source) */
+    if (dom_tag_is(parent, "picture")) {
+        extern void image_api_source_changed(uint32_t from);
+        if (dom_tag_is(child, "img")) image_api_relevant(child);
+        else if (dom_tag_is(child, "source")) image_api_source_changed(dom_next_sibling(child));
+    }
 
     // CEReactions frame for this insertion: any connectedCallback and upgrade
     // reactions queued below are flushed before we return, so a parent
@@ -1822,6 +1915,40 @@ bool dom_api_insert(JSContextHandle ctx, NodeId parent, NodeId child, NodeId ref
     // Scripts inserted dynamically after the initial page load (e.g. YouTube's
     // module loader), the node's and any in its subtree, once the operation
     // is done.
+    /* (the options it brought: their insertion steps, the select's selectedness, HTML 4.10.7; once for them all) */
+    if (!g_option_tag) { css_atom_reserve(1); g_option_tag = css_atom_intern("option", 6); }
+    if (dom_kind(child) == DOM_K_ELEMENT) {
+        uint32_t r_ = dom_slot(child);
+        bool has_opt = false;
+        for (uint32_t s_ = r_; s_ && !has_opt; s_ = dom_next_in_subtree(s_, r_))
+            has_opt = g_dom.kind[s_] == DOM_K_ELEMENT && g_dom.tag[s_] == g_option_tag;
+        /* (a named open <details> inserted: its group's exclusivity, connected or not) */
+        {
+            static CssAtom a_det_;
+            if (!a_det_) { css_atom_reserve(1); a_det_ = css_atom_intern("details", 7); }
+            bool has_det = false;
+            for (uint32_t s_ = r_; s_ && !has_det; s_ = dom_next_in_subtree(s_, r_))
+                has_det = g_dom.kind[s_] == DOM_K_ELEMENT && g_dom.tag[s_] == a_det_;
+            if (has_det) {
+                GCValue g_ = JS_GetGlobalObject(ctx);
+                GCValue fn_ = JS_GetPropertyStr(ctx, g_, "__cyberDetailsInserted");
+                if (JS_IsFunction(ctx, fn_)) {
+                    GCValue cj_ = dom_js(ctx, child);
+                    GCValue rr_ = JS_Call(ctx, fn_, g_, 1, &cj_);
+                    if (JS_IsException(rr_)) JS_GetException(ctx);
+                }
+            }
+        }
+        if (has_opt) {
+            GCValue g_ = JS_GetGlobalObject(ctx);
+            GCValue fn_ = JS_GetPropertyStr(ctx, g_, "__cyberOptionInserted");
+            if (JS_IsFunction(ctx, fn_)) {
+                GCValue cj_ = dom_js(ctx, child);
+                GCValue rr_ = JS_Call(ctx, fn_, g_, 1, &cj_);
+                if (JS_IsException(rr_)) JS_GetException(ctx);
+            }
+        }
+    }
     if (connected) {
         post_insert_collect(parent, child);
         if (!mo_batch_active()) dom_post_insert_flush(ctx);
@@ -1838,6 +1965,7 @@ bool dom_api_remove_discard(JSContextHandle ctx, NodeId parent, NodeId child) {
     return true;
 }
 
+NodeId g_dom_focused;   /* (the element with focus, html_element_api.c's state) */
 bool dom_api_remove(JSContextHandle ctx, NodeId parent, NodeId child) {
     CP_ACC("DOM remove");
     if (!dom_valid(parent) || !dom_valid(child) || dom_parent(child) != parent) return false;
@@ -1861,14 +1989,41 @@ bool dom_api_remove(JSContextHandle ctx, NodeId parent, NodeId child) {
     bool was_connected = dom_api_is_connected(ctx, parent);
     /* (a subtree observer of another kind still follows it) */
     if (!observers) mo_note_removal(ctx, parent_js, child_js);
+    /* (the focused element going with it: focusreset at its document, from a microtask queued now) */
+    bool focus_gone = false;
+    if (was_connected && !g_dom_moving && g_dom_focused && dom_valid(g_dom_focused)) {
+        int d = 0;
+        for (NodeId x = g_dom_focused; x && d < 4096; x = dom_parent(x), d++) if (x == child) { focus_gone = true; break; }
+    }
+    NodeId after_child = dom_next_sibling(child);
     dom_detach(child, false);
+    if (focus_gone) {
+        /* (its :focus gone; :focus-within off the ancestors left) */
+        if (dom_valid(g_dom_focused)) g_dom.state[dom_slot(g_dom_focused)] &= (uint16_t)~(DOM_ST_FOCUS | DOM_ST_FOCUS_VISIBLE);
+        for (NodeId x = parent; x && dom_kind(x) == DOM_K_ELEMENT; x = dom_parent(x)) g_dom.state[dom_slot(x)] &= (uint16_t)~DOM_ST_FOCUS_WITHIN;
+        dom_mark_dirty(parent, DOMF_DIRTY_ATTR);
+        g_dom_focused = DOM_NULL;
+        NodeId r = parent;
+        for (int d = 0; dom_parent(r) && d < 4096; d++) r = dom_parent(r);
+        GCValue fr = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberFocusReset");
+        if (JS_IsFunction(ctx, fr) && dom_kind(r) == DOM_K_DOCUMENT) {
+            GCValue a = dom_js(ctx, r);
+            if (JS_IsException(JS_Call(ctx, fr, JS_UNDEFINED, 1, &a))) JS_GetException(ctx);
+        }
+    }
+    /* (a popover showing in what left: hidden, platform_api.js; there only while one shows) */
+    if (was_connected && !g_dom_moving) {
+        GCValue pc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberPopoverCheck");
+        if (JS_IsFunction(ctx, pc) && JS_IsException(JS_Call(ctx, pc, JS_UNDEFINED, 0, NULL))) JS_GetException(ctx);
+    }
     if (was_connected && !g_dom_moving) {
         frame_api_on_disconnect();
         anim_node_removed(child);
     }
     dom_request_layout();
     if (dom_tag_is(parent, "picture")) {
-        image_api_picture_changed(parent);
+        extern void image_api_source_changed(uint32_t from);
+        if (dom_tag_is(child, "source")) image_api_source_changed(after_child);
         image_api_relevant(child);
     }
     /* Every custom element of the removed subtree is disconnected, not just
@@ -2981,6 +3136,66 @@ static void attr_changed_ns(JSContextHandle ctx, GCValue el, NodeId n, const cha
     /* (a media element's src set: it loads; removed: it does not) */
     if (!ns && new_value && !strcasecmp(name, "src") && (dom_tag_is(n, "video") || dom_tag_is(n, "audio")))
         js_video_src_attr_changed(ctx, el, new_value);
+    {
+        extern void image_api_attr_changed(uint32_t n, const char *name, const char *old_value, const char *new_value);
+        if (!ns) image_api_attr_changed(n, name, old_value, new_value);
+    }
+    /* (a showing popover's popover attribute changed state: hidden, platform_api.js) */
+    if (!ns && !strcasecmp(name, "popover")) {
+        GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberPopoverAttr");
+        GCValue av[2] = { el, old_value ? JS_NewString(ctx, old_value) : JS_NULL };
+        if (JS_IsFunction(ctx, fn) && JS_IsException(JS_Call(ctx, fn, JS_UNDEFINED, 2, av))) JS_GetException(ctx);
+    }
+    /* (an <input>'s src or type changed: its image, for the Image Button state, form_controls.js) */
+    if (!ns && (!strcasecmp(name, "src") || !strcasecmp(name, "type")) && dom_tag_is(n, "input")) {
+        GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberInputImage");
+        if (JS_IsFunction(ctx, fn) && JS_IsException(JS_Call(ctx, fn, JS_UNDEFINED, 1, &el))) JS_GetException(ctx);
+    }
+    /* (an iframe's or frame's marginwidth / marginheight: its document's body restyled) */
+    if (!ns && (!strcasecmp(name, "marginwidth") || !strcasecmp(name, "marginheight")) && (dom_tag_is(n, "iframe") || dom_tag_is(n, "frame"))) {
+        extern NodeId frame_content_document_of(NodeId el);
+        NodeId cd = frame_content_document_of(n);
+        for (NodeId r = cd ? dom_first_child(cd) : 0; r; r = dom_next_sibling(r)) {
+            if (dom_kind(r) != DOM_K_ELEMENT) continue;
+            for (NodeId b = dom_first_child(r); b; b = dom_next_sibling(b))
+                if (dom_kind(b) == DOM_K_ELEMENT && !strcmp(dom_local_name(b), "body")) dom_mark_dirty(b, DOMF_DIRTY_ATTR);
+        }
+    }
+    /* (an SVG <image>'s href set: its image loads, platform_api.js) */
+    if (new_value && !strcasecmp(name, "href") && (!ns || !strcmp(dom_name_str(ns), "http://www.w3.org/1999/xlink")) &&
+        dom_ns(n) == DOM_NS_SVG && !strcmp(dom_local_name(n), "image")) {
+        GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberSvgImageHref");
+        if (JS_IsFunction(ctx, fn) && JS_IsException(JS_Call(ctx, fn, JS_UNDEFINED, 1, &el))) JS_GetException(ctx);
+    }
+    /* (an event handler content attribute set or removed: the handler activated, with its place in the listeners, or
+     * deactivated, dom_events.js) */
+    if (!ns && (name[0] == 'o' || name[0] == 'O') && (name[1] == 'n' || name[1] == 'N') && name[2]) {
+        GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberHandlerAttr");
+        GCValue av[3] = { el, JS_NewString(ctx, name), new_value ? JS_TRUE : JS_FALSE };
+        if (JS_IsFunction(ctx, fn) && JS_IsException(JS_Call(ctx, fn, JS_UNDEFINED, 3, av))) JS_GetException(ctx);
+    }
+    /* (a <details>' open attribute added or removed: its toggle event, dom_events.js) */
+    if (!ns && !strcasecmp(name, "open") && dom_ns(n) == DOM_NS_HTML && dom_tag_is(n, "details")) {
+        GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberDetailsOpen");
+        GCValue av[2] = { el, new_value ? JS_TRUE : JS_FALSE };
+        if (JS_IsFunction(ctx, fn) && JS_IsException(JS_Call(ctx, fn, JS_UNDEFINED, 2, av))) JS_GetException(ctx);
+    }
+    /* (its name set: its group's exclusivity, it closed if another is open) */
+    if (!ns && new_value && !strcasecmp(name, "name") && dom_ns(n) == DOM_NS_HTML && dom_tag_is(n, "details")) {
+        GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberDetailsName");
+        if (JS_IsFunction(ctx, fn) && JS_IsException(JS_Call(ctx, fn, JS_UNDEFINED, 1, &el))) JS_GetException(ctx);
+    }
+    /* (a select's size or multiple, an option's disabled or selected changed: its <selectedcontent>, form_controls.js) */
+    if (!ns && dom_ns(n) == DOM_NS_HTML && (((!strcasecmp(name, "size") || !strcasecmp(name, "multiple")) && dom_tag_is(n, "select")) ||
+                                         ((!strcasecmp(name, "disabled") || !strcasecmp(name, "selected")) && dom_tag_is(n, "option")))) {
+        GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberSelectAttr");
+        if (JS_IsFunction(ctx, fn) && JS_IsException(JS_Call(ctx, fn, JS_UNDEFINED, 1, &el))) JS_GetException(ctx);
+    }
+    /* (a <track>'s src changed: its track loads again) */
+    if (!ns && !strcasecmp(name, "src") && dom_tag_is(n, "track")) {
+        GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberTrackSrcChanged");
+        if (JS_IsFunction(ctx, fn) && JS_IsException(JS_Call(ctx, fn, JS_UNDEFINED, 1, &el))) JS_GetException(ctx);
+    }
     dom_request_layout();
 }
 
@@ -3167,6 +3382,23 @@ GCValue js_element_remove_attribute(JSContextHandle ctx, GCValue this_val, int a
     }
     if (old_value) {
         if (n && name[0] == 'o' && name[1] == 'n' && name[2]) handler_attr_changed(ctx, this_val, n, name + 2, NULL);
+        /* (a showing popover's popover attribute removed: hidden, platform_api.js) */
+        if (n && !strcasecmp(name, "popover")) {
+            GCValue pfn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberPopoverAttr");
+            GCValue pav[2] = { this_val, JS_NewString(ctx, old_value) };
+            if (JS_IsFunction(ctx, pfn) && JS_IsException(JS_Call(ctx, pfn, JS_UNDEFINED, 2, pav))) JS_GetException(ctx);
+        }
+        /* (a <details>' open removed: its toggle event; a select's or option's state: its selectedcontent) */
+        if (n && dom_ns(n) == DOM_NS_HTML && !strcasecmp(name, "open") && dom_tag_is(n, "details")) {
+            GCValue dfn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberDetailsOpen");
+            GCValue dav[2] = { this_val, JS_FALSE };
+            if (JS_IsFunction(ctx, dfn) && JS_IsException(JS_Call(ctx, dfn, JS_UNDEFINED, 2, dav))) JS_GetException(ctx);
+        }
+        if (n && dom_ns(n) == DOM_NS_HTML && (((!strcasecmp(name, "size") || !strcasecmp(name, "multiple")) && dom_tag_is(n, "select")) ||
+                                              ((!strcasecmp(name, "disabled") || !strcasecmp(name, "selected")) && dom_tag_is(n, "option")))) {
+            GCValue sfn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberSelectAttr");
+            if (JS_IsFunction(ctx, sfn) && JS_IsException(JS_Call(ctx, sfn, JS_UNDEFINED, 1, &this_val))) JS_GetException(ctx);
+        }
         invoke_attribute_changed(ctx, this_val, name, old_value, NULL);
         mo_notify_attribute(ctx, this_val, name, old_value);
         if (n) { dom_mark_dirty(n, DOMF_DIRTY_ATTR); dom_query_note_attr(n, name); }
@@ -3481,21 +3713,24 @@ static void sb_put(SBuf *b, const char *s, size_t n) {
     b->data[b->len] = '\0';
 }
 static void sb_str(SBuf *b, const char *s) { sb_put(b, s, strlen(s)); }
+/* (HTML 13.3 "escaping a string": &, no-break space, < and >; in attribute mode " too) */
 static void sb_escape(SBuf *b, const char *s, size_t n, bool attr) {
     size_t run = 0;
     for (size_t i = 0; i < n; i++) {
         const char *rep = NULL;
+        size_t w = 1;
         switch (s[i]) {
         case '&': rep = "&amp;"; break;
-        case '<': rep = attr ? NULL : "&lt;"; break;
-        case '>': rep = attr ? NULL : "&gt;"; break;
+        case '<': rep = "&lt;"; break;
+        case '>': rep = "&gt;"; break;
         case '"': rep = attr ? "&quot;" : NULL; break;
-        case '\xa0': break;
+        case '\xc2': if (i + 1 < n && s[i + 1] == '\xa0') { rep = "&nbsp;"; w = 2; } break;
         }
         if (!rep) continue;
         sb_put(b, s + run, i - run);
         sb_str(b, rep);
-        run = i + 1;
+        run = i + w;
+        i += w - 1;
     }
     sb_put(b, s + run, n - run);
 }
@@ -3503,6 +3738,8 @@ static void sb_escape(SBuf *b, const char *s, size_t n, bool attr) {
 static void serialize_node(SBuf *b, NodeId n);
 
 static void serialize_children(SBuf *b, NodeId n) {
+    /* (a void element's: none) */
+    if (dom_kind(n) == DOM_K_ELEMENT && (dom_flags(n) & DOMF_VOID) && dom_ns(n) == DOM_NS_HTML) return;
     NodeId src = dom_template_content(n) ? dom_template_content(n) : n;
     for (NodeId c = dom_first_child(src); c; c = dom_next_sibling(c)) serialize_node(b, c);
 }
@@ -3524,6 +3761,15 @@ static void serialize_node(SBuf *b, NodeId n) {
         sb_str(b, "-->");
         break;
     }
+    case DOM_K_PI: {
+        const char *t = dom_text(n, &len);
+        sb_str(b, "<?");
+        sb_str(b, dom_node_name(n));
+        sb_str(b, " ");
+        sb_put(b, t, len);
+        sb_str(b, "?>");
+        break;
+    }
     case DOM_K_ELEMENT: {
         /* (HTML's, SVG's and MathML's by local name, others' qualified name) */
         const char *tag = dom_local_name(n), *prefix = dom_prefix(n);
@@ -3534,7 +3780,13 @@ static void serialize_node(SBuf *b, NodeId n) {
         for (int i = 0; i < dom_attr_count(n); i++) {
             const DomAttr *a = dom_attr_at(n, i);
             sb_str(b, " ");
-            sb_str(b, attr_output_name(a));
+            /* (an attribute's serialized name, HTML 13.3: xml:, xmlns: and xlink: for those namespaces) */
+            const char *uri = a->ns ? dom_name_str(a->ns) : NULL;
+            const char *ln = uri ? dom_attr_local_name(a) : NULL;
+            if (uri && ln && !strcmp(uri, "http://www.w3.org/XML/1998/namespace")) { sb_str(b, "xml:"); sb_str(b, ln); }
+            else if (uri && ln && !strcmp(uri, "http://www.w3.org/2000/xmlns/")) { sb_str(b, strcmp(ln, "xmlns") ? "xmlns:" : "xmlns"); if (strcmp(ln, "xmlns")) sb_str(b, ln); }
+            else if (uri && ln && !strcmp(uri, "http://www.w3.org/1999/xlink")) { sb_str(b, "xlink:"); sb_str(b, ln); }
+            else sb_str(b, attr_output_name(a));
             sb_str(b, "=\"");
             sb_escape(b, a->value.s ? a->value.s : "", a->value.len, true);
             sb_str(b, "\"");
@@ -5149,8 +5401,12 @@ GCValue js_dom_parser_parse_from_string(JSContextHandle ctx, GCValue this_val, i
     if (t) return dom_new_xml_document(ctx, str, len, types[t]);
     /* (an empty string is a document with an empty body) */
     GCValue js_doc = dom_new_parsed_document(ctx, str, len);
-    if (JS_IsObject(js_doc))
+    if (JS_IsObject(js_doc)) {
         JS_DefinePropertyValueStr(ctx, js_doc, "__cyber_ct", JS_NewString(ctx, types[t]), JS_PROP_CONFIGURABLE);
+        /* (the details the parser made open: their toggle events) */
+        GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberDetailsParsed");
+        if (JS_IsFunction(ctx, fn) && JS_IsException(JS_Call(ctx, fn, JS_UNDEFINED, 1, &js_doc))) JS_GetException(ctx);
+    }
     return js_doc;
 }
 
@@ -5296,6 +5552,11 @@ static GCValue hit_test_layout_node(JSContextHandle ctx, LayoutContext *layout, 
     LayoutBox *box = &layout->boxes[idx];
     LayoutNodeRef *ref = &layout->tree.nodes[idx];
     if (box->s->display == CSS_DISPLAY_NONE) return JS_NULL;   /* not laid out (or styled) */
+    /* (a backdrop with pointer-events: none, a popover's: not there, nor what it holds) */
+    if (box->s->pe_none) {
+        const HtmlNode *bn = css_layout_box_node(layout, idx);
+        if (bn && bn->tag_name && !strcmp(bn->tag_name, "::backdrop")) return JS_NULL;
+    }
     bool inside = (x >= box->x && x <= box->x + box->width &&
                    y >= box->y && y <= box->y + box->height);
     /* (what overflows a box is still there, unless it clips: what is fixed
@@ -5325,7 +5586,7 @@ static GCValue hit_test_layout_node(JSContextHandle ctx, LayoutContext *layout, 
         const HtmlNode *on = css_layout_box_node(layout, scroll_owner);
         if (on && dom_valid(on->store_id)) return dom_js(ctx, on->store_id);
     }
-    if (inside && box->s->visibility != CSS_VISIBILITY_HIDDEN && ref->dom_node_idx >= 0 && layout->doc) {
+    if (inside && box->s->visibility != CSS_VISIBILITY_HIDDEN && !box->s->pe_none && ref->dom_node_idx >= 0 && layout->doc) {
         HtmlNode *hnode = (HtmlNode *)po_array_payload(&layout->doc->array, ref->dom_node_idx);
         if (hnode && hnode->type == HTML_NODE_ELEMENT && dom_valid(hnode->store_id) &&
             dom_kind(hnode->store_id) == DOM_K_ELEMENT) {

@@ -522,6 +522,8 @@ const char *http_last_content_type(void) {
 
 /* (the response's Content-Language, its first tag; and the document's, kept from its own response) */
 static __thread char t_last_lang[64];
+static __thread char t_last_charset[64];   /* (the Content-Type's charset parameter, as written) */
+const char *http_last_content_charset(void) { return t_last_charset; }
 static char g_doc_lang[64];
 const char *http_last_content_language(void) { return t_last_lang; }
 const char *http_doc_language(void) { return g_doc_lang; }
@@ -532,13 +534,20 @@ void http_set_last_content_type(const char *type) {
     snprintf(t_last_type, sizeof(t_last_type), "%s", type ? type : "");
     char *tb = strchr(t_last_type, '\t');
     t_last_lang[0] = 0;
-    if (tb) { *tb = 0; snprintf(t_last_lang, sizeof t_last_lang, "%s", tb + 1); }
+    t_last_charset[0] = 0;
+    if (tb) {
+        *tb = 0;
+        char *tb2 = strchr(tb + 1, '\t');
+        if (tb2) { *tb2 = 0; snprintf(t_last_charset, sizeof t_last_charset, "%s", tb2 + 1); }
+        snprintf(t_last_lang, sizeof t_last_lang, "%s", tb + 1);
+    }
 }
 
 /* t_last_type from a response's header block. */
 static void note_content_type(const char *hdrs, size_t len) {
     t_last_type[0] = 0;
     t_last_lang[0] = 0;
+    t_last_charset[0] = 0;
     for (size_t i = 0; i + 17 <= len; i++) {
         if ((i && hdrs[i - 1] != '\n') || strncasecmp(hdrs + i, "content-language:", 17)) continue;
         const char *p = hdrs + i + 17, *e = hdrs + len;
@@ -558,6 +567,20 @@ static void note_content_type(const char *hdrs, size_t len) {
             n++;
         }
         t_last_type[n] = 0;
+        /* (its charset parameter) */
+        const char *le = p;
+        while (le < e && *le != '\r' && *le != '\n') le++;
+        for (const char *q = p + n; q + 8 <= le; q++) {
+            if (strncasecmp(q, "charset=", 8)) continue;
+            const char *v = q + 8;
+            size_t l = 0;
+            if (v < le && *v == '"') { v++; while (v + l < le && v[l] != '"') l++; }
+            else while (v + l < le && v[l] != ';' && v[l] != ' ' && v[l] != '\t') l++;
+            if (l >= sizeof t_last_charset) l = sizeof t_last_charset - 1;
+            memcpy(t_last_charset, v, l);
+            t_last_charset[l] = 0;
+            break;
+        }
         return;
     }
 }
@@ -1324,9 +1347,11 @@ static bool http_request_net(const char *url, const char *method,
                                   strncasecmp(custom_headers[i], "Accept-Encoding:", 16) == 0))
             want_coding = false;
     }
-    bool own_coding = false;
-    for (size_t i = 0; i < custom_header_count; i++)
+    bool own_coding = false, own_accept = false;
+    for (size_t i = 0; i < custom_header_count; i++) {
         if (custom_headers[i] && strncasecmp(custom_headers[i], "Accept-Encoding:", 16) == 0) own_coding = true;
+        if (custom_headers[i] && strncasecmp(custom_headers[i], "Accept:", 7) == 0) own_accept = true;
+    }
 
     /* Build HTTP request */
     char request[16384];
@@ -1334,11 +1359,12 @@ static bool http_request_net(const char *url, const char *method,
              "%s %s HTTP/1.1\r\n"
              "Host: %s\r\n"
              "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n"
-             "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/apng,image/*,*/*;q=0.8\r\n"
+             "%s"
              "Accept-Language: en-US,en;q=0.9\r\n"
              "%s"
              "Connection: keep-alive\r\n",
              method, path, host_hdr,
+             own_accept ? "" : "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/apng,image/*,*/*;q=0.8\r\n",
              own_coding ? "" : want_coding ? "Accept-Encoding: gzip, deflate, br\r\n" : "Accept-Encoding: identity\r\n");
     
     /* Add custom headers */
@@ -2155,14 +2181,19 @@ static bool raw_header(const char *headers, const char *name, char *out, size_t 
     return false;
 }
 
+/* (the next fetch's Accept header, this thread's: a module's type asks for its own) */
+static __thread const char *t_next_accept;
+void http_next_accept(const char *a) { t_next_accept = a; }
 bool http_get_to_memory(const char *url, HttpBuffer *outBuffer,
                         char *err, size_t errLen) {
     double t0 = wall_ms();
+    const char *acc_ = t_next_accept;
+    t_next_accept = NULL;
     bool cors = false;
     int n_cors = 0;
     bool noted = false;
     char n_origin[300] = "", n_integ[600] = "", h_origin[320], h_ref[2200];
-    const char *hs[3];
+    const char *hs[4];
     size_t hn = 0;
     res_lock();
     for (size_t i = 0; i < g_cors_n && i < HTTP_CORS_MAX && !cors; i++) cors = !strcmp(g_cors_urls[i], url);
@@ -2180,6 +2211,7 @@ bool http_get_to_memory(const char *url, HttpBuffer *outBuffer,
     if (n_cors && (!n_origin[0] || (!strncmp(url, n_origin, strlen(n_origin)) && url[strlen(n_origin)] == '/'))) n_cors = 0;
     if (cors || n_cors) hs[hn++] = "Sec-Fetch-Mode: cors";
     if (n_cors) { snprintf(h_origin, sizeof h_origin, "Origin: %s", n_origin); hs[hn++] = h_origin; }
+    if (acc_) hs[hn++] = acc_;
     bool ok = hn ? http_get_to_memory_with_headers(url, hs, hn, outBuffer, err, errLen)
                  : http_request(url, outBuffer, err, errLen, NULL, NULL);
     if (ok && noted) {

@@ -30,6 +30,7 @@
 #include "dom_store.h"
 #include "dom_wrap.h"
 #include "dom_js.h"
+extern void dom_doc_set(JSContextHandle ctx, GCValue doc, const char *k, GCValue v);
 
 #define LOG_TAG "html_dom"
 #define LOG_INFO(...) platform_log(LOG_LEVEL_INFO, LOG_TAG, __VA_ARGS__)
@@ -38,7 +39,7 @@
 
 /* List of self-closing HTML tags (void elements) */
 static const char *SELF_CLOSING_TAGS[] = {
-    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "area", "base", "basefont", "bgsound", "br", "col", "embed", "frame", "hr", "img", "input", "keygen",
     "link", "meta", "param", "source", "track", "wbr", NULL
 };
 
@@ -534,7 +535,7 @@ HtmlDocStream *html_doc_stream_begin(JSContextHandle ctx, GCValue js_doc) {
     /* The page replaces the skeleton's root element. */
     NodeId old = dom_node_of(s->old_de);
     if (old && dom_parent(old) == doc) dom_detach(old, true);
-    JS_SetPropertyStr(ctx, js_doc, "readyState", JS_NewString(ctx, "loading"));
+    dom_doc_set(ctx, js_doc, "readyState", JS_NewString(ctx, "loading"));
     s->st = dom_stream_begin(doc, doc);
     if (!s->st) { html_doc_stream_end(s); return NULL; }
     return s;
@@ -677,6 +678,28 @@ void html_doc_stream_xml(HtmlDocStream *s, const char *data, size_t len, const c
     s->st = NULL;
 }
 
+/* At the end of a written document's input (document.close): the html, head and body the parser implies there */
+void html_doc_imply_roots(NodeId doc) {
+    if (!dom_valid(doc) || dom_kind(doc) != DOM_K_DOCUMENT) return;
+    NodeId de = DOM_NULL;
+    for (NodeId c = dom_first_child(doc); c; c = dom_next_sibling(c))
+        if (dom_kind(c) == DOM_K_ELEMENT) { de = c; break; }
+    if (!de) {
+        de = shallow_copy(DOM_NULL, "html", doc);
+        dom_attach(doc, de, DOM_NULL);
+    }
+    if (strcmp(dom_tag_name(de), "html")) return;
+    NodeId head = first_child_tagged(de, "head");
+    if (!head) {
+        head = shallow_copy(DOM_NULL, "head", doc);
+        dom_attach(de, head, first_child_tagged(de, NULL));
+    }
+    if (first_child_tagged(de, "body") || first_child_tagged(de, "frameset")) return;
+    NodeId body = shallow_copy(DOM_NULL, "body", doc);
+    dom_attach(de, body, DOM_NULL);
+    dom_request_layout();
+}
+
 void html_doc_stream_end(HtmlDocStream *s) {
     if (!s) return;
     JSContextHandle ctx = s->ctx;
@@ -684,20 +707,30 @@ void html_doc_stream_end(HtmlDocStream *s) {
      * population does: what the parser put at the top goes into the root. */
     if (s->st) {
         if (!s->de) {
+            /* (the document's doctype and comments stay its own; the rest goes into the root) */
             NodeId de = shallow_copy(DOM_NULL, "html", s->doc);
-            move_children(s->doc, de, false);
+            for (NodeId c = dom_first_child(s->doc), next; c; c = next) {
+                next = dom_next_sibling(c);
+                if (dom_kind(c) == DOM_K_DOCTYPE || dom_kind(c) == DOM_K_COMMENT || dom_kind(c) == DOM_K_PI) continue;
+                dom_detach(c, false);
+                dom_attach(de, c, DOM_NULL);
+            }
             dom_attach(s->doc, de, DOM_NULL);
         }
         stream_note_root_elements(s);
         if (s->de && !s->head) {
             NodeId head = shallow_copy(DOM_NULL, "head", s->doc);
-            dom_attach(s->de, head, dom_first_child(s->de));
+            dom_attach(s->de, head, first_child_tagged(s->de, NULL));
         }
-        if (s->de && !s->body) {
+        /* (a frameset document: no body) */
+        bool frameset_doc = false;
+        for (NodeId c = s->de ? dom_first_child(s->de) : DOM_NULL; c && !frameset_doc; c = dom_next_sibling(c))
+            frameset_doc = dom_kind(c) == DOM_K_ELEMENT && !strcmp(dom_tag_name(c), "frameset");
+        if (s->de && !s->body && !frameset_doc) {
             /* (After the head, as html_populate_js_document_from_html puts it.) */
             NodeId body = shallow_copy(DOM_NULL, "body", s->doc);
             NodeId head = first_child_tagged(s->de, "head");
-            dom_attach(s->de, body, head ? dom_next_sibling(head) : dom_first_child(s->de));
+            dom_attach(s->de, body, DOM_NULL);
         }
         stream_note_root_elements(s);
         dom_request_layout();
@@ -726,7 +759,7 @@ static GCValue new_js_document(JSContextHandle ctx) {
     NodeId d = dom_create_document();
     GCValue js_doc = dom_js(ctx, d);
     JS_SetPropertyStr(ctx, js_doc, "nodeType", JS_NewInt32(ctx, 9));
-    JS_SetPropertyStr(ctx, js_doc, "readyState", JS_NewString(ctx, "complete"));
+    dom_doc_set(ctx, js_doc, "readyState", JS_NewString(ctx, "complete"));
     JS_SetPropertyStr(ctx, js_doc, "contentType", JS_NewString(ctx, "text/html"));
     JS_SetPropertyStr(ctx, js_doc, "createElement",
         JS_NewCFunction(ctx, js_document_create_element, "createElement", 1));
@@ -791,7 +824,37 @@ void dom_set_inner_html(JSContextHandle ctx, NodeId target, const char *html, si
     }
     if (!len) return;
     NodeId owner = dom_kind(target) == DOM_K_DOCUMENT ? target : dom_owner(target);
+    /* (a raw-text or RCDATA element's markup: one text, references decoded in textarea and title, NUL as U+FFFD) */
+    if (dom_kind(target) == DOM_K_ELEMENT && dom_ns(target) == DOM_NS_HTML) {
+        static const char *const rawt[] = { "script", "style", "xmp", "iframe", "noembed", "noframes", "noscript", "plaintext", "textarea", "title" };
+        const char *tn = dom_tag_name(target);
+        int which = -1;
+        for (int i = 0; tn && i < 10; i++) if (!strcasecmp(tn, rawt[i])) which = i;
+        if (which >= 0) {
+            char *o = (char *)malloc(len * 3 + 1);
+            if (o) {
+                size_t k = 0;
+                for (size_t i = 0; i < len; i++) {
+                    char ch = html[i];
+                    if (ch == '\r') { if (i + 1 < len && html[i + 1] == '\n') continue; o[k++] = '\n'; }
+                    else if (!ch) { o[k++] = (char)0xEF; o[k++] = (char)0xBF; o[k++] = (char)0xBD; }
+                    else o[k++] = ch;
+                }
+                o[k] = 0;
+                if (which >= 8) { extern uint32_t dom_parse_decode_entities(char *str, size_t len); k = dom_parse_decode_entities(o, k); }
+                if (k) {
+                    NodeId t = dom_create_chardata(DOM_K_TEXT, o, k, owner);
+                    dom_api_insert(ctx, target, t, DOM_NULL);
+                }
+                free(o);
+            }
+            return;
+        }
+    }
+    extern void dom_parse_set_context(NodeId el);
+    dom_parse_set_context(target);
     NodeId frag = dom_parse_html_fragment(html, len, owner);
+    dom_parse_set_context(DOM_NULL);
     dom_adopt_template_contents(frag);
     NodeId start = dom_parse_fragment_source(frag);
     /* (the html element: a head and a body, as its context parses them) */
@@ -2483,6 +2546,36 @@ void dom_live_value_set(NodeId id, const char *v)
     free(g_live_val[at].v);
     g_live_val[at].v = strdup(v);
 }
+/* (a textarea showing its placeholder: no value, a placeholder; that, else NULL) */
+static const char *mir_ta_placeholder(NodeId s) {
+    if (dom_kind(s) != DOM_K_ELEMENT || dom_ns(s) != DOM_NS_HTML || strcmp(css_atom_str(g_dom.tag[dom_slot(s)]), "textarea")) return NULL;
+    const char *ph = dom_get_attr_str(s, "placeholder");
+    if (!ph || !ph[0]) return NULL;
+    const char *lv = g_live_val_n ? dom_live_value(s) : NULL;
+    if (lv) return lv[0] ? NULL : ph;
+    uint32_t r = dom_slot(s);
+    for (uint32_t x = r; x; x = dom_next_in_subtree(x, r)) {
+        if (g_dom.kind[x] != DOM_K_TEXT && g_dom.kind[x] != DOM_K_CDATA) continue;
+        uint32_t tl = 0;
+        dom_text(dom_id_of(x), &tl);
+        if (tl) return NULL;
+    }
+    return ph;
+}
+
+/* (a frame's body: its frame element's marginwidth / marginheight, which its style reads, as an attribute of its own) */
+static const char *mir_frame_margins(NodeId s) {
+    extern NodeId frame_container_of_document(NodeId doc);
+    if (dom_kind(s) != DOM_K_ELEMENT || dom_ns(s) != DOM_NS_HTML || strcmp(css_atom_str(g_dom.tag[dom_slot(s)]), "body")) return NULL;
+    NodeId fr = frame_container_of_document(dom_owner(s));
+    if (!fr) return NULL;
+    const char *mw = dom_get_attr_str(fr, "marginwidth"), *mh = dom_get_attr_str(fr, "marginheight");
+    if (!mw && !mh) return NULL;
+    static char buf[160];
+    snprintf(buf, sizeof buf, "%.70s|%.70s", mw ? mw : "", mh ? mh : "");
+    return buf;
+}
+
 static void mir_store_attrs(NodeId s, MirStoreAttrs *a) {
     a->n = 0;
     a->style = NULL;
@@ -2490,6 +2583,9 @@ static void mir_store_attrs(NodeId s, MirStoreAttrs *a) {
     {
         const char *lv_ = g_live_val_n ? dom_live_value(s) : NULL;
         if (lv_) { a->names[a->n] = "-cb-value"; a->values[a->n] = lv_; a->lens[a->n] = (uint32_t)strlen(lv_); a->n++; }
+        if (mir_ta_placeholder(s)) { a->names[a->n] = "-cb-ph"; a->values[a->n] = "1"; a->lens[a->n] = 1; a->n++; }
+        const char *fm_ = mir_frame_margins(s);
+        if (fm_) { a->names[a->n] = "-cb-fm"; a->values[a->n] = fm_; a->lens[a->n] = (uint32_t)strlen(fm_); a->n++; }
     }
     int na = dom_attr_count(s), style_at = -1;
     /* (the root, no language of its own: the one its response's Content-Language gave, as an inherited one) */
@@ -2571,7 +2667,7 @@ static bool mir_read_attrs(NodeId s, int idx, const char *tag_lower, bool in_svg
     } else {
         LooseAttrs loose = {0};
         ser_element_attrs(g_mir.ctx, ser_of_node(s), tag_lower, &loose, mir_attr_sink, &a);
-        { const char *lv_ = g_live_val_n ? dom_live_value(s) : NULL; if (lv_) mir_attr_sink(&a, "-cb-value", lv_); }   /* (as script set it: painted) */
+        { const char *lv_ = g_live_val_n ? dom_live_value(s) : NULL; if (lv_) mir_attr_sink(&a, "-cb-value", lv_); if (mir_ta_placeholder(s)) mir_attr_sink(&a, "-cb-ph", "1"); const char *fm_ = mir_frame_margins(s); if (fm_) mir_attr_sink(&a, "-cb-fm", fm_); }   /* (as script set it: painted) */
         names = a.names;
         values = (const char *const *)a.values;
         n = a.n;
@@ -2642,8 +2738,16 @@ static void mir_buf_add(MirBuf *b, const char *s, size_t n) {
 }
 
 /* Raw-text element content: the text of its subtree. */
+static const char *mir_ta_placeholder(NodeId s);
 static char *mir_raw_text(NodeId s, size_t *len_out) {
     MirBuf b = {0};
+    { const char *ph_ = mir_ta_placeholder(s);   /* (a textarea's placeholder, shown while it has no value) */
+      if (ph_) { size_t n_ = strlen(ph_), k_ = 0; char *o_ = (char *)malloc(n_ + 1); if (o_) { for (size_t i_ = 0; i_ < n_; i_++) { if (ph_[i_] == 13) { o_[k_++] = 10; if (ph_[i_ + 1] == 10) i_++; } else o_[k_++] = ph_[i_]; } o_[k_] = 0; *len_out = k_; return o_; } } }   /* (CR and CRLF: line feeds) */
+    /* (a textarea's value as script set it: shown in place of its text) */
+    if (g_live_val_n && !strcmp(css_atom_str(g_dom.tag[dom_slot(s)]), "textarea")) {
+        const char *lv_ = dom_live_value(s);
+        if (lv_) { size_t n_ = strlen(lv_); char *o_ = (char *)malloc(n_ + 1); if (o_) { memcpy(o_, lv_, n_ + 1); *len_out = n_; return o_; } }
+    }
     uint32_t r = dom_slot(s);
     for (uint32_t x = r; x; x = dom_next_in_subtree(x, r)) {
         if (g_dom.kind[x] != DOM_K_TEXT && g_dom.kind[x] != DOM_K_CDATA) continue;
@@ -2690,6 +2794,28 @@ static bool mir_has_content(NodeId root) {
     return false;
 }
 
+/* (a <select>'s UA shadow tree: slot "-cb-button" takes its first element child when that is a
+ * <button>, "-cb-rest" the rest of its children) */
+static int sel_slot_kind(NodeId host, const char *name) {
+    if (!name || name[0] != '-' || strncmp(name, "-cb-", 4)) return 0;
+    const char *t = dom_tag_name(host);
+    if (!t || (strcmp(t, "select") && strcmp(t, "details"))) return 0;
+    return !strcmp(name, "-cb-button") || !strcmp(name, "-cb-summary") ? 1 : !strcmp(name, "-cb-rest") ? 2 : 0;
+}
+/* (a select's first element child when a <button>; a details' first <summary>) */
+static NodeId sel_button_of(NodeId host) {
+    const char *ht = dom_tag_name(host);
+    bool det = ht && !strcmp(ht, "details");
+    const char *want = det ? "summary" : "button";
+    for (NodeId c = dom_first_child(host); c; c = dom_next_sibling(c)) {
+        if (dom_kind(c) != DOM_K_ELEMENT) continue;
+        const char *t = dom_tag_name(c);
+        if (t && !strcmp(t, want)) return c;
+        if (!det) return DOM_NULL;
+    }
+    return DOM_NULL;
+}
+
 /* A <slot> below the top of a shadow tree (those at the top are unwrapped by
  * their host's mir_compose): what is assigned to it, if it has any. */
 static bool mir_compose_nested_slot(NodeId s, NodeList *out) {
@@ -2709,6 +2835,13 @@ static bool mir_compose_nested_slot(NodeId s, NodeList *out) {
         if (!strcmp(other ? other : "", name)) return false;
     }
     int had = out->n;
+    int sk = sel_slot_kind(dom_id_of(host), name);
+    if (sk) {
+        NodeId btn = sel_button_of(dom_id_of(host));
+        for (NodeId c = dom_first_child(dom_id_of(host)); c; c = dom_next_sibling(c))
+            if ((sk == 1) == (c == btn)) nl_push(out, c);
+        return out->n > had;
+    }
     for (NodeId c = dom_first_child(dom_id_of(host)); c; c = dom_next_sibling(c)) {
         const char *ls = dom_kind(c) == DOM_K_ELEMENT ? dom_attr(c, "slot") : NULL;
         if (!strcmp(ls ? ls : "", name)) nl_push(out, c);
@@ -3029,7 +3162,7 @@ static void mir_update_element(NodeId s, int m, bool in_svg) {
     if (html_is_self_closing_tag(tag_lower)) return;
     if (html_is_raw_content_tag(tag_lower)) {
         if (strcmp(tag_lower, "script") == 0) return;
-        if (!(f & (DOMF_DIRTY_CHILDREN | DOMF_DIRTY_DESCENDANT)) && !g_mir.full) return;
+        if (!(f & (DOMF_DIRTY_CHILDREN | DOMF_DIRTY_DESCENDANT)) && !g_mir.full && !((f & DOMF_DIRTY_ATTR) && !strcmp(tag_lower, "textarea"))) return;
         size_t n = 0;
         char *t = mir_raw_text(s, &n);
         HtmlNode *hn = po_array_payload(&g_mir.doc->array, m);

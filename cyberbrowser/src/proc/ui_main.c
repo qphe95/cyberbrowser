@@ -277,13 +277,25 @@ static void update_tab(Tab *t) { update_chrome(&g_wins[t->win]); }
 static bool g_reuse;
 static int g_reuse_max;   /* (CYBER_TAB_REUSE_MAX: a new process after that many pages; 0 none) */
 
+/* (CYBER_TAB_FRESH: comma-separated pieces of URL whose pages always get a new process: heavy ones a used process may not hold) */
+static bool fresh_url(const char *url) {
+    const char *l = getenv("CYBER_TAB_FRESH");
+    while (l && *l) {
+        const char *e = strchr(l, ',');
+        size_t n = e ? (size_t)(e - l) : strlen(l);
+        if (n) { char piece[256]; if (n >= sizeof piece) n = sizeof piece - 1; memcpy(piece, l, n); piece[n] = 0; if (strstr(url, piece)) return true; }
+        l = e ? e + 1 : NULL;
+    }
+    return false;
+}
+
 static void navigate(Tab *t, const char *url) {
     char site[SITE_MAX];
     size_t n = strlen(url);
     if (getenv("CYBER_REUSE_DEBUG"))
         ui_log("[ui] navigate: reuse %d id %u started %d state %d site %s", g_reuse, t->id, t->started, t->state, t->site);
     if (g_reuse && t->id && t->started && t->state != ST_CRASHED && t->site[0] && n <= PROTO_URL_MAX &&
-        !(g_reuse_max > 0 && t->reuses >= g_reuse_max) &&
+        !(g_reuse_max > 0 && t->reuses >= g_reuse_max) && !fresh_url(url) &&
         url_site(url, site) && !strcmp(site, t->site) && chan_send(&t->chan, UT_NAVIGATE, url, (uint32_t)n, 1000)) {
         t->reuses++;
         snprintf(t->url, sizeof(t->url), "%s", url);

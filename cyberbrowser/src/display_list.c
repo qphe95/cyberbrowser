@@ -19,8 +19,10 @@
 #include "css_parser.h"
 #include "dom_query.h"
 #include "browser/webgpu_bridge.h"
+#include "browser/canvas2d.h"
 
 /* The frame a <video> shows now (browser/media_source_api.c). */
+bool media_poster_shown(uint32_t node);
 bool media_video_frame_for_node(uint32_t node, const uint8_t **rgba, int *w, int *h,
                                 uint64_t *frame_id);
 
@@ -1218,6 +1220,13 @@ static bool grad_image_key(const char *g, int w, int h, char *key, size_t kn)
     return true;
 }
 
+/* (a CSS gradient rastered w x h into the image cache: its key (a canvas gradient in another color space)) */
+bool display_list_gradient_image(const char *css, int w, int h, char *key, size_t kn)
+{
+    if (!g_image_cache || !css || w <= 0 || h <= 0 || w > 8192 || h > 8192) return false;
+    return grad_image_key(css, w, h, key, kn);
+}
+
 static void on_async_image_loaded(const char *url, void *user_data);
 
 /* ---- reference filters ---- */
@@ -1442,7 +1451,7 @@ static void dl_svg_filter_hook(const char *value, const float box[4], unsigned c
 {
     LayoutContext *ctx = t_flt_ctx;
     if (!ctx || !ctx->doc) return;
-    SvgFilterEnv env = { ctx->doc, dl_flt_prop, dl_flt_color, dl_flt_image, dl_flt_element, (void *)ctx, { t_flt_color[0], t_flt_color[1], t_flt_color[2], t_flt_color[3] }, true, dl_flt_ext_doc };
+    SvgFilterEnv env = { ctx->doc, dl_flt_prop, dl_flt_color, dl_flt_image, dl_flt_element, (void *)ctx, { t_flt_color[0], t_flt_color[1], t_flt_color[2], t_flt_color[3] }, true, dl_flt_ext_doc, { plutosvg_filter_origin[0], plutosvg_filter_origin[1] } };
     svg_filter_apply(&env, value, box, 16.0f, rgba, w, h);
 }
 /* The commands since `from` (the box and its subtree) become an image of them filtered. */
@@ -2283,36 +2292,406 @@ static const char* node_attribute_value(HtmlNode *node, const char *name)
  * Returns a malloc'd URL string (caller frees) or NULL. */
 static __thread double t_srcset_x = 1.0;   /* (the last picked candidate's density: 1 for a w one or none) */
 double display_list_image_density(void) { return t_srcset_x; }
+/* (HTML's "parse a srcset attribute": its next image candidate from *pp, url and descriptors; false at the end) */
+static bool srcset_ws(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r'; }
+static __thread double t_srcset_h;   /* (the last candidate's h descriptor, or -1) */
+static __thread int t_sz_mode;       /* (sizes_source_size: 1 contain, 2 cover, with t_sz_h a height) */
+static __thread double t_sz_h;
+static bool srcset_next(const char **pp, char **url_out, double *w_out, double *x_out, bool *ok_out)
+{
+    const char *p = *pp;
+    while (*p && (srcset_ws(*p) || *p == ',')) p++;
+    if (!*p) { *pp = p; return false; }
+    const char *u0 = p;
+    while (*p && !srcset_ws(*p)) p++;
+    const char *u1 = p;
+    bool desc_none = false;
+    if (u1 > u0 && u1[-1] == ',') { while (u1 > u0 && u1[-1] == ',') u1--; desc_none = true; }
+    *url_out = (char *)malloc((size_t)(u1 - u0) + 1);
+    if (*url_out) { memcpy(*url_out, u0, (size_t)(u1 - u0)); (*url_out)[u1 - u0] = 0; }
+    double w = -1.0, x = -1.0, h = -1.0;
+    bool ok = u1 > u0;
+    if (!desc_none) {
+        /* (the descriptors: tokens up to a comma outside parentheses) */
+        while (*p && srcset_ws(*p)) p++;
+        char tok[64];
+        size_t tn = 0;
+        int depth = 0;
+        for (;;) {
+            char c = *p;
+            bool endtok = !c || (depth == 0 && (srcset_ws(c) || c == ','));
+            if (endtok) {
+                if (tn) {
+                    tok[tn] = 0;
+                    char last = tok[tn - 1];
+                    char *e = NULL;
+                    tok[tn - 1] = 0;
+                    if (last == 'w') {
+                        bool digits = tn > 1;
+                        for (size_t k = 0; k + 1 < tn; k++) if (tok[k] < '0' || tok[k] > '9') digits = false;
+                        long v = digits ? strtol(tok, &e, 10) : 0;
+                        if (!digits || w >= 0 || x >= 0 || v <= 0) ok = false; else w = (double)v;
+                    } else if (last == 'x') {
+                        double v = strtod(tok, &e);
+                        bool num = tn > 1 && e && *e == 0 && (tok[0] == '-' || tok[0] == '.' || (tok[0] >= '0' && tok[0] <= '9'));
+                        if (tn > 1 && (tok[tn - 2] == '.' )) num = false;
+                        if (!num || w >= 0 || x >= 0 || h >= 0 || v < 0) ok = false; else x = v;
+                    } else if (last == 'h') {
+                        bool digits = tn > 1;
+                        for (size_t k = 0; k + 1 < tn; k++) if (tok[k] < '0' || tok[k] > '9') digits = false;
+                        long v = digits ? strtol(tok, &e, 10) : 0;
+                        if (!digits || h >= 0 || x >= 0 || v <= 0) ok = false; else h = (double)v;
+                    } else ok = false;
+                    tn = 0;
+                }
+                if (!c) break;
+                if (c == ',') { p++; break; }
+                p++;
+                continue;
+            }
+            if (c == '(') depth++;
+            else if (c == ')' && depth) depth--;
+            if (tn + 1 < sizeof tok) tok[tn++] = c; else ok = false;
+            p++;
+        }
+    }
+    if (h >= 0 && w < 0) ok = false;
+    t_srcset_h = h;
+    *pp = p;
+    *w_out = w;
+    *x_out = x < 0 && w < 0 ? 1.0 : x;
+    *ok_out = ok;
+    return true;
+}
+
+/* (HTML "parse a sizes attribute": the first source size whose media condition matches, in CSS px; 100vw without one) */
+extern void css_layout_viewport_size(double *w, double *h);
+static double sz_unit(const char *u, double vw, double vh) {
+    double vmin = vw < vh ? vw : vh, vmax = vw > vh ? vw : vh;
+    static const struct { const char *u; int k; double f; } t[] = {
+        { "px", 0, 1 }, { "em", 0, 16 }, { "rem", 0, 16 }, { "ex", 0, 8 }, { "rex", 0, 8 }, { "ch", 0, 8 }, { "rch", 0, 8 },
+        { "ic", 0, 16 }, { "ric", 0, 16 }, { "cap", 0, 11 }, { "rcap", 0, 11 }, { "lh", 0, 19.2 }, { "rlh", 0, 19.2 },
+        { "in", 0, 96 }, { "cm", 0, 96 / 2.54 }, { "mm", 0, 96 / 25.4 }, { "q", 0, 96 / 101.6 }, { "pt", 0, 96 / 72.0 }, { "pc", 0, 16 },
+        { "vw", 1, 1 }, { "svw", 1, 1 }, { "lvw", 1, 1 }, { "dvw", 1, 1 }, { "vi", 1, 1 }, { "svi", 1, 1 }, { "lvi", 1, 1 }, { "dvi", 1, 1 },
+        { "cqw", 1, 1 }, { "cqi", 1, 1 },
+        { "vh", 2, 1 }, { "svh", 2, 1 }, { "lvh", 2, 1 }, { "dvh", 2, 1 }, { "vb", 2, 1 }, { "svb", 2, 1 }, { "lvb", 2, 1 }, { "dvb", 2, 1 },
+        { "cqh", 2, 1 }, { "cqb", 2, 1 },
+        { "vmin", 3, 1 }, { "svmin", 3, 1 }, { "lvmin", 3, 1 }, { "dvmin", 3, 1 }, { "cqmin", 3, 1 },
+        { "vmax", 4, 1 }, { "svmax", 4, 1 }, { "lvmax", 4, 1 }, { "dvmax", 4, 1 }, { "cqmax", 4, 1 },
+    };
+    for (size_t i = 0; i < sizeof t / sizeof t[0]; i++) {
+        if (strcasecmp(u, t[i].u)) continue;
+        switch (t[i].k) {
+        case 1: return vw / 100.0;
+        case 2: return vh / 100.0;
+        case 3: return vmin / 100.0;
+        case 4: return vmax / 100.0;
+        default: return t[i].f;
+        }
+    }
+    return -1;
+}
+/* (a cleaned entry: comments out, escapes resolved to their characters, blocks closed) */
+static bool sz_len(const char **pp, const char *end, double vw, double vh, double *out, bool math);
+static bool sz_math(const char *name, const char **pp, const char *end, double vw, double vh, double *out) {
+    double v[8];
+    int n = 0;
+    const char *p = *pp;
+    for (;;) {
+        while (p < end && srcset_ws(*p)) p++;
+        if (n >= 8 || !sz_len(&p, end, vw, vh, &v[n], true)) return false;
+        n++;
+        while (p < end && srcset_ws(*p)) p++;
+        if (p < end && *p == ',') { p++; continue; }
+        if (p < end && *p == ')') { p++; break; }
+        if (p >= end) break;   /* (closed by the end) */
+        return false;
+    }
+    double r;
+    if (!strcasecmp(name, "calc")) { if (n != 1) return false; r = v[0]; }
+    else if (!strcasecmp(name, "min")) { r = v[0]; for (int i = 1; i < n; i++) if (v[i] < r) r = v[i]; }
+    else if (!strcasecmp(name, "max")) { r = v[0]; for (int i = 1; i < n; i++) if (v[i] > r) r = v[i]; }
+    else if (!strcasecmp(name, "clamp")) { if (n != 3) return false; r = v[1] < v[0] ? v[0] : v[1]; if (r > v[2]) r = v[2] < v[0] ? v[0] : v[2]; }
+    else return false;
+    *out = r;
+    *pp = p;
+    return true;
+}
+static bool sz_len(const char **pp, const char *end, double vw, double vh, double *out, bool math) {
+    const char *p = *pp;
+    /* (a math function) */
+    const char *q = p;
+    while (q < end && ((*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z'))) q++;
+    if (q > p && q < end && *q == '(') {
+        char name[8];
+        size_t nl = (size_t)(q - p);
+        if (nl >= sizeof name) return false;
+        memcpy(name, p, nl); name[nl] = 0;
+        const char *r = q + 1;
+        double v;
+        if (!sz_math(name, &r, end, vw, vh, &v)) return false;
+        if (!math && v < 0) v = 0;
+        *out = v;
+        *pp = r;
+        return true;
+    }
+    char buf[48];
+    size_t k = 0;
+    while (p < end && k + 1 < sizeof buf && !srcset_ws(*p) && *p != ',' && *p != ')' && *p != '(') buf[k++] = *p++;
+    buf[k] = 0;
+    if (!k) return false;
+    char *e = NULL;
+    double v = strtod(buf, &e);
+    if (e == buf) return false;
+    if (!*e) { if (v != 0) return false; *out = 0; *pp = p; return true; }
+    double f = sz_unit(e, vw, vh);
+    if (f < 0) return false;
+    if (!math && v < 0) return false;
+    *out = v * f;
+    *pp = p;
+    return true;
+}
+/* (an <img>'s sizes for the srcset chosen: its <source>'s, or its own; and its width for sizes=auto, when lazy) */
+static __thread NodeId t_pic_source;
+static const char *img_sizes_of(NodeId img, bool pic, double *autow) {
+    *autow = -1;
+    const char *lz = dom_get_attr_str(img, "loading");
+    if (lz && !strcasecmp(lz, "lazy")) {
+        const char *w = dom_get_attr_str(img, "width");
+        *autow = w && atof(w) >= 0 && (w[0] >= '0' && w[0] <= '9') ? atof(w) : 300.0;
+    }
+    const char *own = dom_get_attr_str(img, "sizes");
+    if (pic && t_pic_source) {
+        const char *ss = dom_get_attr_str(t_pic_source, "sizes");
+        /* (a source without sizes: the img's auto, if it has one) */
+        if (!ss && own && !strncasecmp(own, "auto", 4)) return own;
+        return ss;
+    }
+    return own;
+}
+static double sizes_source_size(const char *sizes, double autow) {
+    t_sz_mode = 0;
+    double vw = 1024.0, vh = 768.0;
+    css_layout_viewport_size(&vw, &vh);
+    if (!sizes) return vw;
+    /* (CSS-tokenized: comments go, escapes their characters, a block's commas its own) */
+    size_t n = strlen(sizes);
+    char *c = (char *)malloc(n * 2 + 8);
+    if (!c) return vw;
+    size_t k = 0;
+    for (size_t i = 0; i < n; ) {
+        if (sizes[i] == '/' && i + 1 < n && sizes[i + 1] == '*') {
+            const char *e = strstr(sizes + i + 2, "*/");
+            i = e ? (size_t)(e - sizes) + 2 : n;
+            c[k++] = ' ';
+            continue;
+        }
+        if (sizes[i] == '\\' && i + 1 < n) {
+            /* (escaped: \x01 then it; a hex escape, a code point that is nothing here) */
+            char e = sizes[i + 1];
+            bool hex = (e >= '0' && e <= '9') || (e >= 'a' && e <= 'f') || (e >= 'A' && e <= 'F');
+            c[k++] = '\x01'; c[k++] = hex ? '\x02' : e; i += 2;
+            if (hex) { while (i < n && ((sizes[i] >= '0' && sizes[i] <= '9') || (sizes[i] >= 'a' && sizes[i] <= 'f') || (sizes[i] >= 'A' && sizes[i] <= 'F'))) i++; if (i < n && srcset_ws(sizes[i])) i++; }
+            continue;
+        }
+        c[k++] = sizes[i++];
+    }
+    c[k] = 0;
+    double result = vw;
+    char stack[64];
+    size_t i = 0;
+    bool done = false;
+    while (i <= k && !done) {
+        /* (one entry: to a comma outside blocks) */
+        size_t st = i;
+        int sp = 0;
+        bool bad = false;
+        while (i < k) {
+            char ch = c[i];
+            if (ch == '\x01') { i += 2; continue; }
+            if (ch == ',' && sp == 0) break;
+            if (ch == '(' || ch == '[' || ch == '{') { if (sp < 64) stack[sp++] = ch == '(' ? ')' : ch == '[' ? ']' : '}'; }
+            else if (ch == ')' || ch == ']' || ch == '}') { if (sp && stack[sp - 1] == ch) sp--; else bad = true; }
+            i++;
+        }
+        size_t en = i;
+        i++;
+        /* (its last component value: a token, or a function or block to its end) */
+        size_t b = en;
+        while (b > st && srcset_ws(c[b - 1])) b--;
+        if (b == st) continue;
+        /* (auto: the image's width, where it is lazily loaded; else not a size) */
+        {
+            size_t a0 = st;
+            while (a0 < b && srcset_ws(c[a0])) a0++;
+            if (b - a0 == 4 && !strncasecmp(c + a0, "auto", 4)) {
+                if (autow >= 0) { result = autow; done = true; break; }
+                continue;
+            }
+        }
+        size_t lv;
+        if (sp > 0 || c[b - 1] == ')' || c[b - 1] == ']' || c[b - 1] == '}') {
+            /* (from where the last top-level block opens, with its function name) */
+            int d = 0;
+            size_t j = st, open = st;
+            bool found = false;
+            for (; j < b; j++) {
+                char ch = c[j];
+                if (ch == '\x01') { j++; continue; }
+                if (ch == '(' || ch == '[' || ch == '{') { if (d == 0) { open = j; found = true; } d++; }
+                else if (ch == ')' || ch == ']' || ch == '}') { if (d) d--; }
+            }
+            if (!found) continue;
+            lv = open;
+            while (lv > st && ((c[lv - 1] >= 'a' && c[lv - 1] <= 'z') || (c[lv - 1] >= 'A' && c[lv - 1] <= 'Z') || c[lv - 1] == '-')) lv--;
+            if (c[open] != '(') bad = true;
+        } else {
+            lv = b;
+            while (lv > st && !srcset_ws(c[lv - 1])) lv--;
+        }
+        if (bad) continue;
+        /* (the value, escapes as their characters) */
+        char val[128];
+        size_t vk = 0;
+        for (size_t j = lv; j < b && vk + 1 < sizeof val; j++) { if (c[j] == '\x01') continue; val[vk++] = c[j]; }
+        val[vk] = 0;
+        const char *vp = val;
+        double v;
+        if (!sz_len(&vp, val + vk, vw, vh, &v, false) || vp != val + vk) continue;
+        /* (the rest: nothing, or a media condition: "(" or "not (" first, and none of ] } loose) */
+        size_t c0 = st, c1 = lv;
+        while (c0 < c1 && srcset_ws(c[c0])) c0++;
+        while (c1 > c0 && srcset_ws(c[c1 - 1])) c1--;
+        if (c1 == c0) { result = v; done = true; break; }
+        /* (a two-dimensional size, contain or cover with a width and a height, last: its width; a media condition before it, maybe) */
+        int mode2 = 0;
+        double wv2 = 0;
+        {
+            size_t w1 = c1, w0 = c1;
+            while (w0 > c0 && !srcset_ws(c[w0 - 1])) w0--;
+            size_t k1 = w0;
+            while (k1 > c0 && srcset_ws(c[k1 - 1])) k1--;
+            size_t k0 = k1;
+            while (k0 > c0 && !srcset_ws(c[k0 - 1])) k0--;
+            size_t kl = k1 - k0;
+            int km = kl == 7 && !strncasecmp(c + k0, "contain", 7) ? 1 : kl == 5 && !strncasecmp(c + k0, "cover", 5) ? 2 : 0;
+            if (km && w0 < w1 && k1 < w0) {
+                char w2[64];
+                size_t wk = 0;
+                for (size_t j = w0; j < w1 && wk + 1 < sizeof w2; j++) w2[wk++] = c[j];
+                w2[wk] = 0;
+                const char *wp = w2;
+                if (!sz_len(&wp, w2 + wk, vw, vh, &wv2, false) || wp != w2 + wk) continue;
+                mode2 = km;
+                c1 = k0;
+                while (c1 > c0 && srcset_ws(c[c1 - 1])) c1--;
+                if (c1 == c0) { result = wv2; t_sz_mode = mode2; t_sz_h = v; done = true; break; }
+            }
+        }
+        char cond[512];
+        size_t ck = 0;
+        for (size_t j = c0; j < c1 && ck + 1 < sizeof cond; j++) { if (c[j] == '\x01') { cond[ck++] = 'x'; j++; continue; } cond[ck++] = c[j]; }
+        cond[ck] = 0;
+        bool okc = cond[0] == '(' || (!strncasecmp(cond, "not", 3) && srcset_ws(cond[3]));
+        if (okc && cond[0] != '(') { const char *x = cond + 3; while (srcset_ws(*x)) x++; okc = *x == '('; }
+        /* (in its parentheses: nothing unmatched) */
+        int dd = 0;
+        for (size_t j = 0; j < ck && okc; j++) {
+            char ch = cond[j];
+            if (ch == '(' || ch == '[' || ch == '{') dd++;
+            else if (ch == ')' || ch == ']' || ch == '}') { if (!dd) okc = false; else dd--; }
+            if (ch == ']' || ch == '}') { /* (a ] or } in a ( block: not <any-value>) */ int pd = 0; for (size_t z = 0; z < j; z++) { if (cond[z] == '(') pd++; else if (cond[z] == ')') pd--; } if (pd > 0) okc = false; }
+        }
+        if (!okc) continue;
+        if (css_media_query_matches(cond, vw, vh)) {
+            if (mode2) { result = wv2; t_sz_mode = mode2; t_sz_h = v; }
+            else result = v;
+            done = true;
+            break;
+        }
+    }
+    free(c);
+    return result;
+}
+/* (HTML "select an image source": the candidates as densities, w ones over the source size, the src a 1x one
+ * when nothing else is; the smallest density of at least 1, else the largest; its URL (NULL for the src) and density) */
+static char *source_select(const char *srcset, const char *src, const char *sizes, double autow, double *dens_out) {
+    *dens_out = 1.0;
+    if (!srcset || !srcset[0]) return NULL;
+    char *urls[64];
+    double dens[64];
+    int n = 0;
+    bool have_w = false, have_1x = false;
+    const char *p = srcset;
+    char *cand = NULL;
+    double w, x, size = -1.0;
+    bool ok;
+    while (srcset_next(&p, &cand, &w, &x, &ok)) {
+        if (!cand || !ok || n >= 64) { free(cand); cand = NULL; continue; }
+        double d;
+        if (w > 0.0) {
+            if (size < 0) size = sizes_source_size(sizes, autow);
+            d = size > 0 ? w / size : 1e300;
+            /* (a 2D size and an h: contain, the larger of the two ratios; cover, the smaller) */
+            if (t_sz_mode && t_srcset_h > 0 && t_sz_h > 0 && size > 0) {
+                double dw = w / size, dh = t_srcset_h / t_sz_h;
+                d = t_sz_mode == 1 ? (dw > dh ? dw : dh) : (dw < dh ? dw : dh);
+            }
+            have_w = true;
+        } else { d = x; if (d == 1.0) have_1x = true; }
+        bool dup = false;
+        for (int i = 0; i < n && !dup; i++) dup = dens[i] == d;
+        if (dup) { free(cand); cand = NULL; continue; }
+        urls[n] = cand; dens[n] = d; n++;
+        cand = NULL;
+    }
+    if (src && src[0] && !have_1x && !have_w && n < 64) {
+        bool dup = false;
+        for (int i = 0; i < n && !dup; i++) dup = dens[i] == 1.0;
+        if (!dup) { urls[n] = strdup(src); dens[n] = 1.0; n++; }
+    }
+    if (!n) return NULL;
+    int best = -1;
+    for (int i = 0; i < n; i++) if (dens[i] >= 1.0 && (best < 0 || dens[i] < dens[best])) best = i;
+    if (best < 0) for (int i = 0; i < n; i++) if (best < 0 || dens[i] > dens[best]) best = i;
+    for (int i = 0; i < n; i++) if (i != best) free(urls[i]);
+    *dens_out = dens[best] > 0 && dens[best] < 1e300 ? dens[best] : 1.0;
+    return urls[best];
+}
+
+/* (a srcset and sizes's pick, as an <img> without a src makes it: a preload's imagesrcset and imagesizes) */
+char *display_list_select_srcset(const char *srcset, const char *sizes) {
+    double d = 1.0;
+    return source_select(srcset, NULL, sizes, -1.0, &d);
+}
+
+/* (an <img>'s chosen source, raw, and its density: srcset (or its <picture>'s source), sizes and src) */
+char *display_list_pick_source(NodeId id, double *dens_out) {
+    *dens_out = 1.0;
+    const char *src = dom_get_attr_str(id, "src");
+    const char *pic = display_list_picture_srcset(id);
+    const char *srcset = pic ? pic : dom_get_attr_str(id, "srcset");
+    double autow;
+    const char *sizes = img_sizes_of(id, pic != NULL, &autow);
+    char *picked = srcset && srcset[0] ? source_select(srcset, pic ? NULL : src, sizes, autow, dens_out) : NULL;
+    if (picked) return picked;
+    *dens_out = 1.0;
+    return src ? strdup(src) : NULL;
+}
+
 static char *srcset_pick(const char *srcset, float css_width)
 {
     if (!srcset || !srcset[0]) return NULL;
-    char *copy = strdup(srcset);
-    if (!copy) return NULL;
-
     char *best_w_ge = NULL;  double best_w_ge_v = 0.0;  /* smallest w >= target */
     char *best_any = NULL;   double best_any_v = 0.0;   /* largest overall */
     char *best_x_ge = NULL;  double best_x_ge_v = 0.0;  /* smallest x >= 1 */
     char *best_x = NULL;     double best_x_v = 0.0;     /* largest x */
-
-    char *save = NULL;
-    for (char *cand = strtok_r(copy, ",", &save); cand; cand = strtok_r(NULL, ",", &save)) {
-        while (isspace((unsigned char)*cand)) cand++;
-        if (!cand[0]) continue;
-        /* Split URL from descriptor at the first space. */
-        char *desc = NULL;
-        for (char *q = cand; *q; q++) {
-            if (isspace((unsigned char)*q)) { *q = '\0'; desc = q + 1; break; }
-        }
-        double w = -1.0, x = 1.0;
-        if (desc) {
-            while (isspace((unsigned char)*desc)) desc++;
-            char *end = NULL;
-            double v = strtod(desc, &end);
-            if (end && end != desc) {
-                if (*end == 'w') { w = v; x = -1.0; }
-                else if (*end == 'x') x = v;
-            }
-        }
+    const char *p = srcset;
+    char *cand = NULL;
+    double w, x;
+    bool ok;
+    while (srcset_next(&p, &cand, &w, &x, &ok)) {
+        if (!cand || !ok) { free(cand); cand = NULL; continue; }
         if (w > 0.0) {
             if (css_width > 0.0f && w >= css_width &&
                 (best_w_ge == NULL || w < best_w_ge_v)) {
@@ -2329,6 +2708,8 @@ static char *srcset_pick(const char *srcset, float css_width)
                 free(best_x); best_x = strdup(cand); best_x_v = x;
             }
         }
+        free(cand);
+        cand = NULL;
     }
 
     char *out = NULL;
@@ -2338,7 +2719,6 @@ static char *srcset_pick(const char *srcset, float css_width)
     if (best_any && out != best_any) free(best_any);
     if (best_x_ge && out != best_x_ge) free(best_x_ge);
     if (best_x && out != best_x) free(best_x);
-    free(copy);
     return out;
 }
 
@@ -4183,6 +4563,23 @@ static size_t dl_zs_len(const char *s, size_t n, bool ascii)
 static __thread int t_caret_box = -1;   /* (a block caret's text: its box, its first character's length, the color) */
 static __thread size_t t_caret_len, t_caret_at;
 static __thread float t_caret_col[4];
+/* (a text node that is a canvas's, video's, audio's or iframe's fallback content: not rendered) */
+static bool dl_fallback_text(const HtmlNode *node)
+{
+    if (!node->store_id || !dom_valid(node->store_id)) return false;
+    NodeId pn = dom_parent(node->store_id);
+    if (!pn || dom_kind(pn) != DOM_K_ELEMENT || dom_ns(pn) != DOM_NS_HTML) return false;
+    static CssAtom a_canvas, a_video, a_audio, a_iframe, a_geo, a_um, a_perm, a_inst;
+    if (!a_canvas) {
+        css_atom_reserve(8);
+        a_canvas = css_atom_intern("canvas", 6); a_video = css_atom_intern("video", 5);
+        a_audio = css_atom_intern("audio", 5); a_iframe = css_atom_intern("iframe", 6);
+        a_geo = css_atom_intern("geolocation", 11); a_um = css_atom_intern("usermedia", 9);
+        a_perm = css_atom_intern("permission", 10); a_inst = css_atom_intern("install", 7);
+    }
+    CssAtom pt = g_dom.tag[dom_slot(pn)];
+    return (pt == a_canvas && !dom_get_attr_str(pn, "content") && !dom_get_attr_str(pn, "layoutsubtree")) || pt == a_video || pt == a_audio || pt == a_iframe || pt == a_geo || pt == a_um || pt == a_perm || pt == a_inst;
+}
 /* (a text node an SVG <text> draws: inside an svg, no foreignObject between) */
 static bool dl_svg_text_node(const LayoutContext *ctx, int i)
 {
@@ -4209,12 +4606,14 @@ static bool inside_svg(PreOrderCompactionArray *arr, int dom_idx)
 
 /* (the attribute an image-showing element takes its image from: <object>'s
  * data, <embed>'s src, a source-less <video>'s poster; NULL none) */
+static __thread bool t_dl_poster;   /* (a video's poster wanted, its source or not) */
 static const char *dl_image_attr(const HtmlNode *node)
 {
     if (!node || node->type != HTML_NODE_ELEMENT || !node->tag_name) return NULL;
     if (!strcasecmp(node->tag_name, "object")) return "data";
     if (!strcasecmp(node->tag_name, "embed")) return "src";
     if (!strcasecmp(node->tag_name, "video")) {
+        if (t_dl_poster) return "poster";
         const char *src = node_attribute_value((HtmlNode *)node, "src");
         if (src && src[0]) return NULL;
         for (NodeId c = node->store_id ? dom_first_child(node->store_id) : 0; c; c = dom_next_sibling(c))
@@ -4250,8 +4649,12 @@ void display_list_set_media_viewport(double vw, double vh)
     g_media_vh = vh;
 }
 
+static __thread NodeId t_pic_source;   /* (the <source> display_list_picture_srcset last chose) */
+/* (an <img>'s chosen <source> in its <picture>, or 0) */
+NodeId display_list_picture_source(uint32_t img) { return display_list_picture_srcset(img) ? t_pic_source : DOM_NULL; }
 const char *display_list_picture_srcset(uint32_t img)
 {
+    t_pic_source = DOM_NULL;
     NodeId p = dom_parent(img);
     const char *pt = p && dom_kind(p) == DOM_K_ELEMENT ? css_atom_str(dom_tag(p)) : NULL;
     if (!pt || strcmp(pt, "picture")) return NULL;
@@ -4262,7 +4665,9 @@ const char *display_list_picture_srcset(uint32_t img)
         const char *media = dom_get_attr_str(c, "media");
         if (media && media[0] && !css_media_query_matches(media, g_media_vw, g_media_vh)) continue;
         const char *type = dom_get_attr_str(c, "type");
+        while (type && srcset_ws(*type)) type++;
         if (type && type[0] && strncasecmp(type, "image/", 6)) continue;
+        t_pic_source = c;
         return ss;
     }
     return NULL;
@@ -4305,8 +4710,12 @@ char *display_list_image_source(const char *base_url, HtmlNode *node, float css_
     const char *pic = node->store_id ? display_list_picture_srcset(node->store_id) : NULL;
     const char *srcset = pic ? pic : node_attribute_value(node, "srcset");
     t_srcset_x = 1.0;
-    char *picked = srcset ? srcset_pick(srcset, css_width) : NULL;
-    if (picked) src = picked;
+    (void)css_width;
+    double dens_ = 1.0;
+    double autow_ = -1;
+    const char *sizes_ = node->store_id ? img_sizes_of(node->store_id, pic != NULL, &autow_) : node_attribute_value(node, "sizes");
+    char *picked = srcset ? source_select(srcset, pic ? NULL : src, sizes_, autow_, &dens_) : NULL;
+    if (picked) { src = picked; t_srcset_x = dens_; }
     else t_srcset_x = 1.0;
     char *url = NULL;
     if (src && src[0]) {
@@ -4314,8 +4723,25 @@ char *display_list_image_source(const char *base_url, HtmlNode *node, float css_
          * directory, not just the origin layout carries). */
         extern const char *g_cyber_start_url;
         const char *doc_url = (g_cyber_start_url && g_cyber_start_url[0]) ? g_cyber_start_url : base_url;
+        /* (the layout's base a document's own, past its origin (a <base href>, a frame's location): that) */
+        /* (a <base href> in the element's document head: its URL, resolved against the document's) */
+        char *bu_ = NULL;
+        if (node->store_id) {
+            NodeId d_ = dom_owner(node->store_id), he_ = 0, hd_ = 0;
+            for (NodeId c_ = d_ ? dom_first_child(d_) : 0; c_ && !he_; c_ = dom_next_sibling(c_)) if (dom_kind(c_) == DOM_K_ELEMENT) he_ = c_;
+            for (NodeId c_ = he_ ? dom_first_child(he_) : 0; c_ && !hd_; c_ = dom_next_sibling(c_)) if (dom_kind(c_) == DOM_K_ELEMENT && !strcmp(css_atom_str(dom_tag(c_)), "head")) hd_ = c_;
+            for (NodeId c_ = hd_ ? dom_first_child(hd_) : 0; c_; c_ = dom_next_sibling(c_)) {
+                if (dom_kind(c_) != DOM_K_ELEMENT || strcmp(css_atom_str(dom_tag(c_)), "base") || dom_ns(c_) != DOM_NS_HTML) continue;
+                const char *bh_ = dom_get_attr_str(c_, "href");
+                if (!bh_) continue;
+                bu_ = (doc_url && doc_url[0]) ? wurl_resolve(doc_url, bh_) : NULL;
+                break;
+            }
+        }
+        if (bu_) doc_url = bu_;
         url = (doc_url && doc_url[0]) ? wurl_resolve(doc_url, src) : NULL;
         if (!url) url = dl_resolve_url(base_url, src);
+        free(bu_);
     }
     free(picked);
     return url;
@@ -4509,7 +4935,7 @@ static void dl_text_decorations(DisplayList *dl, const LayoutContext *ctx, int i
     for (int c = i, p = ctx->tree.nodes[i].parent_idx; p >= 0; c = p, p = ctx->tree.nodes[p].parent_idx) {
         const LayoutStyle *cs = ctx->boxes[c].s;
         if (c != i && (cs->float_side || cs->position == CSS_POSITION_ABSOLUTE || cs->position == CSS_POSITION_FIXED ||
-                       cs->display == CSS_DISPLAY_INLINE_BLOCK || cs->inline_level)) break;
+                       (cs->display == CSS_DISPLAY_INLINE_BLOCK && !cs->inl_ctl) || cs->inline_level)) break;
         const LayoutStyle *ps = ctx->boxes[p].s;
         if (ps->text_decoration_set && ps->text_decoration && ps != last && nr < 8) { recs[nr++] = p; last = ps; }
     }
@@ -5126,7 +5552,7 @@ static void paint_column_rules(const LayoutContext *ctx, int idx, DisplayList *d
     int vm = mb->mc_vert;
     float cl0 = (float)(mb->x + mb->padding_left + s->border_left);
     float left = vm ? 0.0f : cl0;
-    float top = vm ? 0.0f : (float)(mb->y + mb->padding_top + s->border_top) + 2.0f * mb->fs_off;   /* (a fieldset: below its legend) */
+    float top = vm ? 0.0f : (float)(mb->y + mb->padding_top + s->border_top) + mb->fs_cofs;   /* (a fieldset: below its legend) */
     bool rtl = (s->direction == 1) != (vm && s->writing_mode == 4);
     float U = vm ? (float)mb->content_height : (float)mb->content_width, W = mb->mc_w, G = mb->mc_gap, H = mb->mc_h;
     bool wrap = mb->mc_rgap >= 0.0f;
@@ -5393,7 +5819,7 @@ static void dl_bdb_clone(const LayoutContext *ctx, DisplayList *dl, int from, in
     int mch = -1, mo = mc_owner(ctx, a, &mch);
     if (mo < 0) return;
     const LayoutBox *mb = &ctx->boxes[mo], *chb = &ctx->boxes[mch], *A = &ctx->boxes[a];
-    float top = (float)(mb->y + mb->padding_top + mb->s->border_top) + 2.0f * mb->fs_off, H = mb->mc_h;
+    float top = (float)(mb->y + mb->padding_top + mb->s->border_top) + mb->fs_cofs, H = mb->mc_h;
     if (chb->mc_seg_h > 0.0f) { top = chb->mc_src; H = chb->mc_seg_h; }
     if (H <= 1.0f) return;
     float bt = (float)A->s->border_top, bb = (float)A->s->border_bottom;
@@ -5553,7 +5979,7 @@ static void dl_columns_range(const LayoutContext *ctx, DisplayList *dl, int from
     bool need_x = has_x || xf_linear;
     const LayoutBox *mb = &ctx->boxes[m];
     float left = (float)(mb->x + mb->padding_left + mb->s->border_left);
-    float top = (float)(mb->y + mb->padding_top + mb->s->border_top) + 2.0f * mb->fs_off;
+    float top = (float)(mb->y + mb->padding_top + mb->s->border_top) + mb->fs_cofs;
     float W = mb->mc_w, G = mb->mc_gap, H = mb->mc_h, dst = top;
     float seg_end = 1e9f;
     /* (runs by place in the one column: each has the part of the range in it) */
@@ -8589,6 +9015,14 @@ static void dl_emphasis_marks(DisplayList *dl, TextShaper *font, const LayoutBox
 }
 
 static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (*clip)[4], float (*off)[2]);
+/* (box i is in the top layer: a modal dialog, a showing popover, or one's ::backdrop) */
+static bool dl_top_layer_box(LayoutContext *ctx, int i)
+{
+    const HtmlNode *n = css_layout_box_node(ctx, i);
+    if (!n) return false;
+    if (n->tag_name && !strcmp(n->tag_name, "::backdrop")) return true;
+    return n->type == HTML_NODE_ELEMENT && n->store_id && (dom_element_state(n->store_id) & (DOM_ST_POPOVER_OPEN | DOM_ST_MODAL));
+}
 /* (a containing block for what is positioned in it by a transform, filter, containment...: as layout_box_abs_cb has it) */
 static bool dl_abs_cb(const LayoutContext *ctx, int p)
 {
@@ -8677,12 +9111,16 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                 while (p >= 0 && ctx->tree.nodes[p].parent_idx >= 0 && ctx->boxes[p].s->position == CSS_POSITION_STATIC &&
                        !dl_paint_contained(&ctx->boxes[p]) && !dl_abs_cb(ctx, p))   /* (or a transform's: its containing block too) */
                     p = ctx->tree.nodes[p].parent_idx;
+            /* (an absolute box in the top layer: on the initial containing block, nothing around it clipping) */
+            if (b->s->position == CSS_POSITION_ABSOLUTE && dl_top_layer_box(ctx, i)) p = -1;
             /* (a fixed box under a paint-contained one: its containing block, clipping it) */
             bool fixed_contained = false;
-            if (b->s->position == CSS_POSITION_FIXED)
-                for (int q = p; q >= 0; q = ctx->tree.nodes[q].parent_idx)
+            if (b->s->position == CSS_POSITION_FIXED && !dl_top_layer_box(ctx, i))   /* (the top layer: on the viewport, whatever is around it) */
+                for (int q = p; q >= 0; q = ctx->tree.nodes[q].parent_idx) {
                     if (dl_paint_contained(&ctx->boxes[q]) || (ctx->boxes[q].s->abs_cb != 1024 && dl_abs_cb(ctx, q)) ||
-                        (ctx->tree.nodes[q].parent_idx < 0 && (ctx->boxes[q].s->abs_cb & 128u))) { p = q; fixed_contained = true; break; }   /* (the root's containment too: its document scrolls it then) */
+                        (ctx->tree.nodes[q].parent_idx < 0 && (ctx->boxes[q].s->abs_cb & 128u))) { p = q; fixed_contained = true; break; }
+                    if (dl_top_layer_box(ctx, q)) break;   /* (a top layer box: nothing around it containing) */
+                }   /* (the root's containment too: its document scrolls it then) */
             float c[4] = { -1e30f, -1e30f, 1e30f, 1e30f };
             if (b->s->position == CSS_POSITION_FIXED && !fixed_contained) {
                 fixed = true;
@@ -8732,7 +9170,7 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                     }
                     if (pb->s->is_fieldset) {
                         /* (a fieldset's clip is its anonymous content box's, below the legend; the rendered legend: outside it) */
-                        py0 += 2.0f * pb->fs_off;
+                        py0 += pb->fs_cofs;
                         if (pb->fs_legend == i + 1) { px0 = c[0]; py0 = c[1]; px1 = c[2]; py1 = c[3]; }
                     }
                     /* (overflow-clip-margin: overflow: clip and paint containment clip that far out) */
@@ -9175,6 +9613,25 @@ static void paint_native_control(const LayoutContext *ctx, DisplayList *dl, int 
             if (aa_ < 1.0f && aa_ >= 0.0f) for (int q_ = 0; q_ < 3; q_++) ac[q_] = aa_ * ac[q_] + (1.0f - aa_) * cv_;
             break;
         }
+    }
+    /* (a checkbox with the switch attribute: a track and a thumb, at the inline start until checked; indeterminate no matter) */
+    if (kind == 4 && node_attribute_value(node, "switch") && w >= 3.0f && h >= 3.0f) {
+        bool on_ = (dom_element_state(node->store_id) & DOM_ST_CHECKED) != 0, dk = s->cs_dark != 0;
+        bool rev_ = (s->direction == 1);
+        float ec = dk ? 0.522f : 0.463f, fcv = dk ? 0.231f : 1.0f;
+        if (on_) display_list_add_rect(dl, x, y, w, h, ac[0], ac[1], ac[2], op);
+        else {
+            display_list_add_rect(dl, x, y, w, h, ec, ec, ec, op);
+            display_list_add_rect(dl, x + 1.0f, y + 1.0f, w - 2.0f, h - 2.0f, fcv, fcv, fcv, op);
+        }
+        float th_ = h - 4.0f, tw_ = th_ < w / 2.0f ? th_ : w / 2.0f;
+        if (th_ > 0.0f && tw_ > 0.0f) {
+            bool end_ = on_ != rev_;   /* (the thumb at the right: checked in ltr, unchecked in rtl) */
+            float tx_ = end_ ? x + w - 2.0f - tw_ : x + 2.0f;
+            if (on_) display_list_add_rect(dl, tx_, y + 2.0f, tw_, th_, 1.0f, 1.0f, 1.0f, op);
+            else display_list_add_rect(dl, tx_, y + 2.0f, tw_, th_, ec, ec, ec, op);
+        }
+        return;
     }
     if (kind >= 4) {
         if (!(dom_element_state(node->store_id) & DOM_ST_CHECKED)) {
@@ -9807,6 +10264,10 @@ static void paint_walk(const LayoutContext *ctx, int n, PaintLayers *L, bool pse
             /* (flex and grid items paint as inline blocks do: each whole, in turn) */
             pv_push(&L->inlines, -(c + 2));
             if (!pseudo) paint_hoist(ctx, c, L);
+        } else if (ctx->boxes[n].s->is_fieldset && !text && ctx->boxes[n].mc_n <= 1) {
+            /* (a fieldset's rendered legend and its anonymous content box's blocks: each whole, in turn, as atomic inlines) */
+            pv_push(&L->inlines, -(c + 2));
+            if (!pseudo) paint_hoist(ctx, c, L);
         } else {
             pv_push(&L->blocks, c);
             paint_walk(ctx, c, L, pseudo);
@@ -9857,7 +10318,7 @@ static void paint_context(const LayoutContext *ctx, int root, PaintVec *out, int
     }
     pv_push(out, root);
     for (int k = 0; k < L.negs.n; k++) paint_context(ctx, L.negs.v[k], out, depth + 1);
-    for (int k = 0; k < L.blocks.n; k++) pv_push(out, L.blocks.v[k]);
+    for (int k = 0; k < L.blocks.n; k++) { int x = L.blocks.v[k]; if (x >= 0) pv_push(out, x); else paint_context(ctx, -x - 2, out, depth + 1); }
     for (int k = 0; k < L.floats.n; k++) paint_context(ctx, L.floats.v[k], out, depth + 1);
     for (int k = 0; k < L.inlines.n; k++) {
         int x = L.inlines.v[k];
@@ -9868,6 +10329,7 @@ static void paint_context(const LayoutContext *ctx, int root, PaintVec *out, int
     if (t_ol_def && ctx->doc)
         for (int k = 0; k < L.blocks.n; k++) {
             int x = L.blocks.v[k];
+            if (x < 0) continue;
             HtmlNode *fn_ = x < t_ol_def_n ? css_layout_box_node(ctx, x) : NULL;
             if (fn_ && fn_->type == HTML_NODE_ELEMENT && fn_->tag_name && (!strcasecmp(fn_->tag_name, "iframe") || !strcasecmp(fn_->tag_name, "frame")) &&
                 k + 1 < L.blocks.n && pv_push(out, x | OL_LATER)) t_ol_def[x] |= 2;
@@ -9876,6 +10338,7 @@ static void paint_context(const LayoutContext *ctx, int root, PaintVec *out, int
     if (t_ol_def && (L.floats.n || L.inlines.n))
         for (int k = 0; k < L.blocks.n; k++) {
             int x = L.blocks.v[k];
+            if (x < 0) continue;
             if (x < t_ol_def_n && ol_has(&ctx->boxes[x]) && ((t_ol_def[x] & 2) || pv_push(out, x | OL_LATER))) t_ol_def[x] |= 1;
         }
     /* (inline boxes' outlines too: over the text of the lines they are on) */
@@ -9965,12 +10428,99 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             int a = 0, m = 0;
             for (int k = 0; k < order.n; k++) {
                 int v = order.v[k], bi = v >= 0 ? (v & ~OL_LATER) : -1;
-                if (bi >= 0 && bi < ctx->tree.count && dl_box_under(ctx, bi, t)) tmp[m++] = v;
+                bool bd_ = false;   /* (its ::backdrop, the sibling just before it: under it, in the top layer) */
+                if (bi >= 0 && bi < ctx->tree.count && ctx->tree.nodes[bi].next_sibling_idx == t) {
+                    const HtmlNode *bn_ = css_layout_box_node(ctx, bi);
+                    bd_ = bn_ && bn_->tag_name && !strcmp(bn_->tag_name, "::backdrop");
+                }
+                bool mine_ = bi >= 0 && bi < ctx->tree.count && (bd_ || dl_box_under(ctx, bi, t));
+                /* (not one of a top layer box nested in it, with a place of its own) */
+                for (int tj = 0; mine_ && !bd_ && tj < ntl; tj++) {
+                    int t2 = tl[tj];
+                    if (t2 == t || !dl_box_under(ctx, t2, t)) continue;
+                    if (bi == t2 || dl_box_under(ctx, bi, t2) || (ctx->tree.nodes[bi].next_sibling_idx == t2 && ctx->tree.nodes[t2].prev_sibling_idx == bi && css_layout_box_node(ctx, bi) && css_layout_box_node(ctx, bi)->tag_name && !strcmp(css_layout_box_node(ctx, bi)->tag_name, "::backdrop"))) mine_ = false;
+                }
+                if (mine_ && bd_) { memmove(tmp + 1, tmp, (size_t)m * sizeof(int)); tmp[0] = v; m++; }   /* (its backdrop first, whatever z-index says) */
+                else if (mine_) tmp[m++] = v;
                 else order.v[a++] = v;
             }
             if (m) memcpy(order.v + a, tmp, (size_t)m * sizeof(int));
         }
         free(tmp);
+    }
+    /* (each box's top layer root: a modal dialog, a showing popover or a backdrop above it, -1 none;
+     * what its ancestors outside that do (transforms, opacity, filters, masks) does not reach it) */
+    int *tl_root = NULL;
+    for (int t = 0; t < ctx->tree.count; t++) {
+        const LayoutStyle *ts = ctx->boxes[t].s;
+        if (!ts || (ts->position != CSS_POSITION_FIXED && ts->position != CSS_POSITION_ABSOLUTE) || !dl_top_layer_box(ctx, t)) continue;
+        if (!tl_root) {
+            tl_root = (int *)malloc((size_t)ctx->tree.count * sizeof(int));
+            if (!tl_root) break;
+            for (int q = 0; q < ctx->tree.count; q++) tl_root[q] = -1;
+        }
+        for (int q = 0; q < ctx->tree.count; q++) if (q == t || dl_box_under(ctx, q, t)) { if (tl_root[q] < 0 || dl_box_under(ctx, t, tl_root[q])) tl_root[q] = t; }
+    }
+    /* (a canvas laid out for drawElementImage: each box's child of it, -1 none; where that child was drawn,
+     * as a translation of what it paints; one not drawn paints nothing) */
+    int *dc_root = NULL;
+    float (*dc_t)[4] = NULL;   /* (scale x, y about the child's corner, then translation) */
+    float (*dc_cv)[4] = NULL;  /* (the canvas's content box, on the page) */
+    unsigned char *dc_drawn = NULL;
+    bool dc_any = false;
+    for (int c = 0; c < ctx->tree.count; c++) {
+        int p = ctx->tree.nodes[c].parent_idx;
+        if (p < 0) continue;
+        HtmlNode *pn = css_layout_box_node(ctx, p), *cn = css_layout_box_node(ctx, c);
+        if (!pn || pn->type != HTML_NODE_ELEMENT || !pn->tag_name || strcasecmp(pn->tag_name, "canvas") || !pn->store_id) continue;
+        if (!node_attribute_value(pn, "content") && !node_attribute_value(pn, "layoutsubtree")) continue;
+        if (!cn || cn->type != HTML_NODE_ELEMENT || !cn->store_id) continue;
+        if (!dc_root) {
+            dc_root = (int *)malloc((size_t)ctx->tree.count * sizeof(int));
+            dc_t = (float (*)[4])calloc((size_t)ctx->tree.count, sizeof(*dc_t));
+            dc_drawn = (unsigned char *)calloc((size_t)ctx->tree.count, 1);
+            dc_cv = (float (*)[4])calloc((size_t)ctx->tree.count, sizeof(*dc_cv));
+            if (!dc_root || !dc_t || !dc_drawn || !dc_cv) { free(dc_root); free(dc_t); free(dc_drawn); free(dc_cv); dc_root = NULL; dc_t = NULL; dc_drawn = NULL; dc_cv = NULL; break; }
+            for (int q = 0; q < ctx->tree.count; q++) dc_root[q] = -1;
+        }
+        for (int q = 0; q < ctx->tree.count; q++) if (q == c || dl_box_under(ctx, q, c)) dc_root[q] = c;
+        float d[4];
+        int bw = 0, bh = 0;
+        if (canvas2d_elem_draw(pn->store_id, cn->store_id, d, &bw, &bh) && bw > 0 && bh > 0) {
+            const LayoutBox *cb = &ctx->boxes[p];
+            double cx = cb->x + cb->s->border_left + cb->padding_left, cy = cb->y + cb->s->border_top + cb->padding_top;
+            double cw = cb->width - cb->s->border_left - cb->s->border_right - cb->padding_left - cb->padding_right;
+            double ch = cb->height - cb->s->border_top - cb->s->border_bottom - cb->padding_top - cb->padding_bottom;
+            double kx = cw / bw, ky = ch / bh;
+            /* (a size given: scaled to it from its border box) */
+            double sx = 1.0, sy = 1.0, ew = ctx->boxes[c].width, eh = ctx->boxes[c].height;
+            if (d[2] > 0 && ew > 0) sx = d[2] * kx / ew;
+            if (d[3] > 0 && eh > 0) sy = d[3] * ky / eh;
+            dc_t[c][0] = (float)sx; dc_t[c][1] = (float)sy;
+            dc_t[c][2] = (float)(cx + d[0] * kx - ctx->boxes[c].x * sx);
+            dc_t[c][3] = (float)(cy + d[1] * ky - ctx->boxes[c].y * sy);
+            dc_drawn[c] = 1;
+            dc_any = true;
+            dc_cv[c][0] = (float)cx; dc_cv[c][1] = (float)cy; dc_cv[c][2] = (float)(cx + cw); dc_cv[c][3] = (float)(cy + ch);
+            /* (cut to the canvas: its content box, back in the child's own coordinates; and to the part of the child
+             * drawn, its border box when no part was given: no ink overflow) */
+            float sr[4] = { 0, 0, (float)ew, (float)eh };
+            canvas2d_elem_src(pn->store_id, cn->store_id, sr);
+            float s0 = (float)ctx->boxes[c].x + sr[0], s1 = (float)ctx->boxes[c].y + sr[1], s2 = s0 + sr[2], s3 = s1 + sr[3];
+            for (int q = 0; clip && q < ctx->tree.count; q++) {
+                if (dc_root[q] != c) continue;
+                float r0 = (float)((cx - dc_t[c][2]) / sx), r1 = (float)((cy - dc_t[c][3]) / sy);
+                float r2 = (float)((cx + cw - dc_t[c][2]) / sx), r3 = (float)((cy + ch - dc_t[c][3]) / sy);
+                if (r0 < s0) r0 = s0;
+                if (r1 < s1) r1 = s1;
+                if (r2 > s2) r2 = s2;
+                if (r3 > s3) r3 = s3;
+                if (clip[q][0] < r0) clip[q][0] = r0;
+                if (clip[q][1] < r1) clip[q][1] = r1;
+                if (clip[q][2] > r2) clip[q][2] = r2;
+                if (clip[q][3] > r3) clip[q][3] = r3;
+            }
+        }
     }
     bool any_mc = false;
     for (int k = 0; k < ctx->tree.count && !any_mc; k++) any_mc = ctx->boxes[k].mc_n > 0;
@@ -9989,6 +10539,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
     }
     t_mc_flat = !any3d;
     if (any3d) any_tf = true;
+    if (dc_any) any_tf = true;
     bool pending_hidden = false;
     /* (a box in columns opened a mask over its subtree: what it and the subtree
      * paint goes through the columns as one, once the mask has closed) */
@@ -10031,7 +10582,8 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         }
         if (ncb) dl_cb_flush(ctx, dl, cbt, cba, cbb, &ncb, i);
         int cbr_from = -1;
-        while (nmask > 0 && !mask_covers(ctx, i, mask_start[nmask - 1], mask_end[nmask - 1])) {
+        while (nmask > 0 && (!mask_covers(ctx, i, mask_start[nmask - 1], mask_end[nmask - 1]) ||
+               (tl_root && tl_root[i] >= 0 && mask_start[nmask - 1] != tl_root[i] && mask_covers(ctx, tl_root[i], mask_start[nmask - 1], mask_end[nmask - 1])))) {   /* (or an ancestor's outside its top layer root) */
             nmask--;
             if (mask_idx[nmask] <= -1000) { dl_ref_filter_end(ctx, dl, mask_start[nmask], -1000 - mask_idx[nmask]); }
             else dl_add_mask_cmd(dl, DL_MASK_END, mask_idx[nmask], &dl->masks[mask_idx[nmask]]);
@@ -10042,6 +10594,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         }
         for (int r = 0; r < nreg && nmask < 64; r++) {
             if (i == reg_start[r] || !mask_covers(ctx, i, reg_start[r], reg_end[r])) continue;
+            if (tl_root && tl_root[i] >= 0 && reg_start[r] != tl_root[i] && mask_covers(ctx, tl_root[i], reg_start[r], reg_end[r])) continue;   /* (an ancestor's, outside its top layer root) */
             bool open = false;
             for (int m = 0; m < nmask && !open; m++) open = mask_idx[m] == reg_idx[r];
             if (open || !dl_add_mask_cmd(dl, DL_MASK_BEGIN, reg_idx[r], &dl->masks[reg_idx[r]])) continue;
@@ -10053,7 +10606,13 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         if (any_tf) {
             double m[6] = { 1, 0, 0, 1, 0, 0 };
             if (any3d) css_layout_box_map3d(ctx, i, m, &pending_hidden);
-            else if (!css_layout_box_map(ctx, i, -1, m)) { m[0] = m[3] = 1.0; m[1] = m[2] = m[4] = m[5] = 0.0; }
+            else if (!css_layout_box_map(ctx, i, tl_root && tl_root[i] >= 0 ? ctx->tree.nodes[tl_root[i]].parent_idx : -1, m)) { m[0] = m[3] = 1.0; m[1] = m[2] = m[4] = m[5] = 0.0; }
+            if (dc_root && dc_root[i] >= 0 && dc_drawn[dc_root[i]]) {
+                /* (its drawn place: scale, then the translation, after its own transforms) */
+                const float *t_ = dc_t[dc_root[i]];
+                m[0] *= t_[0]; m[2] *= t_[0]; m[4] = m[4] * t_[0] + t_[2];
+                m[1] *= t_[1]; m[3] *= t_[1]; m[5] = m[5] * t_[1] + t_[3];
+            }
             float f[6];
             for (int q = 0; q < 6; q++) f[q] = (float)m[q];
             if (memcmp(f, cur_xf, sizeof f) && display_list_reserve(dl, 1)) {
@@ -10065,6 +10624,46 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             }
         }
         memcpy(range_xf, cur_xf, sizeof range_xf);
+        if (dc_root && dc_root[i] >= 0 && !dc_drawn[dc_root[i]]) pending_hidden = true;   /* (a canvas child not drawn: nothing) */
+        /* (a canvas child drawn through the context's filter or shadow: its subtree through that, outside its own) */
+        if (dc_root && dc_root[i] == i && dc_drawn[i] && !ol_later && nmask < 64) {
+            int p_ = ctx->tree.nodes[i].parent_idx;
+            HtmlNode *pn_ = p_ >= 0 ? css_layout_box_node(ctx, p_) : NULL, *cn_ = css_layout_box_node(ctx, i);
+            unsigned char fn_ = 0, ft_[8];
+            float fv_[8], ds_[7];
+            if (pn_ && cn_ && canvas2d_elem_fx(pn_->store_id, cn_->store_id, &fn_, ft_, fv_, ds_)) {
+                DisplayMask m;
+                memset(&m, 0, sizeof m);
+                m.kind = 9;
+                m.image_handle = -1;
+                m.x = (float)ctx->boxes[i].x; m.y = (float)ctx->boxes[i].y; m.w = (float)ctx->boxes[i].width; m.h = (float)ctx->boxes[i].height;
+                dl_subtree_union(ctx, i, &m.x, &m.y, &m.w, &m.h);
+                m.nstops = fn_;
+                for (int k = 0; k < fn_ && k < 8; k++) {
+                    m.stop_pos[k] = ft_[k] / 32.0f;
+                    float v = fv_[k];
+                    if (ft_[k] == 4) { v = fmodf(v, 360.0f); if (v < 0.0f) v += 360.0f; }
+                    if (k < 4) m.rx[k] = v; else m.ry[k - 4] = v;
+                }
+                m.ix = ds_[0]; m.iy = ds_[1]; m.blur = ds_[2];
+                m.border[0] = ds_[3]; m.border[1] = ds_[4]; m.border[2] = ds_[5]; m.border[3] = ds_[6] * 255.0f;
+                /* (its output cut to the canvas, not to the child) */
+                {
+                    const float *t_ = dc_t[i];
+                    if (t_[0] > 0 && t_[1] > 0) {
+                        m.ex_rx[0] = (dc_cv[i][0] - t_[2]) / t_[0]; m.ex_rx[1] = (dc_cv[i][1] - t_[3]) / t_[1];
+                        m.ex_rx[2] = (dc_cv[i][2] - t_[2]) / t_[0]; m.ex_rx[3] = (dc_cv[i][3] - t_[3]) / t_[1];
+                    }
+                }
+                int mi = dl_add_mask(dl, &m);
+                if (mi >= 0 && dl_add_mask_cmd(dl, DL_MASK_BEGIN, mi, &m)) {
+                    mask_start[nmask] = i;
+                    mask_end[nmask] = subtree_end(ctx, i);
+                    mask_idx[nmask] = mi;
+                    nmask++;
+                }
+            }
+        }
         pending_box = i;
         pending_from = dl->count;
         pending_mask = dl->mask_count;
@@ -11016,6 +11615,23 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             const uint8_t *px = NULL;
             int vw = 0, vh = 0;
             uint64_t frame_id = 0;
+            /* (its poster until it plays or seeks: the show-poster flag) */
+            const char *pa_ = node_attribute_value(node, "poster");
+            const char *lz_ = node_attribute_value(node, "loading");
+            bool lzoff_ = lz_ && !strcasecmp(lz_, "lazy") && ctx->viewport_height > 0 && box->y > ctx->viewport_height;   /* (a lazy one far off: not fetched) */
+            if (!box->s->cv_hidden && pa_ && pa_[0] && !lzoff_ && media_poster_shown(node->store_id)) {
+                t_dl_poster = true;
+                char *pu_ = display_list_image_source(ctx->base_url, node, (float)box->width);
+                t_dl_poster = false;
+                if (pu_) {
+                    LayoutBox pbox = *box;
+                    LayoutStyle pstyle = *box->s;
+                    pbox.s = &pstyle;
+                    if (pstyle.object_fit == 0) pstyle.object_fit = 1;
+                    emit_image_async(dl, &pbox, pu_, op);
+                    free(pu_);
+                }
+            } else
             if (!box->s->cv_hidden && media_video_frame_for_node(node->store_id, &px, &vw, &vh, &frame_id)) {
                 char key[48];
                 snprintf(key, sizeof(key), "cyber-video-frame:%u", node->store_id);
@@ -11038,6 +11654,18 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             int ff_ = dl->count;
             dl_emit_frame(dl, box, node->store_id);
             if (t_ol_def && i < t_ol_def_n && (t_ol_def[i] & 2)) ol_keep(dl, i, ff_);   /* (kept for later: over the blocks after it) */
+        }
+        /* (a 2D canvas with a bitmap (browser/canvas2d.c): that image, placed as an image is) */
+        if (node && node->type == HTML_NODE_ELEMENT && node->store_id && g_image_cache && !box->s->cv_hidden &&
+            strcasecmp(node->tag_name, "canvas") == 0 && canvas2d_has(node->store_id)) {
+            char key[48];
+            if (canvas2d_paint_key(node->store_id, key, sizeof key)) {
+                LayoutBox cbox = *box;
+                LayoutStyle cstyle = *box->s;
+                cbox.s = &cstyle;
+                emit_image_async(dl, &cbox, key, op);
+            }
+            goto replaced_border;
         }
         /* (a 2D canvas: its solid rectangles, from its bitmap's pixels to its content box;
          * an element a paint worklet drew for: from its padding box's corner) */
@@ -11143,7 +11771,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
          * Skip nodes whose box has collapsed to the viewport root; they have
          * not been positioned and would all overlap at the origin. */
         if (default_font && ctx->doc) {
-            if (node && node->type == HTML_NODE_TEXT && !dl_svg_text_node(ctx, i) &&
+            if (node && node->type == HTML_NODE_TEXT && !dl_svg_text_node(ctx, i) && !dl_fallback_text(node) &&
                 css_layout_node_text(ctx, node) && css_layout_node_text(ctx, node)[0] &&
                 (!text_is_whitespace(css_layout_node_text(ctx, node)) || dl_frags_ell(ctx, i) || dl_frags_deco(ctx, i) ||
                  (g_hl_nseg && node->store_id && dl_hl_node_has(node->store_id)))) {
@@ -12310,7 +12938,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
 
         /* (a fieldset's legend: its top border not painted behind it) */
         if (box->s->is_fieldset && box->fs_gx1 > box->fs_gx0 && cbr_from >= 0 && dl->count > cbr_from)
-            dl_fieldset_gap(dl, cbr_from, (float)box->x + box->fs_gx0, (float)box->x + box->fs_gx1, (float)box->y + box->fs_off + (float)box->s->border_top);
+            dl_fieldset_gap(dl, cbr_from, roundf((float)box->x + box->fs_gx0), roundf((float)box->x + box->fs_gx1), (float)box->y + box->fs_off + (float)box->s->border_top);
         if (box->s->table_role == 4 && box->s->border_collapse && cbr_from >= 0 && dl->count > cbr_from && ncb < CBMAX) {
             int tb = ctx->tree.nodes[i].parent_idx;
             while (tb >= 0 && ctx->boxes[tb].s->table_role != 1) tb = ctx->tree.nodes[tb].parent_idx;
@@ -12552,5 +13180,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         xc->u.xf[0] = xc->u.xf[3] = 1.0f;
     }
 
+    free(tl_root);
+    free(dc_root); free(dc_t); free(dc_drawn); free(dc_cv);
     return true;
 }

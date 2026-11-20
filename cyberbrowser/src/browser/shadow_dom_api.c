@@ -383,7 +383,9 @@ GCValue js_element_attach_shadow(JSContextHandle ctx, GCValue this_val, int argc
     if (!JS_IsUndefined(existing_shadow) && !JS_IsNull(existing_shadow) && JS_IsObject(existing_shadow)) {
         return JS_ThrowTypeError(ctx, "NotSupportedError: element already has a shadow root");
     }
-    if (!is_valid_shadow_host_local_name(tag_name)) {
+    /* (__cyberUA: the browser's own shadow tree for a form control) */
+    bool ua_root = JS_ToBool(ctx, JS_GetPropertyStr(ctx, argv[0], "__cyberUA")) > 0;
+    if (!ua_root && !is_valid_shadow_host_local_name(tag_name)) {
         return JS_ThrowTypeError(ctx, "NotSupportedError: element does not support shadow root");
     }
 

@@ -497,7 +497,21 @@ static GCValue js_encoder_encoding_magic(JSContextHandle ctx, GCValue this_val, 
     return js_encoder_encoding(ctx, this_val, argc, argv);
 }
 
+/* __cyberLegacyQuery(url, encoding): the URL string with its query in that encoding (css_charset.c), or null */
+char *url_legacy_query(const char *in, const char *enc);
+static GCValue js_legacy_query(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_NULL;
+    const char *u = JS_ToCString(ctx, argv[0]), *e = JS_ToCString(ctx, argv[1]);
+    char *r = u && e ? url_legacy_query(u, e) : NULL;
+    if (!r) return JS_NULL;
+    GCValue v = JS_NewString(ctx, r);
+    free(r);
+    return v;
+}
+
 void encoding_install(JSContextHandle ctx, GCValue global) {
+    JS_DefinePropertyValueStr(ctx, global, "__cyberLegacyQuery", JS_NewCFunction(ctx, js_legacy_query, "__cyberLegacyQuery", 2), JS_PROP_CONFIGURABLE);
     JSRuntimeHandle rt = JS_GetRuntime(ctx);
     if (!g_enc_class) JS_NewClassID(&g_enc_class);
     if (!g_dec_class) JS_NewClassID(&g_dec_class);

@@ -251,7 +251,15 @@
         changedTouches: function (v) { return arguments.length ? v : []; } }));
     eventClass('ErrorEvent', Event, { message: str(''), filename: str(''), lineno: int(0), colno: int(0),
                                        error: any(undefined) });
-    eventClass('PromiseRejectionEvent', Event, { promise: any(undefined), reason: any(undefined) });
+    /* (InterestEvent, tentative: its source an Element or null) */
+    eventClass('InterestEvent', Event, { source: any(null) }, function (s, init) {
+        if (init.source !== undefined && init.source !== null && !(global.Element && init.source instanceof global.Element)) throw new TypeError("Failed to construct 'InterestEvent': Failed to read the 'source' property: Failed to convert value to 'Element'.");
+        if (init.source === undefined) s.source = null;
+    });
+    eventClass('PromiseRejectionEvent', Event, { promise: any(undefined), reason: any(undefined) }, function (s, init) {
+        /* (promise: a required member of its init) */
+        if (init.promise === undefined) throw new TypeError("Failed to construct 'PromiseRejectionEvent': required member promise is undefined.");
+    });
     eventClass('HashChangeEvent', Event, { oldURL: str(''), newURL: str('') });
     eventClass('MediaQueryListEvent', Event, { media: str(''), matches: bool(false) });
     eventClass('NavigateEvent', Event, { navigationType: str('push'), destination: nul(), canIntercept: bool(false),
@@ -266,17 +274,45 @@
     eventClass('TransitionEvent', Event, { propertyName: str(''), elapsedTime: dbl(0), pseudoElement: str(''), animation: nul() });
     eventClass('SubmitEvent', Event, { submitter: nul() });
     eventClass('FormDataEvent', Event, { formData: nul() });
-    eventClass('ToggleEvent', Event, { oldState: str(''), newState: str('') });
+    eventClass('ToggleEvent', Event, { oldState: str(''), newState: str(''), source: nul() });
     eventClass('FontFaceSetLoadEvent', Event, { fontfaces: function (v) { return Object.freeze(arguments.length && v != null ? Array.prototype.slice.call(v) : []); } });
     eventClass('StorageEvent', Event, { key: nul(), oldValue: nul(), newValue: nul(), url: str(''),
                                          storageArea: nul() });
-    eventClass('MessageEvent', Event, { data: nul(), origin: str(''), lastEventId: str(''),
-                                             source: nul(), ports: function (v) { return arguments.length ? v : []; } });
+    /* (ports: a sequence, null not one; a frozen array) */
+    var portsOf = function (v, what) {
+        if (v === null || (typeof v !== 'object' && typeof v !== 'function') || typeof v[Symbol.iterator] !== 'function')
+            throw new TypeError(what + ": The provided value cannot be converted to a sequence.");
+        return Object.freeze(Array.from(v));
+    };
+    var MessageEventC = eventClass('MessageEvent', Event, { data: nul(), origin: str(''), lastEventId: str(''),
+                                             source: nul(), ports: function (v) { return arguments.length ? portsOf(v, "Failed to construct 'MessageEvent'") : Object.freeze([]); } });
+    define(MessageEventC.prototype, 'initMessageEvent', function initMessageEvent(type, bubbles, cancelable, data, origin, lastEventId, source, ports) {
+        if (!(this instanceof MessageEventC)) throw new TypeError('Illegal invocation');
+        if (arguments.length < 1) throw new TypeError("Failed to execute 'initMessageEvent' on 'MessageEvent': 1 argument required, but only 0 present.");
+        var p = ports === undefined ? Object.freeze([]) : portsOf(ports, "Failed to execute 'initMessageEvent' on 'MessageEvent'");
+        if (st(this).dispatching) return;
+        this.initEvent(type, !!bubbles, !!cancelable);
+        var x = st(this);
+        x.data = data === undefined ? null : data;
+        x.origin = origin === undefined ? '' : String(origin);
+        x.lastEventId = lastEventId === undefined ? '' : String(lastEventId);
+        x.source = source === undefined ? null : source;
+        x.ports = p;
+    });
+    Object.defineProperty(MessageEventC.prototype.initMessageEvent, 'length', { value: 1 });
     eventClass('DeviceMotionEvent', Event, { acceleration: nul(), accelerationIncludingGravity: nul(), rotationRate: nul(),
                                              interval: num(0) });
     eventClass('DeviceOrientationEvent', Event, { alpha: nul(), beta: nul(), gamma: nul(), absolute: bool(false) });
     /* (made by createEvent only, in browsers; a constructor here) */
-    eventClass('BeforeUnloadEvent', Event, { returnValue: str('') });
+    (function () {
+        var BUE = eventClass('BeforeUnloadEvent', Event, { returnValue: str('') });
+        /* (no constructor of its own in the IDL: length 0; returnValue settable) */
+        Object.defineProperty(BUE, 'length', { value: 0 });
+        var g0 = Object.getOwnPropertyDescriptor(BUE.prototype, 'returnValue').get;
+        var s0 = { returnValue: function (v) { if (!(this instanceof BUE)) throw new TypeError('Illegal invocation'); st(this).returnValue = String(v); } }.returnValue;
+        Object.defineProperty(s0, 'name', { value: 'set returnValue' });
+        Object.defineProperty(BUE.prototype, 'returnValue', { get: g0, set: s0, enumerable: true, configurable: true });
+    })();
     eventClass('GamepadEvent', Event, { gamepad: nul() });
     var TextEvent = eventClass('TextEvent', UIEvent, { data: str('') });
     define(TextEvent.prototype, 'initTextEvent', function (type, bubbles, cancelable, view, data) {
@@ -342,7 +378,7 @@
         var list = map[type] || (map[type] = []);
         for (var i = 0; i < list.length; i++)
             if (list[i].callback === callback && list[i].capture === o.capture) return;
-        var l = { callback: callback, capture: o.capture, once: !!o.once,
+        var l = { seq: ++listenerSeq, callback: callback, capture: o.capture, once: !!o.once,
                   passive: o.passive === undefined ? defaultPassive(target, type) : !!o.passive,
                   removed: false };
         list.push(l);
@@ -424,7 +460,9 @@
     function report(err, g) {
         try {
             /* (in the listener's global, when it's another) */
-            if (g && g !== global && typeof g.reportError === 'function') g.reportError(err);
+            if (g && g !== global && typeof g.__cyberReportError === 'function') g.__cyberReportError(err);
+            else if (g && g !== global && typeof g.reportError === 'function') g.reportError(err);
+            else if (global.reportError === publicReportError) reportError(err);
             else if (typeof global.reportError === 'function' && global.reportError !== report) global.reportError(err);
             else if (global.console) global.console.error('Uncaught ' + (err && err.stack ? err + '\n' + err.stack : err));
         } catch (e) { /* the report itself failed */ }
@@ -436,23 +474,57 @@
      * console when nothing cancels it.  (An error while one is reported is
      * not reported again.) */
     var reporting = false;
-    function reportError(err) {
+    /* (where script called from: the first frame of a page's script on the stack, its URL, line and column) */
+    function callerLocation() {
+        var st = '';
+        try { st = String(new Error().stack || ''); } catch (e) { return null; }
+        var lines = st.split('\n');
+        for (var i = 0; i < lines.length; i++) {
+            var m = /\(?((?:https?|file|blob|data):[^\s()]*?|<script_\d+>):(\d+)(?::(\d+))?\)?\s*$/.exec(lines[i]);
+            if (!m) continue;
+            var file = m[1], line = +m[2] || 0, col = +m[3] || 1;
+            try {
+                var smap = global.__cyberScriptMap, sm = /^<script_\d+>$/.test(file) && smap ? smap[file] : null;
+                if (sm) { file = sm[0]; line += sm[1]; }
+            } catch (e) { }
+            if (/^<script_/.test(file)) continue;
+            return { file: file, line: line, col: col };
+        }
+        return null;
+    }
+    function isErrorObject(e) {
+        try { return !!e && typeof e === 'object' && Object.prototype.toString.call(e) === '[object Error]'; } catch (x) { return false; }
+    }
+    function reportError(err, where) {
         if (reporting) return;
         reporting = true;
         try {
-            var msg;
-            try { msg = 'Uncaught ' + (err && typeof err === 'object' && 'message' in err ? (err.name ? err.name + ': ' : '') + err.message : String(err)); }
+            var msg, isErr = isErrorObject(err);
+            try { msg = 'Uncaught ' + (isErr ? (err.name ? err.name + ': ' : '') + err.message : typeof err === 'object' && err !== null ? 'exception' : String(err)); }
             catch (e) { msg = 'Uncaught exception'; }
-            var line = 0, file = '';
-            try { if (err && typeof err === 'object') { line = +err.lineNumber || 0; file = String(err.fileName || ''); } } catch (e) { /* (getters) */ }
-            var ev = new global.ErrorEvent('error', { message: msg, filename: file, lineno: line, colno: 0,
+            var line = 0, file = '', col = 0;
+            try { if (isErr && !where) { line = +err.lineNumber || 0; file = String(err.fileName || ''); } } catch (e) { /* (getters) */ }
+            if (where) { file = where.file; line = where.line; col = where.col; }
+            /* (a parser-run script's name: its URL, or the document's and where its text starts) */
+            try {
+                var smap = global.__cyberScriptMap, sm = /^<script_\d+>$/.test(file) && smap ? smap[file] : null;
+                if (sm) { file = sm[0]; line += sm[1]; }
+            } catch (e) { }
+            var ev = new global.ErrorEvent('error', { message: msg, filename: file, lineno: line, colno: col || (line ? 1 : 0),
                                                        error: err, cancelable: true });
             if (global.dispatchEvent(ev) && global.console)
                 global.console.error(msg + (err && err.stack ? '\n' + err.stack : ''));
         } catch (e) { /* the report itself failed */ }
         reporting = false;
     }
-    Object.defineProperty(global, 'reportError', { value: reportError, writable: true, configurable: true, enumerable: true });
+    /* (self.reportError(e): reported as from where it was called) */
+    var publicReportError = { reportError: function (e) {
+        if (arguments.length < 1) throw new TypeError("Failed to execute 'reportError' on 'Window': 1 argument required, but only 0 present.");
+        reportError(e, callerLocation());
+    } }.reportError;
+    Object.defineProperty(publicReportError, 'length', { value: 1 });
+    Object.defineProperty(global, 'reportError', { value: publicReportError, writable: true, configurable: true, enumerable: true });
+    Object.defineProperty(global, '__cyberReportError', { value: function (e) { reportError(e); }, configurable: true });
 
     /* The legacy (prefixed) types of a trusted event that has no listener of
      * its own type on an object (DOM 2.9 "invoke"), and their handlers'
@@ -522,6 +594,7 @@
     }
 
     /* The listeners of s.type at item (and its handler); whether it has any. */
+    var listenerSeq = 0;
     function innerInvoke(ev, s, entry, item, capturePass) {
         /* (where the object was when the path was made) */
         var shadow = entry.flags === undefined ? entry.shadow : (entry.flags & EP_SHADOW) !== 0;
@@ -529,12 +602,19 @@
         var list = map && map[s.type];
         var found = false;
         if (list) for (var k = 0; k < list.length && !found; k++) found = !list[k].removed;
+        /* (the handler's place among the non-capture listeners: where it was first set) */
+        var hq = !capturePass && item[HANDLER_SEQ], hseq = hq ? hq[s.type] : undefined, handlerRun = false;
         if (list) {
             /* (the listeners there now: DOM 2.10 clones the list) */
             for (var i = 0, end = list.length; i < end; i++) {
                 var l = list[i];
                 if (l.removed) continue;
                 if (l.capture !== capturePass) continue;
+                if (hseq !== undefined && !handlerRun && l.seq > hseq) {
+                    handlerRun = true;
+                    if (runHandler(ev, s, entry, item, shadow)) found = true;
+                    if (s.stopImmediate) return true;
+                }
                 if (l.once) removeListener(item, s.type, l);
                 var fn = l.callback, thisArg = item;
                 var g = listenerGlobal(fn), here = g === global;
@@ -564,15 +644,20 @@
                 if (s.stopImmediate) return true;
             }
         }
-        /* the on<type> handler, in the non-capture pass: read through its
-         * property unless the native path says there is no content attribute
-         * and none was set (nor forwarded from <body> to the window) */
+        if (!capturePass && !handlerRun && runHandler(ev, s, entry, item, shadow)) found = true;
+        return found;
+    }
+    /* the on<type> handler, in the non-capture pass: read through its
+     * property unless the native path says there is no content attribute
+     * and none was set (nor forwarded from <body> to the window) */
+    function runHandler(ev, s, entry, item, shadow) {
+        var found = false;
         /* (a native path's flags say whether a handler may be set) */
         var h = (entry.flags === undefined || (entry.flags & (EP_ON_ATTR | EP_HANDLER | EP_ALWAYS | EP_ON_PROP))) &&
                 !inactive(item, null) ? handlerProp(item, s.type) : null;
         if (h && inactive(item, listenerGlobal(h))) h = null;
         if (h) found = true;
-        if (!capturePass) {
+        {
             if (h) {
                 var r, hg = listenerGlobal(h), hhere = hg === global;
                 var prevEv = hhere ? currentEvent : hg[CURRENT_EVENT];
@@ -589,7 +674,11 @@
                     if (hhere) currentEvent = prevEv; else hg[CURRENT_EVENT] = prevEv;
                 }
                 if (s.type === 'error' && item === global ? r === true : r === false) cancel(s);
-                else if (s.type === 'beforeunload' && r != null) cancel(s);
+                /* (beforeunload: a value cancels a BeforeUnloadEvent, and is its returnValue if it had none) */
+                else if (s.type === 'beforeunload' && r != null && global.BeforeUnloadEvent && ev instanceof global.BeforeUnloadEvent) {
+                    cancel(s);
+                    try { if (ev.returnValue === '') ev.returnValue = r; } catch (e) { }
+                }
             }
         }
         return found;
@@ -600,15 +689,39 @@
      * activation behavior) gets its legacy-pre-activation behavior first,
      * then its activation behavior, or (canceled) its legacy-canceled one. */
     function dispatch(target, ev) {
-        var s = st(ev), act = null, saved;
+        var s = st(ev), act = null, saved, isClick = false;
         if (s.type === 'click' && !s.dispatching && s.initialized && global.MouseEvent && ev instanceof global.MouseEvent) {
+            isClick = true;
             act = activationTargetOf(target, s.bubbles);
+            /* (the path as it is now: listeners may take the target out) */
+            var clickPath = [];
+            for (var cp = target; cp && clickPath.length < 4096; cp = s.bubbles ? (cp.parentNode || cp.host) : null) clickPath.push(cp);
             if (act) saved = preActivate(act);
         }
         var r = dispatchEvent0(target, ev);
-        if (act) {
-            if (s.canceled) canceledActivate(act, saved);
-            else runActivation(act, saved);
+        if (isClick) {
+            if (s.canceled) { if (act) canceledActivate(act, saved); }
+            else {
+                /* (who handles it, decided after the listeners, as engines do (whatwg/html#10032): from the target up,
+                 * the first that does something now; a button or input that does nothing passes it on to a link) */
+                var pre = act && act.localName === 'input' && saved && (saved.type === 'checkbox' || saved.type === 'radio') ? act : null;
+                var inner = false;
+                for (var ci = 0, up; ci < clickPath.length && (up = clickPath[ci]); ci++) {
+                    if (up === pre) { runActivation(up, saved); break; }
+                    /* (a label: nothing when the click came from interactive content in it, or from its own control) */
+                    if (up.nodeType === 1 && up.localName === 'label' && up.namespaceURI === HTML_NS && up !== target) {
+                        var lc = null;
+                        try { lc = up.control; } catch (e) { }
+                        if (inner || (lc && (lc === target || (lc.contains && lc.contains(target))))) break;
+                    }
+                    var wasInner = inner;
+                    if (interactiveContent(up)) inner = true;
+                    if (!hasActivationNow(up)) continue;
+                    /* (past interactive content that did nothing: only a link it is in goes on) */
+                    if (wasInner && !((up.localName === 'a' || up.localName === 'area') && up.hasAttribute('href'))) continue;
+                    if (runActivation(up, up === act ? saved : null) !== false) break;
+                }
+            }
         }
         return r;
     }
@@ -823,8 +936,8 @@
     /* a control's form owner: its form="" element, else its nearest form ancestor */
     function formOf(el) {
         var id = el.getAttribute && el.getAttribute('form');
-        if (id !== null && id !== undefined) {
-            var f = el.isConnected && el.ownerDocument ? el.ownerDocument.getElementById(id) : null;
+        if (id !== null && id !== undefined && el.isConnected) {
+            var f = el.ownerDocument ? el.ownerDocument.getElementById(id) : null;
             return f && f.localName === 'form' ? f : null;
         }
         for (var n = el.parentNode; n; n = n.parentNode) if (n.localName === 'form') return n;
@@ -862,9 +975,11 @@
     }
     var HTML_NS = 'http://www.w3.org/1999/xhtml';
     var ACTIVATING_INPUT = { checkbox: 1, radio: 1, submit: 1, image: 1, reset: 1, button: 1 };
+    /* (a button's type state: its keyword; none or another, Auto: a button with command or commandfor, else a submit) */
     function buttonType(el) {
-        var t = String(el.getAttribute('type') || 'submit').toLowerCase();
-        return t === 'reset' || t === 'button' ? t : 'submit';
+        var t = String(el.getAttribute('type') || '').toLowerCase();
+        if (t === 'reset' || t === 'button' || t === 'submit') return t;
+        return el.hasAttribute('commandfor') || el.hasAttribute('command') ? 'button' : 'submit';
     }
     /* Whether a node has activation behavior (HTML: input, button, a and
      * area with href, label, a details element's summary). */
@@ -886,6 +1001,24 @@
             if (c.localName === 'summary' && c.namespaceURI === HTML_NS) return c === n ? d : null;
         return null;
     }
+    /* (what can handle a click as it is now: any input or button (one that does nothing passes it on), a link with an href, a
+     * label, a details element's summary) */
+    /* (HTML 3.2.5.2.7 interactive content) */
+    function interactiveContent(n) {
+        if (!n || n.nodeType !== 1 || n.namespaceURI !== HTML_NS) return false;
+        switch (n.localName) {
+        case 'a': return n.hasAttribute('href');
+        case 'audio': case 'video': return n.hasAttribute('controls');
+        case 'img': return n.hasAttribute('usemap');
+        case 'input': return inputType(n) !== 'hidden';
+        case 'button': case 'details': case 'embed': case 'iframe': case 'label': case 'select': case 'textarea': return true;
+        }
+        return false;
+    }
+    function hasActivationNow(n) {
+        if (!n || n.nodeType !== 1 || n.namespaceURI !== HTML_NS) return false;
+        return n.localName === 'input' || hasActivation(n);
+    }
     function activationTargetOf(target, bubbles) {
         if (hasActivation(target)) return target;
         if (!bubbles) return null;
@@ -896,8 +1029,9 @@
     /* legacy-pre-activation behavior: a checkbox toggles, a radio is checked */
     function preActivate(el) {
         if (el.localName !== 'input') return null;
-        var type = inputType(el), saved = { type: type, checked: getChecked(el), radio: null };
-        if (type === 'checkbox') setChecked(el, !saved.checked);
+        var type = inputType(el), saved = { type: type, checked: getChecked(el), radio: null, indeterminate: !!el.indeterminate };
+        /* (a checkbox: toggled, no longer indeterminate) */
+        if (type === 'checkbox') { setChecked(el, !saved.checked); if (saved.indeterminate) el.indeterminate = false; }
         else if (type === 'radio') {
             radioGroup(el).forEach(function (r) { if (getChecked(r)) saved.radio = r; });
             setChecked(el, true);
@@ -906,7 +1040,7 @@
     }
     function canceledActivate(el, saved) {
         if (!saved) return;
-        if (saved.type === 'checkbox') setChecked(el, saved.checked);
+        if (saved.type === 'checkbox') { setChecked(el, saved.checked); el.indeterminate = saved.indeterminate; }
         else if (saved.type === 'radio') { setChecked(el, saved.checked); if (saved.radio) setChecked(saved.radio, true); }
     }
     function runActivation(el, saved) {
@@ -916,8 +1050,11 @@
             /* (a disconnected one changes, with no events) */
             if (!el.isConnected) return;
             if (type === 'checkbox' || (saved && !saved.checked)) {
-                fire(el, 'input', Event, { bubbles: true, composed: true });
-                fire(el, 'change', Event, { bubbles: true });
+                /* (the user agent's: trusted) */
+                var tr = typeof global.__cyberDispatchTrusted === 'function' ? global.__cyberDispatchTrusted : null;
+                var ie = new Event('input', { bubbles: true, composed: true }), ce = new Event('change', { bubbles: true });
+                if (tr) tr(el, ie); else el.dispatchEvent(ie);
+                if (tr) tr(el, ce); else el.dispatchEvent(ce);
             }
             return;
         }
@@ -934,49 +1071,59 @@
                     pt.setAttribute('data-cyber-ia', ik);
                 } catch (e) { }
                 try {
-                    if (act === 'show') pt.showPopover(); else if (act === 'hide') pt.hidePopover(); else pt.togglePopover();
+                    if (typeof global.__cyberPopoverInvoke === 'function') global.__cyberPopoverInvoke(pt, el, act);
+                    else if (act === 'show') pt.showPopover(); else if (act === 'hide') pt.hidePopover(); else pt.togglePopover();
                 } catch (e) { /* (not shown: as if not asked) */ }
             }
-            return;
+            /* (a popover's: not handling the click, a link it is in goes on, as engines do) */
+            return false;
         }
         if ((isInput && (type === 'submit' || type === 'image')) || (el.localName === 'button' && buttonType(el) === 'submit')) {
             var form = disabledControl(el) ? null : formOf(el);
-            if (form && form.isConnected) requestSubmit(form, el);
-            return;
+            if (form && form.isConnected) { requestSubmit(form, el); return; }
+            return false;
         }
         if ((isInput && type === 'reset') || (el.localName === 'button' && buttonType(el) === 'reset')) {
             var f2 = disabledControl(el) ? null : formOf(el);
-            if (f2 && f2.isConnected && typeof f2.reset === 'function') f2.reset();
-            return;
+            if (f2 && f2.isConnected && typeof f2.reset === 'function') { f2.reset(); return; }
+            return false;
         }
-        if (isInput || el.localName === 'button') return;
+        /* (what does nothing on its own: false, so a link it is in goes on) */
+        if (el.localName === 'button' && (el.hasAttribute('command') || el.hasAttribute('commandfor'))) return false;
+        if (isInput && type === 'file') return;
+        if (isInput && /^(text|search|tel|url|email|password|number|range|color|date|month|week|time|datetime-local|hidden)$/.test(type)) return false;
+        if (isInput || el.localName === 'button') return false;
         if (el.localName === 'label') {
             var control = el.control !== undefined ? el.control
                 : (el.htmlFor ? (el.ownerDocument.getElementById(el.htmlFor)) : el.querySelector('input,button,select,textarea'));
-            if (control && control !== el && typeof control.click === 'function') control.click();
-            return;
+            if (control && control !== el && typeof control.click === 'function') { control.click(); return; }
+            return false;
         }
         if (el.localName === 'summary') {
             var d = summaryOf(el);
             if (d) {
                 var was = d.hasAttribute('open');
+                /* (its toggle event: the attribute's change queues it, __cyberDetailsOpen) */
                 if (was) d.removeAttribute('open'); else d.setAttribute('open', '');
-                /* (details' toggle event, in a task) */
-                global.setTimeout(function () {
-                    fire(d, 'toggle', global.ToggleEvent || Event, { oldState: was ? 'open' : 'closed',
-                                                                     newState: was ? 'closed' : 'open' });
-                }, 0);
             }
             return;
         }
         followHyperlink(el, view);
     }
+    var FIRING_SUBMIT = Symbol('firingSubmit');
     function requestSubmit(form, submitter) {
+        /* (HTML 4.10.21.3: while its submission events fire, a form is not submitted again) */
+        if (form[FIRING_SUBMIT]) return;
+        form[FIRING_SUBMIT] = true;
+        try { requestSubmit0(form, submitter); } finally { form[FIRING_SUBMIT] = false; }
+    }
+    function requestSubmit0(form, submitter) {
         /* (interactive validation: an invalid form isn't sent, unless told not to check) */
         if (!form.hasAttribute('novalidate') && !(submitter && submitter.hasAttribute && submitter.hasAttribute('formnovalidate')) &&
             typeof form.checkValidity === 'function' && !form.checkValidity()) return;
         var ok = form.dispatchEvent(new global.SubmitEvent('submit', { bubbles: true, cancelable: true,
                                                                        submitter: submitter || null }));
+        form[FIRING_SUBMIT] = false;
         if (ok && typeof form.__cyberSubmit === 'function') form.__cyberSubmit(submitter);
     }
     function followHyperlink(a, view) {
@@ -993,6 +1140,18 @@
         if (!loc) return;
         var url;
         try { url = new global.URL(href, a.baseURI || loc.href); } catch (e) { return; }
+        /* (hyperlink auditing: each ping URL, parsed as the document's, sent "PING" as it goes) */
+        var ping = a.getAttribute('ping');
+        if (ping && typeof global.fetch === 'function' && /^https?:$/.test(url.protocol)) {
+            String(ping).split(/[\t\n\f\r ]+/).forEach(function (p) {
+                if (!p) return;
+                var pa = a.ownerDocument.createElement('a'), pu;
+                pa.setAttribute('href', p);
+                try { pu = pa.href; } catch (e) { pu = ''; }
+                if (!/^https?:/.test(pu)) return;
+                try { global.fetch(pu, { method: 'POST', body: 'PING', headers: { 'Content-Type': 'text/ping' }, keepalive: true, credentials: 'include' }).catch(function () { }); } catch (e) { }
+            });
+        }
         /* (target: another browsing context, the link's own or its document's <base>) */
         var target = a.getAttribute('target');
         if (target === null) {
@@ -1038,11 +1197,122 @@
             return;
         }
         var action = attr('action', 'formaction'), url;
+        /* (its query in the document's encoding, URL parsing's encoding override) */
+        if (action && /[^\x00-\x7f]/.test(action) && d.characterSet && !/^utf-8$/i.test(d.characterSet) && typeof global.__cyberLegacyQuery === 'function') {
+            var lqa = global.__cyberLegacyQuery(action, d.characterSet);
+            if (lqa) action = lqa;
+        }
         try { url = new global.URL(action || d.URL, form.baseURI); } catch (e) { return; }
         var post = method === 'post', data = new global.FormData(form, submitter || undefined);
-        if (!post) url.search = new global.URLSearchParams(data).toString();
+        var nl = function (s) { return String(s).replace(/\r\n|\r|\n/g, '\r\n'); };
+        var pairs = function () {
+            var o = [];
+            data.forEach(function (v, n) { o.push([nl(n), nl(global.File && v instanceof global.File ? v.name : v)]); });
+            return o;
+        };
+        /* (the form's encoding: accept-charset's first known label, else its document's; UTF-16 as UTF-8) */
+        var formCs = (function () {
+            var ls = String(form.getAttribute('accept-charset') || '').trim().split(/[\t\n\f\r ]+/);
+            for (var li = 0; li < ls.length; li++) {
+                if (!ls[li]) continue;
+                try { var e0 = new global.TextDecoder(ls[li]).encoding; if (e0) return /^utf-16/i.test(e0) ? 'UTF-8' : e0; } catch (x) { }
+            }
+            var c0 = d.characterSet || 'UTF-8';
+            return /^utf-16/i.test(c0) ? 'UTF-8' : c0;
+        })();
+        /* (a string's bytes in it: a character it lacks as &#N;, a lone surrogate first U+FFFD) */
+        var usv = function (s) { return String(s).replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/g, function (m, pre) { return (pre || '') + '\uFFFD'; }); };
+        var bytesOf = function (s) {
+            s = usv(s);
+            if (!/^utf-8$/i.test(formCs) && typeof global.__cyberLegacyQuery === 'function') {
+                var q = global.__cyberLegacyQuery('http://x/?' + s.replace(/%/g, '%25').replace(/#/g, '%23'), formCs);
+                if (q !== null && q !== undefined) {
+                    q = q.slice(10);
+                    var out = [];
+                    for (var k = 0; k < q.length; k++) {
+                        var c = q.charCodeAt(k);
+                        if (c === 37 && /^[0-9A-Fa-f]{2}$/.test(q.substr(k + 1, 2))) { out.push(parseInt(q.substr(k + 1, 2), 16)); k += 2; }
+                        else out.push(c & 0xFF);
+                    }
+                    return new Uint8Array(out);
+                }
+            }
+            return new global.TextEncoder().encode(s);
+        };
+        /* (application/x-www-form-urlencoded: the bytes percent-encoded, a space a +) */
+        var urlenc = function (s) {
+            var b = bytesOf(s), o = '';
+            for (var k = 0; k < b.length; k++) {
+                var c = b[k];
+                if ((c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 42 || c === 45 || c === 46 || c === 95) o += String.fromCharCode(c);
+                else if (c === 32) o += '+';
+                else o += '%' + (c < 16 ? '0' : '') + c.toString(16).toUpperCase();
+            }
+            return o;
+        };
+        var urlencoded = function () { return pairs().map(function (p) { return urlenc(p[0]) + '=' + urlenc(p[1]); }).join('&'); };
+        if (!post) url.search = urlencoded();
         var target = attr('target', 'formtarget');
-        if (target && !/^_self$/i.test(target) && !post) { view.open(url.href, target); return; }
+        /* (a POST into a frame: its body as the enctype has it, sent, and the response the frame's document; one from a frame
+         * into itself the same, its own document replaced) */
+        var selfPost = post && (!target || /^_self$/i.test(target)) && view.parent && view.parent !== view;
+        if (post && ((target && !/^_(self|top|parent|blank)$/i.test(target)) || selfPost)) {
+            var w = selfPost ? view : null;
+            if (!w) {
+                try { w = view.frames[target]; } catch (e) { w = null; }
+                if (!w || w === view || !w.document) {
+                    var fr = d.getElementsByName(target);
+                    for (var fi = 0; fi < fr.length && !w; fi++) if (fr[fi].localName === 'iframe' || fr[fi].localName === 'frame') w = fr[fi].contentWindow;
+                }
+            }
+            var doc2 = null;
+            try { doc2 = w && w.document; } catch (e) { doc2 = null; }
+            if (doc2 && typeof view.fetch === 'function') {
+                var enc = String(attr('enctype', 'formenctype') || '').toLowerCase(), body, type;
+                if (enc === 'multipart/form-data') {
+                    var bd = '----cyberFormBoundary' + Math.random().toString(36).slice(2, 18), parts = [];
+                    var esc = function (s) { return String(s).replace(/\n/g, '%0A').replace(/\r/g, '%0D').replace(/"/g, '%22'); };
+                    data.forEach(function (v, n) {
+                        var isFile = global.File && v instanceof global.File;
+                        var h = '--' + bd + '\r\nContent-Disposition: form-data; name="' + esc(nl(n)) + '"';
+                        if (isFile) h += '; filename="' + esc(v.name) + '"\r\nContent-Type: ' + (v.type || 'application/octet-stream');
+                        parts.push(bytesOf(h + '\r\n\r\n'), isFile ? v : bytesOf(nl(v)), bytesOf('\r\n'));
+                    });
+                    parts.push(bytesOf('--' + bd + '--\r\n'));
+                    /* (the files' bytes read first: the body goes as one array of bytes) */
+                    body = Promise.all(parts.map(function (p) { return p instanceof Uint8Array ? p : p.arrayBuffer().then(function (ab) { return new Uint8Array(ab); }); })).then(function (a) {
+                        var tot = 0;
+                        a.forEach(function (x) { tot += x.length; });
+                        var all = new Uint8Array(tot), at = 0;
+                        a.forEach(function (x) { all.set(x, at); at += x.length; });
+                        return all;
+                    });
+                    type = 'multipart/form-data; boundary=' + bd;
+                } else if (enc === 'text/plain') {
+                    body = bytesOf(pairs().map(function (p) { return p[0] + '=' + p[1] + '\r\n'; }).join(''));
+                    type = 'text/plain';
+                } else {
+                    body = urlencoded();
+                    type = 'application/x-www-form-urlencoded';
+                }
+                Promise.resolve(body).then(function (b) { return view.fetch(url.href, { method: 'POST', body: b, headers: { 'Content-Type': type } }); }).then(function (r) {
+                    var ct = r.headers.get('content-type') || '';
+                    return r.text().then(function (t) {
+                        var html = /html|xml/i.test(ct) ? t : '<pre>' + t.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</pre>';
+                        doc2.open(); doc2.write(html); doc2.close();
+                    });
+                }).catch(function () { });
+                return;
+            }
+        }
+        if (target && !/^_self$/i.test(target) && !post) {
+            /* (the form's rel: noreferrer, noopener, opener; a new _blank one implies noopener) */
+            var frel = ' ' + String(form.getAttribute('rel') || '').toLowerCase().replace(/\s+/g, ' ') + ' ';
+            var fnoref = frel.indexOf(' noreferrer ') >= 0;
+            var fnoopen = fnoref || frel.indexOf(' noopener ') >= 0 || (/^_blank$/i.test(target) && frel.indexOf(' opener ') < 0);
+            view.open(url.href, target, [fnoopen ? 'noopener' : '', fnoref ? 'noreferrer' : ''].filter(Boolean).join(','));
+            return;
+        }
         if (typeof view.__cyberNavigate === 'function') view.__cyberNavigate(url.href, submitter || form, post ? data : null);
         else if (!post) view.location.href = url.href;
     }
@@ -1059,7 +1329,7 @@
     /* ---- event handler attributes (HTML 8.1.8.1) ---- */
     var HANDLERS = Symbol.for('cyber.eventHandlers');
     var GLOBAL_HANDLERS = ['abort', 'auxclick', 'beforeinput', 'beforematch', 'beforetoggle', 'blur',
-        'cancel', 'canplay', 'canplaythrough', 'change', 'click', 'close', 'contextlost', 'contextmenu',
+        'cancel', 'canplay', 'canplaythrough', 'change', 'click', 'close', 'command', 'contextlost', 'contextmenu',
         'contextrestored', 'copy', 'cuechange', 'cut', 'dblclick', 'drag', 'dragend', 'dragenter',
         'dragleave', 'dragover', 'dragstart', 'drop', 'durationchange', 'emptied', 'ended', 'error',
         'focus', 'formdata', 'input', 'invalid', 'keydown', 'keypress', 'keyup', 'load', 'loadeddata',
@@ -1093,8 +1363,10 @@
         Object.defineProperty(P, name, { configurable: true, enumerable: true,
             get: function () {
                 var t = handlerThis(this, P);
-                /* <body>'s window handlers are the window's (HTML 8.1.8.2) */
-                var self = bodyForwards(t, type) ? global : t;
+                /* <body>'s window handlers are the window's (HTML 8.1.8.2); a body with no window, none */
+                var fw = bodyForwards(t, type);
+                if (fw && t.ownerDocument !== global.document) return null;
+                var self = fw ? global : t;
                 var h = self[HANDLERS];
                 if (h && Object.prototype.hasOwnProperty.call(h, type)) return h[type];
                 /* the content attribute, compiled on first use (the window's
@@ -1102,14 +1374,32 @@
                 var holder = self === global && BODY_FORWARDED.indexOf(type) >= 0 && global.document ? global.document.body : self;
                 if (holder && typeof holder.getAttribute === 'function') {
                     var code = holder.getAttribute(name);
+                    /* (an element of a document with no browsing context: never compiled) */
+                    if (code !== null && holder.ownerDocument && !holder.ownerDocument.defaultView) return null;
                     if (code !== null) {
                         var fn = null;
+                        /* (its source text as HTML's "getting the current value of the event handler" makes it: function onX(params) { body }) */
+                        var params = type === 'error' && (t === global || fw) ? 'event, source, lineno, colno, error' : 'event';
                         try {
-                            fn = type === 'error' && t === global
-                                ? new Function('event', 'source', 'lineno', 'colno', 'error', code)
-                                : new Function('event', code);
-                        } catch (e) { report(e); }
-                        setHandler(self, type, fn);
+                            fn = (0, eval)('(function ' + name + '(' + params + ') {\n' + code + '\n})');
+                            if (typeof fn !== 'function') throw new SyntaxError('Invalid event handler');
+                        } catch (e) {
+                            fn = null;
+                            /* (a body that only parses on its own lines: as the Function constructor takes it) */
+                            if (!(e instanceof SyntaxError)) report(e);
+                            else {
+                                try { fn = params === 'event' ? new Function('event', code) : new Function('event', 'source', 'lineno', 'colno', 'error', code); }
+                                catch (e2) { report(e2); }
+                            }
+                        }
+                        /* (compiled: its value now; its place in the listeners as it was, even when it failed) */
+                        var hh = self[HANDLERS];
+                        if (!hh) { hh = Object.create(null); Object.defineProperty(self, HANDLERS, { value: hh, configurable: true }); }
+                        hh[type] = fn;
+                        var qq = self[HANDLER_SEQ];
+                        if (!qq) { qq = Object.create(null); Object.defineProperty(self, HANDLER_SEQ, { value: qq, configurable: true }); }
+                        if (!qq[type]) qq[type] = ++listenerSeq;
+                        listenerChanges++;
                         return fn;
                     }
                 }
@@ -1117,7 +1407,9 @@
             },
             set: function (v) {
                 var t = handlerThis(this, P);
-                var self = bodyForwards(t, type) ? global : t;
+                var fw = bodyForwards(t, type);
+                if (fw && t.ownerDocument !== global.document) return;
+                var self = fw ? global : t;
                 setHandler(self, type, typeof v === 'function' || (v !== null && typeof v === 'object') ? v : null);
             } });
         /* (named as an attribute's accessors are) */
@@ -1131,6 +1423,30 @@
         return el !== global && el && (el.localName === 'body' || el.localName === 'frameset') &&
                el.namespaceURI === 'http://www.w3.org/1999/xhtml' && BODY_FORWARDED.indexOf(type) >= 0;
     }
+    /* (document.open, HTML 8.4.x: every listener and handler of the document, its shadow-including descendants and its window, gone at once) */
+    var clearTarget = function (t) {
+        var map = t[LISTENERS];
+        if (map) {
+            for (var ty in map) (map[ty] || []).forEach(function (l) { l.removed = true; });
+            delete t[LISTENERS];
+        }
+        var h = t[HANDLERS];
+        if (h) { for (var k in h) h[k] = null; }
+        listenerChanges++;
+    };
+    Object.defineProperty(global, '__cyberDocOpenClear', { configurable: true, value: function (doc) {
+        var walk = function (n) {
+            clearTarget(n);
+            if (n.nodeType === 1 && n.shadowRoot) walk(n.shadowRoot);
+            for (var c = n.firstChild; c; c = c.nextSibling) walk(c);
+        };
+        walk(doc);
+        var w = doc.defaultView;
+        if (w && w.document === doc) {
+            try { if (typeof w.__cyberDocOpenClearWindow === 'function') w.__cyberDocOpenClearWindow(); else clearTarget(w); } catch (e) { }
+        }
+    } });
+    Object.defineProperty(global, '__cyberDocOpenClearWindow', { configurable: true, value: function () { clearTarget(global); } });
     function setHandler(target, type, v) {
         listenerChanges++;
         var h = target[HANDLERS];
@@ -1139,15 +1455,120 @@
             Object.defineProperty(target, HANDLERS, { value: h, configurable: true });
         }
         h[type] = v;
+        /* (HTML "event handlers": its listener added, at the end of the list, when it is first set; kept where it is while
+         * it changes; gone when it is set to null) */
+        var q = target[HANDLER_SEQ];
+        if (!q) { q = Object.create(null); Object.defineProperty(target, HANDLER_SEQ, { value: q, configurable: true }); }
+        if (v === null || v === undefined) delete q[type];
+        else if (!q[type]) q[type] = ++listenerSeq;
     }
+    var HANDLER_SEQ = Symbol('cyber.handlerSeq');
+    /* (a content attribute set: the handler's value its uncompiled script, compiled when read; activated if it wasn't;
+     * removed: deactivated) */
+    /* (a details element's open attribute added or removed: its toggle event in a task, one for the changes before it runs,
+     * HTML's details notification task steps) */
+    var DOPEN = Symbol('detailsOpen'), DPEND = Symbol('detailsToggle');
+    /* (the details elements of el's name group: the same name, in the same tree, el left out) */
+    function detailsGroup(el) {
+        var nm = el.getAttribute('name');
+        if (!nm) return [];
+        /* (its tree: the document, a shadow root, or the top of a subtree not in either) */
+        var root = el.getRootNode(), out = [];
+        var all = root.querySelectorAll ? Array.prototype.slice.call(root.querySelectorAll('details[name]')) : [];
+        if (root.nodeType === 1 && root.localName === 'details') all.unshift(root);
+        for (var i = 0; i < all.length; i++) {
+            var d = all[i];
+            if (d !== el && d.namespaceURI === HTML_NS && d.getAttribute('name') === nm) out.push(d);
+        }
+        return out;
+    }
+    /* (inserted, or its name changed: closed if another of its group is open, HTML's ensure details exclusivity) */
+    function detailsEnsure(el) {
+        if (!el.hasAttribute('open')) return;
+        var g = detailsGroup(el);
+        for (var i = 0; i < g.length; i++) if (g[i].hasAttribute('open')) { el.removeAttribute('open'); return; }
+    }
+    Object.defineProperty(global, '__cyberDetailsInserted', { configurable: true, value: function (n) {
+        if (!n || n.nodeType !== 1) return;
+        var list = n.localName === 'details' ? [n] : [];
+        if (n.querySelectorAll) list = list.concat(Array.prototype.slice.call(n.querySelectorAll('details[open]')));
+        list.forEach(function (d) {
+            if (d.namespaceURI !== HTML_NS) return;
+            /* (open from the parser, never seen by the attribute hook: its toggle event all the same) */
+            if (d[DOPEN] === undefined && d.hasAttribute('open')) global.__cyberDetailsOpen(d, true, true);
+            if (!d.hasAttribute('name') || !d.hasAttribute('open')) return;
+            /* (as if inserted one at a time, in tree order: the open ones outside, and those before it, count) */
+            var at = list.indexOf(d), g = detailsGroup(d);
+            for (var i = 0; i < g.length; i++) {
+                var o = g[i], oi = list.indexOf(o);
+                if (o.hasAttribute('open') && (oi < 0 ? !(n === o || n.contains(o)) : oi < at)) { d.removeAttribute('open'); return; }
+            }
+        });
+    } });
+    Object.defineProperty(global, '__cyberDetailsName', { configurable: true, value: function (el) { detailsEnsure(el); } });
+    /* (a document the parser made: its open details' toggle events, the attribute never having been added by a hook) */
+    Object.defineProperty(global, '__cyberDetailsParsed', { configurable: true, value: function (doc) {
+        var all = doc && doc.querySelectorAll ? doc.querySelectorAll('details[open]') : [];
+        for (var i = 0; i < all.length; i++) if (all[i][DOPEN] === undefined && all[i].namespaceURI === HTML_NS) global.__cyberDetailsOpen(all[i], true, true);
+    } });
+    Object.defineProperty(global, '__cyberDetailsOpen', { configurable: true, value: function (el, present, noClose) {
+        present = !!present;
+        /* (opened: the others of its group closed; not for one the parser made open, which its insertion decides) */
+        if (present && !noClose && el.getAttribute('name')) {
+            detailsGroup(el).forEach(function (d) { if (d.hasAttribute('open')) d.removeAttribute('open'); });
+        }
+        var prev = el[DOPEN];
+        if (prev === undefined) prev = !present;
+        if (prev === present) return;
+        el[DOPEN] = present;
+        var p = el[DPEND];
+        if (p) { p.newState = present ? 'open' : 'closed'; return; }
+        p = { oldState: prev ? 'open' : 'closed', newState: present ? 'open' : 'closed' };
+        el[DPEND] = p;
+        global.setTimeout(function () {
+            el[DPEND] = null;
+            /* (one for all the changes since it was queued, the same state or not; a user agent's: trusted) */
+            var te = new (global.ToggleEvent || Event)('toggle', { oldState: p.oldState, newState: p.newState });
+            if (typeof global.__cyberDispatchTrusted === 'function') global.__cyberDispatchTrusted(el, te); else el.dispatchEvent(te);
+        }, 0);
+    } });
+    Object.defineProperty(global, '__cyberHandlerAttr', { configurable: true, value: function (el, name, present) {
+        var type = String(name).slice(2).toLowerCase();
+        if (!HANDLER_TYPE[type] || !el || el.nodeType !== 1) return;
+        var self = bodyForwards(el, type) ? (el.ownerDocument === global.document ? global : null) : el;
+        if (!self) return;
+        listenerChanges++;
+        var h = self[HANDLERS];
+        if (h) delete h[type];
+        var q = self[HANDLER_SEQ];
+        if (!q) { q = Object.create(null); Object.defineProperty(self, HANDLER_SEQ, { value: q, configurable: true }); }
+        if (!present) delete q[type];
+        else if (!q[type]) q[type] = ++listenerSeq;
+    } });
     var ELEMENT_P = global.HTMLElement && global.HTMLElement.prototype;
     var DOC_P = global.Document && global.Document.prototype;
-    [ELEMENT_P, global.SVGElement && global.SVGElement.prototype, DOC_P].forEach(function (P) {
+    /* (MathML Core 2.1.x: MathMLElement, an Element with GlobalEventHandlers, HTMLOrSVGElement and ElementCSSInlineStyle) */
+    if (typeof global.MathMLElement !== 'function' && global.Element) {
+        var MC = function MathMLElement() { throw new TypeError('Illegal constructor'); };
+        var MP = Object.create(global.Element.prototype);
+        Object.defineProperty(MP, 'constructor', { value: MC, writable: true, configurable: true });
+        Object.defineProperty(MP, Symbol.toStringTag, { value: 'MathMLElement', configurable: true });
+        Object.defineProperty(MC, 'prototype', { value: MP, writable: false, enumerable: false, configurable: false });
+        Object.setPrototypeOf(MC, global.Element);
+        var SP_ = global.SVGElement && global.SVGElement.prototype;
+        if (SP_) ['dataset', 'style', 'attributeStyleMap', 'tabIndex', 'autofocus', 'focus', 'blur'].forEach(function (k) {
+            var d = Object.getOwnPropertyDescriptor(SP_, k);
+            if (d) Object.defineProperty(MP, k, d);
+        });
+        Object.defineProperty(global, 'MathMLElement', { value: MC, writable: true, configurable: true, enumerable: false });
+    }
+    var MATH_P = global.MathMLElement && global.MathMLElement.prototype;
+    [ELEMENT_P, global.SVGElement && global.SVGElement.prototype, MATH_P, DOC_P].forEach(function (P) {
         if (P) GLOBAL_HANDLERS.forEach(function (t) { handlerAccessor(P, t); });
     });
     if (DOC_P) DOCUMENT_HANDLERS.forEach(function (t) { handlerAccessor(DOC_P, t); });
     /* (the legacy prefixed handlers: GlobalEventHandlers' too) */
-    [ELEMENT_P, global.SVGElement && global.SVGElement.prototype, DOC_P, Object.getPrototypeOf(global) !== Object.prototype ? Object.getPrototypeOf(global) : null].forEach(function (P) {
+    [ELEMENT_P, global.SVGElement && global.SVGElement.prototype, MATH_P, DOC_P, Object.getPrototypeOf(global) !== Object.prototype ? Object.getPrototypeOf(global) : null].forEach(function (P) {
         if (P) Object.keys(HANDLER_NAME).forEach(function (k) { handlerAccessor(P, HANDLER_NAME[k]); });
     });
     /* (the Fullscreen API's on Element and Document; slotchange on ShadowRoot) */
@@ -1156,18 +1577,25 @@
     });
     if (global.ShadowRoot) handlerAccessor(global.ShadowRoot.prototype, 'slotchange');
     var WINP = Object.getPrototypeOf(global);
-    if (WINP && WINP !== Object.prototype)
-        GLOBAL_HANDLERS.concat(WINDOW_HANDLERS).forEach(function (t) { handlerAccessor(WINP, t); });
+    /* (Window is the [Global]: its handlers are the window's own properties; a plain value already there kept as the handler) */
+    GLOBAL_HANDLERS.concat(WINDOW_HANDLERS).forEach(function (t) {
+        var d = Object.getOwnPropertyDescriptor(global, 'on' + t);
+        if (d && 'value' in d && d.configurable) {
+            delete global['on' + t];
+            if (typeof d.value === 'function') setHandler(global, t, d.value);
+        }
+        handlerAccessor(global, t);
+        if (WINP && WINP !== Object.prototype) { var wd = Object.getOwnPropertyDescriptor(WINP, 'on' + t); if (wd && wd.configurable) delete WINP['on' + t]; }
+    });
     /* (the window's own, as its native handlers are: the global's attributes) */
     ['transitionrun', 'transitionstart', 'transitionend', 'transitioncancel',
      'animationstart', 'animationiteration', 'animationend', 'animationcancel'].forEach(function (t) {
         if (!Object.getOwnPropertyDescriptor(global, 'on' + t)) handlerAccessor(global, t);
         if (WINP && WINP !== Object.prototype && Object.getOwnPropertyDescriptor(WINP, 'on' + t)) delete WINP['on' + t];
     });
-    if (ELEMENT_P) ['afterprint', 'beforeprint', 'beforeunload', 'hashchange', 'message', 'offline', 'online',
-                    'pagehide', 'pageshow', 'popstate', 'storage', 'unload'].forEach(function (t) {
-        /* (<body> and <frameset> forward these to the window; kept on the element here) */
-        handlerAccessor(ELEMENT_P, t);
+    /* (WindowEventHandlers: <body> and <frameset>'s, forwarded to the window) */
+    [global.HTMLBodyElement, global.HTMLFrameSetElement].forEach(function (C) {
+        if (C && C.prototype) WINDOW_HANDLERS.forEach(function (t) { handlerAccessor(C.prototype, t); });
     });
     /* window and document data properties (set up earlier as plain values)
      * give way to the accessors, keeping a handler already stored there */
@@ -1182,10 +1610,9 @@
     });
 
     /* ---- messaging (HTML 9.4, 9.5) ---- */
+    /* (StructuredSerialize: what it throws, a getter's exception too, goes to the caller) */
     function clone(v) {
-        if (typeof global.structuredClone === 'function') {
-            try { return global.structuredClone(v); } catch (e) { if (e && e.name === 'DataCloneError') throw e; }
-        }
+        if (typeof global.structuredClone === 'function') return global.structuredClone(v);
         return v;
     }
     function task(fn) { global.setTimeout(fn, 0); }
@@ -1203,18 +1630,35 @@
         var s = target[PORT];
         if (!s.started || s.closed) return;
         while (s.queue.length) {
-            var data = s.queue.shift();
-            target.dispatchEvent(new global.MessageEvent('message', { data: data }));
+            var m = s.queue.shift();
+            target.dispatchEvent(new global.MessageEvent('message', { data: m.data, ports: m.ports || [] }));
         }
     }
+    /* (postMessage's transfer list: an array, or options.transfer) */
+    function transferOf(x) {
+        if (x === undefined || x === null) return [];
+        if (typeof x === 'object' && typeof x[Symbol.iterator] === 'function' && !(typeof x.transfer === 'object')) return Array.from(x);
+        if (typeof x === 'object' && x.transfer !== undefined) {
+            if (x.transfer === null || typeof x.transfer !== 'object' || typeof x.transfer[Symbol.iterator] !== 'function') throw new TypeError("Failed to execute 'postMessage': transfer is not iterable.");
+            return Array.from(x.transfer);
+        }
+        return [];
+    }
+    function cloneWith(message, tl) {
+        if (!tl.length) return clone(message);
+        return global.structuredClone(message, { transfer: tl });
+    }
+    function portsOf(tl) { return tl.filter(function (t) { return Object.prototype.toString.call(t) === '[object MessagePort]'; }); }
     define(MessagePort.prototype, 'postMessage', function postMessage(message) {
         var s = port(this), other = s.other;
+        var tl = transferOf(arguments[1]);
+        if (tl.indexOf(this) >= 0) throw new global.DOMException("Failed to execute 'postMessage' on 'MessagePort': Port at index is the source port.", 'DataCloneError');
+        var data = cloneWith(message, tl), ports = portsOf(tl);
         if (s.closed || !other) return;
-        var data = clone(message);
         task(function () {
             var o = other[PORT];
             if (o.closed) return;
-            o.queue.push(data);
+            o.queue.push({ data: data, ports: ports });
             deliver(other);
         });
     });
@@ -1235,9 +1679,16 @@
         if (!new.target) throw new TypeError("Failed to construct 'MessageChannel': Please use the 'new' operator");
         var a = newPort(), b = newPort();
         a[PORT].other = b; b[PORT].other = a;
-        Object.defineProperty(this, 'port1', { value: a, enumerable: true });
-        Object.defineProperty(this, 'port2', { value: b, enumerable: true });
+        Object.defineProperty(this, CHAN, { value: [a, b] });
     }
+    /* (its ports: behind the prototype's getters) */
+    var CHAN = Symbol('cyber.channel');
+    ['port1', 'port2'].forEach(function (k, i) {
+        var g = { [k]: function () { var s = this && this[CHAN]; if (!s) throw new TypeError('Illegal invocation'); return s[i]; } }[k];
+        Object.defineProperty(g, 'name', { value: 'get ' + k });
+        Object.defineProperty(MessageChannel.prototype, k, { get: g, enumerable: true, configurable: true });
+    });
+    Object.defineProperty(MessageChannel.prototype, Symbol.toStringTag, { value: 'MessageChannel', configurable: true });
     expose('MessageChannel', MessageChannel);
     expose('MessagePort', MessagePort);
     /* window.postMessage: a message event at the target window, from the
@@ -1249,11 +1700,12 @@
         var source = global.__cyberCallerGlobal() || global;
         var targetOrigin = typeof options === 'object' && options !== null ? options.targetOrigin : options;
         if (targetOrigin === undefined) targetOrigin = '/';
-        var data = clone(message);
+        var tl = typeof options === 'object' && options !== null ? transferOf(options) : transferOf(arguments[2]);
+        var data = cloneWith(message, tl), ports = portsOf(tl);
         task(function () {
             if (targetOrigin !== '*' && targetOrigin !== '/' && targetOrigin !== originOf(target)) return;
             var ME = target.MessageEvent || global.MessageEvent;
-            target.dispatchEvent(new ME('message', { data: data, origin: originOf(source), source: source }));
+            target.dispatchEvent(new ME('message', { data: data, origin: originOf(source), source: source, ports: ports }));
         });
     });
 
@@ -1274,6 +1726,16 @@
         var sameOrigin = function (a, b) {
             try { return new global.URL(a).origin === new global.URL(b).origin; } catch (e) { return false; }
         };
+        /* (HTML "can have its URL rewritten": the same scheme, credentials, host and port; http(s): anything else may
+         * change; file: not the path; the rest only the fragment) */
+        var rewritable = function (from, to) {
+            var a, b;
+            try { a = new global.URL(from); b = new global.URL(to); } catch (e) { return false; }
+            if (a.protocol !== b.protocol || a.username !== b.username || a.password !== b.password || a.host !== b.host) return false;
+            if (/^https?:$/.test(b.protocol)) return true;
+            if (b.protocol === 'file:') return a.pathname === b.pathname;
+            return stripHash(a.href) === stripHash(b.href);
+        };
         var fireHistoryEvents = function (oldURL, newURL, state, hashChanged) {
             task(function () {
                 global.dispatchEvent(new global.PopStateEvent('popstate', { state: state }));
@@ -1282,13 +1744,18 @@
             });
         };
         var cloneState = function (s) { return s === undefined ? null : clone(s); };
+        var rateStart = 0, rateCount = 0;
         var updateState = function (method, state, url, push) {
             var serialized = cloneState(state), cur = getHref(), target = cur;
             if (url !== undefined && url !== null) {
                 target = resolve(url);
-                if (!sameOrigin(target, cur))
+                if (!sameOrigin(target, cur) || !rewritable(cur, target))
                     throw new (global.DOMException || Error)("Failed to execute '" + method + "' on 'History': a history state object with URL '" + target + "' cannot be created in a document with origin '" + new global.URL(cur).origin + "'.", 'SecurityError');
             }
+            /* (too many calls, as engines limit them (200 in 10 s): ignored, after the checks above) */
+            var nowMs = Date.now();
+            if (nowMs - rateStart > 10000) { rateStart = nowMs; rateCount = 0; }
+            if (++rateCount > 200) return;
             if (push) { entries.length = index + 1; entries.push({ url: target, state: serialized }); index++; }
             else entries[index] = { url: target, state: serialized };
             if (target !== cur) setHref(target);
@@ -1350,8 +1817,8 @@
             if (!impl) throw new TypeError('Illegal invocation');
             return impl;
         };
-        define(HP, 'pushState', function pushState(state, unused, url) { histOf(this).update('pushState', state, url, true); });
-        define(HP, 'replaceState', function replaceState(state, unused, url) { histOf(this).update('replaceState', state, url, false); });
+        define(HP, 'pushState', function pushState(state, unused, url) { var h = histOf(this); if (arguments.length < 2) throw new TypeError("Failed to execute 'pushState' on 'History': 2 arguments required, but only " + arguments.length + ' present.'); h.update('pushState', state, url, true); });
+        define(HP, 'replaceState', function replaceState(state, unused, url) { var h = histOf(this); if (arguments.length < 2) throw new TypeError("Failed to execute 'replaceState' on 'History': 2 arguments required, but only " + arguments.length + ' present.'); h.update('replaceState', state, url, false); });
         define(HP, 'back', function back() { histOf(this).traverse(-1); });
         define(HP, 'forward', function forward() { histOf(this).traverse(1); });
         define(HP, 'go', function go(delta) { histOf(this).traverse(delta | 0); });
@@ -1363,8 +1830,14 @@
             set: function (v) {
                 var u = new global.URL(getHref());
                 v = String(v);
-                u.hash = v;
-                if (u.href !== getHref()) navigateToFragment(u.href);
+                /* (Location's: an empty one is an empty fragment, the '#' kept, not none as URL's) */
+                var target;
+                if (v.replace(/^#/, '') === '') {
+                    if (getHref().indexOf('#') < 0) return;   /* (none before: none still) */
+                    target = stripHash(getHref()) + '#';
+                }
+                else { u.hash = v; target = u.href; }
+                if (target !== getHref()) navigateToFragment(target);
             } });
         /* (the page set elsewhere by script: the tab process has it go there) */
         var leave = function (v) {
@@ -1445,6 +1918,27 @@
                 set: function (f) { this[slot] = typeof f === 'function' ? f : null; } });
         });
         function NavigationDestination() { throw new TypeError('Illegal constructor'); }
+        /* (a destination's and a navigate event's state: behind their prototypes' members) */
+        var DEST = Symbol('cyber.navDest'), NAVEV = Symbol('cyber.navEvent');
+        ['url', 'key', 'id', 'index', 'sameDocument'].forEach(function (k) {
+            var g = { [k]: function () { var s = this && this[DEST]; if (!s) throw new TypeError('Illegal invocation'); return s[k]; } }[k];
+            Object.defineProperty(g, 'name', { value: 'get ' + k });
+            Object.defineProperty(NavigationDestination.prototype, k, { get: g, enumerable: true, configurable: true });
+        });
+        define(NavigationDestination.prototype, 'getState', function getState() {
+            var s = this && this[DEST];
+            if (!s) throw new TypeError('Illegal invocation');
+            return s.state === undefined ? undefined : clone(s.state);
+        });
+        Object.defineProperty(NavigationDestination.prototype, Symbol.toStringTag, { value: 'NavigationDestination', configurable: true });
+        if (global.NavigateEvent && global.NavigateEvent.prototype) {
+            define(global.NavigateEvent.prototype, 'intercept', function intercept(options) {
+                var s = this && this[NAVEV];
+                if (!(this instanceof global.NavigateEvent)) throw new TypeError('Illegal invocation');
+                if (s) s.intercept(options);
+            });
+            define(global.NavigateEvent.prototype, 'scroll', function scroll() { if (!(this instanceof global.NavigateEvent)) throw new TypeError('Illegal invocation'); });
+        }
         var settled = function (d) {
             d.promise.catch(function () {});
             return d;
@@ -1463,21 +1957,17 @@
             var sameDoc = stripHash(url) === stripHash(getHref());
             var hashChange = sameDoc && url !== getHref() && url.indexOf('#') >= 0;
             var dest = Object.create(NavigationDestination.prototype);
-            Object.defineProperties(dest, {
-                url: { value: url, enumerable: true }, key: { value: '', enumerable: true }, id: { value: '', enumerable: true },
-                index: { value: -1, enumerable: true }, sameDocument: { value: hashChange, enumerable: true } });
-            define(dest, 'getState', function getState() { return state === undefined ? undefined : clone(state); });
+            Object.defineProperty(dest, DEST, { value: { url: url, key: '', id: '', index: -1, sameDocument: hashChange, state: state } });
             var handlers = null, precommits = null, controller = new global.AbortController();
             var ev = new global.NavigateEvent('navigate', { cancelable: true, navigationType: type, destination: dest,
                 canIntercept: sameOrigin(url, getHref()), userInitiated: false, hashChange: hashChange,
                 signal: controller.signal, formData: formData || null, downloadRequest: null, sourceElement: source || null, info: info, hasUAVisualTransition: false });
-            define(ev, 'intercept', function intercept(options) {
+            Object.defineProperty(ev, NAVEV, { value: { intercept: function (options) {
                 handlers = handlers || [];
                 precommits = precommits || [];
                 if (options && options.handler) handlers.push(options.handler);
                 if (options && options.precommitHandler) precommits.push(options.precommitHandler);
-            });
-            define(ev, 'scroll', function scroll() {});
+            } } });
             var go = dispatch(nav, ev);
             if (!go) {
                 var e = navAbort();
@@ -1524,7 +2014,8 @@
             Object.defineProperty(e, 'from', { value: from, enumerable: true });
             dispatch(nav, e);
         };
-        define(Navigation.prototype, 'entries', function entriesOf() { return entries.map(entryObject); });
+        define(Navigation.prototype, 'entries', function entries_() { return entries.map(entryObject); });
+        Object.defineProperty(Navigation.prototype.entries, 'name', { value: 'entries' });
         Object.defineProperty(Navigation.prototype, 'currentEntry', { configurable: true, enumerable: true, get: function () { return entryObject(entries[index]); } });
         Object.defineProperty(Navigation.prototype, 'transition', { configurable: true, enumerable: true, get: function () { return navTransition; } });
         Object.defineProperty(Navigation.prototype, 'activation', { configurable: true, enumerable: true, get: function () { return null; } });
@@ -1584,6 +2075,48 @@
             entries[index].navState = clone(o.state);
             entryChanged(null, from);
         });
+        /* (Navigation's operations: this a Navigation) */
+        ['navigate', 'reload', 'traverseTo', 'back', 'forward', 'entries', 'updateCurrentEntry'].forEach(function (k) {
+            var f = Navigation.prototype[k];
+            if (typeof f !== 'function') return;
+            var w = { [k]: function () { if (!(this instanceof Navigation)) throw new TypeError('Illegal invocation'); return f.apply(this, arguments); } }[k];
+            Object.defineProperty(w, 'length', { value: f.length });
+            define(Navigation.prototype, k, w);
+        });
+        /* (NavigationHistoryEntry's ondispose) */
+        (function () {
+            var slot = Symbol('ondispose');
+            Object.defineProperty(NavigationHistoryEntry.prototype, 'ondispose', { configurable: true, enumerable: true,
+                get: function () { if (!(this instanceof NavigationHistoryEntry)) throw new TypeError('Illegal invocation'); return this[slot] || null; },
+                set: function (f) { if (!(this instanceof NavigationHistoryEntry)) throw new TypeError('Illegal invocation'); this[slot] = typeof f === 'function' ? f : null; } });
+        })();
+        /* (NavigationTransition, NavigationActivation, NavigationPrecommitController: their interfaces) */
+        var plainIface = function (name, attrs, ops) {
+            var C = function () { throw new TypeError('Illegal constructor'); };
+            Object.defineProperty(C, 'name', { value: name });
+            var K = Symbol(name);
+            attrs.forEach(function (k) {
+                var g = { [k]: function () { var s = this && this[K]; if (!s) throw new TypeError('Illegal invocation'); return s[k]; } }[k];
+                Object.defineProperty(g, 'name', { value: 'get ' + k });
+                Object.defineProperty(C.prototype, k, { get: g, enumerable: true, configurable: true });
+            });
+            (ops || []).forEach(function (o) {
+                var m = { [o[0]]: function () {
+                    if (!this || !this[K]) throw new TypeError('Illegal invocation');
+                    if (arguments.length < o[1]) throw new TypeError("Failed to execute '" + o[0] + "' on '" + name + "': " + o[1] + ' argument required, but only ' + arguments.length + ' present.');
+                } }[o[0]];
+                Object.defineProperty(m, 'length', { value: o[1] });
+                define(C.prototype, o[0], m);
+            });
+            Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
+            expose(name, C);
+            return C;
+        };
+        plainIface('NavigationTransition', ['navigationType', 'from', 'to', 'committed', 'finished']);
+        plainIface('NavigationActivation', ['from', 'entry', 'navigationType']);
+        plainIface('NavigationPrecommitController', [], [['redirect', 1], ['addHandler', 1]]);
+        if (typeof global.NavigationCurrentEntryChangeEvent !== 'function')
+            eventClass('NavigationCurrentEntryChangeEvent', Event, { navigationType: nul(), from: nul() });
         expose('Navigation', Navigation);
         expose('NavigationHistoryEntry', NavigationHistoryEntry);
         expose('NavigationDestination', NavigationDestination);
@@ -1774,7 +2307,7 @@
     }
     function trusted(target, Ctor, type, init) {
         init.bubbles = init.bubbles !== false;
-        init.composed = true;
+        init.composed = init.composed !== false;
         return global.__cyberDispatchTrusted(target, new Ctor(type, init));
     }
     function hitAt(x, y) {
@@ -1795,9 +2328,17 @@
         i.pointerId = 1; i.pointerType = 'mouse'; i.isPrimary = true; i.pressure = pointer.buttons ? 0.5 : 0;
         return i;
     }
+    /* (in a disabled form control, its shadow tree or children included: no mousedown, mouseup or click) */
+    function inDisabledControl(t) {
+        for (var e = t, n = 0; e && n < 1000; n++) {
+            if (e.nodeType === 1 && controlDisabled(e)) return true;
+            e = e.parentNode || (e.host && e.nodeType === 11 ? e.host : null);
+        }
+        return false;
+    }
     function bothEvents(t, x, y, button, ptype, mtype, related) {
         trusted(t, global.PointerEvent, ptype, pointerInit(x, y, button, related));
-        if (controlDisabled(t)) return true;
+        if ((mtype === 'mousedown' || mtype === 'mouseup') && inDisabledControl(t)) return true;
         return trusted(t, MouseEvent, mtype, mouseInit(x, y, button, related));
     }
     /* pointerenter/leave, mouseenter/leave: at each element, not bubbling */
@@ -1807,7 +2348,7 @@
         pi.bubbles = mi.bubbles = false;
         pi.cancelable = mi.cancelable = false;
         trusted(el, global.PointerEvent, ptype, pi);
-        if (!controlDisabled(el)) trusted(el, MouseEvent, mtype, mi);
+        trusted(el, MouseEvent, mtype, mi);
     }
     /* :hover and :active: the element and what it is in */
     function chainState(el, bit, on) {
@@ -1912,9 +2453,14 @@
                  '\uE011': 'Home', '\uE012': 'ArrowLeft', '\uE013': 'ArrowUp', '\uE014': 'ArrowRight', '\uE015': 'ArrowDown',
                  '\uE017': 'Delete', '\uE03D': 'Meta' };
     function keyOf(k) { return KEYS[k] || k; }
+    /* (the modifier keys held down) */
+    var held = { Shift: false, Control: false, Alt: false, Meta: false };
     /* Tab: the next element in the sequential focus order (positive tabindex
-     * first, then tree order), round to the first. */
-    function focusNext() {
+     * first, then tree order), round to the first; Shift+Tab the one before.
+     * A focusgroup's items, a run of them in that order, are one stop: the one
+     * focused last there (unless it has no memory), else its focusgroupstart one, else its first. */
+    var FG_MEM = new WeakMap();
+    function focusNext(back) {
         var d = global.document, all = d.querySelectorAll('*'), list = [];
         for (var i = 0; i < all.length; i++) {
             var e = all[i];
@@ -1923,13 +2469,233 @@
         list = list.filter(function (e) { return e.tabIndex > 0; }).sort(function (a, b) { return a.tabIndex - b.tabIndex; })
             .concat(list.filter(function (e) { return e.tabIndex === 0; }));
         if (!list.length) return;
-        var at = list.indexOf(d.activeElement);
-        list[(at + 1) % list.length].focus();
+        /* (the stops: each a run of one focusgroup's items, or an element alone; a native directional input handler, or what is in the top layer, alone) */
+        var stops = [], cur = d.activeElement;
+        for (var j = 0; j < list.length; j++) {
+            var el = list[j], tk = fgTokens(el), owner = tk && tk[0] === 'none' ? null : fgScope(el);
+            if (owner && (fgDirectional(el) || fgInTopLayer(el, owner))) owner = null;
+            var last = stops[stops.length - 1];
+            if (owner && last && last.owner === owner) last.items.push(el);
+            else stops.push({ owner: owner, items: [el] });
+        }
+        var at = -1;
+        for (var q = 0; q < stops.length && at < 0; q++) if (stops[q].items.indexOf(cur) >= 0) at = q;
+        var n = stops.length, to;
+        if (at < 0 && cur && cur !== d.body && cur.compareDocumentPosition) {
+            /* (focused but not a stop (tabindex -1): the next stop after it in the tree, or the one before; not its own focusgroup's) */
+            var curOwner = fgScope(cur);
+            to = -1;
+            if (!back) { for (var q2 = 0; q2 < n && to < 0; q2++) if ((cur.compareDocumentPosition(stops[q2].items[0]) & 4) && !(curOwner && stops[q2].owner === curOwner)) to = q2; }
+            else { for (var q3 = n - 1; q3 >= 0 && to < 0; q3--) if ((cur.compareDocumentPosition(stops[q3].items[0]) & 2) && !(curOwner && stops[q3].owner === curOwner)) to = q3; }
+            if (to < 0) to = back ? n - 1 : 0;
+        } else to = at < 0 ? (back ? n - 1 : 0) : (at + (back ? -1 : 1) + n) % n;
+        var st = stops[to], pick = st.items[0];
+        if (st.owner) {
+            var otk = fgTokens(st.owner) || [], mem = otk.indexOf('nomemory') < 0 ? FG_MEM.get(st.owner) : null;
+            var start = null;
+            for (var r = 0; r < st.items.length && !start; r++) if (st.items[r].hasAttribute('focusgroupstart')) start = st.items[r];
+            pick = mem && st.items.indexOf(mem) >= 0 ? mem : start || st.items[0];
+        }
+        pick.focus();
+    }
+    /* (an element that takes the arrow keys itself: a text field, a select, an editing host, media with controls) */
+    function fgDirectional(e) {
+        var ln = e.localName;
+        if (ln === 'textarea' || ln === 'select') return true;
+        if (ln === 'input') return !/^(button|submit|reset|image|checkbox|radio|color|file|hidden)$/.test(String(e.getAttribute('type') || 'text').toLowerCase());
+        if ((ln === 'video' || ln === 'audio') && e.hasAttribute('controls')) return true;
+        return !!e.isContentEditable;
+    }
+    /* (inside a showing popover or modal dialog that is inside the focusgroup: not its item) */
+    function fgInTopLayer(e, owner) {
+        for (var p = e; p && p !== owner; p = flatParent(p)) {
+            if (p.nodeType !== 1) continue;
+            try { if (p.matches(':popover-open') || p.matches(':modal')) return true; } catch (x) { }
+        }
+        return false;
+    }
+    /* (a focusgroup's item focused: what it remembers) */
+    if (global.document && global.document.addEventListener) global.document.addEventListener('focusin', function (ev) {
+        var t = ev.target;
+        if (!t || t.nodeType !== 1) return;
+        var tk = fgTokens(t);
+        if (tk && tk[0] === 'none') return;
+        var o = fgScope(t);
+        if (o) FG_MEM.set(o, t);
+    }, true);
+    /* ---- scoped focusgroup (Open UI): arrow keys, Home and End move focus among a focusgroup's items ---- */
+    /* (its tokens, when the first names a behavior: else no focusgroup at all) */
+    var FG_BEHAVIORS = { toolbar: 1, tablist: 1, radiogroup: 1, listbox: 1, menu: 1, menubar: 1, grid: 1, feed: 1, none: 1 };
+    function fgTokens(e) {
+        var v = e.getAttribute && e.getAttribute('focusgroup');
+        if (v === null || v === undefined) return null;
+        var t = String(v).toLowerCase().trim().split(/\s+/).filter(Boolean);
+        /* (the first behavior token, wherever it is: first in the list handed back) */
+        for (var i = 0; i < t.length; i++) if (FG_BEHAVIORS[t[i]]) return [t[i]].concat(t.slice(0, i), t.slice(i + 1));
+        return null;
+    }
+    /* (the focusgroup an element is an item of: its nearest ancestor with the attribute, unless that opts out) */
+    function fgScope(e) {
+        for (var p = e && flatParent(e); p && p.nodeType === 1; p = flatParent(p)) {
+            var t = fgTokens(p);
+            if (!t) continue;
+            return t[0] === 'none' ? null : p;
+        }
+        return null;
+    }
+    function fgFocusable(e) {
+        if (e.nodeType !== 1 || typeof e.tabIndex !== 'number') return false;
+        if (typeof global.__cyberFocusableArea === 'function') { try { if (!global.__cyberFocusableArea(e)) return false; } catch (x) { return false; } }
+        else if (e.tabIndex < 0 && !e.hasAttribute('tabindex')) return false;
+        if (controlDisabled(e)) return false;
+        return e.getClientRects().length > 0;
+    }
+    function fgItems(owner) {
+        var out = [];
+        (function walk(n) {
+            for (var c = n.firstChild; c; c = c.nextSibling) {
+                if (c.nodeType !== 1) continue;
+                var t = fgTokens(c);
+                if (fgScope(c) === owner && fgFocusable(c) && !(t && t[0] === 'none') && !fgInTopLayer(c, owner)) out.push(c);
+                /* (a nested focusgroup's or an opted-out subtree's elements are not this one's) */
+                if (t) continue;
+                walk(c);
+                if (c.shadowRoot) walk(c.shadowRoot);
+            }
+        })(owner);
+        if (owner.shadowRoot) (function walkS(n) {
+            for (var c = n.firstChild; c; c = c.nextSibling) {
+                if (c.nodeType !== 1) continue;
+                if (fgScope(c) === owner && fgFocusable(c) && out.indexOf(c) < 0) out.push(c);
+                if (!fgTokens(c)) walkS(c);
+            }
+        })(owner.shadowRoot);
+        return out;
+    }
+    /* (a grid focusgroup: a table's (or CSS table's) cells by row and column, spans taken in; past an edge, the wrap or
+     * flow its tokens say, each axis apart) */
+    function fgGridMap(owner) {
+        var rows = [];
+        var disp = function (e) { try { return global.getComputedStyle(e).display; } catch (x) { return ''; } };
+        if (owner.localName === 'table' && owner.rows) {
+            for (var i = 0; i < owner.rows.length; i++) rows.push(Array.prototype.filter.call(owner.rows[i].cells, function () { return true; }));
+        } else if (disp(owner) === 'table' || disp(owner) === 'inline-table') {
+            (function walk(n) {
+                for (var c = n.firstElementChild; c; c = c.nextElementSibling) {
+                    var d = disp(c);
+                    if (d === 'table-row') rows.push(Array.prototype.filter.call(c.children, function (x) { return disp(x) === 'table-cell'; }));
+                    else if (/^table-(row|header|footer)-group$/.test(d)) walk(c);
+                }
+            })(owner);
+        } else return null;
+        var grid = [], pos = new Map();
+        for (var r = 0; r < rows.length; r++) {
+            grid[r] = grid[r] || [];
+            var col = 0;
+            for (var k = 0; k < rows[r].length; k++) {
+                var cell = rows[r][k];
+                while (grid[r][col]) col++;
+                var cs = Math.max(1, parseInt(cell.getAttribute && cell.getAttribute('colspan'), 10) || 1);
+                var rs = Math.max(1, parseInt(cell.getAttribute && cell.getAttribute('rowspan'), 10) || 1);
+                rs = Math.min(rs, rows.length - r);
+                for (var a = 0; a < rs; a++) { grid[r + a] = grid[r + a] || []; for (var b = 0; b < cs; b++) grid[r + a][col + b] = cell; }
+                pos.set(cell, { r: r, c: col, rs: rs, cs: cs });
+                col += cs;
+            }
+        }
+        var cols = 0;
+        for (var g = 0; g < grid.length; g++) cols = Math.max(cols, grid[g].length);
+        return { grid: grid, pos: pos, rows: grid.length, cols: cols };
+    }
+    function fgGridMove(key, el, owner, tk) {
+        if (!/^Arrow/.test(key)) return false;
+        var m = fgGridMap(owner);
+        if (!m) return false;
+        var cell = el;
+        while (cell && !m.pos.has(cell) && cell !== owner) cell = flatParent(cell);
+        if (!cell || !m.pos.has(cell)) return false;
+        var p = m.pos.get(cell);
+        var has = function (t) { return tk.indexOf(t) >= 0; };
+        var rowWrap = has('wrap') || has('rowwrap'), colWrap = has('wrap') || has('colwrap');
+        var rowFlow = has('flow') || has('rowflow'), colFlow = has('flow') || has('colflow');
+        /* (conflicts: wrap and flow on one axis, or nowrap with either: a hard edge) */
+        if (rowWrap && rowFlow) rowWrap = rowFlow = false;
+        if (colWrap && colFlow) colWrap = colFlow = false;
+        if (has('nowrap')) { rowWrap = colWrap = rowFlow = colFlow = false; }
+        if (has('noflow')) { rowFlow = colFlow = false; }
+        var horiz = key === 'ArrowRight' || key === 'ArrowLeft', dir = key === 'ArrowRight' || key === 'ArrowDown' ? 1 : -1;
+        var rtl = false;
+        try { rtl = global.getComputedStyle(owner).direction === 'rtl'; } catch (x) { }
+        if (horiz && rtl) dir = -dir;
+        var r = p.r, c = p.c;
+        if (horiz) c = dir > 0 ? p.c + p.cs : p.c - 1; else r = dir > 0 ? p.r + p.rs : p.r - 1;
+        for (var guard = 0; guard < (m.rows + 1) * (m.cols + 1) * 2; guard++) {
+            if (horiz && (c < 0 || c >= m.cols)) {
+                if (rowFlow) { r = (r + dir + m.rows) % m.rows; c = dir > 0 ? 0 : m.cols - 1; }
+                else if (rowWrap) c = dir > 0 ? 0 : m.cols - 1;
+                else return true;
+            }
+            if (!horiz && (r < 0 || r >= m.rows)) {
+                if (colFlow) { c = (c + dir + m.cols) % m.cols; r = dir > 0 ? 0 : m.rows - 1; }
+                else if (colWrap) r = dir > 0 ? 0 : m.rows - 1;
+                else return true;
+            }
+            var x = m.grid[r] && m.grid[r][c];
+            if (x === cell && guard > 0 && !rowFlow && !colFlow) return true;
+            if (x && x !== cell && fgFocusable(x)) { global.__cyberLastInput = 'key'; x.focus(); return true; }
+            if (horiz) c += dir; else r += dir;
+        }
+        return true;
+    }
+    function focusgroupMove(key, el) {
+        if (!el || el.nodeType !== 1) return false;
+        var own = fgTokens(el);
+        if (own && own[0] === 'none') return false;
+        /* (it takes the arrows itself) */
+        if (fgDirectional(el) && /^(Arrow|Home|End)/.test(key)) return false;
+        var owner = fgScope(el);
+        if (!owner) return false;
+        var tk = fgTokens(owner) || [];
+        /* (a grid's own two-dimensional navigation) */
+        if (tk[0] === 'grid') return fgGridMove(key, el, owner, tk);
+        var inl = tk.indexOf('inline') >= 0, blk = tk.indexOf('block') >= 0;
+        if (!inl && !blk) inl = blk = true;
+        var wrap = tk.indexOf('wrap') >= 0 && tk.indexOf('nowrap') < 0;
+        /* (a feed: the block axis, hard edges) */
+        if (tk[0] === 'feed') { inl = false; blk = true; wrap = false; }
+        /* (a behavior's defaults: its axis, and wrapping, unless the tokens say otherwise) */
+        var DEF = { tablist: ['i', 1], menubar: ['i', 1], menu: ['b', 1], radiogroup: ['ib', 1], listbox: ['b', 0] }[tk[0]];
+        if (DEF) {
+            if (tk.indexOf('inline') < 0 && tk.indexOf('block') < 0) { inl = DEF[0].indexOf('i') >= 0; blk = DEF[0].indexOf('b') >= 0; }
+            if (DEF[1] && tk.indexOf('nowrap') < 0) wrap = true;
+        }
+        /* (tabindex -1 items: not moved to, only from) */
+        var items = fgItems(owner).filter(function (x) { return x === el || x.tabIndex >= 0; }), at = items.indexOf(el);
+        if (at < 0) return false;
+        var rtl = false;
+        try { rtl = global.getComputedStyle(owner).direction === 'rtl'; } catch (x) { }
+        var to = -2;
+        if (key === 'Home') to = 0;
+        else if (key === 'End') to = items.length - 1;
+        else {
+            var step = 0;
+            if (key === 'ArrowRight' && inl) step = rtl ? -1 : 1;
+            else if (key === 'ArrowLeft' && inl) step = rtl ? 1 : -1;
+            else if (key === 'ArrowDown' && blk) step = 1;
+            else if (key === 'ArrowUp' && blk) step = -1;
+            if (!step) return /^Arrow/.test(key) && false;
+            to = at + step;
+            if (to < 0 || to >= items.length) to = wrap ? (to + items.length) % items.length : -2;
+        }
+        if (to >= 0 && to < items.length && items[to] !== el) { global.__cyberLastInput = 'key'; items[to].focus(); }
+        return true;
     }
     function keyDefault(key, el) {
         var d = global.document, h = global.innerHeight, dx = 0, dy = 0;
+        /* (in a focusgroup: its navigation, not scrolling) */
+        if (/^(Arrow(Up|Down|Left|Right)|Home|End)$/.test(key) && focusgroupMove(key, el)) return;
         switch (key) {
-        case 'Tab': global.__cyberLastInput = 'key'; focusNext(); return;
+        case 'Tab': global.__cyberLastInput = 'key'; focusNext(held.Shift); return;
         case 'ArrowDown': dy = 40; break;
         case 'ArrowUp': dy = -40; break;
         case 'ArrowRight': dx = 40; break;
@@ -1941,8 +2707,19 @@
         default:
             /* (typed into a text control) */
             if (key.length === 1 && el && /^(input|textarea)$/.test(el.localName) && !el.disabled && !el.readOnly) {
+                /* (beforeinput first, which can stop it; then the edit and input; change when it loses focus) */
+                if (!trusted(el, global.InputEvent || Event, 'beforeinput', { cancelable: true, data: key, inputType: 'insertText' })) return;
                 el.value += key;
                 trusted(el, global.InputEvent || Event, 'input', { cancelable: false, data: key, inputType: 'insertText' });
+                if (!el.__cyberTypedChange) {
+                    Object.defineProperty(el, '__cyberTypedChange', { value: true, configurable: true, writable: true });
+                    var onBlur = function () {
+                        el.removeEventListener('blur', onBlur, true);
+                        el.__cyberTypedChange = false;
+                        trusted(el, Event, 'change', { cancelable: false, composed: false });
+                    };
+                    el.addEventListener('blur', onBlur, true);
+                }
             }
             return;
         }
@@ -1962,8 +2739,120 @@
         /* (Home and End go to their ends) */
         wheelScroll(from || d.documentElement, dx, dy, Math.abs(dy) < 1e8);
     }
+    /* ---- drag and drop (HTML 6.11.5), from a press on something draggable and a move away ---- */
+    var HTMLNS_D = 'http://www.w3.org/1999/xhtml';
+    function dragSource(t) {
+        for (var e = t; e && e.nodeType === 1; e = flatParent(e)) {
+            /* (a press in text to edit or a list to pick from: that, not a drag) */
+            if (e.isContentEditable) return null;
+            if (e.namespaceURI === HTMLNS_D && (/^(textarea|select)$/.test(e.localName) ||
+                (e.localName === 'input' && !/^(button|submit|reset|image|checkbox|radio|color|file|range|hidden)$/.test(String(e.type || ''))))) return null;
+            var d = e.getAttribute('draggable');
+            if (d !== null && /^true$/i.test(d)) return e;
+            if (d !== null && /^false$/i.test(d)) return null;
+            if (e.namespaceURI !== HTMLNS_D) continue;
+            if (/^(input|button)$/.test(e.localName)) return null;
+            if (e.localName === 'img' && e.hasAttribute('src')) return e;
+            if ((e.localName === 'a' || e.localName === 'area') && e.hasAttribute('href')) return e;
+        }
+        return null;
+    }
+    function dropEffectFor(eff, src) {
+        switch (eff) {
+        case 'none': return 'none';
+        case 'copy': case 'copyLink': case 'copyMove': case 'all': return 'copy';
+        case 'link': case 'linkMove': return 'link';
+        case 'move': return 'move';
+        default: return src && src.localName === 'a' && src.hasAttribute('href') ? 'link' : 'copy';
+        }
+    }
+    function dropAllowed(op, eff) {
+        if (op === 'none') return false;
+        if (eff === 'uninitialized' || eff === 'all') return true;
+        return eff.toLowerCase().indexOf(op) >= 0;
+    }
+    function isTextTarget(el) {
+        if (!el || el.nodeType !== 1) return false;
+        if (el.isContentEditable) return true;
+        if (el.localName === 'textarea') return !el.disabled && !el.readOnly;
+        return el.localName === 'input' && /^(text|search|url|tel|email|password|)$/.test(String(el.type || '')) && !el.disabled && !el.readOnly;
+    }
+    function dragEv(D, el, type, x, y, cancelable, related) {
+        var i = mouseInit(x, y, 0, related);
+        i.cancelable = cancelable;
+        i.dataTransfer = D.dt;
+        return trusted(el, global.DragEvent || MouseEvent, type, i);
+    }
+    function dragStart(F, x, y) {
+        if (typeof global.__cyberDragData !== 'function' || !F.el.isConnected) return false;
+        var made = global.__cyberDragData(), D = { src: F.el, dt: made[0], st: made[1], target: null, immediate: null, op: 'none' };
+        var s = D.src;
+        try {
+            if (s.localName === 'a' || s.localName === 'area') { D.st.items.push({ type: 'text/uri-list', data: s.href }); D.st.items.push({ type: 'text/plain', data: s.href }); }
+            else if (s.localName === 'img') D.st.items.push({ type: 'text/uri-list', data: s.currentSrc || s.src });
+        } catch (e) { }
+        D.st.dropEffect = 'none';
+        var ok = dragEv(D, s, 'dragstart', F.x, F.y, true);
+        if (!ok) return false;
+        pointer.drag = D;
+        if (pointer.active) { chainState(pointer.active, 2, false); pointer.active = null; }
+        return true;
+    }
+    function dragMove(x, y) {
+        var D = pointer.drag, d = global.document;
+        D.st.mode = 'protected';
+        D.st.dropEffect = 'none';
+        if (!dragEv(D, D.src, 'drag', x, y, true)) { D.cancelled = true; return; }
+        var t = hitAt(x, y);
+        if (t && t !== D.immediate) {
+            D.immediate = t;
+            D.st.dropEffect = dropEffectFor(D.st.effectAllowed, D.src);
+            /* (the element under the pointer is the target, as engines have it, whether or not its dragenter was canceled) */
+            dragEv(D, t, 'dragenter', x, y, true, D.target);
+            var next = t;
+            if (D.target && D.target !== next && D.target.isConnected) { D.st.dropEffect = 'none'; dragEv(D, D.target, 'dragleave', x, y, false, next); }
+            D.target = next;
+        }
+        if (D.target) {
+            D.st.dropEffect = dropEffectFor(D.st.effectAllowed, D.src);
+            var over = dragEv(D, D.target, 'dragover', x, y, true);
+            if (!over) D.op = dropAllowed(D.st.dropEffect, D.st.effectAllowed) ? D.st.dropEffect : 'none';
+            else D.op = isTextTarget(D.target) && dropAllowed('copy', D.st.effectAllowed) ? 'copy' : 'none';
+        }
+    }
+    function dragEnd(x, y) {
+        var D = pointer.drag;
+        pointer.drag = null;
+        if (D.cancelled) D.op = 'none';
+        if (!D.target || D.op === 'none') {
+            if (D.target && D.target.isConnected) { D.st.mode = 'protected'; D.st.dropEffect = 'none'; dragEv(D, D.target, 'dragleave', x, y, false); }
+            D.op = 'none';
+        } else {
+            D.st.mode = 'ro';
+            D.st.dropEffect = D.op;
+            var notCanceled = dragEv(D, D.target, 'drop', x, y, true);
+            if (notCanceled) {
+                /* (a text control or editing host: the text goes in) */
+                if (isTextTarget(D.target) && (D.target.localName === 'input' || D.target.localName === 'textarea')) {
+                    var txt = D.dt.getData('text/plain');
+                    if (txt) { D.target.value += txt; trusted(D.target, global.InputEvent || Event, 'input', { cancelable: false, data: txt, inputType: 'insertFromDrop' }); }
+                }   /* (else the operation stands, as engines report it at dragend) */
+            } else D.op = D.st.dropEffect;
+        }
+        D.st.mode = 'protected';
+        D.st.dropEffect = D.op;
+        if (D.src.isConnected) dragEv(D, D.src, 'dragend', x, y, false);
+        D.st.mode = 'gone';
+    }
     Object.defineProperty(global, '__cyberInput', { configurable: true, value: {
         move: function (x, y) {
+            /* (a drag going: drag events, no mouse ones) */
+            if (pointer.drag) { dragMove(x, y); return; }
+            var F = pointer.dragFrom;
+            if (F && F.el && (pointer.buttons & 1) && Math.abs(x - F.x) + Math.abs(y - F.y) >= 4) {
+                pointer.dragFrom = null;
+                if (dragStart(F, x, y)) { dragMove(x, y); return; }
+            }
             var t = hitAt(x, y);
             if (!t) return;
             var into = frameInput(t);
@@ -2005,12 +2894,20 @@
             if (button === 0) { chainState(t, 2, true); pointer.active = t; }
             global.__cyberLastInput = 'mouse';
             var canceled = !bothEvents(t, x, y, button, 'pointerdown', 'mousedown');
+            pointer.dragFrom = button === 0 && !canceled ? { el: dragSource(t), x: x, y: y } : null;
             global.__cyberFocusByMouse = true;
             try { focusTarget(t, canceled); } finally { global.__cyberFocusByMouse = false; }
             var bar = button === 0 ? scrollbarAt(t, x, y) : null;
             if (bar) barPress(bar);
         },
         up: function (x, y, button) {
+            pointer.dragFrom = null;
+            if (pointer.drag && button === 0) {
+                dragEnd(x, y);
+                pointer.buttons &= ~1;
+                pointer.pressed = null;
+                return;
+            }
             var t = hitAt(x, y);
             if (!t) return;
             var into = frameInput(t);
@@ -2021,7 +2918,7 @@
             bothEvents(t, x, y, button, 'pointerup', 'mouseup');
             var on = pointer.pressed && commonAncestor(pointer.pressed, t);
             pointer.pressed = null;
-            if (on && on.nodeType === 1 && !controlDisabled(on)) {
+            if (on && on.nodeType === 1 && !inDisabledControl(on)) {
                 var i = mouseInit(x, y, button);
                 i.detail = 1;
                 var clicked = trusted(on, MouseEvent, button === 0 ? 'click' : 'auxclick', i);
@@ -2099,14 +2996,17 @@
         keyDown: function (k, el) {
             global.__cyberLastInput = 'key';
             var key = keyOf(k), t = el || (global.document && (global.document.activeElement || global.document.body));
+            if (key in held) held[key] = true;
             if (!t) return;
-            var go = trusted(t, KeyboardEvent, 'keydown', { cancelable: true, key: key, view: global });
+            var go = trusted(t, KeyboardEvent, 'keydown', { cancelable: true, key: key, view: global, shiftKey: held.Shift, ctrlKey: held.Control, altKey: held.Alt, metaKey: held.Meta });
             if (go && key.length === 1) go = trusted(t, KeyboardEvent, 'keypress', { cancelable: true, key: key, view: global });
             if (go) keyDefault(key, t);
         },
         keyUp: function (k, el) {
             var t = el || (global.document && (global.document.activeElement || global.document.body));
-            if (t) trusted(t, KeyboardEvent, 'keyup', { cancelable: true, key: keyOf(k), view: global });
+            var ku = keyOf(k);
+            if (t) trusted(t, KeyboardEvent, 'keyup', { cancelable: true, key: ku, view: global, shiftKey: held.Shift, ctrlKey: held.Control, altKey: held.Alt, metaKey: held.Meta });
+            if (ku in held) held[ku] = false;
         }
     } });
 

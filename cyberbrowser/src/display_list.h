@@ -118,6 +118,8 @@ void display_list_canvas_rect(uint32_t node, float x, float y, float w, float h,
 void display_list_canvas_image(uint32_t node, const char *url, float x, float y, float w, float h);
 /* (a new document: its node ids the last one's again, every canvas's drawing gone) */
 void display_list_canvas_reset(void);
+/* (a CSS gradient rastered w x h into the image cache: its key) */
+bool display_list_gradient_image(const char *css, int w, int h, char *key, size_t kn);
 bool display_list_add_rect(DisplayList *dl, float x, float y, float w, float h,
                            float r, float g, float b, float a);
 bool display_list_add_border(DisplayList *dl, float x, float y, float w, float h,

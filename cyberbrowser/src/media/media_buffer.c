@@ -701,6 +701,20 @@ static bool frame_to_rgba(MediaBuffer *mb, const AVFrame *f, struct VFrame *v)
     mb->sws = sws_getCachedContext(mb->sws, w, h, (enum AVPixelFormat)f->format,
                                    w, h, AV_PIX_FMT_RGBA, SWS_BILINEAR, NULL, NULL, NULL);
     if (!mb->sws) return false;
+    /* (the frame's own matrix and range: BT.709 / 601 / 2020, full or limited; to full-range RGB) */
+    {
+        int cs = SWS_CS_DEFAULT;
+        switch (f->colorspace) {
+        case AVCOL_SPC_BT709: cs = SWS_CS_ITU709; break;
+        case AVCOL_SPC_BT470BG: case AVCOL_SPC_SMPTE170M: cs = SWS_CS_ITU601; break;
+        case AVCOL_SPC_SMPTE240M: cs = SWS_CS_SMPTE240M; break;
+        case AVCOL_SPC_FCC: cs = SWS_CS_FCC; break;
+        case AVCOL_SPC_BT2020_NCL: case AVCOL_SPC_BT2020_CL: cs = SWS_CS_BT2020; break;
+        default: cs = h >= 720 ? SWS_CS_ITU709 : SWS_CS_ITU601; break;   /* (untagged: by its size, as engines guess) */
+        }
+        int full = f->color_range == AVCOL_RANGE_JPEG || f->format == AV_PIX_FMT_YUVJ420P || f->format == AV_PIX_FMT_YUVJ444P || f->format == AV_PIX_FMT_YUVJ422P;
+        sws_setColorspaceDetails(mb->sws, sws_getCoefficients(cs), full, sws_getCoefficients(SWS_CS_DEFAULT), 1, 0, 1 << 16, 1 << 16);
+    }
     if (w != v->w || h != v->h || !v->rgba) {
         free(v->rgba);
         v->rgba = malloc((size_t)w * (size_t)h * 4);

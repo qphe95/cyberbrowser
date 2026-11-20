@@ -102,7 +102,8 @@ bool platform_http_request(const char *url,
                                          &http_buffer, outStatus,
                                          error, errorLen);
 
-    if (result) {
+    /* (an HTTP error status: its response all the same, for fetch) */
+    if (result || (outStatus && *outStatus >= 100)) {
         copy_http_buffer_fields(outBuffer, &http_buffer);
     }
 

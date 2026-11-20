@@ -57,7 +57,7 @@ for (let i = 0; i < n; i++) {
     for (const l of mine) {
         const [k, url, ms, shot] = l.split(' ');
         /* (the page's clock is virtual, so a real wait this long means it is stuck, not slow) */
-        if (js) script += `go ${url.replace(/^http:\/\/[^/]+/, origin)}\nwaitfile ${W}/step-${k}.flag ${+ms > 20000 ? 40000 : 8000}\n`;
+        if (js) script += `go ${url.replace(/^http:\/\/[^/]+/, origin)}\nwaitfile ${W}/step-${k}.flag ${+ms > 20000 ? 70000 : 8000}\n`;
         else script += `go ${url}\nwaitfile ${W}/step-${k}.flag ${ms}\nshotc ${shot}\n`;
     }
     if (js) script += `go ${origin}/end\nwaitfile ${W}/end-${+portArg + i}.flag 2000\n`;

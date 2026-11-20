@@ -359,10 +359,10 @@ void dom_store_reset(void) {
  * ============================================================================ */
 
 static const char *const k_void_tags[] = {
-    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "area", "base", "basefont", "bgsound", "br", "col", "embed", "frame", "hr", "img", "input", "keygen",
     "link", "meta", "param", "source", "track", "wbr", NULL
 };
-static const char *const k_raw_tags[] = { "script", "style", "textarea", "title", "xmp", "noembed", "noframes", "noscript", NULL };   /* (as dom_parse.c's tokenizer has them) */
+static const char *const k_raw_tags[] = { "script", "style", "textarea", "title", "xmp", "noembed", "noframes", "noscript", "iframe", NULL };   /* (as dom_parse.c's tokenizer has them) */
 
 static uint16_t *g_tag_flags;      /* by atom id; bit 15 = computed */
 static uint32_t g_tag_flags_cap;
@@ -1134,6 +1134,16 @@ void dom_note_mutation(uint32_t s, uint16_t bits) {
      * parent for (un)linking): mark it dirty, so the snapshot and the
      * layout mirror (html_dom.c), which keep clean subtrees, see it. */
     if (s && g_dom.kind[s] != DOM_K_FREE) dom_mark_dirty(dom_id_of(s), bits);
+    /* (content changed: a dir=auto element over it may change direction; restyled) */
+    if (s && g_dom.kind[s] != DOM_K_FREE && !(bits & DOMF_DIRTY_ATTR)) {
+        for (uint32_t p = s; p; p = g_dom.parent[p]) {
+            if (g_dom.kind[p] != DOM_K_ELEMENT) continue;
+            const char *d = dom_get_attr_str(dom_id_of(p), "dir");
+            if (!d) continue;
+            if (strcasecmp(d, "auto")) break;
+            dom_mark_dirty(dom_id_of(p), DOMF_DIRTY_ATTR);
+        }
+    }
     if (!s || !g_dom_document || !dom_valid(g_dom_document)) return;
     if (dom_tree_root_slot(s) == dom_slot(g_dom_document)) g_dom.connected_version++;
 }

@@ -30,7 +30,7 @@ typedef struct IdlMember {
     uint8_t kind;
     uint8_t required;           /* operations: the arguments they need */
     const char *value;          /* constants */
-    uint8_t unscopable;         /* [Unscopable]: in the prototype's @@unscopables */
+    uint8_t unscopable;         /* 1 [Unscopable]: in the prototype's @@unscopables; 2 [PutForwards], [Replaceable]: a readonly one with a setter */
 } IdlMember;
 
 typedef struct IdlIface {
@@ -67,6 +67,9 @@ static const char *const k_proto_brands[] = { "MutationObserver", "AbstractRange
 static int brand_of(const char *iface) {
     for (size_t i = 0; i < sizeof k_brands / sizeof k_brands[0]; i++)
         if (!strcmp(k_brands[i].name, iface)) return k_brands[i].brand;
+    /* (an HTML element interface's native members: this an element; HTMLElement's own left as they are) */
+    size_t il = strlen(iface);
+    if (il > 11 && !strncmp(iface, "HTML", 4) && !strcmp(iface + il - 7, "Element")) return B_ELEMENT;
     for (size_t i = 0; i < sizeof k_proto_brands / sizeof k_proto_brands[0]; i++) {
         if (strcmp(k_proto_brands[i], iface)) continue;
         for (int k = 0; k < NIFACE; k++)
@@ -190,7 +193,9 @@ static void shape_member(JSContextHandle ctx, GCValue obj, const IdlMember *m, i
             if (fs) JS_FreeCString(ctx, fs);
             if (!fl) JS_DefinePropertyValueStr(ctx, d.value, "name", JS_NewString(ctx, m->name), JS_PROP_CONFIGURABLE);
             /* (a promise-returning operation rejects rather than throws: its own check) */
-            bool promise = !strcmp(m->name, "exitFullscreen") || !strcmp(m->name, "requestFullscreen");
+            bool promise = !strcmp(m->name, "exitFullscreen") || !strcmp(m->name, "requestFullscreen") || !strcmp(m->name, "play") ||
+                           !strcmp(m->name, "decode") || !strcmp(m->name, "requestPictureInPicture") || !strcmp(m->name, "setSinkId") ||
+                           !strcmp(m->name, "setMediaKeys");
             set_checks(ctx, seen, n, cap, d.value, m->required, m->kind == IDL_OP && !promise ? brand : B_NONE);
         }
     } else if (d.flags & JS_PROP_GETSET) {
@@ -201,6 +206,8 @@ static void shape_member(JSContextHandle ctx, GCValue obj, const IdlMember *m, i
             JS_DefinePropertyValueStr(ctx, d.getter, "length", JS_NewInt32(ctx, 0), JS_PROP_CONFIGURABLE);
             if (m->kind != IDL_STATIC_ATTR) set_checks(ctx, seen, n, cap, d.getter, 0, brand);
         }
+        /* (readonly: no setter, unless it forwards or is replaceable) */
+        if (m->kind == IDL_RO_ATTR && !(m->unscopable & 2) && JS_IsFunction(ctx, d.setter)) d.setter = JS_UNDEFINED;
         if (JS_IsFunction(ctx, d.setter)) {
             snprintf(gname, sizeof gname, "set %s", m->name);
             JS_DefinePropertyValueStr(ctx, d.setter, "name", JS_NewString(ctx, gname), JS_PROP_CONFIGURABLE);
@@ -224,7 +231,7 @@ GCValue idl_window_only_names(JSContextHandle ctx) {
     GCValue a = JS_NewArray(ctx);
     uint32_t k = 0;
     for (int i = 0; i < NIFACE; i++)
-        if (!(k_idl_ifaces[i].flags & 4)) JS_SetPropertyUint32(ctx, a, k++, JS_NewString(ctx, k_idl_ifaces[i].name));
+        if (!(k_idl_ifaces[i].flags & 4) && !(k_idl_ifaces[i].flags & 8)) JS_SetPropertyUint32(ctx, a, k++, JS_NewString(ctx, k_idl_ifaces[i].name));
     return a;
 }
 
@@ -242,6 +249,47 @@ static const IdlIface *iface_named(const char *name) {
     for (int i = 0; i < NIFACE; i++)
         if (!strcmp(k_idl_ifaces[i].name, name)) return &k_idl_ifaces[i];
     return NULL;
+}
+
+/* (each interface's parent as an index into k_idl_ifaces, -1 none: worked out once) */
+static int16_t g_parent_ix[NIFACE];
+static bool g_parent_ready;
+static void parents_ready(void) {
+    if (g_parent_ready) return;
+    for (int i = 0; i < NIFACE; i++) {
+        const IdlIface *p = k_idl_ifaces[i].parent ? iface_named(k_idl_ifaces[i].parent) : NULL;
+        g_parent_ix[i] = p ? (int16_t)(p - k_idl_ifaces) : -1;
+    }
+    g_parent_ready = true;
+}
+/* (whether interface g inherits f, at any depth) */
+static bool iface_inherits(const IdlIface *g, const IdlIface *f) {
+    int fi = (int)(f - k_idl_ifaces);
+    for (int x = g_parent_ix[g - k_idl_ifaces], d = 0; x >= 0 && d < 32; x = g_parent_ix[x], d++) if (x == fi) return true;
+    return false;
+}
+
+/* A member the IDL puts on f's prototype that the realm defined lower down, on an inheriting
+ * interface's prototype (a media element's on HTMLVideoElement's, say): moved up to f's. */
+static void hoist_member(JSContextHandle ctx, GCValue global, const IdlIface *f, GCValue proto, const char *name) {
+    JSAtom a = JS_NewAtom(ctx, name);
+    JSPropertyDescriptor d;
+    if (JS_GetOwnProperty(ctx, &d, proto, a) != 0) { JS_FreeAtom(ctx, a); return; }
+    for (int i = 0; i < NIFACE; i++) {
+        const IdlIface *g = &k_idl_ifaces[i];
+        if (!iface_inherits(g, f)) continue;
+        GCValue gc = JS_GetPropertyStr(ctx, global, g->name);
+        if (!JS_IsObject(gc)) continue;
+        GCValue gp = JS_GetPropertyStr(ctx, gc, "prototype");
+        if (!JS_IsObject(gp) || JS_StrictEq(ctx, gp, proto)) continue;
+        if (JS_GetOwnProperty(ctx, &d, gp, a) <= 0) continue;
+        int fl = (d.flags & (JS_PROP_ENUMERABLE | JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE));
+        if (d.flags & JS_PROP_GETSET) JS_DefinePropertyGetSet(ctx, proto, a, d.getter, d.setter, fl | JS_PROP_CONFIGURABLE);
+        else JS_DefinePropertyValue(ctx, proto, a, d.value, fl | JS_PROP_CONFIGURABLE);
+        JS_DeleteProperty(ctx, gp, a, 0);
+        break;
+    }
+    JS_FreeAtom(ctx, a);
 }
 
 static void stub_interface(JSContextHandle ctx, GCValue global, const IdlIface *f) {
@@ -269,6 +317,16 @@ static void stub_interface(JSContextHandle ctx, GCValue global, const IdlIface *
     if (JS_IsException(r)) JS_GetException(ctx);
 }
 
+bool g_idl_worker_realm;   /* (set by worker_api.c while a worker's realm is made) */
+/* (html.idl's interfaces a worker has too, shaped there as in a window: the canvas ones) */
+static bool worker_shaped(const char *nm) {
+    static const char *const k[] = { "CanvasGradient", "CanvasPattern", "TextMetrics", "Path2D", "ImageBitmapRenderingContext",
+                                     "OffscreenCanvas", "OffscreenCanvasRenderingContext2D", "ImageBitmap", "ImageData", "DOMStringList",
+                                     "Origin", "ErrorEvent", "PromiseRejectionEvent", "MessageEvent", "EventSource", "MessageChannel", "MessagePort",
+                                     "BroadcastChannel", "WorkerNavigator", "WorkerLocation", "Worker" };
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; i++) if (!strcmp(nm, k[i])) return true;
+    return false;
+}
 void idl_shape_apply(JSContextHandle ctx, GCValue global) {
     JS_SetBrandCheck(brand_check);
     for (size_t s = 0; s < sizeof k_idl_stubs / sizeof k_idl_stubs[0]; s++) {
@@ -288,12 +346,33 @@ void idl_shape_apply(JSContextHandle ctx, GCValue global) {
         GCValue brand_js = JS_GetPropertyStr(ctx, global, "__cyberBrandAccessors");
         for (int i = 0; i < NIFACE && JS_IsFunction(ctx, brand_js); i++) {
             const char *nm = k_idl_ifaces[i].name;
-            if (strncmp(nm, "CSS", 3) && strncmp(nm, "FontFace", 8) && strcmp(nm, "StyleSheet") && strcmp(nm, "StylePropertyMapReadOnly") && strcmp(nm, "StylePropertyMap")) continue;
+            /* (all but the globals' and the ones made per object, which instanceof can't tell) */
+            if (!strcmp(nm, "Window") || strstr(nm, "GlobalScope") || !strcmp(nm, "Location") || !strcmp(nm, "WindowProperties") ||
+                (k_idl_ifaces[i].flags & 3)) continue;
+            bool css_ = !strncmp(nm, "CSS", 3) || !strncmp(nm, "FontFace", 8) || !strcmp(nm, "StyleSheet") || !strcmp(nm, "StylePropertyMapReadOnly") || !strcmp(nm, "StylePropertyMap");
+            if (!css_) continue;   /* (the rest after their members have moved up, below) */
             GCValue c = JS_GetPropertyStr(ctx, global, nm);
             if (!JS_IsFunction(ctx, c)) continue;
             GCValue r = JS_Call(ctx, brand_js, JS_UNDEFINED, 1, &c);
             if (JS_IsException(r)) JS_GetException(ctx);
         }
+    }
+    /* (a window realm: workers keep what they have) */
+    bool winrealm_ = !g_idl_worker_realm;
+    /* (each interface prototype's [[Prototype]]: its parent interface's prototype, as the IDL has it, before members move up) */
+    for (int i = 0; i < NIFACE; i++) {
+        const IdlIface *f = &k_idl_ifaces[i];
+        if (!winrealm_ && !worker_shaped(f->name)) continue;
+        if (!f->parent || (f->flags & 3)) continue;
+        GCValue c = JS_GetPropertyStr(ctx, global, f->name), pc = JS_GetPropertyStr(ctx, global, f->parent);
+        if (!JS_IsObject(c) || !JS_IsObject(pc)) continue;
+        GCValue p = JS_GetPropertyStr(ctx, c, "prototype"), pp = JS_GetPropertyStr(ctx, pc, "prototype");
+        if (!JS_IsObject(p) || !JS_IsObject(pp) || JS_StrictEq(ctx, p, pp)) continue;
+        /* (only a missing link: a prototype that already reaches the parent's keeps its chain) */
+        bool reaches = false;
+        GCValue x = JS_GetPrototype(ctx, p);
+        for (int d = 0; d < 64 && JS_IsObject(x) && !reaches; d++) { reaches = JS_StrictEq(ctx, x, pp); if (!reaches) x = JS_GetPrototype(ctx, x); }
+        if (!reaches) JS_SetPrototype(ctx, p, pp);
     }
     GCValue win = JS_GetPropertyStr(ctx, global, "window");
     bool win_other = JS_IsObject(win) && !JS_StrictEq(ctx, win, global);
@@ -302,6 +381,8 @@ void idl_shape_apply(JSContextHandle ctx, GCValue global) {
     for (int i = 0; i < NIFACE; i++) {
         const IdlIface *f = &k_idl_ifaces[i];
         if (f->flags & 2) continue;
+        if ((f->flags & 24) && !winrealm_ && !worker_shaped(f->name)) continue;   /* (html.idl's, or what it adds to: window realms only, but the canvas ones) */
+        bool hoist_ = winrealm_ || worker_shaped(f->name);
         GCValue ctor = JS_GetPropertyStr(ctx, global, f->name);
         if (!JS_IsObject(ctor)) continue;
         /* (interface objects: writable, configurable, not enumerable) */
@@ -332,7 +413,7 @@ void idl_shape_apply(JSContextHandle ctx, GCValue global) {
         /* ([Unscopable] members: the prototype's @@unscopables, a null-prototype object) */
         GCValue unscop = JS_UNDEFINED;
         for (int k = 0; k < f->count; k++) {
-            if (!mem[k].unscopable) continue;
+            if (!(mem[k].unscopable & 1)) continue;
             if (JS_IsUndefined(unscop)) unscop = JS_NewObjectProto(ctx, JS_NULL);
             JS_DefinePropertyValueStr(ctx, unscop, mem[k].name, JS_TRUE, JS_PROP_C_W_E);
         }
@@ -343,6 +424,29 @@ void idl_shape_apply(JSContextHandle ctx, GCValue global) {
             JS_FreeAtom(ctx, ua);
         }
         int brand = brand_of(f->name);
+        /* (the realm's document's own operations, as the engine set them on it: Document.prototype's) */
+        if (winrealm_ && !strcmp(f->name, "Document")) {
+            GCValue doc = JS_GetPropertyStr(ctx, global, "document");
+            for (int k = 0; k < f->count && JS_IsObject(doc); k++) {
+                if (mem[k].kind != IDL_OP) continue;
+                static const char *const k_doc_ops[] = { "open", "close", "write", "writeln", "hasFocus", "execCommand", "getElementsByName",
+                                                        "queryCommandEnabled", "queryCommandIndeterm", "queryCommandState", "queryCommandSupported", "queryCommandValue", NULL };
+                bool listed = false;
+                for (int q = 0; k_doc_ops[q] && !listed; q++) listed = !strcmp(k_doc_ops[q], mem[k].name);
+                if (!listed) continue;
+                JSAtom a = JS_NewAtom(ctx, mem[k].name);
+                JSPropertyDescriptor d, pd;
+                if (JS_GetOwnProperty(ctx, &d, doc, a) > 0 && !(d.flags & JS_PROP_GETSET) && JS_IsFunction(ctx, d.value) &&
+                    JS_GetOwnProperty(ctx, &pd, proto, a) <= 0) {
+                    JS_DefinePropertyValue(ctx, proto, a, d.value, JS_PROP_WRITABLE | JS_PROP_ENUMERABLE | JS_PROP_CONFIGURABLE);
+                    JS_DeleteProperty(ctx, doc, a, 0);
+                }
+                JS_FreeAtom(ctx, a);
+            }
+        }
+        parents_ready();
+        for (int k = 0; k < f->count && hoist_; k++)
+            if (mem[k].kind == IDL_OP || mem[k].kind == IDL_ATTR || mem[k].kind == IDL_RO_ATTR) hoist_member(ctx, global, f, proto, mem[k].name);
         for (int k = 0; k < f->count; k++) {
             const IdlMember *m = &mem[k];
             if (m->kind == IDL_CONST) define_constant(ctx, proto, m);
@@ -351,4 +455,31 @@ void idl_shape_apply(JSContextHandle ctx, GCValue global) {
         }
     }
     free(seen);
+    /* (the other interfaces made in script, now their members are where the IDL puts them: their IDL accessors and
+     * operations check this, and the operations their required arguments) */
+    GCValue brand2 = JS_GetPropertyStr(ctx, global, "__cyberBrandAccessors");
+    for (int i = 0; i < NIFACE && JS_IsFunction(ctx, brand2); i++) {
+        const char *nm = k_idl_ifaces[i].name;
+        if (!winrealm_ && !worker_shaped(nm)) continue;
+        if (!strcmp(nm, "Window") || strstr(nm, "GlobalScope") || !strcmp(nm, "Location") || !strcmp(nm, "WindowProperties") ||
+            (k_idl_ifaces[i].flags & 3)) continue;
+        if (!strcmp(nm, "EventTarget") || !strcmp(nm, "Node")) continue;   /* (the window and its document reach these too) */
+        if (!strncmp(nm, "CSS", 3) || !strncmp(nm, "FontFace", 8) || !strcmp(nm, "StyleSheet") || !strcmp(nm, "StylePropertyMapReadOnly") || !strcmp(nm, "StylePropertyMap")) continue;
+        GCValue c = JS_GetPropertyStr(ctx, global, nm);
+        if (!JS_IsFunction(ctx, c)) continue;
+        GCValue req = JS_NewObject(ctx);
+        const IdlMember *mm = &k_idl_members[k_idl_ifaces[i].first];
+        for (int k = 0; k < k_idl_ifaces[i].count; k++) {
+            if (mm[k].kind == IDL_OP) JS_SetPropertyStr(ctx, req, mm[k].name, JS_NewInt32(ctx, mm[k].required));
+            else if (mm[k].kind == IDL_ATTR || mm[k].kind == IDL_RO_ATTR) JS_SetPropertyStr(ctx, req, mm[k].name, JS_NewInt32(ctx, -1));
+        }
+        GCValue args_[3] = { c, req, JS_TRUE };
+        GCValue r = JS_Call(ctx, brand2, JS_UNDEFINED, 3, args_);
+        if (JS_IsException(r)) JS_GetException(ctx);
+    }
+    /* (what script adds once the shape is set: platform_api.js) */
+    if (winrealm_) {
+        GCValue after = JS_GetPropertyStr(ctx, global, "__cyberAfterShape");
+        if (JS_IsFunction(ctx, after) && JS_IsException(JS_Call(ctx, after, JS_UNDEFINED, 0, NULL))) JS_GetException(ctx);
+    }
 }

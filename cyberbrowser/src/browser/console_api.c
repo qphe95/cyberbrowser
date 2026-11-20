@@ -589,7 +589,7 @@ static bool gcs_pseudo_known(const char *q, bool two)
     if (!two) return false;
     if (!strncasecmp(q, "-webkit-", 8)) return true;
     static const char *const plain[] = { "backdrop", "placeholder", "file-selector-button", "selection", "target-text", "search-text",
-        "spelling-error", "grammar-error", "view-transition", "details-content", "column", "checkmark", "picker-icon" };
+        "spelling-error", "grammar-error", "view-transition", "details-content", "column", "checkmark", "picker-icon", "interest-button" };
     for (size_t i = 0; i < sizeof plain / sizeof plain[0]; i++) if (!strcasecmp(q, plain[i])) return true;
     static const char *const fns[] = { "highlight(", "view-transition-group(", "view-transition-group-children(", "view-transition-image-pair(", "view-transition-old(",
         "view-transition-new(", "picker(", "scroll-button(" };

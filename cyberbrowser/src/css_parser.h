@@ -67,6 +67,7 @@ typedef struct CssRule {
     int specificity;
     unsigned char shadow;   /* (a shadow tree's, scoped to its host: an inner context in the cascade) */
     unsigned char scoped;   /* (one that reaches into shadow trees of plain hosts: their own sheets', ::part()s) */
+    unsigned char part;     /* (a ::part() rule: an outer context to the tree it styles) */
     CssDeclaration *declarations;
     int declaration_count;
     int declaration_capacity;

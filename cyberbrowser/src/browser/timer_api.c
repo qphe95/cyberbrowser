@@ -44,7 +44,7 @@ GCValue js_navigator_send_beacon(JSContextHandle ctx, GCValue this_val, int argc
 #include <pthread.h>
 
 // Maximum number of concurrent timers
-#define MAX_TIMERS 256
+#define MAX_TIMERS 8192   /* (a page with thousands pending: the harness, its tests, its frames all still get theirs) */
 #define MAX_TIMER_ARGS 8
 
 typedef enum {
@@ -95,6 +95,7 @@ typedef struct {
 // Static timer state - will be properly initialized at runtime
 static TimerState g_timer_state = TIMER_STATE_INIT;
 static int g_timer_state_initialized = 0;
+static int g_timer_hw;   /* (one past the highest slot ever used: the loops go no further) */
 
 // Initialize timer state on first use
 void timer_state_ensure_initialized(void) {
@@ -179,12 +180,15 @@ void unregister_timer_roots(Timer *timer) {
 }
 
 // Clear all timers and callback storage
+static void rejections_drop(JSContextHandle realm);
 void timer_api_reset(void) {
+    /* (the promises waiting for their unhandledrejection: the old page's, gone with it) */
+    rejections_drop(GC_HANDLE_NULL);
     timer_state_ensure_initialized();
     pthread_mutex_lock(&g_timer_state.mutex);
     
     // Unregister all GC roots before clearing
-    for (int i = 0; i < MAX_TIMERS; i++) {
+    for (int i = 0; i < g_timer_hw; i++) {
         if (g_timer_state.timers[i].id != 0) {
             unregister_timer_roots(&g_timer_state.timers[i]);
         }
@@ -198,6 +202,7 @@ void timer_api_reset(void) {
     
     // Reset timers
     memset(&g_timer_state.timers, 0, sizeof(g_timer_state.timers));
+    g_timer_hw = 0;
     g_timer_state.timer_count = 0;
     g_timer_state.next_id = 1;
     
@@ -230,6 +235,7 @@ int add_timer(JSContextHandle ctx, TimerType type, GCValue callback,
         return 0; // No slots available
     }
     
+    if (slot + 1 > g_timer_hw) g_timer_hw = slot + 1;
     Timer *timer = &g_timer_state.timers[slot];
     timer->id = g_timer_state.next_id++;
     timer->type = type;
@@ -279,7 +285,7 @@ int clear_timer_by_id(int id) {
     
     timer_state_ensure_initialized();
     pthread_mutex_lock(&g_timer_state.mutex);
-    for (int i = 0; i < MAX_TIMERS; i++) {
+    for (int i = 0; i < g_timer_hw; i++) {
         if (g_timer_state.timers[i].id == id && g_timer_state.timers[i].active) {
             // Unregister GC roots for this timer's callback and args
             unregister_timer_roots(&g_timer_state.timers[i]);
@@ -300,9 +306,10 @@ int clear_timer_by_id(int id) {
 
 /* Clear every timer a realm scheduled (a frame's, when it goes away). */
 void timer_cancel_realm(JSContextHandle realm) {
+    rejections_drop(realm);
     timer_state_ensure_initialized();
     pthread_mutex_lock(&g_timer_state.mutex);
-    for (int i = 0; i < MAX_TIMERS; i++) {
+    for (int i = 0; i < g_timer_hw; i++) {
         Timer *t = &g_timer_state.timers[i];
         if (t->active && t->realm == realm) {
             unregister_timer_roots(t);
@@ -346,7 +353,7 @@ int find_due_timer(unsigned long long current_time) {
     int due_id = 0;
     unsigned long long earliest_time = (unsigned long long)(-1);
     
-    for (int i = 0; i < MAX_TIMERS; i++) {
+    for (int i = 0; i < g_timer_hw; i++) {
         Timer *t = &g_timer_state.timers[i];
         if (!timer_waits(t) && t->trigger_time <= current_time && t->trigger_time < earliest_time) {
             earliest_time = t->trigger_time;
@@ -365,7 +372,7 @@ unsigned long long timer_next_due_ms(void) {
     timer_state_ensure_initialized();
     pthread_mutex_lock(&g_timer_state.mutex);
     unsigned long long earliest = (unsigned long long)(-1);
-    for (int i = 0; i < MAX_TIMERS; i++) {
+    for (int i = 0; i < g_timer_hw; i++) {
         Timer *t = &g_timer_state.timers[i];
         if (!timer_waits(t) && t->trigger_time < earliest) {
             earliest = t->trigger_time;
@@ -460,7 +467,7 @@ void execute_timer(JSContextHandle ctx, int id) {
     
     Timer *timer = NULL;
     int slot = -1;
-    for (int i = 0; i < MAX_TIMERS; i++) {
+    for (int i = 0; i < g_timer_hw; i++) {
         if (g_timer_state.timers[i].id == id && g_timer_state.timers[i].active) {
             timer = &g_timer_state.timers[i];
             slot = i;
@@ -599,7 +606,10 @@ void execute_timer(JSContextHandle ctx, int id) {
  * checkpoint, those still unhandled fire unhandledrejection at their
  * realm's window, and are reported unless that is canceled. */
 #define MAX_REJECTIONS 256
-static struct { GCValue promise; JSContextHandle realm; } g_rejections[MAX_REJECTIONS];
+static struct { GCValue promise; JSContextHandle realm; int armed; } g_rejections[MAX_REJECTIONS];   /* (armed: the checkpoint's batch that saw it, 0 none yet) */
+static int g_arm_batch;
+/* (the batches whose notify tasks are queued, oldest first: each task takes the oldest) */
+static int g_batch_q[256], g_batch_qh, g_batch_qn;
 static int g_rejection_count;
 
 static void promise_rejection_tracker(JSContextHandle ctx, GCValue promise, GCValue reason,
@@ -610,14 +620,24 @@ static void promise_rejection_tracker(JSContextHandle ctx, GCValue promise, GCVa
         gc_add_root(GC_VALUE_GET_HANDLE(promise));
         g_rejections[g_rejection_count].promise = promise;
         g_rejections[g_rejection_count].realm = ctx;
+        g_rejections[g_rejection_count].armed = 0;
         g_rejection_count++;
         return;
     }
     for (int i = 0; i < g_rejection_count; i++) {
         if (GC_VALUE_GET_HANDLE(g_rejections[i].promise) != GC_VALUE_GET_HANDLE(promise)) continue;
         gc_remove_root(GC_VALUE_GET_HANDLE(promise));
-        g_rejections[i] = g_rejections[--g_rejection_count];
+        memmove(&g_rejections[i], &g_rejections[i + 1], (size_t)(g_rejection_count - i - 1) * sizeof g_rejections[0]); g_rejection_count--;
         return;
+    }
+}
+
+/* (a realm's waiting rejections dropped (all of them: null): their realm is going, and its handles with it) */
+static void rejections_drop(JSContextHandle realm) {
+    for (int k = 0; k < g_rejection_count; ) {
+        if (realm != GC_HANDLE_NULL && g_rejections[k].realm != realm) { k++; continue; }
+        gc_remove_root(GC_VALUE_GET_HANDLE(g_rejections[k].promise));
+        memmove(&g_rejections[k], &g_rejections[k + 1], (size_t)(g_rejection_count - k - 1) * sizeof g_rejections[0]); g_rejection_count--;
     }
 }
 
@@ -625,11 +645,13 @@ void timer_install_rejection_tracker(JSRuntimeHandle rt) {
     JS_SetHostPromiseRejectionTracker(rt, promise_rejection_tracker, NULL);
 }
 
-static void notify_rejections(void) {
-    while (g_rejection_count > 0) {
-        GCValue promise = g_rejections[0].promise;
-        JSContextHandle realm = g_rejections[0].realm;
-        g_rejections[0] = g_rejections[--g_rejection_count];
+/* (the ones a checkpoint saw: their event's task now; a handler attached since took them off the list) */
+static void notify_rejections(int upto) {
+    for (int k = 0; k < g_rejection_count; ) {
+        if (!g_rejections[k].armed || g_rejections[k].armed > upto) { k++; continue; }   /* (one a later checkpoint saw: its own task) */
+        GCValue promise = g_rejections[k].promise;
+        JSContextHandle realm = g_rejections[k].realm;
+        memmove(&g_rejections[k], &g_rejections[k + 1], (size_t)(g_rejection_count - k - 1) * sizeof g_rejections[0]); g_rejection_count--;   /* (the rest in rejection order) */
         GCValue reason = JS_PromiseResult(realm, promise);
         GCValue global = JS_GetGlobalObject(realm);
         GCValue ctor = JS_GetPropertyStr(realm, global, "PromiseRejectionEvent");
@@ -662,6 +684,16 @@ static void notify_rejections(void) {
 
 unsigned long long g_anim_task_ms;
 
+static GCValue js_notify_rejections_task(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    (void)argc; (void)argv;
+    int upto = 0x7fffffff;
+    if (g_batch_qn > 0) { upto = g_batch_q[g_batch_qh]; g_batch_qh = (g_batch_qh + 1) & 255; g_batch_qn--; }
+    notify_rejections(upto);
+    (void)ctx;
+    return JS_UNDEFINED;
+}
+
 void timer_microtask_checkpoint(JSContextHandle ctx) {
     CP_ACC("microtask checkpoint");
     g_anim_task_ms = 0;
@@ -669,8 +701,30 @@ void timer_microtask_checkpoint(JSContextHandle ctx) {
     JSContextHandle pctx = GC_HANDLE_NULL;
     for (int guard = 0; guard < 100000 && JS_ExecutePendingJob(rt, &pctx) > 0; guard++) {}
     if (g_rejection_count) {
-        notify_rejections();
-        for (int guard = 0; guard < 100000 && JS_ExecutePendingJob(rt, &pctx) > 0; guard++) {}
+        /* (HTML "notify about rejected promises": the ones this checkpoint finds, their events in a task queued now,
+         * behind the tasks already queued; a handler attached before it runs means no event) */
+        bool fresh = false;
+        int batch = ++g_arm_batch;
+        for (int k = 0; k < g_rejection_count; k++) if (!g_rejections[k].armed) { g_rejections[k].armed = batch; fresh = true; }
+        if (fresh) {
+            /* (a window's: a task of its own; a worker's timers turn elsewhere: there, now) */
+            GCValue doc_ = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document");
+            GCValue st = JS_IsObject(doc_) ? JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "setTimeout") : JS_UNDEFINED;
+            bool queued = false;
+            if (JS_IsFunction(ctx, st)) {
+                GCValue args[2] = { JS_NewCFunction(ctx, js_notify_rejections_task, "notifyRejections", 0), JS_NewInt32(ctx, 0) };
+                GCValue r = JS_Call(ctx, st, JS_UNDEFINED, 2, args);
+                if (JS_IsException(r)) JS_GetException(ctx);
+                else {
+                    queued = true;
+                    if (g_batch_qn < 256) { g_batch_q[(g_batch_qh + g_batch_qn) & 255] = batch; g_batch_qn++; }
+                }
+            }
+            if (!queued) {
+                notify_rejections(0x7fffffff);
+                for (int guard = 0; guard < 100000 && JS_ExecutePendingJob(rt, &pctx) > 0; guard++) {}
+            }
+        }
     }
 }
 
@@ -723,7 +777,7 @@ int timer_has_pending(void) {
     unsigned long long now = page_time_ms();
     int has_pending = 0;
     
-    for (int i = 0; i < MAX_TIMERS; i++) {
+    for (int i = 0; i < g_timer_hw; i++) {
         if (!timer_waits(&g_timer_state.timers[i]) && g_timer_state.timers[i].trigger_time <= now) {
             has_pending = 1;
             break;
@@ -739,6 +793,18 @@ int timer_has_pending(void) {
 // ============================================================================
 
 // setTimeout(callback, delay, ...args)
+/* setTimeout / setInterval with a string: a function that runs it, by indirect eval (a classic script's global scope) */
+static GCValue timer_string_callback(JSContextHandle ctx, GCValue v) {
+    static const char mk[] = "(function (c) { return function () { (0, eval)(c); }; })";
+    GCValue code = JS_ToString(ctx, v);
+    if (JS_IsException(code)) { JS_GetException(ctx); return JS_UNDEFINED; }
+    GCValue f = JS_Eval(ctx, mk, sizeof mk - 1, "<timer-string>", JS_EVAL_TYPE_GLOBAL);
+    if (!JS_IsFunction(ctx, f)) { JS_GetException(ctx); return JS_UNDEFINED; }
+    GCValue r = JS_Call(ctx, f, JS_UNDEFINED, 1, &code);
+    if (JS_IsException(r)) { JS_GetException(ctx); return JS_UNDEFINED; }
+    return r;
+}
+
 GCValue js_set_timeout(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
     
@@ -753,8 +819,11 @@ GCValue js_set_timeout(JSContextHandle ctx, GCValue this_val, int argc, GCValue 
     
     // Accept any object as callback (functions are objects in JS)
     // The actual call will fail gracefully if not callable
+    /* (a string: its code, run as a script in the global scope when the timer fires) */
+    GCValue cb0 = argv[0];
     if (!JS_IsObject(argv[0]) && !JS_IsFunction(ctx, argv[0])) {
-        return JS_NewInt32(ctx, 0);
+        cb0 = timer_string_callback(ctx, argv[0]);
+        if (!JS_IsFunction(ctx, cb0)) return JS_NewInt32(ctx, 0);
     }
     
     // Parse delay (default 0)
@@ -773,7 +842,7 @@ GCValue js_set_timeout(JSContextHandle ctx, GCValue this_val, int argc, GCValue 
         args[arg_count] = argv[i];
     }
     
-    int id = add_timer(ctx, TIMER_TYPE_TIMEOUT, argv[0], delay, arg_count, args);
+    int id = add_timer(ctx, TIMER_TYPE_TIMEOUT, cb0, delay, arg_count, args);
     return JS_NewInt32(ctx, id);
 }
 
@@ -795,9 +864,9 @@ GCValue js_clear_timeout(JSContextHandle ctx, GCValue this_val, int argc, GCValu
 GCValue js_set_interval(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
     
-    if (argc < 1 || !JS_IsFunction(ctx, argv[0])) {
-        return JS_NewInt32(ctx, 0);
-    }
+    if (argc < 1) return JS_NewInt32(ctx, 0);
+    GCValue cbi = argv[0];
+    if (!JS_IsFunction(ctx, argv[0])) { cbi = timer_string_callback(ctx, argv[0]); if (!JS_IsFunction(ctx, cbi)) return JS_NewInt32(ctx, 0); }
     
     // Parse delay (default 0 if not specified, but spec says at least 4ms for intervals)
     unsigned long long delay = 4;  // Minimum 4ms per HTML spec
@@ -815,7 +884,7 @@ GCValue js_set_interval(JSContextHandle ctx, GCValue this_val, int argc, GCValue
         args[arg_count] = argv[i];
     }
     
-    int id = add_timer(ctx, TIMER_TYPE_INTERVAL, argv[0], delay, arg_count, args);
+    int id = add_timer(ctx, TIMER_TYPE_INTERVAL, cbi, delay, arg_count, args);
     return JS_NewInt32(ctx, id);
 }
 

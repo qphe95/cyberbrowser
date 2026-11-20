@@ -47,6 +47,8 @@ enum {
     SS_LANG,         /* :lang(val) */
     SS_DIR,          /* :dir(ltr), :dir(rtl): a is 1 for rtl */
     SS_HEADING,      /* :heading, :heading(levels): a, a bit for each level */
+    SS_OPEN,         /* :open: a details or dialog with open, a select whose picker is open; a = 1: :closed, the others of those */
+    SS_MARKATTR,     /* (a state its script keeps as an attribute, val its name: :interest-source, :interest-target) */
     SS_HOST,         /* :host: only across a combinator out of a shadow tree */
     SS_VALID, SS_INVALID,
     SS_ANIMIMG,      /* :animated-image: its image more than one frame (g_dom_animated_image) */
@@ -203,6 +205,7 @@ static const char *const k_pseudo_classes[] = {
     "has-slotted", "active", "animated-image", "any-link", "autofill", "blank", "buffering", "checked", "closed", "current", "default", "defined",
     "dir", "disabled", "empty", "enabled", "first", "first-child", "first-of-type", "focus", "focus-visible",
     "focus-within", "fullscreen", "future", "has", "heading", "host", "host-context", "hover", "in-range", "indeterminate",
+    "interest-source", "interest-target",
     "invalid", "is", "lang", "last-child", "last-of-type", "left", "link", "local-link", "matches", "modal", "muted",
     "not", "nth-child", "nth-col", "nth-last-child", "nth-last-col", "nth-last-of-type", "nth-of-type",
     "only-child", "only-of-type", "open", "optional", "out-of-range", "past", "paused", "picture-in-picture",
@@ -213,7 +216,7 @@ static const char *const k_pseudo_classes[] = {
     NULL };
 static const char *const k_pseudo_elements[] = {
     "after", "backdrop", "before", "cue", "cue-region", "details-content", "file-selector-button", "first-letter",
-    "first-line", "grammar-error", "highlight", "marker", "part", "picker", "placeholder", "scroll-marker",
+    "first-line", "grammar-error", "highlight", "interest-button", "marker", "part", "picker", "placeholder", "scroll-marker",
     "scroll-marker-group", "selection", "slider-fill", "slider-thumb", "slider-track", "slotted", "spelling-error", "target-text", "view-transition",
     "view-transition-group", "view-transition-group-children", "view-transition-image-pair", "view-transition-new", "view-transition-old", NULL };
 
@@ -598,6 +601,12 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                     css_atom_reserve(1);
                     s.atom = css_atom_intern("form", 4);
                 }
+                else if ((strcmp(name, "open") == 0 || strcmp(name, "closed") == 0) && !args) { s.kind = SS_OPEN; s.a = name[0] == 'c'; }
+                else if ((strcmp(name, "interest-source") == 0 || strcmp(name, "interest-target") == 0) && !args) {
+                    s.kind = SS_MARKATTR;
+                    s.val = strdup(name[9] == 's' ? "data-cyber-interest-source" : "data-cyber-interest-target");
+                    s.vlen = (uint32_t)strlen(s.val);
+                }
                 else if (known_name(name, k_pseudo_classes)) s.kind = SS_ANY;
                 else { sp->err = true; free(name); break; }
                 free(name);
@@ -909,7 +918,8 @@ void dom_validity_refresh(void)
         g_validity_cap = g_dom.count;
     }
     for (uint32_t s = 1; s < g_dom.count; s++) {
-        if (g_dom.kind[s] != DOM_K_ELEMENT || g_dom.ns[s] != DOM_NS_HTML) continue;
+        /* (a slot reused for what has no validity: none, not its last node's) */
+        if (g_dom.kind[s] != DOM_K_ELEMENT || g_dom.ns[s] != DOM_NS_HTML) { g_validity[s] = 0; continue; }
         uint8_t v = 0;
         static CssAtom t_form;
         if (!t_form) { css_atom_reserve(1); t_form = css_atom_intern("form", 4); }
@@ -922,7 +932,7 @@ void dom_validity_refresh(void)
             extern int (*g_dom_query_formstate)(NodeId el);
             /* (and what else its value says: placeholder shown, default, in or out of range) */
             if (g_dom_query_formstate) v |= (uint8_t)(g_dom_query_formstate(dom_id_of(s)) << 2);
-        } else continue;
+        }
         if (v != g_validity[s]) {
             g_validity[s] = v;
             dom_mark_dirty(dom_id_of(s), DOMF_DIRTY_ATTR);
@@ -956,6 +966,16 @@ uint32_t dom_element_state(NodeId el)
         if (v & 32) st |= DOM_ST_OUT_OF_RANGE;
     }
     if (g_dom.kind[s] != DOM_K_ELEMENT || g_dom.ns[s] != DOM_NS_HTML) return st;
+    /* (a menu's checkbox or radio item: checked by its defaultchecked attribute until its own is set; :default by it) */
+    {
+        static CssAtom a_mic, a_mir;
+        if (!a_mic) { css_atom_reserve(2); a_mic = css_atom_intern("menuitemcheckbox", 16); a_mir = css_atom_intern("menuitemradio", 13); }
+        if (g_dom.tag[s] == a_mic || g_dom.tag[s] == a_mir) {
+            bool dc = dom_get_attr_str(el, "defaultchecked") != NULL;
+            if (!(st & DOM_ST_CHECK_SET)) st = dc ? st | DOM_ST_CHECKED : st & ~(uint32_t)DOM_ST_CHECKED;
+            if (dc) st |= DOM_ST_DEFAULT;
+        }
+    }
     /* (each element, each time it is read for style: by atom, not by name) */
     static CssAtom a_ce, t_video, t_audio;
     if (!a_ce) {
@@ -1075,6 +1095,30 @@ static bool tag_is(uint32_t s, const char *t)
 
 static int auto_dir(uint32_t s)
 {
+    /* (a slot in a shadow tree: what is assigned to it first) */
+    if (g_dom.ns[s] == DOM_NS_HTML && tag_is(s, "slot")) {
+        uint32_t root = s;
+        while (g_dom.parent[root]) root = g_dom.parent[root];
+        uint32_t host = root != s && (g_dom.flags[root] & DOMF_SHADOW_ROOT) ? g_dom.host[root] : 0;
+        if (host) {
+            const char *name = dom_get_attr_str(dom_id_of(s), "name");
+            if (!name) name = "";
+            for (uint32_t c = g_dom.first[host]; c; c = g_dom.next[c]) {
+                const char *ls = g_dom.kind[c] == DOM_K_ELEMENT ? dom_get_attr_str(dom_id_of(c), "slot") : NULL;
+                if (strcmp(ls ? ls : "", name)) continue;
+                int r = -1;
+                if (g_dom.kind[c] == DOM_K_TEXT) {
+                    uint32_t n = 0;
+                    const char *t = dom_text(dom_id_of(c), &n);
+                    if (t) r = bidi_first_strong(t, n);
+                } else if (g_dom.kind[c] == DOM_K_ELEMENT) {
+                    if ((g_dom.ns[c] == DOM_NS_HTML && (tag_is(c, "bdi") || tag_is(c, "script") || tag_is(c, "style") || tag_is(c, "textarea"))) || dir_attr(c)) continue;
+                    r = auto_dir(c);
+                }
+                if (r >= 0) return r;
+            }
+        }
+    }
     int found = -1;
     uint32_t x = g_dom.first[s];
     while (x && found < 0) {
@@ -1134,6 +1178,7 @@ static int elem_dir(uint32_t s)
     }
     return 0;
 }
+/* (an element's directionality, as :dir() sees it: 1 rtl, 0 ltr) */int dom_query_directionality(NodeId id) { return dom_valid(id) ? elem_dir(dom_slot(id)) : 0; }
 
 static const char *attr_val(uint32_t s, CssAtom a, uint32_t *len) {
     DomAttrList *l = &g_dom.attrs[s];
@@ -1256,6 +1301,17 @@ static bool simple_ok(uint32_t s, const SelSimple *ss, uint32_t scope) {
     }
     case SS_LANG: return lang_ok(s, ss->val, ss->vlen);
     case SS_DIR: return elem_dir(s) == ss->a;
+    case SS_MARKATTR: return ss->val && dom_get_attr_str(dom_id_of(s), ss->val) != NULL;
+    case SS_OPEN: {
+        if (g_dom.ns[s] != DOM_NS_HTML) return false;
+        NodeId id_ = dom_id_of(s);
+        const char *t_ = dom_tag_name(id_);
+        if (!t_) return false;
+        bool closed_ = ss->a != 0;
+        if (!strcmp(t_, "details") || !strcmp(t_, "dialog")) return (dom_get_attr_str(id_, "open") != NULL) != closed_;
+        if (!strcmp(t_, "select")) return (dom_get_attr_str(id_, "data-cyber-open") != NULL) != closed_;
+        return false;
+    }
     case SS_HEADING: {
         if (g_dom.ns[s] != DOM_NS_HTML) return false;
         static uint32_t h[7];
@@ -1266,7 +1322,9 @@ static bool simple_ok(uint32_t s, const SelSimple *ss, uint32_t scope) {
             if (g_dom.tag[s] != h[i]) continue;
             /* (its level: offsets of it and what's above, up to a reset; at most 9) */
             int lv = i;
-            for (uint32_t x = s; x && g_dom.kind[x] == DOM_K_ELEMENT && lv < 9; x = g_dom.parent[x]) {
+            /* (through a shadow root to its host) */
+            for (uint32_t x = s; x && g_dom.kind[x] == DOM_K_ELEMENT && lv < 9;
+                 x = g_dom.parent[x] && (g_dom.flags[g_dom.parent[x]] & DOMF_SHADOW_ROOT) ? g_dom.host[g_dom.parent[x]] : g_dom.parent[x]) {
                 uint32_t l = 0;
                 const char *v = attr_val(x, off_a, &l);
                 if (v && l && l < 8) {

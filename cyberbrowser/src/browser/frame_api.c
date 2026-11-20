@@ -86,7 +86,39 @@ typedef struct Frame {
     char *vt_carry;             /* (its old state then, serialized, for the next document's transition) */
     char fallback_base[2048];   /* an about: frame: its base URL when it has no <base> */
     bool dead;                  /* its document is no longer fully active */
+    char features[512];         /* window.open's features string, for its window's size, place and bars */
+    char wname[256];            /* window.open's target name: its browsing context's name, until its realm is there */
+    char domain[256];           /* document.domain as its document set it (domain_doc that document; 0 none set) */
+    NodeId domain_doc;
+    char coop[32];              /* its document's Cross-Origin-Opener-Policy value (normalized) */
+    bool coop_severed;          /* a popup its COOP took from its opener: closed to it, no opener */
+    char referrer[2048];        /* the URL of the document that began the navigation due ("" none) */
 } Frame;
+
+static void frame_referrer_from(struct Frame *f, JSContextHandle initiator);
+/* (Cross-Origin-Opener-Policy, HTML 7.1.3: a response's value, normalized; unsafe-none for what is not one) */
+static void coop_of_headers(const char *h, size_t n, char *out, size_t cap) {
+    snprintf(out, cap, "unsafe-none");
+    for (size_t i = 0; h && i < n; ) {
+        size_t e = i;
+        while (e < n && h[e] != '\n') e++;
+        const char *k = "cross-origin-opener-policy:";
+        size_t kl = strlen(k);
+        if (e - i > kl && !strncasecmp(h + i, k, kl)) {
+            const char *v = h + i + kl, *ve = h + e;
+            while (v < ve && (*v == ' ' || *v == '\t')) v++;
+            const char *t = v;
+            while (t < ve && *t != ';' && *t != ' ' && *t != '\t' && *t != '\r') t++;
+            size_t tl = (size_t)(t - v);
+            static const char *const ok[] = { "same-origin", "same-origin-allow-popups", "noopener-allow-popups", "unsafe-none" };
+            for (int q = 0; q < 4; q++) if (tl == strlen(ok[q]) && !strncmp(v, ok[q], tl)) { snprintf(out, cap, "%s", ok[q]); return; }
+            return;
+        }
+        i = e + 1;
+    }
+}
+static char g_page_coop[32] = "unsafe-none";
+void frame_api_set_page_coop(const char *headers, size_t n) { coop_of_headers(headers, n, g_page_coop, sizeof g_page_coop); }
 
 static Frame *g_frames;
 static uint32_t g_next_id = 2;
@@ -112,6 +144,18 @@ uint32_t frame_named_child(JSContextHandle ctx, const char *name, size_t len) {
     return 0;
 }
 
+
+/* The <iframe> or <frame> element whose document doc is; 0 for none. */
+/* The document of iframe or frame element el's browsing context; 0 for none. */
+NodeId frame_content_document_of(NodeId el) {
+    Frame *f = frame_of_iframe(el);
+    return f && dom_valid(f->doc) ? f->doc : 0;
+}
+
+NodeId frame_container_of_document(NodeId doc) {
+    for (Frame *f = g_frames; f; f = f->next) if (f->doc == doc && !f->popup && dom_valid(f->iframe)) return f->iframe;
+    return 0;
+}
 
 static JSContextHandle realm_of_document(NodeId doc) {
     for (Frame *f = g_frames; f; f = f->next) if (f->doc == doc && SAFE_VALID(f->ctx)) return f->ctx;
@@ -184,6 +228,16 @@ static void dead_doc_add(NodeId doc) {
     g_dead_docs.id[g_dead_docs.n++] = doc;
 }
 
+/* Whether doc is a document whose browsing context is gone: a frame's that was removed or closed (no live frame has it,
+ * and it is not the page's); false for the page's and a live frame's. */
+bool frame_document_discarded(NodeId doc) {
+    if (!doc || doc == g_main_doc) return false;
+    for (uint32_t i = 0; i < g_dead_docs.n; i++) if (g_dead_docs.id[i] == doc) return true;
+    for (Frame *f = g_frames; f; f = f->next)
+        if (f->doc == doc) return f->dead || f->closing || (!f->popup && (!dom_valid(f->iframe) || !dom_is_connected(f->iframe)));
+    return false;
+}
+
 /* __cyberInactive(item, global): is item's document, or (not a node) its
  * realm's global, or the listener's global, not fully active? */
 static GCValue js_inactive(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
@@ -214,6 +268,8 @@ static void frame_mark_dead(Frame *f) {
     dead_doc_add(f->doc);
     JSAtom a = inactive_atom(f->ctx);
     JS_SetProperty(f->ctx, JS_GetGlobalObject(f->ctx), a, JS_TRUE);
+    /* (its window is closed now: its browsing context is gone) */
+    JS_DefinePropertyValueStr(f->ctx, JS_GetGlobalObject(f->ctx), "closed", JS_TRUE, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     for (Frame *c = g_frames; c; c = c->next)
         if (c != f && c->parent == f->ctx) frame_mark_dead(c);
 }
@@ -374,11 +430,30 @@ static bool realm_opaque(JSContextHandle ctx) {
     return false;
 }
 
+/* (a realm's document.domain, set by its document: NULL for none) */
+static char g_page_domain[256];
+static NodeId g_page_domain_doc;
+static const char *realm_domain(JSContextHandle ctx) {
+    if (ctx == g_js_context) return g_page_domain_doc && g_page_domain_doc == g_main_doc ? g_page_domain : NULL;
+    Frame *f = frame_of_realm(ctx);
+    return f && f->domain_doc && f->domain_doc == f->doc ? f->domain : NULL;
+}
+static bool url_scheme_same(const char *a, const char *b) {
+    const char *ca = strchr(a, ':'), *cb = strchr(b, ':');
+    return ca && cb && ca - a == cb - b && !strncasecmp(a, b, (size_t)(ca - a));
+}
+
 static bool realms_same_origin(JSContextHandle a, JSContextHandle b) {
     if (a == b) return true;
     if (realm_opaque(a) || realm_opaque(b)) return false;
     char *ua = origin_url(a), *ub = origin_url(b);
     bool same = same_origin(ua, ub);
+    /* (same origin-domain, HTML 7.1.1: document.domain set to the same on both, the same scheme: let through too;
+     * a same-origin pair where one set it is not held apart here) */
+    if (!same) {
+        const char *da = realm_domain(a), *db = realm_domain(b);
+        if (0 && da && db && !strcmp(da, db) && url_scheme_same(ua, ub)) same = true;   /* (off: no origin-keyed agent clusters here to keep it from letting through what engines hold apart) */
+    }
     free(ua);
     free(ub);
     return same;
@@ -417,7 +492,8 @@ static const char cross_window_js[] =
     "    Object.defineProperty(loc, 'href', { set: go, get: function () { throw security(); }, enumerable: true });"
     "    Object.defineProperty(loc, 'replace', { value: go, enumerable: true });"
     "    Object.freeze(loc);"
-    "    function self() { return w; }"
+    "    function self() { return made.get(id) || w; }"
+    "    var locProxy = null;"
     "    function nothing() {}"
     "    Object.defineProperties(w, {"
     "      postMessage: { value: function postMessage(message, options) {"
@@ -425,7 +501,7 @@ static const char cross_window_js[] =
     "        if (to === undefined) to = '/';"
     "        op(0, id, JSON.stringify(message === undefined ? null : message), String(to));"
     "      }, enumerable: true },"
-    "      location: { get: function () { return loc; }, set: go, enumerable: true },"
+    "      location: { get: function () { return locProxy || loc; }, set: go, enumerable: true },"
     "      window: { get: self, enumerable: true }, self: { get: self, enumerable: true },"
     "      frames: { get: self, enumerable: true },"
     "      parent: { get: function () { return op(2, id); }, enumerable: true },"
@@ -436,8 +512,35 @@ static const char cross_window_js[] =
     "      close: { value: nothing }, focus: { value: nothing }, blur: { value: nothing }"
     "    });"
     "    Object.freeze(w);"
-    "    made.set(id, w);"
-    "    return w;"
+    /* (HTML 7.2.3.x: across origins only what CrossOriginProperties lists; the rest a SecurityError) */
+    "    var guard = function (real, names) {"
+    "      var ok = function (k) { return typeof k === 'string' ? names.indexOf(k) >= 0 || /^\\d+$/.test(k) : false; };"
+    "      var quiet = function (k) { return k === 'then' || k === Symbol.toStringTag || k === Symbol.hasInstance || k === Symbol.isConcatSpreadable; };"
+    "      return new Proxy({}, {"
+    "        get: function (t, k) { if (ok(k)) return Reflect.get(real, k); if (quiet(k)) return undefined; throw security(); },"
+    "        set: function (t, k, v) { if (k === 'location' || k === 'href') { Reflect.set(real, k, v); return true; } throw security(); },"
+    "        has: function (t, k) { if (ok(k) || quiet(k)) return k in real; throw security(); },"
+    "        getOwnPropertyDescriptor: function (t, k) {"
+    "          if (!ok(k)) { if (quiet(k)) return undefined; throw security(); }"
+    "          var d = Object.getOwnPropertyDescriptor(real, k);"
+    "          if (!d) return undefined;"
+    "          d.configurable = true;"
+    "          return d;"
+    "        },"
+    "        defineProperty: function () { throw security(); },"
+    "        deleteProperty: function () { throw security(); },"
+    "        ownKeys: function () { return names.filter(function (n) { return n in real; }); },"
+    "        getPrototypeOf: function () { return null; },"
+    "        setPrototypeOf: function (t, p) { return p === null; },"
+    "        preventExtensions: function () { return false; },"
+    "        isExtensible: function () { return true; }"
+    "      });"
+    "    };"
+    "    var gloc = guard(loc, ['href', 'replace']);"
+    "    var gw = guard(w, ['window', 'self', 'location', 'close', 'closed', 'focus', 'blur', 'frames', 'length', 'top', 'opener', 'parent', 'postMessage']);"
+    "    locProxy = gloc;"
+    "    made.set(id, gw);"
+    "    return gw;"
     "  };"
     "})";
 
@@ -520,6 +623,7 @@ static GCValue cross_op(JSContextHandle ctx, GCValue this_val, int argc, GCValue
         char *abs = wurl_resolve(base, u);
         free(base);
         snprintf(tf->url, sizeof(tf->url), "%s", abs ? abs : u);
+        frame_referrer_from(tf, ctx);
         tf->state = FRAME_PENDING;
         free(abs);
         JS_FreeCString(ctx, u);
@@ -536,8 +640,10 @@ static GCValue cross_op(JSContextHandle ctx, GCValue this_val, int argc, GCValue
         for (Frame *f = g_frames; f; f = f->next) if (SAFE_VALID(target) && f->parent == target) n++;
         return JS_NewInt32(ctx, n);
     }
-    case 5:                                     /* closed */
-        return SAFE_VALID(target) ? JS_FALSE : JS_TRUE;
+    case 5: {                                   /* closed */
+        Frame *sf = SAFE_VALID(target) ? frame_of_realm(target) : NULL;
+        return SAFE_VALID(target) && !(sf && sf->coop_severed) ? JS_FALSE : JS_TRUE;
+    }
     }
     return JS_UNDEFINED;
 }
@@ -547,7 +653,8 @@ static GCValue cross_op(JSContextHandle ctx, GCValue this_val, int argc, GCValue
 static GCValue window_seen_from(JSContextHandle ctx, uint32_t id) {
     JSContextHandle target = window_realm(id);
     if (!id || !SAFE_VALID(target)) return JS_NULL;
-    if (realms_same_origin(ctx, target)) return JS_GetGlobalObject(target);
+    Frame *sev_ = frame_of_realm(target);
+    if (realms_same_origin(ctx, target) && !(sev_ && sev_->coop_severed)) return JS_GetGlobalObject(target);
     GCValue *factory;
     bool *made;
     Frame *own = frame_of_realm(ctx);
@@ -620,10 +727,10 @@ static int deliver_messages(void) {
 }
 
 static const char frame_window_js[] =
-    "(function (url, parent, top, frameElement, opener) {"
+    "(function (url, parent, top, frameElement, opener, features) {"
     "  var w = globalThis;"
     "  if (w.location) w.location.href = url;"
-    "  if (document) { try { document.domain = w.location.hostname; } catch (e) {}"
+    "  if (document) {"
     "                  try { document.baseURI = w.location.href; } catch (e) {} }"
     "  function ro(name, v) { Object.defineProperty(w, name, { value: v, configurable: true, writable: false }); }"
     "  ro('parent', opener ? w : parent); ro('top', opener ? w : top || parent); ro('frameElement', frameElement);"
@@ -642,6 +749,45 @@ static const char frame_window_js[] =
     "  function px(v) { var n = parseFloat(v); return isFinite(n) ? n : NaN; }"
     "  var hidden = !!frameElement && !!frameElement.ownerDocument && frameElement.getClientRects && !frameElement.getClientRects().length;"
     "  var forced = {};"
+    /* (window.open's features: its size, its place, and whether it is a popup, its bars hidden) */
+    "  if (typeof features === 'string') {"
+    "    var tok = {}, p = 0, s = features, sep = function (c) { return c === ' ' || c === '\\t' || c === '\\n' || c === '\\f' || c === '\\r' || c === '=' || c === ','; };"
+    "    while (p < s.length) {"
+    "      var nm = '', vl = '';"
+    "      while (p < s.length && sep(s[p])) p++;"
+    "      while (p < s.length && !sep(s[p])) nm += s[p++];"
+    "      nm = nm.toLowerCase(); nm = { screenx: 'left', screeny: 'top', innerwidth: 'width', innerheight: 'height' }[nm] || nm;"
+    "      while (p < s.length && s[p] !== '=') { if (s[p] === ',' || !sep(s[p])) break; p++; }"
+    "      if (p < s.length && sep(s[p])) {"
+    "        while (p < s.length && sep(s[p])) { if (s[p] === ',') break; p++; }"
+    "        while (p < s.length && !sep(s[p])) vl += s[p++];"
+    "      }"
+    "      if (nm) tok[nm] = vl;"
+    "    }"
+    "    var int = function (v) { var m = /^[\\t\\n\\f\\r ]*([-+]?\\d+)/.exec(v); return m ? parseInt(m[1], 10) : null; };"
+    "    var bool = function (v) { if (v === '' || /^(yes|true)$/i.test(v)) return true; var n = int(v); return n !== null && n !== 0; };"
+    "    var isSet = function (k, d) { return Object.prototype.hasOwnProperty.call(tok, k) ? bool(tok[k]) : d; };"
+    "    var popup = false;"
+    "    if (Object.keys(tok).length) {"
+    "      if (Object.prototype.hasOwnProperty.call(tok, 'split') && bool(tok.split)) popup = false;"
+    "      else if (Object.prototype.hasOwnProperty.call(tok, 'popup')) popup = bool(tok.popup);"
+    "      else popup = (!isSet('location', false) && !isSet('toolbar', false)) || !isSet('menubar', false) || !isSet('resizable', true) || !isSet('scrollbars', false) || !isSet('status', false);"
+    "    }"
+    "    if ((Object.prototype.hasOwnProperty.call(tok, 'noopener') && bool(tok.noopener)) || (Object.prototype.hasOwnProperty.call(tok, 'noreferrer') && bool(tok.noreferrer))) popup = false;"
+    "    Object.defineProperty(w, '__cyberIsPopup', { value: popup, configurable: true });"
+    "    var wv = 'width' in tok ? int(tok.width) : null, hv = 'height' in tok ? int(tok.height) : null;"
+    "    if (wv !== null) forced.width = Math.max(100, wv);"
+    "    if (hv !== null) forced.height = Math.max(100, hv);"
+    /* (a popup without a size of its own, or an unparsable one: as 0, the least there is) */
+    "    if (popup && wv === null) forced.width = 100;"
+    "    if (popup && hv === null) forced.height = 100;"
+    "    var lv = 'left' in tok ? int(tok.left) : null, tv = 'top' in tok ? int(tok.top) : null;"
+    "    if (lv !== null || tv !== null) {"
+    "      var sx = lv !== null ? Math.max(0, lv) : 0, sy = tv !== null ? Math.max(0, tv) : 0;"
+    "      ['screenX', 'screenLeft'].forEach(function (k) { Object.defineProperty(w, k, { get: function () { return sx; }, configurable: true }); });"
+    "      ['screenY', 'screenTop'].forEach(function (k) { Object.defineProperty(w, k, { get: function () { return sy; }, configurable: true }); });"
+    "    }"
+    "  }"
     /* (its element's content box, as of the parent's last look: a style sheet
      * may size it.  What is on the element itself counts at once) */
     "  var box = {};"
@@ -680,7 +826,10 @@ static const char frame_window_js[] =
     /* (a frame's location navigates it; a fragment alone doesn't) */
     "  var loc = w.location, hd = loc && Object.getOwnPropertyDescriptor(loc, 'href'), nav = w.__cyberFrameNavigate;"
     "  if (hd && hd.set && hd.configurable && nav) {"
-    "    var go = function (u) { if (!nav(String(u))) hd.set.call(loc, u); };"
+    "    var go = function (u) { u = String(u);"
+    "      if (/[^\\x00-\\x7f]/.test(u) && w.__cyberLegacyQuery && w.document && w.document.characterSet && !/^utf-8$/i.test(w.document.characterSet)) {"
+    "        var lq = w.__cyberLegacyQuery(u, w.document.characterSet); if (lq) u = lq; }"
+    "      if (!nav(u)) hd.set.call(loc, u); };"
     "    Object.defineProperty(loc, 'href', { get: hd.get, set: go, enumerable: true, configurable: true });"
     "    ['assign', 'replace'].forEach(function (k) {"
     "      Object.defineProperty(loc, k, { value: function (u) { go(u); }, enumerable: true, configurable: true, writable: true });"
@@ -692,6 +841,45 @@ static const char frame_window_js[] =
 /* The frame's window: its location, its place among windows (parent, top,
  * frameElement: stand-ins and null across origins) and a viewport the
  * iframe's size. */
+/* (the document that begins a navigation of f: its URL, the next document's referrer's source) */
+static void frame_referrer_from(Frame *f, JSContextHandle initiator) {
+    f->referrer[0] = 0;
+    if (!SAFE_VALID(initiator)) return;
+    char *u = realm_url(initiator);
+    if (!u) return;
+    char *h = strchr(u, '#');
+    if (h) *h = 0;
+    snprintf(f->referrer, sizeof f->referrer, "%s", u);
+    free(u);
+}
+
+/* (document.referrer, by strict-origin-when-cross-origin or the iframe's referrerpolicy: the URL, its origin, or "") */
+static void frame_set_document_referrer(Frame *f) {
+    if (!SAFE_VALID(f->ctx)) return;
+    const char *ref = f->referrer;
+    char out[2048] = "";
+    const char *pol = !f->popup && dom_valid(f->iframe) ? dom_get_attr_str(f->iframe, "referrerpolicy") : NULL;
+    char pl[40] = "";
+    if (pol) { size_t i = 0; for (; pol[i] && i + 1 < sizeof pl; i++) pl[i] = (char)tolower((unsigned char)pol[i]); pl[i] = 0; }
+    if (ref[0] && (!strncasecmp(ref, "http:", 5) || !strncasecmp(ref, "https:", 6)) && strcmp(pl, "no-referrer")) {
+        bool same = same_origin(ref, f->url);
+        bool down = !strncasecmp(ref, "https:", 6) && !strncasecmp(f->url, "http:", 5);
+        WUrl w;
+        char *orig = NULL;
+        if (wurl_parse(ref, strlen(ref), NULL, &w) == 0) { orig = wurl_origin(&w); wurl_free(&w); }
+        if (!strcmp(pl, "unsafe-url")) snprintf(out, sizeof out, "%s", ref);
+        else if (!strcmp(pl, "origin")) { if (orig) snprintf(out, sizeof out, "%s/", orig); }
+        else if (!strcmp(pl, "same-origin")) { if (same) snprintf(out, sizeof out, "%s", ref); }
+        else if (!strcmp(pl, "no-referrer-when-downgrade")) { if (!down) snprintf(out, sizeof out, "%s", ref); }
+        else if (!strcmp(pl, "strict-origin")) { if (!down && orig) snprintf(out, sizeof out, "%s/", orig); }
+        else if (!strcmp(pl, "origin-when-cross-origin")) { if (same) snprintf(out, sizeof out, "%s", ref); else if (orig) snprintf(out, sizeof out, "%s/", orig); }
+        else { if (same) snprintf(out, sizeof out, "%s", ref); else if (!down && orig) snprintf(out, sizeof out, "%s/", orig); }
+        free(orig);
+    }
+    GCValue doc = JS_GetPropertyStr(f->ctx, JS_GetGlobalObject(f->ctx), "document");
+    if (JS_IsObject(doc)) { extern void dom_doc_set(JSContextHandle ctx, GCValue doc, const char *k, GCValue v); dom_doc_set(f->ctx, doc, "referrer", JS_NewString(f->ctx, out)); }
+}
+
 static void frame_setup_window(Frame *f) {
     JSContextHandle ctx = f->ctx;
     GCValue win = JS_GetGlobalObject(ctx);
@@ -711,8 +899,9 @@ static void frame_setup_window(Frame *f) {
         f->vt_carry = NULL;
     }
     if (JS_IsFunction(ctx, setup)) {
-        GCValue args[5] = { JS_NewString(ctx, f->url), parent_win, top, iframe, f->popup ? parent_win : JS_NULL };
-        GCValue r = JS_Call(ctx, setup, JS_UNDEFINED, 5, args);
+        GCValue args[6] = { JS_NewString(ctx, f->url), parent_win, top, iframe, f->popup ? parent_win : JS_NULL,
+                            f->popup ? JS_NewString(ctx, f->features) : JS_UNDEFINED };
+        GCValue r = JS_Call(ctx, setup, JS_UNDEFINED, 6, args);
         if (JS_IsException(r)) JS_GetException(ctx);
     } else if (JS_IsException(setup)) {
         JS_GetException(ctx);
@@ -737,11 +926,22 @@ static void frame_setup_window(Frame *f) {
 }
 
 static void frame_fire(JSContextHandle ctx, GCValue target, const char *type) {
-    GCValue ctor = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "Event");
+    /* (beforeunload: a BeforeUnloadEvent, cancelable) */
+    bool bu = !strcmp(type, "beforeunload");
+    GCValue ctor = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), bu ? "BeforeUnloadEvent" : "Event");
+    if (bu && !JS_IsFunction(ctx, ctor)) { bu = false; ctor = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "Event"); }
     if (!JS_IsFunction(ctx, ctor) || !JS_IsObject(target)) return;
-    GCValue tv = JS_NewString(ctx, type);
-    GCValue ev = JS_CallConstructor(ctx, ctor, 1, &tv);
+    GCValue args[2] = { JS_NewString(ctx, type), JS_UNDEFINED };
+    if (bu) { args[1] = JS_NewObject(ctx); JS_SetPropertyStr(ctx, args[1], "cancelable", JS_TRUE); }
+    GCValue ev = JS_CallConstructor(ctx, ctor, bu ? 2 : 1, args);
     if (!JS_IsObject(ev)) { JS_GetException(ctx); return; }
+    /* (the user agent's: trusted) */
+    GCValue tr = !strcmp(type, "load") ? JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberDispatchTrusted") : JS_UNDEFINED;   /* (not while a realm goes: unload and the rest native) */
+    if (JS_IsFunction(ctx, tr)) {
+        GCValue a2[2] = { target, ev };
+        if (JS_IsException(JS_Call(ctx, tr, JS_UNDEFINED, 2, a2))) JS_GetException(ctx);
+        return;
+    }
     js_event_target_dispatchEvent(ctx, target, 1, &ev);
 }
 
@@ -942,6 +1142,30 @@ static void frame_load(Frame *f) {
         for (const char *p = url + 5; *p && *p != ';' && *p != ',' && k + 1 < sizeof data_mime; p++)
             data_mime[k++] = (char)(*p >= 'A' && *p <= 'Z' ? *p + 32 : *p);
         if (k) data_mime[k] = 0;
+    } else if (!strncmp(url, "blob:", 5)) {
+        /* (a blob: URL: the Blob's bytes, its type from the parent's registry) */
+        extern bool image_cache_blob_bytes(const char *url, uint8_t **out, size_t *n);
+        uint8_t *d = NULL;
+        size_t n = 0;
+        if (image_cache_blob_bytes(url, &d, &n)) {
+            buf.data = (char *)d;
+            buf.size = n;
+            fetched = true;
+            data = true;
+            snprintf(data_mime, sizeof data_mime, "text/html");
+            if (SAFE_VALID(f->parent)) {
+                GCValue reg = JS_GetPropertyStr(f->parent, JS_GetGlobalObject(f->parent), "__blobRegistry");
+                GCValue bo = JS_IsObject(reg) ? JS_GetPropertyStr(f->parent, reg, url) : JS_UNDEFINED;
+                GCValue ty = JS_IsObject(bo) ? JS_GetPropertyStr(f->parent, bo, "type") : JS_UNDEFINED;
+                const char *ts = JS_IsString(ty) ? JS_ToCString(f->parent, ty) : NULL;
+                if (ts && ts[0]) {
+                    size_t k = 0;
+                    for (const char *p = ts; *p && *p != ';' && k + 1 < sizeof data_mime; p++) data_mime[k++] = (char)(*p >= 'A' && *p <= 'Z' ? *p + 32 : *p);
+                    data_mime[k] = 0;
+                }
+                if (ts) JS_FreeCString(f->parent, ts);
+            }
+        }
     } else if (!blank) {
         fetched = http_get_to_memory(url, &buf, err, sizeof(err));
     }
@@ -952,12 +1176,62 @@ static void frame_load(Frame *f) {
         snprintf(url, sizeof(url), "%s", http_last_url());
         snprintf(f->url, sizeof(f->url), "%s", url);
     }
+    /* (a popup's document whose COOP its opener's doesn't allow: a new browsing context group, severed) */
+    if (f->popup) {
+        char rc[32];
+        coop_of_headers(fetched && !data ? buf.headers : NULL, fetched && !data ? buf.headers_size : 0, rc, sizeof rc);
+        Frame *of = SAFE_VALID(f->parent) ? frame_of_realm(f->parent) : NULL;
+        const char *oc = of ? of->coop : g_page_coop;
+        if (!oc[0]) oc = "unsafe-none";
+        char *oo = SAFE_VALID(f->parent) ? realm_origin(f->parent) : NULL;
+        bool same = oo && same_origin(oo, url);
+        free(oo);
+        bool keep;
+        if (!strcmp(oc, "unsafe-none") && !strcmp(rc, "unsafe-none")) keep = true;
+        else if ((!strcmp(oc, "same-origin-allow-popups") || !strcmp(oc, "noopener-allow-popups")) && !strcmp(rc, "unsafe-none")) keep = true;
+        else if (!strcmp(oc, rc) && same && strcmp(rc, "noopener-allow-popups")) keep = true;
+        else keep = false;
+        if (!keep && !blank) f->coop_severed = true;
+        snprintf(f->coop, sizeof f->coop, "%s", rc);
+    }
+    /* (the browsing context's name: its, not the document's; kept as the next document comes) */
+    char keep_name[256] = "";
+    if (SAFE_VALID(f->ctx)) {
+        GCValue nm = JS_GetPropertyStr(f->ctx, JS_GetGlobalObject(f->ctx), "name");
+        const char *ns = JS_IsString(nm) ? JS_ToCString(f->ctx, nm) : NULL;
+        if (ns) snprintf(keep_name, sizeof keep_name, "%s", ns);
+    }
+    if (!keep_name[0] && f->wname[0]) snprintf(keep_name, sizeof keep_name, "%s", f->wname);
+    f->wname[0] = 0;
+    /* (none yet: its container's name attribute, an iframe's, frame's or object's, HTML 7.3.6) */
+    if (!keep_name[0] && !f->popup && dom_valid(f->iframe)) {
+        const char *en = dom_get_attr_str(f->iframe, "name");
+        if (en && en[0]) snprintf(keep_name, sizeof keep_name, "%s", en);
+    }
+    /* (a javascript: URL: its script's result is the new document, at the URL of the one it replaces) */
+    char *jsrc = NULL;
+    if (!strncasecmp(url, "javascript:", 11)) {
+        jsrc = strdup(url);
+        char *prev = SAFE_VALID(f->ctx) ? realm_url(f->ctx) : NULL;
+        snprintf(url, sizeof url, "%s", prev && prev[0] && strncasecmp(prev, "javascript:", 11) ? prev : "about:blank");
+        snprintf(f->url, sizeof f->url, "%s", url);
+        free(prev);
+    }
     if (!frame_new_realm(f)) {
+        free(jsrc);
         http_free_buffer(&buf);
         return;
     }
     if (!traverse) frame_history_commit(f, url, replace_entry);
     frame_setup_window(f);
+    frame_set_document_referrer(f);
+    if (keep_name[0] && SAFE_VALID(f->ctx))
+        JS_SetPropertyStr(f->ctx, JS_GetGlobalObject(f->ctx), "name", JS_NewString(f->ctx, keep_name));
+    if (f->coop_severed && SAFE_VALID(f->ctx)) {
+        static const char sev_js[] = "Object.defineProperty(window, 'opener', { value: null, writable: true, configurable: true, enumerable: true });";
+        GCValue r = JS_Eval(f->ctx, sev_js, sizeof sev_js - 1, "<coop>", JS_EVAL_TYPE_GLOBAL);
+        if (JS_IsException(r)) JS_GetException(f->ctx);
+    }
     frame_index_define(f->parent);
     JSContextHandle ctx = f->ctx;
     char mime[128];
@@ -967,23 +1241,70 @@ static void frame_load(Frame *f) {
         GCValue fd = dom_js(ctx, f->doc);
         if (JS_IsObject(fd)) JS_DefinePropertyValueStr(ctx, fd, "__cyber_ct", JS_NewString(ctx, mime), JS_PROP_CONFIGURABLE);
     }
+    /* (a Refresh header: the document's declarative refresh, as a <meta http-equiv=refresh>'s, platform_api.js) */
+    for (size_t i = 0; fetched && buf.headers && i + 8 <= buf.headers_size; i++) {
+        if ((i && buf.headers[i - 1] != '\n') || strncasecmp(buf.headers + i, "refresh:", 8)) continue;
+        const char *p = buf.headers + i + 8, *e = buf.headers + buf.headers_size;
+        while (p < e && (*p == ' ' || *p == '\t')) p++;
+        const char *le = p;
+        while (le < e && *le != '\r' && *le != '\n') le++;
+        while (le > p && (le[-1] == ' ' || le[-1] == '\t')) le--;
+        GCValue fd = dom_js(ctx, f->doc);
+        if (JS_IsObject(fd)) JS_DefinePropertyValueStr(ctx, fd, "__cyber_refresh", JS_NewStringLen(ctx, p, (size_t)(le - p)), JS_PROP_CONFIGURABLE);
+        break;
+    }
     HtmlPageStream *ps = html_page_stream_begin_frame(ctx, url);
     if (ps && fetched && xml_mime(mime)) html_page_stream_set_xml(ps, mime);
+    else if (ps && fetched && buf.data && strncasecmp(mime, "text/plain", 10) && strncasecmp(mime, "image/", 6)) {
+        /* (an HTML page's bytes: their encoding sniffed, the transport's charset first, else a same-origin parent's
+         * document's, HTML 13.2.3.2's "the encoding of the parent") */
+        char cs[64] = "";
+        for (size_t i = 0; buf.headers && i + 13 <= buf.headers_size; i++) {
+            if ((i && buf.headers[i - 1] != '\n') || strncasecmp(buf.headers + i, "content-type:", 13)) continue;
+            const char *p = buf.headers + i + 13, *e = buf.headers + buf.headers_size;
+            const char *le = p;
+            while (le < e && *le != '\r' && *le != '\n') le++;
+            for (const char *q = p; q + 8 <= le; q++) {
+                if (strncasecmp(q, "charset=", 8)) continue;
+                const char *v = q + 8;
+                size_t l = 0;
+                if (v < le && *v == '"') { v++; while (v + l < le && v[l] != '"') l++; }
+                else while (v + l < le && v[l] != ';' && v[l] != ' ' && v[l] != '\t') l++;
+                if (l >= sizeof cs) l = sizeof cs - 1;
+                memcpy(cs, v, l);
+                cs[l] = 0;
+                break;
+            }
+            break;
+        }
+        char inh[32] = "";
+        if (SAFE_VALID(f->parent) && !f->popup) {
+            char *po = realm_url(f->parent);
+            if (po && same_origin(po, url)) {
+                GCValue pd = JS_GetPropertyStr(f->parent, JS_GetGlobalObject(f->parent), "document");
+                GCValue pcs = JS_IsObject(pd) ? JS_GetPropertyStr(f->parent, pd, "characterSet") : JS_UNDEFINED;
+                const char *pc = JS_IsString(pcs) ? JS_ToCString(f->parent, pcs) : NULL;
+                if (pc) snprintf(inh, sizeof inh, "%s", pc);
+            }
+            free(po);
+        }
+        html_page_stream_set_bytes(ps, cs, inh);
+    }
     if (ps) {
         /* (about:srcdoc: the attribute's markup) */
         const char *srcdoc = !strcmp(url, "about:srcdoc") ? dom_get_attr_str(f->iframe, "srcdoc") : NULL;
         const char *js_out = NULL;
         size_t js_out_n = 0;
-        if (!strncasecmp(url, "javascript:", 11)) {
+        if (jsrc) {
             /* (a javascript: URL: what its script returns, as a string, is the document) */
-            char *body = wurl_percent_decode(url + 11);
+            char *body = wurl_percent_decode(jsrc + 11);
             GCValue v = JS_Eval(ctx, body ? body : "", body ? strlen(body) : 0, "<javascript-url>", JS_EVAL_TYPE_GLOBAL);
             free(body);
             if (JS_IsException(v)) JS_GetException(ctx);
             else if (JS_IsString(v)) js_out = JS_ToCStringLen(ctx, &js_out_n, v);
         }
         if (js_out) html_page_stream_feed(ps, js_out, js_out_n);
-        else if (!strncasecmp(url, "javascript:", 11)) { /* (nothing to show) */ }
+        else if (jsrc) { /* (nothing to show) */ }
         else if (srcdoc && srcdoc[0]) html_page_stream_feed(ps, srcdoc, strlen(srcdoc));
         else if (fetched && !strncasecmp(mime, "image/", 6) && strcasecmp(mime, "image/svg+xml")) {
             /* (an image document) */
@@ -1007,6 +1328,7 @@ static void frame_load(Frame *f) {
         html_page_stream_finish(ps, NULL);
     }
     http_free_buffer(&buf);
+    free(jsrc);
     if (!SAFE_VALID(f->ctx)) return;    /* (a script removed the frame) */
     /* (its own frames waiting to load: loaded first, so its load event comes after theirs) */
     for (int guard_ = 0; guard_ < 64 && SAFE_VALID(f->ctx); guard_++) {
@@ -1017,10 +1339,21 @@ static void frame_load(Frame *f) {
         frame_load(c);
     }
     if (!SAFE_VALID(f->ctx)) return;
+    /* (an about:blank document: its creator's encoding, HTML "create a new browsing context") */
+    const char *jsrc_ = !f->popup && dom_valid(f->iframe) ? dom_get_attr_str(f->iframe, "src") : NULL;
+    while (jsrc_ && (*jsrc_ == ' ' || *jsrc_ == '\t' || *jsrc_ == '\n')) jsrc_++;
+    if (!strncmp(f->url, "about:blank", 11) && SAFE_VALID(f->parent) && !(jsrc_ && !strncasecmp(jsrc_, "javascript:", 11))) {
+        GCValue pd = JS_GetPropertyStr(f->parent, JS_GetGlobalObject(f->parent), "document");
+        GCValue cs = JS_IsObject(pd) ? JS_GetPropertyStr(f->parent, pd, "characterSet") : JS_UNDEFINED;
+        const char *c = JS_IsString(cs) ? JS_ToCString(f->parent, cs) : NULL;
+        GCValue cd = JS_GetPropertyStr(f->ctx, JS_GetGlobalObject(f->ctx), "document");
+        if (c && strcmp(c, "UTF-8") && JS_IsObject(cd))
+            JS_DefinePropertyValueStr(f->ctx, cd, "__cyber_charset", JS_NewString(f->ctx, c), JS_PROP_CONFIGURABLE);
+    }
     static const char lifecycle_js[] =
-        "document.readyState = 'interactive';"
+        "(window.__cyberDocSet ? __cyberDocSet(document, 'readyState', 'interactive') : (document.readyState = 'interactive'));"
         "__cyberDispatchTrusted(document, new Event('DOMContentLoaded', { bubbles: true }));"
-        "document.readyState = 'complete';"
+        "(window.__cyberDocSet ? __cyberDocSet(document, 'readyState', 'complete') : (document.readyState = 'complete'));"
         "if (window.__cyberPageReveal) __cyberPageReveal();"
         "window.dispatchEvent(new Event('load'));"
         "window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: false }));";
@@ -1041,7 +1374,7 @@ static void frame_load(Frame *f) {
         /* (its parent still being parsed: the frame's load event when the parse ends, the scripts after it run first) */
         static const char later_js[] =
             "(function (fr) { if (document.readyState !== 'loading') return false;"
-            " document.addEventListener('DOMContentLoaded', function () { fr.dispatchEvent(new Event('load')); }, { once: true }); return true; })";
+            " document.addEventListener('DOMContentLoaded', function () { if (window.__cyberDispatchTrusted) __cyberDispatchTrusted(fr, new Event('load')); else fr.dispatchEvent(new Event('load')); }, { once: true }); return true; })";
         bool queued = false;
         GCValue fn = JS_Eval(f->parent, later_js, sizeof later_js - 1, "<frame_load_later>", JS_EVAL_TYPE_GLOBAL);
         GCValue fr = dom_js(f->parent, f->iframe);
@@ -1065,9 +1398,9 @@ void frame_api_doc_closed(JSContextHandle ctx, NodeId doc)
         if (dom_node_of(dv) != doc) continue;
         static const char src[] =
             "(function (win, frame) { setTimeout(function () {"
-            " try { win.document.readyState = 'complete'; } catch (e) {}"
+            " try { if (win.__cyberDocSet) win.__cyberDocSet(win.document, 'readyState', 'complete'); else win.document.readyState = 'complete'; } catch (e) {}"
             " win.dispatchEvent(new win.Event('load'));"
-            " if (frame) frame.dispatchEvent(new Event('load'));"
+            " if (frame) { if (window.__cyberDispatchTrusted) __cyberDispatchTrusted(frame, new Event('load')); else frame.dispatchEvent(new Event('load')); }"
             "}, 0); })";
         GCValue fn = JS_Eval(f->parent, src, sizeof src - 1, "<frame_doc_closed>", JS_EVAL_TYPE_GLOBAL);
         GCValue argv[2] = { JS_GetGlobalObject(f->ctx), dom_js(f->parent, f->iframe) };
@@ -1160,6 +1493,7 @@ static void frame_navigate(JSContextHandle parent, NodeId iframe, const char *ur
     }
     f->parent = parent;
     snprintf(f->url, sizeof(f->url), "%s", url);
+    frame_referrer_from(f, parent);
     f->state = FRAME_PENDING;
 }
 
@@ -1337,12 +1671,12 @@ uint32_t frame_indexed_child(JSContextHandle ctx, uint32_t index) {
  * script looks first). */
 static void frame_ensure(Frame *f) {
     if (!f || f->state != FRAME_PENDING || g_processing || SAFE_VALID(f->ctx)) return;
-    if (strncmp(f->url, "about:", 6) != 0 || !dom_valid(f->iframe) || (!f->popup && !dom_is_connected(f->iframe))) return;
+    if (!dom_valid(f->iframe) || (!f->popup && !dom_is_connected(f->iframe))) return;
     if (parent_scripts_pending(f)) return;
     g_processing = true;
-    /* (srcdoc comes in a task, as a navigation; until then the window asked
-     * for is the initial about:blank's, which then goes on as srcdoc's) */
-    if (!strncmp(f->url, "about:srcdoc", 12)) {
+    /* (srcdoc, and a URL, come in a task, as a navigation; until then the window asked
+     * for is the initial about:blank's, which then goes on as theirs, or is replaced) */
+    if (!strncmp(f->url, "about:srcdoc", 12) || strncmp(f->url, "about:", 6) != 0) {
         char target[sizeof f->url];
         snprintf(target, sizeof target, "%s", f->url);
         snprintf(f->url, sizeof f->url, "about:blank");
@@ -1403,10 +1737,22 @@ static GCValue js_iframe_get_src(JSContextHandle ctx, GCValue this_val, int argc
     const char *src = dom_get_attr_str(n, "src");
     if (!src) return JS_NewString(ctx, "");
     char *base = realm_url(ctx);
-    char *abs = wurl_resolve(base, src);
+    /* (non-ASCII in its query: in the document's encoding) */
+    char *lq = NULL;
+    for (const char *c = src; *c; c++) {
+        if ((unsigned char)*c < 0x80) continue;
+        extern char *url_legacy_query(const char *in, const char *enc);
+        GCValue od = JS_GetPropertyStr(ctx, this_val, "ownerDocument");
+        GCValue cs = JS_IsObject(od) ? JS_GetPropertyStr(ctx, od, "characterSet") : JS_UNDEFINED;
+        const char *css = JS_IsString(cs) ? JS_ToCString(ctx, cs) : NULL;
+        if (css) lq = url_legacy_query(src, css);
+        break;
+    }
+    char *abs = wurl_resolve(base, lq ? lq : src);
     free(base);
     GCValue r = JS_NewString(ctx, abs ? abs : src);
     free(abs);
+    free(lq);
     return r;
 }
 
@@ -1502,19 +1848,75 @@ static GCValue js_frame_navigate_to(JSContextHandle ctx, GCValue this_val, int a
     const char *u = argc ? JS_ToCString(ctx, argv[0]) : NULL;
     if (!f || !u) return JS_FALSE;
     char *base = realm_url(ctx);
-    char *abs = wurl_resolve(base, u);
+    /* (an about:blank or about:srcdoc document: URLs against its fallback base URL, its creator's) */
+    char *rbase = NULL;
+    if (!strncmp(base, "about:", 6)) {
+        rbase = f->fallback_base[0] ? strdup(f->fallback_base) : SAFE_VALID(f->parent) ? realm_url(f->parent) : NULL;
+    }
+    char *abs = wurl_resolve(rbase ? rbase : base, u);
+    free(rbase);
     const char *to = abs ? abs : u, *hash = strchr(to, '#');
     size_t n = hash ? (size_t)(hash - to) : strlen(to), bn = strcspn(base, "#");
     bool same = hash && n == bn && !strncmp(to, base, n);
-    if (argc > 1 && JS_ToBool(ctx, argv[1])) same = false;     /* (a reload) */
+    bool reload = argc > 1 && JS_ToBool(ctx, argv[1]);
+    if (reload) same = false;     /* (a reload) */
+    /* (the initial about:blank's reload, with its navigation still to come: nothing) */
+    if (reload && f->state == FRAME_PENDING && !strncmp(base, "about:blank", 11) && strncmp(f->url, "about:blank", 11)) {
+        free(abs);
+        free(base);
+        JS_FreeCString(ctx, u);
+        return JS_TRUE;
+    }
     if (!same) {
         snprintf(f->url, sizeof(f->url), "%s", to);
+        frame_referrer_from(f, ctx);
         f->state = FRAME_PENDING;
     }
     free(abs);
     free(base);
     JS_FreeCString(ctx, u);
     return same ? JS_FALSE : JS_TRUE;
+}
+
+/* (HTML's "tokenize the features argument": the value of one feature, lowercased name, or NULL if absent) */
+static bool feat_sep(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r' || c == '=' || c == ','; }
+static bool feat_ws(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r'; }
+static bool feat_get(const char *in, const char *want, char *val, size_t cap) {
+    bool found = false;
+    const char *p = in;
+    while (*p) {
+        char name[64]; size_t nn = 0;
+        val[0] = 0;
+        while (*p && feat_sep(*p)) p++;
+        while (*p && !feat_sep(*p)) { if (nn + 1 < sizeof name) name[nn++] = (char)tolower((unsigned char)*p); p++; }
+        name[nn] = 0;
+        if (!strcmp(name, "screenx")) strcpy(name, "left");
+        else if (!strcmp(name, "screeny")) strcpy(name, "top");
+        else if (!strcmp(name, "innerwidth")) strcpy(name, "width");
+        else if (!strcmp(name, "innerheight")) strcpy(name, "height");
+        while (*p && *p != '=') { if (*p == ',' || !feat_sep(*p)) break; p++; }
+        char v[256]; size_t vn = 0;
+        if (*p && feat_sep(*p)) {
+            while (*p && feat_sep(*p)) { if (*p == ',') break; p++; }
+            while (*p && !feat_sep(*p)) { if (vn + 1 < sizeof v) v[vn++] = *p; p++; }
+        }
+        v[vn] = 0;
+        if (nn && !strcmp(name, want)) { snprintf(val, cap, "%s", v); found = true; }
+    }
+    if (found) return true;
+    val[0] = 0;
+    return false;
+}
+/* ("parse a boolean feature": empty, yes or true; else an integer not 0) */
+static bool feat_bool(const char *in, const char *want) {
+    char v[256];
+    if (!feat_get(in, want, v, sizeof v)) return false;
+    if (!v[0] || !strcasecmp(v, "yes") || !strcasecmp(v, "true")) return true;
+    const char *q = v;
+    while (feat_ws(*q)) q++;
+    if (*q == '+' || *q == '-') q++;
+    if (!isdigit((unsigned char)*q)) return false;
+    return strtol(v, NULL, 10) != 0;
 }
 
 /* window.open: only an empty window, a browsing context with no element in
@@ -1530,17 +1932,61 @@ static GCValue js_window_open(JSContextHandle ctx, GCValue this_val, int argc, G
         if (!blank) {
             if (!cyber_getenv("CYBER_ALLOW_POPUPS")) { JS_FreeCString(ctx, u); return JS_NULL; }
             char *base = realm_url(ctx);
-            to = wurl_resolve(base, u);
+            /* (its query in the document's encoding, URL parsing's encoding override) */
+            char *lq = NULL;
+            {
+                bool wide = false;
+                for (const unsigned char *p = (const unsigned char *)u; *p && !wide; p++) wide = *p >= 0x80;
+                GCValue dv = wide ? JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document") : JS_UNDEFINED;
+                GCValue cs = JS_IsObject(dv) ? JS_GetPropertyStr(ctx, dv, "characterSet") : JS_UNDEFINED;
+                const char *c = JS_IsString(cs) ? JS_ToCString(ctx, cs) : NULL;
+                extern char *url_legacy_query(const char *in, const char *enc);
+                if (c && strcasecmp(c, "UTF-8")) lq = url_legacy_query(u, c);
+            }
+            to = wurl_resolve(base, lq ? lq : u);
+            free(lq);
             free(base);
         }
         JS_FreeCString(ctx, u);
     }
     bool noopener = false;
-    if (argc > 2 && JS_IsString(argv[2])) {
+    char features[512] = "";
+    if (argc > 2 && !JS_IsUndefined(argv[2])) {
         const char *feat = JS_ToCString(ctx, argv[2]);
         if (feat) {
-            noopener = strstr(feat, "noopener") || strstr(feat, "noreferrer");
+            snprintf(features, sizeof features, "%s", feat);
+            noopener = feat_bool(feat, "noopener") || feat_bool(feat, "noreferrer");
             JS_FreeCString(ctx, feat);
+        }
+    }
+    /* (a target name: a navigable of that name gets the URL, a child frame first; "_self" this one; else a new popup with it) */
+    char tname[256] = "";
+    if (argc > 1 && !JS_IsUndefined(argv[1])) {
+        const char *tn = JS_ToCString(ctx, argv[1]);
+        if (tn) { snprintf(tname, sizeof tname, "%s", tn); JS_FreeCString(ctx, tn); }
+    }
+    if (tname[0] && strcasecmp(tname, "_blank") && !noopener) {
+        Frame *hit = NULL;
+        if (!strcasecmp(tname, "_self")) {
+            if (to) {
+                GCValue loc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "location");
+                if (JS_IsObject(loc)) { GCValue r = JS_SetPropertyStr(ctx, loc, "href", JS_NewString(ctx, to)) < 0 ? JS_EXCEPTION : JS_UNDEFINED; if (JS_IsException(r)) JS_GetException(ctx); }
+                free(to);
+            }
+            return JS_GetGlobalObject(ctx);
+        }
+        uint32_t cid = frame_named_child(ctx, tname, strlen(tname));
+        for (Frame *q = g_frames; q && !hit; q = q->next) if (cid && q->id == cid) hit = q;
+        for (Frame *q = g_frames; q && !hit; q = q->next) {
+            if (!SAFE_VALID(q->ctx) || q->dead || q->closing) continue;
+            GCValue nm = JS_GetPropertyStr(q->ctx, JS_GetGlobalObject(q->ctx), "name");
+            const char *ns = JS_IsString(nm) ? JS_ToCString(q->ctx, nm) : NULL;
+            if (ns && !strcmp(ns, tname)) hit = q;
+            if (ns) JS_FreeCString(q->ctx, ns);
+        }
+        if (hit) {
+            if (to) { snprintf(hit->url, sizeof(hit->url), "%s", to); frame_referrer_from(hit, ctx); hit->state = FRAME_PENDING; free(to); }
+            return SAFE_VALID(hit->ctx) ? window_seen_from(ctx, hit->id) : JS_NULL;
         }
     }
     GCValue g = JS_GetGlobalObject(ctx), doc = JS_GetPropertyStr(ctx, g, "document");
@@ -1565,10 +2011,17 @@ static GCValue js_window_open(JSContextHandle ctx, GCValue this_val, int argc, G
     if (!f) return JS_NULL;
     f->popup = true;
     f->noopener = noopener;
+    snprintf(f->features, sizeof f->features, "%s", features);
     frame_ensure(f);
+    /* (its name: the target's) */
+    if (tname[0] && strcasecmp(tname, "_blank")) {
+        snprintf(f->wname, sizeof f->wname, "%s", tname);
+        if (SAFE_VALID(f->ctx)) JS_SetPropertyStr(f->ctx, JS_GetGlobalObject(f->ctx), "name", JS_NewString(f->ctx, tname));
+    }
     /* (its initial document first, as the opener can reach it at once) */
     if (to) {
         snprintf(f->url, sizeof(f->url), "%s", to);
+        if (!noopener) frame_referrer_from(f, ctx);
         f->state = FRAME_PENDING;
         free(to);
     }
@@ -1661,7 +2114,87 @@ static GCValue js_frame_traverse(JSContextHandle ctx, GCValue this_val, int argc
     return JS_TRUE;
 }
 
+/* __cyberSharedHub(): one object for the page and all its frames and popups (BroadcastChannel's registry), on the page's global */
+static GCValue js_shared_hub(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    JSContextHandle m = SAFE_VALID(g_js_context) ? g_js_context : ctx;
+    GCValue g = JS_GetGlobalObject(m);
+    GCValue h = JS_GetPropertyStr(m, g, "__cyberSharedHubObj");
+    if (!JS_IsObject(h)) {
+        h = JS_NewObject(m);
+        JS_DefinePropertyValueStr(m, g, "__cyberSharedHubObj", h, JS_PROP_CONFIGURABLE);
+    }
+    return h;
+}
+
+/* __cyberFrameAllow(feature): the allowlist this realm's frame element's allow attribute gives the
+ * feature ("'none'", "*", ...), or null; __cyberFrameChainHidden(): whether this frame, or one it is
+ * in, is not rendered (no box, visibility hidden, or no area), across origins */
+static GCValue js_frame_allow(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    Frame *f = frame_of_realm(ctx);
+    if (!f || f->popup || !dom_valid(f->iframe) || argc < 1) return JS_NULL;
+    const char *al = dom_get_attr_str(f->iframe, "allow");
+    const char *feat = JS_ToCString(ctx, argv[0]);
+    if (!al || !feat) return JS_NULL;
+    size_t fl = strlen(feat);
+    for (const char *p = al; *p; ) {
+        while (*p == ' ' || *p == ';' || *p == '\t' || *p == '\n') p++;
+        const char *e = p;
+        while (*e && *e != ';') e++;
+        if ((size_t)(e - p) >= fl && !strncasecmp(p, feat, fl) && (p[fl] == ' ' || p[fl] == '\t' || p + fl == e)) {
+            const char *v = p + fl;
+            while (v < e && (*v == ' ' || *v == '\t')) v++;
+            const char *ve = e;
+            while (ve > v && (ve[-1] == ' ' || ve[-1] == '\t')) ve--;
+            return JS_NewStringLen(ctx, v, (size_t)(ve - v));
+        }
+        p = *e ? e + 1 : e;
+    }
+    return JS_NULL;
+}
+static GCValue js_frame_chain_hidden(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    static const char probe[] =
+        "(function (el) { if (!el || !el.isConnected) return true; var cs = el.ownerDocument.defaultView.getComputedStyle(el);"
+        " if (cs.display === 'none' || cs.visibility === 'hidden' || cs.visibility === 'collapse') return true;"
+        " var r = el.getBoundingClientRect(); return !(r.width > 0 && r.height > 0) || el.clientWidth === 0 || el.clientHeight === 0; })";
+    for (Frame *f = frame_of_realm(ctx); f && !f->popup; ) {
+        if (!SAFE_VALID(f->parent) || !dom_valid(f->iframe)) return JS_FALSE;
+        GCValue fn = JS_Eval(f->parent, probe, sizeof probe - 1, "<frame_hidden>", JS_EVAL_TYPE_GLOBAL);
+        if (JS_IsFunction(f->parent, fn)) {
+            GCValue el = dom_js(f->parent, f->iframe);
+            GCValue r = JS_Call(f->parent, fn, JS_UNDEFINED, 1, &el);
+            if (JS_IsException(r)) JS_GetException(f->parent);
+            else if (JS_ToBool(f->parent, r) > 0) return JS_TRUE;
+        } else JS_GetException(f->parent);
+        f = frame_of_realm(f->parent);
+    }
+    return JS_FALSE;
+}
+
+/* __cyberDomain(): this realm's document.domain as set, or null; __cyberDomain(v): set it */
+static GCValue js_cyber_domain(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc < 1) {
+        const char *d = realm_domain(ctx);
+        return d ? JS_NewString(ctx, d) : JS_NULL;
+    }
+    const char *v = JS_ToCString(ctx, argv[0]);
+    if (!v) return JS_UNDEFINED;
+    if (ctx == g_js_context) { snprintf(g_page_domain, sizeof g_page_domain, "%s", v); g_page_domain_doc = g_main_doc; }
+    else {
+        Frame *f = frame_of_realm(ctx);
+        if (f) { snprintf(f->domain, sizeof f->domain, "%s", v); f->domain_doc = f->doc; }
+    }
+    return JS_UNDEFINED;
+}
+
 void frame_api_install(JSContextHandle ctx, GCValue global) {
+    JS_DefinePropertyValueStr(ctx, global, "__cyberDomain", JS_NewCFunction(ctx, js_cyber_domain, "__cyberDomain", 1), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberFrameAllow", JS_NewCFunction(ctx, js_frame_allow, "__cyberFrameAllow", 1), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberFrameChainHidden", JS_NewCFunction(ctx, js_frame_chain_hidden, "__cyberFrameChainHidden", 0), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberSharedHub", JS_NewCFunction(ctx, js_shared_hub, "__cyberSharedHub", 0), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberTabNavigate", JS_NewCFunction(ctx, js_tab_navigate, "__cyberTabNavigate", 1), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberWindowById", JS_NewCFunction(ctx, js_window_by_id, "__cyberWindowById", 1), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberFrameTraverse", JS_NewCFunction(ctx, js_frame_traverse, "__cyberFrameTraverse", 1), JS_PROP_CONFIGURABLE);

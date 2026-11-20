@@ -29,6 +29,7 @@
 #include <quickjs_gc_unified.h>
 #include "dom_js.h"
 #include "display_list.h"
+#include "canvas2d.h"
 #include <math.h>
 void dom_request_layout(void);
 #include "css_style.h"
@@ -86,23 +87,99 @@ static const char k_html_element_js[] =
 "    if (prev && prev.nodeType === 1 && prev.localName !== 'body' && prev !== el.ownerDocument.documentElement) return __cyberElState(prev, ST_VISIBLE);\n"
 "    return window.__cyberLastInput !== 'mouse';\n"
 "  }\n"
+"  /* (HTML 6.6.2: a focusable area: a control, a link, an editing host, one with a tabindex, ... that is rendered and not inert) */\n"
+"  var HTMLNS = 'http://www.w3.org/1999/xhtml', SVGNS = 'http://www.w3.org/2000/svg';\n"
+"  function focusableArea(el) {\n"
+"    if (!el || el.nodeType !== 1) return false;\n"
+"    var ln = el.localName, ns = el.namespaceURI, ti = el.getAttribute('tabindex');\n"
+"    var tab = ti !== null && /^\\s*[-+]?\\d+/.test(ti);\n"
+"    var own = tab;\n"
+"    if (!own && ns === HTMLNS) {\n"
+"      if (ln === 'a' || ln === 'area') own = el.hasAttribute('href');\n"
+"      else if (ln === 'input') own = String(el.getAttribute('type') || '').toLowerCase() !== 'hidden';\n"
+"      else if (/^(button|select|textarea|iframe|embed|object)$/.test(ln)) own = true;\n"
+"      else if (ln === 'audio' || ln === 'video') own = el.hasAttribute('controls');\n"
+"      else if (ln === 'summary') { var dp = el.parentElement; own = !!dp && dp.localName === 'details' && dp.querySelector(':scope > summary') === el; }\n"
+"      else if (ln === 'option') { var os = el.closest('select'); own = !!os && os.hasAttribute('data-cyber-open'); }\n"
+"      else if (ln === 'menuitem') own = !el.hasAttribute('disabled');\n"
+"      if (!own && el.isContentEditable && (!el.parentElement || !el.parentElement.isContentEditable)) own = true;\n"
+"    } else if (!own && ns === SVGNS && ln === 'a') own = el.hasAttribute('href') || el.hasAttributeNS('http://www.w3.org/1999/xlink', 'href');\n"
+"    if (!own) return false;\n"
+"    try { if (el.matches(':disabled')) return false; } catch (e) {}\n"
+"    if (el.closest && el.closest('[inert]')) return false;\n"
+"    /* (blocked by a modal dialog: outside the topmost one, and not in a popover shown over it) */\n"
+"    try {\n"
+"      var md = el.ownerDocument && el.ownerDocument.querySelectorAll(':modal');\n"
+"      if (md && md.length) {\n"
+"        var mo = window.__cyberModalOrder || [], top = null, inTop = false;\n"
+"        for (var mi = mo.length - 1; mi >= 0 && !top; mi--) if (mo[mi].isConnected && mo[mi].matches(':modal')) top = mo[mi];\n"
+"        if (!top) top = md[md.length - 1];\n"
+"        for (var fp = el; fp && !inTop; fp = fp.assignedSlot || fp.parentNode || (fp.host || null)) { if (fp === top) inTop = true; if (fp.nodeType === 1 && fp !== top && fp.matches && fp.matches(':popover-open')) inTop = true; }\n"
+"        if (!inTop) return false;\n"
+"      }\n"
+"    } catch (e) {}\n"
+"    if (ln === 'area') return true;\n"
+"    /* (a canvas's fallback content: focusable with no box, while the canvas is rendered and nothing on the way down is display: none) */\n"
+"    for (var cv = el.parentElement; cv; cv = cv.parentElement) if (cv.localName === 'canvas' && cv.namespaceURI === HTMLNS) {\n"
+"      if (!cv.getClientRects().length) return false;\n"
+"      try { for (var up = el; up && up !== cv; up = up.parentElement) { if (up.hasAttribute('hidden') || (up.style && up.style.display === 'none')) return false; } } catch (e) {}\n"
+"      return true;\n"
+"    }\n"
+"    try {\n"
+"      var cs = getComputedStyle(el);\n"
+"      if (cs.visibility === 'hidden' || cs.visibility === 'collapse') return false;\n"
+"      /* (the popover or dialog itself just shown: its style and boxes may be from before, during an event's dispatch) */\n"
+"      var justShown = el.matches && (el.matches(':popover-open, dialog[open]') || (cs.display !== 'none' && !!el.closest(':popover-open, dialog[open]')));\n"
+"      /* (an SVG element inside an <svg>: rendered when its outermost <svg> is, its own geometry not boxes) */\n"
+"      var boxEl = el;\n"
+"      if (ns === SVGNS && el.ownerSVGElement) { if (cs.display === 'none') return false; while (boxEl.ownerSVGElement) boxEl = boxEl.ownerSVGElement; }\n"
+"      if (cs.display !== 'contents' && !boxEl.getClientRects().length && !justShown) return false;\n"
+"    } catch (e) {}\n"
+"    return true;\n"
+"  }\n"
+"  /* (a shadow host that delegates focus: its first focusable area, flat tree order) */\n"
+"  function delegateOf(el) {\n"
+"    var sr = el.shadowRoot;\n"
+"    if (!sr || !sr.delegatesFocus) return null;\n"
+"    var stack = Array.prototype.slice.call(sr.childNodes).reverse();\n"
+"    while (stack.length) {\n"
+"      var n = stack.pop();\n"
+"      if (n.nodeType !== 1) continue;\n"
+"      if (focusableArea(n)) return n;\n"
+"      var d = n.shadowRoot && n.shadowRoot.delegatesFocus ? delegateOf(n) : null;\n"
+"      if (d) return d;\n"
+"      var ch = Array.prototype.slice.call(n.childNodes);\n"
+"      for (var i = ch.length - 1; i >= 0; i--) stack.push(ch[i]);\n"
+"    }\n"
+"    return null;\n"
+"  }\n"
+"  Object.defineProperty(window, '__cyberFocusableArea', { configurable: true, value: focusableArea });\n"
 "  method('focus', function(options){\n"
 "    var doc = this.ownerDocument || document;\n"
 "    if (!this.isConnected) return;\n"
+"    var self = this;\n"
+"    /* (not a focusable area: a host's delegate, else nothing; a dialog: its own focusing steps) */\n"
+"    if (!focusableArea(self) && !(self.localName === 'dialog' && self.namespaceURI === HTMLNS)) {\n"
+"      var dl = delegateOf(self);\n"
+"      if (!dl) return;\n"
+"      self = dl;\n"
+"    }\n"
 "    var prev = doc.activeElement;\n"
-"    if (prev === this) return;\n"
-"    var visible = focusVisible(this, prev);\n"
-"    if (prev && prev !== doc.body && prev.dispatchEvent) { focusState(prev, false); fire(prev, 'blur', false, this); fire(prev, 'focusout', true, this); }\n"
-"    doc.activeElement = this;\n"
-"    focusState(this, true, visible);\n"
-"    var boxless = false; try { boxless = getComputedStyle(this).display === 'contents'; } catch (e) {}   /* (no box: nothing to scroll to) */\n"
-"    if (!(options && options.preventScroll) && !boxless && this.scrollIntoViewIfNeeded) this.scrollIntoViewIfNeeded();\n"
-"    fire(this, 'focus', false, prev); fire(this, 'focusin', true, prev);\n"
+"    if (prev === self) return;\n"
+"    var visible = focusVisible(self, prev);\n"
+"    if (prev && prev !== doc.body && prev.dispatchEvent) { focusState(prev, false); fire(prev, 'blur', false, self); fire(prev, 'focusout', true, self); }\n"
+"    if (window.__cyberDocSet) __cyberDocSet(doc, 'activeElement', self); else doc.activeElement = self;\n"
+"    window.__cyberFocusGen = (window.__cyberFocusGen | 0) + 1;\n"
+"    focusState(self, true, visible);\n"
+"    var boxless = false; try { boxless = getComputedStyle(self).display === 'contents'; } catch (e) {}   /* (no box: nothing to scroll to) */\n"
+"    if (!(options && options.preventScroll) && !boxless && self.scrollIntoViewIfNeeded) self.scrollIntoViewIfNeeded();\n"
+"    fire(self, 'focus', false, prev); fire(self, 'focusin', true, prev);\n"
 "  });\n"
 "  method('blur', function(){\n"
 "    var doc = this.ownerDocument || document;\n"
 "    if (doc.activeElement !== this) return;\n"
-"    doc.activeElement = doc.body;\n"
+"    if (window.__cyberDocSet) __cyberDocSet(doc, 'activeElement', doc.body); else doc.activeElement = doc.body;\n"
+"    window.__cyberFocusGen = (window.__cyberFocusGen | 0) + 1;\n"
 "    focusState(this, false);\n"
 "    fire(this, 'blur', false, null); fire(this, 'focusout', true, null);\n"
 "  });\n"
@@ -133,7 +210,7 @@ static const char k_html_element_js[] =
 "              set: function(v){ this.setAttribute('translate', v ? 'yes' : 'no'); }});\n"
 "  var FOCUSABLE = {A:1, BUTTON:1, INPUT:1, SELECT:1, TEXTAREA:1, IFRAME:1, SUMMARY:1};\n"
 "  def('tabIndex', {get: function(){ var v = parseInt(this.getAttribute('tabindex'), 10);\n"
-"                if (!isNaN(v)) return v;\n"
+"                if (!isNaN(v) && v >= -2147483648 && v <= 2147483647) return v === 0 ? 0 : v;\n"
 "                var t = String(this.tagName || '').toUpperCase();\n"
 "                return FOCUSABLE[t] && (t !== 'A' || this.hasAttribute('href')) ? 0 : -1; },\n"
 "              set: function(v){ this.setAttribute('tabindex', String(v | 0)); }});\n"
@@ -231,7 +308,8 @@ static const char k_script_js[] =
 "  Object.defineProperty(P, 'src', {configurable: true, enumerable: true,\n"
 "    get: function(){ var v = this.getAttribute('src'); if (v == null) return '';\n"
 "      try { return new URL(v, document.baseURI || location.href).href; } catch (e) { return v; } },\n"
-"    set: function(v){ Object.defineProperty(this, 'src', {value: v, writable: true, configurable: true, enumerable: true}); }});\n"
+"    set: function(v){ if (!this.isConnected) { this.setAttribute('src', String(v)); return; }\n"
+"      Object.defineProperty(this, 'src', {value: v, writable: true, configurable: true, enumerable: true}); }});\n"
 "  Object.defineProperty(P, 'text', {configurable: true, enumerable: true,\n"
 "    get: function(){ return this.textContent; }, set: function(v){ this.textContent = v; }});\n"
 "})";
@@ -385,14 +463,32 @@ static GCValue js_options(JSContextHandle ctx, GCValue this_val, int argc, GCVal
         option = css_atom_intern("option", 6);
         optgroup = css_atom_intern("optgroup", 8);
     }
+    static CssAtom hr_, select_, datalist_;
+    if (!hr_) { css_atom_reserve(3); hr_ = css_atom_intern("hr", 2); select_ = css_atom_intern("select", 6); datalist_ = css_atom_intern("datalist", 8); }
+    /* (customizable select: options inside wrappers too; not inside an option, hr, datalist or another select, nor a second optgroup) */
     uint32_t k = 0, sel = dom_slot(id);
-    for (uint32_t c = g_dom.first[sel]; c; c = g_dom.next[c]) {
-        if (g_dom.kind[c] != DOM_K_ELEMENT) continue;
-        if (g_dom.tag[c] == option) JS_SetPropertyUint32(ctx, arr, k++, dom_js(ctx, dom_id_of(c)));
-        else if (g_dom.tag[c] == optgroup)
-            for (uint32_t o = g_dom.first[c]; o; o = g_dom.next[o])
-                if (g_dom.kind[o] == DOM_K_ELEMENT && g_dom.tag[o] == option)
-                    JS_SetPropertyUint32(ctx, arr, k++, dom_js(ctx, dom_id_of(o)));
+    uint32_t stack[64];
+    unsigned char og[64];
+    int sp = 0;
+    uint32_t c = g_dom.first[sel];
+    unsigned char in_og = 0;
+    while (c || sp > 0) {
+        if (!c) { sp--; c = g_dom.next[stack[sp]]; in_og = sp > 0 ? og[sp - 1] : 0; if (sp > 0) in_og = og[sp - 1]; else in_og = 0; continue; }
+        if (g_dom.kind[c] == DOM_K_ELEMENT && g_dom.ns[c] == DOM_NS_HTML) {
+            CssAtom t = g_dom.tag[c];
+            if (t == option) { JS_SetPropertyUint32(ctx, arr, k++, dom_js(ctx, dom_id_of(c))); c = g_dom.next[c]; continue; }
+            if (t == hr_ || t == select_ || t == datalist_ || (t == optgroup && in_og)) { c = g_dom.next[c]; continue; }
+            if (g_dom.first[c] && sp < 64) {
+                unsigned char now = in_og || t == optgroup;
+                stack[sp] = c;
+                og[sp] = now;
+                sp++;
+                in_og = now;
+                c = g_dom.first[c];
+                continue;
+            }
+        }
+        c = g_dom.next[c];
     }
     return arr;
 }
@@ -474,6 +570,14 @@ static GCValue js_el_state(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     if (argc > 2 && !JS_IsUndefined(argv[2])) {
         uint16_t was = g_dom.state[s];
         uint16_t now = JS_ToBool(ctx, argv[2]) ? (uint16_t)(was | mask) : (uint16_t)(was & ~mask);
+        /* (the focused element, for its removal: dom_api.c) */
+        {
+            extern NodeId g_dom_focused;
+            if (mask & DOM_ST_FOCUS) {
+                if (now & DOM_ST_FOCUS) g_dom_focused = el;
+                else if (g_dom_focused == el) g_dom_focused = DOM_NULL;
+            }
+        }
         if (now != was) {
             g_dom.state[s] = now;
             dom_mark_dirty(el, DOMF_DIRTY_ATTR);
@@ -527,6 +631,7 @@ static GCValue js_highlight_set(JSContextHandle ctx, GCValue this_val, int argc,
 
 void html_element_api_install(JSContextHandle ctx, GCValue element_proto)
 {
+    canvas2d_api_install(ctx);
     JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberHighlightSet",
                               JS_NewCFunction(ctx, js_highlight_set, "__cyberHighlightSet", 3), JS_PROP_CONFIGURABLE);
     if (!JS_IsObject(element_proto)) return;

@@ -13,6 +13,76 @@
  */
 (function (global, win) {
     'use strict';
+    /* (window listeners added while this runs wait for the DOM event system, dom_events.js, which comes after it:
+     * form_controls.js adds them; later ones go straight in) */
+    var afterEvents = [], eventsIn = false;
+    function onWin(type, fn, cap) {
+        if (eventsIn) global.addEventListener(type, fn, cap);
+        else afterEvents.push(function () { global.addEventListener(type, fn, cap); });
+    }
+    Object.defineProperty(global, '__cyberAfterEvents', { configurable: true, value: function () {
+        eventsIn = true;
+        afterEvents.splice(0).forEach(function (f) { try { f(); } catch (e) { } });
+    } });
+    /* User activation (HTML 6.4.3): trusted input events activate; transient for 5 s */
+    (function () {
+        if (!global.addEventListener) return;
+        var last = -Infinity, ever = false;
+        var now = function () { return global.performance && global.performance.now ? global.performance.now() : Date.now(); };
+        /* (the listeners: once the DOM event system is in, dom_events.js runs after this; form_controls.js calls it) */
+        Object.defineProperty(global, '__cyberActivationListen', { configurable: true, value: function () {
+            ['keydown', 'mousedown', 'pointerdown', 'pointerup', 'mouseup', 'touchend'].forEach(function (t) {
+                global.addEventListener(t, function (e) { if (e.isTrusted && !(t === 'keydown' && e.key === 'Escape')) { last = now(); ever = true; } }, true);
+            });
+        } });
+        Object.defineProperty(global, '__cyberTransientActivation', { configurable: true, value: function () { return now() - last < 5000; } });
+        Object.defineProperty(global, '__cyberConsumeActivation', { configurable: true, value: function () { last = -Infinity; } });
+        function UserActivation() { throw new TypeError('Illegal constructor'); }
+        var UP = UserActivation.prototype;
+        Object.defineProperty(UP, 'hasBeenActive', { configurable: true, enumerable: true, get: function hasBeenActive() { return ever; } });
+        Object.defineProperty(UP, 'isActive', { configurable: true, enumerable: true, get: function isActive() { return now() - last < 5000; } });
+        Object.defineProperty(UP, Symbol.toStringTag, { configurable: true, value: 'UserActivation' });
+        Object.defineProperty(global, 'UserActivation', { configurable: true, writable: true, value: UserActivation });
+        var ua = Object.create(UP);
+        var nav = global.navigator, NP = nav && Object.getPrototypeOf(nav);
+        var tgt = NP && NP !== Object.prototype ? NP : nav;   /* (a plain-object navigator: on it, never on Object.prototype) */
+        if (tgt && !Object.prototype.hasOwnProperty.call(tgt, 'userActivation')) Object.defineProperty(tgt, 'userActivation', { configurable: true, enumerable: true, get: function userActivation() { return ua; } });
+    })();
+    /* btoa / atob (HTML 8.3): binary strings, forgiving-base64 decoding */
+    (function () {
+        var B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+        function bad(msg) { return new global.DOMException(msg, 'InvalidCharacterError'); }
+        var btoa = function btoa(data) {
+            if (arguments.length < 1) throw new TypeError("Failed to execute 'btoa': 1 argument required, but only 0 present.");
+            var s = String(data), out = '', i;
+            for (i = 0; i < s.length; i++) if (s.charCodeAt(i) > 255) throw bad("Failed to execute 'btoa': The string to be encoded contains characters outside of the Latin1 range.");
+            for (i = 0; i + 2 < s.length; i += 3) {
+                var n = (s.charCodeAt(i) << 16) | (s.charCodeAt(i + 1) << 8) | s.charCodeAt(i + 2);
+                out += B64[n >> 18] + B64[(n >> 12) & 63] + B64[(n >> 6) & 63] + B64[n & 63];
+            }
+            var r = s.length - i;
+            if (r === 1) { var a = s.charCodeAt(i) << 16; out += B64[a >> 18] + B64[(a >> 12) & 63] + '=='; }
+            else if (r === 2) { var b = (s.charCodeAt(i) << 16) | (s.charCodeAt(i + 1) << 8); out += B64[b >> 18] + B64[(b >> 12) & 63] + B64[(b >> 6) & 63] + '='; }
+            return out;
+        };
+        var atob = function atob(data) {
+            if (arguments.length < 1) throw new TypeError("Failed to execute 'atob': 1 argument required, but only 0 present.");
+            var s = String(data).replace(/[\t\n\f\r ]/g, '');
+            if (s.length % 4 === 0) s = s.replace(/={1,2}$/, '');
+            if (s.length % 4 === 1 || /[^A-Za-z0-9+/]/.test(s)) throw bad("Failed to execute 'atob': The string to be decoded is not correctly encoded.");
+            var out = '', buf = 0, bits = 0;
+            for (var i = 0; i < s.length; i++) {
+                buf = (buf << 6) | B64.indexOf(s[i]); bits += 6;
+                if (bits >= 8) { bits -= 8; out += String.fromCharCode((buf >> bits) & 255); }
+            }
+            return out;
+        };
+        [global, win].forEach(function (g) {
+            if (!g) return;
+            Object.defineProperty(g, 'btoa', { value: btoa, writable: true, configurable: true, enumerable: true });
+            Object.defineProperty(g, 'atob', { value: atob, writable: true, configurable: true, enumerable: true });
+        });
+    })();
     function define(obj, name, value) {
         Object.defineProperty(obj, name, { value: value, writable: true, configurable: true });
     }
@@ -69,6 +139,223 @@
         Object.setPrototypeOf(C, HE);
         expose(name, C);
     });
+
+    /* (the menu elements, whatwg/html#12011 (tentative): interfaces as the IDL has them) */
+    if (HE) [['HTMLMenuBarElement', 0], ['HTMLMenuListElement', 0], ['HTMLSubMenuElement', 0], ['HTMLMenuItemElement', 1],
+             ['HTMLMenuItemCheckboxElement', 2], ['HTMLMenuItemRadioElement', 2]].forEach(function (p) {
+        var name = p[0];
+        if (typeof global[name] === 'function') return;
+        var C = function () { throw new TypeError('Illegal constructor'); };
+        Object.defineProperty(C, 'name', { value: name, configurable: true });
+        Object.defineProperty(C, 'length', { value: 0, configurable: true });
+        var P = Object.create(HE.prototype);
+        Object.defineProperty(P, 'constructor', { value: C, writable: true, configurable: true });
+        Object.defineProperty(P, Symbol.toStringTag, { value: name, configurable: true });
+        Object.defineProperty(C, 'prototype', { value: P, writable: false, enumerable: false, configurable: false });
+        Object.setPrototypeOf(C, HE);
+        var acc = function (k, get, set) {
+            var g = { get: function () { if (!(this instanceof C)) throw new TypeError('Illegal invocation'); return get.call(this); } }.get;
+            var st = { set: function (v) { if (!(this instanceof C)) throw new TypeError('Illegal invocation'); set.call(this, v); } }.set;
+            Object.defineProperty(g, 'name', { value: 'get ' + k });
+            Object.defineProperty(st, 'name', { value: 'set ' + k });
+            Object.defineProperty(P, k, { get: g, set: st, enumerable: true, configurable: true });
+        };
+        var bool = function (k, attr) {
+            acc(k, function () { return this.hasAttribute(attr); }, function (v) { if (v) this.setAttribute(attr, ''); else this.removeAttribute(attr); });
+        };
+        if (p[1] >= 1) bool('disabled', 'disabled');
+        if (p[1] === 2) {
+            var CHK = Symbol('checked');
+            /* (its checkedness: the defaultchecked attribute's until set; :checked with it; a radio's set unchecks the rest of its fieldset's) */
+            var setChk = function (el, v) {
+                el[CHK] = !!v;
+                if (typeof global.__cyberElState === 'function') { global.__cyberElState(el, 128, true); global.__cyberElState(el, 64, !!v); }
+            };
+            var radio = name === 'HTMLMenuItemRadioElement';
+            acc('checked', function () { return CHK in this ? this[CHK] : this.hasAttribute('defaultchecked'); }, function (v) {
+                setChk(this, v);
+                if (radio && v) {
+                    var grp = this.parentElement;
+                    while (grp && grp.localName !== 'fieldset' && grp.localName !== 'menulist' && grp.localName !== 'menubar') grp = grp.parentElement;
+                    if (grp) {
+                        var others = grp.querySelectorAll('menuitemradio');
+                        for (var oi = 0; oi < others.length; oi++) if (others[oi] !== this && (CHK in others[oi] ? others[oi][CHK] : others[oi].hasAttribute('defaultchecked'))) setChk(others[oi], false);
+                    }
+                }
+            });
+            bool('defaultChecked', 'defaultchecked');
+        }
+        Object.defineProperty(global, name, { value: C, writable: true, configurable: true, enumerable: false });
+    });
+
+    /* (the permission elements, tentative: their interfaces, members as the IDL has them, at rest) */
+    if (HE) (function () {
+        var mk = function (name, attrs, ops) {
+            if (typeof global[name] === 'function') return;
+            var C = function () { throw new TypeError('Illegal constructor'); };
+            Object.defineProperty(C, 'name', { value: name, configurable: true });
+            Object.defineProperty(C, 'length', { value: 0, configurable: true });
+            var P = Object.create(HE.prototype);
+            Object.defineProperty(P, 'constructor', { value: C, writable: true, configurable: true });
+            Object.defineProperty(P, Symbol.toStringTag, { value: name, configurable: true });
+            Object.defineProperty(C, 'prototype', { value: P, writable: false, enumerable: false, configurable: false });
+            Object.setPrototypeOf(C, HE);
+            var chk = function (o) { if (!(o instanceof C)) throw new TypeError('Illegal invocation'); };
+            /* (why it can't be used now: its display one of those a permission element may have, PEPC's locked style) */
+            var reasonOf = function (el) {
+                if (!el.isConnected) return 'unsuccessful_registration';
+                var d = '';
+                try { d = global.getComputedStyle(el).display; } catch (e) { }
+                return /^(block|inline-block|flex|inline-flex|flow-root)$/.test(d) || d === 'block flow' || d === 'inline flow-root' ? '' : 'style_invalid';
+            };
+            var named = function (f, n) { Object.defineProperty(f, 'name', { value: n }); return f; };
+            (attrs || []).forEach(function (a) {
+                var k = a[0], kind = a[1], g, st;
+                if (kind === 'ro') { var dv = a[2]; g = function () { chk(this); return dv; }; }
+                else if (kind === 'reason') g = function () { chk(this); return reasonOf(this); };
+                else if (kind === 'valid') g = function () { chk(this); return reasonOf(this) === ''; };
+                else if (kind === 'str') { var sn = k.toLowerCase(); g = function () { chk(this); var v = this.getAttribute(sn); return v === null ? '' : v; };
+                    st = function (v) { chk(this); this.setAttribute(sn, String(v)); }; }
+                else if (kind === 'bool') { var an = k.toLowerCase(); g = function () { chk(this); return this.hasAttribute(an); };
+                    st = function (v) { chk(this); if (v) this.setAttribute(an, ''); else this.removeAttribute(an); }; }
+                else if (kind === 'url') { var un = a[2] || k.toLowerCase();
+                    g = function () { chk(this); var v = this.getAttribute(un); if (v === null) return ''; try { return new global.URL(v, this.baseURI).href; } catch (e) { return v; } };
+                    st = function (v) { chk(this); this.setAttribute(un, String(v)); }; }
+                else if (kind === 'h') {
+                    var HK = Symbol(k), ty = k.slice(2);
+                    g = function () { chk(this); var h = this[HK]; return h ? h.fn : null; };
+                    st = function (v) {
+                        chk(this);
+                        var h = this[HK];
+                        if (h) { this.removeEventListener(ty, h.wrap); this[HK] = null; }
+                        if (typeof v === 'function' || (v !== null && typeof v === 'object')) {
+                            var fn = v, wrap = function (e) { return typeof fn === 'function' ? fn.call(this, e) : undefined; };
+                            this[HK] = { fn: fn, wrap: wrap };
+                            this.addEventListener(ty, wrap);
+                            /* (its validation status, told once it is known) */
+                            if (ty === 'validationstatuschange') {
+                                var el = this;
+                                global.setTimeout(function () { try { el.dispatchEvent(new global.Event('validationstatuschange')); } catch (e) { } }, 0);
+                            }
+                        }
+                    };
+                }
+                var d = { get: named(g, 'get ' + k), enumerable: true, configurable: true };
+                if (st) d.set = named(st, 'set ' + k);
+                Object.defineProperty(P, k, d);
+            });
+            (ops || []).forEach(function (o) {
+                var f = named(function () { chk(this); return undefined; }, o[0]);
+                Object.defineProperty(f, 'length', { value: o[1] });
+                Object.defineProperty(P, o[0], { value: f, writable: true, enumerable: true, configurable: true });
+            });
+            Object.defineProperty(global, name, { value: C, writable: true, configurable: true, enumerable: false });
+        };
+        var device = [['track', 'ro', null], ['error', 'ro', null], ['ontrack', 'h'], ['oncancel', 'h'], ['onerror', 'h']];
+        mk('HTMLUserMediaElement', [['onstream', 'h'], ['oncancel', 'h'], ['onerror', 'h'], ['stream', 'ro', null], ['error', 'ro', null]], [['setConstraints', 0]]);
+        mk('HTMLGeolocationElement', [['position', 'ro', null], ['error', 'ro', null], ['autolocate', 'bool'], ['watch', 'bool'], ['onlocation', 'h'],
+            ['isValid', 'valid'], ['invalidReason', 'reason'], ['initialPermissionStatus', 'ro', 'prompt'], ['permissionStatus', 'ro', 'prompt'],
+            ['onpromptaction', 'h'], ['onpromptdismiss', 'h'], ['onvalidationstatuschange', 'h']]);
+        mk('HTMLCameraElement', device);
+        mk('HTMLMicrophoneElement', device);
+        mk('HTMLInstallElement', [['manifest', 'url'], ['manifestId', 'url', 'manifestid'], ['isValid', 'valid'], ['invalidReason', 'reason'],
+            ['onvalidationstatuschange', 'h']]);
+        /* (persistent widgets, tentative: the element, its opener's interface, window.persistentWidgetOpener) */
+        mk('HTMLPersistentWidgetElement', [['src', 'url'], ['name', 'str']], [['postMessage', 1]]);
+        if (typeof global.PersistentWidgetOpener !== 'function' && global.EventTarget) {
+            var PWO = function PersistentWidgetOpener() { throw new TypeError('Illegal constructor'); };
+            PWO.prototype = Object.create(global.EventTarget.prototype);
+            Object.defineProperty(PWO.prototype, 'constructor', { value: PWO, writable: true, configurable: true });
+            Object.defineProperty(PWO.prototype, Symbol.toStringTag, { value: 'PersistentWidgetOpener', configurable: true });
+            var pwm = { postMessage: function (message) {
+                if (!(this instanceof PWO)) throw new TypeError('Illegal invocation');
+                if (arguments.length < 1) throw new TypeError("Failed to execute 'postMessage' on 'PersistentWidgetOpener': 1 argument required, but only 0 present.");
+            } }.postMessage;
+            Object.defineProperty(pwm, 'length', { value: 1 });
+            Object.defineProperty(PWO.prototype, 'postMessage', { value: pwm, writable: true, enumerable: true, configurable: true });
+            Object.setPrototypeOf(PWO, global.EventTarget);
+            Object.defineProperty(global, 'PersistentWidgetOpener', { value: PWO, writable: true, configurable: true });
+            if (!('persistentWidgetOpener' in global))
+                Object.defineProperty(global, 'persistentWidgetOpener', { enumerable: true, configurable: true, get: { get: function persistentWidgetOpener() { return null; } }.get });
+        }
+        /* (InstallResultEvent: an Event with its result) */
+        var EV = global.Event;
+        if (EV && typeof global.InstallResultEvent !== 'function') {
+            var RES = { success: 1, aborted: 1, 'invalid-data': 1 };
+            var IRE = function InstallResultEvent(type, init) {
+                if (!new.target) throw new TypeError("Failed to construct 'InstallResultEvent': Please use the 'new' operator");
+                if (arguments.length < 1) throw new TypeError("Failed to construct 'InstallResultEvent': 1 argument required, but only 0 present.");
+                var e = Reflect.construct(EV, [type, init], new.target);
+                var r = init && init.result !== undefined ? String(init.result) : 'aborted';
+                if (!RES[r]) throw new TypeError("Failed to construct 'InstallResultEvent': The provided value '" + r + "' is not a valid enum value of type InstallResult.");
+                Object.defineProperty(e, '__result', { value: r });
+                return e;
+            };
+            IRE.prototype = Object.create(EV.prototype);
+            Object.defineProperty(IRE.prototype, 'constructor', { value: IRE, writable: true, configurable: true });
+            Object.defineProperty(IRE.prototype, Symbol.toStringTag, { value: 'InstallResultEvent', configurable: true });
+            Object.defineProperty(IRE.prototype, 'result', { enumerable: true, configurable: true,
+                get: { get: function () { if (!(this instanceof IRE)) throw new TypeError('Illegal invocation'); return this.__result; } }.get });
+            Object.setPrototypeOf(IRE, EV);
+            Object.defineProperty(IRE, 'length', { value: 1 });
+            Object.defineProperty(global, 'InstallResultEvent', { value: IRE, writable: true, configurable: true, enumerable: false });
+        }
+    })();
+
+    /* (SVG 2 SVGURIReference: href, an SVGAnimatedString of the href attribute, else xlink:href) */
+    (function () {
+        var XL = 'http://www.w3.org/1999/xlink';
+        var SAS = global.SVGAnimatedString;
+        if (typeof SAS !== 'function') {
+            SAS = function SVGAnimatedString() { throw new TypeError('Illegal constructor'); };
+            Object.defineProperty(SAS.prototype, Symbol.toStringTag, { value: 'SVGAnimatedString', configurable: true });
+            Object.defineProperty(global, 'SVGAnimatedString', { value: SAS, writable: true, configurable: true, enumerable: false });
+        }
+        var EL = Symbol('svgHrefElement');
+        if (!Object.getOwnPropertyDescriptor(SAS.prototype, 'baseVal')) {
+            var cur = function (el) { var v = el.getAttribute('href'); if (v === null) v = el.getAttributeNS(XL, 'href'); return v === null ? '' : v; };
+            Object.defineProperty(SAS.prototype, 'baseVal', { enumerable: true, configurable: true,
+                get: { get: function baseVal() { var el = this[EL]; if (!el) throw new TypeError('Illegal invocation'); return cur(el); } }.get,
+                set: { set: function baseVal(v) {
+                    var el = this[EL]; if (!el) throw new TypeError('Illegal invocation');
+                    if (!el.hasAttribute('href') && el.hasAttributeNS(XL, 'href')) el.setAttributeNS(XL, 'xlink:href', String(v));
+                    else el.setAttribute('href', String(v));
+                } }.set });
+            Object.defineProperty(SAS.prototype, 'animVal', { enumerable: true, configurable: true,
+                get: { get: function animVal() { var el = this[EL]; if (!el) throw new TypeError('Illegal invocation'); return cur(el); } }.get });
+        }
+    /* (SVG 2's element interfaces, bare: what they have is SVGElement's for now) */
+    if (global.document && global.SVGElement) plainInterfaces([
+        ['SVGGraphicsElement', 'SVGElement'], ['SVGGeometryElement', 'SVGGraphicsElement'], ['SVGSVGElement', 'SVGGraphicsElement'],
+        ['SVGGElement', 'SVGGraphicsElement'], ['SVGDefsElement', 'SVGGraphicsElement'], ['SVGSymbolElement', 'SVGElement'],
+        ['SVGUseElement', 'SVGGraphicsElement'], ['SVGImageElement', 'SVGGraphicsElement'], ['SVGSwitchElement', 'SVGGraphicsElement'],
+        ['SVGForeignObjectElement', 'SVGGraphicsElement'], ['SVGRectElement', 'SVGGeometryElement'], ['SVGCircleElement', 'SVGGeometryElement'],
+        ['SVGEllipseElement', 'SVGGeometryElement'], ['SVGLineElement', 'SVGGeometryElement'], ['SVGPolylineElement', 'SVGGeometryElement'],
+        ['SVGPolygonElement', 'SVGGeometryElement'], ['SVGPathElement', 'SVGGeometryElement'], ['SVGTextContentElement', 'SVGGraphicsElement'],
+        ['SVGTextPositioningElement', 'SVGTextContentElement'], ['SVGTextElement', 'SVGTextPositioningElement'],
+        ['SVGTSpanElement', 'SVGTextPositioningElement'], ['SVGTextPathElement', 'SVGTextContentElement'], ['SVGTitleElement', 'SVGElement'],
+        ['SVGDescElement', 'SVGElement'], ['SVGMetadataElement', 'SVGElement'], ['SVGStyleElement', 'SVGElement'], ['SVGScriptElement', 'SVGElement'],
+        ['SVGMarkerElement', 'SVGElement'], ['SVGPatternElement', 'SVGElement'], ['SVGGradientElement', 'SVGElement'],
+        ['SVGLinearGradientElement', 'SVGGradientElement'], ['SVGRadialGradientElement', 'SVGGradientElement'], ['SVGStopElement', 'SVGElement'],
+        ['SVGClipPathElement', 'SVGElement'], ['SVGMaskElement', 'SVGElement'], ['SVGViewElement', 'SVGElement'],
+        ['SVGAnimationElement', 'SVGElement'], ['SVGAnimateElement', 'SVGAnimationElement'], ['SVGSetElement', 'SVGAnimationElement'],
+        ['SVGAnimateMotionElement', 'SVGAnimationElement'], ['SVGAnimateTransformElement', 'SVGAnimationElement'], ['SVGMPathElement', 'SVGElement'],
+    ].map(function (d) { return [d[0], d[1], [], [], []]; }));
+        var HREFS = Symbol('svgHref');
+        ['SVGAElement', 'SVGUseElement', 'SVGImageElement', 'SVGScriptElement', 'SVGPatternElement', 'SVGLinearGradientElement',
+         'SVGRadialGradientElement', 'SVGGradientElement', 'SVGFilterElement', 'SVGTextPathElement', 'SVGFEImageElement', 'SVGMPathElement'].forEach(function (n) {
+            var C = global[n];
+            if (typeof C !== 'function' || !C.prototype) return;
+            var d = Object.getOwnPropertyDescriptor(C.prototype, 'href');
+            if (d && d.get) return;   /* (one there already) */
+            Object.defineProperty(C.prototype, 'href', { enumerable: true, configurable: true,
+                get: { get: function href() {
+                    if (!(this instanceof C)) throw new TypeError('Illegal invocation');
+                    if (!this[HREFS]) { var o = Object.create(SAS.prototype); Object.defineProperty(o, EL, { value: this }); Object.defineProperty(this, HREFS, { value: o }); }
+                    return this[HREFS];
+                } }.get });
+        });
+    })();
 
     /* (HTMLAudioElement: an <audio> is the native media object, with the
      * media members of HTMLVideoElement.prototype but not video's own) */
@@ -318,12 +605,34 @@
     if (global.Document && !global.Document.parseHTMLUnsafe)
         Object.defineProperty(global.Document, 'parseHTMLUnsafe', { configurable: true, enumerable: true, writable: true,
             value: function parseHTMLUnsafe(html) { return new global.DOMParser().parseFromString(String(html), 'text/html'); } });
+    /* (runScripts: the scripts put in run, in tree order, shadow trees too, each as if just inserted; one a script took out does not) */
+    var runInsertedScripts = function (root) {
+        var list = [];
+        var walk = function (n) {
+            for (var c = n.firstChild; c; c = c.nextSibling) {
+                if (c.nodeType !== 1) continue;
+                if (c.localName === 'script' && c.namespaceURI === 'http://www.w3.org/1999/xhtml') list.push(c);
+                if (c.shadowRoot) walk(c.shadowRoot);
+                walk(c.localName === 'template' && c.content ? c.content : c);
+            }
+        };
+        walk(root);
+        list.forEach(function (s) {
+            if (!s.isConnected || !s.parentNode) return;
+            var n = s.ownerDocument.createElement('script');
+            for (var i = 0; i < s.attributes.length; i++) n.setAttribute(s.attributes[i].name, s.attributes[i].value);
+            n.text = s.text;
+            s.parentNode.replaceChild(n, s);
+        });
+    };
+    var setUnsafe = function setHTMLUnsafe(html, options) {
+        this.innerHTML = String(html);
+        if (options && typeof options === 'object' && options.runScripts) runInsertedScripts(this);
+    };
     if (global.Element && !global.Element.prototype.setHTMLUnsafe)
-        Object.defineProperty(global.Element.prototype, 'setHTMLUnsafe', { configurable: true, enumerable: true, writable: true,
-            value: function setHTMLUnsafe(html) { this.innerHTML = String(html); } });
+        Object.defineProperty(global.Element.prototype, 'setHTMLUnsafe', { configurable: true, enumerable: true, writable: true, value: setUnsafe });
     if (global.ShadowRoot && !global.ShadowRoot.prototype.setHTMLUnsafe)
-        Object.defineProperty(global.ShadowRoot.prototype, 'setHTMLUnsafe', { configurable: true, enumerable: true, writable: true,
-            value: function setHTMLUnsafe(html) { this.innerHTML = String(html); } });
+        Object.defineProperty(global.ShadowRoot.prototype, 'setHTMLUnsafe', { configurable: true, enumerable: true, writable: true, value: setUnsafe });
     /* (XMLHttpRequest's response, by its responseType) */
     var XHRP = global.XMLHttpRequest && global.XMLHttpRequest.prototype;
     if (XHRP) {
@@ -338,6 +647,17 @@
             switch (this.responseType) {
             case 'document': return parsedDoc(this);
             case 'json': try { return JSON.parse(this.responseText); } catch (e) { return null; }
+            /* (the bytes: the same object each time) */
+            case 'arraybuffer': case 'blob': {
+                var by = this.__cyberXhrBytes;
+                if (!by) return null;
+                if (this.responseType === 'arraybuffer') return by;
+                if (!this.__cyberXhrBlob || this.__cyberXhrBlob[0] !== by) {
+                    var ct = (this.getResponseHeader('content-type') || '').split(';')[0].trim().toLowerCase();
+                    Object.defineProperty(this, '__cyberXhrBlob', { value: [by, new global.Blob([by], { type: ct })], configurable: true, writable: true });
+                }
+                return this.__cyberXhrBlob[1];
+            }
             default: return this.responseText;
             }
         } });
@@ -372,7 +692,7 @@
             for (var p of parts) {
                 var c;
                 if (p !== null && typeof p === 'object' && blobBytes.has(p)) c = blobBytes.get(p);
-                else if (p instanceof ArrayBuffer) c = new Uint8Array(p);
+                else if (p instanceof ArrayBuffer || (p !== null && typeof p === 'object' && Object.prototype.toString.call(p) === '[object ArrayBuffer]')) c = new Uint8Array(p);   /* (another realm's too: a native's) */
                 else if (ArrayBuffer.isView(p)) c = new Uint8Array(p.buffer, p.byteOffset, p.byteLength);
                 else { text.push(String(p).toWellFormed()); continue; }
                 flush();
@@ -434,7 +754,10 @@
     var ERROR_NAMES = ['Error', 'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError', 'TypeError', 'URIError'];
     var VIEWS = ['Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array',
                  'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array', 'DataView'];
+    /* (the MessagePorts a transfer moves: passed through as they are) */
+    var curPorts = null;
     function wire(v, seen) {
+        if (curPorts && v && typeof v === 'object') { var pi = curPorts.indexOf(v); if (pi >= 0) return { tp: pi }; }
         switch (typeof v) {
         case 'undefined': return { u: 1 };
         case 'boolean': case 'string': return v;
@@ -462,7 +785,7 @@
         case 'RegExp': return { i: id, re: v.source, f: v.flags };
         case 'Boolean': case 'Number': case 'String': case 'BigInt':
             return { i: id, w: kind, v: wire(v.valueOf(), new Map()) };
-        case 'ArrayBuffer': return { i: id, ab: Array.from(new Uint8Array(v)) };
+        case 'ArrayBuffer': return v.resizable ? { i: id, ab: Array.from(new Uint8Array(v)), abmax: v.maxByteLength } : { i: id, ab: Array.from(new Uint8Array(v)) };
         case 'Map': {
             var m = [];
             v.forEach(function (x, k) { m.push([wire(k, seen), wire(x, seen)]); });
@@ -476,7 +799,18 @@
         case 'DOMException': return { i: id, x: v.name, msg: v.message };
         case 'Error': {
             var name = ERROR_NAMES.indexOf(v.name) >= 0 ? v.name : 'Error';
-            return { i: id, e: name, msg: v.message === undefined ? '' : String(v.message), st: v.stack === undefined ? '' : String(v.stack) };
+            /* (its message only if its own; its cause too, cloned) */
+            var md = Object.getOwnPropertyDescriptor(v, 'message'), cd = Object.getOwnPropertyDescriptor(v, 'cause');
+            var ew = { i: id, e: name, st: v.stack === undefined ? '' : String(v.stack) };
+            if (md && 'value' in md) ew.msg = String(md.value);
+            if (cd && 'value' in cd) ew.cause = wire(cd.value, seen);
+            return ew;
+        }
+        case 'ImageData': return { i: id, idt: Array.from(v.data), iw: v.width, ih: v.height, ics: v.colorSpace || 'srgb' };
+        case 'FileList': {
+            var fl = [];
+            for (var fi = 0; fi < v.length; fi++) fl.push(wire(v[fi], seen));
+            return { i: id, flist: fl };
         }
         case 'DOMPoint': case 'DOMPointReadOnly': case 'DOMRect': case 'DOMRectReadOnly':
         case 'DOMQuad': case 'DOMMatrix': case 'DOMMatrixReadOnly': {
@@ -496,6 +830,17 @@
             var names = two ? ['a', 'b', 'c', 'd', 'e', 'f'] : ['m11', 'm12', 'm13', 'm14', 'm21', 'm22', 'm23', 'm24', 'm31', 'm32', 'm33', 'm34', 'm41', 'm42', 'm43', 'm44'];
             return { i: id, g: kind, gv: names.map(function (k) { return own(v, k); }) };
         }
+        case 'OffscreenCanvas': {
+            var ow = typeof global.__cyberOffscreenWire === 'function' ? global.__cyberOffscreenWire(v) : null;
+            if (!ow) throw cloneError(kind);
+            return { i: id, ocv: ow };
+        }
+        case 'ImageBitmap': {
+            /* (a bitmap: its id in canvas2d.c, shared by the realms of this thread) */
+            var bw = typeof global.__cyberBitmapWire === 'function' ? global.__cyberBitmapWire(v) : null;
+            if (!bw) throw cloneError(kind);
+            return { i: id, ib: bw };
+        }
         case 'File': case 'Blob': {
             var w = { i: id, bl: Array.from(bytesOfBlob(v)), t: v.type };
             if (kind === 'File') { w.nm = v.name; w.lm = v.lastModified; }
@@ -507,12 +852,15 @@
         /* (what has no serialization: a platform object, a promise, a weak collection) */
         if (kind !== 'Object' && kind !== 'Arguments') throw cloneError(kind);
         if (global.Node && v instanceof global.Node) throw cloneError(v);
+        if ((global.Response && v instanceof global.Response) || (global.Request && v instanceof global.Request) ||
+            (global.Headers && v instanceof global.Headers)) throw cloneError(v);
         var props = [];
         Object.keys(v).forEach(function (k) { props.push([k, wire(v[k], seen)]); });
         return { i: id, o: props };
     }
     function unwire(w, made) {
         if (w === null || typeof w !== 'object') return w;
+        if (w.tp !== undefined && curPorts) return curPorts[w.tp];
         if (w.u) return undefined;
         if (w.n !== undefined) return w.n === 'NaN' ? NaN : w.n === '-0' ? -0 : w.n === 'Infinity' ? Infinity : -Infinity;
         if (w.b !== undefined) return BigInt(w.b);
@@ -533,7 +881,8 @@
         } else if (w.w !== undefined) {
             v = made[w.i] = Object(unwire(w.v, []));
         } else if (w.ab !== undefined) {
-            v = made[w.i] = new Uint8Array(w.ab).buffer;
+            if (w.abmax !== undefined) { v = made[w.i] = new ArrayBuffer(w.ab.length, { maxByteLength: w.abmax }); new Uint8Array(v).set(w.ab); }
+            else v = made[w.i] = new Uint8Array(w.ab).buffer;
         } else if (w.m !== undefined) {
             v = made[w.i] = new Map();
             w.m.forEach(function (e) { v.set(unwire(e[0], made), unwire(e[1], made)); });
@@ -543,8 +892,14 @@
         } else if (w.x !== undefined) {
             v = made[w.i] = new global.DOMException(w.msg, w.x);
         } else if (w.e !== undefined) {
-            v = made[w.i] = new global[w.e](w.msg);
+            v = made[w.i] = w.msg === undefined ? new global[w.e]() : new global[w.e](w.msg);
             if (w.st) Object.defineProperty(v, 'stack', { value: w.st, writable: true, configurable: true });
+            if (w.cause !== undefined) Object.defineProperty(v, 'cause', { value: unwire(w.cause, made), writable: true, configurable: true });
+        } else if (w.idt !== undefined) {
+            v = made[w.i] = new global.ImageData(new Uint8ClampedArray(w.idt), w.iw, w.ih, { colorSpace: w.ics });
+        } else if (w.flist !== undefined) {
+            var files = w.flist.map(function (x) { return unwire(x, made); });
+            v = made[w.i] = global.__cyberFileList ? global.__cyberFileList(files) : files;
         } else if (w.g !== undefined) {
             var C = global[w.g], gv = w.gv;
             if (/Point/.test(w.g)) v = new C(gv[0], gv[1], gv[2], gv[3]);
@@ -553,6 +908,10 @@
                                                         new global.DOMPoint(gv[2][0], gv[2][1], gv[2][2], gv[2][3]), new global.DOMPoint(gv[3][0], gv[3][1], gv[3][2], gv[3][3]));
             else v = new C(gv);
             made[w.i] = v;
+        } else if (w.ocv !== undefined) {
+            v = made[w.i] = global.__cyberOffscreenMake(w.ocv);
+        } else if (w.ib !== undefined) {
+            v = made[w.i] = global.__cyberBitmapMake(w.ib);
         } else if (w.bl !== undefined) {
             var bytes = new Uint8Array(w.bl);
             v = made[w.i] = w.nm !== undefined ? new global.File([bytes], w.nm, { type: w.t, lastModified: w.lm }) : new Blob([bytes], { type: w.t });
@@ -566,7 +925,31 @@
     Object.defineProperty(global, '__cyberUnwire', { configurable: true, value: function (w) { return unwire(w, []); } });
     Object.defineProperty(global, 'structuredClone', { configurable: true, enumerable: true, writable: true, value: function structuredClone(value) {
         if (arguments.length < 1) throw new TypeError("Failed to execute 'structuredClone': 1 argument required, but only 0 present.");
-        return unwire(wire(value, new Map()), []);
+        /* (options.transfer: ArrayBuffers detached after, their contents moved; anything else not transferable) */
+        var opts = arguments[1], list = [];
+        if (opts !== undefined && opts !== null) {
+            var tr = opts.transfer;
+            if (tr !== undefined) {
+                if (tr === null || typeof tr !== 'object' || typeof tr[Symbol.iterator] !== 'function') throw new TypeError("Failed to execute 'structuredClone': transfer is not iterable.");
+                list = Array.from(tr);
+            }
+        }
+        var seenT = new Set();
+        list.forEach(function (t) {
+            if (seenT.has(t)) throw new global.DOMException("Failed to execute 'structuredClone': ArrayBuffer at index is a duplicate of an earlier ArrayBuffer.", 'DataCloneError');
+            seenT.add(t);
+            var tag = Object.prototype.toString.call(t), isAB = tag === '[object ArrayBuffer]', isPort = tag === '[object MessagePort]';
+            if (!isAB && !isPort) throw new global.DOMException("Failed to execute 'structuredClone': Value at index is not a transferable type.", 'DataCloneError');
+            if (isAB && t.detached === true) throw new global.DOMException("Failed to execute 'structuredClone': An ArrayBuffer is detached and could not be cloned.", 'DataCloneError');
+            if (isPort && t.__cyberDetached) throw new global.DOMException("Failed to execute 'structuredClone': A MessagePort is detached and could not be transferred.", 'DataCloneError');
+        });
+        var ports = list.filter(function (t) { return Object.prototype.toString.call(t) === '[object MessagePort]'; });
+        var wasPorts = curPorts;
+        curPorts = ports;
+        var out;
+        try { out = unwire(wire(value, new Map()), []); } finally { curPorts = wasPorts; }
+        list.forEach(function (t) { try { if (typeof t.transfer === 'function') t.transfer(); } catch (e) { } });
+        return out;
     } });
     /* (a blob: URL's script, for a Worker) */
     Object.defineProperty(global, '__cyberBlobText', { configurable: true, value: function (url) {
@@ -754,14 +1137,39 @@
     } });
     /* (for idl_shape.c: a script-made accessor checks its this, as a native one does) */
     var fnText = Function.prototype.toString;
-    Object.defineProperty(global, '__cyberBrandAccessors', { configurable: true, value: function (C) {
+    var BRANDED = typeof Symbol === 'function' ? Symbol.for('cyber.branded') : '__cyberBranded';
+    Object.defineProperty(global, '__cyberBrandAccessors', { configurable: true, value: function (C, req, ops) {
         var proto = C.prototype;
-        Object.getOwnPropertyNames(proto).forEach(function (k) {
+        if (!proto || typeof proto !== 'object') return;
+        /* (with the IDL's members given: only those looked at) */
+        (ops && req ? Object.keys(req) : Object.getOwnPropertyNames(proto)).forEach(function (k) {
             var d = Object.getOwnPropertyDescriptor(proto, k);
-            if (!d.get || fnText.call(d.get).indexOf('[native code]') >= 0) return;
+            if (!d || !d.configurable) return;
+            /* (an operation made in script: its this an instance; its required arguments there) */
+            if (false && ops && req && typeof d.value === 'function' && k !== 'constructor' && Object.prototype.hasOwnProperty.call(req, k) && req[k] >= 0 &&
+                !d.value[BRANDED] && fnText.call(d.value).indexOf('[native code]') < 0) {
+                var f = d.value, need = req[k] | 0;
+                var w = function () {
+                    if (!(this instanceof C) && this != null && this !== global) throw new TypeError("Failed to execute '" + k + "' on '" + C.name + "': Illegal invocation");
+                    if (arguments.length < need) throw new TypeError("Failed to execute '" + k + "' on '" + C.name + "': " + need + " argument" + (need > 1 ? 's' : '') + " required, but only " + arguments.length + " present.");
+                    return f.apply(this, arguments);
+                };
+                Object.defineProperty(w, 'name', { value: k, configurable: true });
+                Object.defineProperty(w, 'length', { value: f.length, configurable: true });
+                Object.defineProperty(w, BRANDED, { value: true });
+                Object.defineProperty(proto, k, { value: w, writable: d.writable, enumerable: d.enumerable, configurable: true });
+                return;
+            }
+            /* (the cheap tests first: a realm runs this over every interface) */
+            if (!d.get || d.get[BRANDED]) return;
+            if (ops && req && !Object.prototype.hasOwnProperty.call(req, k)) return;
+            if (fnText.call(d.get).indexOf('[native code]') >= 0) return;
             var g = d.get, s = d.set;
             var get = function () { if (!(this instanceof C)) throw new TypeError('Illegal invocation'); return g.call(this); };
             var set = s && function (v) { if (!(this instanceof C)) throw new TypeError('Illegal invocation'); return s.call(this, v); };
+            Object.defineProperty(get, 'name', { value: 'get ' + k, configurable: true });
+            Object.defineProperty(get, BRANDED, { value: true });
+            if (set) { Object.defineProperty(set, 'name', { value: 'set ' + k, configurable: true }); Object.defineProperty(set, 'length', { value: 1, configurable: true }); }
             Object.defineProperty(proto, k, { get: get, set: set, enumerable: d.enumerable, configurable: true });
         });
     } });
@@ -885,6 +1293,7 @@
             var f = Reflect.construct(ffOrig, arguments, new.target === ffCtor ? ffOrig : new.target), init = arguments[2];
             if (srcBad) ffOf(f).badSrc = true;
             if (typeof source === 'string') ffOf(f).src = source;   /* (its sources as written: an @font-face of it once added) */
+            if (typeof source === 'string') Object.defineProperty(f, Symbol.for('cyber.ffsrc'), { value: source });   /* (a worker's face set: the same) */
             if (init && typeof init === 'object') Object.keys(ffMore).forEach(function (k) {
                 if (init[k] === undefined) return;
                 var ok = ffMore[k][1](init[k]);
@@ -975,6 +1384,7 @@
                 if (h.sheetText !== text) { try { h.sheet.replaceSync(text); h.sheetText = text; doc.adoptedStyleSheets = doc.adoptedStyleSheets; } catch (e) { } }
                 return;
             }
+            try { if (typeof global.__c2dFontScan === 'function') global.__c2dFontScan(text, doc.baseURI || global.location.href); } catch (e) { }
             var sh;
             try { sh = new global.CSSStyleSheet(); sh.replaceSync(text); } catch (e) { return; }
             h.sheetText = text;
@@ -1199,10 +1609,19 @@
             walk(el.shadowRoot || el);
             var best = null, bestD = Infinity, budget = 4000, r = doc.createRange();
             for (var k = 0; k < texts.length && budget > 0; k++) {
-                var t = texts[k], n = t.data.length;
-                for (var i = 0; i < n && budget > 0; i++, budget--) {
+                var t = texts[k], n = t.data.length, lvs = null;
+                /* (a right-to-left character: its right half before it, logically) */
+                if (typeof global.__c2dBidi === 'function' && t.parentNode && t.parentNode.nodeType === 1) {
+                    var tdir = 0;
+                    try { tdir = global.getComputedStyle(t.parentNode).direction === 'rtl' ? 1 : 0; } catch (e) { }
+                    if (tdir || /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]/.test(t.data)) { try { lvs = global.__c2dBidi(t.data, tdir); } catch (e) { lvs = null; } }
+                }
+                for (var i = 0, i2; i < n && budget > 0; i = i2, budget--) {
+                    /* (a character at a time: a surrogate pair is one) */
+                    var cu = t.data.charCodeAt(i), cu2 = t.data.charCodeAt(i + 1);
+                    i2 = cu >= 0xd800 && cu < 0xdc00 && cu2 >= 0xdc00 && cu2 < 0xe000 ? i + 2 : i + 1;
                     r.setStart(t, i);
-                    r.setEnd(t, i + 1);
+                    r.setEnd(t, i2);
                     var rs = r.getClientRects();
                     for (var j = 0; j < rs.length; j++) {
                         var b = rs[j];
@@ -1210,7 +1629,7 @@
                         var dy = y < b.top ? b.top - y : y >= b.bottom ? y - b.bottom : 0;
                         var dx = x < b.left ? b.left - x : x >= b.right ? x - b.right : 0;
                         var d = dy * 1e4 + dx;
-                        if (d < bestD) { bestD = d; best = [t, x < b.left + b.width / 2 ? i : i + 1]; }
+                        if (d < bestD) { bestD = d; var lh0 = x < b.left + b.width / 2; best = [t, (lvs && lvs[i] & 1) ? (lh0 ? i2 : i) : (lh0 ? i : i2)]; }
                         if (!d) break;
                     }
                     if (!bestD) break;
@@ -2221,6 +2640,10 @@
         catch (e) { return []; }
     };
     var vtInline = function (from, to) {
+        to.setAttribute('style', vtStyleText(from));
+        to.removeAttribute('id');
+    };
+    var vtStyleText = function (from) {
         var cs = global.getComputedStyle(from), parts = [];
         for (var i = 0; i < cs.length; i++) {
             var p = cs[i];
@@ -2232,16 +2655,20 @@
         }
         /* (the used sizes last: nothing before them resets them) */
         ['width', 'height'].forEach(function (p) { var v = cs.getPropertyValue(p); if (v && v !== 'auto') parts.push(p + ':' + v); });
-        to.setAttribute('style', parts.join(';'));
-        to.removeAttribute('id');
+        return parts.join(';');
     };
     /* (a deep clone of el as it looks now, named descendants left out) */
     var vtSnap = function (el, isRoot, keepNamed) {
         var c = el.cloneNode(true);
+        /* (everything read first, then written: a write between reads would have each element's style worked out afresh) */
+        var writes = [];
+        /* (a large subtree: its descendants keep their classes and the sheets' rules, only the top's values written in;
+         * every value of every element read is too slow there) */
+        var big = el.getElementsByTagName('*').length > 400;
         var walk = function (a, b, top) {
             if (a.nodeType !== 1 || b.nodeType !== 1) return;
-            vtInline(a, b);
-            if (!top && !keepNamed && vtName(a)) { b.style.setProperty('visibility', 'hidden'); }
+            var w = { b: b, text: top || !big ? vtStyleText(a) : null, hide: !top && !keepNamed && !!vtName(a), pos: null };
+            writes.push(w);
             /* (a fixed descendant: where it is on screen, from the nearest positioned box of the clone) */
             var apos = !top && !isRoot ? global.getComputedStyle(a).position : '';
             if (apos === 'fixed' || apos === 'absolute') {
@@ -2251,14 +2678,23 @@
                 if (apos === 'absolute' && !(cb === el && global.getComputedStyle(el).position === 'static')) cb = null;
                 if (cb && cb.nodeType === 1) {
                     var ar = a.getBoundingClientRect(), cr = cb.getBoundingClientRect();
-                    [['position', 'absolute'], ['left', (ar.left - cr.left - (cb.clientLeft || 0)) + 'px'], ['top', (ar.top - cr.top - (cb.clientTop || 0)) + 'px'],
-                     ['right', 'auto'], ['bottom', 'auto'], ['margin', '0']].forEach(function (d) { b.style.setProperty(d[0], d[1]); });
+                    w.pos = [['position', 'absolute'], ['left', (ar.left - cr.left - (cb.clientLeft || 0)) + 'px'], ['top', (ar.top - cr.top - (cb.clientTop || 0)) + 'px'],
+                     ['right', 'auto'], ['bottom', 'auto'], ['margin', '0']];
                 }
             }
             var ak = a.childNodes, bk = b.childNodes;
             for (var i = 0; i < ak.length && i < bk.length; i++) walk(ak[i], bk[i], false);
         };
-        walk(el, c, true);
+        /* (the values as they are: no transition worked out again for each one read, the tree over) */
+        var heldSnap = global.__cyberVtSnapping;
+        global.__cyberVtSnapping = true;
+        try { walk(el, c, true); } finally { global.__cyberVtSnapping = heldSnap; }
+        writes.forEach(function (w) {
+            if (w.text !== null) w.b.setAttribute('style', w.text);
+            w.b.removeAttribute('id');
+            if (w.hide) w.b.style.setProperty('visibility', 'hidden');
+            if (w.pos) w.pos.forEach(function (d) { w.b.style.setProperty(d[0], d[1]); });
+        });
         ['position:absolute', 'left:0', 'top:0', 'right:auto', 'bottom:auto', 'margin:0', 'transform:none', 'translate:none',
          'rotate:none', 'scale:none', 'float:none', 'visibility:visible', 'transform-style:flat'].forEach(function (d) {
             var k = d.indexOf(':');
@@ -3865,8 +4301,8 @@
         global.__cyberHighlightSet(names, prios, flat);
     };
     if (global.addEventListener) {
-        global.addEventListener('hashchange', function () { hlTouch(); });
-        global.addEventListener('load', function () { if (String(global.location && global.location.href).indexOf(':~:') >= 0) hlTouch(); });
+        onWin('hashchange', function () { hlTouch(); });
+        onWin('load', function () { if (String(global.location && global.location.href).indexOf(':~:') >= 0) hlTouch(); });
     }
     Object.defineProperty(global, '__cyberSelectionChanged', { configurable: true, value: function () { hlTouch(); } });
     var hlTouch = function () {
@@ -3991,20 +4427,25 @@
             Object.defineProperty(P, name, { configurable: true, enumerable: true, writable: true, value: fn });
         }
         function invalidState(msg) { return new global.DOMException(msg, 'InvalidStateError'); }
-        function toggleEvent(el, type, oldState, newState, cancelable) {
+        function toggleEvent(el, type, oldState, newState, cancelable, source) {
             var C = global.ToggleEvent || global.Event;
-            return el.dispatchEvent(new C(type, { cancelable: !!cancelable, oldState: oldState, newState: newState }));
+            /* (a dialog's: the command button that opened or closed it, its source) */
+            var src = source !== undefined ? source : (el.localName === 'dialog' ? global.__cyberDialogSource || null : undefined);
+            var init = { cancelable: !!cancelable, oldState: oldState, newState: newState };
+            if (src) init.source = src;
+            return el.dispatchEvent(new C(type, init));
         }
         /* (a toggle event, in a task: one pending per element, its first old state kept) */
-        var pendingToggle = new WeakMap();
-        function queueToggle(el, oldState, newState) {
+        var pendingToggleD = new WeakMap(), pendingPopToggle = new WeakMap();
+        function queueToggle(el, oldState, newState, pop) {
+            var pendingToggle = pop ? pendingPopToggle : pendingToggleD;   /* (a dialog's and a popover's toggle task trackers: apart) */
             var p = pendingToggle.get(el);
             if (p) { p.newState = newState; return; }
-            p = { oldState: oldState, newState: newState };
+            p = { oldState: oldState, newState: newState, source: !pop && el.localName === 'dialog' ? global.__cyberDialogSource || null : undefined };
             pendingToggle.set(el, p);
             global.setTimeout(function () {
                 pendingToggle.delete(el);
-                if (p.oldState !== p.newState) toggleEvent(el, 'toggle', p.oldState, p.newState, false);
+                if (p.oldState !== p.newState || (!pop && el.localName === 'dialog')) toggleEvent(el, 'toggle', p.oldState, p.newState, false, p.source === undefined ? null : p.source);   /* (a dialog's: even when it ends as it began) */
             }, 0);
         }
 
@@ -4014,10 +4455,164 @@
             var isDialog = function (el) { return el instanceof D; };
             Object.defineProperty(DP, 'open', { configurable: true, enumerable: true,
                 get: function () { if (!isDialog(this)) throw new TypeError('Illegal invocation'); return this.hasAttribute('open'); },
-                set: function (v) { if (!isDialog(this)) throw new TypeError('Illegal invocation'); if (v) this.setAttribute('open', ''); else this.removeAttribute('open'); } });
+                set: function (v) {
+                    if (!isDialog(this)) throw new TypeError('Illegal invocation');
+                    if (v) this.setAttribute('open', ''); else this.removeAttribute('open');
+                    /* (opened so, or closed so: its close watcher too, the dialog setup and cleanup steps) */
+                    if (v && this.isConnected && typeof global.__cyberCloseWatchAdd === 'function') global.__cyberCloseWatchAdd(this);
+                    else if (!v && typeof global.__cyberCloseWatchRemove === 'function') global.__cyberCloseWatchRemove(this);
+                } });
             Object.defineProperty(DP, 'returnValue', { configurable: true, enumerable: true,
                 get: function () { if (!isDialog(this)) throw new TypeError('Illegal invocation'); return RV.has(this) ? RV.get(this) : ''; },
                 set: function (v) { if (!isDialog(this)) throw new TypeError('Illegal invocation'); RV.set(this, String(v)); } });
+            /* (closedBy: the attribute's state; auto, as the dialog is: close requests if modal, nothing if not) */
+            Object.defineProperty(DP, 'closedBy', { configurable: true, enumerable: true,
+                get: function () {
+                    if (!isDialog(this)) throw new TypeError('Illegal invocation');
+                    var v = String(this.getAttribute('closedby') || '').toLowerCase();
+                    if (v === 'any' || v === 'closerequest' || v === 'none') return v;
+                    return elState(this, ST_MODAL) ? 'closerequest' : 'none';
+                },
+                set: function (v) { if (!isDialog(this)) throw new TypeError('Illegal invocation'); this.setAttribute('closedby', String(v)); } });
+            /* the focus delegate (HTML 6.6.3): an autofocus one, else the first focusable one in the flat tree */
+            var NATIVE_FOCUS = /^(button|select|textarea|iframe|object|embed)$/;
+            var focusableArea = function (el) {
+                if (!el || el.nodeType !== 1) return false;
+                var ln = el.localName, html = el.namespaceURI === 'http://www.w3.org/1999/xhtml';
+                var native = html && (NATIVE_FOCUS.test(ln) || (ln === 'input' && String(el.getAttribute('type') || '').toLowerCase() !== 'hidden') ||
+                    ((ln === 'a' || ln === 'area') && el.hasAttribute('href')) ||
+                    (ln === 'summary' && el.parentElement && el.parentElement.localName === 'details' && el.parentElement.querySelector('summary') === el));
+                if (!native && !el.hasAttribute('tabindex') && !(el.isContentEditable && (!el.parentElement || !el.parentElement.isContentEditable))) return false;
+                if (el.disabled === true && html && /^(button|input|select|textarea)$/.test(ln)) return false;
+                if (el.closest && el.closest('[inert]')) return false;
+                try { if (!el.getClientRects().length) return false; } catch (e) { }
+                return true;
+            };
+            /* (descendants in tree order: a shadow tree only through a host that delegates focus) */
+            var kids = function (n) { return Array.prototype.slice.call(n.childNodes); };
+            var autofocusIn = function (root) {
+                var stack = kids(root).reverse();
+                while (stack.length) {
+                    var n = stack.pop();
+                    if (n.nodeType !== 1) continue;
+                    if (n.hasAttribute('autofocus') && focusableArea(n)) return n;
+                    stack.push.apply(stack, kids(n).reverse());
+                }
+                return null;
+            };
+            var focusDelegate = function (target, keyboard) {
+                var a = autofocusIn(target);
+                if (a) return a;
+                var stack = kids(target).reverse();
+                while (stack.length) {
+                    var n = stack.pop();
+                    if (n.nodeType !== 1) continue;
+                    /* (a dialog's: keyboard focusable, sequentially) */
+                    if (focusableArea(n) && (!keyboard || n.tabIndex >= 0)) return n;
+                    if (n.shadowRoot && n.shadowRoot.delegatesFocus) { var d = focusDelegate(n.shadowRoot, keyboard); if (d) return d; }
+                    stack.push.apply(stack, kids(n).reverse());
+                }
+                return null;
+            };
+            var PREV = new WeakMap();
+            var dialogFocus = function (dlg) {
+                var doc = dlg.ownerDocument, prev = doc && doc.activeElement;
+                PREV.set(dlg, prev && prev !== doc.body ? prev : null);
+                /* (an autofocus dialog: itself) */
+                var control = dlg.hasAttribute('autofocus') ? dlg : focusDelegate(dlg, true) || dlg;
+                try { control.focus(); } catch (e) { /* (not focusable) */ }
+            };
+            /* (the close watchers: open dialogs and auto/hint popovers, newest last; Escape asks the newest to close,
+             * a click outside a closedby=any dialog closes it, HTML 6.x close watchers and dialog light dismiss) */
+            var CW = [];
+            var cwRemove = function (el) { var i = CW.indexOf(el); if (i >= 0) CW.splice(i, 1); };
+            var cwWatched = new WeakSet();
+            var cwAdd = function (el) {
+                cwRemove(el);
+                CW.push(el);
+                var doc = el.ownerDocument;
+                if (!doc || cwWatched.has(doc) || typeof doc.addEventListener !== 'function') return;
+                cwWatched.add(doc);
+                var downIn = null, lastUp = 0;
+                /* (dialogs opened by their open attribute: watched too, the dialog setup steps) */
+                var adopt = function () {
+                    var ods = doc.querySelectorAll('dialog[open]');
+                    for (var oi = 0; oi < ods.length; oi++) if (CW.indexOf(ods[oi]) < 0) CW.push(ods[oi]);
+                };
+                doc.addEventListener('keydown', function (e) {
+                    if ((e.key !== 'Escape' && e.key !== 'Esc') || e.defaultPrevented) return;
+                    adopt();
+                    for (var i = CW.length - 1; i >= 0; i--) {
+                        var w = CW[i];
+                        if (w.ownerDocument !== doc) continue;
+                        if (w.localName === 'dialog') {
+                            if (!w.hasAttribute('open')) { CW.splice(i, 1); continue; }
+                            if (w.closedBy !== 'none') { try { w.requestClose(); } catch (x) { } }
+                            return;
+                        }
+                        if (global.CloseWatcher && w instanceof global.CloseWatcher) { if (w.__cyberActive && w.__cyberActive()) { w.requestClose(); return; } CW.splice(i, 1); continue; }
+                        if (typeof global.__cyberPopoverEscape === 'function' && global.__cyberPopoverEscape(w)) return;
+                        CW.splice(i, 1);
+                    }
+                }, false);
+                var topDialog = function () {
+                    adopt();
+                    for (var i = CW.length - 1; i >= 0; i--) {
+                        var w = CW[i];
+                        if (w.ownerDocument === doc && w.localName === 'dialog' && w.hasAttribute('open')) return w;
+                        if (w.ownerDocument === doc && w.localName !== 'dialog') return null;
+                    }
+                    return null;
+                };
+                /* (a click in the dialog: in its subtree; the dialog itself (its ::backdrop) only inside its box) */
+                var inDlg = function (d, e) {
+                    if (!d.contains(e.target)) return false;
+                    if (e.target !== d || typeof e.clientX !== 'number') return true;
+                    var r = d.getBoundingClientRect();
+                    return e.clientX >= r.left && e.clientX < r.right && e.clientY >= r.top && e.clientY < r.bottom;
+                };
+                /* (HTML "light dismiss open dialogs": the topmost open dialog, unless the click was in it (its nearest clicked
+                 * dialog, through the flat tree; a modal one's backdrop is outside), down and up in the same one) */
+                var topOpenDialog = function () {
+                    adopt();
+                    for (var i = CW.length - 1; i >= 0; i--) {
+                        var w = CW[i];
+                        if (w.ownerDocument === doc && w.localName === 'dialog' && w.hasAttribute('open')) return w;
+                    }
+                    return null;
+                };
+                var nearestClicked = function (e) {
+                    var cp = typeof e.composedPath === 'function' ? e.composedPath() : null, t = cp && cp.length ? cp[0] : e.target;
+                    if (t && t.localName === 'dialog' && t.hasAttribute('open') && typeof e.clientX === 'number' && t.matches(':modal')) {
+                        var r = t.getBoundingClientRect();
+                        if (!(e.clientX >= r.left && e.clientX < r.right && e.clientY >= r.top && e.clientY < r.bottom)) return null;
+                    }
+                    for (var n = t, g = 0; n && g < 4096; g++) {
+                        if (n.nodeType === 1 && n.localName === 'dialog' && n.hasAttribute('open')) return n;
+                        n = n.assignedSlot || n.parentNode || n.host || null;
+                    }
+                    return null;
+                };
+                var NONE = {};
+                downIn = NONE;
+                doc.addEventListener('pointerdown', function (e) { downIn = topOpenDialog() ? nearestClicked(e) : NONE; }, true);
+                doc.addEventListener('mousedown', function (e) { if (downIn === NONE) downIn = topOpenDialog() ? nearestClicked(e) : NONE; }, true);
+                var up = function (e) {
+                    var now = Date.now();
+                    if (e.type === 'mouseup' && now - lastUp < 50) return;
+                    lastUp = now;
+                    var top = topOpenDialog(), was = downIn;
+                    downIn = NONE;
+                    if (!top || was === NONE) return;
+                    var anc = nearestClicked(e);
+                    if (anc !== was || anc === top || top.closedBy !== 'any') return;
+                    try { top.requestClose(); } catch (x) { }
+                };
+                doc.addEventListener('pointerup', up, true);
+                doc.addEventListener('mouseup', up, true);
+            };
+            Object.defineProperty(global, '__cyberCloseWatchAdd', { configurable: true, value: cwAdd });
+            Object.defineProperty(global, '__cyberCloseWatchRemove', { configurable: true, value: cwRemove });
             method(DP, 'show', function () {
                 if (!isDialog(this)) throw new TypeError('Illegal invocation');
                 if (this.hasAttribute('open')) {
@@ -4027,6 +4622,8 @@
                 if (!toggleEvent(this, 'beforetoggle', 'closed', 'open', true) || this.hasAttribute('open')) return;
                 this.setAttribute('open', '');
                 queueToggle(this, 'closed', 'open');
+                cwAdd(this);
+                dialogFocus(this);
             });
             method(DP, 'showModal', function () {
                 if (!isDialog(this)) throw new TypeError('Illegal invocation');
@@ -4035,24 +4632,46 @@
                     throw invalidState('The dialog is already open as a non-modal dialog.');
                 }
                 if (!this.isConnected) throw invalidState('The dialog is not connected.');
+                /* (its document not fully active: one with no browsing context) */
+                if (!this.ownerDocument || !this.ownerDocument.defaultView) throw invalidState('The dialog\'s document is not fully active.');
                 if (elState(this, ST_POPOVER)) throw invalidState('The dialog is already open as a popover.');
-                if (!toggleEvent(this, 'beforetoggle', 'closed', 'open', true) || this.hasAttribute('open')) return;
+                if (!toggleEvent(this, 'beforetoggle', 'closed', 'open', true) || this.hasAttribute('open') || !this.isConnected || elState(this, ST_POPOVER)) return;
                 this.setAttribute('open', '');
                 elState(this, ST_MODAL, true);
+                /* (the modal dialogs in the order shown: the topmost last, html_element_api.c's focusable check) */
+                var mord = global.__cyberModalOrder || (global.__cyberModalOrder = []), mix = mord.indexOf(this);
+                if (mix >= 0) mord.splice(mix, 1);
+                mord.push(this);
+                /* (the popovers shown: hidden, up to the dialog's topmost popover ancestor, else all of them) */
+                if (typeof global.__cyberHidePopoversFor === 'function') { try { global.__cyberHidePopoversFor(this); } catch (e) { } }
                 queueToggle(this, 'closed', 'open');
-                /* (its focus: the autofocus one, or the dialog itself) */
-                var f = this.querySelector('[autofocus]') || this;
-                try { if (typeof f.focus === 'function') f.focus(); } catch (e) { /* (not focusable) */ }
+                cwAdd(this);
+                dialogFocus(this);
             });
             var closeDialog = function (el, rv) {
+                cwRemove(el);
                 if (!el.hasAttribute('open')) return;
                 toggleEvent(el, 'beforetoggle', 'open', 'closed', false);
                 if (!el.hasAttribute('open')) return;
+                var doc = el.ownerDocument, act = doc && doc.activeElement;
+                var hadFocus = act && (act === el || el.contains(act) || (act.shadowRoot && el.contains(act)));
                 el.removeAttribute('open');
                 elState(el, ST_MODAL, false);
+                var mord2 = global.__cyberModalOrder, mix2 = mord2 ? mord2.indexOf(el) : -1;
+                if (mix2 >= 0) mord2.splice(mix2, 1);
                 if (rv !== undefined && rv !== null) RV.set(el, String(rv));
                 queueToggle(el, 'open', 'closed');
-                global.setTimeout(function () { el.dispatchEvent(new global.Event('close')); }, 0);
+                /* (focus back where it was, if it was in the dialog) */
+                var prev = PREV.get(el);
+                PREV.delete(el);
+                if (hadFocus || (act && act === doc.body)) {
+                    if (prev && prev.isConnected) { try { prev.focus({ preventScroll: true }); } catch (e) { } }
+                    else if (act && act.blur && act !== doc.body) { try { act.blur(); } catch (e) { } }
+                }
+                global.setTimeout(function () {
+                    var ev = new global.Event('close');
+                    if (global.__cyberDispatchTrusted) global.__cyberDispatchTrusted(el, ev); else el.dispatchEvent(ev);
+                }, 0);
             };
             method(DP, 'close', function (rv) {
                 if (!isDialog(this)) throw new TypeError('Illegal invocation');
@@ -4061,6 +4680,8 @@
             method(DP, 'requestClose', function (rv) {
                 if (!isDialog(this)) throw new TypeError('Illegal invocation');
                 if (!this.hasAttribute('open')) return;
+                /* (no close watcher in a document not fully active) */
+                if (!this.ownerDocument || !this.ownerDocument.defaultView) return;
                 if (!this.dispatchEvent(new global.Event('cancel', { cancelable: true }))) return;
                 closeDialog(this, rv);
             });
@@ -4071,9 +4692,10 @@
         if (!HP || typeof HP.showPopover === 'function') return;
         function popoverKind(el) {
             var v = el.getAttribute('popover');
-            if (v === null) return null;
+            if (v === null) return el.localName === 'menulist' && el.namespaceURI === 'http://www.w3.org/1999/xhtml' ? 'auto' : null;   /* (a menulist: a popover of its own) */
             v = v.toLowerCase();
-            return v === 'manual' ? 'manual' : v === 'hint' ? 'hint' : 'auto';
+            /* (auto: the keyword or empty; hint; anything else, the invalid value default, manual) */
+            return v === '' || v === 'auto' ? 'auto' : v === 'hint' ? 'hint' : 'manual';
         }
         var isHTML = function (el) { return el instanceof global.HTMLElement; };
         function showing(el) { return !!elState(el, ST_POPOVER); }
@@ -4082,56 +4704,343 @@
             if (!el.isConnected) throw invalidState('The popover is not connected.');
             if (el.localName === 'dialog' && el.hasAttribute('open') && !showing(el)) throw invalidState('The dialog is already open.');
         }
+        /* (those showing: one removed from its document, or whose popover attribute changes state, hides at once, dom_api.c) */
+        var shownSet = new Set();
+        var noteShown = function (el, on) {
+            if (on) shownSet.add(el); else shownSet.delete(el);
+            if (shownSet.size) {
+                if (!global.__cyberPopoverCheck) Object.defineProperty(global, '__cyberPopoverCheck', { configurable: true, writable: true, value: function () {
+                    shownSet.forEach(function (p) { if (!p.isConnected) hide(p, false); });
+                } });
+            } else if (global.__cyberPopoverCheck) delete global.__cyberPopoverCheck;
+        };
+        var kindOfValue = function (v) {
+            if (v === null || v === undefined) return null;
+            v = String(v).toLowerCase();
+            return v === '' || v === 'auto' ? 'auto' : v === 'hint' ? 'hint' : 'manual';
+        };
+        Object.defineProperty(global, '__cyberPopoverAttr', { configurable: true, value: function (el, old) {
+            if (showing(el) && kindOfValue(old) !== popoverKind(el)) hide(el, true, true);
+        } });
         function hide(el, events) {
             if (!showing(el)) return;
             if (events) toggleEvent(el, 'beforetoggle', 'open', 'closed', false);
             if (!showing(el)) return;
             elState(el, ST_POPOVER, false);
-            if (events) queueToggle(el, 'open', 'closed');
+            noteShown(el, false);
+            if (events) queueToggle(el, 'open', 'closed', true);
         }
-        /* (the auto ones showing, oldest first) */
-        var autoStack = [];
-        function show(el) {
-            if (showing(el)) return;
-            check(el);
-            if (!toggleEvent(el, 'beforetoggle', 'closed', 'open', true) || showing(el)) return;
-            if (popoverKind(el) === 'auto') {
-                /* (the others shown with it close, but for its ancestors) */
-                for (var i = autoStack.length - 1; i >= 0; i--) {
-                    var o = autoStack[i];
-                    if (o === el || !showing(o) || o.contains(el)) continue;
-                    autoStack.splice(i, 1);
-                    hide(o, true);
-                }
-                autoStack.push(el);
+        /* (HTML 6.12: each document's showing auto and hint popover lists, oldest first; who is being shown or hidden) */
+        var POPLISTS = new WeakMap(), busy = new WeakSet();
+        var lists = function (doc) { var l = POPLISTS.get(doc); if (!l) { l = { auto: [], hint: [], down: null }; POPLISTS.set(doc, l); } return l; };
+        var unlist = function (el) {
+            var l = POPLISTS.get(el.ownerDocument);
+            if (!l) return;
+            var k = l.auto.indexOf(el); if (k >= 0) l.auto.splice(k, 1);
+            k = l.hint.indexOf(el); if (k >= 0) l.hint.splice(k, 1);
+        };
+        function checkValidity(el, expectShowing, throwEx, expectedDoc) {
+            if (popoverKind(el) === null) { if (throwEx) throw new global.DOMException('Not a popover.', 'NotSupportedError'); return false; }
+            /* (the state asked for first: a popover hidden is hidden, connected or not) */
+            if (expectShowing !== showing(el)) return false;
+            if (!el.isConnected || (expectedDoc && el.ownerDocument !== expectedDoc) || (el.localName === 'dialog' && elState(el, ST_MODAL)) ||
+                (!expectShowing && el.localName === 'dialog' && el.hasAttribute('open') && !showing(el))) {
+                if (throwEx) throw invalidState(!el.isConnected ? 'The popover is not connected.' : 'The popover is in a state it cannot be toggled from.');
+                return false;
             }
-            elState(el, ST_POPOVER, true);
-            queueToggle(el, 'closed', 'open');
+            return true;
+        }
+        /* (the flat tree's parent) */
+        var flatParent = function (n) {
+            if (n.assignedSlot) return n.assignedSlot;
+            var p = n.parentNode;
+            if (p && p.nodeType === 11 && p.host) return p.host;
+            return p;
+        };
+        var openPopover = function (n) {
+            for (; n; n = flatParent(n))
+                if (n.nodeType === 1 && isHTML(n) && (popoverKind(n) === 'auto' || popoverKind(n) === 'hint') && showing(n)) return n;
+            return null;
+        };
+        /* (an invoker's target popover, for the nearest invoker at or above n, when it is open) */
+        var invokerTarget = function (n) {
+            for (; n; n = flatParent(n)) {
+                if (n.nodeType !== 1 || !isHTML(n)) continue;
+                var t = null;
+                try { t = 'popoverTargetElement' in n ? n.popoverTargetElement : null; } catch (e) { t = null; }
+                /* (a button whose command is a popover's: its commandfor element) */
+                if (!t && n.localName === 'button') {
+                    try {
+                        var cmd = String(n.getAttribute('command') || '').toLowerCase();
+                        if (cmd === 'toggle-popover' || cmd === 'show-popover' || cmd === 'hide-popover') t = n.commandForElement || null;
+                    } catch (e) { t = null; }
+                }
+                if (t && (popoverKind(t) === 'auto' || popoverKind(t) === 'hint') && showing(t)) return t;
+            }
+            return null;
+        };
+        function topmostAncestor(np, list, invoker, isPopover) {
+            var pos = new Map();
+            list.forEach(function (p, i) { pos.set(p, i); });
+            if (isPopover) pos.set(np, list.length);
+            var top = null;
+            var chk = function (c) {
+                if (!c) return;
+                var a = openPopover(c);
+                if (!a || a === np || !pos.has(a)) return;
+                if (isPopover && pos.get(a) >= pos.get(np)) return;
+                if (top === null || pos.get(top) < pos.get(a)) top = a;
+            };
+            chk(flatParent(np));
+            chk(invoker);
+            return top;
+        }
+        function closeEntire(list, focusPrev, fireEvents) {
+            for (var guard = 0; list.length && guard < 1000; guard++) {
+                var last = list[list.length - 1];
+                hidePopoverAlg(last, focusPrev, fireEvents, false);
+                if (list.length && list[list.length - 1] === last) { list.pop(); elState(last, ST_POPOVER, false); noteShown(last, false); }
+            }
+        }
+        function hideStackUntil(endpoint, list, focusPrev, fireEvents) {
+            var repeating = false;
+            for (var guard = 0; guard < 100; guard++) {
+                var lastToHide = null;
+                for (var i = list.length - 1; i >= 0; i--) { if (list[i] === endpoint) break; lastToHide = list[i]; }
+                if (!lastToHide) return;
+                for (var g2 = 0; showing(lastToHide) && list.length && g2 < 1000; g2++) {
+                    var last = list[list.length - 1];
+                    hidePopoverAlg(last, focusPrev, fireEvents, false);
+                    if (list.length && list[list.length - 1] === last) { list.pop(); elState(last, ST_POPOVER, false); noteShown(last, false); }
+                }
+                repeating = list.indexOf(endpoint) >= 0 && list[list.length - 1] !== endpoint;
+                if (!repeating) return;
+                fireEvents = false;
+            }
+        }
+        function hideAllUntil(endpoint, focusPrev, fireEvents) {
+            var isDoc = endpoint && endpoint.nodeType === 9;
+            if (!isDoc && !showing(endpoint)) return;
+            var l = lists(isDoc ? endpoint : endpoint.ownerDocument);
+            if (isDoc) { closeEntire(l.hint, focusPrev, fireEvents); closeEntire(l.auto, focusPrev, fireEvents); return; }
+            if (l.hint.indexOf(endpoint) >= 0) { hideStackUntil(endpoint, l.hint, focusPrev, fireEvents); return; }
+            /* (an auto one: the autos above it; hints opened apart from it stay, as engines have it) */
+            if (l.auto.indexOf(endpoint) < 0) return;
+            hideStackUntil(endpoint, l.auto, focusPrev, fireEvents);
+        }
+        /* (each popover's previously focused element, for its hiding to go back to) */
+        var popPrevFocus = new WeakMap();
+        var tryFocus = function (c) {
+            var d = c.ownerDocument;
+            try { global.HTMLElement.prototype.focus.call(c, { preventScroll: true }); } catch (e) {
+                try { c.focus({ preventScroll: true }); } catch (e2) { return false; } }
+            var a = d.activeElement;
+            for (var g = 0; a && a.shadowRoot && a.shadowRoot.activeElement && g < 32; g++) a = a.shadowRoot.activeElement;
+            return a === c || d.activeElement === c;
+        };
+        /* (HTML "popover focusing steps": a dialog's own initial focus; else the popover, with autofocus, or its autofocus delegate) */
+        var popoverFocusingSteps = function (el) {
+            var isDialog = el.localName === 'dialog' && el.namespaceURI === 'http://www.w3.org/1999/xhtml';
+            /* (a shadow host that delegates focus: its autofocus delegate in there) */
+            var sr = el.shadowRoot;
+            if (el.hasAttribute('autofocus') && sr && sr.delegatesFocus) {
+                var inner = sr.querySelectorAll('[autofocus]');
+                for (var s2 = 0; s2 < inner.length; s2++) if (tryFocus(inner[s2])) return;
+            }
+            if (el.hasAttribute('autofocus')) { if (tryFocus(el)) return; if (!isDialog) return; }
+            var auto = el.querySelectorAll('[autofocus]');
+            for (var i = 0; i < auto.length; i++) {
+                /* (not inside a nested popover or dialog of its own) */
+                if (auto[i].closest('[popover], dialog') !== el && auto[i].closest('[popover], dialog') !== auto[i]) continue;
+                if (tryFocus(auto[i])) return;
+            }
+            if (!isDialog) return;
+            var all = el.querySelectorAll('*');
+            for (var k = 0; k < all.length; k++) if (all[k].tabIndex >= 0 && !all[k].hasAttribute('disabled') && tryFocus(all[k])) return;
+        };
+        Object.defineProperty(global, '__cyberHidePopoversFor', { configurable: true, value: function (dlg) {
+            var d = dlg.ownerDocument, ls = lists(d);
+            if (!ls.auto.length && !ls.hint.length) return;
+            var until = topmostAncestor(dlg, ls.auto, null, false) || d;
+            hideAllUntil(until, false, true);
+        } });
+        function showPopoverAlg(el, throwEx, invoker) {
+            if (!checkValidity(el, false, throwEx, null)) return;
+            var doc = el.ownerDocument, nested = busy.has(el), fire = !nested;
+            busy.add(el);
+            var cleanup = function () { if (!nested) busy.delete(el); };
+            try {
+                if (!toggleEvent(el, 'beforetoggle', 'closed', 'open', true)) return;
+                if (!checkValidity(el, false, throwEx, doc)) return;
+                watchDoc(doc);
+                if (global.__cyberWatchPopover) global.__cyberWatchPopover(doc);
+                var orig = popoverKind(el), stack = null, l = lists(doc);
+                var autoA = topmostAncestor(el, l.auto, invoker, true), hintA = topmostAncestor(el, l.hint, invoker, true);
+                if (orig === 'auto') { closeEntire(l.hint, false, fire); hideAllUntil(autoA || doc, false, fire); stack = 'auto'; }
+                else if (orig === 'hint') {
+                    if (hintA) { hideAllUntil(hintA, false, fire); stack = 'hint'; }
+                    else { closeEntire(l.hint, false, fire); if (autoA) { hideAllUntil(autoA, false, fire); stack = 'auto'; } else stack = 'hint'; }
+                }
+                if (orig === 'auto' || orig === 'hint') {
+                    if (orig !== popoverKind(el)) { if (throwEx) throw invalidState('The popover type changed while it was being shown.'); return; }
+                    if (!checkValidity(el, false, throwEx, doc)) return;
+                }
+                elState(el, ST_POPOVER, true);
+                noteShown(el, true);
+                if (stack) l[stack].push(el);
+                if (stack && typeof global.__cyberCloseWatchAdd === 'function') global.__cyberCloseWatchAdd(el);
+                /* (focus: the popover's focusing steps; an auto one's hiding goes back to what had it) */
+                popPrevFocus.delete(el);
+                var origFocus = doc.activeElement;
+                try { popoverFocusingSteps(el); } catch (e) { }
+                if (orig === 'auto' && popoverKind(el) !== null && origFocus) popPrevFocus.set(el, origFocus);
+                queueToggle(el, 'closed', 'open', true);
+            } finally { cleanup(); }
+        }
+        function hidePopoverAlg(el, focusPrev, fireEvents, throwEx) {
+            if (!checkValidity(el, true, throwEx, null)) return;
+            var doc = el.ownerDocument, l = lists(doc), nested = busy.has(el);
+            busy.add(el);
+            if (nested) fireEvents = false;
+            try {
+                var k = popoverKind(el);
+                if (k === 'auto' || k === 'hint') {
+                    hideAllUntil(el, focusPrev, fireEvents);
+                    if (!checkValidity(el, true, throwEx, null)) return;
+                }
+                var autoTop = l.auto.length && l.auto[l.auto.length - 1] === el;
+                if (fireEvents) {
+                    toggleEvent(el, 'beforetoggle', 'open', 'closed', false);
+                    if (autoTop && l.auto[l.auto.length - 1] !== el) hideAllUntil(el, focusPrev, false);
+                    if (!checkValidity(el, true, throwEx, null)) return;
+                }
+                unlist(el);
+                elState(el, ST_POPOVER, false);
+                noteShown(el, false);
+                if (typeof global.__cyberCloseWatchRemove === 'function') global.__cyberCloseWatchRemove(el);
+                if (fireEvents) queueToggle(el, 'open', 'closed', true);
+                /* (the previously focused element: focus back to it, when focus was inside the popover) */
+                var prevF = popPrevFocus.get(el);
+                popPrevFocus.delete(el);
+                if (focusPrev && prevF && prevF.isConnected) {
+                    var af = doc.activeElement;
+                    var inside = false;
+                    for (var n = af, g2 = 0; n && g2 < 256; g2++) { if (n === el) { inside = true; break; } n = n.parentNode || n.host; }
+                    if (inside) tryFocus(prevF);
+                }
+            } finally { if (!nested) busy.delete(el); }
+        }
+        /* (hidden as it stops being one, or leaves its document: at once, no events) */
+        function hide(el, events, focusPrev) {
+            if (!showing(el)) return;
+            if (el.isConnected && popoverKind(el) !== null) { hidePopoverAlg(el, !!focusPrev, events, false); if (!showing(el)) return; }
+            /* (one that stopped being a popover: beforetoggle first all the same) */
+            if (events && el.isConnected) { toggleEvent(el, 'beforetoggle', 'open', 'closed', false); if (!showing(el)) return; }
+            /* (out of its document: the popovers shown above it in its list go first, no events) */
+            var L = POPLISTS.get(el.ownerDocument);
+            if (L && L.auto.indexOf(el) >= 0) for (var gh = 0; L.hint.length && gh < 1000; gh++) { var th = L.hint[L.hint.length - 1]; hide(th, false); if (L.hint[L.hint.length - 1] === th) L.hint.pop(); }
+            if (L) [L.hint, L.auto].forEach(function (list) {
+                var at = list.indexOf(el);
+                for (var g = 0; at >= 0 && list.length > at + 1 && g < 1000; g++) {
+                    var top = list[list.length - 1];
+                    hide(top, false);
+                    if (list[list.length - 1] === top) list.pop();
+                    at = list.indexOf(el);
+                }
+            });
+            unlist(el);
+            elState(el, ST_POPOVER, false);
+            noteShown(el, false);
+            if (events) queueToggle(el, 'open', 'closed', true);
+        }
+        function show(el) { showPopoverAlg(el, true, null); }
+        /* (light dismiss, HTML 6.12.x: a click outside the topmost popovers; Escape: the topmost one's close watcher) */
+        var clickedPopover = function (n, l) {
+            var a = openPopover(n), b = invokerTarget(n);
+            var ia = a ? Math.max(l.auto.indexOf(a), l.hint.indexOf(a) + 10000) : -1, ib = b ? Math.max(l.auto.indexOf(b), l.hint.indexOf(b) + 10000) : -1;
+            return ia >= ib ? a : b;
+        };
+        var watched = new WeakSet();
+        function watchDoc(doc) {
+            if (!doc || watched.has(doc) || typeof doc.addEventListener !== 'function') return;
+            watched.add(doc);
+            var lastDown = 0;
+            var down = function (e) {
+                var now = Date.now();
+                if (e.type === 'mousedown' && now - lastDown < 50) return;
+                lastDown = now;
+                var l = lists(doc);
+                if (!l.auto.length && !l.hint.length) return;
+                l.down = clickedPopover(e.target, l);
+                l.downSet = true;
+                l.downNode = e.target;
+            };
+            var lastUp = 0;
+            var up = function (e) {
+                var now = Date.now();
+                if (e.type === 'mouseup' && now - lastUp < 50) return;
+                lastUp = now;
+                var l = lists(doc);
+                if (!l.downSet) return;
+                var a = clickedPopover(e.target, l), same = a === l.down;
+                /* (what was pressed on gone from the document since: not a click outside) */
+                if (l.downNode && l.downNode.nodeType === 1 && !l.downNode.isConnected) same = false;
+                l.down = null; l.downSet = false; l.downNode = null;
+                if (!l.auto.length && !l.hint.length) return;
+                if (same) hideAllUntil(a || doc, false, true);
+            };
+            doc.addEventListener('pointerdown', down, true);
+            doc.addEventListener('mousedown', down, true);
+            doc.addEventListener('pointerup', up, true);
+            doc.addEventListener('mouseup', up, true);
+            /* (Escape: through the close watchers, with the dialogs) */
+            if (!global.__cyberPopoverEscape) Object.defineProperty(global, '__cyberPopoverEscape', { configurable: true, value: function (el) {
+                if (!showing(el)) return false;
+                hidePopoverAlg(el, true, true, false);
+                return true;
+            } });
+        }
+        /* (a popovertarget invoker's: with it as the invoker, dom_events.js) */
+        Object.defineProperty(global, '__cyberPopoverInvoke', { configurable: true, value: function (pt, invoker, action) {
+            if (action === 'show') { if (!showing(pt)) showPopoverAlg(pt, false, invoker); }
+            else if (action === 'hide') { if (showing(pt)) hidePopoverAlg(pt, true, true, false); }
+            else if (showing(pt)) hidePopoverAlg(pt, true, true, false);
+            else showPopoverAlg(pt, false, invoker);
+        } });
+        /* (options.source: the popover's implicit anchor, as an invoker's) */
+        function sourceAnchor(el, options) {
+            var src = options && typeof options === 'object' ? options.source : undefined;
+            if (src === undefined || src === null) return null;
+            if (!(src instanceof global.HTMLElement)) throw new TypeError("Failed to read the 'source' property: not an HTMLElement.");
+            var ik = src.getAttribute('data-cyber-iasrc') || String(++global.__cyberIaSeq || (global.__cyberIaSeq = 1));
+            if (src.getAttribute('data-cyber-iasrc') !== ik) src.setAttribute('data-cyber-iasrc', ik);
+            if (el.getAttribute('data-cyber-ia') !== ik) el.setAttribute('data-cyber-ia', ik);
+            return src;
         }
         method(HP, 'showPopover', function (options) {
             if (!isHTML(this)) throw new TypeError('Illegal invocation');
-            show(this);
+            var src = sourceAnchor(this, options);
+            showPopoverAlg(this, true, src);
         });
         method(HP, 'hidePopover', function () {
             if (!isHTML(this)) throw new TypeError('Illegal invocation');
-            if (!showing(this)) return;
-            check(this);
-            var k = autoStack.indexOf(this);
-            if (k >= 0) autoStack.splice(k, 1);
-            hide(this, true);
+            hidePopoverAlg(this, true, true, true);
         });
-        method(HP, 'togglePopover', function (force) {
+        method(HP, 'togglePopover', function (options) {
             if (!isHTML(this)) throw new TypeError('Illegal invocation');
-            var want = typeof force === 'boolean' ? force : force && typeof force === 'object' && typeof force.force === 'boolean' ? force.force : !showing(this);
-            if (want) show(this); else if (showing(this)) this.hidePopover();
-            else check(this);
+            var force = null, src = null;
+            if (typeof options === 'boolean') force = options;
+            else if (options && typeof options === 'object') { if (typeof options.force === 'boolean') force = options.force; src = sourceAnchor(this, options); }
+            if (showing(this) && force !== true) hidePopoverAlg(this, true, true, true);
+            else if (force === null || force === true) showPopoverAlg(this, true, src);
+            else checkValidity(this, showing(this), true, null);
             return showing(this);
         });
         Object.defineProperty(HP, 'popover', { configurable: true, enumerable: true,
-            get: function () { if (!isHTML(this)) throw new TypeError('Illegal invocation'); return popoverKind(this); },
+            get: function () { if (!isHTML(this)) throw new TypeError('Illegal invocation'); return this.getAttribute('popover') === null ? null : popoverKind(this); },   /* (a menulist's own popover-ness: not the attribute's) */
             set: function (v) {
                 if (!isHTML(this)) throw new TypeError('Illegal invocation');
-                if (v === null) this.removeAttribute('popover'); else this.setAttribute('popover', String(v));
+                if (v === null || v === undefined) this.removeAttribute('popover'); else this.setAttribute('popover', String(v));
             } });
         /* (a popover that stops being one: hidden) */
         var setA = global.Element.prototype.removeAttribute;
@@ -4139,7 +5048,7 @@
             var mo = new global.MutationObserver(function (recs) {
                 recs.forEach(function (r) {
                     var el = r.target;
-                    if (r.attributeName === 'popover' && showing(el) && popoverKind(el) !== r.oldValue) hide(el, false);
+                    /* (a popover attribute's change: __cyberPopoverAttr, at once) */
                     if (r.attributeName === 'open' && el.localName === 'dialog' && !el.hasAttribute('open')) elState(el, ST_MODAL, false);
                 });
             });
@@ -4426,6 +5335,46 @@
             this.removeChild(cells[index]);
         });
     }
+    /* (the table interfaces' operations: this one of theirs, their required arguments; caption, tHead, tFoot settable) */
+    [[global.HTMLTableElement, { createCaption: 0, deleteCaption: 0, createTHead: 0, deleteTHead: 0, createTFoot: 0, deleteTFoot: 0, createTBody: 0, insertRow: 0, deleteRow: 1 }],
+     [global.HTMLTableSectionElement, { insertRow: 0, deleteRow: 1 }],
+     [global.HTMLTableRowElement, { insertCell: 0, deleteCell: 1 }]].forEach(function (e) {
+        var C = e[0];
+        if (typeof C !== 'function') return;
+        Object.keys(e[1]).forEach(function (k) {
+            var f = C.prototype[k], need = e[1][k];
+            if (typeof f !== 'function') return;
+            var w = { [k]: function () {
+                if (!(this instanceof C)) throw new TypeError("Failed to execute '" + k + "' on '" + C.name + "': Illegal invocation");
+                if (arguments.length < need) throw new TypeError("Failed to execute '" + k + "' on '" + C.name + "': " + need + ' argument required, but only ' + arguments.length + ' present.');
+                return f.apply(this, arguments);
+            } }[k];
+            Object.defineProperty(w, 'length', { value: need });
+            define(C.prototype, k, w);
+        });
+    });
+    if (TP) [['caption', 'caption', 'deleteCaption', function (t) { return t.firstChild; }],
+             ['tHead', 'thead', 'deleteTHead', function (t) {
+                 for (var c = t.firstChild; c; c = c.nextSibling)
+                     if (c.nodeType === 1 && c.localName !== 'caption' && c.localName !== 'colgroup') return c;
+                 return null; }],
+             ['tFoot', 'tfoot', 'deleteTFoot', function () { return null; }]].forEach(function (a) {
+        var d = Object.getOwnPropertyDescriptor(TP, a[0]);
+        if (!d || !d.get || d.set) return;
+        var g = d.get;
+        var gg = { [a[0]]: function () { if (!(this instanceof global.HTMLTableElement)) throw new TypeError('Illegal invocation'); return g.call(this); } }[a[0]];
+        Object.defineProperty(gg, 'name', { value: 'get ' + a[0] });
+        var ss = { [a[0]]: function (v) {
+            if (!(this instanceof global.HTMLTableElement)) throw new TypeError('Illegal invocation');
+            if (v !== null && !(v instanceof global.HTMLTableCaptionElement || v instanceof global.HTMLTableSectionElement || (v && v.nodeType === 1)))
+                throw new TypeError("Failed to set the '" + a[0] + "' property on 'HTMLTableElement': The provided value is not of the right type.");
+            if (v !== null && v.localName !== a[1]) throw new global.DOMException('Not a ' + a[1] + ' element.', 'HierarchyRequestError');
+            this[a[2]]();
+            if (v !== null) this.insertBefore(v, a[3](this));
+        } }[a[0]];
+        Object.defineProperty(ss, 'name', { value: 'set ' + a[0] });
+        Object.defineProperty(TP, a[0], { get: gg, set: ss, enumerable: true, configurable: true });
+    });
     var CP = global.HTMLTableCellElement && global.HTMLTableCellElement.prototype;
     if (CP) {
         accessor(CP, 'cellIndex', function () {
@@ -4715,6 +5664,28 @@
             if (/^(article|aside|main|nav|section)$/.test(p.localName)) return true;
         return false;
     }
+    /* (a menu tree, its menulists and menubars nested through submenus: one with anything its content model has not
+     * (text outside an item or legend, an element other than its own kinds, a focusable container) is lists, all of it) */
+    var MENU_ITEMS = { menuitem: 1, menuitemradio: 1, menuitemcheckbox: 1, legend: 1 };
+    var MENU_PARTS = { fieldset: 1, div: 1, submenu: 1, menulist: 1, menubar: 1, hr: 1, template: 1, script: 1, style: 1 };
+    function menuTreeBad(el) {
+        var root = el;
+        for (var p = el.parentElement; p; p = p.parentElement)
+            if ((p.localName === 'menulist' || p.localName === 'menubar') && p.namespaceURI === el.namespaceURI) root = p;
+        var bad = function (n) {
+            for (var c = n.firstChild; c; c = c.nextSibling) {
+                if (c.nodeType === 3) { if (/[^\t\n\f\r ]/.test(c.data)) return true; continue; }
+                if (c.nodeType !== 1) continue;
+                var ln = c.localName;
+                if (c.namespaceURI !== 'http://www.w3.org/1999/xhtml') return true;
+                if (MENU_ITEMS[ln]) continue;
+                if (!MENU_PARTS[ln] || (ln !== 'template' && c.hasAttribute('tabindex'))) return true;
+                if (ln !== 'template' && ln !== 'script' && ln !== 'style' && bad(c)) return true;
+            }
+            return false;
+        };
+        return bad(root);
+    }
     function axRole(el) {
         var explicit = (el.getAttribute('role') || '').trim().toLowerCase().split(/\s+/);
         for (var i = 0; i < explicit.length; i++) if (ARIA_ROLES.indexOf(explicit[i]) >= 0) return explicit[i];
@@ -4738,6 +5709,15 @@
         case 'search': return 'search';
         case 'article': return 'article';
         case 'ul': case 'ol': case 'menu': return 'list';
+        case 'menulist': return menuTreeBad(el) ? 'list' : 'menu';
+        case 'menubar': return menuTreeBad(el) ? 'list' : 'menubar';
+        case 'menuitem': case 'menuitemradio': case 'menuitemcheckbox': {
+            /* (in a menu tree that is lists: a list item, a radio, a checkbox) */
+            var mo = el.parentElement;
+            while (mo && mo.localName !== 'menulist' && mo.localName !== 'menubar') mo = mo.parentElement;
+            var lst = mo && menuTreeBad(mo);
+            return tag === 'menuitem' ? (lst ? 'listitem' : 'menuitem') : tag === 'menuitemradio' ? (lst ? 'radio' : 'menuitemradio') : (lst ? 'checkbox' : 'menuitemcheckbox');
+        }
         case 'li': return 'listitem';
         case 'table': return 'table';
         case 'caption': return 'caption';
@@ -4822,11 +5802,36 @@
         return axClean(el.getAttribute('title'));
     }
     var axDepth = 0;
+    /* (scoped focusgroup's implied roles, Open UI: a generic owner its behavior's role; its generic or button items the
+     * behavior's child role; explicit roles and other native ones kept) */
+    var FG_OWNER = { tablist: 'tablist', radiogroup: 'radiogroup', listbox: 'listbox', menu: 'menu', menubar: 'menubar', toolbar: 'toolbar', feed: 'feed' };
+    var FG_CHILD = { tablist: 'tab', radiogroup: 'radio', listbox: 'option', menu: 'menuitem', menubar: 'menuitem', feed: 'article' };
+    var fgBehavior = function (n) {
+        var v = n.getAttribute && n.getAttribute('focusgroup');
+        if (v === null || v === undefined) return null;
+        var t = String(v).trim().toLowerCase().split(/\s+/);
+        for (var i = 0; i < t.length; i++) if (FG_OWNER[t[i]]) return t[i];
+        return '';
+    };
+    var fgImplied = function (el, r) {
+        var explicit = (el.getAttribute('role') || '').trim();
+        if (explicit) return r;
+        var own = fgBehavior(el);
+        if (own && r === 'generic') return FG_OWNER[own];
+        if ((r !== 'generic' && r !== 'button') || !(el.tabIndex >= 0)) return r;
+        for (var n = el.assignedSlot || el.parentNode || el.host, g = 0; n && g < 256; n = n.assignedSlot || n.parentNode || n.host, g++) {
+            if (n.nodeType !== 1) continue;
+            var b = fgBehavior(n);
+            if (b === null) continue;
+            return b && FG_CHILD[b] ? FG_CHILD[b] : r;
+        }
+        return r;
+    };
     function axRoleOnly(el) {
         /* (a role that asks for the name asks again: once is enough) */
         if (axDepth > 2) return '';
         axDepth++;
-        try { return axRole(el); } finally { axDepth--; }
+        try { return fgImplied(el, axRole(el)); } finally { axDepth--; }
     }
     /* ---- print mode (CSS Page 3): pages as a strip, one under the other: the
      * engine paginates the root (__cyberPrintSet); here the @page rules, the page
@@ -5334,4 +6339,3531 @@
         role: function (el) { return el && el.nodeType === 1 ? axRoleOnly(el) : ''; },
         label: function (el) { return el && el.nodeType === 1 ? axName(el) : ''; },
     }) });
+
+    /* ---- interfaces for objects made plain elsewhere (HTML 4.8.11 media, 7.2 window parts) ---- */
+    (function () {
+        if (!global.document || global.document.nodeType !== 9) return;   /* (a window's realm) */
+        var ET = global.EventTarget;
+        function iface(name, Parent) {
+            var C = function () { illegal(); };
+            Object.defineProperty(C, 'name', { value: name });
+            C.prototype = Object.create(Parent ? Parent.prototype : Object.prototype);
+            define(C.prototype, 'constructor', C);
+            Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
+            if (Parent) Object.setPrototypeOf(C, Parent);
+            expose(name, C);
+            return C;
+        }
+        function getter(P, name, brand, get, set) {
+            var g = { get: function () { if (!this || !this[brand]) throw new TypeError('Illegal invocation'); return get.call(this, this[brand]); } };
+            var d = { get: Object.getOwnPropertyDescriptor(g, 'get').value, enumerable: true, configurable: true };
+            if (set) {
+                var s = { set: function (v) { if (!this || !this[brand]) throw new TypeError('Illegal invocation'); set.call(this, this[brand], v); } };
+                d.set = Object.getOwnPropertyDescriptor(s, 'set').value;
+            }
+            Object.defineProperty(P, name, d);
+        }
+        function op(P, name, brand, len, fn) {
+            var o = { f: function () {
+                if (!this || !this[brand]) throw new TypeError('Illegal invocation');
+                if (arguments.length < len) throw new TypeError("Failed to execute '" + name + "': " + len + ' argument' + (len > 1 ? 's' : '') + ' required, but only ' + arguments.length + ' present.');
+                return fn.apply(this, [this[brand]].concat([].slice.call(arguments)));
+            } };
+            var f = o.f;
+            Object.defineProperty(f, 'name', { value: name, configurable: true });
+            Object.defineProperty(f, 'length', { value: len, configurable: true });
+            Object.defineProperty(P, name, { value: f, writable: true, enumerable: true, configurable: true });
+        }
+        /* (an event handler IDL attribute: the listener it adds) */
+        function handler(P, name) {
+            var K = Symbol(name), L = Symbol(name + 'L'), type = name.slice(2);
+            Object.defineProperty(P, name, { enumerable: true, configurable: true,
+                get: function () { return this[K] || null; },
+                set: function (v) {
+                    if (this[L]) { this.removeEventListener(type, this[L]); this[L] = null; }
+                    var f = typeof v === 'function' || (v && typeof v === 'object') ? v : null;
+                    Object.defineProperty(this, K, { value: f, writable: true, configurable: true });
+                    if (f) {
+                        var self = this, w = function (e) { var r = typeof f === 'function' ? f.call(self, e) : null; if (r === false) e.preventDefault(); return r; };
+                        Object.defineProperty(this, L, { value: w, writable: true, configurable: true });
+                        this.addEventListener(type, w);
+                    }
+                } });
+        }
+        function brandNew(C, brand, st) { var o = Object.create(C.prototype); Object.defineProperty(o, brand, { value: st }); return o; }
+        function fire(t, type, init) { var E = global.Event; try { t.dispatchEvent(init && global.TrackEvent ? new global.TrackEvent(type, init) : new E(type)); } catch (e) { } }
+
+        /* TimeRanges */
+        var TRB = Symbol('timeRanges');
+        var TimeRanges = iface('TimeRanges');
+        getter(TimeRanges.prototype, 'length', TRB, function (st) { return st.s.length; });
+        ['start', 'end'].forEach(function (k) {
+            op(TimeRanges.prototype, k, TRB, 1, function (st, i) {
+                i = Number(i); i = isFinite(i) ? Math.trunc(i) >>> 0 : 0;
+                if (i >= st.s.length) throw new global.DOMException("Failed to execute '" + k + "' on 'TimeRanges': The index provided (" + i + ") is greater than or equal to the maximum bound (" + st.s.length + ').', 'IndexSizeError');
+                return (k === 'start' ? st.s : st.e)[i];
+            });
+        });
+        function ranges(nat) {
+            var s = [], e = [];
+            if (nat && typeof nat === 'object') {
+                var n = nat.length >>> 0;
+                for (var i = 0; i < n; i++) { try { s.push(+nat.start(i)); e.push(+nat.end(i)); } catch (x) { } }
+            }
+            return brandNew(TimeRanges, TRB, { s: s, e: e });
+        }
+        define(global, '__cyberTimeRanges', function (s, e) { return brandNew(TimeRanges, TRB, { s: s || [], e: e || [] }); });
+
+        /* MediaError */
+        var MEB = Symbol('mediaError');
+        var MediaError = iface('MediaError');
+        getter(MediaError.prototype, 'code', MEB, function (st) { return +st.code || 0; });
+        getter(MediaError.prototype, 'message', MEB, function (st) { return st.message == null ? '' : String(st.message); });
+        var errs = new WeakMap();
+        function mediaError(nat) {
+            if (!nat || typeof nat !== 'object') return nat === undefined ? null : nat;
+            if (nat instanceof MediaError) return nat;
+            var w = errs.get(nat);
+            if (!w) { w = brandNew(MediaError, MEB, nat); errs.set(nat, w); }
+            return w;
+        }
+
+        /* the track lists, the tracks, the cues */
+        var LB = Symbol('trackList'), TB = Symbol('track'), CB = Symbol('cueList'), QB = Symbol('cue');
+        var TextTrackList = iface('TextTrackList', ET), AudioTrackList = iface('AudioTrackList', ET), VideoTrackList = iface('VideoTrackList', ET);
+        var AudioTrack = iface('AudioTrack'), VideoTrack = iface('VideoTrack');
+        var TextTrack = iface('TextTrack', ET), TextTrackCueList = iface('TextTrackCueList'), TextTrackCue = iface('TextTrackCue', ET);
+        [TextTrackList, AudioTrackList, VideoTrackList].forEach(function (L) {
+            var P = L.prototype;
+            getter(P, 'length', LB, function (st) { return st.items.length; });
+            op(P, 'getTrackById', LB, 1, function (st, id) {
+                id = String(id);
+                for (var i = 0; i < st.items.length; i++) if (st.items[i].id === id) return st.items[i];
+                return null;
+            });
+            if (L === VideoTrackList) getter(P, 'selectedIndex', LB, function (st) {
+                for (var i = 0; i < st.items.length; i++) if (st.items[i].selected) return i;
+                return -1;
+            });
+            ['onchange', 'onaddtrack', 'onremovetrack'].forEach(function (h) { handler(P, h); });
+        });
+        function listSync(list, items) {
+            var st = list[LB], old = st.items.length;
+            st.items = items;
+            for (var i = 0; i < Math.max(old, items.length); i++) {
+                if (i < items.length) Object.defineProperty(list, i, { value: items[i], enumerable: true, configurable: true });
+                else delete list[i];
+            }
+        }
+        function newList(L) { return brandNew(L, LB, { items: [] }); }
+        [AudioTrack, VideoTrack].forEach(function (T) {
+            var P = T.prototype;
+            ['id', 'kind', 'label', 'language'].forEach(function (k) { getter(P, k, TB, function (st) { return st[k] || ''; }); });
+            if (T === AudioTrack) getter(P, 'enabled', TB, function (st) { return !!st.enabled; }, function (st, v) { st.enabled = !!v; });
+            else getter(P, 'selected', TB, function (st) { return !!st.selected; }, function (st, v) { st.selected = !!v; });
+        });
+        /* TextTrack: what addTextTrack or a <track> makes */
+        var KINDS = ['subtitles', 'captions', 'descriptions', 'chapters', 'metadata'], MODES = ['disabled', 'hidden', 'showing'];
+        var TTP = TextTrack.prototype;
+        /* (a <track>'s: its attributes as they are now) */
+        var TRACK_ATTR = { label: 'label', language: 'srclang', id: 'id' };
+        ['kind', 'label', 'language', 'id', 'inBandMetadataTrackDispatchType'].forEach(function (k) {
+            getter(TTP, k, TB, function (st) {
+                if (st.el && TRACK_ATTR[k]) { var av = st.el.getAttribute(TRACK_ATTR[k]); return av === null ? '' : av; }
+                return st[k] || '';
+            });
+        });
+        getter(TTP, 'mode', TB, function (st) { return st.mode; }, function (st, v) {
+            v = String(v);
+            if (MODES.indexOf(v) < 0 || v === st.mode) return;
+            st.mode = v;
+            if (st.el && v !== 'disabled' && typeof global.__cyberTrackLoad === 'function') global.__cyberTrackLoad(st.el);
+            if (st.media) { var self = this; setTimeout(function () { var l = st.media.textTracks; if (l) fire(l, 'change'); }, 0); }
+        });
+        function cueList(st) {
+            if (!st.cueList) st.cueList = brandNew(TextTrackCueList, CB, { items: st.cues });
+            var cl = st.cueList, items = st.cues;
+            for (var i = 0; i < Math.max(items.length, cl[CB].n || 0); i++) {
+                if (i < items.length) Object.defineProperty(cl, i, { value: items[i], enumerable: true, configurable: true });
+                else delete cl[i];
+            }
+            cl[CB].n = items.length; cl[CB].items = items;
+            return cl;
+        }
+        getter(TTP, 'cues', TB, function (st) { return st.mode === 'disabled' ? null : cueList(st); });
+        getter(TTP, 'activeCues', TB, function (st) {
+            if (st.mode === 'disabled') return null;
+            if (!st.active) st.active = brandNew(TextTrackCueList, CB, { items: [], n: 0 });
+            return st.active;
+        });
+        function cueSort(a, b) { var x = a[QB], y = b[QB]; return x.startTime - y.startTime || y.endTime - x.endTime; }
+        op(TTP, 'addCue', TB, 1, function (st, cue) {
+            if (!(cue instanceof TextTrackCue)) throw new TypeError("Failed to execute 'addCue' on 'TextTrack': parameter 1 is not of type 'TextTrackCue'.");
+            var q = cue[QB];
+            if (q.track && q.track !== this) q.track.removeCue(cue);
+            var i = st.cues.indexOf(cue);
+            if (i >= 0) st.cues.splice(i, 1);
+            q.track = this;
+            st.cues.push(cue);
+            st.cues.sort(cueSort);
+            if (st.cueList) cueList(st);   /* (the list: live) */
+        });
+        op(TTP, 'removeCue', TB, 1, function (st, cue) {
+            if (!(cue instanceof TextTrackCue)) throw new TypeError("Failed to execute 'removeCue' on 'TextTrack': parameter 1 is not of type 'TextTrackCue'.");
+            var i = st.cues.indexOf(cue);
+            if (i < 0) throw new global.DOMException("Failed to execute 'removeCue' on 'TextTrack': The specified cue is not listed in the TextTrack's list of cues.", 'NotFoundError');
+            st.cues.splice(i, 1);
+            cue[QB].track = null;
+            if (st.cueList) cueList(st);
+        });
+        handler(TTP, 'oncuechange');
+        var TCLP = TextTrackCueList.prototype;
+        getter(TCLP, 'length', CB, function (st) { return st.items.length; });
+        op(TCLP, 'getCueById', CB, 1, function (st, id) {
+            id = String(id);
+            if (!id) return null;
+            for (var i = 0; i < st.items.length; i++) if (st.items[i].id === id) return st.items[i];
+            return null;
+        });
+        /* TextTrackCue: abstract; VTTCue makes them */
+        var TCP = TextTrackCue.prototype;
+        getter(TCP, 'track', QB, function (st) { return st.track || null; });
+        getter(TCP, 'id', QB, function (st) { return st.id; }, function (st, v) { st.id = String(v); });
+        ['startTime', 'endTime'].forEach(function (k) {
+            getter(TCP, k, QB, function (st) { return st[k]; }, function (st, v) {
+                v = Number(v);
+                if (!isFinite(v)) throw new TypeError("Failed to set the '" + k + "' property on 'TextTrackCue': The provided double value is non-finite.");
+                st[k] = v;
+                if (st.track) st.track[TB].cues.sort(cueSort);
+            });
+        });
+        getter(TCP, 'pauseOnExit', QB, function (st) { return !!st.pauseOnExit; }, function (st, v) { st.pauseOnExit = !!v; });
+        ['onenter', 'onexit'].forEach(function (h) { handler(TCP, h); });
+        define(global, '__cyberNewCue', function (cue, start, end) {
+            Object.defineProperty(cue, QB, { value: { id: '', startTime: +start, endTime: +end, pauseOnExit: false, track: null } });
+            return cue;
+        });
+        function newTextTrack(kind, label, lang, media) {
+            return brandNew(TextTrack, TB, { kind: kind, label: label, language: lang, id: '', inBandMetadataTrackDispatchType: '',
+                                            mode: 'hidden', cues: [], media: media || null });
+        }
+
+        /* the media element's: lists kept per element, a <track> child's track among them */
+        var MP = null;
+        for (var p = global.HTMLVideoElement && global.HTMLVideoElement.prototype; p && !MP; p = Object.getPrototypeOf(p))
+            if (Object.getOwnPropertyDescriptor(p, 'buffered')) MP = p;
+        var lists = new WeakMap();
+        function listsOf(el) {
+            var l = lists.get(el);
+            if (!l) { l = { text: newList(TextTrackList), audio: newList(AudioTrackList), video: newList(VideoTrackList), added: [] }; lists.set(el, l); }
+            return l;
+        }
+        var TRP = global.HTMLTrackElement && global.HTMLTrackElement.prototype;
+        var trackOf = new WeakMap();
+        function elementTrack(t) {
+            var tt = trackOf.get(t);
+            if (!tt) {
+                tt = newTextTrack('', '', '', null);
+                tt[TB].mode = 'disabled';
+                tt[TB].el = t;
+                trackOf.set(t, tt);
+            }
+            var st = tt[TB], k = (t.getAttribute('kind') || '').toLowerCase();
+            st.kind = !t.hasAttribute('kind') || k === '' ? 'subtitles' : KINDS.indexOf(k) >= 0 ? k : 'metadata';
+            st.label = t.getAttribute('label') || '';
+            st.language = t.getAttribute('srclang') || '';
+            st.id = t.id || '';
+            return tt;
+        }
+        function textTracksOf(el) {
+            var l = listsOf(el), items = [];
+            for (var c = el.firstElementChild; c; c = c.nextElementSibling)
+                if (c.localName === 'track' && c.namespaceURI === 'http://www.w3.org/1999/xhtml') { var tt = elementTrack(c); tt[TB].media = el; items.push(tt); }
+            listSync(l.text, items.concat(l.added));
+            return l.text;
+        }
+        function wrapGet(name, conv) {
+            var d = MP && Object.getOwnPropertyDescriptor(MP, name);
+            var og = d && d.get;
+            var g = { get: function () { return conv.call(this, og ? og.call(this) : undefined); } };
+            Object.defineProperty(MP, name, { get: Object.getOwnPropertyDescriptor(g, 'get').value, set: d ? d.set : undefined, enumerable: true, configurable: true });
+        }
+        if (MP) {
+            ['buffered', 'played', 'seekable'].forEach(function (k) { wrapGet(k, function (nat) { return nat instanceof TimeRanges ? nat : ranges(nat); }); });
+            wrapGet('error', function (nat) { return mediaError(nat); });
+            wrapGet('textTracks', function () { return textTracksOf(this); });
+            wrapGet('audioTracks', function () { return listsOf(this).audio; });
+            wrapGet('videoTracks', function () { return listsOf(this).video; });
+            Object.defineProperty(MP, 'addTextTrack', { writable: true, enumerable: true, configurable: true, value: function addTextTrack(kind) {
+                if (arguments.length < 1) throw new TypeError("Failed to execute 'addTextTrack' on 'HTMLMediaElement': 1 argument required, but only 0 present.");
+                kind = String(kind);
+                if (KINDS.indexOf(kind) < 0) throw new TypeError("Failed to execute 'addTextTrack' on 'HTMLMediaElement': The provided value '" + kind + "' is not a valid enum value of type TextTrackKind.");
+                var label = arguments.length > 1 && arguments[1] !== undefined ? String(arguments[1]) : '';
+                var lang = arguments.length > 2 && arguments[2] !== undefined ? String(arguments[2]) : '';
+                var tt = newTextTrack(kind, label, lang, this), l = listsOf(this);
+                l.added.push(tt);
+                var list = textTracksOf(this);
+                setTimeout(function () { fire(list, 'addtrack', { track: tt }); }, 0);
+                return tt;
+            } });
+        }
+        if (TRP) {
+            Object.defineProperty(TRP, 'track', { enumerable: true, configurable: true, get: function track() { return elementTrack(this); } });
+            Object.defineProperty(TRP, 'readyState', { enumerable: true, configurable: true, get: function readyState() { var tt = trackOf.get(this); return tt && tt[TB].ready || 0; } });
+            /* ---- the text track processing model (HTML 4.8.11.11.x): a <track>'s cues fetched and parsed, WebVTT ---- */
+            var vttTime = function (s) {
+                var m = /^(?:(\d{2,}):)?([0-5]\d):([0-5]\d)\.(\d{3})$/.exec(s);
+                return m ? (m[1] ? +m[1] * 3600 : 0) + +m[2] * 60 + +m[3] + +m[4] / 1000 : null;
+            };
+            var vttSettings = function (cue, s) {
+                s.split(/[ \t]+/).forEach(function (tok) {
+                    var i = tok.indexOf(':');
+                    if (i <= 0 || i === tok.length - 1) return;
+                    var k = tok.slice(0, i), v = tok.slice(i + 1), m;
+                    try {
+                        if (k === 'vertical') { if (v === 'rl' || v === 'lr') cue.vertical = v; }
+                        else if (k === 'line') {
+                            var parts = v.split(','), lv = parts[0], la = parts[1];
+                            if (la !== undefined && !/^(start|center|end)$/.test(la)) return;
+                            if ((m = /^(\d+(?:\.\d+)?)%$/.exec(lv)) && +m[1] <= 100) { cue.line = +m[1]; cue.snapToLines = false; }
+                            else if (/^-?\d+$/.test(lv)) { cue.line = +lv; cue.snapToLines = true; }
+                            else return;
+                            if (la) cue.lineAlign = la;
+                        } else if (k === 'position') {
+                            var pp = v.split(','), pa = pp[1];
+                            if (!(m = /^(\d+(?:\.\d+)?)%$/.exec(pp[0])) || +m[1] > 100) return;
+                            if (pa !== undefined && !/^(line-left|center|line-right)$/.test(pa)) return;
+                            cue.position = +m[1];
+                            if (pa) cue.positionAlign = pa;
+                        } else if (k === 'size') {
+                            if ((m = /^(\d+(?:\.\d+)?)%$/.exec(v)) && +m[1] <= 100) cue.size = +m[1];
+                        } else if (k === 'align') {
+                            if (/^(start|center|end|left|right)$/.test(v)) cue.align = v;
+                        }
+                    } catch (e) { }
+                });
+            };
+            var parseVTT = function (text) {
+                if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+                text = text.replace(/\0/g, '\uFFFD');
+                var lines = text.split(/\r\n|\r|\n/), i = 0, cues = [];
+                if (!/^WEBVTT(?:[ \t]|$)/.test(lines[0] || '')) return null;
+                i = 1;
+                /* (the header: to a blank line, or to a line with "-->") */
+                while (i < lines.length && lines[i] !== '' && lines[i].indexOf('-->') < 0) i++;
+                /* (to the end of a block: a blank line, or (not its first) a line with "-->", which starts the next) */
+                var skipBlock = function () { while (i < lines.length && lines[i] !== '' && lines[i].indexOf('-->') < 0) i++; };
+                /* (cue timings: a time, "-->" with white space around it or not, a time, then the settings) */
+                var timings = function (l) {
+                    var k = l.indexOf('-->');
+                    if (k < 0) return null;
+                    var left = l.slice(0, k).replace(/^[ \t\f]+|[ \t\f]+$/g, ''), rest = l.slice(k + 3).replace(/^[ \t\f]+/, '');
+                    var m2 = /^([^ \t\f]+)(?:[ \t\f]+([\s\S]*))?$/.exec(rest);
+                    if (!left || /[ \t\f]/.test(left) || !m2) return null;
+                    return [l, left, m2[1], m2[2]];
+                };
+                while (i < lines.length) {
+                    while (i < lines.length && lines[i] === '') i++;
+                    if (i >= lines.length) break;
+                    var id = '', line = lines[i];
+                    if (line.indexOf('-->') < 0) {
+                        /* (NOTE, STYLE, REGION blocks, or an id line) */
+                        if (/^(NOTE|STYLE|REGION)(?:[ \t]|$)/.test(line)) { i++; skipBlock(); continue; }
+                        id = line; i++;
+                        if (i >= lines.length || lines[i] === '' || lines[i].indexOf('-->') < 0) { skipBlock(); continue; }
+                        line = lines[i];
+                    }
+                    i++;
+                    var tm = timings(line);
+                    var st0 = tm && vttTime(tm[1]), en0 = tm && vttTime(tm[2]);
+                    if (!tm || st0 === null || en0 === null) { skipBlock(); continue; }
+                    var body = [];
+                    while (i < lines.length && lines[i] !== '' && lines[i].indexOf('-->') < 0) body.push(lines[i++]);
+                    var cue;
+                    try { cue = new global.VTTCue(st0, en0, body.join('\n')); } catch (e) { continue; }
+                    cue.id = id;
+                    if (tm[3]) vttSettings(cue, tm[3]);
+                    cues.push(cue);
+                }
+                return cues;
+            };
+            var fireSimple = function (t, type) { try { t.dispatchEvent(new global.Event(type)); } catch (e) { } };
+            var mediaParent = function (t) { var p = t.parentNode; return p && p.nodeType === 1 && (p.localName === 'video' || p.localName === 'audio') ? p : null; };
+            Object.defineProperty(global, '__cyberTrackLoad', { configurable: true, value: function (t) {
+                var tt = elementTrack(t), st = tt[TB];
+                if (st.mode === 'disabled' || !mediaParent(t)) return;
+                var src = t.getAttribute('src');
+                var key = src === null ? null : String(src);
+                if (st.loadingFor === key && st.ready) return;
+                st.loadingFor = key;
+                st.cues.length = 0;
+                st.ready = 1;
+                var gen = st.gen = (st.gen || 0) + 1;
+                var fail = function () { if (st.gen !== gen) return; st.ready = 3; fireSimple(t, 'error'); };
+                if (!key) { global.setTimeout(fail, 0); return; }
+                var url;
+                /* (its query in the document's encoding) */
+                var tdc = t.ownerDocument && t.ownerDocument.characterSet, tkey = key;
+                if (tdc && !/^utf-8$/i.test(tdc) && /[^\x00-\x7f]/.test(key) && typeof global.__cyberLegacyQuery === 'function') { var tlq = global.__cyberLegacyQuery(key, tdc); if (tlq) tkey = tlq; }
+                try { url = new global.URL(tkey, t.baseURI || global.location.href).href; } catch (e) { global.setTimeout(fail, 0); return; }
+                /* (the media element's CORS setting: none a no-cors fetch, which another origin's response fails) */
+                var ca = mediaParent(t).getAttribute('crossorigin'), self0 = global.location.origin;
+                var opts = ca === null ? { mode: 'no-cors', credentials: 'include' } :
+                           String(ca).toLowerCase() === 'use-credentials' ? { mode: 'cors', credentials: 'include' } : { mode: 'cors', credentials: 'same-origin' };
+                var crossAt = function (u) { try { var o = new global.URL(u).origin; return o !== self0 && !/^(data|blob):/.test(u); } catch (e) { return false; } };
+                global.fetch(url, opts).then(function (r) {
+                    if (!r.ok && r.status !== 0) throw new Error('status');
+                    if (ca === null && (crossAt(url) || (r.url && crossAt(r.url)) || r.type === 'opaque')) throw new Error('opaque');
+                    return r.text();
+                }).then(function (txt) {
+                    if (st.gen !== gen) return;
+                    var cues = parseVTT(txt);
+                    if (!cues) { fail(); return; }
+                    cues.forEach(function (c) { c[QB].track = tt; st.cues.push(c); });
+                    st.cues.sort(cueSort);
+                    st.ready = 2;
+                    fireSimple(t, 'load');
+                }).catch(fail);
+            } });
+            /* (a <track> in a media element: a default one showing (hidden for metadata), the first of its kind; then loading) */
+            var autoSelect = function (t) {
+                var m = mediaParent(t);
+                if (!m) return;
+                var tt = elementTrack(t), st = tt[TB];
+                if (t.hasAttribute('default') && st.mode === 'disabled' && !st.autoDone) {
+                    st.autoDone = true;
+                    var others = m.querySelectorAll('track'), taken = false;
+                    for (var i = 0; i < others.length; i++) {
+                        if (others[i] === t) break;
+                        var ot = trackOf.get(others[i]);
+                        if (ot && ot[TB].kind === st.kind && ot[TB].mode !== 'disabled' && others[i].hasAttribute('default')) taken = true;
+                    }
+                    if (!taken) { st.mode = st.kind === 'metadata' ? 'hidden' : 'showing'; }
+                }
+                if (st.mode !== 'disabled') global.__cyberTrackLoad(t);
+            };
+            Object.defineProperty(global, '__cyberTrackInserted', { configurable: true, value: function (t) { global.setTimeout(function () { autoSelect(t); }, 0); } });
+            Object.defineProperty(global, '__cyberTrackSrcChanged', { configurable: true, value: function (t) {
+                var tt = trackOf.get(t);
+                if (tt && tt[TB].mode !== 'disabled') { tt[TB].loadingFor = undefined; tt[TB].ready = 0; global.__cyberTrackLoad(t); }
+            } });
+            onWin('DOMContentLoaded', function () {
+                var l = global.document.querySelectorAll('video > track, audio > track');
+                for (var i = 0; i < l.length; i++) global.__cyberTrackInserted(l[i]);
+            });
+            if (!Object.getOwnPropertyDescriptor(TRP, 'kind')) Object.defineProperty(TRP, 'kind', { enumerable: true, configurable: true,
+                get: function kind() { var k = (this.getAttribute('kind') || '').toLowerCase(); return !this.hasAttribute('kind') || !k ? 'subtitles' : KINDS.indexOf(k) >= 0 ? k : 'metadata'; },
+                set: function kind(v) { this.setAttribute('kind', String(v)); } });
+        }
+
+        /* the window's one Navigator, History and bars: their members moved to an interface's prototype */
+        function adopt(obj, name, keepOwn) {
+            if (!obj || typeof obj !== 'object') return;
+            var C = typeof global[name] === 'function' ? global[name] : iface(name);
+            var P = C.prototype;
+            if (Object.getPrototypeOf(obj) === P) return;
+            if (!keepOwn) Object.getOwnPropertyNames(obj).forEach(function (k) {
+                var d = Object.getOwnPropertyDescriptor(obj, k);
+                if (!d.configurable || Object.getOwnPropertyDescriptor(P, k)) return;
+                var nd;
+                if (d.get || d.set) {
+                    var og = d.get, os = d.set;
+                    var g = { get: function () { if (this !== obj) throw new TypeError('Illegal invocation'); return og ? og.call(obj) : undefined; } };
+                    var s = os && { set: function (v) { if (this !== obj) throw new TypeError('Illegal invocation'); os.call(obj, v); } };
+                    nd = { get: Object.getOwnPropertyDescriptor(g, 'get').value, set: s ? Object.getOwnPropertyDescriptor(s, 'set').value : undefined, enumerable: true, configurable: true };
+                } else if (typeof d.value === 'function') {
+                    var of = d.value;
+                    var o = { f: function () { if (this !== obj) throw new TypeError('Illegal invocation'); return of.apply(obj, arguments); } };
+                    Object.defineProperty(o.f, 'name', { value: k, configurable: true });
+                    Object.defineProperty(o.f, 'length', { value: of.length, configurable: true });
+                    nd = { value: o.f, writable: true, enumerable: true, configurable: true };
+                } else {
+                    var held = d.value;
+                    var g2 = { get: function () { if (this !== obj) throw new TypeError('Illegal invocation'); return held; } };
+                    var s2 = { set: function (v) { if (this !== obj) throw new TypeError('Illegal invocation'); held = v; } };
+                    nd = { get: Object.getOwnPropertyDescriptor(g2, 'get').value, set: Object.getOwnPropertyDescriptor(s2, 'set').value, enumerable: true, configurable: true };
+                }
+                try { Object.defineProperty(P, k, nd); delete obj[k]; } catch (e) { }
+            });
+            try { Object.setPrototypeOf(obj, P); } catch (e) { }
+        }
+        try { adopt(global.navigator, 'Navigator'); } catch (e) { }
+        /* registerProtocolHandler / unregisterProtocolHandler (HTML 8.9.1.3): checked, nothing registered */
+        (function () {
+            var NP = global.Navigator && global.Navigator.prototype;
+            if (!NP || NP.registerProtocolHandler) return;
+            var SAFE = ['bitcoin', 'cabal', 'dat', 'did', 'dweb', 'ethereum', 'ftp', 'ftps', 'geo', 'im', 'ipfs', 'ipns', 'irc', 'ircs',
+                        'matrix', 'magnet', 'mailto', 'mms', 'news', 'nntp', 'openpgp4fpr', 'sftp', 'sip', 'sms', 'smsto', 'ssb', 'ssh',
+                        'tel', 'urn', 'webcal', 'wtai', 'xmpp'];
+            function normalize(name, scheme, url) {
+                scheme = String(scheme).replace(/[A-Z]/g, function (c) { return c.toLowerCase(); });
+                if (SAFE.indexOf(scheme) < 0 && !/^web\+[a-z]+$/.test(scheme))
+                    throw new global.DOMException("Failed to execute '" + name + "' on 'Navigator': The scheme '" + scheme + "' doesn't belong to the scheme allowlist.", 'SecurityError');
+                url = String(url);
+                if (url.indexOf('%s') < 0)
+                    throw new global.DOMException("Failed to execute '" + name + "' on 'Navigator': The url provided ('" + url + "') does not contain '%s'.", 'SyntaxError');
+                var u;
+                try { u = new global.URL(url, global.document.baseURI); } catch (e) {
+                    throw new global.DOMException("Failed to execute '" + name + "' on 'Navigator': The custom handler URL created by removing '%s' and prepending the base URL is not valid.", 'SyntaxError');
+                }
+                if ((u.protocol !== 'http:' && u.protocol !== 'https:') || u.origin !== global.location.origin)
+                    throw new global.DOMException("Failed to execute '" + name + "' on 'Navigator': Can only register custom handler in the document's origin.", 'SecurityError');
+            }
+            Object.defineProperty(NP, 'registerProtocolHandler', { configurable: true, writable: true, enumerable: true, value: function registerProtocolHandler(scheme, url) {
+                if (this !== global.navigator) throw new TypeError('Illegal invocation');
+                if (arguments.length < 2) throw new TypeError("Failed to execute 'registerProtocolHandler' on 'Navigator': 2 arguments required, but only " + arguments.length + ' present.');
+                normalize('registerProtocolHandler', scheme, url);
+            } });
+            Object.defineProperty(NP, 'unregisterProtocolHandler', { configurable: true, writable: true, enumerable: true, value: function unregisterProtocolHandler(scheme, url) {
+                if (this !== global.navigator) throw new TypeError('Illegal invocation');
+                if (arguments.length < 2) throw new TypeError("Failed to execute 'unregisterProtocolHandler' on 'Navigator': 2 arguments required, but only " + arguments.length + ' present.');
+                normalize('unregisterProtocolHandler', scheme, url);
+            } });
+            /* (window.clientInformation: the navigator, replaceable) */
+            if (!Object.getOwnPropertyDescriptor(global, 'clientInformation')) Object.defineProperty(global, 'clientInformation', { configurable: true, enumerable: true,
+                get: function () { return global.navigator; },
+                set: function (v) { Object.defineProperty(global, 'clientInformation', { value: v, writable: true, enumerable: true, configurable: true }); } });
+        })();
+        try { adopt(global.history, 'History'); } catch (e) { }
+        try { adopt(global.location, 'Location', true); } catch (e) { }
+        /* Storage: localStorage's and sessionStorage's methods (this-based natives) on its prototype */
+        (function () {
+            var ls = global.localStorage, ss = global.sessionStorage;
+            if (!ls || typeof ls !== 'object' || typeof global.Storage === 'function') return;
+            var St = iface('Storage'), SP_ = St.prototype, both = ss && typeof ss === 'object' ? [ls, ss] : [ls];
+            ['key', 'getItem', 'setItem', 'removeItem', 'clear'].forEach(function (k) {
+                var d = Object.getOwnPropertyDescriptor(ls, k);
+                /* (this a Storage) */
+                if (d && typeof d.value === 'function') {
+                    var f0 = d.value;
+                    var w = { [k]: function () {
+                        if (!(this instanceof St)) throw new TypeError("Failed to execute '" + k + "' on 'Storage': Illegal invocation");
+                        var need = { key: 1, getItem: 1, setItem: 2, removeItem: 1, clear: 0 }[k];
+                        if (arguments.length < need) throw new TypeError("Failed to execute '" + k + "' on 'Storage': " + need + ' argument' + (need > 1 ? 's' : '') + ' required, but only ' + arguments.length + ' present.');
+                        return f0.apply(this, arguments);
+                    } }[k];
+                    Object.defineProperty(w, 'length', { value: f0.length });
+                    Object.defineProperty(SP_, k, { value: w, writable: true, enumerable: true, configurable: true });
+                }
+                both.forEach(function (o) { try { delete o[k]; } catch (e) { } });
+            });
+            var ld = Object.getOwnPropertyDescriptor(ls, 'length');
+            if (ld && ld.get) {
+                var lg0 = ld.get, lg = function () { if (!(this instanceof St)) throw new TypeError('Illegal invocation'); return lg0.call(this); };
+                Object.defineProperty(lg, 'name', { value: 'get length' });
+                Object.defineProperty(SP_, 'length', { get: lg, enumerable: true, configurable: true });
+                both.forEach(function (o) { try { delete o.length; } catch (e) { } });
+            }
+            both.forEach(function (o) { try { Object.setPrototypeOf(o, SP_); } catch (e) { } });
+        })();
+        /* BarProp: locationbar, menubar, personalbar, scrollbars, statusbar, toolbar */
+        var BB = Symbol('barProp'), BarProp = iface('BarProp');
+        getter(BarProp.prototype, 'visible', BB, function () { return !global.__cyberIsPopup; });
+        ['locationbar', 'menubar', 'personalbar', 'scrollbars', 'statusbar', 'toolbar'].forEach(function (k) {
+            if (k in global) return;
+            var b = brandNew(BarProp, BB, {});
+            Object.defineProperty(global, k, { enumerable: true, configurable: true, get: function () { return b; }, set: function (v) { Object.defineProperty(global, k, { value: v, writable: true, enumerable: true, configurable: true }); } });
+        });
+    })();
+
+    /* ---- BroadcastChannel (HTML 9.6): messages to the same-named channels of the same origin, in this page's realms ---- */
+    (function () {
+        var ETc = global.EventTarget;
+        if (typeof global.BroadcastChannel === 'function' || !ETc || typeof global.__cyberWire !== 'function') return;
+        var BC = Symbol.for('cyber.broadcastChannel');   /* (one key for every realm's channels) */
+        var localHub = {};
+        var hub = function () {
+            try { if (typeof global.__cyberSharedHub === 'function') return global.__cyberSharedHub(); } catch (e) { }
+            return localHub;
+        };
+        var originOf = function () { try { return global.origin || (global.location && global.location.origin) || ''; } catch (e) { return ''; } };
+        var BroadcastChannel = function BroadcastChannel(name) {
+            if (!new.target) throw new TypeError("Failed to construct 'BroadcastChannel': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
+            if (arguments.length < 1) throw new TypeError("Failed to construct 'BroadcastChannel': 1 argument required, but only 0 present.");
+            var self = this;
+            var st = { name: String(name), closed: false, origin: originOf(), g: global };
+            /* (a message for it: in a task of its own realm's) */
+            st.deliver = function (wire, origin) {
+                global.setTimeout(function () {
+                    if (st.closed) return;
+                    var data, ME = global.MessageEvent || global.Event;
+                    try { data = global.__cyberUnwire(wire); }
+                    catch (e) { var ee = new global.Event('messageerror'); if (global.__cyberDispatchTrusted) global.__cyberDispatchTrusted(self, ee); else self.dispatchEvent(ee); return; }
+                    var ev = new ME('message', { data: data, origin: origin });
+                    if (global.__cyberDispatchTrusted) global.__cyberDispatchTrusted(self, ev); else self.dispatchEvent(ev);
+                }, 0);
+            };
+            Object.defineProperty(self, BC, { value: st });
+            var h = hub(), key = 'bc:' + st.name;
+            (h[key] || (h[key] = [])).push(self);
+            return self;
+        };
+        BroadcastChannel.prototype = Object.create(ETc.prototype);
+        Object.defineProperty(BroadcastChannel.prototype, 'constructor', { value: BroadcastChannel, writable: true, configurable: true });
+        Object.setPrototypeOf(BroadcastChannel, ETc);
+        var stOf = function (x) { var s = x && x[BC]; if (!s) throw new TypeError('Illegal invocation'); return s; };
+        Object.defineProperty(BroadcastChannel.prototype, 'name', { configurable: true, enumerable: true, get: function name() { return stOf(this).name; } });
+        Object.defineProperty(BroadcastChannel.prototype, 'postMessage', { configurable: true, enumerable: true, writable: true, value: function postMessage(message) {
+            var st = stOf(this);
+            if (arguments.length < 1) throw new TypeError("Failed to execute 'postMessage' on 'BroadcastChannel': 1 argument required, but only 0 present.");
+            if (st.closed) throw new global.DOMException("Failed to execute 'postMessage' on 'BroadcastChannel': Channel is closed", 'InvalidStateError');
+            var w = global.__cyberWire(message), self = this;
+            var list = (hub()['bc:' + st.name] || []).slice();
+            list.forEach(function (ch) {
+                var cs = ch[BC];
+                if (ch === self || !cs || cs.closed || cs.origin !== st.origin) return;
+                try { cs.deliver(w, st.origin); } catch (e) { cs.closed = true; }
+            });
+        } });
+        Object.defineProperty(BroadcastChannel.prototype, 'close', { configurable: true, enumerable: true, writable: true, value: function close() {
+            var st = stOf(this);
+            if (st.closed) return;
+            st.closed = true;
+            var list = hub()['bc:' + st.name];
+            if (list) { var i = list.indexOf(this); if (i >= 0) list.splice(i, 1); }
+        } });
+        ['onmessage', 'onmessageerror'].forEach(function (h) {
+            var K = Symbol(h), type = h.slice(2);
+            Object.defineProperty(BroadcastChannel.prototype, h, { configurable: true, enumerable: true,
+                get: function () { stOf(this); return this[K] || null; },
+                set: function (v) {
+                    stOf(this);
+                    if (this[K]) this.removeEventListener(type, this[K]);
+                    var f = typeof v === 'function' ? v : null;
+                    Object.defineProperty(this, K, { value: f, writable: true, configurable: true });
+                    if (f) this.addEventListener(type, f);
+                } });
+        });
+        Object.defineProperty(BroadcastChannel.prototype, Symbol.toStringTag, { configurable: true, value: 'BroadcastChannel' });
+        Object.defineProperty(global, 'BroadcastChannel', { configurable: true, writable: true, value: BroadcastChannel });
+    })();
+
+    /* ---- Origin (HTML 7.1.1.x): an origin as an object, from what has one ---- */
+    (function () {
+        if (typeof global.Origin === 'function' || !global.URL) return;
+        var OB = Symbol('origin');
+        function Origin() {
+            if (!new.target) throw new TypeError("Failed to construct 'Origin': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
+            Object.defineProperty(this, OB, { value: { opaque: true, id: {} } });
+        }
+        function make(o) { var x = Object.create(Origin.prototype); Object.defineProperty(x, OB, { value: o }); return x; }
+        function opaque() { return { opaque: true, id: {} }; }
+        var TUPLE = { 'http:': 1, 'https:': 1, 'ws:': 1, 'wss:': 1, 'ftp:': 1 };
+        function ofURL(u) {
+            if (u.protocol === 'blob:') {
+                try { var inner = new global.URL(u.pathname); if (inner.protocol === 'http:' || inner.protocol === 'https:') return ofURL(inner); } catch (e) { }
+                return opaque();
+            }
+            if (!TUPLE[u.protocol]) return opaque();
+            return { opaque: false, scheme: u.protocol.slice(0, -1), host: u.hostname, port: u.port };
+        }
+        function ofString(s) {
+            var u;
+            try { u = new global.URL(s); } catch (e) { throw new TypeError("Failed to execute 'from' on 'Origin': The URL '" + s + "' is invalid."); }
+            return ofURL(u);
+        }
+        function ofSerialized(s) {
+            if (s === 'null' || !s) return null;
+            try { return ofURL(new global.URL(s)); } catch (e) { return null; }
+        }
+        function bad() { return new TypeError("Failed to execute 'from' on 'Origin': The value has no origin."); }
+        Object.defineProperty(Origin, 'from', { configurable: true, writable: true, enumerable: true, value: function from(value) {
+            if (arguments.length < 1) throw new TypeError("Failed to execute 'from' on 'Origin': 1 argument required, but only 0 present.");
+            if (typeof value === 'string') return make(ofString(value));
+            if (!value || (typeof value !== 'object' && typeof value !== 'function')) throw bad();
+            if (value[OB]) return make(value[OB]);
+            if (global.URL && value instanceof global.URL) return make(ofURL(value));
+            if (global.Location && value instanceof global.Location) throw bad();
+            if (global.MessageEvent && value instanceof global.MessageEvent) {
+                if (!value.isTrusted) throw bad();
+                return make(ofSerialized(value.origin) || opaque());
+            }
+            /* (an element with a URL to follow: <a>, <area>, SVG's <a>) */
+            if (value.nodeType === 1) {
+                var ns = value.namespaceURI, ln = value.localName;
+                var html = ns === 'http://www.w3.org/1999/xhtml' && (ln === 'a' || ln === 'area');
+                var svg = ns === 'http://www.w3.org/2000/svg' && ln === 'a';
+                var mml = ns === 'http://www.w3.org/1998/Math/MathML' && ln === 'a';
+                if (!html && !svg && !mml) throw bad();
+                var h = value.getAttribute('href');
+                if (h === null && svg) h = value.getAttributeNS('http://www.w3.org/1999/xlink', 'href');
+                /* (MathML's: its href, as set on it) */
+                if (h === null && mml && Object.prototype.hasOwnProperty.call(value, 'href') && typeof value.href === 'string') h = value.href;
+                if (h === null) throw bad();
+                var u;
+                try { u = new global.URL(h, value.baseURI); } catch (e) { throw bad(); }
+                return make(ofURL(u));
+            }
+            /* (a window, or a worker's global: its document's or its own origin) */
+            var loc;
+            try {
+                if (value === global || (value.window === value && value.document) || (value.self === value && value.location)) {
+                    loc = value === global ? global.origin : value.origin;
+                    if (loc === undefined && value.location) loc = value.location.origin;
+                } else if (global.Worker && value instanceof global.Worker) {
+                    loc = value.__cyberOrigin;
+                }
+            } catch (e) { throw bad(); }
+            if (loc === undefined) throw bad();
+            var o = ofSerialized(String(loc));
+            if (!o) throw bad();
+            return o.opaque ? make(o) : make(o);
+        } });
+        var P = Origin.prototype;
+        function brand(x) { if (!x || !x[OB]) throw new TypeError('Illegal invocation'); return x[OB]; }
+        Object.defineProperty(P, 'opaque', { configurable: true, enumerable: true, get: function opaque() { return !!brand(this).opaque; } });
+        function site(host) {
+            if (/^\[|^\d+\.\d+\.\d+\.\d+$/.test(host)) return host;
+            var parts = host.split('.');
+            return parts.length <= 2 ? host : parts.slice(-2).join('.');
+        }
+        function other(o, name) {
+            if (!o || !o[OB]) throw new TypeError("Failed to execute '" + name + "' on 'Origin': parameter 1 is not of type 'Origin'.");
+            return o[OB];
+        }
+        Object.defineProperty(P, 'isSameOrigin', { configurable: true, writable: true, enumerable: true, value: function isSameOrigin(o) {
+            var a = brand(this), b = other(o, 'isSameOrigin');
+            if (a.opaque || b.opaque) return a === b || (a.opaque && b.opaque && a.id === b.id);
+            return a.scheme === b.scheme && a.host === b.host && a.port === b.port;
+        } });
+        Object.defineProperty(P, 'isSameSite', { configurable: true, writable: true, enumerable: true, value: function isSameSite(o) {
+            var a = brand(this), b = other(o, 'isSameSite');
+            if (a.opaque || b.opaque) return a === b || (a.opaque && b.opaque && a.id === b.id);
+            return a.scheme === b.scheme && site(a.host) === site(b.host);
+        } });
+        Object.defineProperty(P, Symbol.toStringTag, { configurable: true, value: 'Origin' });
+        Object.defineProperty(global, 'Origin', { configurable: true, writable: true, value: Origin });
+    })();
+
+    /* ---- <meta http-equiv=refresh> (HTML 4.2.5.3): the shared declarative refresh steps, once per document ---- */
+    (function () {
+        var doc = global.document;
+        if (!doc || doc.nodeType !== 9 || typeof global.MutationObserver !== 'function') return;
+        var WSP = /[\t\n\f\r ]/;
+        function parseRefresh(input) {
+            var p = 0, n = input.length;
+            while (p < n && WSP.test(input[p])) p++;
+            var t = '';
+            while (p < n && input[p] >= '0' && input[p] <= '9') t += input[p++];
+            var time = 0;
+            if (t === '') { if (input[p] !== '.') return null; }
+            else time = parseInt(t, 10);
+            while (p < n && ((input[p] >= '0' && input[p] <= '9') || input[p] === '.')) p++;
+            var url = null;
+            if (p < n) {
+                if (input[p] !== ';' && input[p] !== ',' && !WSP.test(input[p])) return null;
+                while (p < n && WSP.test(input[p])) p++;
+                if (input[p] === ';' || input[p] === ',') p++;
+                while (p < n && WSP.test(input[p])) p++;
+            }
+            if (p < n) {
+                var urlString = input.slice(p), skip = false;
+                if (input[p] === 'U' || input[p] === 'u') {
+                    p++;
+                    if (input[p] === 'R' || input[p] === 'r') {
+                        p++;
+                        if (input[p] === 'L' || input[p] === 'l') {
+                            p++;
+                            while (p < n && WSP.test(input[p])) p++;
+                            if (input[p] === '=') {
+                                p++;
+                                while (p < n && WSP.test(input[p])) p++;
+                                skip = true;
+                            }
+                        }
+                    }
+                } else skip = true;
+                if (skip) {
+                    var q = input[p] === '"' || input[p] === "'" ? input[p] : null;
+                    if (q) p++;
+                    urlString = input.slice(p);
+                    if (q) { var e = urlString.indexOf(q); if (e >= 0) urlString = urlString.slice(0, e); }
+                }
+                url = urlString;
+            }
+            return { time: time, url: url };
+        }
+        var armed = false;
+        function consider(m) {
+            if (armed || !m || m.localName !== 'meta' || m.namespaceURI !== 'http://www.w3.org/1999/xhtml') return;
+            if (!m.isConnected || m.getRootNode() !== doc) return;
+            if (String(m.getAttribute('http-equiv') || '').replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, '').toLowerCase() !== 'refresh') return;
+            var c = m.getAttribute('content');
+            if (c === null) return;
+            arm(c);
+        }
+        function arm(c) {
+            if (armed) return;
+            var r = parseRefresh(c);
+            if (!r) return;
+            var target;
+            try { target = r.url === null ? doc.URL : new global.URL(r.url, doc.baseURI).href; } catch (e) { return; }
+            armed = true;
+            var go = function () {
+                global.setTimeout(function () {
+                    if (doc.defaultView !== global) return;
+                    try { global.location.replace(target); } catch (e) { }
+                }, r.time * 1000);
+            };
+            if (doc.readyState === 'complete') go(); else onWin('load', go);
+        }
+        function scan(root) {
+            if (armed || !root || root.nodeType !== 1 && root.nodeType !== 9 && root.nodeType !== 11) return;
+            if (root.localName === 'meta') consider(root);
+            if (root.firstElementChild && root.querySelectorAll) { var l = root.querySelectorAll('meta[http-equiv]'); for (var i = 0; i < l.length && !armed; i++) consider(l[i]); }
+        }
+        var mo = new global.MutationObserver(function (recs) {
+            for (var i = 0; i < recs.length && !armed; i++) {
+                var r = recs[i];
+                if (r.type === 'attributes') consider(r.target);
+                else for (var k = 0; k < r.addedNodes.length; k++) scan(r.addedNodes[k]);
+            }
+            if (armed) mo.disconnect();
+        });
+        mo.observe(doc, { childList: true, subtree: true, attributes: true, attributeFilter: ['http-equiv', 'content'] });
+        scan(doc);
+        onWin('DOMContentLoaded', function () {
+            /* (the response's Refresh header, first) */
+            if (!armed && typeof doc.__cyber_refresh === 'string') arm(doc.__cyber_refresh);
+            scan(doc);
+        });
+        /* (once loaded, only the head watched: a page's churn in the body costs nothing) */
+        onWin('load', function () {
+            if (armed || !doc.head) return;
+            mo.disconnect();
+            mo.observe(doc.head, { childList: true, subtree: true, attributes: true, attributeFilter: ['http-equiv', 'content'] });
+            if (doc.body) mo.observe(doc.body, { childList: true });   /* (and the body's own children: cheap, and what script appends there) */
+        });
+    })();
+
+    /* ---- img.decode() (HTML 4.8.4.3.x): settles with the image's load, rejects if it breaks or its source changes first ---- */
+    (function () {
+        var IP = global.HTMLImageElement && global.HTMLImageElement.prototype;
+        if (!IP || typeof global.MutationObserver !== 'function') return;
+        function encodingError() { return new global.DOMException('The source image cannot be decoded.', 'EncodingError'); }
+        Object.defineProperty(IP, 'decode', { configurable: true, writable: true, enumerable: true, value: function decode() {
+            var img = this;
+            if (!(img instanceof global.HTMLImageElement)) return Promise.reject(new TypeError('Illegal invocation'));
+            return new Promise(function (resolve, reject) {
+                var d = img.ownerDocument;
+                if (!d || !d.defaultView) { reject(encodingError()); return; }
+                var done = false, mo = null;
+                function finish(ok) {
+                    if (done) return;
+                    done = true;
+                    img.removeEventListener('load', onload);
+                    img.removeEventListener('error', onerror);
+                    if (mo) mo.disconnect();
+                    if (ok) resolve(); else reject(encodingError());
+                }
+                function onload() { finish(img.naturalWidth > 0 || img.naturalHeight > 0 || /\.svg(\?|#|$)/i.test(img.currentSrc || '') || true); }
+                function onerror() { finish(false); }
+                var hasSrc = img.hasAttribute('src') || img.hasAttribute('srcset') || (img.parentNode && img.parentNode.localName === 'picture');
+                if (!hasSrc) { global.setTimeout(function () { finish(false); }, 0); return; }
+                img.addEventListener('load', onload);
+                img.addEventListener('error', onerror);
+                /* (its source changed while waiting: this decode fails) */
+                mo = new global.MutationObserver(function () { finish(false); });
+                mo.observe(img, { attributes: true, attributeFilter: ['src', 'srcset', 'sizes', 'crossorigin', 'referrerpolicy'] });
+                /* (no load or error event in a while: settled by what it has) */
+                global.setTimeout(function () { if (!done) finish(img.naturalWidth > 0); }, 8000);
+                /* (already there: settled now, by what it is) */
+                if (img.complete) global.setTimeout(function () {
+                    if (done) return;
+                    if (img.naturalWidth > 0 || img.naturalHeight > 0) finish(true);
+                    else if (img.complete) finish(false);
+                }, 0);
+            });
+        } });
+    })();
+
+    /* ---- the document's collections (HTML 3.1.5) and named properties (3.1.6) ---- */
+    (function () {
+        var DocP = global.Document && global.Document.prototype, HC = global.HTMLCollection;
+        if (!DocP || !HC || typeof Proxy !== 'function') return;
+        var XHTML = 'http://www.w3.org/1999/xhtml';
+        function isIndex(k) { return typeof k === 'string' && /^(0|[1-9]\d*)$/.test(k); }
+        /* (a live HTMLCollection over what items() finds each time) */
+        function liveColl(items) {
+            var t = Object.create(HC.prototype);
+            Object.defineProperty(t, 'length', { configurable: true, get: function () { return items().length; } });
+            Object.defineProperty(t, 'item', { configurable: true, value: function item(i) { return items()[i >>> 0] || null; } });
+            Object.defineProperty(t, 'namedItem', { configurable: true, value: function namedItem(n) {
+                n = String(n);
+                if (!n) return null;
+                var l = items();
+                for (var i = 0; i < l.length; i++) if (l[i].id === n || (l[i].namespaceURI === XHTML && l[i].getAttribute('name') === n)) return l[i];
+                return null;
+            } });
+            return new Proxy(t, {
+                get: function (o, k, r) { if (isIndex(k)) return items()[+k]; return Reflect.get(o, k, r); },
+                has: function (o, k) { if (isIndex(k)) return +k < items().length; return k in o; },
+                ownKeys: function (o) { var n = items().length, ks = []; for (var i = 0; i < n; i++) ks.push(String(i)); return ks.concat(Reflect.ownKeys(o)); },
+                getOwnPropertyDescriptor: function (o, k) {
+                    if (isIndex(k)) { var e = items()[+k]; return e ? { value: e, enumerable: true, configurable: true, writable: false } : undefined; }
+                    return Reflect.getOwnPropertyDescriptor(o, k);
+                },
+            });
+        }
+        var cache = new WeakMap();
+        function coll(doc, key, make) {
+            var c = cache.get(doc);
+            if (!c) { c = {}; cache.set(doc, c); }
+            return c[key] || (c[key] = make(doc));
+        }
+        function byTag(tag) { return function (doc) { return doc.getElementsByTagNameNS(XHTML, tag); }; }
+        function filtered(sel, test) {
+            return function (doc) {
+                return liveColl(function () {
+                    var l = doc.querySelectorAll(sel), out = [];
+                    for (var i = 0; i < l.length; i++) if (l[i].namespaceURI === XHTML && (!test || test(l[i]))) out.push(l[i]);
+                    return out;
+                });
+            };
+        }
+        var DEFS = {
+            images: byTag('img'), embeds: byTag('embed'), plugins: byTag('embed'), forms: byTag('form'), scripts: byTag('script'),
+            links: filtered('a[href], area[href]'), anchors: filtered('a[name]'),
+            applets: function () { return liveColl(function () { return []; }); },
+        };
+        Object.keys(DEFS).forEach(function (k) {
+            var d = Object.getOwnPropertyDescriptor(DocP, k);
+            if (d && d.get) return;
+            var g = { get: function () {
+                if (!(this instanceof global.Document)) throw new TypeError('Illegal invocation');
+                return coll(this, k === 'plugins' ? 'embeds' : k, DEFS[k]);
+            } };
+            Object.defineProperty(DocP, k, { configurable: true, enumerable: true, get: Object.getOwnPropertyDescriptor(g, 'get').value });
+        });
+
+        /* getElementsByName: a live NodeList of the HTML elements so named */
+        var NLP = global.NodeList && global.NodeList.prototype;
+        function liveNodeList(items) {
+            var t = Object.create(NLP || HC.prototype);
+            Object.defineProperty(t, 'length', { configurable: true, get: function () { return items().length; } });
+            Object.defineProperty(t, 'item', { configurable: true, value: function item(i) { return items()[i >>> 0] || null; } });
+            return new Proxy(t, {
+                get: function (o, k, r) { if (isIndex(k)) return items()[+k]; return Reflect.get(o, k, r); },
+                has: function (o, k) { if (isIndex(k)) return +k < items().length; return k in o; },
+                ownKeys: function (o) { var n = items().length, ks = []; for (var i = 0; i < n; i++) ks.push(String(i)); return ks.concat(Reflect.ownKeys(o)); },
+                getOwnPropertyDescriptor: function (o, k) {
+                    if (isIndex(k)) { var e = items()[+k]; return e ? { value: e, enumerable: true, configurable: true, writable: false } : undefined; }
+                    return Reflect.getOwnPropertyDescriptor(o, k);
+                },
+            });
+        }
+        Object.defineProperty(DocP, 'getElementsByName', { configurable: true, writable: true, enumerable: true, value: function getElementsByName(name) {
+            if (arguments.length < 1) throw new TypeError("Failed to execute 'getElementsByName' on 'Document': 1 argument required, but only 0 present.");
+            var d = this;
+            name = String(name);
+            return liveNodeList(function () {
+                var l = d.querySelectorAll('[name]'), out = [];
+                for (var i = 0; i < l.length; i++) if (l[i].namespaceURI === XHTML && l[i].getAttribute('name') === name) out.push(l[i]);
+                return out;
+            });
+        } });
+        if (global.document && Object.prototype.hasOwnProperty.call(global.document, 'getElementsByName')) { try { delete global.document.getElementsByName; } catch (e) { } }
+        /* HTMLDocument: the document's interface, Document's own as the standard keeps it */
+        if (typeof global.HTMLDocument !== 'function') {
+            var HD = function HTMLDocument() { throw new TypeError('Illegal constructor'); };
+            HD.prototype = Object.create(DocP);
+            Object.defineProperty(HD.prototype, 'constructor', { value: HD, writable: true, configurable: true });
+            Object.defineProperty(HD.prototype, Symbol.toStringTag, { value: 'HTMLDocument', configurable: true });
+            Object.setPrototypeOf(HD, global.Document);
+            Object.defineProperty(global, 'HTMLDocument', { value: HD, writable: true, configurable: true });
+        }
+
+        /* the document's named properties: embed, form, iframe, img and object elements by name (and object, img by id) */
+        var doc = global.document;
+        if (!doc || doc.nodeType !== 9 || (doc.contentType && doc.contentType !== 'text/html')) return;
+        var NAMED_TAGS = { embed: 1, form: 1, iframe: 1, img: 1, object: 1 };
+        function namedFor(d, k) {
+            if (!k) return [];
+            var out = [], l = d.querySelectorAll('embed[name], form[name], iframe[name], img[name], object[name]');
+            for (var i = 0; i < l.length; i++) if (l[i].namespaceURI === XHTML && l[i].getAttribute('name') === k) out.push(l[i]);
+            /* (an object by its id, an img by its id when it has a name too) */
+            var byId = d.getElementById(k);
+            if (byId && out.indexOf(byId) < 0 && byId.namespaceURI === XHTML && (byId.localName === 'object' || (byId.localName === 'img' && byId.getAttribute('name')))) {
+                var all = d.querySelectorAll('object[id], img[id][name]');
+                for (var j = 0; j < all.length; j++) if (all[j].id === k && out.indexOf(all[j]) < 0) out.push(all[j]);
+                out.sort(function (x, y) { return x === y ? 0 : x.compareDocumentPosition(y) & 4 ? -1 : 1; });
+            }
+            return out;
+        }
+        function namedValue(d, k) {
+            var l = namedFor(d, k);
+            if (!l.length) return undefined;
+            if (l.length === 1) return l[0].localName === 'iframe' ? l[0].contentWindow : l[0];
+            return liveColl(function () { return namedFor(d, k); });
+        }
+        var base = Object.getPrototypeOf(doc);
+        if (base !== DocP && base !== global.HTMLDocument.prototype) return;
+        /* (between the document and HTMLDocument.prototype: a names object, the builtins first) */
+        var named = new Proxy(Object.create(global.HTMLDocument.prototype), {
+            get: function (o, k, r) {
+                if (typeof k === 'string' && !(k in o)) { var v = namedValue(doc, k); if (v !== undefined) return v; }
+                return Reflect.get(o, k, r);
+            },
+            has: function (o, k) {
+                if (k in o) return true;
+                return typeof k === 'string' && namedFor(doc, k).length > 0;
+            },
+            setPrototypeOf: function () { return false; },
+        });
+        try { Object.setPrototypeOf(doc, named); } catch (e) { }
+    })();
+
+    /* ---- WebSocket (WebSockets Standard): the object, its URL and checks; no connection is made: it fails, error then close ---- */
+    (function () {
+        if (typeof global.WebSocket === 'function' || typeof global.EventTarget !== 'function') return;
+        var WSK = Symbol('webSocket');
+        var WebSocket = function WebSocket(url, protocols) {
+            if (!new.target) throw new TypeError("Failed to construct 'WebSocket': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
+            if (arguments.length < 1) throw new TypeError("Failed to construct 'WebSocket': 1 argument required, but only 0 present.");
+            var base = (global.document && global.document.baseURI) || (global.location && global.location.href), u;
+            try { u = new global.URL(String(url), base); } catch (e) { throw new global.DOMException("Failed to construct 'WebSocket': The URL '" + url + "' is invalid.", 'SyntaxError'); }
+            if (u.protocol === 'http:') u.protocol = 'ws:';
+            else if (u.protocol === 'https:') u.protocol = 'wss:';
+            if (u.protocol !== 'ws:' && u.protocol !== 'wss:') throw new global.DOMException("Failed to construct 'WebSocket': The URL's scheme must be either 'http', 'https', 'ws', or 'wss'. '" + u.protocol + "' is not allowed.", 'SyntaxError');
+            if (u.hash) throw new global.DOMException("Failed to construct 'WebSocket': The URL contains a fragment identifier ('" + u.hash + "'). Fragment identifiers are not allowed in WebSocket URLs.", 'SyntaxError');
+            var ps = protocols === undefined ? [] : typeof protocols === 'string' ? [protocols] : Array.from(protocols, String);
+            var seen = {};
+            ps.forEach(function (p) {
+                if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(p) || seen[p]) throw new global.DOMException("Failed to construct 'WebSocket': The subprotocol '" + p + "' is invalid.", 'SyntaxError');
+                seen[p] = 1;
+            });
+            var self = Reflect.construct(global.EventTarget, [], new.target);
+            var st = { url: u.href, readyState: 0, binaryType: 'blob' };
+            Object.defineProperty(self, WSK, { value: st });
+            global.setTimeout(function () {
+                if (st.readyState === 3) return;
+                st.readyState = 3;
+                try { self.dispatchEvent(new global.Event('error')); } catch (e) { }
+                var CE = global.CloseEvent || global.Event;
+                try { self.dispatchEvent(new CE('close', { wasClean: false, code: 1006, reason: '' })); } catch (e) { }
+            }, 0);
+            return self;
+        };
+        WebSocket.prototype = Object.create(global.EventTarget.prototype);
+        Object.defineProperty(WebSocket.prototype, 'constructor', { value: WebSocket, writable: true, configurable: true });
+        Object.setPrototypeOf(WebSocket, global.EventTarget);
+        ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'].forEach(function (k, i) {
+            Object.defineProperty(WebSocket, k, { value: i, enumerable: true });
+            Object.defineProperty(WebSocket.prototype, k, { value: i, enumerable: true });
+        });
+        var wst = function (x) { var s = x && x[WSK]; if (!s) throw new TypeError('Illegal invocation'); return s; };
+        var wget = function (k, f) {
+            var g = { [k]: function () { return f(wst(this)); } }[k];
+            Object.defineProperty(g, 'name', { value: 'get ' + k });
+            Object.defineProperty(WebSocket.prototype, k, { configurable: true, enumerable: true, get: g });
+        };
+        wget('url', function (s) { return s.url; });
+        wget('readyState', function (s) { return s.readyState; });
+        wget('bufferedAmount', function () { return 0; });
+        wget('extensions', function () { return ''; });
+        wget('protocol', function () { return ''; });
+        Object.defineProperty(WebSocket.prototype, 'binaryType', { configurable: true, enumerable: true,
+            get: function () { return wst(this).binaryType; },
+            set: function (v) { var s = wst(this); if (v === 'blob' || v === 'arraybuffer') s.binaryType = v; } });
+        ['onopen', 'onerror', 'onclose', 'onmessage'].forEach(function (h) {
+            var K = Symbol(h), type = h.slice(2);
+            Object.defineProperty(WebSocket.prototype, h, { configurable: true, enumerable: true,
+                get: function () { wst(this); return this[K] || null; },
+                set: function (v) {
+                    wst(this);
+                    if (this[K]) this.removeEventListener(type, this[K]);
+                    var f = typeof v === 'function' ? v : null;
+                    Object.defineProperty(this, K, { value: f, writable: true, configurable: true });
+                    if (f) this.addEventListener(type, f);
+                } });
+        });
+        Object.defineProperty(WebSocket.prototype, 'send', { configurable: true, enumerable: true, writable: true, value: function send(data) {
+            var s = wst(this);
+            if (arguments.length < 1) throw new TypeError("Failed to execute 'send' on 'WebSocket': 1 argument required, but only 0 present.");
+            if (s.readyState === 0) throw new global.DOMException("Failed to execute 'send' on 'WebSocket': Still in CONNECTING state.", 'InvalidStateError');
+        } });
+        Object.defineProperty(WebSocket.prototype, 'close', { configurable: true, enumerable: true, writable: true, value: function close(code, reason) {
+            var s = wst(this);
+            if (code !== undefined && code !== 1000 && !(code >= 3000 && code <= 4999))
+                throw new global.DOMException("Failed to execute 'close' on 'WebSocket': The close code must be either 1000, or between 3000 and 4999. " + code + ' is neither.', 'InvalidAccessError');
+            if (s.readyState < 2) s.readyState = 2;
+        } });
+        Object.defineProperty(WebSocket.prototype, Symbol.toStringTag, { configurable: true, value: 'WebSocket' });
+        Object.defineProperty(global, 'WebSocket', { configurable: true, writable: true, value: WebSocket });
+    })();
+
+    /* ---- EventSource (HTML 9.2): server-sent events over fetch; DOMStringList (HTML 2.6.x) ---- */
+    (function () {
+        var ETc = global.EventTarget;
+        if (typeof global.EventSource !== 'function' && ETc && typeof global.fetch === 'function') {
+            var ES = Symbol('eventSource');
+            var EventSource = function EventSource(url, init) {
+                if (!new.target) throw new TypeError("Failed to construct 'EventSource': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
+                if (arguments.length < 1) throw new TypeError("Failed to construct 'EventSource': 1 argument required, but only 0 present.");
+                var base = (global.document && global.document.baseURI) || (global.location && global.location.href);
+                var u;
+                try { u = new global.URL(String(url), base); } catch (e) { throw new global.DOMException("Failed to construct 'EventSource': Cannot open an EventSource to '" + url + "'. The URL is invalid.", 'SyntaxError'); }
+                /* (the realm's EventTarget now: the one there when this was set up may have been replaced since) */
+                var self = Reflect.construct(global.EventTarget || ETc, [], new.target);
+                var st = { url: u.href, withCredentials: !!(init && init.withCredentials), readyState: 0, lastId: '', retry: 3000, ctrl: null, timer: 0 };
+                Object.defineProperty(self, ES, { value: st });
+                connect(self, st);
+                return self;
+            };
+            EventSource.prototype = Object.create(ETc.prototype);
+            Object.defineProperty(EventSource.prototype, 'constructor', { value: EventSource, writable: true, configurable: true });
+            Object.setPrototypeOf(EventSource, ETc);
+            ['CONNECTING', 'OPEN', 'CLOSED'].forEach(function (k, i) {
+                Object.defineProperty(EventSource, k, { value: i, enumerable: true });
+                Object.defineProperty(EventSource.prototype, k, { value: i, enumerable: true });
+            });
+            var stOf = function (x) { var s = x && x[ES]; if (!s) throw new TypeError('Illegal invocation'); return s; };
+            ['url', 'withCredentials', 'readyState'].forEach(function (k) {
+                var g = { get: function () { return stOf(this)[k]; } };
+                Object.defineProperty(EventSource.prototype, k, { configurable: true, enumerable: true, get: Object.getOwnPropertyDescriptor(g, 'get').value });
+            });
+            ['onopen', 'onmessage', 'onerror'].forEach(function (h) {
+                var K = Symbol(h), type = h.slice(2);
+                Object.defineProperty(EventSource.prototype, h, { configurable: true, enumerable: true,
+                    get: function () { stOf(this); return this[K] || null; },
+                    set: function (v) {
+                        stOf(this);
+                        if (this[K]) this.removeEventListener(type, this[K]);
+                        var f = typeof v === 'function' ? v : null;
+                        Object.defineProperty(this, K, { value: f, writable: true, configurable: true });
+                        if (f) this.addEventListener(type, f);
+                    } });
+            });
+            Object.defineProperty(EventSource.prototype, 'close', { configurable: true, enumerable: true, writable: true, value: function close() {
+                var st = stOf(this);
+                st.readyState = 2;
+                if (st.timer) { global.clearTimeout(st.timer); st.timer = 0; }
+                if (st.ctrl) { try { st.ctrl.abort(); } catch (e) { } st.ctrl = null; }
+            } });
+            Object.defineProperty(EventSource.prototype, Symbol.toStringTag, { configurable: true, value: 'EventSource' });
+            var fire = function (t, ev) { if (global.__cyberDispatchTrusted) global.__cyberDispatchTrusted(t, ev); else t.dispatchEvent(ev); };
+            var reconnect = function (es, st) {
+                if (st.readyState === 2) return;
+                st.readyState = 0;
+                fire(es, new global.Event('error'));
+                if (st.readyState === 2) return;
+                st.timer = global.setTimeout(function () { st.timer = 0; if (st.readyState !== 2) connect(es, st); }, st.retry);
+            };
+            var fail = function (es, st) {
+                if (st.readyState === 2) return;
+                st.readyState = 2;
+                fire(es, new global.Event('error'));
+            };
+            var connect = function (es, st) {
+                var ctrl = global.AbortController ? new global.AbortController() : null;
+                st.ctrl = ctrl;
+                var headers = { 'Accept': 'text/event-stream', 'Cache-Control': 'no-store' };
+                if (st.lastId) headers['Last-Event-ID'] = st.lastId;
+                var buf = '', data = '', type = '', origin = '';
+                try { origin = new global.URL(st.url).origin; } catch (e) { }
+                var line = function (l) {
+                    if (l === '') {
+                        if (data !== '') {
+                            if (data.charAt(data.length - 1) === '\n') data = data.slice(0, -1);
+                            var ME = global.MessageEvent || global.Event;
+                            var ev = new ME(type || 'message', { data: data, origin: origin, lastEventId: st.lastId });
+                            if (st.readyState !== 2) fire(es, ev);
+                        }
+                        data = ''; type = '';
+                        return;
+                    }
+                    if (l.charAt(0) === ':') return;
+                    var c = l.indexOf(':'), f = c < 0 ? l : l.slice(0, c), v = c < 0 ? '' : l.slice(c + 1);
+                    if (v.charAt(0) === ' ') v = v.slice(1);
+                    if (f === 'data') data += v + '\n';
+                    else if (f === 'event') type = v;
+                    else if (f === 'id') { if (v.indexOf('\0') < 0) st.lastId = v; }
+                    else if (f === 'retry') { if (/^\d+$/.test(v)) st.retry = +v; }
+                };
+                var feed = function (chunk) {
+                    buf += chunk;
+                    var m;
+                    while ((m = /\r\n|\r|\n/.exec(buf))) {
+                        /* (a CR at the end might be half of a CRLF still coming) */
+                        if (m[0] === '\r' && m.index === buf.length - 1) break;
+                        line(buf.slice(0, m.index));
+                        buf = buf.slice(m.index + m[0].length);
+                    }
+                };
+                global.fetch(st.url, { headers: headers, credentials: st.withCredentials ? 'include' : 'same-origin', cache: 'no-store', signal: ctrl ? ctrl.signal : undefined })
+                    .then(function (r) {
+                        if (st.readyState === 2) return;
+                        var ct = String(r.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+                        if (r.status !== 200 || ct !== 'text/event-stream') { fail(es, st); return; }
+                        st.readyState = 1;
+                        fire(es, new global.Event('open'));
+                        var dec = global.TextDecoder ? new global.TextDecoder() : null;
+                        var reader = r.body && r.body.getReader ? r.body.getReader() : null;
+                        if (reader && dec) {
+                            var pump = function () {
+                                return reader.read().then(function (x) {
+                                    if (st.readyState === 2) return;
+                                    if (x.done) { feed(dec.decode()); reconnect(es, st); return; }
+                                    feed(dec.decode(x.value, { stream: true }));
+                                    return pump();
+                                });
+                            };
+                            return pump();
+                        }
+                        return r.text().then(function (t) { if (st.readyState === 2) return; feed(t); reconnect(es, st); });
+                    })
+                    .catch(function () { if (st.readyState !== 2 && !(ctrl && ctrl.signal.aborted)) reconnect(es, st); });
+            };
+            Object.defineProperty(global, 'EventSource', { configurable: true, writable: true, value: EventSource });
+        }
+
+        /* DOMStringList: a list of strings (location.ancestorOrigins and the like) */
+        if (typeof global.DOMStringList !== 'function') {
+            var DSB = Symbol('stringList');
+            var DOMStringList = function DOMStringList() { throw new TypeError('Illegal constructor'); };
+            var DP = DOMStringList.prototype;
+            Object.defineProperty(DP, 'length', { configurable: true, enumerable: true, get: function length() { var l = this[DSB]; if (!l) throw new TypeError('Illegal invocation'); return l.length; } });
+            Object.defineProperty(DP, 'item', { configurable: true, enumerable: true, writable: true, value: function item(i) {
+                var l = this[DSB]; if (!l) throw new TypeError('Illegal invocation');
+                if (arguments.length < 1) throw new TypeError("Failed to execute 'item' on 'DOMStringList': 1 argument required, but only 0 present.");
+                i = Number(i); i = isFinite(i) ? Math.trunc(i) >>> 0 : 0;
+                return i < l.length ? l[i] : null;
+            } });
+            Object.defineProperty(DP, 'contains', { configurable: true, enumerable: true, writable: true, value: function contains(s) {
+                var l = this[DSB]; if (!l) throw new TypeError('Illegal invocation');
+                if (arguments.length < 1) throw new TypeError("Failed to execute 'contains' on 'DOMStringList': 1 argument required, but only 0 present.");
+                return l.indexOf(String(s)) >= 0;
+            } });
+            Object.defineProperty(DP, Symbol.toStringTag, { configurable: true, value: 'DOMStringList' });
+            Object.defineProperty(global, 'DOMStringList', { configurable: true, writable: true, value: DOMStringList });
+            var makeList = function (arr) {
+                var o = Object.create(DP);
+                Object.defineProperty(o, DSB, { value: arr.slice() });
+                arr.forEach(function (v, i) { Object.defineProperty(o, i, { value: v, enumerable: true }); });
+                return o;
+            };
+            Object.defineProperty(global, '__cyberStringList', { configurable: true, value: makeList });
+            /* (location.ancestorOrigins: the origins of the documents it is nested in) */
+            try {
+                var loc = global.location;
+                if (loc && Object.getOwnPropertyDescriptor(loc, 'ancestorOrigins')) {
+                    var anc = [];
+                    try { for (var w = global; w.parent && w.parent !== w; w = w.parent) anc.push(w.parent.location.origin); } catch (e) { }
+                    var ao = makeList(anc);
+                    Object.defineProperty(loc, 'ancestorOrigins', { configurable: true, enumerable: true, get: function ancestorOrigins() { return ao; } });
+                }
+            } catch (e) { }
+        }
+    })();
+
+    /* ---- VTTCue (WebVTT): a TextTrackCue with its settings and text ---- */
+    (function () {
+        var TTC = global.TextTrackCue;
+        if (typeof TTC !== 'function' || typeof global.VTTCue === 'function' || typeof global.__cyberNewCue !== 'function') return;
+        var VB = Symbol('vttCue');
+        var VTTCue = function VTTCue(startTime, endTime, text) {
+            if (!new.target) throw new TypeError("Failed to construct 'VTTCue': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
+            if (arguments.length < 3) throw new TypeError("Failed to construct 'VTTCue': 3 arguments required, but only " + arguments.length + " present.");
+            var s = Number(startTime), e = Number(endTime);
+            if (!isFinite(s) || !isFinite(e)) throw new TypeError("Failed to construct 'VTTCue': The provided double value is non-finite.");
+            var self = Object.create(new.target.prototype);
+            global.__cyberNewCue(self, s, e);
+            Object.defineProperty(self, VB, { value: { region: null, vertical: '', snapToLines: true, line: 'auto', lineAlign: 'start',
+                position: 'auto', positionAlign: 'auto', size: 100, align: 'center', text: String(text) } });
+            return self;
+        };
+        VTTCue.prototype = Object.create(TTC.prototype);
+        Object.defineProperty(VTTCue.prototype, 'constructor', { value: VTTCue, writable: true, configurable: true });
+        Object.setPrototypeOf(VTTCue, TTC);
+        var st = function (x) { var v = x && x[VB]; if (!v) throw new TypeError('Illegal invocation'); return v; };
+        var acc = function (k, set) {
+            Object.defineProperty(VTTCue.prototype, k, { configurable: true, enumerable: true,
+                get: function () { return st(this)[k]; },
+                set: function (v) { var s = st(this); set(s, v); } });
+        };
+        var enumSet = function (k, list) { return function (s, v) { v = String(v); if (list.indexOf(v) >= 0) s[k] = v; }; };
+        acc('region', function (s, v) { s.region = v === undefined ? null : v; });
+        acc('vertical', enumSet('vertical', ['', 'rl', 'lr']));
+        acc('snapToLines', function (s, v) { s.snapToLines = !!v; });
+        acc('line', function (s, v) { if (v === 'auto') s.line = 'auto'; else { var n = Number(v); if (!isFinite(n)) throw new TypeError("Failed to set the 'line' property on 'VTTCue': The provided double value is non-finite."); s.line = n; } });
+        acc('lineAlign', enumSet('lineAlign', ['start', 'center', 'end']));
+        acc('position', function (s, v) {
+            if (v === 'auto') { s.position = 'auto'; return; }
+            var n = Number(v);
+            if (n < 0 || n > 100 || !isFinite(n)) throw new global.DOMException("Failed to set the 'position' property on 'VTTCue': The value provided (" + v + ") is outside the range [0, 100].", 'IndexSizeError');
+            s.position = n;
+        });
+        acc('positionAlign', enumSet('positionAlign', ['line-left', 'center', 'line-right', 'auto']));
+        acc('size', function (s, v) {
+            var n = Number(v);
+            if (n < 0 || n > 100 || !isFinite(n)) throw new global.DOMException("Failed to set the 'size' property on 'VTTCue': The value provided (" + v + ") is outside the range [0, 100].", 'IndexSizeError');
+            s.size = n;
+        });
+        acc('align', enumSet('align', ['start', 'center', 'end', 'left', 'right']));
+        acc('text', function (s, v) { s.text = String(v); });
+        /* (WebVTT cue text parsing: c, i, b, u, ruby, rt, v and lang, their classes; entities; timestamps as PIs) */
+        var XH = 'http://www.w3.org/1999/xhtml';
+        var decode = function (t) {
+            if (t.indexOf('&') < 0) return t;
+            var ta = global.document.createElement('textarea');
+            ta.innerHTML = t.replace(/</g, '&lt;');
+            return ta.value;
+        };
+        Object.defineProperty(VTTCue.prototype, 'getCueAsHTML', { configurable: true, enumerable: true, writable: true, value: function getCueAsHTML() {
+            var s = st(this), d = global.document, f = d.createDocumentFragment(), text = s.text;
+            var stack = [{ node: f, tag: '' }], buf = '';
+            var flush = function () { if (buf) { stack[stack.length - 1].node.appendChild(d.createTextNode(decode(buf))); buf = ''; } };
+            var i = 0;
+            while (i < text.length) {
+                var ch = text[i];
+                if (ch !== '<') { buf += ch; i++; continue; }
+                var e = text.indexOf('>', i);
+                var tagText = e < 0 ? text.slice(i + 1) : text.slice(i + 1, e);
+                i = e < 0 ? text.length : e + 1;
+                if (/^\d/.test(tagText)) {
+                    flush();
+                    if (/^(?:\d{2,}:)?[0-5]\d:[0-5]\d\.\d{3}$/.test(tagText)) stack[stack.length - 1].node.appendChild(d.createProcessingInstruction('timestamp', tagText));
+                    continue;
+                }
+                if (tagText[0] === '/') {
+                    var nm = tagText.slice(1).replace(/[\s.].*$/, '');
+                    var cur = stack[stack.length - 1];
+                    if (nm === cur.tag) { flush(); stack.pop(); }
+                    else if (nm === 'ruby' && cur.tag === 'rt' && stack.length > 2 && stack[stack.length - 2].tag === 'ruby') { flush(); stack.pop(); stack.pop(); }
+                    continue;
+                }
+                var m = /^([^\s.]*)((?:\.[^\s.]*)*)(?:\s+([\s\S]*))?$/.exec(tagText);
+                if (!m) continue;
+                var tag = m[1], classes = m[2] ? m[2].split('.').filter(Boolean) : [], ann = m[3] ? m[3].replace(/^\s+|\s+$/g, '').replace(/\s+/g, ' ') : '';
+                if (!/^(c|i|b|u|ruby|rt|v|lang)$/.test(tag)) continue;
+                if (tag === 'rt' && stack[stack.length - 1].tag !== 'ruby') continue;
+                flush();
+                var el = d.createElementNS(XH, tag === 'c' || tag === 'v' || tag === 'lang' ? 'span' : tag);
+                if (classes.length) el.className = classes.join(' ');
+                if (tag === 'v') el.title = decode(ann);
+                if (tag === 'lang') el.lang = ann;
+                stack[stack.length - 1].node.appendChild(el);
+                stack.push({ node: el, tag: tag });
+            }
+            flush();
+            return f;
+        } });
+        Object.defineProperty(VTTCue.prototype, Symbol.toStringTag, { configurable: true, value: 'VTTCue' });
+        Object.defineProperty(global, 'VTTCue', { configurable: true, writable: true, value: VTTCue });
+
+        /* media: preservesPitch; volume a finite number in [0, 1] */
+        var MP2 = null;
+        for (var p = global.HTMLVideoElement && global.HTMLVideoElement.prototype; p && !MP2; p = Object.getPrototypeOf(p))
+            if (Object.getOwnPropertyDescriptor(p, 'buffered')) MP2 = p;
+        if (MP2) {
+            if (!('preservesPitch' in MP2)) {
+                var PP = new WeakMap();
+                Object.defineProperty(MP2, 'preservesPitch', { configurable: true, enumerable: true,
+                    get: function () { return PP.has(this) ? PP.get(this) : true; },
+                    set: function (v) { PP.set(this, !!v); } });
+            }
+            var vd = Object.getOwnPropertyDescriptor(MP2, 'volume');
+            if (vd && vd.set) Object.defineProperty(MP2, 'volume', { configurable: true, enumerable: true, get: vd.get,
+                set: function (v) {
+                    var n = Number(v);
+                    if (!isFinite(n)) throw new TypeError("Failed to set the 'volume' property on 'HTMLMediaElement': The provided double value is non-finite.");
+                    if (n < 0 || n > 1) throw new global.DOMException("Failed to set the 'volume' property on 'HTMLMediaElement': The volume provided (" + n + ") is outside the range [0, 1].", 'IndexSizeError');
+                    if (vd.get && vd.get.call(this) === n) return;   /* (the same volume: no volumechange) */
+                    vd.set.call(this, n);
+                } });
+            var md = Object.getOwnPropertyDescriptor(MP2, 'muted');
+            /* (muted: the attribute's until the setter is used; from then on, what was set) */
+            var LATCH = new WeakMap();
+            if (md && md.set && md.get) Object.defineProperty(MP2, 'muted', { configurable: true, enumerable: true,
+                get: { muted: function () { return LATCH.has(this) ? LATCH.get(this) : md.get.call(this); } }.muted,
+                set: { muted: function (v) { v = !!v; LATCH.set(this, v); if (md.get.call(this) !== v) md.set.call(this, v); } }.muted });
+        }
+    })();
+
+    /* ---- XML serialization (DOM Parsing 3.2): XMLSerializer, and innerHTML / outerHTML in XML documents ---- */
+    (function () {
+        var XML_NS = 'http://www.w3.org/XML/1998/namespace', XMLNS_NS = 'http://www.w3.org/2000/xmlns/', HTML_NS = 'http://www.w3.org/1999/xhtml';
+        var VOID = { area: 1, base: 1, basefont: 1, bgsound: 1, br: 1, col: 1, embed: 1, frame: 1, hr: 1, img: 1, input: 1, keygen: 1,
+                     link: 1, menuitem: 1, meta: 1, param: 1, source: 1, track: 1, wbr: 1 };
+        var esc = function (v, attr) {
+            v = String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            return attr ? v.replace(/"/g, '&quot;') : v;
+        };
+        var copyMap = function (m) { var n = new Map(); m.forEach(function (v, k) { n.set(k, v.slice()); }); return n; };
+        var addPrefix = function (m, prefix, ns) { var l = m.get(ns); if (l) l.push(prefix); else m.set(ns, [prefix]); };
+        var preferred = function (m, ns, pref) {
+            var l = m.get(ns);
+            if (!l || !l.length) return null;
+            return l.indexOf(pref) >= 0 ? pref : l[l.length - 1];
+        };
+        var recordNs = function (el, m, local) {
+            var def = null, at = el.attributes;
+            for (var i = 0; i < at.length; i++) {
+                var a = at[i];
+                if (a.namespaceURI !== XMLNS_NS) continue;
+                if (a.prefix === null) { def = a.value; continue; }
+                var p = a.localName, ns = a.value;
+                if (ns === XML_NS) continue;
+                if (ns === '') ns = null;
+                var l = m.get(ns);
+                if (l && l.indexOf(p) >= 0) continue;
+                addPrefix(m, p, ns);
+                local[p] = ns;
+            }
+            return def;
+        };
+        var ser = function (node, ns, m, ctr, out) {
+            switch (node.nodeType) {
+            case 1: {
+                var local = {}, ignoreDef = false, mp = copyMap(m), qn, markup = '<';
+                var defNs = recordNs(node, mp, local), inherited = ns, nsu = node.namespaceURI, ln = node.localName;
+                if (inherited === nsu) {
+                    if (defNs !== null) ignoreDef = true;
+                    qn = nsu === XML_NS ? 'xml:' + ln : ln;
+                    markup += qn;
+                } else {
+                    var prefix = node.prefix, cand = preferred(mp, nsu, prefix);
+                    if (prefix === 'xmlns') cand = prefix;
+                    if (cand !== null) {
+                        qn = cand + ':' + ln;
+                        if (defNs !== null && defNs !== XML_NS) inherited = defNs === '' ? null : defNs;
+                        markup += qn;
+                    } else if (prefix !== null) {
+                        if (Object.prototype.hasOwnProperty.call(local, prefix)) prefix = 'ns' + (ctr.i++);
+                        addPrefix(mp, prefix, nsu);
+                        qn = prefix + ':' + ln;
+                        markup += qn + ' xmlns:' + prefix + '="' + esc(nsu, true) + '"';
+                        if (defNs !== null) inherited = defNs === '' ? null : defNs;
+                    } else if (defNs === null || defNs !== nsu) {
+                        ignoreDef = true;
+                        qn = ln;
+                        inherited = nsu;
+                        markup += qn + ' xmlns="' + esc(nsu === null ? '' : nsu, true) + '"';
+                    } else {
+                        qn = ln;
+                        inherited = nsu;
+                        markup += qn;
+                    }
+                }
+                var at = node.attributes;
+                for (var i = 0; i < at.length; i++) {
+                    var a = at[i], ans = a.namespaceURI, cp = null;
+                    if (ans !== null) {
+                        cp = preferred(mp, ans, a.prefix);
+                        if (ans === XMLNS_NS) {
+                            if (a.value === XML_NS || (a.prefix === null && ignoreDef) ||
+                                (a.prefix !== null && (!Object.prototype.hasOwnProperty.call(local, a.localName) || local[a.localName] !== a.value))) continue;
+                            cp = 'xmlns';
+                        } else if (cp === null) {
+                            cp = 'ns' + (ctr.i++);
+                            addPrefix(mp, cp, ans);
+                            markup += ' xmlns:' + cp + '="' + esc(ans, true) + '"';
+                        }
+                    }
+                    markup += ' ' + (cp !== null ? cp + ':' : '') + a.localName + '="' + esc(a.value, true) + '"';
+                }
+                var kids = nsu === HTML_NS && ln === 'template' && node.content ? node.content.childNodes : node.childNodes;
+                var skipEnd = false;
+                if (nsu === HTML_NS && !kids.length && VOID[ln]) { markup += ' /'; skipEnd = true; }
+                else if (nsu !== HTML_NS && !kids.length) { markup += '/'; skipEnd = true; }
+                markup += '>';
+                out.push(markup);
+                if (skipEnd) return;
+                for (var k = 0; k < kids.length; k++) ser(kids[k], inherited, mp, ctr, out);
+                out.push('</' + qn + '>');
+                return;
+            }
+            case 3: out.push(esc(node.data, false)); return;
+            case 4: out.push('<![CDATA[' + node.data + ']]>'); return;
+            case 7: out.push('<?' + node.target + ' ' + node.data + '?>'); return;
+            case 8: out.push('<!--' + node.data + '-->'); return;
+            case 9: case 11: {
+                var c = node.childNodes;
+                for (var j = 0; j < c.length; j++) ser(c[j], ns, m, ctr, out);
+                return;
+            }
+            case 10: {
+                var d = '<!DOCTYPE ' + node.name;
+                if (node.publicId) d += ' PUBLIC "' + node.publicId + '"';
+                if (node.systemId && !node.publicId) d += ' SYSTEM';
+                if (node.systemId) d += ' "' + node.systemId + '"';
+                out.push(d + '>');
+                return;
+            }
+            default: return;
+            }
+        };
+        var xmlSerialize = function (node, kidsOnly) {
+            var m = new Map(); m.set(XML_NS, ['xml']);
+            var out = [], ctr = { i: 1 };
+            if (kidsOnly) {
+                var c = node.nodeType === 1 && node.namespaceURI === HTML_NS && node.localName === 'template' && node.content ? node.content.childNodes : node.childNodes;
+                for (var i = 0; i < c.length; i++) ser(c[i], null, m, ctr, out);
+            } else ser(node, null, m, ctr, out);
+            return out.join('');
+        };
+        var isXmlDoc = function (n) {
+            var d = n && (n.nodeType === 9 ? n : n.ownerDocument);
+            try { return !!d && d.contentType !== 'text/html' && !(global.HTMLDocument && d instanceof global.HTMLDocument); } catch (e) { return false; }
+        };
+        var Node_ = global.Node;
+        var XMLSerializer = function XMLSerializer() {
+            if (!new.target) throw new TypeError("Failed to construct 'XMLSerializer': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
+        };
+        Object.defineProperty(XMLSerializer.prototype, 'serializeToString', { configurable: true, enumerable: true, writable: true, value: function serializeToString(root) {
+            if (arguments.length < 1) throw new TypeError("Failed to execute 'serializeToString' on 'XMLSerializer': 1 argument required, but only 0 present.");
+            if (!Node_ || !(root instanceof Node_)) throw new TypeError("Failed to execute 'serializeToString' on 'XMLSerializer': parameter 1 is not of type 'Node'.");
+            return xmlSerialize(root, false);
+        } });
+        Object.defineProperty(XMLSerializer.prototype, Symbol.toStringTag, { configurable: true, value: 'XMLSerializer' });
+        Object.defineProperty(global, 'XMLSerializer', { configurable: true, writable: true, value: XMLSerializer });
+        var EP = global.Element && global.Element.prototype;
+        ['innerHTML', 'outerHTML'].forEach(function (n) {
+            var p = EP;
+            while (p && !Object.getOwnPropertyDescriptor(p, n)) p = Object.getPrototypeOf(p);
+            var d = p && Object.getOwnPropertyDescriptor(p, n);
+            if (!d || !d.get) return;
+            var g = d.get;
+            Object.defineProperty(p, n, { configurable: true, enumerable: d.enumerable, set: d.set,
+                get: function () { return this && this.nodeType === 1 && isXmlDoc(this) ? xmlSerialize(this, n === 'innerHTML') : g.call(this); } });
+        });
+    })();
+
+    /* ---- Range.createContextualFragment (DOM Parsing), Element.streamAppendHTMLUnsafe (WICG partial updates) ---- */
+    (function () {
+        var HTML_NS = 'http://www.w3.org/1999/xhtml';
+        var RP = global.Range && global.Range.prototype;
+        var fragmentFor = function (n, html) {
+            var doc = n.nodeType === 9 ? n : n.ownerDocument;
+            var el = n.nodeType === 1 ? n : (n.nodeType === 3 || n.nodeType === 8 || n.nodeType === 7) ? n.parentElement : null;
+            var htmlDoc = doc.contentType === 'text/html';
+            if (!el || (htmlDoc && el.localName === 'html' && el.namespaceURI === HTML_NS)) el = doc.createElement('body');
+            var tmp = doc.createElementNS(el.namespaceURI, el.localName);
+            tmp.innerHTML = String(html);
+            var src = tmp.namespaceURI === HTML_NS && tmp.localName === 'template' && tmp.content ? tmp.content : tmp;
+            var frag = doc.createDocumentFragment();
+            while (src.firstChild) frag.appendChild(src.firstChild);
+            return frag;
+        };
+        if (RP && typeof RP.createContextualFragment !== 'function')
+            Object.defineProperty(RP, 'createContextualFragment', { configurable: true, enumerable: true, writable: true, value: function createContextualFragment(fragment) {
+                if (arguments.length < 1) throw new TypeError("Failed to execute 'createContextualFragment' on 'Range': 1 argument required, but only 0 present.");
+                return fragmentFor(this.startContainer, fragment);
+            } });
+        /* (template.htmlFor reflects for) */
+        var TP = global.HTMLTemplateElement && global.HTMLTemplateElement.prototype;
+        if (TP && !('htmlFor' in TP))
+            Object.defineProperty(TP, 'htmlFor', { configurable: true, enumerable: true,
+                get: function () { var v = this.getAttribute('for'); return v === null ? '' : v; },
+                set: function (v) { this.setAttribute('for', String(v)); } });
+        /* (output (HTML 4.10.12): its type, value and defaultValue, by its value mode and default value override; a form reset puts it back) */
+        var OUTP = global.HTMLOutputElement && global.HTMLOutputElement.prototype;
+        if (OUTP && !Object.prototype.hasOwnProperty.call(OUTP, 'value')) {
+            var OST = new WeakMap();
+            var ochk = function (t) { if (!(t instanceof global.HTMLOutputElement)) throw new TypeError('Illegal invocation'); };
+            var ost = function (t) { var s = OST.get(t); if (!s) OST.set(t, s = { value: false, over: '' }); return s; };
+            var odef = function (k, get, set) {
+                var g0 = { [k]: get }[k];
+                Object.defineProperty(g0, 'name', { value: 'get ' + k });
+                var d = { configurable: true, enumerable: true, get: g0 };
+                if (set) { var s0 = { [k]: set }[k]; Object.defineProperty(s0, 'name', { value: 'set ' + k }); d.set = s0; }
+                Object.defineProperty(OUTP, k, d);
+            };
+            odef('type', function () { ochk(this); return 'output'; });
+            odef('value', function () { ochk(this); return this.textContent; }, function (v) {
+                ochk(this);
+                var s = ost(this);
+                if (!s.value) { s.over = this.textContent; s.value = true; }
+                this.textContent = String(v);
+            });
+            odef('defaultValue', function () { ochk(this); var s = ost(this); return s.value ? s.over : this.textContent; }, function (v) {
+                ochk(this);
+                var s = ost(this);
+                if (!s.value) this.textContent = String(v); else s.over = String(v);
+            });
+            Object.defineProperty(global, '__cyberOutputReset', { configurable: true, value: function (o) {
+                var s = OST.get(o);
+                if (!s || !s.value) return;
+                s.value = false;
+                o.textContent = s.over;
+                s.over = '';
+            } });
+        }
+        /* (marquee: loop, a positive integer or -1; start and stop) */
+        var MQP = global.HTMLMarqueeElement && global.HTMLMarqueeElement.prototype;
+        if (MQP && !Object.prototype.hasOwnProperty.call(MQP, 'start')) {
+            var mqchk = function (t) { if (!(t instanceof global.HTMLMarqueeElement)) throw new TypeError('Illegal invocation'); };
+            ['start', 'stop'].forEach(function (k) {
+                Object.defineProperty(MQP, k, { configurable: true, enumerable: true, writable: true, value: { [k]: function () { mqchk(this); } }[k] });
+            });
+            Object.defineProperty(MQP, 'loop', { configurable: true, enumerable: true,
+                get: { get: function () {
+                    mqchk(this);
+                    var v = this.getAttribute('loop'), m = v === null ? null : /^[\t\n\f\r ]*([-+]?\d+)/.exec(v);
+                    var n = m ? parseInt(m[1], 10) : -1;
+                    return n > 0 ? n : -1;
+                } }.get,
+                set: { set: function (v) {
+                    mqchk(this);
+                    v = Math.trunc(Number(v)) | 0;
+                    if (v > 0 || v === -1) this.setAttribute('loop', String(v));
+                    else throw new global.DOMException('The loop value must be positive or -1.', 'IndexSizeError');
+                } }.set });
+        }
+        if (MQP) { var mld = Object.getOwnPropertyDescriptor(MQP, 'loop'); if (mld && mld.get) { Object.defineProperty(mld.get, 'name', { value: 'get loop' }); Object.defineProperty(mld.set, 'name', { value: 'set loop' }); } }
+        /* (script: async, by its force async flag (set for those not the parser's) or its attribute; referrerPolicy, an enumerated one) */
+        var SCP = global.HTMLScriptElement && global.HTMLScriptElement.prototype;
+        if (SCP && !Object.prototype.hasOwnProperty.call(SCP, 'async')) {
+            var FA_OFF = new WeakSet();
+            var scchk = function (t) { if (!(t instanceof global.HTMLScriptElement)) throw new TypeError('Illegal invocation'); };
+            Object.defineProperty(SCP, 'async', { configurable: true, enumerable: true,
+                get: Object.defineProperty(function () {
+                    scchk(this);
+                    if (this.hasAttribute('async')) return true;
+                    return !FA_OFF.has(this) && !this.__cyber_parser_script;
+                }, 'name', { value: 'get async' }),
+                set: Object.defineProperty(function (v) {
+                    scchk(this);
+                    FA_OFF.add(this);
+                    if (v) this.setAttribute('async', ''); else this.removeAttribute('async');
+                }, 'name', { value: 'set async' }) });
+        }
+        if (SCP && !Object.prototype.hasOwnProperty.call(SCP, 'referrerPolicy')) {
+            var RPK = ['', 'no-referrer', 'no-referrer-when-downgrade', 'same-origin', 'origin', 'strict-origin', 'origin-when-cross-origin', 'strict-origin-when-cross-origin', 'unsafe-url'];
+            Object.defineProperty(SCP, 'referrerPolicy', { configurable: true, enumerable: true,
+                get: Object.defineProperty(function () {
+                    if (!(this instanceof global.HTMLScriptElement)) throw new TypeError('Illegal invocation');
+                    var v = this.getAttribute('referrerpolicy');
+                    v = v === null ? '' : v.toLowerCase();
+                    return RPK.indexOf(v) >= 0 ? v : '';
+                }, 'name', { value: 'get referrerPolicy' }),
+                set: Object.defineProperty(function (v) {
+                    if (!(this instanceof global.HTMLScriptElement)) throw new TypeError('Illegal invocation');
+                    this.setAttribute('referrerpolicy', String(v));
+                }, 'name', { value: 'set referrerPolicy' }) });
+        }
+        /* (a template's declarative shadow root attributes, reflected) */
+        if (TP && !('shadowRootMode' in TP)) {
+            var tchk = function (t) { if (!(t instanceof global.HTMLTemplateElement)) throw new TypeError('Illegal invocation'); };
+            var tdef = function (k, get, set) {
+                var g0 = { [k]: get }[k], s0 = { [k]: set }[k];
+                Object.defineProperty(g0, 'name', { value: 'get ' + k });
+                Object.defineProperty(s0, 'name', { value: 'set ' + k });
+                Object.defineProperty(TP, k, { configurable: true, enumerable: true, get: g0, set: s0 });
+            };
+            var tenum = function (k, attr, kws, dflt) {
+                tdef(k, function () { tchk(this); var v = this.getAttribute(attr); v = v === null ? null : v.toLowerCase(); return v !== null && kws.indexOf(v) >= 0 ? v : dflt; },
+                     function (v) { tchk(this); this.setAttribute(attr, String(v)); });
+            };
+            var tbool = function (k, attr) {
+                tdef(k, function () { tchk(this); return this.hasAttribute(attr); },
+                     function (v) { tchk(this); if (v) this.setAttribute(attr, ''); else this.removeAttribute(attr); });
+            };
+            tenum('shadowRootMode', 'shadowrootmode', ['open', 'closed'], '');
+            tenum('shadowRootSlotAssignment', 'shadowrootslotassignment', ['named', 'manual'], 'named');
+            tbool('shadowRootDelegatesFocus', 'shadowrootdelegatesfocus');
+            tbool('shadowRootSerializable', 'shadowrootserializable');
+            tbool('shadowRootClonable', 'shadowrootclonable');
+            tdef('shadowRootCustomElementRegistry', function () { tchk(this); var v = this.getAttribute('shadowrootcustomelementregistry'); return v === null ? '' : v; },
+                 function (v) { tchk(this); this.setAttribute('shadowrootcustomelementregistry', String(v)); });
+        }
+        /* (appendHTMLUnsafe and the like: markup parsed in the element's context, or its parent's, put in place) */
+        var EP0 = global.Element && global.Element.prototype;
+        var ins = function (name, where) {
+            if (!EP0 || typeof EP0[name] === 'function') return;
+            var insf = { [name]: function (html) {
+                if (!(this instanceof global.Node)) throw new TypeError('Illegal invocation');
+                if (arguments.length < 1) throw new TypeError("Failed to execute '" + name + "' on 'Element': 1 argument required, but only 0 present.");
+                var inner = where === 'append' || where === 'prepend';
+                var ctx = inner ? this : this.parentNode;
+                if (!ctx) return;
+                var frag = fragmentFor(ctx.nodeType === 11 ? (this.ownerDocument || this) : ctx, html);
+                if (where === 'append') this.append(frag);
+                else if (where === 'prepend') this.prepend(frag);
+                else if (where === 'before') this.before(frag);
+                else if (where === 'after') this.after(frag);
+                else this.replaceWith(frag);
+            } }[name];
+            Object.defineProperty(insf, 'length', { value: 1 });
+            Object.defineProperty(EP0, name, { configurable: true, enumerable: true, writable: true, value: insf });
+            /* (before, after, replaceWith: CharacterData's too, as ChildNode's) */
+            var CDP0 = global.CharacterData && global.CharacterData.prototype;
+            if (CDP0 && !inner0(where) && typeof CDP0[name] !== 'function')
+                Object.defineProperty(CDP0, name, { configurable: true, enumerable: true, writable: true, value: insf });
+        };
+        var inner0 = function (w) { return w === 'append' || w === 'prepend'; };
+        ins('appendHTMLUnsafe', 'append');
+        ins('prependHTMLUnsafe', 'prepend');
+        ins('beforeHTMLUnsafe', 'before');
+        ins('afterHTMLUnsafe', 'after');
+        ins('replaceWithHTMLUnsafe', 'replace');
+        /* (a WritableStream, where the realm has none: its sink's write and close in order, through one writer) */
+        if (typeof global.WritableStream !== 'function') {
+            var WS = Symbol('writableStream');
+            var WritableStream = function WritableStream(sink) {
+                if (!new.target) throw new TypeError("Failed to construct 'WritableStream': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
+                sink = sink || {};
+                var st = { sink: sink, q: Promise.resolve(), locked: false, state: 'writable', err: undefined, ctrl: { error: function (e) { st.state = 'errored'; st.err = e; } } };
+                Object.defineProperty(this, WS, { value: st });
+                if (typeof sink.start === 'function') { var sr = sink.start.call(sink, st.ctrl); st.q = Promise.resolve(sr); }
+            };
+            var run = function (st, name, arg) {
+                st.q = st.q.then(function () {
+                    if (st.state === 'errored') throw st.err;
+                    var fn = st.sink[name];
+                    return typeof fn === 'function' ? fn.call(st.sink, arg, st.ctrl) : undefined;
+                }).then(function () { if (name === 'close') st.state = 'closed'; }, function (e) { st.state = 'errored'; st.err = e; throw e; });
+                var p = st.q;
+                st.q = st.q.catch(function () { });
+                return p;
+            };
+            var Writer = function (stream) {
+                var st = stream[WS];
+                if (st.locked) throw new TypeError('WritableStream is locked');
+                st.locked = true;
+                var closedR, closed = new Promise(function (r) { closedR = r; });
+                this.write = function (chunk) { return run(st, 'write', chunk); };
+                this.close = function () { var p = run(st, 'close'); p.then(closedR, function () { }); return p; };
+                this.abort = function (r) { st.state = 'errored'; st.err = r; var fn = st.sink.abort; return Promise.resolve(typeof fn === 'function' ? fn.call(st.sink, r) : undefined); };
+                this.releaseLock = function () { st.locked = false; };
+                this.ready = Promise.resolve();
+                this.closed = closed;
+                Object.defineProperty(this, 'desiredSize', { get: function () { return st.state === 'writable' ? 1 : 0; } });
+            };
+            WritableStream.prototype.getWriter = function getWriter() { return new Writer(this); };
+            Object.defineProperty(WritableStream.prototype, 'locked', { configurable: true, enumerable: true, get: function () { return !!(this[WS] && this[WS].locked); } });
+            WritableStream.prototype.abort = function abort(r) { var st = this[WS]; st.state = 'errored'; st.err = r; return Promise.resolve(); };
+            WritableStream.prototype.close = function close() { return run(this[WS], 'close'); };
+            Object.defineProperty(WritableStream.prototype, Symbol.toStringTag, { configurable: true, value: 'WritableStream' });
+            Object.defineProperty(global, 'WritableStream', { configurable: true, writable: true, value: WritableStream });
+        }
+        var EP = global.Element && global.Element.prototype;
+        if (EP && typeof EP.streamAppendHTMLUnsafe !== 'function' && typeof global.WritableStream === 'function')
+            Object.defineProperty(EP, 'streamAppendHTMLUnsafe', { configurable: true, enumerable: true, writable: true, value: function streamAppendHTMLUnsafe() {
+                var el = this, buf = [];
+                return new global.WritableStream({
+                    write: function (c) { buf.push(String(c)); },
+                    close: function () { el.appendChild(fragmentFor(el, buf.join(''))); }
+                });
+            } });
+    })();
+
+    /* ---- Location's protocol, host, hostname and port setters (HTML 7.2.4): the URL changed so, navigated to ---- */
+    (function () {
+        var loc = global.location;
+        if (!loc || typeof global.URL !== 'function') return;
+        var setPart = function (part, v) {
+            var u;
+            try { u = new global.URL(String(this.href)); } catch (e) { return; }
+            v = String(v);
+            if (part === 'protocol') {
+                var sch = v.replace(/[\t\n\r]/g, '');
+                var c = sch.indexOf(':');
+                if (c >= 0) sch = sch.slice(0, c);
+                if (!/^[A-Za-z][A-Za-z0-9+.\-]*$/.test(sch))
+                    throw new global.DOMException("Failed to set the 'protocol' property on 'Location': '" + v + "' is an invalid protocol.", 'SyntaxError');
+                var before = u.href;
+                u.protocol = sch;
+                if (!/^https?:$/.test(u.protocol) || u.href === before) return;
+                this.href = u.href;
+                return;
+            }
+            var was = u.href;
+            u[part] = v;
+            if (u.href !== was) this.href = u.href;
+        };
+        ['protocol', 'host', 'hostname', 'port'].forEach(function (part) {
+            var o = loc, d = null;
+            while (o && !(d = Object.getOwnPropertyDescriptor(o, part))) o = Object.getPrototypeOf(o);
+            if (!d || !d.get || d.set || !d.configurable) return;
+            Object.defineProperty(o, part, { configurable: true, enumerable: d.enumerable, get: d.get,
+                set: function (v) { setPart.call(this, part, v); } });
+        });
+    })();
+
+    /* ---- document.body's setter (HTML 3.1.5): a body or frameset, in place of the one there or into the root ---- */
+    (function () {
+        var DP = global.Document && global.Document.prototype;
+        var bd = DP && Object.getOwnPropertyDescriptor(DP, 'body');
+        if (!bd || !bd.get || bd.set) return;
+        var XH = 'http://www.w3.org/1999/xhtml';
+        Object.defineProperty(DP, 'body', { configurable: true, enumerable: true, get: bd.get, set: function (v) {
+            if (v !== null && !(global.HTMLElement && v instanceof global.HTMLElement) && !(v && v.nodeType === 1 && v.namespaceURI === XH))
+                throw new TypeError("Failed to set the 'body' property on 'Document': The provided value is not of type 'HTMLElement'.");
+            if (v === null || v.namespaceURI !== XH || (v.localName !== 'body' && v.localName !== 'frameset'))
+                throw new global.DOMException("Failed to set the 'body' property on 'Document': The new body element is of type '" + (v ? v.tagName : 'null') + "'. It must be either a 'BODY' or 'FRAMESET' element.", 'HierarchyRequestError');
+            var cur = bd.get.call(this);
+            if (v === cur) return;
+            if (cur && cur.parentNode) { cur.parentNode.replaceChild(v, cur); return; }
+            var de = this.documentElement;
+            if (!de) throw new global.DOMException("Failed to set the 'body' property on 'Document': No document element exists.", 'HierarchyRequestError');
+            de.appendChild(v);
+        } });
+    })();
+
+    /* ---- writingSuggestions (HTML 6.8.x): the nearest writingsuggestions attribute's state, false only for "false" ---- */
+    (function () {
+        var HP = global.HTMLElement && global.HTMLElement.prototype;
+        if (!HP || 'writingSuggestions' in HP) return;
+        Object.defineProperty(HP, 'writingSuggestions', { configurable: true, enumerable: true,
+            get: function writingSuggestions() {
+                for (var e = this; e && e.nodeType === 1; e = e.parentElement) {
+                    var v = e.getAttribute('writingsuggestions');
+                    if (v !== null) return String(v).toLowerCase() === 'false' ? 'false' : 'true';
+                }
+                return 'true';
+            },
+            set: function writingSuggestions(v) { this.setAttribute('writingsuggestions', String(v)); } });
+    })();
+
+    /* ---- image maps in hit testing (HTML 4.8.14.x): an img's usemap map's area at the point ---- */
+    (function () {
+        var DP = global.Document && global.Document.prototype;
+        var holders = [DP, global.document].filter(function (o) { return o && Object.prototype.hasOwnProperty.call(o, 'elementFromPoint'); });
+        var nums = function (v) { return String(v || '').split(/[\s,;]+/).filter(Boolean).map(parseFloat).map(function (n) { return isFinite(n) ? n : 0; }); };
+        var hitArea = function (area, x, y) {
+            var shape = String(area.getAttribute('shape') || 'rect').toLowerCase(), c = nums(area.getAttribute('coords'));
+            if (shape === 'default') return true;
+            if (shape === 'circle' || shape === 'circ') { if (c.length < 3) return false; var dx = x - c[0], dy = y - c[1]; return dx * dx + dy * dy <= c[2] * c[2]; }
+            if (shape === 'poly' || shape === 'polygon') {
+                if (c.length < 6) return false;
+                var inside = false;
+                for (var i = 0, j = c.length - 2; i + 1 < c.length; j = i, i += 2) {
+                    var xi = c[i], yi = c[i + 1], xj = c[j], yj = c[j + 1];
+                    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+                }
+                return inside;
+            }
+            if (c.length < 4) return false;
+            var x1 = Math.min(c[0], c[2]), x2 = Math.max(c[0], c[2]), y1 = Math.min(c[1], c[3]), y2 = Math.max(c[1], c[3]);
+            return x >= x1 && x < x2 && y >= y1 && y < y2;
+        };
+        holders.forEach(function (H) {
+        var d = Object.getOwnPropertyDescriptor(H, 'elementFromPoint');
+        if (!d || typeof d.value !== 'function' || !d.configurable) return;
+        var orig = d.value;
+        Object.defineProperty(H, 'elementFromPoint', { configurable: true, enumerable: d.enumerable, writable: true, value: function elementFromPoint(x, y) {
+            var el = orig.apply(this, arguments);
+            if (!el || el.localName !== 'img' || el.namespaceURI !== 'http://www.w3.org/1999/xhtml') return el;
+            var um = el.getAttribute('usemap');
+            if (um === null || um.charAt(0) !== '#' || um.length < 2) return el;
+            var name = um.slice(1), maps = this.getElementsByTagName('map'), map = null;
+            for (var i = 0; i < maps.length && !map; i++) if (maps[i].getAttribute('name') === name || maps[i].id === name) map = maps[i];
+            if (!map) return el;
+            var r = el.getBoundingClientRect(), px = Number(x) - r.left, py = Number(y) - r.top;
+            var areas = map.querySelectorAll('area');
+            for (var k = 0; k < areas.length; k++) if (hitArea(areas[k], px, py)) return areas[k];
+            return el;
+        } });
+        });
+    })();
+
+    /* ---- getClientRects of an empty inline: one empty box where it is (CSSOM View 6), as long as it is rendered ---- */
+    (function () {
+        var EP = global.Element && global.Element.prototype;
+        var d = EP && Object.getOwnPropertyDescriptor(EP, 'getClientRects');
+        if (!d || typeof d.value !== 'function') return;
+        var orig = d.value;
+        Object.defineProperty(EP, 'getClientRects', { configurable: true, enumerable: d.enumerable, writable: true, value: function getClientRects() {
+            var l = orig.apply(this, arguments);
+            if (l && l.length === 0 && this.isConnected && this.namespaceURI === 'http://www.w3.org/1999/xhtml' && !this.firstChild) {
+                var cs;
+                try { cs = global.getComputedStyle(this); } catch (e) { return l; }
+                if (!cs || !/^inline$|^inline flow$/.test(cs.display)) return l;
+                for (var a = this.parentElement; a; a = a.parentElement) {
+                    var ac = global.getComputedStyle(a);
+                    if (!ac || ac.display === 'none') return l;
+                }
+                var b = this.getBoundingClientRect();
+                l[0] = new global.DOMRect(b.x, b.y, 0, b.height);
+                try { Object.defineProperty(l, 'length', { value: 1 }); } catch (e) { l.length = 1; }
+            }
+            return l;
+        } });
+    })();
+
+    /* ---- document.all (HTML 2.6.2.1): HTMLAllCollection, callable; its elements in tree order, by index, id or name ---- */
+    (function () {
+        if (typeof global.HTMLAllCollection === 'function') return;
+        var DP = global.Document && global.Document.prototype;
+        if (!DP) return;
+        var HTMLAllCollection = function HTMLAllCollection() { throw new TypeError('Illegal constructor'); };
+        var P = HTMLAllCollection.prototype;
+        var OWN = Symbol('allOwner');
+        var NAMED = /^(a|button|embed|form|frame|frameset|iframe|img|input|map|meta|object|select|textarea)$/;
+        var XH = 'http://www.w3.org/1999/xhtml';
+        var items = function (doc) { return Array.prototype.slice.call(doc.getElementsByTagName('*')); };
+        var byName = function (doc, n) {
+            n = String(n);
+            if (!n) return [];
+            return items(doc).filter(function (e) { return e.id === n || (e.namespaceURI === XH && NAMED.test(e.localName) && e.getAttribute('name') === n); });
+        };
+        var isIndex = function (k) { return typeof k === 'string' && /^(0|[1-9]\d*)$/.test(k) && +k < 4294967295; };
+        var named = function (doc, n) {
+            var l = byName(doc, n);
+            if (!l.length) return null;
+            if (l.length === 1) return l[0];
+            var hc = doc.createElement('div'), r = Object.create(global.HTMLCollection ? global.HTMLCollection.prototype : Object.prototype);
+            l.forEach(function (e, i) { Object.defineProperty(r, i, { value: e, enumerable: true }); });
+            Object.defineProperty(r, 'length', { value: l.length });
+            (void hc);
+            return r;
+        };
+        /* (document.all is falsy, [[IsHTMLDDA]]: looked at as an object, not by truth) */
+        var docOf = function (t) { var d = t === undefined || t === null ? undefined : t[OWN]; if (!d) throw new TypeError('Illegal invocation'); return d; };
+        var itemImpl = function (doc, a) {
+            if (a === undefined || a === null && arguments.length < 2) return null;
+            var k = String(a);
+            if (isIndex(k)) return items(doc)[+k] || null;
+            return named(doc, k);
+        };
+        Object.defineProperty(P, 'length', { configurable: true, enumerable: true, get: function () { return items(docOf(this)).length; } });
+        Object.defineProperty(P, 'item', { configurable: true, enumerable: true, writable: true, value: function item(n) { var d = docOf(this); return arguments.length ? itemImpl(d, n) : null; } });
+        Object.defineProperty(P, 'namedItem', { configurable: true, enumerable: true, writable: true, value: function namedItem(n) {
+            if (arguments.length < 1) throw new TypeError("Failed to execute 'namedItem' on 'HTMLAllCollection': 1 argument required, but only 0 present.");
+            return named(docOf(this), n);
+        } });
+        Object.defineProperty(P, Symbol.iterator, { configurable: true, writable: true, value: function () { return items(docOf(this))[Symbol.iterator](); } });
+        Object.defineProperty(P, Symbol.toStringTag, { configurable: true, value: 'HTMLAllCollection' });
+        Object.defineProperty(global, 'HTMLAllCollection', { configurable: true, writable: true, value: HTMLAllCollection });
+        var made = new WeakMap();
+        var allOf = function (doc) {
+            var a = made.get(doc);
+            if (a) return a;
+            /* (its legacy caller: callable, not a constructor) */
+            var fn = (...args) => args.length ? itemImpl(doc, args[0]) : null;
+            Object.setPrototypeOf(fn, P);
+            Object.defineProperty(fn, OWN, { value: doc });
+            a = new Proxy(fn, {
+                get: function (t, k, r) {
+                    if (k === 'length') return items(doc).length;
+                    if (typeof k === 'string' && !(k in P)) {
+                        if (isIndex(k)) return items(doc)[+k];
+                        var v = named(doc, k);
+                        if (v) return v;
+                    }
+                    return Reflect.get(t, k, r === a ? t : r);
+                },
+                has: function (t, k) {
+                    if (typeof k === 'string') { if (isIndex(k)) return +k < items(doc).length; if (byName(doc, k).length) return true; }
+                    return k in t;
+                },
+                getOwnPropertyDescriptor: function (t, k) {
+                    if (typeof k === 'string' && isIndex(k)) { var e = items(doc)[+k]; return e ? { value: e, writable: false, enumerable: true, configurable: true } : undefined; }
+                    return Reflect.getOwnPropertyDescriptor(t, k);
+                },
+                ownKeys: function (t) { return items(doc).map(function (_, i) { return String(i); }).concat(Reflect.ownKeys(t)); }
+            });
+            if (typeof global.__cyberMarkHTMLDDA === 'function') global.__cyberMarkHTMLDDA(a);
+            made.set(doc, a);
+            return a;
+        };
+        Object.defineProperty(DP, 'all', { configurable: true, enumerable: true, get: function all() {
+            if (!(this instanceof global.Document)) throw new TypeError('Illegal invocation');
+            return allOf(this);
+        } });
+        try {
+            if (Object.prototype.hasOwnProperty.call(global.document, 'all')) delete global.document.all;
+            var dp0 = Object.getPrototypeOf(global.document);
+            if (dp0 && dp0 !== DP && Object.prototype.hasOwnProperty.call(dp0, 'all')) delete dp0.all;
+        } catch (e) { }
+        if (typeof global.__cyberMarkHTMLDDA !== 'function') delete DP.all;   /* (no way to make it falsy: the old one stays) */
+    })();
+
+    /* ---- Window's small members (HTML 7.2.2): stop(), status, external, origin ---- */
+    (function () {
+        if (!global.document) return;
+        if (!('stop' in global)) Object.defineProperty(global, 'stop', { configurable: true, enumerable: true, writable: true, value: function stop() { } });
+        if (!('status' in global)) {
+            var st = '';
+            Object.defineProperty(global, 'status', { configurable: true, enumerable: true, get: function status() { return st; }, set: function status(v) { st = String(v); } });
+        }
+        if (!('external' in global)) {
+            var External = function External() { throw new TypeError('Illegal constructor'); };
+            var extOf = function (t) { if (!(t instanceof External)) throw new TypeError('Illegal invocation'); };
+            Object.defineProperty(External, 'prototype', { writable: false });
+            Object.defineProperty(External.prototype, 'AddSearchProvider', { configurable: true, enumerable: true, writable: true, value: function AddSearchProvider() { extOf(this); } });
+            Object.defineProperty(External.prototype, 'IsSearchProviderInstalled', { configurable: true, enumerable: true, writable: true, value: function IsSearchProviderInstalled() { extOf(this); } });
+            Object.defineProperty(External.prototype, Symbol.toStringTag, { configurable: true, value: 'External' });
+            Object.defineProperty(global, 'External', { configurable: true, writable: true, value: External });
+            var ext = Object.create(External.prototype);
+            Object.defineProperty(global, 'external', { configurable: true, enumerable: true, get: function external() { return ext; }, set: function (v) { Object.defineProperty(global, 'external', { value: v, writable: true, configurable: true, enumerable: true }); } });
+        }
+        if (!('origin' in global)) {
+            Object.defineProperty(global, 'origin', { configurable: true, enumerable: true,
+                get: function origin() {
+                    try {
+                        if (global.document && global.document.origin) return global.document.origin;
+                        var o = global.location.origin;
+                        /* (an about:blank or srcdoc document: its creator's origin, as its base URL comes from it; not a sandboxed one's) */
+                        if ((!o || o === 'null') && global.location.protocol === 'about:' && global.document && global.document.baseURI &&
+                            !/^about:/.test(global.document.baseURI) && !(global.frameElement && global.frameElement.hasAttribute && global.frameElement.hasAttribute('sandbox'))) {
+                            try { o = new global.URL(global.document.baseURI).origin; } catch (e) { }
+                        }
+                        return o && o !== 'null' ? o : 'null';
+                    } catch (e) { return 'null'; }
+                },
+                set: function (v) { Object.defineProperty(global, 'origin', { value: v, writable: true, configurable: true, enumerable: true }); } });
+        }
+    })();
+
+    /* ---- focusgroup (Open UI scoped focusgroup, tentative): arrow keys move focus among a group's items ---- */
+    (function () {
+        if (!global.document) return;
+        var BEHAVIORS = { toolbar: 1, tablist: 1, radiogroup: 1, listbox: 1, menu: 1, menubar: 1 };
+        var tokens = function (el) {
+            var v = el.getAttribute && el.getAttribute('focusgroup');
+            if (v === null || v === undefined) return null;
+            return String(v).toLowerCase().split(/[\t\n\f\r ]+/).filter(Boolean);
+        };
+        var isOwner = function (el) { var t = tokens(el); return !!(t && t.length && BEHAVIORS[t[0]]); };
+        var optedOut = function (el) { var t = tokens(el); return !!(t && t[0] === 'none'); };
+        var focusable = function (el) {
+            if (!el || el.nodeType !== 1) return false;
+            if (el.hasAttribute('disabled') && /^(button|input|select|textarea)$/.test(el.localName)) return false;
+            var ti = el.getAttribute('tabindex');
+            if (ti !== null && !isNaN(parseInt(ti, 10))) return true;
+            if (/^(button|select|textarea|iframe)$/.test(el.localName)) return true;
+            if (el.localName === 'input') return String(el.getAttribute('type') || '').toLowerCase() !== 'hidden';
+            if ((el.localName === 'a' || el.localName === 'area') && el.hasAttribute('href')) return true;
+            return false;
+        };
+        var ownerOf = function (el) {
+            for (var a = el.parentElement; a; a = a.parentElement) {
+                if (optedOut(a)) return null;
+                if (isOwner(a)) return a;
+            }
+            return null;
+        };
+        var itemsOf = function (owner) {
+            var out = [];
+            (function walk(n) {
+                for (var c = n.firstElementChild; c; c = c.nextElementSibling) {
+                    if (optedOut(c)) continue;
+                    var rendered = true;
+                    try { var cs = global.getComputedStyle(c); rendered = cs.display !== 'none' && cs.visibility !== 'hidden'; } catch (e) { }
+                    if (!rendered) continue;
+                    if (focusable(c)) out.push(c);
+                    if (isOwner(c)) continue;   /* (a nested group: an item itself, its items its own) */
+                    walk(c);
+                }
+            })(owner);
+            return out;
+        };
+        onWin('keydown', function (e) {
+            if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
+            var k = e.key;
+            if (!/^(ArrowLeft|ArrowRight|ArrowUp|ArrowDown|Home|End)$/.test(k)) return;
+            var d = global.document, cur = d.activeElement;
+            if (!cur || cur === d.body) return;
+            var owner = ownerOf(cur);
+            if (!owner) return;
+            var t = tokens(owner), inline = t.indexOf('inline') >= 0, block = t.indexOf('block') >= 0;
+            if (!inline && !block) inline = block = true;
+            var items = itemsOf(owner), i = items.indexOf(cur);
+            if (i < 0 || !items.length) return;
+            var rtl = false;
+            try { rtl = global.getComputedStyle(owner).direction === 'rtl'; } catch (e2) { }
+            var step = 0;
+            if (k === 'ArrowRight' && inline) step = rtl ? -1 : 1;
+            else if (k === 'ArrowLeft' && inline) step = rtl ? 1 : -1;
+            else if (k === 'ArrowDown' && block) step = 1;
+            else if (k === 'ArrowUp' && block) step = -1;
+            var to = -1;
+            if (k === 'Home') to = 0;
+            else if (k === 'End') to = items.length - 1;
+            else if (step) {
+                to = i + step;
+                if (to < 0 || to >= items.length) to = t.indexOf('wrap') >= 0 ? (to + items.length) % items.length : -1;
+            }
+            if (to < 0 || to === i) return;
+            e.preventDefault();
+            try { items[to].focus(); } catch (e3) { }
+        });
+    })();
+
+    /* ---- HTML members the interfaces lacked (HTML's IDL): reflections, text, areas, media odds and ends ---- */
+    (function () {
+        var def = function (C, name, d) {
+            var P = global[C] && global[C].prototype;
+            if (!P || Object.getOwnPropertyDescriptor(P, name)) return;
+            d.configurable = true; d.enumerable = true;
+            Object.defineProperty(P, name, d);
+        };
+        var str = function (attr) { return { get: function () { var v = this.getAttribute(attr); return v === null ? '' : v; }, set: function (v) { this.setAttribute(attr, String(v)); } }; };
+        var enm = function (attr, kw, missing, invalid) {
+            return { get: function () {
+                var v = this.getAttribute(attr);
+                if (v === null) return missing;
+                v = v.toLowerCase();
+                return kw.indexOf(v) >= 0 ? v : invalid;
+            }, set: function (v) { this.setAttribute(attr, String(v)); } };
+        };
+        var ulong = function (attr, dflt) {
+            return { get: function () {
+                var m = /^[\t\n\f\r ]*\+?(\d+)/.exec(this.getAttribute(attr) || '');
+                var n = m ? parseInt(m[1], 10) : NaN;
+                return isFinite(n) && n >= 0 && n <= 2147483647 ? n : dflt;
+            }, set: function (v) { var n = Number(v) >>> 0; this.setAttribute(attr, String(n > 2147483647 ? dflt : n)); } };
+        };
+        def('HTMLImageElement', 'sizes', str('sizes'));
+        def('HTMLImageElement', 'loading', enm('loading', ['eager', 'lazy'], 'eager', 'eager'));
+        def('HTMLImageElement', 'fetchPriority', enm('fetchpriority', ['high', 'low', 'auto'], 'auto', 'auto'));
+        def('HTMLIFrameElement', 'allow', str('allow'));
+        def('HTMLIFrameElement', 'loading', enm('loading', ['eager', 'lazy'], 'eager', 'eager'));
+        def('HTMLLinkElement', 'fetchPriority', enm('fetchpriority', ['high', 'low', 'auto'], 'auto', 'auto'));
+        def('HTMLLinkElement', 'imageSizes', str('imagesizes'));
+        def('HTMLLinkElement', 'imageSrcset', str('imagesrcset'));
+        def('HTMLScriptElement', 'fetchPriority', enm('fetchpriority', ['high', 'low', 'auto'], 'auto', 'auto'));
+        def('HTMLSourceElement', 'width', ulong('width', 0));
+        def('HTMLSourceElement', 'height', ulong('height', 0));
+        def('HTMLFormElement', 'rel', str('rel'));
+        def('HTMLElement', 'autocapitalize', { get: function () {
+            var v = (this.getAttribute('autocapitalize') || '').toLowerCase();
+            if (v === 'off' || v === 'none') return 'none';
+            if (v === 'on' || v === 'sentences') return 'sentences';
+            if (v === 'words' || v === 'characters') return v;
+            return '';
+        }, set: function (v) { this.setAttribute('autocapitalize', String(v)); } });
+        def('HTMLElement', 'autocorrect', { get: function () { var v = this.getAttribute('autocorrect'); return !(v !== null && v.toLowerCase() === 'off'); },
+            set: function (v) { this.setAttribute('autocorrect', v ? 'on' : 'off'); } });
+        def('HTMLElement', 'spellcheck', { get: function () {
+            for (var e = this; e && e.nodeType === 1; e = e.parentElement) {
+                var v = e.getAttribute('spellcheck');
+                if (v !== null) { v = v.toLowerCase(); if (v === '' || v === 'true') return true; if (v === 'false') return false; }
+            }
+            return true;
+        }, set: function (v) { this.setAttribute('spellcheck', v ? 'true' : 'false'); } });
+        def('HTMLElement', 'accessKeyLabel', { get: function () { return ''; } });
+        def('HTMLAnchorElement', 'text', { get: function () { return this.textContent; }, set: function (v) { this.textContent = String(v); } });
+        def('HTMLTitleElement', 'text', { get: function () {
+            var t = '';
+            for (var c = this.firstChild; c; c = c.nextSibling) if (c.nodeType === 3) t += c.data;
+            return t;
+        }, set: function (v) { this.textContent = String(v); } });
+        var areasOf = new WeakMap();
+        def('HTMLMapElement', 'areas', { get: function () {
+            var self = this, c = areasOf.get(this);
+            if (!c) {
+                c = self.getElementsByTagName('area');
+                areasOf.set(this, c);
+            }
+            return c;
+        } });
+        def('HTMLMediaElement', 'srcObject', { get: function () { return this.__cyberSrcObject || null; },
+            set: function (v) { Object.defineProperty(this, '__cyberSrcObject', { value: v === undefined ? null : v, writable: true, configurable: true }); } });
+        var MP = global.HTMLMediaElement && global.HTMLMediaElement.prototype;
+        if (MP && typeof MP.fastSeek !== 'function') Object.defineProperty(MP, 'fastSeek', { configurable: true, enumerable: true, writable: true, value: function fastSeek(time) {
+            if (arguments.length < 1) throw new TypeError("Failed to execute 'fastSeek' on 'HTMLMediaElement': 1 argument required, but only 0 present.");
+            var t = Number(time);
+            if (!isFinite(t)) throw new TypeError("Failed to execute 'fastSeek' on 'HTMLMediaElement': The provided double value is non-finite.");
+            this.currentTime = t;
+        } });
+        if (MP && typeof MP.getStartDate !== 'function') Object.defineProperty(MP, 'getStartDate', { configurable: true, enumerable: true, writable: true, value: function getStartDate() { return new Date(NaN); } });
+        ['HTMLEmbedElement', 'HTMLIFrameElement', 'HTMLObjectElement'].forEach(function (C) {
+            var P = global[C] && global[C].prototype;
+            if (!P || typeof P.getSVGDocument === 'function') return;
+            Object.defineProperty(P, 'getSVGDocument', { configurable: true, enumerable: true, writable: true, value: function getSVGDocument() {
+                var d = null;
+                try { d = this.contentDocument || null; } catch (e) { d = null; }
+                return d && d.documentElement && d.documentElement.namespaceURI === 'http://www.w3.org/2000/svg' ? d : null;
+            } });
+        });
+    })();
+
+    /* ---- document.queryCommand* (HTML 8.x, editing): nothing enabled, nothing on ---- */
+    (function () {
+        var DP = global.Document && global.Document.prototype;
+        if (!DP) return;
+        var SUPPORTED = /^(bold|italic|underline|strikethrough|subscript|superscript|createlink|unlink|delete|forwarddelete|inserttext|inserthtml|insertparagraph|insertlinebreak|insertorderedlist|insertunorderedlist|indent|outdent|justifyleft|justifyright|justifycenter|justifyfull|removeformat|selectall|undo|redo|copy|cut|paste|forecolor|backcolor|hilitecolor|fontname|fontsize|formatblock|inserthorizontalrule|insertimage|stylewithcss|defaultparagraphseparator|contentreadonly|usecss)$/;
+        var op = function (name, impl) {
+            if (typeof DP[name] === 'function') return;
+            var fn = function (cmd) {
+                if (arguments.length < 1) throw new TypeError("Failed to execute '" + name + "' on 'Document': 1 argument required, but only 0 present.");
+                if (!(this instanceof global.Document)) throw new TypeError('Illegal invocation');
+                return impl(String(cmd).toLowerCase());
+            };
+            Object.defineProperty(fn, 'name', { value: name });
+            Object.defineProperty(DP, name, { configurable: true, enumerable: true, writable: true, value: fn });
+        };
+        op('queryCommandEnabled', function () { return false; });
+        op('queryCommandIndeterm', function () { return false; });
+        op('queryCommandState', function () { return false; });
+        op('queryCommandSupported', function (c) { return SUPPORTED.test(c); });
+        op('queryCommandValue', function () { return ''; });
+    })();
+
+    /* ---- a form's named properties (HTML 4.10.3): its listed elements by name or id, where nothing else is named so ---- */
+    /* (after the IDL shaping, which sets each prototype's parent: idl_shape.c calls this) */
+    /* (focusreset: the focused element removed, the event at its document from a microtask, HTML PR 13050) */
+    (function () {
+        var DPf = global.Document && global.Document.prototype;
+        if (!DPf || Object.getOwnPropertyDescriptor(DPf, 'onfocusreset')) return;
+        var FR = Symbol('onfocusreset'), FRW = Symbol('onfocusresetW');
+        var g = function () { if (!(this instanceof global.Document)) throw new TypeError('Illegal invocation'); return this[FR] || null; };
+        var s = function (f) {
+            if (!(this instanceof global.Document)) throw new TypeError('Illegal invocation');
+            if (this[FRW]) this.removeEventListener('focusreset', this[FRW]);
+            if (typeof f !== 'function' && (typeof f !== 'object' || f === null)) { this[FR] = null; this[FRW] = null; return; }
+            var self = this, w = function (e) { return typeof f === 'function' ? f.call(self, e) : undefined; };
+            this[FR] = f; this[FRW] = w;
+            this.addEventListener('focusreset', w);
+        };
+        Object.defineProperty(g, 'name', { value: 'get onfocusreset' });
+        Object.defineProperty(s, 'name', { value: 'set onfocusreset' });
+        Object.defineProperty(DPf, 'onfocusreset', { get: g, set: s, enumerable: true, configurable: true });
+        Object.defineProperty(global, '__cyberFocusReset', { configurable: true, value: function (doc) {
+            /* (the viewport focused now; a focus update before the microtask runs: no event) */
+            try { if (typeof global.__cyberDocSet === 'function') global.__cyberDocSet(doc, 'activeElement', doc.body); } catch (e) { }
+            var gen = global.__cyberFocusGen | 0;
+            global.queueMicrotask(function () {
+                if ((global.__cyberFocusGen | 0) !== gen) return;
+                var ev = new global.Event('focusreset');
+                if (typeof global.__cyberDispatchTrusted === 'function') global.__cyberDispatchTrusted(doc, ev); else doc.dispatchEvent(ev);
+            });
+        } });
+    })();
+    Object.defineProperty(global, '__cyberAfterShape', { configurable: true, value: function () {
+        try { mediaPolicy(); } catch (e) { }
+        /* (HTMLElement's own members the engine put higher up: its own, as the IDL has them) */
+        try {
+            [['HTMLElement', ['translate', 'draggable', 'isContentEditable', 'dataset', 'tabIndex', 'focus', 'blur', 'nonce', 'autofocus']],
+             ['SVGElement', ['dataset', 'tabIndex', 'focus', 'blur', 'nonce', 'autofocus']],
+             ['MathMLElement', ['dataset', 'tabIndex', 'focus', 'blur', 'nonce', 'autofocus']]].forEach(function (ent) {
+            var HEo = global[ent[0]] && global[ent[0]].prototype;
+            if (HEo) ent[1].forEach(function (k) {
+                for (var p = HEo; p; p = Object.getPrototypeOf(p)) {
+                    var d = Object.getOwnPropertyDescriptor(p, k);
+                    if (d) {
+                        /* (enumerable, its accessors named as WebIDL names them) */
+                        d.enumerable = true;
+                        try {
+                            if (d.get && (d.get.name === 'get' || d.get.name === '')) Object.defineProperty(d.get, 'name', { value: 'get ' + k });
+                            if (d.set && (d.set.name === 'set' || d.set.name === '')) Object.defineProperty(d.set, 'name', { value: 'set ' + k });
+                        } catch (e2) { }
+                        if (d.configurable !== false) Object.defineProperty(HEo, k, d);
+                        break;
+                    }
+                }
+            });
+            });
+        } catch (e) { }
+        /* (the media element's members wrapped on the video prototype: up on HTMLMediaElement's, an audio element's too) */
+        try {
+            var MEp = global.HTMLMediaElement && global.HTMLMediaElement.prototype, VEp = global.HTMLVideoElement && global.HTMLVideoElement.prototype;
+            var AEp = global.HTMLAudioElement && global.HTMLAudioElement.prototype;
+            if (MEp && VEp && MEp !== VEp) ['buffered', 'played', 'seekable', 'error', 'textTracks', 'audioTracks', 'videoTracks', 'addTextTrack', 'volume', 'muted', 'preservesPitch'].forEach(function (k) {
+                var dv = Object.getOwnPropertyDescriptor(VEp, k);
+                if (!dv || !dv.configurable) return;
+                Object.defineProperty(MEp, k, dv);   /* (kept on the video prototype too: deleting from a prototype here was suspect in a GC crash) */
+                /* (an audio prototype with its own: the same, wrapped one) */
+                var da = AEp && AEp !== MEp && Object.getOwnPropertyDescriptor(AEp, k);
+                if (da && da.configurable) Object.defineProperty(AEp, k, dv);
+            });
+            /* (focus and blur: their IDL names and lengths) */
+            var HEf = global.HTMLElement && global.HTMLElement.prototype;
+            [['focus', 0], ['blur', 0]].forEach(function (p) {
+                var d = HEf && Object.getOwnPropertyDescriptor(HEf, p[0]);
+                if (!d || typeof d.value !== 'function') return;
+                try { Object.defineProperty(d.value, 'name', { value: p[0] }); Object.defineProperty(d.value, 'length', { value: p[1] }); } catch (e2) { }
+            });
+        } catch (e) { }
+        /* (progress: labels as meter has them; datalist: its options) */
+        try {
+            var INp = global.HTMLInputElement && global.HTMLInputElement.prototype;
+            var ldi = INp && Object.getOwnPropertyDescriptor(INp, 'labels');
+            if (ldi && ldi.get) ['HTMLProgressElement', 'HTMLMeterElement'].forEach(function (nm) {
+                var P = global[nm] && global[nm].prototype;
+                if (!P || Object.getOwnPropertyDescriptor(P, 'labels')) return;
+                var C = global[nm], g0 = ldi.get;
+                var g = function () { if (!(this instanceof C)) throw new TypeError('Illegal invocation'); return g0.call(this); };
+                Object.defineProperty(g, 'name', { value: 'get labels' });
+                Object.defineProperty(P, 'labels', { get: g, enumerable: true, configurable: true });
+            });
+            var DLp = global.HTMLDataListElement && global.HTMLDataListElement.prototype;
+            if (DLp && !Object.getOwnPropertyDescriptor(DLp, 'options')) {
+                var dlOpts = function options() {
+                    if (!(this instanceof global.HTMLDataListElement)) throw new TypeError('Illegal invocation');
+                    if (!this.__cyberDlOpts) {
+                        var self = this;
+                        var hc = self.getElementsByTagName('option');
+                        Object.defineProperty(self, '__cyberDlOpts', { value: hc });
+                    }
+                    return this.__cyberDlOpts;
+                };
+                Object.defineProperty(dlOpts, 'name', { value: 'get options' });
+                Object.defineProperty(DLp, 'options', { get: dlOpts, enumerable: true, configurable: true });
+            }
+        } catch (e) { }
+        /* (operations made in script on element interfaces: this one of theirs, their required arguments) */
+        try {
+            [['HTMLSelectElement', { item: 1, namedItem: 1, add: 1, remove: 0, showPicker: 0, checkValidity: 0, reportValidity: 0, setCustomValidity: 1 }],
+             ['HTMLCanvasElement', { transferControlToOffscreen: 0 }],
+             ['HTMLSlotElement', { assignedNodes: 0, assignedElements: 0, assign: 0 }],
+             ['HTMLIFrameElement', { getSVGDocument: 0 }], ['HTMLEmbedElement', { getSVGDocument: 0 }], ['HTMLObjectElement', { getSVGDocument: 0 }],
+             ['XMLSerializer', { serializeToString: 1 }], ['ImageBitmap', { close: 0 }], ['OffscreenCanvas', { transferToImageBitmap: 0 }],
+             ['DataTransfer', { setDragImage: 3 }], ['HTMLMediaElement', { fastSeek: 1, getStartDate: 0 }]].forEach(function (e) {
+                var C = global[e[0]];
+                if (typeof C !== 'function' || !C.prototype) return;
+                Object.keys(e[1]).forEach(function (k) {
+                    var d = Object.getOwnPropertyDescriptor(C.prototype, k);
+                    if (!d || typeof d.value !== 'function' || d.value.__cyberOp || !d.configurable) return;
+                    var f = d.value, need = e[1][k];
+                    var w = { [k]: function () {
+                        if (!(this instanceof C)) throw new TypeError("Failed to execute '" + k + "' on '" + e[0] + "': Illegal invocation");
+                        if (arguments.length < need) throw new TypeError("Failed to execute '" + k + "' on '" + e[0] + "': " + need + ' argument required, but only ' + arguments.length + ' present.');
+                        return f.apply(this, arguments);
+                    } }[k];
+                    Object.defineProperty(w, 'length', { value: need });
+                    Object.defineProperty(w, '__cyberOp', { value: true });
+                    Object.defineProperty(C.prototype, k, { value: w, writable: true, enumerable: true, configurable: true });
+                });
+            });
+        } catch (e) { }
+        /* (the registry: an instance of CustomElementRegistry, its operations on the prototype) */
+        try {
+            var reg = global.customElements, CER = global.CustomElementRegistry;
+            if (reg && typeof reg === 'object' && typeof CER === 'function' && CER.prototype && !(reg instanceof CER)) {
+                ['define', 'get', 'getName', 'whenDefined', 'upgrade', 'initialize'].forEach(function (k) {
+                    var own = Object.getOwnPropertyDescriptor(reg, k);
+                    if (!own || typeof own.value !== 'function' || Object.getOwnPropertyDescriptor(CER.prototype, k)) return;
+                    var f = own.value;
+                    var w = { [k]: function () { if (!(this instanceof CER)) throw new TypeError("Failed to execute '" + k + "' on 'CustomElementRegistry': Illegal invocation"); return f.apply(this, arguments); } }[k];
+                    Object.defineProperty(w, 'length', { value: f.length });
+                    Object.defineProperty(CER.prototype, k, { value: w, writable: true, enumerable: true, configurable: true });
+                });
+                var rp = Object.getPrototypeOf(reg);
+                if (rp === Object.prototype || rp === null) {
+                    Object.setPrototypeOf(reg, CER.prototype);
+                    ['define', 'get', 'getName', 'whenDefined', 'upgrade', 'initialize'].forEach(function (k) {
+                        var own = Object.getOwnPropertyDescriptor(reg, k);
+                        if (own && own.configurable && Object.getOwnPropertyDescriptor(CER.prototype, k)) delete reg[k];
+                    });
+                }
+            }
+        } catch (e) { }
+        /* (fieldset elements, legend form, details name) */
+        try {
+            var FSp = global.HTMLFieldSetElement && global.HTMLFieldSetElement.prototype;
+            if (FSp && !Object.getOwnPropertyDescriptor(FSp, 'elements')) {
+                var LISTED = { button: 1, fieldset: 1, input: 1, object: 1, output: 1, select: 1, textarea: 1 };
+                var fse = function () {
+                    if (!(this instanceof global.HTMLFieldSetElement)) throw new TypeError('Illegal invocation');
+                    var out = [];
+                    this.querySelectorAll('*').forEach(function (e) { if (LISTED[e.localName] && e.namespaceURI === 'http://www.w3.org/1999/xhtml') out.push(e); });
+                    if (global.HTMLCollection) Object.setPrototypeOf(out, global.HTMLCollection.prototype);
+                    return out;
+                };
+                Object.defineProperty(fse, 'name', { value: 'get elements' });
+                Object.defineProperty(FSp, 'elements', { get: fse, enumerable: true, configurable: true });
+            }
+            var LGp = global.HTMLLegendElement && global.HTMLLegendElement.prototype;
+            if (LGp && !Object.getOwnPropertyDescriptor(LGp, 'form')) {
+                var lgf = function () {
+                    if (!(this instanceof global.HTMLLegendElement)) throw new TypeError('Illegal invocation');
+                    var p = this.parentNode;
+                    return p && p.localName === 'fieldset' && p.namespaceURI === 'http://www.w3.org/1999/xhtml' ? p.form : null;
+                };
+                Object.defineProperty(lgf, 'name', { value: 'get form' });
+                Object.defineProperty(LGp, 'form', { get: lgf, enumerable: true, configurable: true });
+            }
+            var DTp = global.HTMLDetailsElement && global.HTMLDetailsElement.prototype;
+            if (DTp && !Object.getOwnPropertyDescriptor(DTp, 'name') && !('name' in DTp)) {
+                var dg = function () { if (!(this instanceof global.HTMLDetailsElement)) throw new TypeError('Illegal invocation'); var v = this.getAttribute('name'); return v === null ? '' : v; };
+                var ds = function (v) { if (!(this instanceof global.HTMLDetailsElement)) throw new TypeError('Illegal invocation'); this.setAttribute('name', String(v)); };
+                Object.defineProperty(dg, 'name', { value: 'get name' });
+                Object.defineProperty(ds, 'name', { value: 'set name' });
+                Object.defineProperty(DTp, 'name', { get: dg, set: ds, enumerable: true, configurable: true });
+            }
+        } catch (e) { }
+        /* (OffscreenCanvas: its context loss handlers) */
+        try {
+            var OCp = global.OffscreenCanvas && global.OffscreenCanvas.prototype;
+            if (OCp) ['contextlost', 'contextrestored'].forEach(function (t) {
+                if (Object.getOwnPropertyDescriptor(OCp, 'on' + t)) return;
+                var slot = Symbol('on' + t), OC = global.OffscreenCanvas;
+                var g = function () { if (!(this instanceof OC)) throw new TypeError('Illegal invocation'); return this[slot] || null; };
+                var s = function (f) {
+                    if (!(this instanceof OC)) throw new TypeError('Illegal invocation');
+                    if (this[slot]) this.removeEventListener(t, this[slot]);
+                    this[slot] = typeof f === 'function' ? f : null;
+                    if (this[slot]) this.addEventListener(t, this[slot]);
+                };
+                Object.defineProperty(g, 'name', { value: 'get on' + t });
+                Object.defineProperty(s, 'name', { value: 'set on' + t });
+                Object.defineProperty(OCp, 'on' + t, { get: g, set: s, enumerable: true, configurable: true });
+            });
+        } catch (e) { }
+        /* (the legacy factory functions Image, Audio, Option: new only, length 0, the element interface's prototype) */
+        try {
+            [['Image', 'HTMLImageElement'], ['Audio', 'HTMLAudioElement'], ['Option', 'HTMLOptionElement']].forEach(function (p) {
+                var orig = global[p[0]], E = global[p[1]];
+                if (typeof orig !== 'function' || typeof E !== 'function' || orig.__cyberFactory) return;
+                var N = { [p[0]]: function () {
+                    if (!new.target) throw new TypeError("Failed to construct '" + p[0] + "': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
+                    var el = Reflect.construct(orig, arguments);
+                    if (new.target !== N && new.target.prototype && typeof new.target.prototype === 'object') Object.setPrototypeOf(el, new.target.prototype);
+                    return el;
+                } }[p[0]];
+                Object.defineProperty(N, 'length', { value: 0 });
+                Object.defineProperty(N, 'prototype', { value: E.prototype, writable: false, enumerable: false, configurable: false });
+                Object.defineProperty(N, '__cyberFactory', { value: true });
+                Object.defineProperty(global, p[0], { value: N, writable: true, enumerable: false, configurable: true });
+            });
+        } catch (e) { }
+        /* (SVGElement's HTMLOrSVGElement members, its own; SVGSVGElement's WindowEventHandlers, as body's) */
+        try {
+            var SEp = global.SVGElement && global.SVGElement.prototype, HEp = global.HTMLElement && global.HTMLElement.prototype;
+            /* (MathMLElement's the same) */
+            var MEp = global.MathMLElement && global.MathMLElement.prototype;
+            [SEp, MEp].forEach(function (XP) {
+                if (XP && HEp) ['dataset', 'nonce', 'autofocus', 'tabIndex', 'focus', 'blur'].forEach(function (k) {
+                    if (Object.prototype.hasOwnProperty.call(XP, k)) return;
+                    var d = Object.getOwnPropertyDescriptor(HEp, k);
+                    if (d) Object.defineProperty(XP, k, d);
+                });
+            });
+            /* (MathML's <a>: MathMLAnchorElement, its href's setter and target reflecting; HyperlinkElementUtils' URL parts, url_classes.c) */
+            if (MEp && typeof global.MathMLAnchorElement !== 'function') {
+                var MAE = function MathMLAnchorElement() { throw new TypeError('Illegal constructor'); };
+                Object.defineProperty(MAE, 'prototype', { value: Object.create(MEp), writable: false });
+                Object.defineProperty(MAE.prototype, 'constructor', { value: MAE, writable: true, configurable: true });
+                Object.defineProperty(MAE.prototype, Symbol.toStringTag, { value: 'MathMLAnchorElement', configurable: true });
+                Object.setPrototypeOf(MAE, global.MathMLElement);
+                var mchk = function (t) { if (!(t instanceof MAE)) throw new TypeError('Illegal invocation'); };
+                Object.defineProperty(MAE.prototype, 'target', { configurable: true, enumerable: true,
+                    get: { get: function target() { mchk(this); var v = this.getAttribute('target'); return v === null ? '' : v; } }.get,
+                    set: { set: function target(v) { mchk(this); this.setAttribute('target', String(v)); } }.set });
+                Object.defineProperty(global, 'MathMLAnchorElement', { value: MAE, writable: true, configurable: true });
+                var HAp = global.HTMLAnchorElement && global.HTMLAnchorElement.prototype;
+                if (HAp) ['href', 'origin', 'protocol', 'username', 'password', 'host', 'hostname', 'port', 'pathname', 'search', 'hash'].forEach(function (k) {
+                    var d = Object.getOwnPropertyDescriptor(HAp, k);
+                    if (d) Object.defineProperty(MAE.prototype, k, d);
+                });
+            }
+            /* (HyperlinkElementUtils' hreflang and type, reflected, on SVG's and MathML's <a> too) */
+            [global.SVGAElement, global.MathMLAnchorElement].forEach(function (C) {
+                if (!C || !C.prototype) return;
+                ['hreflang', 'type'].forEach(function (k) {
+                    if (Object.prototype.hasOwnProperty.call(C.prototype, k)) return;
+                    var g0 = { [k]: function () { if (!(this instanceof C)) throw new TypeError('Illegal invocation'); var v = this.getAttribute(k); return v === null ? '' : v; } }[k];
+                    var s0 = { [k]: function (v) { if (!(this instanceof C)) throw new TypeError('Illegal invocation'); this.setAttribute(k, String(v)); } }[k];
+                    Object.defineProperty(g0, 'name', { value: 'get ' + k });
+                    Object.defineProperty(s0, 'name', { value: 'set ' + k });
+                    Object.defineProperty(C.prototype, k, { configurable: true, enumerable: true, get: g0, set: s0 });
+                });
+            });
+            var SSp = global.SVGSVGElement && global.SVGSVGElement.prototype, BOp = global.HTMLBodyElement && global.HTMLBodyElement.prototype;
+            if (SSp && BOp) ['onafterprint', 'onbeforeprint', 'onbeforeunload', 'onhashchange', 'onlanguagechange', 'onmessage', 'onmessageerror',
+                'onoffline', 'ononline', 'onpagehide', 'onpagereveal', 'onpageshow', 'onpageswap', 'onpopstate', 'onrejectionhandled', 'onstorage',
+                'onunhandledrejection', 'onunload'].forEach(function (k) {
+                if (Object.prototype.hasOwnProperty.call(SSp, k)) return;
+                var d = Object.getOwnPropertyDescriptor(BOp, k);
+                if (d) Object.defineProperty(SSp, k, d);
+            });
+        } catch (e) { }
+        /* (Navigator: NavigatorID's legacy members; languages a frozen array, the same each time) */
+        try {
+            var NV = global.Navigator, NP = NV && NV.prototype;
+            if (NP) {
+                var nvOp = function (k, v) {
+                    if (Object.prototype.hasOwnProperty.call(NP, k)) return;
+                    Object.defineProperty(NP, k, { writable: true, enumerable: true, configurable: true, value: Object.defineProperty({ m: function () {
+                        if (!(this instanceof NV)) throw new TypeError('Illegal invocation');
+                        return v;
+                    } }.m, 'name', { value: k }) });
+                };
+                nvOp('javaEnabled', false);
+                nvOp('taintEnabled', false);
+                var ld = Object.getOwnPropertyDescriptor(NP, 'languages');
+                if (ld && ld.get) {
+                    var lg = ld.get, frozen = null, last = '';
+                    Object.defineProperty(NP, 'languages', { enumerable: true, configurable: true, get: Object.defineProperty({ get: function () {
+                        var v = lg.call(this);
+                        if (!Array.isArray(v) || Object.isFrozen(v)) return v;
+                        var key = v.join(',');
+                        if (!frozen || key !== last) { frozen = Object.freeze(v.slice()); last = key; }
+                        return frozen;
+                    } }.get, 'name', { value: 'get languages' }) });
+                }
+            }
+        } catch (e) { }
+        /* (Window's members on the global: operations that check their this, attributes as accessors over what the engine set) */
+        try {
+            if (global.document && typeof global.Window === 'function') {
+                var isWin = function (t) { return t === undefined || t === null || t === global || (t && typeof t === 'object' && t.window === t && t.self === t); };
+                var WOPS = { close: 0, stop: 0, focus: 0, blur: 0, open: 0, alert: 0, confirm: 0, prompt: 0, print: 0 };   /* (not postMessage: a wrapper here would be the incumbent, the message's source) */
+                Object.keys(WOPS).forEach(function (k) {
+                    var d = Object.getOwnPropertyDescriptor(global, k);
+                    if (!d || typeof d.value !== 'function' || !d.configurable || d.value.__cyberWinChecked) return;
+                    var f = d.value;
+                    var w = { m: function () {
+                        if (!isWin(this)) throw new TypeError("Failed to execute '" + k + "' on 'Window': Illegal invocation");
+                        if (arguments.length < WOPS[k]) throw new TypeError("Failed to execute '" + k + "' on 'Window': " + WOPS[k] + ' argument required, but only ' + arguments.length + ' present.');
+                        /* (open's URL: its query in the document's encoding) */
+                        if (k === 'open' && typeof arguments[0] === 'string' && /[^\x00-\x7f]/.test(arguments[0]) && typeof global.__cyberLegacyQuery === 'function') {
+                            var dcs = global.document && global.document.characterSet;
+                            if (dcs && !/^utf-8$/i.test(dcs)) {
+                                var lqo = global.__cyberLegacyQuery(arguments[0], dcs), args = Array.prototype.slice.call(arguments);
+                                if (lqo) { args[0] = lqo; return f.apply(this === undefined || this === null ? global : this, args); }
+                            }
+                        }
+                        return f.apply(this === undefined || this === null ? global : this, arguments);
+                    } }.m;
+                    Object.defineProperty(w, 'name', { value: k });
+                    Object.defineProperty(w, 'length', { value: WOPS[k] });
+                    Object.defineProperty(w, '__cyberWinChecked', { value: true });
+                    Object.defineProperty(global, k, { value: w, writable: d.writable, enumerable: d.enumerable, configurable: true });
+                });
+                /* (the interface object: not enumerable, its prototype fixed, constructor not enumerable) */
+                try {
+                    Object.defineProperty(global, 'Window', { value: global.Window, writable: true, enumerable: false, configurable: true });
+                    Object.defineProperty(global.Window, 'prototype', { writable: false });
+                    Object.defineProperty(global.Window.prototype, 'constructor', { value: global.Window, writable: true, enumerable: false, configurable: true });
+                } catch (e) { }
+                /* (legacy no-ops; originAgentCluster; frameElement, null at the top) */
+                ['captureEvents', 'releaseEvents'].forEach(function (k) {
+                    if (Object.prototype.hasOwnProperty.call(global, k)) return;
+                    var m = { [k]: function () { if (!isWin(this)) throw new TypeError('Illegal invocation'); } }[k];
+                    Object.defineProperty(global, k, { value: m, writable: true, enumerable: true, configurable: true });
+                });
+                [['originAgentCluster', function () { return false; }], ['frameElement', function () { return null; }]].forEach(function (p) {
+                    if (Object.prototype.hasOwnProperty.call(global, p[0])) return;
+                    var g1 = { [p[0]]: function () { if (!isWin(this)) throw new TypeError('Illegal invocation'); return p[1](); } }[p[0]];
+                    Object.defineProperty(g1, 'name', { value: 'get ' + p[0] });
+                    Object.defineProperty(global, p[0], { get: g1, enumerable: true, configurable: true });
+                });
+                ['locationbar', 'menubar', 'personalbar', 'scrollbars', 'statusbar', 'toolbar', 'status', 'length', 'navigation', 'clientInformation', 'external'].forEach(function (k) {
+                    var d = Object.getOwnPropertyDescriptor(global, k);
+                    if (!d || !d.get || !d.configurable || d.get.__cyberWinChecked) return;
+                    var g0 = d.get, s0 = d.set;
+                    var g = { get: function () { if (!isWin(this)) throw new TypeError('Illegal invocation'); return g0.call(this === undefined || this === null ? global : this); } }.get;
+                    Object.defineProperty(g, 'name', { value: 'get ' + k });
+                    Object.defineProperty(g, '__cyberWinChecked', { value: true });
+                    var s = s0 && { set: function (v) { if (!isWin(this)) throw new TypeError('Illegal invocation'); return s0.call(this === undefined || this === null ? global : this, v); } }.set;
+                    /* ([Replaceable] navigation: a set puts a value in its place) */
+                    if (!s && k === 'navigation') s = { set: function (v) { if (!isWin(this)) throw new TypeError('Illegal invocation'); Object.defineProperty(global, k, { value: v, writable: true, enumerable: true, configurable: true }); } }.set;
+                    if (s) Object.defineProperty(s, 'name', { value: 'set ' + k });
+                    Object.defineProperty(global, k, { get: g, set: s, enumerable: d.enumerable, configurable: true });
+                });
+                /* (values: replaceable ones a setter that puts a value in their place; name and opener kept; the rest only read) */
+                var WATTR = { self: 'r', frames: 'r', parent: 'r', name: 'w', opener: 'w', history: 'o', navigator: 'o', customElements: 'o', closed: 'o' };
+                Object.keys(WATTR).forEach(function (k) {
+                    var d = Object.getOwnPropertyDescriptor(global, k);
+                    if (!d || !('value' in d) || !d.configurable) return;
+                    var val = d.value, mode = WATTR[k];
+                    var g = { get: function () { if (!isWin(this)) throw new TypeError('Illegal invocation'); return val; } }.get;
+                    Object.defineProperty(g, 'name', { value: 'get ' + k });
+                    var s;
+                    if (mode === 'w') s = { set: function (v) { if (!isWin(this)) throw new TypeError('Illegal invocation'); val = k === 'name' ? String(v) : v; } }.set;
+                    else if (mode === 'r') s = { set: function (v) {
+                        if (!isWin(this)) throw new TypeError('Illegal invocation');
+                        Object.defineProperty(global, k, { value: v, writable: true, enumerable: true, configurable: true });
+                    } }.set;
+                    if (s) Object.defineProperty(s, 'name', { value: 'set ' + k });
+                    Object.defineProperty(global, k, { get: g, set: s, enumerable: d.enumerable !== false, configurable: true });
+                });
+            }
+        } catch (e) { }
+        /* (the document's attributes the engine keeps as values on it: Document.prototype's accessors over what it set, per document) */
+        try {
+            var DPd = global.Document && global.Document.prototype, doc0 = global.document;
+            if (DPd && doc0 && !DPd.__cyberDocVals) {
+                var DV = new WeakMap();
+                Object.defineProperty(DPd, '__cyberDocVals', { value: DV });
+                var dflt = { referrer: '', cookie: '', lastModified: '', readyState: 'complete', currentScript: null, defaultView: null,
+                             hidden: false, visibilityState: 'visible', designMode: 'off', activeElement: null };
+                /* (the focused element retargeted against a root: the host it is inside of there, DOM "retarget") */
+                var retarget = function (el, root) {
+                    for (var d = 0; el && d < 64; d++) {
+                        var r = el.getRootNode ? el.getRootNode() : null;
+                        if (!r || r === root || r.nodeType !== 11 || !r.host) return r === root || !root || root.nodeType === 9 ? el : null;
+                        el = r.host;
+                    }
+                    return el;
+                };
+                /* (the engine's writes: here, past the accessors, which have no setters for read-only attributes) */
+                var WRITABLE_DV = { cookie: 1, designMode: 1 };
+                Object.defineProperty(global, '__cyberDocSet', { configurable: true, value: function (d, k, v) {
+                    if (!d || (typeof d !== 'object' && typeof d !== 'function')) return;
+                    var m = DV.get(d);
+                    if (!m) DV.set(d, m = {});
+                    m[k] = v;
+                    /* (a value of its own an earlier write left: gone, the accessor's to answer) */
+                    var own = Object.getOwnPropertyDescriptor(d, k);
+                    if (own && 'value' in own && own.configurable) delete d[k];
+                } });
+                if (!('lastModified' in dflt)) dflt.lastModified = '';
+                Object.keys(dflt).forEach(function (k) {
+                    var od = Object.getOwnPropertyDescriptor(doc0, k);
+                    var pd = Object.getOwnPropertyDescriptor(DPd, k);
+                    if (pd && pd.get) return;
+                    /* (an accessor of the page document's own: moved to the prototype as it is) */
+                    if (od && (od.get || od.set) && od.configurable) {
+                        delete doc0[k];
+                        Object.defineProperty(DPd, k, { get: od.get, set: od.set, enumerable: true, configurable: true });
+                        return;
+                    }
+                    if (od && (!('value' in od) || !od.configurable)) return;
+                    var vals = DV.get(doc0);
+                    if (!vals) DV.set(doc0, vals = {});
+                    if (od) { vals[k] = od.value; delete doc0[k]; }
+                    var g = { get: function () {
+                        if (!(this instanceof global.Document)) throw new TypeError('Illegal invocation');
+                        var m = DV.get(this);
+                        var v = m && Object.prototype.hasOwnProperty.call(m, k) ? m[k] : dflt[k];
+                        /* (no Last-Modified: now, local time, MM/DD/YYYY hh:mm:ss) */
+                        if (k === 'lastModified' && !v) {
+                            var dt = new Date(), p2 = function (x) { return (x < 10 ? '0' : '') + x; };
+                            v = p2(dt.getMonth() + 1) + '/' + p2(dt.getDate()) + '/' + dt.getFullYear() + ' ' + p2(dt.getHours()) + ':' + p2(dt.getMinutes()) + ':' + p2(dt.getSeconds());
+                        }
+                        if (k === 'activeElement') {
+                            if (v && (!v.isConnected || v.ownerDocument !== this)) v = null;
+                            v = v ? retarget(v, this) : null;
+                            if (!v) v = this.body || this.documentElement || null;
+                        }
+                        return v;
+                    } }.get;
+                    Object.defineProperty(g, 'name', { value: 'get ' + k });
+                    var st = { set: function (v) {
+                        if (!(this instanceof global.Document)) throw new TypeError('Illegal invocation');
+                        var m = DV.get(this);
+                        if (!m) DV.set(this, m = {});
+                        m[k] = k === 'designMode' ? (/^on$/i.test(String(v)) ? 'on' : /^off$/i.test(String(v)) ? 'off' : (m[k] || 'off')) : k === 'cookie' ? String(v) : v;
+                    } }.set;
+                    Object.defineProperty(st, 'name', { value: 'set ' + k });
+                    Object.defineProperty(DPd, k, { get: g, set: WRITABLE_DV[k] ? st : undefined, enumerable: true, configurable: true });
+                });
+                /* (a shadow root's activeElement: the focused element retargeted to it, if it is in it) */
+                var SRo = global.ShadowRoot && global.ShadowRoot.prototype;
+                if (SRo && !Object.getOwnPropertyDescriptor(SRo, 'activeElement') && Object.getOwnPropertyDescriptor(DPd, 'activeElement'))
+                    Object.defineProperty(SRo, 'activeElement', { enumerable: true, configurable: true, get: { get: function activeElement() {
+                        if (!(this instanceof global.ShadowRoot)) throw new TypeError('Illegal invocation');
+                        var doc = this.ownerDocument, m = doc && DV.get(doc), v = m ? m.activeElement : null;
+                        if (!v || !v.isConnected) return null;
+                        for (var e = v, d = 0; e && d < 64; d++) {
+                            var r = e.getRootNode();
+                            if (r === this) return e;
+                            if (!r || r.nodeType !== 11 || !r.host) return null;
+                            e = r.host;
+                        }
+                        return null;
+                    } }.get });
+            }
+        } catch (e) { }
+        /* (Worker, SharedWorker: interface objects as WebIDL has them: not enumerable, length 1, operations enumerable, handlers brand checked) */
+        try {
+            ['Worker', 'SharedWorker'].forEach(function (wn) {
+                var WC = global[wn];
+                if (typeof WC !== 'function' || !WC.prototype) return;
+                var gd = Object.getOwnPropertyDescriptor(global, wn);
+                if (gd && gd.enumerable) Object.defineProperty(global, wn, { value: WC, writable: true, enumerable: false, configurable: true });
+                try { Object.defineProperty(WC, 'length', { value: 1, configurable: true }); } catch (e) { }
+                var WP = WC.prototype;
+                Object.getOwnPropertyNames(WP).forEach(function (k) {
+                    if (k === 'constructor') return;
+                    var d = Object.getOwnPropertyDescriptor(WP, k);
+                    if (!d.enumerable && d.configurable) { d.enumerable = true; Object.defineProperty(WP, k, d); }
+                    if (/^on/.test(k) && d.get && d.configurable) {
+                        var g0 = d.get, s0 = d.set;
+                        Object.defineProperty(WP, k, { enumerable: true, configurable: true,
+                            get: Object.defineProperty(function () { if (!(this instanceof WC)) throw new TypeError('Illegal invocation'); return g0.call(this); }, 'name', { value: 'get ' + k }),
+                            set: s0 && Object.defineProperty(function (v) { if (!(this instanceof WC)) throw new TypeError('Illegal invocation'); return s0.call(this, v); }, 'name', { value: 'set ' + k }) });
+                    }
+                });
+            });
+        } catch (e) { }
+        /* (document.body's setter, HTML 3.1.x: a body or frameset put in place of the body, or appended to the root) */
+        try {
+            var DPb = global.Document && global.Document.prototype;
+            var bd = DPb && Object.getOwnPropertyDescriptor(DPb, 'body');
+            if (bd && bd.get && !bd.set) {
+                var bget = bd.get;
+                var bset = { body: function (v) {
+                    if (!(this instanceof global.Document)) throw new TypeError('Illegal invocation');
+                    if (v !== null && !(global.HTMLElement && v instanceof global.HTMLElement))
+                        throw new TypeError("Failed to set the 'body' property on 'Document': The provided value is not of type 'HTMLElement'.");
+                    if (v === null || (v.localName !== 'body' && v.localName !== 'frameset'))
+                        throw new global.DOMException("Failed to set the 'body' property on 'Document': The new body element is of type '" + (v ? v.localName.toUpperCase() : 'null') + "'. It must be either a 'BODY' or 'FRAMESET' element.", 'HierarchyRequestError');
+                    var cur = bget.call(this);
+                    if (cur === v) return;
+                    if (cur) { cur.parentNode.replaceChild(v, cur); return; }
+                    var root = this.documentElement;
+                    if (!root) throw new global.DOMException("Failed to set the 'body' property on 'Document': No document element exists.", 'HierarchyRequestError');
+                    root.appendChild(v);
+                } }.body;
+                Object.defineProperty(bset, 'name', { value: 'set body' });
+                Object.defineProperty(DPb, 'body', { get: bget, set: bset, enumerable: true, configurable: true });
+            }
+        } catch (e) { }
+        /* (document.domain: the prototype's accessor, not a value set on the document) */
+        try {
+            var dd = global.document && Object.getOwnPropertyDescriptor(global.document, 'domain');
+            if (dd && 'value' in dd && dd.configurable) delete global.document.domain;
+        } catch (e) { }
+        /* (Location's members: [LegacyUnforgeable], own and fixed; assign/replace need their URL) */
+        try {
+            var loc = global.location, LC = global.Location;
+            if (loc && typeof loc === 'object' && !loc.__cyberLocked) {
+                ['assign', 'replace'].forEach(function (k) {
+                    var f = loc[k];
+                    if (typeof f !== 'function') return;
+                    var w = Object.defineProperty({ m: function (url) {
+                        if (arguments.length < 1) throw new TypeError("Failed to execute '" + k + "' on 'Location': 1 argument required, but only 0 present.");
+                        return f.apply(this, arguments);
+                    } }.m, 'name', { value: k });
+                    Object.defineProperty(loc, k, { value: w, writable: true, enumerable: true, configurable: true });
+                });
+                /* (its members check their this: a Location) */
+                var isLoc = function (t) {
+                    if (t === loc) return true;
+                    if (!t || typeof t !== 'object') return false;
+                    try { return Object.prototype.toString.call(t) === '[object Location]'; } catch (e) { return false; }
+                };
+                ['href', 'origin', 'protocol', 'host', 'hostname', 'port', 'pathname', 'search', 'hash', 'ancestorOrigins', 'assign', 'replace', 'reload', 'toString'].forEach(function (k) {
+                    var d = Object.getOwnPropertyDescriptor(loc, k);
+                    if (!d || !d.configurable) return;
+                    if (typeof d.value === 'function') {
+                        var f = d.value, n0 = f.length;
+                        var w = { m: function () { if (!isLoc(this)) throw new TypeError('Illegal invocation'); return f.apply(this, arguments); } }.m;
+                        Object.defineProperty(w, 'name', { value: k });
+                        Object.defineProperty(w, 'length', { value: n0 });
+                        d.value = w;
+                    } else if (d.get) {
+                        var g0 = d.get, s0 = d.set;
+                        d.get = Object.defineProperty({ get: function () { if (!isLoc(this)) throw new TypeError('Illegal invocation'); return g0.call(this); } }.get, 'name', { value: 'get ' + k });
+                        if (s0) d.set = Object.defineProperty({ set: function (v) { if (!isLoc(this)) throw new TypeError('Illegal invocation'); return s0.call(this, v); } }.set, 'name', { value: 'set ' + k });
+                    } else return;
+                    Object.defineProperty(loc, k, d);
+                });
+                Object.defineProperty(loc, '__cyberLocked', { value: true });
+            }
+        } catch (e) { }
+        /* (Document.parseHTMLUnsafe, a static operation the shaping passed over) */
+        var DC = global.Document;
+        if (DC && typeof DC.parseHTMLUnsafe !== 'function' && typeof global.DOMParser === 'function')
+            Object.defineProperty(DC, 'parseHTMLUnsafe', { configurable: true, enumerable: true, writable: true, value: Object.defineProperty(function parseHTMLUnsafe(html) {
+                if (arguments.length < 1) throw new TypeError("Failed to execute 'parseHTMLUnsafe' on 'Document': 1 argument required, but only 0 present.");
+                return new global.DOMParser().parseFromString(String(html), 'text/html');
+            }, 'length', { value: 1 }) });
+        var FC = global.HTMLFormElement, HE = global.HTMLElement;
+        if (!FC || !HE || Object.getPrototypeOf(FC.prototype) !== HE.prototype) return;
+        var named = function (form, k) {
+            if (typeof k !== 'string' || !k || k === 'then') return undefined;
+            var els;
+            try { els = form.elements; } catch (e) { return undefined; }
+            if (!els || typeof els.namedItem !== 'function') return undefined;
+            var v = els.namedItem(k);
+            return v === null ? undefined : v;
+        };
+        var isForm = function (r) { return r && r.nodeType === 1 && r.localName === 'form' && r.namespaceURI === 'http://www.w3.org/1999/xhtml'; };
+        var px = new Proxy(HE.prototype, {
+            get: function (t, k, r) {
+                if (typeof k === 'string' && !(k in t) && isForm(r)) { var v = named(r, k); if (v !== undefined) return v; }
+                return Reflect.get(t, k, r);
+            },
+            has: function (t, k) { return k in t; },
+            /* (the chain as it was: HTMLElement.prototype next, for instanceof and brand checks) */
+            getPrototypeOf: function () { return HE.prototype; }
+        });
+        try { Object.setPrototypeOf(FC.prototype, px); } catch (e) { }
+    } });
+
+    /* ---- navigator.plugins and navigator.mimeTypes (HTML 8.9.1.6): with a PDF viewer, its five plugins and two types ---- */
+    (function () {
+        var NAV = global.navigator;
+        if (!NAV || typeof global.PluginArray === 'function') return;
+        var mkIface = function (name) {
+            var C = function () { throw new TypeError('Illegal constructor'); };
+            Object.defineProperty(C, 'name', { value: name, configurable: true });
+            Object.defineProperty(C, 'length', { value: 0, configurable: true });
+            Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
+            Object.defineProperty(global, name, { value: C, writable: true, configurable: true, enumerable: false });
+            return C;
+        };
+        var S = Symbol('pluginData');
+        var PA = mkIface('PluginArray'), MTA = mkIface('MimeTypeArray'), PL = mkIface('Plugin'), MT = mkIface('MimeType');
+        var chk = function (o, C) { if (!(o instanceof C) || !o[S]) throw new TypeError('Illegal invocation'); return o[S]; };
+        var getter = function (C, k, f) {
+            var g = { get: function () { return f(chk(this, C)); } }.get;
+            Object.defineProperty(g, 'name', { value: 'get ' + k });
+            Object.defineProperty(C.prototype, k, { get: g, enumerable: true, configurable: true });
+        };
+        var op = function (C, k, n, f) {
+            var fn = { f: function () { var d = chk(this, C); if (arguments.length < n) throw new TypeError("Failed to execute '" + k + "': " + n + ' argument required, but only 0 present.'); return f(d, arguments[0]); } }.f;
+            Object.defineProperty(fn, 'name', { value: k });
+            Object.defineProperty(fn, 'length', { value: n });
+            Object.defineProperty(C.prototype, k, { value: fn, writable: true, enumerable: true, configurable: true });
+        };
+        var make = function (C, data) { var o = Object.create(C.prototype); Object.defineProperty(o, S, { value: data }); return o; };
+        /* (a list's own index and name properties: the items, by position and by name) */
+        var fill = function (o, items, nameOf) {
+            items.forEach(function (it, i) { Object.defineProperty(o, i, { value: it, enumerable: true, configurable: true }); });
+            items.forEach(function (it) { var n = nameOf(it); if (!(n in o)) Object.defineProperty(o, n, { value: it, enumerable: false, configurable: true }); });
+        };
+        var names = ['PDF Viewer', 'Chrome PDF Viewer', 'Chromium PDF Viewer', 'Microsoft Edge PDF Viewer', 'WebKit built-in PDF'];
+        var on = NAV.pdfViewerEnabled !== false;
+        var plugins = on ? names.map(function (n) { return make(PL, { name: n, types: [] }); }) : [];
+        var types = on ? ['application/pdf', 'text/pdf'].map(function (t) { return make(MT, { type: t, plugin: plugins[0] }); }) : [];
+        plugins.forEach(function (p) {
+            var d = p[S];
+            d.types = ['application/pdf', 'text/pdf'].map(function (t) { return make(MT, { type: t, plugin: p }); });
+            fill(p, d.types, function (m) { return m[S].type; });
+        });
+        getter(PL, 'name', function (d) { return d.name; });
+        getter(PL, 'description', function () { return 'Portable Document Format'; });
+        getter(PL, 'filename', function () { return 'internal-pdf-viewer'; });
+        getter(PL, 'length', function (d) { return d.types.length; });
+        op(PL, 'item', 1, function (d, i) { i = Number(i) >>> 0; return i < d.types.length ? d.types[i] : null; });
+        op(PL, 'namedItem', 1, function (d, n) { n = String(n); for (var i = 0; i < d.types.length; i++) if (d.types[i][S].type === n) return d.types[i]; return null; });
+        getter(MT, 'type', function (d) { return d.type; });
+        getter(MT, 'description', function () { return 'Portable Document Format'; });
+        getter(MT, 'suffixes', function () { return 'pdf'; });
+        getter(MT, 'enabledPlugin', function (d) { return d.plugin; });
+        var pa = make(PA, { list: plugins }), mta = make(MTA, { list: types });
+        fill(pa, plugins, function (p) { return p[S].name; });
+        fill(mta, types, function (m) { return m[S].type; });
+        op(PA, 'refresh', 0, function () { });
+        getter(PA, 'length', function (d) { return d.list.length; });
+        op(PA, 'item', 1, function (d, i) { i = Number(i) >>> 0; return i < d.list.length ? d.list[i] : null; });
+        op(PA, 'namedItem', 1, function (d, n) { n = String(n); for (var i = 0; i < d.list.length; i++) if (d.list[i][S].name === n) return d.list[i]; return null; });
+        getter(MTA, 'length', function (d) { return d.list.length; });
+        op(MTA, 'item', 1, function (d, i) { i = Number(i) >>> 0; return i < d.list.length ? d.list[i] : null; });
+        op(MTA, 'namedItem', 1, function (d, n) { n = String(n); for (var i = 0; i < d.list.length; i++) if (d.list[i][S].type === n) return d.list[i]; return null; });
+        [PA, MTA, PL].forEach(function (C) { Object.defineProperty(C.prototype, Symbol.iterator, { value: Array.prototype.values, writable: true, configurable: true }); });
+        var NP = Object.getPrototypeOf(NAV);
+        var put = function (k, v) {
+            var tgt = NP && NP !== Object.prototype ? NP : NAV;
+            var g = { get: function () { return v; } }.get;
+            Object.defineProperty(g, 'name', { value: 'get ' + k });
+            try { if (Object.getOwnPropertyDescriptor(NAV, k)) delete NAV[k]; } catch (e) { }
+            Object.defineProperty(tgt, k, { get: g, enumerable: true, configurable: true });
+        };
+        put('plugins', pa);
+        put('mimeTypes', mta);
+    })();
+
+    /* ---- getHTML (HTML 8.5): serialized with the shadow roots asked for, as declarative ones; setHTML and the like:
+     * the markup sanitized (Sanitizer API, its safe default), and Sanitizer ---- */
+    (function () {
+        var EP = global.Element && global.Element.prototype, SRP = global.ShadowRoot && global.ShadowRoot.prototype;
+        if (!EP || typeof EP.getHTML === 'function') return;
+        var included = function (sr, opts) {
+            if (!sr) return false;
+            if (opts.serializableShadowRoots && sr.serializable) return true;
+            return opts.shadowRoots.indexOf(sr) >= 0;
+        };
+        var hasIncluded = function (n, opts) {
+            if (n.nodeType === 1 && included(n.shadowRoot, opts)) return true;
+            var kids = n.nodeType === 1 && n.localName === 'template' && n.content ? n.content.childNodes : n.childNodes;
+            for (var i = 0; i < kids.length; i++) if (hasIncluded(kids[i], opts)) return true;
+            return false;
+        };
+        var templateOf = function (sr, opts) {
+            var a = ' shadowrootmode="' + sr.mode + '"';
+            if (sr.delegatesFocus) a += ' shadowrootdelegatesfocus=""';
+            if (sr.serializable) a += ' shadowrootserializable=""';
+            if (sr.clonable) a += ' shadowrootclonable=""';
+            return '<template' + a + '>' + children(sr, opts) + '</template>';
+        };
+        var outer = function (n, opts) {
+            if (n.nodeType !== 1 || !hasIncluded(n, opts)) {
+                if (n.nodeType === 1) return n.outerHTML;
+                var d = n.ownerDocument.createElement('div');
+                d.appendChild(n.cloneNode(false));
+                return d.innerHTML;
+            }
+            var oh = n.cloneNode(false).outerHTML;
+            var close = '</' + (n.namespaceURI === 'http://www.w3.org/1999/xhtml' ? n.localName : n.tagName) + '>';
+            var open = oh.endsWith(close) ? oh.slice(0, oh.length - close.length) : oh;
+            var body = (included(n.shadowRoot, opts) ? templateOf(n.shadowRoot, opts) : '') +
+                       children(n.localName === 'template' && n.content ? n.content : n, opts);
+            return open + body + close;
+        };
+        var children = function (n, opts) {
+            var s = '', kids = n.childNodes;
+            for (var i = 0; i < kids.length; i++) s += outer(kids[i], opts);
+            return s;
+        };
+        var optsOf = function (o) {
+            var r = { serializableShadowRoots: !!(o && o.serializableShadowRoots), shadowRoots: [] };
+            if (o && o.shadowRoots !== undefined) {
+                if (o.shadowRoots === null || typeof o.shadowRoots !== 'object' || typeof o.shadowRoots[Symbol.iterator] !== 'function')
+                    throw new TypeError("Failed to execute 'getHTML': The provided value cannot be converted to a sequence.");
+                for (var x of o.shadowRoots) {
+                    if (!(global.ShadowRoot && x instanceof global.ShadowRoot)) throw new TypeError("Failed to execute 'getHTML': Failed to convert value to 'ShadowRoot'.");
+                    r.shadowRoots.push(x);
+                }
+            }
+            return r;
+        };
+        var getHTML = function getHTML(options) {
+            var opts = optsOf(options);
+            var self = this;
+            var tmpl = self.nodeType === 1 && self.localName === 'template' && self.content ? self.content : self;
+            var pre = self.nodeType === 1 && included(self.shadowRoot, opts) ? templateOf(self.shadowRoot, opts) : '';
+            return pre + children(tmpl, opts);
+        };
+        Object.defineProperty(EP, 'getHTML', { value: getHTML, writable: true, enumerable: true, configurable: true });
+        if (SRP) Object.defineProperty(SRP, 'getHTML', { value: getHTML, writable: true, enumerable: true, configurable: true });
+        /* (the safe default: no script, no event handler attributes, no javascript: URLs, none of the elements that run or embed) */
+        var UNSAFE_EL = { script: 1, iframe: 1, frame: 1, frameset: 1, object: 1, embed: 1, noscript: 1, noembed: 1, noframes: 1, base: 1, meta: 1, link: 1, style: 0, template: 0, portal: 1, applet: 1, use: 0 };
+        var URL_ATTR = { href: 1, src: 1, action: 1, formaction: 1, 'xlink:href': 1, data: 1, poster: 1, codebase: 1, background: 1 };
+        var scrub = function (root) {
+            var walk = function (n) {
+                for (var c = n.firstChild; c; ) {
+                    var next = c.nextSibling;
+                    if (c.nodeType === 1) {
+                        var ln = c.localName;
+                        if (UNSAFE_EL[ln] === 1) { c.parentNode.removeChild(c); c = next; continue; }
+                        for (var i = c.attributes.length - 1; i >= 0; i--) {
+                            var a = c.attributes[i], an = a.name.toLowerCase();
+                            if (/^on/.test(an) || (URL_ATTR[an] && /^\s*javascript:/i.test(a.value))) c.removeAttributeNode(a);
+                        }
+                        walk(c.localName === 'template' && c.content ? c.content : c);
+                    } else if (c.nodeType === 7) c.parentNode.removeChild(c);
+                    c = next;
+                }
+            };
+            walk(root);
+            return root;
+        };
+        var parseSafe = function (ctxEl, html) {
+            var doc = ctxEl.ownerDocument || global.document;
+            var t = doc.createElement('template');
+            t.innerHTML = String(html);
+            return scrub(t.content);
+        };
+        /* (unsafe: parsed as is, its scripts left inert as a template's) */
+        var parseUnsafe = function (ctxEl, html) {
+            var doc = ctxEl.ownerDocument || global.document;
+            var t = doc.createElement('template');
+            t.innerHTML = String(html);
+            return t.content;
+        };
+        var put = function (name, how, unsafe, elementOnly) {
+            var f = { f: function (html, options) {
+                if (!(this instanceof global.Node)) throw new TypeError('Illegal invocation');
+                if (arguments.length < 1) throw new TypeError("Failed to execute '" + name + "': 1 argument required, but only 0 present.");
+                var outer = how === 'before' || how === 'after' || how === 'replace';
+                var ctxEl = this.nodeType === 11 ? (this.host || global.document.body) : outer && this.parentNode && this.parentNode.nodeType === 1 ? this.parentNode : this;
+                var frag = unsafe ? parseUnsafe(ctxEl, html) : parseSafe(ctxEl, html);
+                if (how === 'set') { while (this.firstChild) this.removeChild(this.firstChild); this.appendChild(frag); }
+                else if (how === 'append') this.appendChild(frag);
+                else if (how === 'prepend') this.insertBefore(frag, this.firstChild);
+                else {
+                    var p = this.parentNode;
+                    if (!p) return;
+                    if (how === 'before') p.insertBefore(frag, this);
+                    else if (how === 'after') p.insertBefore(frag, this.nextSibling);
+                    else p.replaceChild(frag, this);
+                }
+            } }.f;
+            Object.defineProperty(f, 'name', { value: name });
+            Object.defineProperty(f, 'length', { value: 1 });
+            /* (before, after, replaceWith: CharacterData's too, as ChildNode's) */
+            var CDP = elementOnly && global.CharacterData ? global.CharacterData.prototype : null;
+            [EP, elementOnly ? null : SRP, CDP].forEach(function (P) { if (P && typeof P[name] !== 'function') Object.defineProperty(P, name, { value: f, writable: true, enumerable: true, configurable: true }); });
+        };
+        put('setHTML', 'set'); put('appendHTML', 'append'); put('prependHTML', 'prepend');
+        put('beforeHTML', 'before', false, true); put('afterHTML', 'after', false, true); put('replaceWithHTML', 'replace', false, true);
+        put('appendHTMLUnsafe', 'append', true); put('prependHTMLUnsafe', 'prepend', true);
+        put('beforeHTMLUnsafe', 'before', true, true); put('afterHTMLUnsafe', 'after', true, true); put('replaceWithHTMLUnsafe', 'replace', true, true);
+        if (SRP && typeof SRP.setHTMLUnsafe !== 'function' && typeof EP.setHTMLUnsafe === 'function')
+            Object.defineProperty(SRP, 'setHTMLUnsafe', { value: EP.setHTMLUnsafe, writable: true, enumerable: true, configurable: true });
+        /* (Sanitizer: its configuration, as given, and the lists' edits) */
+        if (typeof global.Sanitizer !== 'function') {
+            var CFG = Symbol('sanitizerConfig');
+            var SZ = function Sanitizer(configuration) {
+                if (!new.target) throw new TypeError("Failed to construct 'Sanitizer': Please use the 'new' operator");
+                var c = configuration === undefined || configuration === 'default' ? {} : configuration;
+                if (typeof c === 'string') { if (c !== 'default') throw new TypeError("Failed to construct 'Sanitizer': The provided value '" + c + "' is not a valid enum value of type SanitizerPresets."); c = {}; }
+                if (c === null || typeof c !== 'object') throw new TypeError("Failed to construct 'Sanitizer': The provided value is not of type 'SanitizerConfig'.");
+                var conf = {};
+                ['elements', 'removeElements', 'replaceWithChildrenElements', 'processingInstructions', 'removeProcessingInstructions', 'attributes', 'removeAttributes'].forEach(function (k) {
+                    if (c[k] !== undefined) conf[k] = Array.prototype.slice.call(c[k]).map(function (x) { return typeof x === 'string' ? { name: x, namespace: k.indexOf('ttribute') >= 0 ? null : 'http://www.w3.org/1999/xhtml' } : x; });
+                });
+                conf.comments = c.comments === undefined ? false : !!c.comments;
+                conf.dataAttributes = c.dataAttributes === undefined ? false : !!c.dataAttributes;
+                Object.defineProperty(this, CFG, { value: conf });
+            };
+            var cf = function (o) { if (!o || !o[CFG]) throw new TypeError('Illegal invocation'); return o[CFG]; };
+            var nm = function (x) { return typeof x === 'string' ? x : x && x.name; };
+            var addTo = function (list, x) { var n = nm(x); if (list.some(function (y) { return nm(y) === n; })) return false; list.push(typeof x === 'string' ? { name: x } : x); return true; };
+            var dropFrom = function (list, x) { var n = nm(x), i = list.findIndex(function (y) { return nm(y) === n; }); if (i < 0) return false; list.splice(i, 1); return true; };
+            var mm = function (k, n, f) {
+                var fn = { f: function () { var c = cf(this); if (arguments.length < n) throw new TypeError("Failed to execute '" + k + "' on 'Sanitizer': " + n + ' argument required, but only 0 present.'); return f(c, arguments[0]); } }.f;
+                Object.defineProperty(fn, 'name', { value: k });
+                Object.defineProperty(fn, 'length', { value: n });
+                Object.defineProperty(SZ.prototype, k, { value: fn, writable: true, enumerable: true, configurable: true });
+            };
+            var L = function (c, k) { return c[k] || (c[k] = []); };
+            mm('get', 0, function (c) { return JSON.parse(JSON.stringify(c)); });
+            mm('allowElement', 1, function (c, x) { dropFrom(L(c, 'removeElements'), x); return addTo(L(c, 'elements'), x); });
+            mm('removeElement', 1, function (c, x) { dropFrom(L(c, 'elements'), x); return addTo(L(c, 'removeElements'), x); });
+            mm('replaceElementWithChildren', 1, function (c, x) { return addTo(L(c, 'replaceWithChildrenElements'), x); });
+            mm('allowProcessingInstruction', 1, function (c, x) { dropFrom(L(c, 'removeProcessingInstructions'), x); return addTo(L(c, 'processingInstructions'), x); });
+            mm('removeProcessingInstruction', 1, function (c, x) { dropFrom(L(c, 'processingInstructions'), x); return addTo(L(c, 'removeProcessingInstructions'), x); });
+            mm('allowAttribute', 1, function (c, x) { dropFrom(L(c, 'removeAttributes'), x); return addTo(L(c, 'attributes'), x); });
+            mm('removeAttribute', 1, function (c, x) { dropFrom(L(c, 'attributes'), x); return addTo(L(c, 'removeAttributes'), x); });
+            mm('setComments', 1, function (c, v) { v = !!v; var ch = c.comments !== v; c.comments = v; return ch; });
+            mm('setDataAttributes', 1, function (c, v) { v = !!v; var ch = c.dataAttributes !== v; c.dataAttributes = v; return ch; });
+            mm('setJavascriptURLs', 1, function (c, v) { v = !!v; var ch = c.javascriptURLs !== v; c.javascriptURLs = v; return ch; });
+            mm('removeUnsafe', 0, function (c) { var ch = false; ['script', 'iframe', 'object', 'embed', 'frame'].forEach(function (e) { dropFrom(L(c, 'elements'), e); if (addTo(L(c, 'removeElements'), e)) ch = true; }); return ch; });
+            Object.defineProperty(SZ.prototype, Symbol.toStringTag, { value: 'Sanitizer', configurable: true });
+            Object.defineProperty(global, 'Sanitizer', { value: SZ, writable: true, configurable: true, enumerable: false });
+        }
+    })();
+
+    /* ---- TrackEvent; ElementInternals and CustomStateSet (attachInternals); DOMParser's prototype; the registry's operations on
+     * CustomElementRegistry.prototype ---- */
+    (function () {
+        var EV = global.Event;
+        if (EV && typeof global.TrackEvent !== 'function') {
+            var TE = function TrackEvent(type, init) {
+                if (!new.target) throw new TypeError("Failed to construct 'TrackEvent': Please use the 'new' operator");
+                if (arguments.length < 1) throw new TypeError("Failed to construct 'TrackEvent': 1 argument required, but only 0 present.");
+                var e = Reflect.construct(EV, [type, init], new.target);
+                if (Object.getPrototypeOf(e) !== new.target.prototype) Object.setPrototypeOf(e, new.target.prototype);   /* (the native Event's new.target unheeded) */
+                var t = init && init.track !== undefined ? init.track : null;
+                if (t !== null && !((global.VideoTrack && t instanceof global.VideoTrack) || (global.AudioTrack && t instanceof global.AudioTrack) || (global.TextTrack && t instanceof global.TextTrack)))
+                    throw new TypeError("Failed to construct 'TrackEvent': The provided value is not of type '(VideoTrack or AudioTrack or TextTrack)'.");
+                Object.defineProperty(e, '__track', { value: t });
+                return e;
+            };
+            TE.prototype = Object.create(EV.prototype);
+            Object.defineProperty(TE.prototype, 'constructor', { value: TE, writable: true, configurable: true });
+            Object.defineProperty(TE.prototype, Symbol.toStringTag, { value: 'TrackEvent', configurable: true });
+            Object.defineProperty(TE.prototype, 'track', { enumerable: true, configurable: true,
+                get: { get: function track() { if (!(this instanceof TE)) throw new TypeError('Illegal invocation'); return this.__track; } }.get });
+            Object.setPrototypeOf(TE, EV);
+            Object.defineProperty(TE, 'length', { value: 1 });
+            Object.defineProperty(global, 'TrackEvent', { value: TE, writable: true, configurable: true, enumerable: false });
+        }
+        /* (CustomStateSet: a set of strings, setlike) */
+        if (typeof global.CustomStateSet !== 'function') {
+            var SET = Symbol('states');
+            var CSS_ = function CustomStateSet() { throw new TypeError('Illegal constructor'); };
+            var csp = CSS_.prototype;
+            var st = function (o) { if (!o || !o[SET]) throw new TypeError('Illegal invocation'); return o[SET]; };
+            var dm = function (k, n, f) { var fn = { f: function () { return f.apply(this, arguments); } }.f; Object.defineProperty(fn, 'name', { value: k }); Object.defineProperty(fn, 'length', { value: n }); Object.defineProperty(csp, k, { value: fn, writable: true, enumerable: true, configurable: true }); };
+            dm('add', 1, function (v) { var s = st(this); s.set.add(String(v)); if (s.changed) s.changed(); return this; });
+            dm('delete', 1, function (v) { var s = st(this), r = s.set.delete(String(v)); if (r && s.changed) s.changed(); return r; });
+            dm('clear', 0, function () { var s = st(this); s.set.clear(); if (s.changed) s.changed(); });
+            dm('has', 1, function (v) { return st(this).set.has(String(v)); });
+            dm('forEach', 1, function (cb, t) { var self = this; st(this).set.forEach(function (v) { cb.call(t, v, v, self); }); });
+            dm('values', 0, function () { return st(this).set.values(); });
+            dm('keys', 0, function () { return st(this).set.values(); });
+            dm('entries', 0, function () { return st(this).set.entries(); });
+            Object.defineProperty(csp, Symbol.iterator, { value: csp.values, writable: true, configurable: true });
+            Object.defineProperty(csp, 'size', { enumerable: true, configurable: true, get: { get: function size() { return st(this).set.size; } }.get });
+            Object.defineProperty(csp, Symbol.toStringTag, { value: 'CustomStateSet', configurable: true });
+            Object.defineProperty(global, 'CustomStateSet', { value: CSS_, writable: true, configurable: true, enumerable: false });
+            global.__cyberNewStateSet = function (changed) { var o = Object.create(csp); Object.defineProperty(o, SET, { value: { set: new Set(), changed: changed } }); return o; };
+            Object.defineProperty(global, '__cyberNewStateSet', { enumerable: false });
+        }
+        /* (ElementInternals: an autonomous custom element's, from attachInternals once) */
+        var HE = global.HTMLElement;
+        if (HE && typeof HE.prototype.attachInternals !== 'function' && typeof global.ElementInternals !== 'function') {
+            var EL = Symbol('internalsOf'), ATT = Symbol('internals');
+            var EI = function ElementInternals() { throw new TypeError('Illegal constructor'); };
+            var eip = EI.prototype;
+            var me = function (o) { var el = o && o[EL]; if (!el) throw new TypeError('Illegal invocation'); return el; };
+            var isFACE = function (el) { var C = global.customElements && global.customElements.get(el.localName); return !!(C && C.formAssociated); };
+            var ga = function (k, f) { Object.defineProperty(eip, k, { enumerable: true, configurable: true, get: Object.defineProperty({ get: function () { return f.call(this, me(this)); } }.get, 'name', { value: 'get ' + k }) }); };
+            var op = function (k, n, f) { var fn = { f: function () { var el = me(this); return f.apply(this, [el].concat(Array.prototype.slice.call(arguments))); } }.f; Object.defineProperty(fn, 'name', { value: k }); Object.defineProperty(fn, 'length', { value: n }); Object.defineProperty(eip, k, { value: fn, writable: true, enumerable: true, configurable: true }); };
+            var notFACE = function () { throw new global.DOMException("The target element is not a form-associated custom element.", 'NotSupportedError'); };
+            ga('shadowRoot', function (el) { var sr = el.shadowRoot; return sr || (this.__closedRoot || null); });
+            ga('form', function (el) { if (!isFACE(el)) notFACE(); return el.closest ? el.closest('form') : null; });
+            ga('willValidate', function (el) { if (!isFACE(el)) notFACE(); return !el.hasAttribute('readonly') && !el.matches(':disabled') && !(el.closest && el.closest('datalist')); });
+            ga('validity', function (el) { if (!isFACE(el)) notFACE(); return this.__validity || (this.__validity = { valid: true }); });
+            ga('validationMessage', function (el) { if (!isFACE(el)) notFACE(); return this.__vmsg || ''; });
+            ga('labels', function (el) { if (!isFACE(el)) notFACE(); var d = el.ownerDocument, out = []; if (d) d.querySelectorAll('label').forEach(function (l) { if (l.htmlFor ? l.htmlFor === el.id : l.contains(el)) out.push(l); }); if (global.NodeList) Object.setPrototypeOf(out, global.NodeList.prototype); return out; });
+            ga('states', function (el) { return this.__states || (this.__states = global.__cyberNewStateSet ? global.__cyberNewStateSet() : new Set()); });
+            op('setFormValue', 1, function (el, v, state) { if (!isFACE(el)) notFACE(); this.__value = v; this.__state = state; });
+            op('setValidity', 0, function (el, flags, msg) { if (!isFACE(el)) notFACE(); var v = { valid: true }; if (flags) for (var k in flags) if (flags[k]) { v[k] = true; v.valid = false; } this.__validity = v; this.__vmsg = v.valid ? '' : String(msg === undefined ? '' : msg); });
+            op('checkValidity', 0, function (el) { if (!isFACE(el)) notFACE(); var ok = !this.__validity || this.__validity.valid; if (!ok) el.dispatchEvent(new global.Event('invalid', { cancelable: true })); return ok; });
+            op('reportValidity', 0, function (el) { return eip.checkValidity.call(this); });
+            Object.defineProperty(eip, Symbol.toStringTag, { value: 'ElementInternals', configurable: true });
+            Object.defineProperty(global, 'ElementInternals', { value: EI, writable: true, configurable: true, enumerable: false });
+            Object.defineProperty(HE.prototype, 'attachInternals', { writable: true, enumerable: true, configurable: true, value: function attachInternals() {
+                if (!(this instanceof HE)) throw new TypeError('Illegal invocation');
+                if (this.getAttribute('is') !== null) throw new global.DOMException("Unable to attach ElementInternals to a customized built-in element.", 'NotSupportedError');
+                var C = global.customElements && global.customElements.get(this.localName);
+                if (!C) throw new global.DOMException("Unable to attach ElementInternals to non-custom elements.", 'NotSupportedError');
+                if (C.disabledFeatures && Array.prototype.indexOf.call(C.disabledFeatures, 'internals') >= 0)
+                    throw new global.DOMException("ElementInternals is disabled by disabledFeature static field.", 'NotSupportedError');
+                if (this[ATT]) throw new global.DOMException("ElementInternals for the specified element was already attached.", 'NotSupportedError');
+                var i = Object.create(eip);
+                Object.defineProperty(i, EL, { value: this });
+                Object.defineProperty(this, ATT, { value: i });
+                return i;
+            } });
+        }
+        /* (DOMParser: an interface with a prototype, its operation there) */
+        var NDP = global.DOMParser;
+        if (typeof NDP === 'function' && !(NDP.prototype && typeof NDP.prototype.parseFromString === 'function')) {
+            var DPW = function DOMParser() {
+                if (!new.target) throw new TypeError("Failed to construct 'DOMParser': Please use the 'new' operator");
+                return Object.create(new.target.prototype);
+            };
+            Object.defineProperty(DPW.prototype, 'parseFromString', { writable: true, enumerable: true, configurable: true, value: function parseFromString(str, type) {
+                if (!(this instanceof DPW)) throw new TypeError('Illegal invocation');
+                if (arguments.length < 2) throw new TypeError("Failed to execute 'parseFromString' on 'DOMParser': 2 arguments required, but only " + arguments.length + ' present.');
+                return new NDP().parseFromString(str, type);
+            } });
+            Object.defineProperty(DPW.prototype, Symbol.toStringTag, { value: 'DOMParser', configurable: true });
+            Object.defineProperty(global, 'DOMParser', { value: DPW, writable: true, configurable: true, enumerable: false });
+        }
+        /* (the registry's operations: on its prototype, the instance's own ones moved there) */
+        var reg = global.customElements, CER = global.CustomElementRegistry;
+        if (reg && typeof CER === 'function' && CER.prototype && Object.getPrototypeOf(reg) === CER.prototype) {
+            ['define', 'get', 'getName', 'whenDefined', 'upgrade', 'initialize'].forEach(function (k) {
+                var own = Object.getOwnPropertyDescriptor(reg, k);
+                if (!own || typeof own.value !== 'function' || Object.getOwnPropertyDescriptor(CER.prototype, k)) return;
+                var f = own.value;
+                var w = { w: function () { if (!(this instanceof CER)) throw new TypeError('Illegal invocation'); return f.apply(this, arguments); } }.w;
+                Object.defineProperty(w, 'name', { value: k });
+                Object.defineProperty(w, 'length', { value: f.length });
+                Object.defineProperty(CER.prototype, k, { value: w, writable: true, enumerable: true, configurable: true });
+                try { delete reg[k]; } catch (e) { }
+            });
+        }
+    })();
+
+    /* ---- SVGImageElement.decode(): its href's image fetched and decoded, else an EncodingError ---- */
+    (function () {
+        var SI = global.SVGImageElement;
+        if (!SI || !SI.prototype || typeof SI.prototype.decode === 'function' || typeof global.Image !== 'function') return;
+        Object.defineProperty(SI.prototype, 'decode', { writable: true, enumerable: true, configurable: true, value: function decode() {
+            if (!(this instanceof SI)) return Promise.reject(new TypeError('Illegal invocation'));
+            var h = this.getAttribute('href');
+            if (h === null) h = this.getAttributeNS('http://www.w3.org/1999/xlink', 'href');
+            var bad = function () { return new global.DOMException('The source image cannot be decoded.', 'EncodingError'); };
+            if (!h) return Promise.reject(bad());
+            var url;
+            try { url = new global.URL(h, this.baseURI).href; } catch (e) { return Promise.reject(bad()); }
+            return new Promise(function (resolve, reject) {
+                var im = new global.Image();
+                im.onload = function () { resolve(undefined); };
+                im.onerror = function () { reject(bad()); };
+                im.src = url;
+            });
+        } });
+    })();
+
+    /* ---- document.domain (HTML 7.1.2): its origin's effective domain; set, a suffix of its host, for same origin-domain access ---- */
+    (function () {
+        var DC = global.Document, DP = DC && DC.prototype;
+        if (!DP || !global.document) return;
+        var op = function (v) { var f = global.__cyberDomain; if (typeof f !== 'function') return null; return arguments.length ? f(v) : f(); };
+        var sec = function (m) { return new global.DOMException("Failed to set the 'domain' property on 'Document': " + m, 'SecurityError'); };
+        var host = function () { try { return String(global.location.hostname || ''); } catch (e) { return ''; } };
+        var opaque = function () { try { return global.origin === 'null'; } catch (e) { return true; } };
+        var isIP = function (h) { return /^\d+\.\d+\.\d+\.\d+$/.test(h) || /^\[.*\]$/.test(h) || h.indexOf(':') >= 0; };
+        var d0 = Object.getOwnPropertyDescriptor(global.document, 'domain');
+        if (d0 && d0.configurable) delete global.document.domain;
+        Object.defineProperty(DP, 'domain', { configurable: true, enumerable: true,
+            get: { get: function () {
+                if (!(this instanceof DC)) throw new TypeError('Illegal invocation');
+                if (opaque()) return '';
+                var d = this === global.document ? op() : null;
+                return d !== null && d !== undefined ? d : host();
+            } }.get,
+            set: { set: function (v) {
+                if (!(this instanceof DC)) throw new TypeError('Illegal invocation');
+                v = String(v);
+                if (this !== global.document || !this.defaultView) throw sec('The document has no browsing context.');
+                if (opaque()) throw sec("Assignment is forbidden for sandboxed iframes.");
+                var h = host(), cur = op(), eff = cur !== null && cur !== undefined ? cur : h;
+                if (!eff) throw sec("'" + v + "' is not a suffix of ''.");
+                var lv = v.toLowerCase();
+                var ok = isIP(eff) ? lv === eff : (lv === eff || (lv && lv.charAt(0) !== '.' && eff.length > lv.length && eff.slice(-lv.length - 1) === '.' + lv && lv.indexOf('.') > 0));
+                if (!ok) throw sec("'" + v + "' is not a suffix of '" + eff + "'.");
+                /* (an origin-keyed agent cluster: nothing changes) */
+                if (global.originAgentCluster === true) return;
+                op(lv);
+            } }.set });
+    })();
+
+    /* ---- media-playback-while-not-visible (permissions policy): a frame allowed 'none' can't play while not rendered, and pauses when hidden ---- */
+    var mediaPolicy = function () {
+        var MP = global.HTMLMediaElement && global.HTMLMediaElement.prototype;
+        if (!MP || !global.document) return;
+        var blockedHere = function () {
+            if (typeof global.__cyberFrameAllow !== 'function') return false;
+            var v = global.__cyberFrameAllow('media-playback-while-not-visible');
+            return v !== null && v !== undefined && /^'none'$|^\(\)$/.test(String(v).trim());
+        };
+        var hidden = function () { try { return !!global.__cyberFrameChainHidden(); } catch (e) { return false; } };
+        var watching = false;
+        var watch = function () {
+            if (watching) return;
+            watching = true;
+            var tick = function () {
+                if (hidden()) {
+                    var ms = global.document.querySelectorAll('video, audio');
+                    for (var i = 0; i < ms.length; i++) if (!ms[i].paused) { try { ms[i].pause(); } catch (e) { } }
+                }
+                global.setTimeout(tick, 100);
+            };
+            global.setTimeout(tick, 100);
+        };
+        /* (each prototype that has its own play: the media element's, the video's, the audio's) */
+        [global.HTMLMediaElement, global.HTMLVideoElement, global.HTMLAudioElement].forEach(function (C) {
+            var P = C && C.prototype;
+            if (!P || !Object.prototype.hasOwnProperty.call(P, 'play')) return;
+            var origPlay = P.play;
+            if (typeof origPlay !== 'function') return;
+            var w = { play: function () {
+                if (blockedHere()) {
+                    watch();
+                    if (hidden()) return Promise.reject(new global.DOMException('Playback is not allowed while the frame is not visible.', 'NotAllowedError'));
+                }
+                return origPlay.apply(this, arguments);
+            } }.play;
+            Object.defineProperty(w, 'length', { value: 0 });
+            Object.defineProperty(P, 'play', { configurable: true, enumerable: true, writable: true, value: w });
+        });
+        if (blockedHere()) watch();
+    };
+
+    /* ---- an SVG <image>'s href set: its image fetched, load or error at the element ---- */
+    (function () {
+        var tok = typeof WeakMap === 'function' ? new WeakMap() : null;
+        if (!tok || typeof global.Image !== 'function') return;
+        Object.defineProperty(global, '__cyberSvgImageHref', { configurable: true, value: function (el) {
+            var h = el.getAttribute('href');
+            if (h === null) h = el.getAttributeNS('http://www.w3.org/1999/xlink', 'href');
+            var im = new global.Image();
+            tok.set(el, im);
+            var fire = function (t) {
+                if (tok.get(el) !== im) return;
+                tok.delete(el);
+                el.dispatchEvent(new global.Event(t));
+            };
+            if (!h) { global.setTimeout(function () { fire('error'); }, 0); return; }
+            var url;
+            try { url = new global.URL(h, el.baseURI).href; } catch (e) { global.setTimeout(function () { fire('error'); }, 0); return; }
+            im.onload = function () { fire('load'); };
+            im.onerror = function () { fire('error'); };
+            im.src = url;
+        } });
+    })();
+
+    /* ---- interfaces nothing makes here yet: NotRestoredReasons (bfcache reasons), VisibilityStateEntry ---- */
+    (function () {
+        var shell = function (name, parent, attrs, json) {
+            if (typeof global[name] === 'function') return;
+            var P0 = parent && global[parent];
+            if (parent && typeof P0 !== 'function') return;
+            var C = function () { throw new TypeError('Illegal constructor'); };
+            Object.defineProperty(C, 'name', { value: name, configurable: true });
+            Object.defineProperty(C, 'length', { value: 0, configurable: true });
+            var P = parent ? Object.create(P0.prototype) : C.prototype;
+            if (parent) { Object.defineProperty(C, 'prototype', { value: P, writable: false }); Object.setPrototypeOf(C, P0); }
+            Object.defineProperty(P, 'constructor', { value: C, writable: true, configurable: true });
+            Object.defineProperty(P, Symbol.toStringTag, { value: name, configurable: true });
+            var D = Symbol(name);
+            attrs.forEach(function (a) {
+                var g = { get: function () { if (!(this instanceof C) || !this[D]) throw new TypeError('Illegal invocation'); return this[D][a]; } }.get;
+                Object.defineProperty(g, 'name', { value: 'get ' + a });
+                Object.defineProperty(P, a, { get: g, enumerable: true, configurable: true });
+            });
+            if (json) Object.defineProperty(P, 'toJSON', { writable: true, enumerable: true, configurable: true, value: function toJSON() {
+                if (!(this instanceof C) || !this[D]) throw new TypeError('Illegal invocation');
+                var o = {}, self = this;
+                attrs.forEach(function (a) { o[a] = self[a]; });
+                return o;
+            } });
+            Object.defineProperty(global, name, { value: C, writable: true, configurable: true, enumerable: false });
+        };
+        shell('NotRestoredReasonDetails', null, ['reason'], true);
+        shell('NotRestoredReasons', null, ['src', 'id', 'name', 'url', 'reasons', 'children'], true);
+        shell('VisibilityStateEntry', 'PerformanceEntry', ['name', 'entryType', 'startTime', 'duration'], false);
+    })();
+
+    /* ---- CloseWatcher (HTML 6.x close requests): requestClose, close, destroy; Escape asks the newest one ---- */
+    (function () {
+        var ET = global.EventTarget;
+        if (!ET || typeof global.CloseWatcher === 'function') return;
+        var ACT = Symbol('cwActive');
+        var CWC = function CloseWatcher(options) {
+            if (!new.target) throw new TypeError("Failed to construct 'CloseWatcher': Please use the 'new' operator");
+            var w = Reflect.construct(ET, [], new.target);
+            var doc = global.document;
+            if (!doc || !doc.defaultView) throw new global.DOMException('The document is not fully active.', 'InvalidStateError');
+            Object.defineProperty(w, ACT, { value: { on: true, running: false }, writable: true });
+            Object.defineProperty(w, 'ownerDocument', { value: doc, configurable: true });
+            Object.defineProperty(w, '__cyberActive', { value: function () { return w[ACT].on; }, configurable: true });
+            var sig = options && options.signal;
+            if (sig) {
+                if (sig.aborted) w[ACT].on = false;
+                else sig.addEventListener('abort', function () { w.destroy(); });
+            }
+            if (w[ACT].on && typeof global.__cyberCloseWatchAdd === 'function') global.__cyberCloseWatchAdd(w);
+            return w;
+        };
+        CWC.prototype = Object.create(ET.prototype);
+        Object.defineProperty(CWC.prototype, 'constructor', { value: CWC, writable: true, configurable: true });
+        Object.defineProperty(CWC.prototype, Symbol.toStringTag, { value: 'CloseWatcher', configurable: true });
+        Object.setPrototypeOf(CWC, ET);
+        var st = function (o) { if (!(o instanceof CWC) || !o[ACT]) throw new TypeError('Illegal invocation'); return o[ACT]; };
+        var m = function (k, f) { Object.defineProperty(CWC.prototype, k, { value: f, writable: true, enumerable: true, configurable: true }); };
+        m('requestClose', function requestClose() {
+            var s = st(this);
+            if (!s.on || s.running) return;
+            s.running = true;
+            var go = this.dispatchEvent(new global.Event('cancel', { cancelable: false }));
+            s.running = false;
+            if (!go || !s.on) return;
+            this.close();
+        });
+        m('close', function close() {
+            var s = st(this);
+            if (!s.on) return;
+            s.on = false;
+            if (typeof global.__cyberCloseWatchRemove === 'function') global.__cyberCloseWatchRemove(this);
+            this.dispatchEvent(new global.Event('close'));
+        });
+        m('destroy', function destroy() {
+            var s = st(this);
+            s.on = false;
+            if (typeof global.__cyberCloseWatchRemove === 'function') global.__cyberCloseWatchRemove(this);
+        });
+        ['cancel', 'close'].forEach(function (t) {
+            var HK = Symbol(t);
+            Object.defineProperty(CWC.prototype, 'on' + t, { enumerable: true, configurable: true,
+                get: { get: function () { st(this); var h = this[HK]; return h ? h.fn : null; } }.get,
+                set: { set: function (v) {
+                    st(this);
+                    var h = this[HK];
+                    if (h) { this.removeEventListener(t, h.wrap); this[HK] = null; }
+                    if (typeof v === 'function') { var fn = v, wrap = function (e) { return fn.call(this, e); }; this[HK] = { fn: fn, wrap: wrap }; this.addEventListener(t, wrap); }
+                } }.set });
+        });
+        Object.defineProperty(global, 'CloseWatcher', { value: CWC, writable: true, configurable: true, enumerable: false });
+    })();
+
+    /* ---- Document.parseHTMLUnsafe (HTML 8.5): a new HTML document from markup; MessageEvent's initMessageEvent ---- */
+    (function () {
+        var D = global.Document;
+        if (D && typeof D.parseHTMLUnsafe !== 'function' && typeof global.DOMParser === 'function') {
+            Object.defineProperty(D, 'parseHTMLUnsafe', { configurable: true, enumerable: true, writable: true, value: function parseHTMLUnsafe(html) {
+                if (arguments.length < 1) throw new TypeError("Failed to execute 'parseHTMLUnsafe' on 'Document': 1 argument required, but only 0 present.");
+                return new global.DOMParser().parseFromString(String(html), 'text/html');
+            } });
+        }
+        var ME = global.MessageEvent;
+        if (ME && ME.prototype && typeof ME.prototype.initMessageEvent !== 'function') {
+            Object.defineProperty(ME.prototype, 'initMessageEvent', { configurable: true, enumerable: true, writable: true, value: function initMessageEvent(type, bubbles, cancelable, data, origin, lastEventId, source, ports) {
+                if (arguments.length < 1) throw new TypeError("Failed to execute 'initMessageEvent' on 'MessageEvent': 1 argument required, but only 0 present.");
+                if (typeof this.initEvent === 'function') this.initEvent(String(type), !!bubbles, !!cancelable);
+                var set = function (o, k, v) { try { Object.defineProperty(o, k, { value: v, configurable: true, enumerable: true }); } catch (e) { } };
+                set(this, 'data', data === undefined ? null : data);
+                set(this, 'origin', origin === undefined ? '' : String(origin));
+                set(this, 'lastEventId', lastEventId === undefined ? '' : String(lastEventId));
+                set(this, 'source', source === undefined ? null : source);
+                set(this, 'ports', Object.freeze(Array.isArray(ports) ? ports.slice() : []));
+            } });
+            Object.defineProperty(ME.prototype.initMessageEvent, 'length', { value: 1 });
+        }
+    })();
+    /* ---- a URL's query in the document's encoding (HTML's encoding-parse a URL): XMLHttpRequest's open, EventSource,
+     * history's pushState and replaceState ---- */
+    (function () {
+        function legacy(u) {
+            if (typeof u !== 'string' || !/[^\x00-\x7f]/.test(u) || typeof global.__cyberLegacyQuery !== 'function') return u;
+            var d = global.document, cs = d && d.characterSet;
+            if (!cs || /^utf-8$/i.test(cs)) return u;
+            var r = global.__cyberLegacyQuery(u, cs);
+            return r || u;
+        }
+        function wrapArg(proto, name, at) {
+            var d = proto && Object.getOwnPropertyDescriptor(proto, name);
+            if (!d || typeof d.value !== 'function' || !d.configurable) return;
+            var f = d.value;
+            var w = { m: function () {
+                if (arguments.length > at && typeof arguments[at] === 'string') {
+                    var lu = legacy(arguments[at]);
+                    if (lu !== arguments[at]) { var args = Array.prototype.slice.call(arguments); args[at] = lu; return f.apply(this, args); }
+                }
+                return f.apply(this, arguments);
+            } }.m;
+            try { Object.defineProperty(w, 'name', { value: f.name }); Object.defineProperty(w, 'length', { value: f.length }); } catch (e) { }
+            Object.defineProperty(proto, name, { value: w, writable: d.writable, enumerable: d.enumerable, configurable: true });
+        }
+        try { wrapArg(global.XMLHttpRequest && global.XMLHttpRequest.prototype, 'open', 1); } catch (e) { }
+        try { wrapArg(global.History && global.History.prototype, 'pushState', 2); } catch (e) { }
+        try { wrapArg(global.History && global.History.prototype, 'replaceState', 2); } catch (e) { }
+    })();
+    /* ---- focusGroupStart (focusgroup, tentative): the focusgroupstart attribute's presence, on HTML, SVG and MathML elements ---- */
+    ['HTMLElement', 'SVGElement', 'MathMLElement'].forEach(function (n) {
+        var P = global[n] && global[n].prototype;
+        if (!P || Object.getOwnPropertyDescriptor(P, 'focusGroupStart')) return;
+        Object.defineProperty(P, 'focusGroupStart', { configurable: true, enumerable: true,
+            get: function focusGroupStart() { return this.hasAttribute('focusgroupstart'); },
+            set: function focusGroupStart(v) { if (v) this.setAttribute('focusgroupstart', ''); else this.removeAttribute('focusgroupstart'); } });
+    });
+    /* ---- interest invokers (interestfor, tentative): interestForElement, InterestEvent, interest gained on focus or hover
+     * and lost on blur, leaving or Escape after the interest-delay times; :interest-source / :interest-target by
+     * data-cyber-interest-source / -target, which the selector engines read ---- */
+    (function () {
+        var EL = global.Element;
+        if (!EL) return;
+        var REF = Symbol.for('cyber.interestForElement');
+        function rootChainHas(el, root) {
+            for (var r = el.getRootNode(); r; r = r.host ? r.host.getRootNode() : null) { if (r === root) return true; if (!r.host) break; }
+            return false;
+        }
+        function targetOf(b) {
+            var id = b.getAttribute('interestfor');
+            if (id === null) return null;
+            var t = b[REF];
+            if (t !== undefined && id === '') return t && t.isConnected && rootChainHas(b, t.getRootNode()) ? t : null;
+            if (!id) return null;
+            var root = b.getRootNode();
+            return root && root.getElementById ? root.getElementById(id) : null;
+        }
+        ['HTMLButtonElement', 'HTMLAnchorElement', 'HTMLAreaElement', 'SVGAElement'].forEach(function (n) {
+            var P = global[n] && global[n].prototype;
+            if (!P || Object.getOwnPropertyDescriptor(P, 'interestForElement')) return;
+            Object.defineProperty(P, 'interestForElement', { configurable: true, enumerable: true,
+                get: function interestForElement() { return targetOf(this); },
+                set: function interestForElement(v) {
+                    if (v !== null && v !== undefined && !(v instanceof EL)) throw new TypeError("Failed to set the 'interestForElement' property: Failed to convert value to 'Element'.");
+                    Object.defineProperty(this, REF, { value: v || null, configurable: true, writable: true });
+                    if (!v) this.removeAttribute('interestfor'); else this.setAttribute('interestfor', '');
+                } });
+        });
+        var INV = 'interestfor';
+        function invokerOf(n) {
+            for (var e = n, d = 0; e && d < 64; d++) {
+                if (e.nodeType === 1 && e.hasAttribute && e.hasAttribute(INV)) {
+                    var ln = e.localName;
+                    if (ln === 'button' || ln === 'a' || ln === 'area' || ln === 'menuitem') return e;
+                }
+                e = e.parentNode || (e.host || null);
+            }
+            return null;
+        }
+        function delayOf(el, which) {
+            var v = '';
+            try { v = global.getComputedStyle(el).getPropertyValue('interest-delay-' + which).trim(); } catch (e) { }
+            var m = /^(-?[\d.]+)(ms|s)$/.exec(v);
+            if (!m) return which === 'start' ? 500 : 250;
+            return Math.max(0, Number(m[1]) * (m[2] === 's' ? 1000 : 1));
+        }
+        var current = [];   /* ([invoker, target]) with interest now */
+        var timers = new Map();
+        function setTimer(el, kind, ms, fn) {
+            var k = timers.get(el);
+            if (k) global.clearTimeout(k.id);
+            var id = global.setTimeout(function () { timers.delete(el); fn(); }, ms);
+            timers.set(el, { id: id, kind: kind });
+        }
+        function clearTimer(el, kind) { var k = timers.get(el); if (k && (!kind || k.kind === kind)) { global.clearTimeout(k.id); timers.delete(el); } }
+        function hasInterest(inv) { for (var i = 0; i < current.length; i++) if (current[i][0] === inv) return current[i]; return null; }
+        function fireI(t, type, inv, notCancelable) {
+            var ev;
+            try { ev = new global.InterestEvent(type, { cancelable: !notCancelable, source: inv }); } catch (e) { return true; }
+            return t.dispatchEvent(ev);
+        }
+        function gain(inv) {
+            if (hasInterest(inv)) return;
+            var t = targetOf(inv);
+            if (!t || !t.isConnected) return;
+            if (!fireI(t, 'interest', inv)) return;
+            current.push([inv, t]);
+            inv.setAttribute('data-cyber-interest-source', '');
+            t.setAttribute('data-cyber-interest-target', '');
+            if (t.hasAttribute('popover') && !t.matches(':popover-open')) { try { t.showPopover({ source: inv }); } catch (e) { } }
+        }
+        function lose(inv, force, notCancelable) {
+            var c = hasInterest(inv);
+            if (!c) return;
+            if (!fireI(c[1], 'loseinterest', inv, notCancelable) && !force) return;
+            current.splice(current.indexOf(c), 1);
+            inv.removeAttribute('data-cyber-interest-source');
+            var still = false;
+            for (var i = 0; i < current.length; i++) if (current[i][1] === c[1]) still = true;
+            if (!still) c[1].removeAttribute('data-cyber-interest-target');
+            if (c[1].hasAttribute('popover') && c[1].matches(':popover-open')) { try { c[1].hidePopover(); } catch (e) { } }
+        }
+        function within(n, c) {
+            for (var e = n, d = 0; e && d < 64; d++) { if (e === c[0] || e === c[1]) return true; e = e.parentNode || (e.host || null); }
+            return false;
+        }
+        onWin('focusin', function (e) {
+            var inv = invokerOf(e.target);
+            for (var i = 0; i < current.length; i++) if (within(e.target, current[i])) clearTimer(current[i][0], 'lose');
+            if (!inv) return;
+            if (hasInterest(inv)) { clearTimer(inv, 'lose'); return; }
+            var ms = delayOf(inv, 'start');
+            setTimer(inv, 'gain', ms, function () { gain(inv); });
+        }, true);
+        onWin('focusout', function (e) {
+            var inv = invokerOf(e.target);
+            if (inv) clearTimer(inv, 'gain');
+            current.slice().forEach(function (c) {
+                if (!within(e.target, c) || (e.relatedTarget && within(e.relatedTarget, c))) return;
+                var ms = delayOf(c[0], 'end');
+                setTimer(c[0], 'lose', ms, function () { lose(c[0]); });
+            });
+        }, true);
+        onWin('mouseover', function (e) {
+            var inv = invokerOf(e.target);
+            for (var i = 0; i < current.length; i++) if (within(e.target, current[i])) clearTimer(current[i][0], 'lose');
+            if (!inv || hasInterest(inv)) return;
+            setTimer(inv, 'gain', delayOf(inv, 'start'), function () { gain(inv); });
+        }, true);
+        onWin('mouseout', function (e) {
+            var inv = invokerOf(e.target);
+            if (inv && !(e.relatedTarget && within(e.relatedTarget, [inv, inv]))) clearTimer(inv, 'gain');
+            current.slice().forEach(function (c) {
+                if (!within(e.target, c) || (e.relatedTarget && within(e.relatedTarget, c))) return;
+                setTimer(c[0], 'lose', delayOf(c[0], 'end'), function () { lose(c[0]); });
+            });
+        }, true);
+        /* (a target popover closing: its invokers lose interest, unless that is canceled) */
+        onWin('beforetoggle', function (e) {
+            if (e.newState !== 'closed') return;
+            var t = e.target;
+            current.slice().forEach(function (c) {
+                if (c[1] !== t) return;
+                clearTimer(c[0]);
+                if (!fireI(t, 'loseinterest', c[0])) return;
+                var ci = current.indexOf(c);
+                if (ci >= 0) current.splice(ci, 1);
+                c[0].removeAttribute('data-cyber-interest-source');
+                var still = false;
+                for (var k = 0; k < current.length; k++) if (current[k][1] === t) still = true;
+                if (!still) t.removeAttribute('data-cyber-interest-target');
+            });
+        }, true);
+        onWin('keydown', function (e) {
+            if (e.key !== 'Escape' || e.defaultPrevented) return;
+            current.slice().reverse().forEach(function (c) { clearTimer(c[0]); lose(c[0], true, true); });
+        }, true);
+    })();
+    /* ---- ImageBitmaps in a postMessage's transfer list: detached once sent (width and height 0) ---- */
+    (function () {
+        function detachAfter(proto) {
+            var d = proto && Object.getOwnPropertyDescriptor(proto, 'postMessage');
+            if (!d || typeof d.value !== 'function' || !d.configurable) return;
+            var f = d.value;
+            var w = { postMessage: function (msg, opts) {
+                var r = f.apply(this, arguments);
+                var list = Array.isArray(opts) ? opts : (opts && typeof opts === 'object' && Array.isArray(opts.transfer) ? opts.transfer : null);
+                if (list && global.ImageBitmap) for (var i = 0; i < list.length; i++) {
+                    if (list[i] instanceof global.ImageBitmap && typeof list[i].close === 'function') { try { list[i].close(); } catch (e) { } }
+                }
+                return r;
+            } }.postMessage;
+            try { Object.defineProperty(w, 'length', { value: f.length }); } catch (e) { }
+            Object.defineProperty(proto, 'postMessage', { value: w, writable: d.writable, enumerable: d.enumerable, configurable: true });
+        }
+        try { detachAfter(global.Worker && global.Worker.prototype); } catch (e) { }
+        try { detachAfter(global.MessagePort && global.MessagePort.prototype); } catch (e) { }
+    })();
 })

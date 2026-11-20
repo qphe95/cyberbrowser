@@ -338,9 +338,58 @@ static void js_xhr_fire_state(JSContextHandle ctx, XMLHttpRequestHandle xhr, GCV
     js_xhr_fire(ctx, this_val, "readystatechange");
 }
 
+/* (an asynchronous request's end: its events in a task after send() returned, not during it) */
+static GCValue js_xhr_finish_cb(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    XMLHttpRequestHandle xhr = JS_GetOpaqueHandle2(ctx, argv[0], js_xhr_class_id);
+    if (SAFE_IS_NULL(xhr)) return JS_UNDEFINED;
+    /* (opened again, or aborted, since: nothing) */
+    GCValue gen = JS_GetPropertyStr(ctx, argv[0], "__cyberXhrGen");
+    int32_t g0 = 0, g1 = 0;
+    JS_ToInt32(ctx, &g0, gen);
+    if (argc > 2) JS_ToInt32(ctx, &g1, argv[2]);
+    if (g0 != g1) return JS_UNDEFINED;
+    if (JS_ToBool(ctx, argv[1])) {
+        js_xhr_fire_state(ctx, xhr, argv[0], 2);
+        js_xhr_fire_state(ctx, xhr, argv[0], 3);
+        js_xhr_fire_state(ctx, xhr, argv[0], 4);
+        js_xhr_fire(ctx, argv[0], "load");
+    } else {
+        js_xhr_fire_state(ctx, xhr, argv[0], 4);
+        js_xhr_fire(ctx, argv[0], "error");
+    }
+    js_xhr_fire(ctx, argv[0], "loadend");
+    return JS_UNDEFINED;
+}
+static bool js_xhr_defer(JSContextHandle ctx, XMLHttpRequestHandle xhr, GCValue this_val, int ok) {
+    GCValue sync = JS_GetPropertyStr(ctx, this_val, "__cyberXhrSync");
+    if (JS_ToBool(ctx, sync)) return false;
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue st = JS_GetPropertyStr(ctx, global, "setTimeout");
+    if (!JS_IsFunction(ctx, st)) return false;
+    GCValue gen = JS_GetPropertyStr(ctx, this_val, "__cyberXhrGen");
+    int32_t g = 0;
+    JS_ToInt32(ctx, &g, gen);
+    GCValue cb = JS_NewCFunction(ctx, js_xhr_finish_cb, "xhrFinish", 3);
+    GCValue args[5] = { cb, JS_NewInt32(ctx, 0), this_val, JS_NewBool(ctx, ok), JS_NewInt32(ctx, g) };
+    GCValue r = JS_Call(ctx, st, global, 5, args);
+    if (JS_IsException(r)) { JS_GetException(ctx); return false; }
+    SAFE_SET(xhr, XMLHttpRequestHandle, ready_state, 1);   /* (OPENED, till then) */
+    return true;
+}
+
 static GCValue js_xhr_open(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     XMLHttpRequestHandle xhr = JS_GetOpaqueHandle2(ctx, this_val, js_xhr_class_id);
     if (SAFE_IS_NULL(xhr)) return JS_ThrowTypeError(ctx, "XMLHttpRequest internal error");
+    /* (async unless the third argument says not; each open a new generation: a pending end of the last is dropped) */
+    JS_DefinePropertyValueStr(ctx, this_val, "__cyberXhrSync", JS_NewBool(ctx, argc > 2 && !JS_IsUndefined(argv[2]) && !JS_ToBool(ctx, argv[2])), JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE);
+    {
+        GCValue gv = JS_GetPropertyStr(ctx, this_val, "__cyberXhrGen");
+        int32_t g = 0;
+        JS_ToInt32(ctx, &g, gv);
+        JS_DefinePropertyValueStr(ctx, this_val, "__cyberXhrGen", JS_NewInt32(ctx, g + 1), JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE);
+    }
     
     const char *method = JS_ToCString(ctx, argv[0]);
     const char *url = JS_ToCString(ctx, argv[1]);
@@ -430,7 +479,8 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
         char origin_header[512];
         char referer_header[1024];
         char cookie_header[2048];
-        if (!has_origin) {
+        /* (an Origin header across origins, or for a method other than GET and HEAD) */
+        if (!has_origin && (!same_origin || (strcasecmp(method, "GET") && strcasecmp(method, "HEAD")))) {
             snprintf(origin_header, sizeof(origin_header), "Origin: %s", origin);
             if (header_count < 24) headers[header_count++] = origin_header;
         }
@@ -521,6 +571,10 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
             SAFE_SET(xhr, XMLHttpRequestHandle, status, status_code);
             SAFE_SET(xhr, XMLHttpRequestHandle, response_text,
                      JS_NewStringLen(ctx, response_buffer.data, strnlen(response_buffer.data, response_buffer.size)));
+            /* (the body's bytes as they came: an arraybuffer or blob response's, platform_api.js) */
+            JS_DefinePropertyValueStr(ctx, this_val, "__cyberXhrBytes",
+                                      JS_NewArrayBufferCopy(ctx, (const uint8_t *)(response_buffer.data ? response_buffer.data : ""), response_buffer.data ? response_buffer.size : 0),
+                                      JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE);
             if (response_buffer.headers && response_buffer.headers_size > 0) {
                 char rh[2048];
                 size_t copy_len = response_buffer.headers_size;
@@ -534,17 +588,21 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
                 SAFE_SET_STR(xhr, XMLHttpRequestHandle, response_headers, rh);
             }
             platform_http_free_buffer(&response_buffer);
+            if (js_xhr_defer(ctx, xhr, this_val, 1)) return JS_UNDEFINED;
             js_xhr_fire_state(ctx, xhr, this_val, 2);
             js_xhr_fire_state(ctx, xhr, this_val, 3);
             js_xhr_fire_state(ctx, xhr, this_val, 4);
             js_xhr_fire(ctx, this_val, "load");
+            js_xhr_fire(ctx, this_val, "loadend");
             return JS_UNDEFINED;
         } else {
             platform_http_free_buffer(&response_buffer);
             SAFE_SET(xhr, XMLHttpRequestHandle, status, 0);
             SAFE_SET(xhr, XMLHttpRequestHandle, response_text, JS_UNDEFINED);
+            if (js_xhr_defer(ctx, xhr, this_val, 0)) return JS_UNDEFINED;
             js_xhr_fire_state(ctx, xhr, this_val, 4);
             js_xhr_fire(ctx, this_val, "error");
+            js_xhr_fire(ctx, this_val, "loadend");
             return JS_UNDEFINED;
         }
     }
@@ -580,6 +638,22 @@ static GCValue js_xhr_set_request_header(JSContextHandle ctx, GCValue this_val, 
     return JS_UNDEFINED;
 }
 
+/* (a header value: a byte string, each byte the code point of its value, Fetch's "isomorphic decode") */
+static GCValue js_new_isomorphic(JSContextHandle ctx, const char *s, size_t n) {
+    char stackb[1024];
+    char *o = n * 2 + 1 <= sizeof stackb ? stackb : (char *)malloc(n * 2 + 1);
+    if (!o) return JS_NewStringLen(ctx, s, n);
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x80) o[k++] = (char)c;
+        else { o[k++] = (char)(0xC0 | (c >> 6)); o[k++] = (char)(0x80 | (c & 0x3F)); }
+    }
+    GCValue v = JS_NewStringLen(ctx, o, k);
+    if (o != stackb) free(o);
+    return v;
+}
+
 static GCValue js_xhr_get_response_header(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     XMLHttpRequestHandle xhr = JS_GetOpaqueHandle2(ctx, this_val, js_xhr_class_id);
     if (SAFE_IS_NULL(xhr)) return JS_ThrowTypeError(ctx, "XMLHttpRequest internal error");
@@ -606,7 +680,7 @@ static GCValue js_xhr_get_response_header(JSContextHandle ctx, GCValue this_val,
                 if (val_len >= sizeof(buf)) val_len = sizeof(buf) - 1;
                 memcpy(buf, val, val_len);
                 buf[val_len] = '\0';
-                return JS_NewString(ctx, buf);
+                return js_new_isomorphic(ctx, buf, val_len);
             }
         }
         p = line_end;
@@ -618,7 +692,8 @@ static GCValue js_xhr_get_response_header(JSContextHandle ctx, GCValue this_val,
 static GCValue js_xhr_get_all_response_headers(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     XMLHttpRequestHandle xhr = JS_GetOpaqueHandle2(ctx, this_val, js_xhr_class_id);
     if (SAFE_IS_NULL(xhr)) return JS_ThrowTypeError(ctx, "XMLHttpRequest internal error");
-    return JS_NewString(ctx, SAFE_GET_OR(xhr, XMLHttpRequestHandle, response_headers, ""));
+    const char *arh = SAFE_GET_OR(xhr, XMLHttpRequestHandle, response_headers, "");
+    return js_new_isomorphic(ctx, arh, strlen(arh));
 }
 
 static GCValue js_xhr_get_with_credentials(JSContextHandle ctx, GCValue this_val) {
@@ -877,13 +952,29 @@ static GCValue js_video_get_network_state(JSContextHandle ctx, GCValue this_val)
     return JS_NewInt32(ctx, state);
 }
 
+static bool strcasestr_ascii(const char *h, const char *n) {
+    size_t nl = strlen(n);
+    for (; h && *h; h++) if (!strncasecmp(h, n, nl)) return true;
+    return false;
+}
 static GCValue js_video_can_play_type(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
     if (argc < 1) return JS_NewString(ctx, "");
     const char *type = JS_ToCString(ctx, argv[0]);
     if (!type) return JS_NewString(ctx, "");
     /* What the decoders handle (src/media/media_buffer.c); no HLS. */
-    return JS_NewString(ctx, media_type_supported(type) ? "probably" : "");
+    /* (a container alone: maybe; with its codecs named: probably) */
+    if (!media_type_supported(type)) return JS_NewString(ctx, "");
+    /* (a codecs parameter with a value in it: probably; none, or empty: maybe) */
+    const char *cp = NULL;
+    for (const char *p = type; *p && !cp; p++) if (!strncasecmp(p, "codecs", 6)) cp = p;
+    bool named = false;
+    if (cp) {
+        const char *q = cp + 6;
+        while (*q == ' ') q++;
+        if (*q == '=') { q++; while (*q == ' ' || *q == '"') q++; named = *q && *q != ';'; }
+    }
+    return JS_NewString(ctx, named ? "probably" : "maybe");
 }
 
 static GCValue js_video_create_time_ranges_start(JSContextHandle c, GCValue t, int argc_unused, GCValue *argv_unused)
@@ -1197,8 +1288,23 @@ static GCValue reject_type_error(JSContextHandle ctx, const char *msg) {
 
 static bool js_get_document_origin(JSContextHandle ctx, char *out, size_t out_len) {
     GCValue global = JS_GetGlobalObject(ctx);
-    GCValue location = JS_GetPropertyStr(ctx, global, "location");
     out[0] = '\0';
+    /* (an about:blank or srcdoc document: its creator's origin, as the window's origin has it) */
+    {
+        GCValue lh = JS_GetPropertyStr(ctx, JS_GetPropertyStr(ctx, global, "location"), "protocol");
+        const char *lp = JS_IsString(lh) ? JS_ToCString(ctx, lh) : NULL;
+        if (lp && !strcmp(lp, "about:")) {
+            GCValue doc = JS_GetPropertyStr(ctx, global, "document");
+            GCValue bu = JS_IsObject(doc) ? JS_GetPropertyStr(ctx, doc, "baseURI") : JS_UNDEFINED;
+            const char *b = JS_IsString(bu) ? JS_ToCString(ctx, bu) : NULL;
+            if (b && strncmp(b, "about:", 6) && parse_url_origin(b, out, out_len)) return true;
+            GCValue o = JS_GetPropertyStr(ctx, global, "origin");
+            const char *os = JS_IsString(o) ? JS_ToCString(ctx, o) : NULL;
+            if (os && strcmp(os, "null") && strncmp(os, "about:", 6)) { snprintf(out, out_len, "%s", os); return true; }
+        }
+        if (JS_IsException(lh)) JS_GetException(ctx);
+    }
+    GCValue location = JS_GetPropertyStr(ctx, global, "location");
     if (JS_IsObject(location)) {
         GCValue proto_val = JS_GetPropertyStr(ctx, location, "protocol");
         GCValue host_val = JS_GetPropertyStr(ctx, location, "host");
@@ -1619,7 +1725,7 @@ static GCValue create_http_response(JSContextHandle ctx, const char *url,
                         char value[2048];
                         memcpy(value, v, vl);
                         value[vl] = '\0';
-                        JS_SetPropertyStr(ctx, headers_obj, name, JS_NewString(ctx, value));
+                        JS_SetPropertyStr(ctx, headers_obj, name, js_new_isomorphic(ctx, value, strlen(value)));
                     }
                 }
             }
@@ -1995,6 +2101,23 @@ static NetReq *net_req_new(const char *url, const char *method, const char *body
 
 static void net_req_run(NetReq *r)
 {
+    /* (a data: URL: its own bytes, no network) */
+    if (r->url && url_is_data_url(r->url) && !strcmp(r->method, "GET")) {
+        size_t n = 0;
+        uint8_t *d = data_url_decode(r->url, &n);
+        if (!d) { r->ok = false; r->status = 0; snprintf(r->err, sizeof(r->err), "bad data: URL"); return; }
+        r->resp.data = (char *)d;
+        r->resp.size = n;
+        const char *m = r->url + 5, *e = m;
+        while (*e && *e != ',' && *e != ';') e++;
+        char hb[256];
+        int hl = snprintf(hb, sizeof hb, "HTTP/1.1 200 OK\r\nContent-Type: %.*s\r\n\r\n", (int)(e - m < 200 ? e - m : 200), m);
+        r->resp.headers = (char *)malloc((size_t)hl + 1);
+        if (r->resp.headers) { memcpy(r->resp.headers, hb, (size_t)hl + 1); r->resp.headers_size = (size_t)hl; }
+        r->ok = true;
+        r->status = 200;
+        return;
+    }
     /* What the network process needs for CORS and ORB (it checks them
      * itself): cors across origins, and the requesting document. */
     HttpRequestContext was;
@@ -2061,7 +2184,8 @@ static void net_req_settle(JSContextHandle ctx, NetReq *r)
     if (r->preflight_failed) {
         platform_log(LOG_LEVEL_WARN, "js_fetch", "CORS preflight failed: %s", r->err);
         value = net_type_error(ctx, r->err);
-    } else if (r->ok && r->resp.data && r->status >= 200 && r->status < 300) {
+    } else if ((r->ok && r->resp.data && r->status >= 200 && r->status < 300) || (r->status >= 100 && r->status < 600)) {
+        /* (any status the server answered with: a response, its ok false when not 2xx; only a network error rejects, Fetch 4.x) */
         char cors_err[256] = {0};
         if (r->cors_check &&
             !cors_validate_response_headers(r->resp.headers, r->origin, r->credentials_include,
@@ -2069,7 +2193,21 @@ static void net_req_settle(JSContextHandle ctx, NetReq *r)
             platform_log(LOG_LEVEL_WARN, "js_fetch", "%s", cors_err);
             value = net_type_error(ctx, cors_err);
         } else {
-            value = create_http_response(ctx, r->url, &r->resp, r->status, "OK");
+            /* (its reason phrase, from the status line) */
+            char reason[64] = "";
+            const char *h = r->resp.headers;
+            if (h && !strncmp(h, "HTTP/", 5)) {
+                const char *sp = strchr(h, ' ');
+                if (sp) sp = strchr(sp + 1, ' ');
+                if (sp) {
+                    sp++;
+                    size_t l = 0;
+                    while (sp[l] && sp[l] != '\r' && sp[l] != '\n' && l + 1 < sizeof reason) { reason[l] = sp[l]; l++; }
+                    reason[l] = 0;
+                }
+            }
+            if (!reason[0] && r->status >= 200 && r->status < 300) snprintf(reason, sizeof reason, "OK");
+            value = create_http_response(ctx, r->url, &r->resp, r->status, reason);
             ok = true;
         }
     } else {
@@ -2361,7 +2499,8 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
         char origin_header[512];
         char referer_header[1024];
         char cookie_header[2048];
-        if (!has_origin) {
+        /* (Fetch: an Origin header on a cors request across origins, or a method other than GET and HEAD) */
+        if (!has_origin && ((!same_origin && !cors_no_cors) || (strcasecmp(method, "GET") && strcasecmp(method, "HEAD")))) {
             snprintf(origin_header, sizeof(origin_header), "Origin: %s", origin);
             if (header_count < 24) headers[header_count++] = origin_header;
         }
@@ -3041,10 +3180,10 @@ void js_quickjs_pump_timers_and_jobs(void) {
 void js_quickjs_dispatch_lifecycle_events(void) {
     if (!SAFE_VALID(g_js_context)) return;
     const char *lifecycle_js =
-        "document.readyState = 'interactive';"
+        "(window.__cyberDocSet ? __cyberDocSet(document, 'readyState', 'interactive') : (document.readyState = 'interactive'));"
         "var dcl = new Event('DOMContentLoaded', { bubbles: true });"
         "document.dispatchEvent(dcl);"
-        "document.readyState = 'complete';"
+        "(window.__cyberDocSet ? __cyberDocSet(document, 'readyState', 'complete') : (document.readyState = 'complete'));"
         "var loadEvt = new Event('load');"
         "window.dispatchEvent(loadEvt);"
         "document.dispatchEvent(loadEvt);";

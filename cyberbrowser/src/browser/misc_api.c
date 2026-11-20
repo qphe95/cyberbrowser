@@ -671,6 +671,21 @@ GCValue js_html_element_constructor(JSContextHandle ctx, GCValue new_target, int
         if (!JS_IsUndefined(uc) && !JS_IsNull(uc) && JS_IsObject(uc)) {
             return uc;
         }
+        /* (a plain call, nothing under construction: an interface object is no function) */
+        return JS_ThrowTypeError(ctx, "Illegal constructor");
+    }
+    /* (new of the interface object itself, not a defined element's class: illegal) */
+    if (JS_IsFunction(ctx, new_target)) {
+        GCValue nm = JS_GetPropertyStr(ctx, new_target, "name");
+        GCValue cen = JS_GetPropertyStr(ctx, new_target, "__cyber_ce_name");
+        if (JS_IsString(nm) && !JS_IsString(cen)) {
+            const char *n = JS_ToCString(ctx, nm);
+            if (n && !strncmp(n, "HTML", 4)) {
+                GCValue gv = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), n);
+                if (JS_StrictEq(ctx, gv, new_target))
+                    return JS_ThrowTypeError(ctx, "Illegal constructor");
+            }
+        }
     }
 
     GCValue obj = JS_NewObjectClass(ctx, js_dom_node_class_id);

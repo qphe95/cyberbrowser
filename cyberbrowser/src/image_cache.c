@@ -97,6 +97,7 @@ typedef struct ImageEntry {
     size_t nbytes;
     ImageFormat fmt;
     unsigned char orient;               /* (its EXIF orientation, 1..8; 0 none) */
+    unsigned char p3;                   /* (a "p3:" entry: decoded to Display P3, for a display-p3 canvas) */
     char *acao;                         /* (its response's Access-Control-Allow-Origin, NULL none) */
     bool acac;                          /* (and Access-Control-Allow-Credentials: true) */
 
@@ -484,8 +485,19 @@ static ImagePixels *decode_svg(const uint8_t *d, size_t n, int nw, int nh, int w
     uint8_t *rgba = NULL;
     int ow = 0, oh = 0;
     /* An <img> has no color context: currentColor is black. */
-    if (iw <= 0 || ih <= 0 || !svg_render_rgba((const char *)d, n, iw, ih, 0x000000FFu, &rgba, &ow, &oh))
-        return NULL;
+    if (iw <= 0 || ih <= 0 || !svg_render_rgba((const char *)d, n, iw, ih, 0x000000FFu, &rgba, &ow, &oh)) {
+        /* (a viewBox with no area: nothing drawn, an image all the same) */
+        char head[2048];
+        size_t k = n < sizeof(head) - 1 ? n : sizeof(head) - 1;
+        memcpy(head, d, k);
+        head[k] = 0;
+        const char *vb = strstr(head, "viewBox=");
+        float a = 0, b = 0, c = 1, e = 1;
+        if (!vb || iw <= 0 || ih <= 0 || sscanf(vb + 9, "%f%*[ ,]%f%*[ ,]%f%*[ ,]%f", &a, &b, &c, &e) != 4 || (c > 0 && e > 0)) return NULL;
+        ImagePixels *px0 = pixels_new(iw, ih);
+        if (px0) memset(px0->data, 0, (size_t)iw * (size_t)ih * 4);
+        return px0;
+    }
     ImagePixels *px = (ImagePixels *)malloc(sizeof(ImagePixels));
     if (!px) { free(rgba); return NULL; }
     px->width = ow;
@@ -494,66 +506,201 @@ static ImagePixels *decode_svg(const uint8_t *d, size_t n, int nw, int nh, int w
     return px;
 }
 
-/* (a PNG's iCCP profile, when its red, green and blue primaries are sRGB's own in some other
- * order: which sRGB channel each of the image's goes to; false otherwise, the image left as sRGB) */
-static bool png_iccp_swap(const uint8_t *d, size_t n, int map[3])
+/* (an ICC profile's tone curve, one channel: an exponent, a table, or ICC parametric; Y from X in 0..1) */
+typedef struct { int kind; double p[7]; const uint8_t *tab; uint32_t n; } IccTrc;
+static double icc_trc_eval(const IccTrc *t, double x)
 {
-    if (n < 8 || memcmp(d, "\x89PNG\r\n\x1a\n", 8)) return false;
+    if (t->kind == 0) return x;
+    if (t->kind == 1) return pow(x, t->p[0]);
+    if (t->kind == 2) {   /* (a table: linear between entries) */
+        double fi = x * (t->n - 1);
+        uint32_t i = (uint32_t)fi;
+        if (i >= t->n - 1) return ((t->tab[(t->n - 1) * 2] << 8) | t->tab[(t->n - 1) * 2 + 1]) / 65535.0;
+        double v0 = ((t->tab[i * 2] << 8) | t->tab[i * 2 + 1]) / 65535.0, v1 = ((t->tab[i * 2 + 2] << 8) | t->tab[i * 2 + 3]) / 65535.0;
+        return v0 + (v1 - v0) * (fi - i);
+    }
+    const double *p = t->p;   /* (para: g a b c d e f) */
+    switch (t->kind - 10) {
+    case 0: return pow(x, p[0]);
+    case 1: return x >= -p[2] / p[1] ? pow(p[1] * x + p[2], p[0]) : 0;
+    case 2: return x >= -p[2] / p[1] ? pow(p[1] * x + p[2], p[0]) + p[3] : p[3];
+    case 3: return x >= p[4] ? pow(p[1] * x + p[2], p[0]) : p[3] * x;
+    default: return x >= p[4] ? pow(p[1] * x + p[2], p[0]) + p[5] : p[3] * x + p[6];
+    }
+}
+static uint32_t be32(const uint8_t *v) { return ((uint32_t)v[0] << 24) | ((uint32_t)v[1] << 16) | ((uint32_t)v[2] << 8) | v[3]; }
+static double s15f16(const uint8_t *v) { return (int32_t)be32(v) / 65536.0; }
+
+/* (an RGB matrix/TRC ICC profile, as a transform to sRGB: per-channel tone curves and the matrix from
+ * its linear light to sRGB's; false for a profile that is sRGB already, or one not of that kind) */
+/* (decoding for a display-p3 canvas: its pixels in Display P3, not sRGB; set around a "p3:" entry's decode) */
+static __thread int t_icc_p3;
+static __thread int t_icc_done;
+static bool icc_to_srgb(const uint8_t *u, size_t il, IccTrc trc[3], double M[3][3])
+{
+    if (il < 132 || memcmp(u + 16, "RGB ", 4)) return false;
+    uint32_t nt = be32(u + 128);
+    double col[3][3];
+    int got = 0;
+    for (uint32_t t = 0; t < nt && 132 + (size_t)t * 12 + 12 <= il; t++) {
+        const uint8_t *e = u + 132 + t * 12;
+        uint32_t off = be32(e + 4), sz = be32(e + 8);
+        if ((size_t)off + sz > il || sz < 12) continue;
+        const uint8_t *v = u + off;
+        int which = !memcmp(e, "rXYZ", 4) ? 0 : !memcmp(e, "gXYZ", 4) ? 1 : !memcmp(e, "bXYZ", 4) ? 2 : -1;
+        if (which >= 0 && sz >= 20 && !memcmp(v, "XYZ ", 4)) {
+            for (int c = 0; c < 3; c++) col[which][c] = s15f16(v + 8 + c * 4);
+            got |= 1 << which;
+            continue;
+        }
+        which = !memcmp(e, "rTRC", 4) ? 0 : !memcmp(e, "gTRC", 4) ? 1 : !memcmp(e, "bTRC", 4) ? 2 : -1;
+        if (which < 0) continue;
+        IccTrc *tr = &trc[which];
+        if (!memcmp(v, "curv", 4)) {
+            uint32_t cnt = be32(v + 8);
+            if (cnt == 0) tr->kind = 0;
+            else if (cnt == 1) { tr->kind = 1; tr->p[0] = ((v[12] << 8) | v[13]) / 256.0; }
+            else if (12 + (size_t)cnt * 2 <= sz) { tr->kind = 2; tr->tab = v + 12; tr->n = cnt; }
+            else continue;
+        } else if (!memcmp(v, "para", 4)) {
+            int ft = (v[8] << 8) | v[9];
+            static const int np[5] = { 1, 3, 4, 5, 7 };
+            if (ft > 4 || 12 + (size_t)np[ft] * 4 > sz) continue;
+            tr->kind = 10 + ft;
+            for (int k = 0; k < np[ft]; k++) tr->p[k] = s15f16(v + 12 + k * 4);
+        } else continue;
+        got |= 8 << which;
+    }
+    if (got != 63) return false;
+    /* (sRGB's primaries, D50 adapted, as an sRGB profile gives them: XYZ to sRGB linear their inverse; Display P3's for a p3 decode) */
+    static const double S_srgb[3][3] = { { 0.4360747, 0.3850649, 0.1430804 }, { 0.2225045, 0.7168786, 0.0606169 }, { 0.0139322, 0.0971045, 0.7141733 } };
+    static const double S_p3[3][3] = { { 0.5151187, 0.2919778, 0.1571035 }, { 0.2411892, 0.6922441, 0.0665668 }, { -0.0010505, 0.0418791, 0.7840713 } };
+    const double (*S)[3] = t_icc_p3 ? S_p3 : S_srgb;
+    double det = S[0][0] * (S[1][1] * S[2][2] - S[1][2] * S[2][1]) - S[0][1] * (S[1][0] * S[2][2] - S[1][2] * S[2][0]) + S[0][2] * (S[1][0] * S[2][1] - S[1][1] * S[2][0]);
+    double I[3][3] = {
+        { (S[1][1] * S[2][2] - S[1][2] * S[2][1]) / det, (S[0][2] * S[2][1] - S[0][1] * S[2][2]) / det, (S[0][1] * S[1][2] - S[0][2] * S[1][1]) / det },
+        { (S[1][2] * S[2][0] - S[1][0] * S[2][2]) / det, (S[0][0] * S[2][2] - S[0][2] * S[2][0]) / det, (S[0][2] * S[1][0] - S[0][0] * S[1][2]) / det },
+        { (S[1][0] * S[2][1] - S[1][1] * S[2][0]) / det, (S[0][1] * S[2][0] - S[0][0] * S[2][1]) / det, (S[0][0] * S[1][1] - S[0][1] * S[1][0]) / det } };
+    double dev = 0;
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++) {
+            M[i][j] = I[i][0] * col[j][0] + I[i][1] * col[j][1] + I[i][2] * col[j][2];
+            dev += fabs(M[i][j] - (i == j));
+        }
+    /* (an sRGB profile: its curves sRGB's within a little at a few points, and its matrix the identity) */
+    if (dev < 0.02) {
+        bool same = true;
+        for (int c = 0; c < 3 && same; c++)
+            for (int k = 1; k < 8 && same; k++) {
+                double x = k / 8.0, sr = x <= 0.04045 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4);
+                if (fabs(icc_trc_eval(&trc[c], x) - sr) > 0.004) same = false;
+            }
+        if (same) { t_icc_done = 1; return false; }   /* (already in the space asked for: nothing to do, and nothing more) */
+    }
+    return true;
+}
+
+/* (a PNG's iCCP profile, decompressed: NULL when it has none, or it is past its first IDAT) */
+static uint8_t *png_iccp(const uint8_t *d, size_t n, int *il)
+{
+    if (n < 8 || memcmp(d, "\x89PNG\r\n\x1a\n", 8)) return NULL;
     size_t p = 8;
     while (p + 12 <= n) {
-        uint32_t len = ((uint32_t)d[p] << 24) | ((uint32_t)d[p + 1] << 16) | ((uint32_t)d[p + 2] << 8) | d[p + 3];
+        uint32_t len = be32(d + p);
         const uint8_t *ty = d + p + 4, *cd = d + p + 8;
-        if (p + 12 + (size_t)len > n) return false;
-        if (!memcmp(ty, "IDAT", 4)) return false;
+        if (p + 12 + (size_t)len > n) return NULL;
+        if (!memcmp(ty, "IDAT", 4)) return NULL;
         if (!memcmp(ty, "iCCP", 4)) {
             size_t k = 0;
             while (k < len && k < 80 && cd[k]) k++;
-            if (k + 2 >= len || cd[k + 1] != 0) return false;   /* (name, nul, method 0: zlib) */
-            int il = 0;
-            char *icc = stbi_zlib_decode_malloc((const char *)cd + k + 2, (int)(len - k - 2), &il);
-            if (!icc) return false;
-            const uint8_t *u = (const uint8_t *)icc;
-            bool ok = false;
-            double col[3][3];
-            int got = 0;
-            if (il >= 132) {
-                uint32_t nt = ((uint32_t)u[128] << 24) | ((uint32_t)u[129] << 16) | ((uint32_t)u[130] << 8) | u[131];
-                for (uint32_t t = 0; t < nt && 132 + (size_t)t * 12 + 12 <= (size_t)il; t++) {
-                    const uint8_t *e = u + 132 + t * 12;
-                    int which = !memcmp(e, "rXYZ", 4) ? 0 : !memcmp(e, "gXYZ", 4) ? 1 : !memcmp(e, "bXYZ", 4) ? 2 : -1;
-                    if (which < 0) continue;
-                    uint32_t off = ((uint32_t)e[4] << 24) | ((uint32_t)e[5] << 16) | ((uint32_t)e[6] << 8) | e[7];
-                    if ((size_t)off + 20 > (size_t)il || memcmp(u + off, "XYZ ", 4)) continue;
-                    for (int c = 0; c < 3; c++) {
-                        const uint8_t *v = u + off + 8 + c * 4;
-                        int32_t fx = (int32_t)(((uint32_t)v[0] << 24) | ((uint32_t)v[1] << 16) | ((uint32_t)v[2] << 8) | v[3]);
-                        col[which][c] = fx / 65536.0;
-                    }
-                    got |= 1 << which;
-                }
-            }
-            if (got == 7) {
-                /* (sRGB's primaries, D50 adapted, as an sRGB profile gives them) */
-                static const double srgb[3][3] = { { 0.4361, 0.2225, 0.0139 }, { 0.3851, 0.7169, 0.0971 }, { 0.1431, 0.0606, 0.7141 } };
-                int used = 0;
-                ok = true;
-                for (int i = 0; i < 3 && ok; i++) {
-                    int m = -1;
-                    for (int j = 0; j < 3; j++) {
-                        double dd = fabs(col[i][0] - srgb[j][0]) + fabs(col[i][1] - srgb[j][1]) + fabs(col[i][2] - srgb[j][2]);
-                        if (dd < 0.03) m = j;
-                    }
-                    if (m < 0 || (used >> m & 1)) ok = false;
-                    else { map[i] = m; used |= 1 << m; }
-                }
-                if (ok && map[0] == 0 && map[1] == 1 && map[2] == 2) ok = false;   /* (sRGB itself: nothing to do) */
-            }
-            free(icc);
-            return ok;
+            if (k + 2 >= len || cd[k + 1] != 0) return NULL;   /* (name, nul, method 0: zlib) */
+            return (uint8_t *)stbi_zlib_decode_malloc((const char *)cd + k + 2, (int)(len - k - 2), il);
         }
         p += 12 + (size_t)len;
     }
-    return false;
+    return NULL;
+}
+
+/* (a JPEG's APP2 ICC_PROFILE, one chunk only: a copy; NULL else) */
+static uint8_t *jpeg_icc(const uint8_t *d, size_t n, int *il)
+{
+    if (n < 4 || d[0] != 0xFF || d[1] != 0xD8) return NULL;
+    size_t p = 2;
+    while (p + 4 <= n && d[p] == 0xFF) {
+        uint8_t m = d[p + 1];
+        if (m == 0xDA || m == 0xD9) break;
+        size_t len = ((size_t)d[p + 2] << 8) | d[p + 3];
+        if (p + 2 + len > n) break;
+        if (m == 0xE2 && len > 16 && !memcmp(d + p + 4, "ICC_PROFILE\0", 12) && d[p + 17] == 1) {
+            uint8_t *c = (uint8_t *)malloc(len - 16);
+            if (!c) return NULL;
+            memcpy(c, d + p + 18, len - 16);
+            *il = (int)(len - 16);
+            return c;
+        }
+        p += 2 + len;
+    }
+    return NULL;
+}
+
+/* (decoded pixels in an embedded profile's space, to sRGB: through its curves and matrix, clipped) */
+static void icc_convert(const uint8_t *d, size_t n, uint8_t *px, size_t count)
+{
+    int il = 0;
+    uint8_t *icc = png_iccp(d, n, &il);
+    if (!icc) icc = jpeg_icc(d, n, &il);
+    if (!icc) return;
+    IccTrc trc[3];
+    double M[3][3];
+    memset(trc, 0, sizeof trc);
+    if (icc_to_srgb(icc, (size_t)il, trc, M)) {
+        t_icc_done = 1;
+        static uint8_t enc[4097];
+        static bool enc_ok = false;
+        if (!enc_ok) {
+            for (int k = 0; k <= 4096; k++) {
+                double x = k / 4096.0, e = x <= 0.0031308 ? x * 12.92 : 1.055 * pow(x, 1 / 2.4) - 0.055;
+                enc[k] = (uint8_t)lround(e * 255);
+            }
+            enc_ok = true;
+        }
+        double lin[3][256];
+        for (int c = 0; c < 3; c++)
+            for (int k = 0; k < 256; k++) lin[c][k] = icc_trc_eval(&trc[c], k / 255.0);
+        for (size_t q = 0; q < count; q++) {
+            uint8_t *pp = px + q * 4;
+            double r = lin[0][pp[0]], g = lin[1][pp[1]], b = lin[2][pp[2]];
+            for (int i = 0; i < 3; i++) {
+                double v = M[i][0] * r + M[i][1] * g + M[i][2] * b;
+                v = v < 0 ? 0 : v > 1 ? 1 : v;
+                pp[i] = enc[(int)lround(v * 4096)];
+            }
+        }
+    }
+    free(icc);
+}
+
+/* (sRGB pixels in Display P3: through linear light, the D65 matrix; the same transfer curve) */
+static void srgb_to_p3(uint8_t *px, size_t count)
+{
+    static double dec[256];
+    static uint8_t enc[4097];
+    static bool ok = false;
+    if (!ok) {
+        for (int k = 0; k < 256; k++) { double x = k / 255.0; dec[k] = x <= 0.04045 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4); }
+        for (int k = 0; k <= 4096; k++) { double x = k / 4096.0, e = x <= 0.0031308 ? x * 12.92 : 1.055 * pow(x, 1 / 2.4) - 0.055; enc[k] = (uint8_t)lround(e * 255); }
+        ok = true;
+    }
+    static const double M[3][3] = { { 0.8224621, 0.1775380, 0.0 }, { 0.0331941, 0.9668058, 0.0 }, { 0.0170827, 0.0723974, 0.9105199 } };
+    for (size_t q = 0; q < count; q++) {
+        uint8_t *p = px + q * 4;
+        double r = dec[p[0]], g = dec[p[1]], b = dec[p[2]];
+        for (int i = 0; i < 3; i++) {
+            double v = M[i][0] * r + M[i][1] * g + M[i][2] * b;
+            v = v < 0 ? 0 : v > 1 ? 1 : v;
+            p[i] = enc[(int)lround(v * 4096)];
+        }
+    }
 }
 
 static ImagePixels *decode_stb(const uint8_t *d, size_t n)
@@ -561,14 +708,7 @@ static ImagePixels *decode_stb(const uint8_t *d, size_t n)
     int w = 0, h = 0, ch = 0;
     uint8_t *data = stbi_load_from_memory(d, (int)n, &w, &h, &ch, 4);
     if (!data) return NULL;
-    {
-        int map[3];
-        if (png_iccp_swap(d, n, map))
-            for (size_t q = 0; q < (size_t)w * (size_t)h; q++) {
-                uint8_t *pp = data + q * 4, o[3] = { pp[0], pp[1], pp[2] };
-                for (int c = 0; c < 3; c++) pp[map[c]] = o[c];
-            }
-    }
+    icc_convert(d, n, data, (size_t)w * (size_t)h);
     ImagePixels *px = (ImagePixels *)malloc(sizeof(ImagePixels));
     if (!px) { stbi_image_free(data); return NULL; }
     px->width = w;
@@ -670,7 +810,16 @@ static ImagePixels *decode_bytes(ImageEntry *e, int ww, int wh)
                                    atomic_load(&e->nat_h), ww, wh, atomic_load(&e->dims)); break;
     default: break;
     }
-    if (!px && e->fmt != FMT_SVG && e->fmt != FMT_WEBP) px = decode_stb(e->bytes, e->nbytes);
+    t_icc_p3 = e->p3;
+    t_icc_done = 0;
+    bool via_stb = false;
+    if (!px && e->fmt != FMT_SVG && e->fmt != FMT_WEBP) { px = decode_stb(e->bytes, e->nbytes); via_stb = px != NULL; }
+    /* (a p3 decode: the profile's colors in P3, else sRGB's; the other decoders' pixels get the profile here) */
+    if (px && e->p3 && !t_icc_done) {
+        if (!via_stb) icc_convert(e->bytes, e->nbytes, px->data, (size_t)px->width * (size_t)px->height);
+        if (!t_icc_done) srgb_to_p3(px->data, (size_t)px->width * (size_t)px->height);
+    }
+    t_icc_p3 = 0;
     if (px && e->orient > 1) px = pixels_orient(px, e->orient);
     return px;
 }
@@ -817,14 +966,16 @@ static ImagePixels *pixels_filter(ImagePixels *px, const char *source, int tw, i
 
 /* (blob: URLs' bytes, registered by URL.createObjectURL) */
 typedef struct { char *url; uint8_t *bytes; size_t n; } BlobBytes;
-static BlobBytes g_blobs[64];
-static int g_nblobs;
+#define BLOB_SLOTS 1024
+static BlobBytes g_blobs[BLOB_SLOTS];
+static int g_nblobs, g_blob_next;
 static pthread_mutex_t g_blob_mu = PTHREAD_MUTEX_INITIALIZER;
 void image_cache_blob_register(const char *url, const uint8_t *bytes, size_t n)
 {
     if (!url || !bytes) return;
     pthread_mutex_lock(&g_blob_mu);
-    BlobBytes *b = &g_blobs[g_nblobs < 64 ? g_nblobs++ : (int)(n % 64)];
+    /* (full: the oldest goes) */
+    BlobBytes *b = &g_blobs[g_nblobs < BLOB_SLOTS ? g_nblobs++ : (g_blob_next++ % BLOB_SLOTS)];
     free(b->url); free(b->bytes);
     b->url = strdup(url);
     b->bytes = (uint8_t *)malloc(n ? n : 1);
@@ -845,11 +996,18 @@ static bool blob_fetch(const char *url, uint8_t **out, size_t *n)
     return ok;
 }
 
+/* (a blob: URL's bytes, for a frame to load: malloc'd) */
+bool image_cache_blob_bytes(const char *url, uint8_t **out, size_t *n)
+{
+    return blob_fetch(url, out, n);
+}
+
 static bool fetch_entry(ImageEntry *e)
 {
     const char *src = e->source;
     if (!strncmp(src, "cbfilter:", 9)) { const char *bar = strchr(src, '|'); if (bar) src = bar + 1; }
     if (!strncmp(src, "noexif:", 7)) src += 7;   /* (image-orientation: none: the same bytes, unturned) */
+    if (!strncmp(src, "p3:", 3)) { src += 3; e->p3 = 1; }   /* (for a display-p3 canvas: the same bytes, decoded to P3) */
     if (url_is_data_url(src)) {
         e->bytes = data_url_decode(src, &e->nbytes);
         return e->bytes != NULL;

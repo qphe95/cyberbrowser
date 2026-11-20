@@ -31,10 +31,20 @@
     internal.send_keys = async function (element, keys) {
         const w = element.ownerDocument.defaultView || window;
         if (element.ownerDocument.activeElement !== element) element.focus();
+        /* (WebDriver: a modifier stays down to the end, or to the null key; the rest pressed and let go) */
+        const MODS = { '\uE008': 1, '\uE009': 1, '\uE00A': 1, '\uE03D': 1, '\uE050': 1, '\uE051': 1, '\uE052': 1, '\uE053': 1 };
+        const held = [];
+        const release = () => { while (held.length) w.__cyberInput.keyUp(held.pop(), element); };
         for (const ch of keys) {
+            if (ch === '\uE000') { release(); continue; }
+            if (MODS[ch]) {
+                if (held.indexOf(ch) < 0) { held.push(ch); w.__cyberInput.keyDown(ch, element); }
+                continue;
+            }
             w.__cyberInput.keyDown(ch, element);
             w.__cyberInput.keyUp(ch, element);
         }
+        release();
         await frame(w);
     };
 

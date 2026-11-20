@@ -5,6 +5,7 @@
 #include <ctype.h>
 #include <stdint.h>
 #include <stdarg.h>
+#include "css_charset.h"
 #include "html_media_extract.h"
 #include "dom_fetch.h"
 #include "html_dom.h"
@@ -20,6 +21,7 @@
 #include "url_whatwg.h"
 #include "import_map.h"
 #include "page_engine.h"
+extern void dom_doc_set(JSContextHandle ctx, GCValue doc, const char *k, GCValue v);
 
 extern const char *g_cyber_start_url;
 
@@ -1180,20 +1182,44 @@ static bool resolve_parser_script_url(const char *raw, char *url, size_t cap) {
     return true;
 }
 
-/* Whether a <script type> is run: none or empty, or the JavaScript types and
- * module, as extract_scripts_in_order decides. */
+/* What a script element's type and language attributes make it (HTML "prepare the script element"):
+ * 0 nothing run, 1 a classic script, 2 a module.  The type: no attribute and no language, or empty,
+ * classic; else trimmed of ASCII white space, a JavaScript MIME type essence (exactly, any case) is
+ * classic and "module" a module.  No type but a language: "text/" + the language. */
+int html_script_type_kind(const char *type, const char *lang) {
+    char buf[96];
+    bool from_lang = false;
+    if (!type) {
+        if (!lang || !lang[0]) return 1;
+        snprintf(buf, sizeof buf, "text/%s", lang);
+        type = buf;
+        from_lang = true;
+    } else if (!type[0]) return 1;
+    const char *b = type, *e = type + strlen(type);
+    /* (the type attribute's value stripped of white space; one made from the language, as it is) */
+    while (!from_lang && b < e && (*b == ' ' || *b == '\t' || *b == '\n' || *b == '\f' || *b == '\r')) b++;
+    while (!from_lang && e > b && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n' || e[-1] == '\f' || e[-1] == '\r')) e--;
+    size_t n = (size_t)(e - b);
+    if (n == 6 && !strncasecmp(b, "module", 6)) return 2;
+    static const char *const js[] = { "application/ecmascript", "application/javascript", "application/x-ecmascript",
+        "application/x-javascript", "text/ecmascript", "text/javascript", "text/javascript1.0", "text/javascript1.1",
+        "text/javascript1.2", "text/javascript1.3", "text/javascript1.4", "text/javascript1.5", "text/jscript",
+        "text/livescript", "text/x-ecmascript", "text/x-javascript" };
+    for (size_t i = 0; i < sizeof js / sizeof js[0]; i++)
+        if (strlen(js[i]) == n && !strncasecmp(b, js[i], n) && memchr(b, 0, n) == NULL) return 1;
+    return 0;
+}
+
+/* Whether a <script type> is run: a classic script or a module. */
 static bool parser_script_type_runs(const char *type) {
-    if (!type || !type[0]) return true;
-    return strncasecmp(type, "text/javascript", 15) == 0 ||
-           strncasecmp(type, "application/javascript", 22) == 0 ||
-           strncasecmp(type, "module", 6) == 0;
+    return html_script_type_kind(type, NULL) != 0;
 }
 
 /* Load a parser-inserted script's source as html_execute_page_scripts does
  * (fetch with the checks and patches, or the inline text with the player
  * bootstrap patch).  Returns malloc'd source, or NULL when it does not run. */
 static char *load_parser_script(NodeId node, size_t *out_len) {
-    if (!parser_script_type_runs(dom_get_attr_str(node, "type"))) return NULL;
+    if (!html_script_type_kind(dom_get_attr_str(node, "type"), dom_ns(node) == DOM_NS_HTML ? dom_get_attr_str(node, "language") : NULL)) return NULL;
     const char *src = dom_get_attr_str(node, "src");
     if (src && src[0] && strlen(src) < SCRIPT_URL_MAX_LEN) {
         char url[SCRIPT_URL_MAX_LEN];
@@ -1267,14 +1293,30 @@ enum { PS_SKIP, PS_BLOCKING, PS_ASYNC, PS_DEFER };
 
 static void register_import_map(NodeId node);
 
+/* (a classic script with for and event attributes: run only for="window" event="onload" / "onload()", HTML 4.12.1.1 prepare step 18) */
+static bool script_for_event_skips(NodeId n) {
+    const char *fo = dom_get_attr_str(n, "for"), *ev = dom_get_attr_str(n, "event");
+    if (!fo || !ev) return false;
+    const char *a = fo, *b = ev;
+    while (*a == ' ' || *a == '\t' || *a == '\n' || *a == '\f' || *a == '\r') a++;
+    while (*b == ' ' || *b == '\t' || *b == '\n' || *b == '\f' || *b == '\r') b++;
+    size_t la = strlen(a), lb = strlen(b);
+    while (la && (a[la - 1] == ' ' || a[la - 1] == '\t' || a[la - 1] == '\n' || a[la - 1] == '\f' || a[la - 1] == '\r')) la--;
+    while (lb && (b[lb - 1] == ' ' || b[lb - 1] == '\t' || b[lb - 1] == '\n' || b[lb - 1] == '\f' || b[lb - 1] == '\r')) lb--;
+    if (!(la == 6 && !strncasecmp(a, "window", 6))) return true;
+    if (!((lb == 6 && !strncasecmp(b, "onload", 6)) || (lb == 8 && !strncasecmp(b, "onload()", 8)))) return true;
+    return false;
+}
+
 static int classify_parser_script(NodeId node, char *url, size_t cap) {
     url[0] = '\0';
     const char *type = dom_get_attr_str(node, "type");
     if (type && strcasecmp(type, "importmap") == 0) { register_import_map(node); return PS_SKIP; }
     if (!parser_script_type_runs(type)) return PS_SKIP;
-    bool module = type && strncasecmp(type, "module", 6) == 0;
+    bool module = html_script_type_kind(type, NULL) == 2;
     /* nomodule: for browsers without modules */
     if (!module && dom_get_attr_str(node, "nomodule")) return PS_SKIP;
+    if (!module && script_for_event_skips(node)) return PS_SKIP;
     const char *src = dom_get_attr_str(node, "src");
     bool external = src && src[0];
     if (external && (strlen(src) >= cap || !resolve_parser_script_url(src, url, cap))) return PS_SKIP;
@@ -1300,6 +1342,7 @@ struct HtmlPageStream {
     bool doc_ended;             /* parsing is over (deferred scripts may run) */
     bool script_created;        /* opened by document.open(): writes append */
     int run, ok;                /* scripts run, and run without an exception */
+    size_t src_cursor;          /* (where the last inline script's text was found in the source: the next is looked for after it) */
     bool frame;                 /* a frame's page */
     bool normalized;
     int blocking_depth;         /* parser-blocking scripts on the stack */
@@ -1311,6 +1354,14 @@ struct HtmlPageStream {
     char xml_mime[64];
     char *xml_buf;
     size_t xml_len, xml_cap;
+    /* (bytes from the network: their encoding sniffed from the first 1024, HTML 13.2.3, and decoded to UTF-8) */
+    bool bytes;
+    bool enc_done;
+    char enc[32], hdr_label[64], inherit[32];
+    char *sniff;
+    size_t sniff_n, sniff_cap;
+    char held[4];
+    size_t held_n;
 };
 
 /* The page being parsed, which document.write writes into. */
@@ -1364,7 +1415,7 @@ static void run_script(HtmlPageStream *ps, GCValue script, bool nonblocking_exte
      * its imports resolve against; currentScript is null while it runs. */
     NodeId node = dom_node_of(script);
     const char *type = dom_get_attr_str(node, "type");
-    bool module = type && strncasecmp(type, "module", 6) == 0;
+    bool module = html_script_type_kind(type, NULL) == 2;
     char module_url[SCRIPT_URL_MAX_LEN];
     if (module) {
         const char *s = dom_get_attr_str(node, "src");
@@ -1372,12 +1423,41 @@ static void run_script(HtmlPageStream *ps, GCValue script, bool nonblocking_exte
             snprintf(module_url, sizeof(module_url), "%s", page_base_url() ? page_base_url() : "<inline module>");
     }
     GCValue doc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document");
-    JS_SetPropertyStr(ctx, doc, "currentScript", module ? JS_NULL : script);
+    dom_doc_set(ctx, doc, "currentScript", module ? JS_NULL : script);
+    /* (its errors' file and line: the script's URL, or the document's and the line its text starts on; dom_events.js reportError) */
+    if (!module) {
+        char key[32], surl[SCRIPT_URL_MAX_LEN];
+        snprintf(key, sizeof key, "<script_%d>", ps->run);
+        const char *ssrc = dom_get_attr_str(node, "src"), *fu = NULL;
+        int off = 0;
+        if (ssrc && ssrc[0] && resolve_parser_script_url(ssrc, surl, sizeof surl)) fu = surl;
+        else {
+            extern const char *g_cyber_start_url;
+            fu = ps->base_url[0] ? ps->base_url : (g_cyber_start_url ? g_cyber_start_url : "");
+            size_t dl = 0;
+            const char *ds = ps->doc ? html_doc_stream_source(ps->doc, &dl) : NULL;
+            size_t nl = len < 64 ? len : 64;
+            if (ds && nl > 0 && ps->src_cursor <= dl) {
+                for (size_t p = ps->src_cursor; p + nl <= dl; p++) {
+                    if (ds[p] != src[0] || memcmp(ds + p, src, nl)) continue;
+                    for (size_t q = 0; q < p; q++) if (ds[q] == '\n') off++;
+                    ps->src_cursor = p + nl;
+                    break;
+                }
+            }
+        }
+        GCValue g = JS_GetGlobalObject(ctx), map = JS_GetPropertyStr(ctx, g, "__cyberScriptMap");
+        if (!JS_IsObject(map)) { map = JS_NewObject(ctx); JS_DefinePropertyValueStr(ctx, g, "__cyberScriptMap", map, JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE); }
+        GCValue ent = JS_NewArray(ctx);
+        JS_SetPropertyUint32(ctx, ent, 0, JS_NewString(ctx, fu));
+        JS_SetPropertyUint32(ctx, ent, 1, JS_NewInt32(ctx, off));
+        JS_SetPropertyStr(ctx, map, key, ent);
+    }
     if (nonblocking_external) ps->nonblocking_external++;
     if (js_quickjs_exec_script(ctx, src, len, ps->run, 0, ps->blocking_depth <= 1, module ? module_url : NULL)) ps->ok++;
     if (nonblocking_external) ps->nonblocking_external--;
     ps->run++;
-    JS_SetPropertyStr(ctx, doc, "currentScript", JS_NULL);
+    dom_doc_set(ctx, doc, "currentScript", JS_NULL);
     free(src);
     if (!ps->frame) page_rendering_opportunity();      /* (a task boundary) */
 }
@@ -1413,6 +1493,12 @@ static void dispatch_parser_script(HtmlPageStream *ps, GCValue script) {
     /* (what ran before it finishes first: HTML "prepare the script element"
      * performs a checkpoint when the stack is empty) */
     timer_microtask_checkpoint(ps->ctx);
+    /* (what the parser built so far, settled for the script: the selects' <selectedcontent>s, form_controls.js) */
+    {
+        GCValue g_ = JS_GetGlobalObject(ps->ctx);
+        GCValue fn_ = JS_GetPropertyStr(ps->ctx, g_, "__cyberBeforeParserScript");
+        if (JS_IsFunction(ps->ctx, fn_)) { GCValue r_ = JS_Call(ps->ctx, fn_, g_, 0, NULL); if (JS_IsException(r_)) JS_GetException(ps->ctx); }
+    }
     /* (an empty script with no src has not started: text given it later
      * runs, HTML "prepare the script element") */
     NodeId sn = dom_node_of(script);
@@ -1546,7 +1632,7 @@ static GCValue js_document_close(JSContextHandle ctx, GCValue this_val, int argc
         HtmlPageStream *ps = g_opened;
         g_opened = NULL;
         html_page_stream_finish(ps, NULL);
-        JS_SetPropertyStr(ctx, this_val, "readyState", JS_NewString(ctx, "complete"));
+        dom_doc_set(ctx, this_val, "readyState", JS_NewString(ctx, "complete"));
     }
     return JS_UNDEFINED;
 }
@@ -1562,10 +1648,12 @@ extern void mo_notify_child_list(JSContextHandle ctx, GCValue target, GCValue ad
  * it, its previous content gone at the first write, its scripts not run. */
 static struct { NodeId doc; DomStream *st; } g_doc_write;
 
+extern void html_doc_imply_roots(NodeId doc);
 static void doc_write_end(void) {
     if (!g_doc_write.st) return;
     dom_stream_pump(g_doc_write.st, true);
     dom_stream_end(g_doc_write.st);
+    html_doc_imply_roots(g_doc_write.doc);
     g_doc_write.st = NULL;
     g_doc_write.doc = DOM_NULL;
 }
@@ -1603,6 +1691,11 @@ static GCValue js_document_proto_open(JSContextHandle ctx, GCValue this_val, int
     if (!d || dom_kind(d) != DOM_K_DOCUMENT) return this_val;
     if (dom_flags(d) & DOMF_XML_DOCUMENT)
         return throw_dom_exception(ctx, "InvalidStateError", "Only HTML documents support open().");
+    /* (its listeners go: document, elements, window, HTML 8.4.x document open steps) */
+    {
+        GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberDocOpenClear");
+        if (JS_IsFunction(ctx, fn) && JS_IsException(JS_Call(ctx, fn, JS_UNDEFINED, 1, &this_val))) JS_GetException(ctx);
+    }
     /* (its content goes now, and a parser is open until close) */
     doc_write_end();
     for (NodeId c = dom_first_child(d); c; c = dom_first_child(d)) dom_detach(c, false);
@@ -1682,8 +1775,79 @@ void html_page_stream_set_xml(HtmlPageStream *ps, const char *mime) {
     snprintf(ps->xml_mime, sizeof(ps->xml_mime), "%s", mime);
 }
 
+/* The page's bytes come from the network: their encoding is the transport's (header_label, its Content-Type charset),
+ * a BOM's, a meta's or an XML declaration's, else inherit's (a same-origin parent's), else UTF-8. */
+void html_page_stream_set_bytes(HtmlPageStream *ps, const char *header_label, const char *inherit) {
+    if (!ps) return;
+    ps->bytes = true;
+    snprintf(ps->hdr_label, sizeof ps->hdr_label, "%s", header_label ? header_label : "");
+    snprintf(ps->inherit, sizeof ps->inherit, "%s", inherit ? inherit : "");
+}
+
+static void page_stream_feed_utf8(HtmlPageStream *ps, const char *data, size_t len) {
+    if (!len) return;
+    html_doc_stream_append(ps->doc, data, len);
+    page_stream_run(ps, false);
+}
+
+/* (the bytes decoded: the encoding settled at the first 1024, or at the end) */
+static void page_stream_bytes(HtmlPageStream *ps, const char *data, size_t len, bool last) {
+    if (!ps->enc_done) {
+        if (len) {
+            if (ps->sniff_n + len > ps->sniff_cap) {
+                size_t cap = ps->sniff_cap ? ps->sniff_cap : 2048;
+                while (cap < ps->sniff_n + len) cap *= 2;
+                char *b = (char *)realloc(ps->sniff, cap);
+                if (!b) return;
+                ps->sniff = b;
+                ps->sniff_cap = cap;
+            }
+            memcpy(ps->sniff + ps->sniff_n, data, len);
+            ps->sniff_n += len;
+        }
+        if (ps->sniff_n < 1024 && !last) return;
+        size_t bom = 0;
+        bool more = false;
+        /* (a head longer than this: settled without the rest) */
+        bool fin = last || ps->sniff_n >= 65536;
+        const char *enc = html_sniff_encoding(ps->sniff ? ps->sniff : "", ps->sniff_n, ps->hdr_label, ps->inherit, &bom, fin, &more);
+        if (more || !enc) return;
+        snprintf(ps->enc, sizeof ps->enc, "%s", enc);
+        ps->enc_done = true;
+        /* (the document's: characterSet) */
+        GCValue doc = JS_GetPropertyStr(ps->ctx, JS_GetGlobalObject(ps->ctx), "document");
+        if (JS_IsObject(doc)) JS_DefinePropertyValueStr(ps->ctx, doc, "__cyber_charset", JS_NewString(ps->ctx, ps->enc), JS_PROP_CONFIGURABLE);
+        char *buf = ps->sniff;
+        size_t n = ps->sniff_n;
+        ps->sniff = NULL;
+        ps->sniff_n = ps->sniff_cap = 0;
+        page_stream_bytes(ps, buf ? buf + bom : "", n > bom ? n - bom : 0, last);
+        free(buf);
+        return;
+    }
+    if (!charset_decodable(ps->enc)) { page_stream_feed_utf8(ps, data, len); return; }
+    char *in = (char *)data;
+    size_t n = len;
+    bool own = false;
+    if (ps->held_n) {
+        in = (char *)malloc(ps->held_n + len + 1);
+        if (!in) return;
+        memcpy(in, ps->held, ps->held_n);
+        if (len) memcpy(in + ps->held_n, data, len);
+        n = ps->held_n + len;
+        ps->held_n = 0;
+        own = true;
+    }
+    size_t out_n = 0, keep = 0;
+    char *out = charset_decode_chunk(ps->enc, in, n, last, &out_n, &keep);
+    if (keep && keep <= sizeof ps->held) { memcpy(ps->held, in + n - keep, keep); ps->held_n = keep; }
+    if (own) free(in);
+    if (out) { page_stream_feed_utf8(ps, out, out_n); free(out); }
+}
+
 void html_page_stream_feed(HtmlPageStream *ps, const char *data, size_t len) {
     if (!ps || !len || ps->doc_ended) return;
+    if (ps->bytes && !ps->xml) { page_stream_bytes(ps, data, len, false); return; }
     /* (a UTF-8 byte order mark first: the encoding's, not the document's text) */
     if (!ps->fed && len >= 3 && (unsigned char)data[0] == 0xEF && (unsigned char)data[1] == 0xBB && (unsigned char)data[2] == 0xBF) { data += 3; len -= 3; }
     ps->fed = true;
@@ -1709,6 +1873,10 @@ void html_page_stream_feed(HtmlPageStream *ps, const char *data, size_t len) {
 bool html_page_stream_finish(HtmlPageStream *ps, JsExecResult *out_result) {
     if (!ps) return false;
     JSContextHandle ctx = ps->ctx;
+    /* (bytes waiting for their encoding, or half a character: in now) */
+    if (ps->bytes && !ps->xml && !ps->doc_ended && (!ps->enc_done || ps->held_n)) page_stream_bytes(ps, "", 0, true);
+    free(ps->sniff);
+    ps->sniff = NULL;
     if (ps->xml) {
         /* (the whole document is parsed first; then from its first script on,
          * the nodes go in one at a time as the XML parser would have put them,
@@ -1767,7 +1935,7 @@ bool html_page_stream_finish(HtmlPageStream *ps, JsExecResult *out_result) {
     /* Parsing is over: "interactive", then the deferred scripts in order and
      * the async ones still downloading, before DOMContentLoaded. */
     GCValue doc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document");
-    JS_SetPropertyStr(ctx, doc, "readyState", JS_NewString(ctx, "interactive"));
+    dom_doc_set(ctx, doc, "readyState", JS_NewString(ctx, "interactive"));
     while (ps->defer.head) {
         QueuedScript *e = ps->defer.head;
         ps->defer.head = e->next;

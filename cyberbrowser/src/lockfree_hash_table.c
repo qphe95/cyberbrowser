@@ -17,6 +17,12 @@ static inline uint32_t round_up_power_of_two(uint32_t v) {
     return v < 16 ? 16 : v;
 }
 
+/* (the bucket a hash starts at: its bits mixed, Fibonacci hashing, the top ones taken; the hashes put in
+ * (QuickJS shapes: (h + handle) * 0x9e370001) have sequential low bits, which linear probing clusters on) */
+static inline uint32_t lf_index(const LFHashTable *t, uint32_t hash) {
+    return t->bucket_bits ? (uint32_t)(hash * 0x9E3779B1u) >> (32 - t->bucket_bits) : 0;
+}
+
 LFHashTable *lf_hash_create(uint32_t bucket_count) {
     bucket_count = round_up_power_of_two(bucket_count);
     size_t alloc_size = sizeof(LFHashTable) + (bucket_count - 1) * sizeof(LFHashBucket);
@@ -36,7 +42,7 @@ void lf_hash_destroy(LFHashTable *t) {
 bool lf_hash_insert(LFHashTable *t, uint32_t hash, GCHandle key, GCHandle value) {
     if (!t) return false;
     uint32_t mask = t->bucket_count - 1;
-    uint32_t idx = hash & mask;
+    uint32_t idx = lf_index(t, hash);
 
     for (uint32_t probe = 0; probe < t->bucket_count; probe++) {
         LFHashBucket *b = &t->buckets[idx];
@@ -69,7 +75,7 @@ bool lf_hash_insert(LFHashTable *t, uint32_t hash, GCHandle key, GCHandle value)
 GCHandle lf_hash_lookup(LFHashTable *t, uint32_t hash, GCHandle key) {
     if (!t) return GC_HANDLE_NULL;
     uint32_t mask = t->bucket_count - 1;
-    uint32_t idx = hash & mask;
+    uint32_t idx = lf_index(t, hash);
 
     for (uint32_t probe = 0; probe < t->bucket_count; probe++) {
         LFHashBucket *b = &t->buckets[idx];
@@ -92,7 +98,7 @@ GCHandle lf_hash_lookup_ex(LFHashTable *t, uint32_t hash, void *lookup_key,
                            LFHashEqFunc eq, void *user_data) {
     if (!t || !eq) return GC_HANDLE_NULL;
     uint32_t mask = t->bucket_count - 1;
-    uint32_t idx = hash & mask;
+    uint32_t idx = lf_index(t, hash);
 
     for (uint32_t probe = 0; probe < t->bucket_count; probe++) {
         LFHashBucket *b = &t->buckets[idx];
@@ -115,7 +121,7 @@ GCHandle lf_hash_lookup_ex(LFHashTable *t, uint32_t hash, void *lookup_key,
 bool lf_hash_remove(LFHashTable *t, uint32_t hash, GCHandle key) {
     if (!t) return false;
     uint32_t mask = t->bucket_count - 1;
-    uint32_t idx = hash & mask;
+    uint32_t idx = lf_index(t, hash);
 
     for (uint32_t probe = 0; probe < t->bucket_count; probe++) {
         LFHashBucket *b = &t->buckets[idx];
@@ -139,7 +145,7 @@ bool lf_hash_remove_ex(LFHashTable *t, uint32_t hash, void *lookup_key,
                        LFHashEqFunc eq, void *user_data) {
     if (!t || !eq) return false;
     uint32_t mask = t->bucket_count - 1;
-    uint32_t idx = hash & mask;
+    uint32_t idx = lf_index(t, hash);
 
     for (uint32_t probe = 0; probe < t->bucket_count; probe++) {
         LFHashBucket *b = &t->buckets[idx];
@@ -165,8 +171,8 @@ bool lf_hash_resize(LFHashTable **pt, uint32_t new_bucket_count) {
     LFHashTable *old_t = (LFHashTable *)atomic_load_ptr((void *volatile *)pt);
     if (!old_t) return false;
 
+    /* (a rebuild may keep the size: what it clears is the tombstones) */
     new_bucket_count = round_up_power_of_two(new_bucket_count);
-    if (new_bucket_count <= old_t->bucket_count) new_bucket_count = old_t->bucket_count * 2;
 
     LFHashTable *new_t = lf_hash_create(new_bucket_count);
     if (!new_t) return false;

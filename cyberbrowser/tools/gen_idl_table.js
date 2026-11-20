@@ -19,8 +19,8 @@ if (!wpt) { console.error('usage: gen_idl_table.js <wpt dir>'); process.exit(1);
 const WebIDL2 = require(path.join(path.resolve(wpt), 'resources/webidl2/lib/webidl2.js'));
 const SPECS = ['css-fonts-5', 'dom', 'fullscreen', 'cssom', 'cssom-view', 'css-typed-om', 'geometry', 'css-conditional', 'css-conditional-5', 'css-fonts',
                'css-font-loading', 'css-anchor-position', 'css-animations', 'css-transitions', 'css-counter-styles', 'css-nesting', 'css-highlight-api',
-               'css-properties-values-api', 'css-mixins', 'web-animations', 'css-masking', 'css-pseudo', 'css-parser-api'];
-const ast = SPECS.flatMap(s => WebIDL2.parse(fs.readFileSync(path.join(wpt, 'interfaces', s + '.idl'), 'utf8')));
+               'css-properties-values-api', 'css-mixins', 'web-animations', 'css-masking', 'css-pseudo', 'css-parser-api', 'html'];
+const ast = SPECS.flatMap(s => WebIDL2.parse(fs.readFileSync(path.join(wpt, 'interfaces', s + '.idl'), 'utf8')).map(d => (d.__spec = s, d)));
 
 const ifaces = new Map(), mixins = new Map(), includes = [];
 function bucket(map, name) {
@@ -38,17 +38,22 @@ for (const d of ast) {
             const v = !ex || !ex.rhs ? [] : ex.rhs.type === '*' ? ['*'] :
                       Array.isArray(ex.rhs.value) ? ex.rhs.value.map(x => x.value) : [ex.rhs.value];
             b.workers = v.some(x => x === '*' || /Worker/.test(x));
+            b.html = d.__spec === 'html';
         }
         b.members.push(...d.members);
+        if (d.__spec === 'html') b.htmlpart = true;
     } else if (d.type === 'interface mixin') {
-        bucket(mixins, d.name).members.push(...d.members);
+        const mb = bucket(mixins, d.name);
+        mb.members.push(...d.members);
+        if (d.__spec === 'html') mb.htmlpart = true;
     } else if (d.type === 'includes') {
         includes.push([d.target, d.includes]);
     }
 }
 for (const [target, mixin] of includes)
-    if (ifaces.has(target) && mixins.has(mixin)) ifaces.get(target).members.push(...mixins.get(mixin).members);
+    if (ifaces.has(target) && mixins.has(mixin)) { ifaces.get(target).members.push(...mixins.get(mixin).members); if (mixins.get(mixin).htmlpart) ifaces.get(target).htmlpart = true; }
 ifaces.delete('Window');
+for (const g of ['WorkerGlobalScope', 'DedicatedWorkerGlobalScope', 'SharedWorkerGlobalScope']) ifaces.delete(g);   /* (global scopes: their own setup) */
 
 const OP = 0, ATTR = 1, RO_ATTR = 2, CONST = 3, STATIC_OP = 4, STATIC_ATTR = 5;
 const required = args => { let n = 0; for (const a of args) { if (a.optional || a.variadic) break; n++; } return n; };
@@ -61,12 +66,13 @@ for (const b of ifaces.values()) {
     const members = new Map();   /* (overloads: the fewest required) */
     const put = (name, kind, req, value, unscop) => {
         const m = members.get(name + '/' + (kind === STATIC_OP || kind === STATIC_ATTR ? 's' : ''));
-        if (m) { m.req = Math.min(m.req, req); m.unscop = m.unscop || unscop; return; }
-        members.set(name + '/' + (kind === STATIC_OP || kind === STATIC_ATTR ? 's' : ''), { name, kind, req, value, unscop: !!unscop });
+        if (m) { m.req = Math.min(m.req, req); m.unscop = (m.unscop | 0) | (unscop | 0); return; }
+        members.set(name + '/' + (kind === STATIC_OP || kind === STATIC_ATTR ? 's' : ''), { name, kind, req, value, unscop: unscop | 0 });
     };
     for (const m of b.members) {
         const unforgeable = (m.extAttrs || []).some(a => a.name === 'LegacyUnforgeable');
-        const unscop = (m.extAttrs || []).some(a => a.name === 'Unscopable');
+        const unscop = ((m.extAttrs || []).some(a => a.name === 'Unscopable') ? 1 : 0) |
+            ((m.extAttrs || []).some(a => a.name === 'PutForwards' || a.name === 'Replaceable' || a.name === 'LegacyLenientSetter') ? 2 : 0);
         if (m.type === 'constructor') b.ctor = b.ctor < 0 ? required(m.arguments) : Math.min(b.ctor, required(m.arguments));
         else if (m.type === 'operation' && m.name) put(m.name, m.special === 'static' ? STATIC_OP : OP, required(m.arguments), undefined, unscop);
         else if (m.type === 'operation' && m.special === 'stringifier') put('toString', OP, 0);
@@ -88,8 +94,8 @@ out.push('static const IdlMember k_idl_members[] = {');
 const ifaceLines = [];
 let first = 0;
 for (const { b, members } of rows) {
-    for (const m of members) out.push(`    { ${q(m.name)}, ${m.kind}, ${m.req}, ${m.value !== undefined ? q(m.value) : 'NULL'}, ${m.unscop ? 1 : 0} },`);
-    const flags = (b.callback ? 1 : 0) | (b.attrs.includes('LegacyNoInterfaceObject') ? 2 : 0) | (b.workers ? 4 : 0);
+    for (const m of members) out.push(`    { ${q(m.name)}, ${m.kind}, ${m.req}, ${m.value !== undefined ? q(m.value) : 'NULL'}, ${m.unscop | 0} },`);
+    const flags = (b.callback ? 1 : 0) | (b.attrs.includes('LegacyNoInterfaceObject') ? 2 : 0) | (b.workers ? 4 : 0) | (b.html ? 8 : 0) | (b.htmlpart ? 16 : 0);
     ifaceLines.push(`    { ${q(b.name)}, ${q(b.parent)}, ${first}, ${members.length}, ${b.ctor}, ${flags} },`);
     first += members.length;
 }

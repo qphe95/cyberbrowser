@@ -503,6 +503,17 @@ void dom_detach(NodeId child, bool free_unwrapped) {
     uint32_t r = dom_tree_root_slot(c);
     uint32_t rec = g_dom.tree[r];
     dom_mark_dirty(dom_id_of(g_dom.parent[c]), DOMF_DIRTY_CHILDREN);
+    /* (a modal dialog removed: out of the top layer, modal no more; its open attribute stays) */
+    if (g_dom_top) {
+        uint32_t x = c;
+        while (x) {
+            if (x < g_dom_top_cap && (g_dom_top[x] & 1)) { g_dom_top[x] &= (uint8_t)~1u; dom_mark_dirty(dom_id_of(x), DOMF_DIRTY_ATTR); }
+            if (g_dom.first[x]) { x = g_dom.first[x]; continue; }
+            while (x && x != c && !g_dom.next[x]) x = g_dom.parent[x];
+            if (!x || x == c) break;
+            x = g_dom.next[x];
+        }
+    }
     dom_unlink(child);
     SlotVec wrapped = { 0 };
     if (rec && g_dom.trees[rec].wrappers) collect_wrapped(c, &wrapped);

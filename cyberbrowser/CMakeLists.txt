@@ -88,6 +88,7 @@ set(BE_SOURCES
     src/browser/image_api.c
     src/browser/layout_api.c
     src/browser/html_element_api.c
+    src/browser/canvas2d.c
     src/browser/event_api.c
     src/browser/shadow_dom_api.c
     src/browser/misc_api.c

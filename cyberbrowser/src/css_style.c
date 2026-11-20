@@ -626,6 +626,22 @@ static bool sd_slotted_in(NodeId x, uint32_t host)
             const char *sn = dom_get_attr_str(dom_id_of(s), "name");
             if (!strcmp(sn ? sn : "", name)) slot = dom_id_of(s);
         }
+        if (!slot && (!strcmp(dom_tag_name(p), "select") || !strcmp(dom_tag_name(p), "details"))) {
+            /* (a select's UA tree: "-cb-button" has its first element child when a <button>, "-cb-rest" the rest) */
+            NodeId first = DOM_NULL;
+            bool det_ = !strcmp(dom_tag_name(p), "details");
+            for (NodeId c = dom_first_child(p); c && !first; c = dom_next_sibling(c)) {
+                if (dom_kind(c) != DOM_K_ELEMENT) continue;
+                if (!strcmp(dom_tag_name(c), det_ ? "summary" : "button")) first = c;
+                else if (!det_) break;   /* (a select's: its first element child only) */
+            }
+            const char *want = first == x ? (det_ ? "-cb-summary" : "-cb-button") : "-cb-rest";
+            for (uint32_t s = g_dom.first[sh]; s && !slot; s = dom_next_in_subtree(s, sh)) {
+                if (g_dom.kind[s] != DOM_K_ELEMENT || strcmp(dom_tag_name(dom_id_of(s)), "slot")) continue;
+                const char *sn = dom_get_attr_str(dom_id_of(s), "name");
+                if (sn && !strcmp(sn, want)) slot = dom_id_of(s);
+            }
+        }
         if (!slot) return false;
         if (p == host) return true;
         x = slot;
@@ -1148,7 +1164,51 @@ static bool lang_match(const CssStyleDoc *D, int n, const char *ranges)
 }
 
 /* (dir=auto: the first strong character of its text, not inside an element with a dir of its own; 0 none) */
+static int dir_auto_scan(NodeId el);
+/* (dir=auto: a slot in a shadow tree goes by what is assigned to it first) */
 static int dir_auto_of(NodeId el)
+{
+    if (!el) return 0;
+    const char *tn0 = dom_tag_name(el);
+    if (tn0 && !strcmp(tn0, "slot")) {
+        NodeId root = el;
+        while (dom_parent(root)) root = dom_parent(root);
+        uint32_t host = root != el && (g_dom.flags[dom_slot(root)] & DOMF_SHADOW_ROOT) ? g_dom.host[dom_slot(root)] : 0;
+        if (host) {
+            const char *name = dom_get_attr_str(el, "name");
+            if (!name) name = "";
+            for (NodeId c = dom_first_child(dom_id_of(host)); c; c = dom_next_sibling(c)) {
+                int k = dom_kind(c);
+                const char *ls = k == DOM_K_ELEMENT ? dom_get_attr_str(c, "slot") : NULL;
+                if (strcmp(ls ? ls : "", name)) continue;
+                int r = 0;
+                if (k == DOM_K_TEXT) {
+                    /* (a text node alone: as an element holding it) */
+                    NodeId p = dom_parent(c);
+                    (void)p;
+                    uint32_t len = 0;
+                    const unsigned char *t = (const unsigned char *)dom_text(c, &len);
+                    for (uint32_t i = 0; t && i < len && !r; ) {
+                        uint32_t ch = t[i];
+                        int nb = ch < 0x80 ? 1 : ch < 0xE0 ? 2 : ch < 0xF0 ? 3 : 4;
+                        if (nb == 2 && i + 1 < len) ch = ((ch & 0x1F) << 6) | (t[i + 1] & 0x3F);
+                        else if (nb == 3 && i + 2 < len) ch = ((ch & 0x0F) << 12) | ((t[i + 1] & 0x3F) << 6) | (t[i + 2] & 0x3F);
+                        i += (uint32_t)nb;
+                        if ((ch >= 0x0590 && ch <= 0x08FF) || (ch >= 0xFB1D && ch <= 0xFDFF) || (ch >= 0xFE70 && ch <= 0xFEFF)) r = 2;
+                        else if ((ch < 0x80 && isalpha((int)ch)) || (ch >= 0xC0 && ch < 0x0590 && ch != 0xD7 && ch != 0xF7) || (ch >= 0x0900 && ch < 0x2000) || (ch >= 0x3040 && ch < 0xFB00)) r = 1;
+                    }
+                } else if (k == DOM_K_ELEMENT) {
+                    const char *t = dom_tag_name(c);
+                    if (dom_get_attr_str(c, "dir") || (t && (!strcasecmp(t, "bdi") || !strcasecmp(t, "script") || !strcasecmp(t, "style") || !strcasecmp(t, "textarea")))) continue;
+                    r = dir_auto_scan(c);
+                }
+                if (r) return r;
+            }
+        }
+    }
+    return dir_auto_scan(el);
+}
+static int dir_auto_scan(NodeId el)
 {
     if (!el) return 0;
     uint32_t root = dom_slot(el);
@@ -1618,7 +1678,11 @@ static int32_t after_base_list(Builder *b, const char *branch, size_t blen, int 
         "::scroll-button(*):enabled", "::scroll-button(up):enabled", "::scroll-button(down):enabled", "::scroll-button(left):enabled", "::scroll-button(right):enabled", "::scroll-button(block-start):enabled", "::scroll-button(block-end):enabled", "::scroll-button(inline-start):enabled", "::scroll-button(inline-end):enabled", "::scroll-button(*):disabled", "::scroll-button(up):disabled", "::scroll-button(down):disabled", "::scroll-button(left):disabled", "::scroll-button(right):disabled", "::scroll-button(block-start):disabled", "::scroll-button(block-end):disabled", "::scroll-button(inline-start):disabled", "::scroll-button(inline-end):disabled",
         "::column::scroll-marker", "::column::scroll-marker:target-current",
         /* (a ::before's or ::after's own ::marker) */
-        "::after::marker", "::before::marker" };
+        "::after::marker", "::before::marker",
+        /* (a top layer element's backdrop) */
+        "::backdrop",
+        /* (an interest invoker's button, after it) */
+        "::interest-button" };
     char buf[512];
     if (blen == 0 || blen >= sizeof(buf)) return -1;
     memcpy(buf, branch, blen);
@@ -1774,7 +1838,7 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
             /* ::after branches (naive comma split, as the legacy code did). */
             if (ci_strstr((char *)sel, ":after") || ci_strstr((char *)sel, ":before") || ci_strstr((char *)sel, ":first-letter") ||
                 ci_strstr((char *)sel, ":first-line") || ci_strstr((char *)sel, ":marker") || ci_strstr((char *)sel, ":scroll-") ||
-                ci_strstr((char *)sel, ":slider-")) {
+                ci_strstr((char *)sel, ":slider-") || ci_strstr((char *)sel, ":backdrop") || ci_strstr((char *)sel, ":interest-button")) {
                 const char *bp = sel;
                 while (*bp) {
                     const char *comma = bp;
@@ -1787,7 +1851,7 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
                     if (blen > 0) {
                         /* (logical buttons as physical: horizontal flow, all layout has) */
                         static const unsigned char k_after_kind[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 6, 26, 27, 28, 29, 13, 14, 15,
-                                                                      16, 17, 18, 19, 20, 30, 31, 32, 33, 21, 22, 23, 24, 25, 34, 35, 36, 37, 38, 39, 40, 41 };
+                                                                      16, 17, 18, 19, 20, 30, 31, 32, 33, 21, 22, 23, 24, 25, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43 };
                         int32_t is_before = 0, li = -1;
                         for (int kk = 0; li < 0 && kk < (int)sizeof k_after_kind; kk++) {
                             /* (only those whose kind of name is in it) */
@@ -1797,7 +1861,9 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
                             if (kk >= 21 && kk < 39 && !ci_strstr((char *)sel, ":scroll-button")) continue;
                             if (kk >= 39 && kk < 41 && !ci_strstr((char *)sel, "::column::scroll-marker")) continue;
                             bool pm_ = ci_strstr((char *)sel, "::after::marker") || ci_strstr((char *)sel, "::before::marker");
-                            if (kk >= 41 && !pm_) continue;
+                            if (kk >= 41 && kk < 43 && !pm_) continue;
+                            if (kk == 43 && !ci_strstr((char *)sel, "::backdrop")) continue;
+                            if (kk == 44 && !ci_strstr((char *)sel, "::interest-button")) continue;
                             if (kk == 4 && pm_) continue;   /* (the pseudo-element's marker, not the element's) */
                             li = after_base_list(&b, bp, blen, kk);
                             is_before = k_after_kind[kk];
@@ -2232,6 +2298,7 @@ int css_style_match(const CssStyleSet *S, const CssStyleDoc *D, int dom,
                     a.specificity = t->rule_spec[g] - (cr->ua ? (1 << 28) : 0);
                     if (cr->layer_bias) a.specificity += (imp ? cr->layer_bias : -cr->layer_bias) * (1 << 22);
                     if (rule->shadow) a.specificity += (imp ? 1 : -1) * (1 << 27);
+                    if (rule->part && !cr->ua) a.specificity += (imp ? -1 : 1) * (1 << 27);
                     a.order = (int)((uint32_t)cr->sheet * 1000000u + (uint32_t)cr->index * 1000u + (uint32_t)d);
                     a.proximity = prox;
                     a.important = imp != 0;
@@ -2257,6 +2324,9 @@ int css_style_match(const CssStyleSet *S, const CssStyleDoc *D, int dom,
             if (cr->layer_bias) a.specificity += (rule->declarations[d].important ? cr->layer_bias : -cr->layer_bias) * (1 << 22);
             /* (a shadow tree's context: below the page's when normal, above it when important) */
             if (rule->shadow) a.specificity += (rule->declarations[d].important ? 1 : -1) * (1 << 27);
+            /* (a ::part(): the outer context to the tree its element is in, above that tree's own rules when normal,
+             * below them when important) */
+            if (rule->part && !cr->ua) a.specificity += (rule->declarations[d].important ? -1 : 1) * (1 << 27);
             a.order = (int)((uint32_t)cr->sheet * 1000000u + (uint32_t)cr->index * 1000u + (uint32_t)d);
             a.proximity = prox;
             a.important = rule->declarations[d].important;

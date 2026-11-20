@@ -22,10 +22,13 @@ dir=$(cd "$(dirname "$0")" && pwd)
 # A page of the site a tab is on loads in its process (CYBER_TAB_REUSE=0:
 # a process each, as the browser's default).
 export CYBER_TAB_REUSE=${CYBER_TAB_REUSE-1}
+# (but a new process after so many pages: what each leaves grows a process to GBs, and then realms fail to be made)
+export CYBER_TAB_REUSE_MAX=${CYBER_TAB_REUSE_MAX-100}
+export CYBER_TAB_FRESH=${CYBER_TAB_FRESH-popover-invoking-attribute,pixel-length-attributes}
 # (no running commentary in the tab logs: thousands of lines a page otherwise)
 export CYBER_QUIET=${CYBER_QUIET-1}
 # (a heavy page's script isn't cut off for what the other browsers are doing)
-export CYBER_SCRIPT_LIMIT_S=${CYBER_SCRIPT_LIMIT_S-30}
+export CYBER_SCRIPT_LIMIT_S=${CYBER_SCRIPT_LIMIT_S-60}   # (a long test making hundreds of iframes needs most of a minute)
 # (the fonts a WPT runner installs: Ahem and the CSSTest ones)
 export CYBER_FONT_DIRS="${CYBER_FONT_DIRS-$(cygpath -w "$wpt/fonts/Ahem.ttf" 2>/dev/null || echo "$wpt/fonts/Ahem.ttf");$(cygpath -w "$wpt/fonts/CSSTest" 2>/dev/null || echo "$wpt/fonts/CSSTest")}"
 # (a page only waiting for a timer doesn't wait: it and its clock skip ahead)

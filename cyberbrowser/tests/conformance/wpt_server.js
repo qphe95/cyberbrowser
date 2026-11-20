@@ -74,7 +74,8 @@ function classify(f) {
     else if (/\/resources\/testharness\.js/.test(src)) {
         c.kind = 'page';
         c.long = /<meta\s+name=["']?timeout["']?\s+content=["']?long/i.test(src);
-        c.variants = [...src.matchAll(/<meta\s+name=["']?variant["']?\s+content=["']([^"']*)["']/gi)].map(v => v[1]);
+        /* (content quoted or not, as the manifest's HTML parser takes it) */
+        c.variants = [...src.matchAll(/<meta\s+name=["']?variant["']?\s+content=(?:["']([^"']*)["']|([^\s"'>]+))/gi)].map(v => v[1] !== undefined ? v[1] : v[2]);
     }
     classified[f] = c;
     classifyChanged = true;
@@ -194,7 +195,8 @@ function refsOf(f) {
     }
     const fuzzy = [...src.matchAll(/<meta\s+name=["']?fuzzy["']?\s+content=["']([^"']*)["']/gi)].map(m => m[1]);
     /* (variants: the first one's query, on the test and its references: wptrunner never runs one without) */
-    const variant = (/<meta\s+name=["']?variant["']?\s+content=["']([^"']*)["']/i.exec(src) || [])[1];
+    const vm_ = /<meta\s+name=["']?variant["']?\s+content=(?:["']([^"']*)["']|([^\s"'>]+))/i.exec(src);
+    const variant = vm_ ? (vm_[1] !== undefined ? vm_[1] : vm_[2]) : undefined;
     if (variant && variant.startsWith('?')) {
         for (const r of refs) if (r.url !== BLANK) r.url += (r.url.includes('?') ? '&' : '?') + variant.slice(1);
         return { refs, fuzzy, url: f + variant };
@@ -431,7 +433,53 @@ const types = { '.html': 'text/html', '.htm': 'text/html', '.xht': 'application/
 /* Python handlers emulated: path -> (url) -> [content type, body]. */
 const escapeHtml = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
     .replace(/'/g, '&#x27;');
+const queryStash = new Map();
+/* (the script element's load-error-events.py: a script that notes it ran, a 404 for _error; the module kinds import their resource) */
+function loadErrorEventsPy(kind) {
+    return url => {
+        const t = url.searchParams.get('test') || '';
+        if (!/^[a-zA-Z0-9_]+$/.test(t)) return [400, 'text/plain', ''];
+        const ok = t.indexOf('_load') >= 0;
+        const fail = t + '.test.step(function() { assert_unreached("404 script should not be executed"); });';
+        if (!kind) return ok ? ['text/javascript', '"use strict"; ' + t + '.executed = true;'] : [404, 'text/javascript', '"use strict"; ' + fail];
+        const res = { json: ['./module.json', './not_found.json'], text: ['./file.txt', './not_found.txt'], css: ['./basic.css', './not_found.css'] }[kind];
+        return ['text/javascript', 'import "' + (ok ? res[0] : res[1]) + '" with { type: "' + kind + '" }; ' + (ok ? t + '.executed = true;' : fail)];
+    };
+}
+/* (serve-text-then-js.py and its reverse: the first answer for a key one kind, the rest the other) */
+const thenCounts = new Map();
+function servesThen(firstText) {
+    return url => {
+        const k = url.searchParams.get('key');
+        if (!k) return [400, 'text/plain', 'Not enough parameters'];
+        const n = thenCounts.get(k) || 0;
+        thenCounts.set(k, n + 1);
+        const text = (n === 0) === firstText;
+        return text ? ['text/plain', 'hello'] : ['application/javascript', "export default 'world';"];
+    };
+}
+const cookieOf = (req, name) => { const m = new RegExp('(?:^|;\\s*)' + name + '=([^;]*)').exec(req.headers.cookie || ''); return m ? m[1] : null; };
+const TM = '/html/semantics/scripting-1/the-script-element/';
 const PY = {
+    /* (navigating-across-documents/refresh: a Refresh header with bytes past ASCII, as they are) */
+    '/html/browsers/browsing-the-web/navigating-across-documents/refresh/resources/refresh.py': () =>
+        [200, 'text/plain', 'Not refreshed.\n', { refresh: '0;./refreshed.txt?\u0080\u00FF' }],
+    '/html/browsers/browsing-the-web/navigating-across-documents/refresh/resources/refresh-with-svg.py': () =>
+        [200, 'image/svg+xml', '<svg version="1.1" xmlns="http://www.w3.org/2000/svg"><text y="14" text-anchor="left" >Not refreshed.</text></svg>\n', { refresh: '0;./refreshed.txt' }],
+    [TM + 'text-module/serve-text-then-js.py']: servesThen(true),
+    [TM + 'text-module/serve-js-then-text.py']: servesThen(false),
+    [TM + 'text-module/http-accept-header-checker.py']: (url, req) => [200, 'text/plain', req.headers.accept || '', { 'access-control-allow-origin': '*' }],
+    [TM + 'json-module/http-accept-header-checker.py']: (url, req) => [200, 'application/json', '{"accept": "' + (req.headers.accept || '') + '"}', { 'access-control-allow-origin': '*' }],
+    [TM + 'text-module/referrer-checker.py']: (url, req) => [200, 'text/plain', req.headers.referer || '', { 'access-control-allow-origin': '*' }],
+    [TM + 'json-module/referrer-checker.py']: (url, req) => [200, 'application/json', '{"referrer": "' + (req.headers.referer || '') + '"}', { 'access-control-allow-origin': '*' }],
+    [TM + 'text-module/cross-origin.py']: (url, req) => [200, 'text/plain', cookieOf(req, 'milk') === '1' ? 'request had cookies' : 'request did not have cookies',
+        { 'access-control-allow-origin': url.searchParams.get('origin') || '', 'access-control-allow-credentials': 'true' }],
+    [TM + 'json-module/cross-origin.py']: (url, req) => [200, 'application/json', '{"requestHadCookies": ' + (cookieOf(req, 'milk') === '1') + '}',
+        { 'access-control-allow-origin': url.searchParams.get('origin') || '', 'access-control-allow-credentials': 'true' }],
+    '/html/semantics/scripting-1/the-script-element/resources/load-error-events.py': loadErrorEventsPy(null),
+    '/html/semantics/scripting-1/the-script-element/json-module/load-error-events.py': loadErrorEventsPy('json'),
+    '/html/semantics/scripting-1/the-script-element/text-module/load-error-events.py': loadErrorEventsPy('text'),
+    '/html/semantics/scripting-1/the-script-element/css-module/resources/load-error-events.py': loadErrorEventsPy('css'),
     /* a document whose <meta charset> is the label */
     /* a document of this content type, its meta saying another */
     '/dom/nodes/Document-contentType/support/contenttype_setter.py': url => {
@@ -441,6 +489,55 @@ const PY = {
     },
     '/html/infrastructure/urls/terminology-0/resources/echo-referrer-text.py': (url, req) => ['text/plain', req.headers.referer || ''],
     '/dom/nodes/encoding.py': url => ['text/html', `<!doctype html><meta charset="${escapeHtml(url.searchParams.get('label') || '')}">`],
+    /* (query-encoding's resources: the raw q echoed as the type asked for) */
+    '/html/infrastructure/urls/resolving-urls/query-encoding/resources/resource.py': url => {
+        const raw = url.search.slice(1), m = /(?:^|&)q=([^&]+)/.exec(raw), q = m ? m[1] : '';
+        const type = url.searchParams.get('type'), enc = url.searchParams.get('encoding') || 'utf-8';
+        switch (type) {
+        case 'html': return ['text/html; charset=utf-8', q];
+        case 'css': return ['text/css; charset=utf-8', "#test::before { content:'" + q + "' }"];
+        case 'js': return ['text/javascript; charset=utf-8', url.searchParams.get('var') + " = '" + q + "';"];
+        case 'worker': return ['text/javascript', "postMessage('" + q + "'); close();"];
+        case 'sharedworker': return ['text/javascript', "onconnect = function(e) { e.source.postMessage('" + q + "'); close(); };"];
+        case 'worker_importScripts': return ['text/javascript; charset=' + enc, "try { var x = 'importScripts failed to run'; importScripts('?q=\\u00E5&type=js&var=x&encoding=" + enc + "'); postMessage(x); close(); } catch(ex) { postMessage(String(ex)); }"];
+        case 'worker_worker': return ['text/javascript; charset=' + enc, "try { var worker = new Worker('?q=\\u00E5&type=worker&encoding=" + enc + "'); worker.onmessage = function(e) { postMessage(e.data); close(); }; } catch(ex) { postMessage(String(ex)); }"];
+        case 'eventstream': return ['text/event-stream', 'data: ' + q + '\n\n'];
+        case 'svg': return ['image/svg+xml', "<svg xmlns='http://www.w3.org/2000/svg'>" + q + '</svg>'];
+        case 'webvtt': return ['text/vtt', 'WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n' + q];
+        case 'png': {
+            const img = q === '%E5' || q === '%26%23229%3B' ? 'green-1x1.png' : q === '%C3%A5' ? 'green-2x2.png' : q === '%3F' ? 'green-16x16.png' : 'green-256x256.png';
+            try { return ['image/png', fs.readFileSync(path.join(root, 'images', img))]; } catch (e) { return [404, 'text/plain', '']; }
+        }
+        case 'video': {
+            const ext = url.searchParams.get('ext') || 'webm';
+            const v = q === '%E5' || q === '%26%23229%3B' ? 'A4' : q === '%C3%A5' ? 'movie_5' : q === '%3F' ? 'green-at-15' : 'movie_300';
+            try { return ['video/' + (ext === 'ogv' ? 'ogg' : ext), fs.readFileSync(path.join(root, 'media', v + '.' + ext))]; } catch (e) { return [404, 'text/plain', '']; }
+        }
+        }
+        return [200, 'text/plain', ''];
+    },
+    '/html/infrastructure/urls/resolving-urls/query-encoding/resources/blank.py': url => ['text/html; charset=' + (url.searchParams.get('encoding') || 'utf-8'), ''],
+    '/html/infrastructure/urls/resolving-urls/query-encoding/resources/css-tmpl.py': url =>
+        ['text/css; charset=' + (url.searchParams.get('encoding') || 'utf-8'), (url.searchParams.get('tmpl') || '').replace(/%s/g, '\\0000E5')],
+    '/html/infrastructure/urls/resolving-urls/query-encoding/resources/stash.py': url => {
+        const key = url.searchParams.get('id'), raw = url.search.slice(1), m = /(?:^|&)q=([^&]+)/.exec(raw);
+        if (url.searchParams.get('action') === 'put') { queryStash.set(key, m ? m[1] : ''); return ['text/html', 'Put ' + (m ? m[1] : '')]; }
+        const v = queryStash.get(key);
+        queryStash.delete(key);
+        return ['text/html', v === undefined ? '' : v];
+    },
+    /* (a page with the Refresh header the URL asks for) */
+    '/html/semantics/document-metadata/the-meta-element/pragma-directives/attr-meta-http-equiv-refresh/support/refresh.py': url =>
+        [200, 'text/html', '<!doctype html>refresh.py\n', { refresh: url.searchParams.get('input') || '' }],
+    /* (a file next to the handler, served as the content type asked for; none, a 400) */
+    '/html/semantics/scripting-1/the-script-element/serve-with-content-type.py': url => {
+        const fn = url.searchParams.get('fn'), ct = url.searchParams.get('ct');
+        const dir = path.join(root, 'html/semantics/scripting-1/the-script-element');
+        const f = fn && path.resolve(dir, fn);
+        if (!fn || ct === null || !f.startsWith(dir) || !fs.existsSync(f)) return [400, 'text/plain', 'Not enough parameters or file not found'];
+        /* (its bytes as they are, which Node would refuse: UTF-8 as Latin-1, a control character as '?', still not a token) */
+        return [Buffer.from(ct, 'utf8').toString('latin1').replace(/[\x00-\x08\x0a-\x1f\x7f]/g, '?'), fs.readFileSync(f)];
+    },
 };
 
 const server = http.createServer((req, res) => {
@@ -578,6 +675,15 @@ const server = http.createServer((req, res) => {
         res.writeHead(302, { location, 'cache-control': 'no-store' });
         return res.end();
     }
+    /* (the link element's resources/css.py: a sheet, with the Content-Type asked for (none by default), nosniff and CORS as asked) */
+    if (url.pathname === '/html/semantics/document-metadata/the-link-element/resources/css.py') {
+        const h = {};
+        if (url.searchParams.has('content_type')) h['content-type'] = url.searchParams.get('content_type');
+        if (url.searchParams.has('nosniff')) h['x-content-type-options'] = 'nosniff';
+        if (url.searchParams.has('cors')) h['access-control-allow-origin'] = '*';
+        try { res.writeHead(200, h); } catch (e) { res.writeHead(200); }
+        return res.end('body { background:red }');
+    }
     if (url.pathname === '/css/fetching/support/echo-css.py') {
         res.writeHead(200, { 'content-type': 'text/css' });
         return res.end(url.searchParams.get('content') || '');
@@ -603,6 +709,200 @@ const server = http.createServer((req, res) => {
         }
         res.writeHead(200, cors);
         return res.end(queue.length ? queue.shift() : 'not ready');
+    }
+    /* (the script element's serve-custom-response.py: by key, a response set ahead (status, type, network error), counted) */
+    if (url.pathname.endsWith('/the-script-element/serve-custom-response.py')) {
+        global.__customResp = global.__customResp || new Map();
+        const st = global.__customResp, key = url.searchParams.get('key') || '', action = url.searchParams.get('action');
+        const c = st.get(key) || { net: false, count: 0, code: 200, type: 'application/javascript' };
+        st.set(key, c);
+        if (action === 'stat') { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end(String(c.count)); }
+        if (action === 'reset-stat') { c.count = 0; res.writeHead(200, { 'content-type': 'text/plain' }); return res.end('OK'); }
+        if (action === 'set') {
+            if (url.searchParams.has('code')) c.code = +url.searchParams.get('code');
+            if (url.searchParams.has('content-type')) c.type = url.searchParams.get('content-type');
+            if (url.searchParams.has('network-error')) c.net = url.searchParams.get('network-error').toLowerCase() === 'true';
+            res.writeHead(200, { 'content-type': 'text/plain' }); return res.end('OK');
+        }
+        c.count++;
+        if (c.net) { req.socket.destroy(); return; }
+        const body = c.type === 'application/javascript' ? "export default 'hello';" : c.type === 'application/json' ? '{"hello": "world"}' :
+                     c.type === 'text/css' ? '#test { background-color: rgb(0, 255, 0); }' : '42';
+        res.writeHead(c.code, { 'content-type': c.type, 'cache-control': 'no-store' });
+        return res.end(body);
+    }
+    /* (script-element moving-between-documents: the iframe page in two chunks, a second apart; the slow script and sheet) */
+    if (url.pathname.endsWith('/moving-between-documents/resources/moving-between-documents-iframe.py')) {
+        const q = k => url.searchParams.get(k);
+        const ioe = q('inlineOrExternal') || 'null', block = (q('hasBlockingStylesheet') || 'true') === 'true';
+        const result = q('result') || 'success', type = (q('type') || 'classic') === 'classic' ? 'text/javascript' : 'module';
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        let body = '<!DOCTYPE html>\n<head>\n<script>\nparent.postMessage("fox", "*");\n</script>\n';
+        if (block) body += '<link rel="stylesheet" href="slow-flag-setter.py?result=css&cache=' + Math.random() + '">\n';
+        body += '</head>\n<body>\n';
+        if (ioe === 'inline' || ioe === 'external' || ioe === 'empty-src') body += '<streaming-element>\n';
+        body += 'A'.repeat(100000);
+        res.write(body);
+        setTimeout(() => {
+            let b2 = '';
+            if (ioe === 'inline') {
+                b2 += '<script id="s1" type="' + type + '" onload="scriptOnLoad()" onerror="scriptOnError(event)">\n' +
+                      'if (!window.readyToEvaluate) { window.didExecute = "executed too early"; } else { window.didExecute = "executed"; }\n';
+                if (result === 'parse-error') b2 += '1=2 parse error\n';
+                b2 += '</script>\n</streaming-element>\n';
+            } else if (ioe === 'external') {
+                b2 += '<script id="s1" type="' + type + '" src="slow-flag-setter.py?result=' + result + '&cache=' + Math.random() +
+                      '" onload="scriptOnLoad()" onerror="scriptOnError(event)"></script>\n</streaming-element>\n';
+            } else if (ioe === 'empty-src') {
+                b2 += '<script id="s1" type="' + type + '" src="" onload="scriptOnLoad()" onerror="scriptOnError(event)"></script>\n</streaming-element>\n';
+            }
+            b2 += 'B'.repeat(100000);
+            res.end(b2);
+        }, ioe === 'null' ? 0 : 1000);
+        return;
+    }
+    /* (the script element's log.py: log('<id>') after sec seconds; script-not-found-not-executed*.py, cacheable-script-throw.py) */
+    if (url.pathname.endsWith('/scripting-1/the-script-element/log.py')) {
+        const id = parseInt(url.searchParams.get('id'), 10), sec = parseInt(url.searchParams.get('sec'), 10);
+        if (!isFinite(id) || !isFinite(sec)) { res.writeHead(400, { 'content-type': 'text/plain' }); return res.end('Invalid parameter'); }
+        setTimeout(() => { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end("log('" + id + "')"); }, sec * 1000);
+        return;
+    }
+    if (/\/scripting-1\/the-script-element\/script-not-found-not-executed(-2)?\.py$/.test(url.pathname)) {
+        const two = /-2\.py$/.test(url.pathname);
+        res.writeHead(two ? 200 : 404, { 'content-type': 'text/javascript' });
+        return res.end(two ? 'test2_token = "script executed";' : 'test1_token = "script executed";');
+    }
+    if (url.pathname.endsWith('/scripting-1/the-script-element/cacheable-script-throw.py')) {
+        res.writeHead(200, { 'content-type': 'text/javascript', 'cache-control': 'public, max-age=100' });
+        return res.end("throw('fox');");
+    }
+    if (url.pathname.endsWith('/moving-between-documents/resources/slow-flag-setter.py')) {
+        const result = url.searchParams.get('result') || 'success';
+        if (result === 'css') { setTimeout(() => { res.writeHead(200, { 'content-type': 'text/css' }); res.end(''); }, 3000); return; }
+        setTimeout(() => {
+            if (result === 'fetch-error') { res.writeHead(404, { 'content-type': 'text/plain' }); return res.end('window.didExecute = "fetch error";'); }
+            res.writeHead(200, { 'content-type': 'text/javascript' });
+            res.end(result === 'parse-error' ? '1=2 parse error;' :
+                "fetch('exec');\nconsole.log('exec');\nif (!window.readyToEvaluate) { window.didExecute = \"executed too early\"; } else { window.didExecute = \"executed\"; }\n");
+        }, 2000);
+        return;
+    }
+    /* (track CORS's cors-tester.py: each request's Origin and cookie noted by id; CORS headers, redirects; read hands them back) */
+    if (url.pathname.endsWith('/track-element/cors/support/cors-tester.py')) {
+        global.__corsStash = global.__corsStash || new Map();
+        const st = global.__corsStash, q = k => url.searchParams.get(k), id = q('id');
+        if (req.method !== 'GET' || !id) { res.writeHead(400); return res.end('bad'); }
+        if (url.searchParams.has('read')) {
+            const d = st.get(id); st.delete(id);
+            if (d === undefined) { res.writeHead(404, { 'content-type': 'text/plain' }); return res.end('Tried to read data not yet set'); }
+            res.writeHead(200, { 'content-type': 'text/plain' }); return res.end(d);
+        }
+        if (url.searchParams.has('cleanup')) { st.delete(id); res.writeHead(200); return res.end('OK'); }
+        if (url.searchParams.has('delete-cookie')) { res.writeHead(200, { 'content-type': 'text/plain', 'set-cookie': id + '=; Max-Age=0; Path=/' }); return res.end('OK'); }
+        const h = { 'content-type': 'text/vtt' };
+        if (q('origin') !== null) { h['access-control-allow-origin'] = q('origin'); h['access-control-allow-credentials'] = 'true'; }
+        const cors = req.headers.origin || 'no';
+        let cookie = 'no';
+        (req.headers.cookie || '').split(/;\s*/).forEach(c => { const i = c.indexOf('='); if (i > 0 && c.slice(0, i) === id) cookie = c.slice(i + 1); });
+        let line = 'cors = ' + cors + ' | cookie = ' + cookie;
+        if (st.has(id)) line = st.get(id) + '\n' + line;
+        st.set(id, line);
+        if (q('redirect') !== null) { h.location = q('redirect'); res.writeHead(302, h); return res.end(); }
+        res.writeHead(200, h);
+        return res.end('WEBVTT\n\n00:00:00.000 --> 00:00:10.000\nTest');
+    }
+    /* (common/slow.py: nothing, after ?delay= ms, 2000 by default) */
+    if (url.pathname === '/common/slow.py') {
+        const ms = parseFloat(url.searchParams.get('delay') || '2000');
+        setTimeout(() => { res.writeHead(200); res.end(); }, isFinite(ms) ? ms : 2000);
+        return;
+    }
+    /* (the iframe tests' stash.py: a POST puts its body under id, a GET takes it, once) */
+    if (url.pathname === '/html/semantics/embedded-content/the-iframe-element/stash.py') {
+        global.__ifStash = global.__ifStash || new Map();
+        const st = global.__ifStash, id = url.searchParams.get('id') || '';
+        if (req.method === 'POST') {
+            const chunks = [];
+            req.on('data', d => chunks.push(d));
+            req.on('end', () => { st.set(id, Buffer.concat(chunks)); res.writeHead(200, { 'content-type': 'text/plain', 'access-control-allow-origin': '*' }); res.end(''); });
+            return;
+        }
+        const v = st.get(id);
+        st.delete(id);
+        res.writeHead(200, { 'content-type': 'text/plain', 'cache-control': 'no-store', 'access-control-allow-origin': '*' });
+        return res.end(v || '');
+    }
+    /* (speculative-parsing's stash.py: put keeps the request's Origin, Accept and Referer lines, take hands them back once) */
+    if (url.pathname === '/html/syntax/speculative-parsing/resources/stash.py') {
+        global.__specStash = global.__specStash || new Map();
+        const st = global.__specStash, uuid = url.searchParams.get('uuid') || '';
+        res.writeHead(200, { 'content-type': 'text/plain', 'cache-control': 'no-store' });
+        if (url.searchParams.get('action') === 'put') {
+            const q = url.search.slice(1), at = q.indexOf('&encodingcheck=');
+            let v = 'param-encodingcheck: ' + (at >= 0 ? q.slice(at + 15) : '') + '\r\n';
+            const lines = [];
+            for (let i = 0; i + 1 < req.rawHeaders.length; i += 2)
+                if (['Origin', 'Accept', 'Referer'].includes(req.rawHeaders[i])) lines.push(req.rawHeaders[i] + ': ' + req.rawHeaders[i + 1]);
+            st.set(uuid, v + lines.join('\r\n'));
+            return res.end('');
+        }
+        const v = st.get(uuid) || '';
+        st.delete(uuid);
+        return res.end(v);
+    }
+    /* (forms' form-submission.py: OK when the body is what the query says it should be) */
+    if (url.pathname.endsWith('/form-submission-0/resources/form-submission.py')) {
+        const chunks = [];
+        req.on('data', d => chunks.push(d));
+        req.on('end', () => {
+            const b = Buffer.concat(chunks), ct = String(req.headers['content-type'] || '');
+            let ok = false;
+            if (url.searchParams.get('query') === '1') {
+                if (ct === 'application/x-www-form-urlencoded') ok = b.toString('latin1') === 'foo=bara';
+                else if (ct === 'text/plain') ok = b.toString('latin1') === 'qux=baz\r\n';
+                else {
+                    const m = /boundary=("?)([^";]+)\1/.exec(ct);
+                    if (m) {
+                        for (const part of b.toString('latin1').split('--' + m[2])) {
+                            const i = part.indexOf('\r\n\r\n');
+                            if (i < 0) continue;
+                            if (/name="foo"/.test(part.slice(0, i))) { ok = part.slice(i + 4).replace(/\r\n$/, '') === 'bar'; break; }
+                        }
+                    }
+                }
+            } else if (url.searchParams.get('expected_body') !== null) ok = b.toString('utf8') === url.searchParams.get('expected_body');
+            res.writeHead(200, { 'content-type': 'text/plain' });
+            res.end(ok ? 'OK' : 'FAIL');
+        });
+        return;
+    }
+    /* (forms' form-echo.py: the request body's bytes in hex, space-separated, as text/plain) */
+    if (url.pathname.endsWith('/form-submission-0/form-echo.py')) {
+        const chunks = [];
+        req.on('data', d => chunks.push(d));
+        req.on('end', () => {
+            const b = Buffer.concat(chunks);
+            res.writeHead(200, { 'content-type': 'text/plain' });
+            res.end(Array.from(b, c => c.toString(16).padStart(2, '0')).join(' '));
+        });
+        return;
+    }
+    /* (FileAPI's echo-content-escaped.py: the request body, its control bytes and backslashes escaped) */
+    if (url.pathname === '/FileAPI/file/resources/echo-content-escaped.py') {
+        const chunks = [];
+        req.on('data', d => chunks.push(d));
+        req.on('end', () => {
+            const b = Buffer.concat(chunks);
+            let out = '';
+            for (const c of b) out += c <= 0x1f || c >= 0x7f ? '\\x' + c.toString(16).padStart(2, '0') : c === 0x5c ? '\\\\' : String.fromCharCode(c);
+            out = out.split('\\x0d\\x0a').join('\r\n');
+            res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'x-request-method': req.method,
+                                 'x-request-content-length': req.headers['content-length'] || 'NO',
+                                 'x-request-content-type': req.headers['content-type'] || 'NO' });
+            res.end(Buffer.from(out, 'latin1'));
+        });
+        return;
     }
     /* (support/stall-resume.py: the start of a video, then the rest once a POST says so) */
     if (url.pathname === '/css/selectors/media/support/stall-resume.py') {
@@ -655,8 +955,9 @@ const server = http.createServer((req, res) => {
         return res.end(body);
     }
     if (PY[url.pathname]) {
-        const [type, body] = PY[url.pathname](url, req);
-        res.writeHead(200, { 'content-type': type });
+        const r = PY[url.pathname](url, req);
+        const [status, type, body, extra] = r.length >= 3 ? r : [200, r[0], r[1]];
+        try { res.writeHead(status, Object.assign({ 'content-type': type }, extra || {})); } catch (e) { res.writeHead(500); }
         return res.end(body);
     }
     let decoded_path;
@@ -688,11 +989,13 @@ const server = http.createServer((req, res) => {
 function serveFile(res, url, file, hit) {
     let data = hit.raw;
     if (/\.sub\.[^/]*$/.test(file)) data = Buffer.from(substitute(data.toString('utf8'), url), 'utf8');
+    /* (?pipe=sub: substituted as a .sub file is) */
+    else if ((url.searchParams.get('pipe') || '').split('|').some(p => /^sub(\([^)]*\))?$/.test(p.trim()))) data = Buffer.from(substitute(data.toString('utf8'), url), 'utf8');
     const headers = Object.assign({}, hit.h);
     if (REFTEST && /^(text\/html|application\/xhtml\+xml)/.test(headers['content-type']) && STEP_PATHS.has(url.pathname)) {
         /* (inside the root element, so XHTML stays well-formed) */
         /* (found in the text itself: lower-casing can change its length, 'İ' -> 'i̇') */
-        const text = data.toString('utf8'), ends = [...text.matchAll(/<\/html>/gi)];
+        const text = data.toString('latin1'), ends = [...text.matchAll(/<\/html>/gi)];   /* (bytes as latin1 both ways: another encoding's kept) */
         let end = ends.length ? ends[ends.length - 1].index : -1;
         /* (in the head when it has one: the body's children as the page wrote them, :last-child and the like) */
         /* (a tag of the page's own: outside any quoted attribute value, a data: URL's markup not counted) */
@@ -721,21 +1024,60 @@ function serveFile(res, url, file, hit) {
         else if (bd >= 0) end = bd;
         /* (no end tag, the file ending in a tag left open ('</html' and nothing after): before that) */
         if (end < 0 && text.lastIndexOf('<') > text.lastIndexOf('>')) end = text.lastIndexOf('<');
+        /* (a <meta> after it within the first kilobyte: the script at the end, not pushing that meta out of the
+         * encoding prescan's reach) */
+        if (end >= 0 && end < 1024 && /<meta[\s>]/i.test(text.slice(end, 1030))) end = -1;
         /* (a print reftest and its references: laid out as pages) */
         const rdy = PRINT_URLS.has(url.pathname) || url.searchParams.has('cyberprint') ? REFREADY.replace('/*PRINT*/', 'if (window.__cyberPrintBegin) window.__cyberPrintBegin();') : REFREADY;
-        data = Buffer.from(end < 0 ? text + rdy : text.slice(0, end) + rdy + text.slice(end), 'utf8');
+        data = Buffer.from(end < 0 ? text + rdy : text.slice(0, end) + rdy + text.slice(end), 'latin1');
     } else if (REFTEST && /^(application|text)\/(xml|[\w.+-]*\+xml)/.test(headers['content-type']) && STEP_PATHS.has(url.pathname)) {
         /* (other XML, SVG among it: an XHTML script before the root element's end tag says when it's ready) */
-        const text = data.toString('utf8'), ends = [...text.matchAll(/<\/[\w:.-]+\s*>/g)];
+        const text = data.toString('latin1'), ends = [...text.matchAll(/<\/[\w:.-]+\s*>/g)];
         const end = ends.length ? ends[ends.length - 1].index : -1;
         const tag = REFREADY.replace('<script ', '<script xmlns="http://www.w3.org/1999/xhtml" ');
-        if (end >= 0) data = Buffer.from(text.slice(0, end) + tag + text.slice(end), 'utf8');
+        if (end >= 0) data = Buffer.from(text.slice(0, end) + tag + text.slice(end), 'latin1');
     }
     /* (?pipe=header(Name,Value)|header(...): response headers the URL asks for) */
-    for (const m of (url.searchParams.get('pipe') || '').matchAll(/header\(([^,()]+),([^()]*)\)/g)) headers[m[1].trim().toLowerCase()] = m[2].trim();
-    res.writeHead(200, headers);
+    const pipe = url.searchParams.get('pipe') || '';
+    let rest = pipe;
+    /* (wptserve's pipe syntax: name(arg,arg), a backslash escaping the next character, so ',' and ')' can be in a value) */
+    {
+        let i = 0, kept = '';
+        while (i < pipe.length) {
+            const m = /^\s*header\(/.exec(pipe.slice(i));
+            if (!m) { kept += pipe[i]; i++; continue; }
+            let j = i + m[0].length, args = [''], ok = false;
+            for (; j < pipe.length; j++) {
+                const c = pipe[j];
+                if (c === '\\' && j + 1 < pipe.length) { args[args.length - 1] += pipe[++j]; continue; }
+                if (c === ',' && args.length < 3) { args.push(''); continue; }
+                if (c === ')') { ok = true; j++; break; }
+                args[args.length - 1] += c;
+            }
+            if (!ok || args.length < 2) { kept += pipe.slice(i); break; }
+            headers[args[0].trim().toLowerCase()] = args[1].trim();
+            i = j;
+        }
+        rest = kept;
+    }
+    /* (a pipe that isn't all header()s, or a header value Node won't send: a server error, as wptserve fails on it) */
+    if (/header\(/.test(rest)) { res.writeHead(500); res.end(); return; }
+    try { res.writeHead(200, headers); }
+    catch (e) {
+        /* (a value with a line break in it: what comes before it, as the raw header line wptserve writes would be read) */
+        const clean = {};
+        let broke = false;
+        for (const k in headers) { const v = String(headers[k]); if (/[\r\n]/.test(v)) broke = true; clean[k] = v.split(/[\r\n]/)[0]; }
+        /* (what Node won't send: other characters as their UTF-8 bytes, as wptserve writes them; a control byte a '"', which
+         * keeps a MIME type as unparsable as the byte made it) */
+        if (!broke) for (const k in clean) clean[k] = Buffer.from(clean[k], 'utf8').toString('latin1').replace(/[^\t\x20-\x7e\x80-\xff]/g, '"');
+        try { res.writeHead(200, clean); }
+        catch (e3) { try { res.writeHead(500); } catch (e2) { } res.end(); return; }
+    }
     res.end(data);
 }
+/* (one request's handler throwing: logged, the server keeps serving the rest of the run) */
+process.on('uncaughtException', (e) => { console.error('wpt_server: request failed:', e && e.stack || e); });
 for (let i = 0; i < NPORTS; i++) {
     const s = i === 0 ? server : http.createServer(server.listeners('request')[0]);
     s.listen(+port + i, '127.0.0.1');

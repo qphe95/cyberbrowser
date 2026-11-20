@@ -187,7 +187,7 @@
         '-webkit-any-link -webkit-full-screen has-slotted').split(' ');
     var PSEUDO_CLASS_FNS = 'has-slotted dir has host host-context is lang not nth-child nth-last-child nth-last-of-type nth-of-type state where heading active-view-transition-type'.split(' ');
     var PSEUDO_ELEMENTS = ('after backdrop before cue file-selector-button first-letter first-line grammar-error marker ' +
-        'placeholder selection spelling-error target-text view-transition details-content checkmark picker-icon ' +
+        'placeholder selection spelling-error target-text view-transition details-content checkmark picker-icon interest-button ' +
         'scroll-marker scroll-marker-group column search-text -webkit-scrollbar -webkit-scrollbar-thumb ' +
         '-webkit-scrollbar-track -webkit-scrollbar-button -webkit-scrollbar-corner -webkit-scrollbar-track-piece ' +
         '-webkit-resizer -webkit-input-placeholder -webkit-file-upload-button -webkit-inner-spin-button ' +
@@ -917,10 +917,17 @@
                     /* (its images: held back with the rectangles, in order) */
                     Object.defineProperty(global, '__cyberCanvasImage', { configurable: true, writable: true,
                         value: function () { var a = Array.prototype.slice.call(arguments); a.__img = true; buf.push(a); } });
+                    /* (drawn on a bitmap of the tile's size, when there is one: then put as an image) */
+                    var pb = typeof global.__cyberPaintBitmap === 'function' && tl.w > 0 && tl.h > 0 ? global.__cyberPaintBitmap(tl.w, tl.h, el, li) : null;
                     try {
-                        var ctx = global.__cyberPaintContext(el, true);
+                        var ctx = pb ? pb.ctx : global.__cyberPaintContext(el, true);
                         new defs[m[1]]().paint(ctx, { width: tl.w, height: tl.h }, lp, args);
                     } catch (e) { ok = false; }
+                    if (pb && ok) {
+                        var pkey = pb.key();
+                        buf.length = 0;
+                        if (pkey) { var ia = [el, pkey, 0, 0, Math.ceil(tl.w), Math.ceil(tl.h)]; ia.__img = true; buf.push(ia); }
+                    }
                     Object.defineProperty(global, '__cyberCanvasRect', { configurable: true, writable: true, value: nat });
                     Object.defineProperty(global, '__cyberCanvasImage', { configurable: true, writable: true, value: natI });
                     if (ok) tl.origins.forEach(function (o) {
@@ -943,7 +950,7 @@
         var worklet = { addModule: function addModule(url) {
             url = String(url);
             var reg = global.__blobRegistry, b = reg && reg[url];
-            var p = b && typeof b.text === 'function' ? b.text() : global.fetch(url).then(function (r) { return r.text(); });
+            var p = b && typeof b.text === 'function' ? b.text() : global.fetch(url).then(function (r) { if (!r.ok) throw new TypeError('Failed to fetch the worklet module: HTTP ' + r.status); return r.text(); });
             return p.then(function (code) {
                 /* (a module: top-level await allowed; import() in a worklet rejects) */
                 code = String(code).replace(/\bimport\s*\(/g, '__cyberWorkletImport(');
@@ -1311,7 +1318,7 @@
         /* (module text: its imports' exports put before it) */
         function fetchText(url) {
             var reg = global.__blobRegistry, b = reg && reg[url];
-            return b && typeof b.text === 'function' ? b.text() : global.fetch(url).then(function (r) { return r.text(); });
+            return b && typeof b.text === 'function' ? b.text() : global.fetch(url).then(function (r) { if (!r.ok) throw new TypeError('Failed to fetch the module: HTTP ' + r.status); return r.text(); });
         }
         async function moduleCode(code, url) {
             var re = /^\s*import\s+(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s+['"]([^'"]+)['"]\s*;?/gm, mm, pre = '';

@@ -23,6 +23,7 @@
 #include "dom_store.h"
 #include "dom_wrap.h"
 #include "xml_parse.h"
+void dom_doc_set(JSContextHandle ctx, GCValue doc, const char *k, GCValue v);
 
 extern NodeId g_dom_document;
 
@@ -224,6 +225,11 @@ static GCValue js_character_set(JSContextHandle ctx, GCValue this_val, int argc,
     (void)argc; (void)argv;
     THIS_DOC(d);
     const char *name = NULL;
+    /* (a document parsed from bytes: the encoding they were decoded from, html_media_extract.c) */
+    {
+        GCValue own = JS_GetPropertyStr(ctx, this_val, "__cyber_charset");
+        if (JS_IsString(own)) return own;
+    }
     if (dom_is_html_document(d)) {
         uint32_t r = dom_slot(d);
         for (uint32_t s = dom_next_in_subtree(r, r); s && !name; s = dom_next_in_subtree(s, r)) {
@@ -345,11 +351,24 @@ static GCValue new_document(JSContextHandle ctx, bool xml, const char *content_t
     /* (what Document.prototype's contentType and URL read: url_classes.c) */
     JS_DefinePropertyValueStr(ctx, doc, "__cyber_ct", JS_NewString(ctx, content_type), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, doc, "__cyber_url", JS_NewString(ctx, "about:blank"), JS_PROP_CONFIGURABLE);
-    JS_DefinePropertyValueStr(ctx, doc, "readyState", JS_NewString(ctx, "complete"), JS_PROP_CONFIGURABLE);
+    dom_doc_set(ctx, doc, "readyState", JS_NewString(ctx, "complete"));
     /* (no browsing context: no window, no location) */
     JS_DefinePropertyValueStr(ctx, doc, "location", JS_NULL, JS_PROP_CONFIGURABLE);
-    JS_DefinePropertyValueStr(ctx, doc, "defaultView", JS_NULL, JS_PROP_CONFIGURABLE);
+    dom_doc_set(ctx, doc, "defaultView", JS_NULL);
     return doc;
+}
+
+/* (a document's value the engine keeps for a read-only attribute (readyState, currentScript, referrer, defaultView...):
+ * kept where Document.prototype's accessor reads it, platform_api.js __cyberDocSet; before that is there, a plain value) */
+void dom_doc_set(JSContextHandle ctx, GCValue doc, const char *k, GCValue v) {
+    GCValue fn = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberDocSet");
+    if (JS_IsFunction(ctx, fn)) {
+        GCValue a[3] = { doc, JS_NewString(ctx, k), v };
+        GCValue r = JS_Call(ctx, fn, JS_UNDEFINED, 3, a);
+        if (JS_IsException(r)) JS_GetException(ctx);
+        return;
+    }
+    JS_DefinePropertyValueStr(ctx, doc, k, v, JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE | JS_PROP_ENUMERABLE);
 }
 
 /* An XML document of these bytes, of this content type: not well-formed,

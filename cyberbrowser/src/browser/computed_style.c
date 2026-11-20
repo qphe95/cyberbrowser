@@ -212,10 +212,41 @@ static void refresh(JSContextHandle ctx, ComputedStyle *cs) {
     else if (root == cs->el && cs->used.font_size > 0) cs->root_font_size = cs->used.font_size;
 }
 
+/* (the slot in host's shadow tree el is assigned to: the first slot in tree order of its slot name) */
+static NodeId assigned_slot_of(NodeId host, NodeId el) {
+    NodeId root = dom_shadow_root(host);
+    if (!root) return DOM_NULL;
+    const char *want = dom_kind(el) == DOM_K_ELEMENT ? dom_attr(el, "slot") : NULL;
+    if (!want) want = "";
+    NodeId n = dom_first_child(root);
+    int guard = 0;
+    while (n && guard++ < 100000) {
+        if (dom_kind(n) == DOM_K_ELEMENT) {
+            const char *ln = dom_local_name(n);
+            if (ln && !strcmp(ln, "slot")) {
+                const char *nm = dom_attr(n, "name");
+                if (!strcmp(nm ? nm : "", want)) return n;
+            }
+        }
+        NodeId c = dom_first_child(n);
+        if (c) { n = c; continue; }
+        while (n && n != root && !dom_next_sibling(n)) n = dom_parent(n);
+        if (!n || n == root) break;
+        n = dom_next_sibling(n);
+    }
+    return DOM_NULL;
+}
+
 static ComputedStyle *parent_of(JSContextHandle ctx, ComputedStyle *cs) {
     if (cs->parent) return cs->parent;
     NodeId p = cs->pseudo ? cs->el : dom_parent(cs->el);
+    /* (a host's child assigned to a slot: the slot is its parent for inheritance, the flat tree's) */
+    if (!cs->pseudo && p && dom_kind(p) == DOM_K_ELEMENT && dom_shadow_root(p)) {
+        NodeId sl = assigned_slot_of(p, cs->el);
+        if (sl) p = sl;
+    }
     /* (a shadow root's host is its children's parent for inheritance) */
+    if (p && dom_kind(p) != DOM_K_ELEMENT) p = dom_host(p);
     if (p && dom_kind(p) != DOM_K_ELEMENT) p = DOM_NULL;
     if (!p) return NULL;
     cs->parent = computed_style_new(p);
@@ -744,16 +775,31 @@ static bool display_blockified(JSContextHandle ctx, ComputedStyle *cs) {
     if (strcmp(computed_of(ctx, cs, "float"), "none")) return true;
     NodeId p = dom_parent(cs->el);
     if (p && dom_kind(p) == DOM_K_DOCUMENT) return true;     /* the root element */
-    /* (a flex or grid container's item; display: contents ones see through to theirs) */
-    for (int d = 0; p && dom_kind(p) == DOM_K_ELEMENT && d < 8; d++, p = dom_parent(p)) {
-        ComputedStyle *ps = computed_style_new(p);
-        if (!ps) return false;
+    /* (a flex or grid container's item; display: contents ones see through to theirs; the ancestors' styles
+     * kept on the chain, taken once, not again for each element and each time display is asked for) */
+    if (cs->pseudo) {
+        for (int d = 0; p && dom_kind(p) == DOM_K_ELEMENT && d < 8; d++, p = dom_parent(p)) {
+            ComputedStyle *ps = computed_style_new(p);
+            if (!ps) return false;
+            refresh(ctx, ps);
+            const char *pd = ps->styled ? computed_of(ctx, ps, "display") : NULL;
+            bool contents = pd && !strcmp(pd, "contents");
+            bool fg = pd && (strstr(pd, "flex") || strstr(pd, "grid")) && !strstr(pd, "-webkit");
+            computed_style_free(ps);
+            if (contents) continue;
+            return fg;
+        }
+        return false;
+    }
+    ComputedStyle *at = cs;
+    for (int d = 0; d < 8; d++) {
+        ComputedStyle *ps = parent_of(ctx, at);
+        if (!ps || !dom_valid(ps->el) || dom_kind(ps->el) != DOM_K_ELEMENT) return false;
         refresh(ctx, ps);
         const char *pd = ps->styled ? computed_of(ctx, ps, "display") : NULL;
         bool contents = pd && !strcmp(pd, "contents");
         bool fg = pd && (strstr(pd, "flex") || strstr(pd, "grid")) && !strstr(pd, "-webkit");
-        computed_style_free(ps);
-        if (contents) continue;
+        if (contents) { at = ps; continue; }
         return fg;
     }
     return false;
@@ -1418,9 +1464,207 @@ static char *origin_px(ComputedStyle *cs, const char *n, char *r) {
     return strdup(out);
 }
 
+int dom_query_directionality(NodeId id);
+uint32_t dom_element_state(NodeId el);
+/* HTML's rules for parsing dimension values: true with the number and whether a percentage */
+static bool hint_dimension_value(const char *v, double *out, bool *pct) {
+    if (!v) return false;
+    while (*v == ' ' || *v == '\t' || *v == '\n' || *v == '\f' || *v == '\r') v++;
+    if (*v < '0' || *v > '9') return false;
+    double n = 0;
+    while (*v >= '0' && *v <= '9') n = n * 10 + (*v++ - '0');
+    if (*v == '.' && v[1] >= '0' && v[1] <= '9') {
+        double f = 0.1;
+        for (v++; *v >= '0' && *v <= '9'; v++, f /= 10) n += (*v - '0') * f;
+    } else if (*v == '.') v++;
+    *pct = *v == '%';
+    *out = n;
+    return true;
+}
+
+/* (a presentational hint for prop from el's dimension attributes, HTML 15.x: what the cascade
+ * leaves unset; malloc'd, or NULL) */
+static char *dimension_hint(NodeId el, const char *prop) {
+    if (!dom_valid(el) || g_dom.ns[dom_slot(el)] != DOM_NS_HTML) return NULL;
+    const char *tg = dom_tag_name(el);
+    if (!tg) return NULL;
+    bool w = !strcmp(prop, "width"), h = !strcmp(prop, "height");
+    bool ml = !strcmp(prop, "margin-left") || !strcmp(prop, "margin-right"), mt = !strcmp(prop, "margin-top") || !strcmp(prop, "margin-bottom");
+    /* (<ol type>, <ul type>, <li type>: the list style they map to, HTML 15.3.8, as css_layout.c's hint) */
+    if (!strcmp(prop, "list-style-type") && (!strcmp(tg, "ol") || !strcmp(tg, "ul") || !strcmp(tg, "li"))) {
+        const char *v = dom_attr(el, "type");
+        if (!v) return NULL;
+        const char *ls = NULL;
+        if (strcmp(tg, "ul")) {
+            if (!strcmp(v, "1")) ls = "decimal";
+            else if (!strcmp(v, "a")) ls = "lower-alpha";
+            else if (!strcmp(v, "A")) ls = "upper-alpha";
+            else if (!strcmp(v, "i")) ls = "lower-roman";
+            else if (!strcmp(v, "I")) ls = "upper-roman";
+        }
+        if (!ls && strcmp(tg, "ol")) {
+            if (!strcasecmp(v, "disc")) ls = "disc";
+            else if (!strcasecmp(v, "circle")) ls = "circle";
+            else if (!strcasecmp(v, "square")) ls = "square";
+            else if (!strcasecmp(v, "none")) ls = "none";
+        }
+        if (!ls && !strcmp(tg, "ol")) ls = "decimal";
+        if (!ls && !strcmp(tg, "ul")) ls = "disc";
+        return ls ? strdup(ls) : NULL;
+    }
+    /* (tables' and their parts' legacy attributes, HTML 15.3.x: bgcolor, background, bordercolor, align; cellpadding on cells) */
+    {
+        bool tpart = !strcmp(tg, "table") || !strcmp(tg, "thead") || !strcmp(tg, "tbody") || !strcmp(tg, "tfoot") || !strcmp(tg, "tr") ||
+                     !strcmp(tg, "td") || !strcmp(tg, "th");
+        extern bool css_layout_legacy_color_rgb(const char *v, char *out, size_t cap);
+        char cb[64];
+        bool bgok = tpart || !strcmp(tg, "body");
+        if (bgok && !strcmp(prop, "background-color")) {
+            const char *bc = dom_attr(el, "bgcolor");
+            if (bc && css_layout_legacy_color_rgb(bc, cb, sizeof cb)) return strdup(cb);
+            return NULL;
+        }
+        if (bgok && !strcmp(prop, "background-image")) {
+            const char *bg = dom_attr(el, "background");
+            if (!bg || !*bg) return NULL;
+            extern const char *g_cyber_start_url;
+            extern char *wurl_resolve(const char *base, const char *href);
+            char *abs = g_cyber_start_url ? wurl_resolve(g_cyber_start_url, bg) : NULL;
+            const char *u = abs ? abs : bg;
+            size_t ul = strlen(u);
+            char *o = malloc(ul + 8);
+            if (o) snprintf(o, ul + 8, "url(\"%s\")", u);
+            free(abs);
+            return o;
+        }
+        if (!strcmp(tg, "table") && !strncmp(prop, "border-", 7) && strstr(prop, "-color") && strcmp(prop, "border-color")) {
+            const char *bc = dom_attr(el, "bordercolor");
+            if (bc && css_layout_legacy_color_rgb(bc, cb, sizeof cb)) return strdup(cb);
+            return NULL;
+        }
+        if (!strcmp(prop, "text-align") && tpart && strcmp(tg, "table")) {
+            const char *al = dom_attr(el, "align");
+            if (al) {
+                if (!strcasecmp(al, "center") || !strcasecmp(al, "middle")) return strdup("center");
+                if (!strcasecmp(al, "left")) return strdup("left");
+                if (!strcasecmp(al, "right")) return strdup("right");
+                if (!strcasecmp(al, "justify")) return strdup("justify");
+            }
+            if (!al && !strcmp(tg, "th")) return strdup("center");
+            return NULL;
+        }
+        if ((!strcmp(tg, "td") || !strcmp(tg, "th")) && !strncmp(prop, "padding-", 8)) {
+            NodeId t = dom_parent(el);
+            while (t && !(dom_kind(t) == DOM_K_ELEMENT && !strcmp(dom_tag_name(t), "table"))) t = dom_parent(t);
+            const char *cp = t ? dom_attr(t, "cellpadding") : NULL;
+            if (!cp) return NULL;
+            while (*cp == ' ' || *cp == '\t' || *cp == '\n' || *cp == '\f' || *cp == '\r') cp++;
+            if (*cp == '+') cp++;
+            if (*cp < '0' || *cp > '9') return NULL;
+            char pb[32];
+            snprintf(pb, sizeof pb, "%ldpx", strtol(cp, NULL, 10));
+            return strdup(pb);
+        }
+    }
+    /* (img and object border: a non-negative integer, a solid border that wide) */
+    if (!strncmp(prop, "border-", 7) && (!strcmp(tg, "img") || !strcmp(tg, "object") ||
+                                         (!strcmp(tg, "input") && dom_attr(el, "type") && !strcasecmp(dom_attr(el, "type"), "image")))) {
+        bool bw = strstr(prop, "-width") != NULL, bs = strstr(prop, "-style") != NULL;
+        const char *bv = dom_attr(el, "border");
+        if ((!bw && !bs) || !bv) return NULL;
+        if (strcmp(prop, "border-top-width") && strcmp(prop, "border-right-width") && strcmp(prop, "border-bottom-width") && strcmp(prop, "border-left-width") &&
+            strcmp(prop, "border-top-style") && strcmp(prop, "border-right-style") && strcmp(prop, "border-bottom-style") && strcmp(prop, "border-left-style")) return NULL;
+        while (*bv == ' ' || *bv == '\t' || *bv == '\n' || *bv == '\f' || *bv == '\r') bv++;
+        bool negb = *bv == '-';
+        if (*bv == '+' || *bv == '-') bv++;
+        if (*bv < '0' || *bv > '9') return NULL;
+        long nb = 0;
+        while (*bv >= '0' && *bv <= '9' && nb < 100000) nb = nb * 10 + (*bv++ - '0');
+        if (negb && nb) return NULL;   /* (a minus sign before anything but zero: not a non-negative integer) */
+        if (bs) return strdup("solid");
+        char bb[32];
+        snprintf(bb, sizeof bb, "%ldpx", nb);
+        return strdup(bb);
+    }
+    /* (li value: counter-set list-item N; ol start: counter-reset list-item N-1, or reversed(list-item) N+1, HTML 15.3.8) */
+    if ((!strcmp(prop, "counter-set") && !strcmp(tg, "li")) || (!strcmp(prop, "counter-reset") && !strcmp(tg, "ol"))) {
+        const char *av = dom_attr(el, !strcmp(tg, "li") ? "value" : "start");
+        if (!av) return NULL;
+        while (*av == ' ' || *av == '\t' || *av == '\n' || *av == '\f' || *av == '\r') av++;
+        bool neg = *av == '-';
+        if (*av == '-' || *av == '+') av++;
+        if (*av < '0' || *av > '9') return NULL;
+        long long v = 0;
+        while (*av >= '0' && *av <= '9' && v < 3000000000LL) v = v * 10 + (*av++ - '0');
+        if (neg) v = -v;
+        if (v > 2147483647LL) v = 2147483647LL;
+        if (v < -2147483648LL) v = -2147483648LL;
+        char cb2[64];
+        if (!strcmp(tg, "li")) snprintf(cb2, sizeof cb2, "list-item %lld", v);
+        else if (dom_attr(el, "reversed")) snprintf(cb2, sizeof cb2, "reversed(list-item) %lld", v + 1);
+        else snprintf(cb2, sizeof cb2, "list-item %lld", v - 1);
+        return strdup(cb2);
+    }
+    if (!w && !h && !ml && !mt && strcmp(prop, "aspect-ratio")) return NULL;
+    bool image_input = !strcmp(tg, "input") && dom_attr(el, "type") && !strcasecmp(dom_attr(el, "type"), "image");
+    bool media = !strcmp(tg, "iframe") || !strcmp(tg, "marquee") || !strcmp(tg, "video") || !strcmp(tg, "object") ||
+                 !strcmp(tg, "embed") || !strcmp(tg, "img") || image_input;
+    /* (img, video and image buttons: width and height attributes, numbers both, map to aspect-ratio: auto w / h; an img's
+     * chosen <source>'s when that has them) */
+    if (!strcmp(prop, "aspect-ratio") && (!strcmp(tg, "img") || !strcmp(tg, "video") || image_input)) {
+        NodeId from = el;
+        if (!strcmp(tg, "img")) {
+            extern NodeId display_list_picture_source(uint32_t img);
+            NodeId src = display_list_picture_source(el);
+            if (src && dom_attr(src, "width") && dom_attr(src, "height")) from = src;
+        }
+        double aw, ah;
+        bool ap, hp;
+        if (!hint_dimension_value(dom_attr(from, "width"), &aw, &ap) || !hint_dimension_value(dom_attr(from, "height"), &ah, &hp) || ap || hp) return NULL;
+        char ab[96];
+        snprintf(ab, sizeof ab, "auto %.10g / %.10g", aw, ah);
+        return strdup(ab);
+    }
+    const char *attr = NULL;
+    bool zero_ok = true;
+    /* (an img in a picture: its chosen source's width and height, when that has them) */
+    if ((w || h) && !strcmp(tg, "img")) {
+        extern NodeId display_list_picture_source(uint32_t img);
+        NodeId src = display_list_picture_source(el);
+        const char *sv = src ? dom_attr(src, w ? "width" : "height") : NULL;
+        double sn;
+        bool spct;
+        if (sv && hint_dimension_value(sv, &sn, &spct)) {
+            char sb[64];
+            snprintf(sb, sizeof sb, "%.10g%s", sn, spct ? "%" : "px");
+            return strdup(sb);
+        }
+    }
+    if (w || h) {
+        if (media) attr = w ? "width" : "height";
+        else if (w && (!strcmp(tg, "hr") || !strcmp(tg, "col"))) attr = "width";
+        else if (!strcmp(tg, "td") || !strcmp(tg, "th")) { attr = w ? "width" : "height"; zero_ok = false; }
+        else if (!strcmp(tg, "table")) { attr = w ? "width" : "height"; zero_ok = !w; }
+        else if (h && !strcmp(tg, "tr")) attr = "height";
+    } else if (!strcmp(tg, "embed") || !strcmp(tg, "img") || !strcmp(tg, "object") || image_input || !strcmp(tg, "marquee")) {
+        attr = ml ? "hspace" : "vspace";
+    }
+    if (!attr) return NULL;
+    double n;
+    bool pct;
+    if (!hint_dimension_value(dom_attr(el, attr), &n, &pct) || (!zero_ok && n == 0)) return NULL;
+    char buf[64];
+    snprintf(buf, sizeof buf, "%.10g%s", n, pct ? "%" : "px");
+    return strdup(buf);
+}
+
 static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p) {
     CST("compute %s", p->name);
     if (!cs->styled) return strdup("");
+    if (!strcmp(p->name, "direction") && cs->el && !cs->pseudo) {
+        const char *d = dom_attr(cs->el, "dir");
+        if (d && !strcasecmp(d, "auto")) return strdup(dom_query_directionality(cs->el) ? "rtl" : "ltr");
+    }
     {
         char phys[64];
         if (css_logical_physical(p->name, cs->used.writing_mode, cs->used.rtl, phys, sizeof phys))
@@ -1429,6 +1673,48 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
     int i = prop_idx(p);
     const char *s = cs->spec[i];
     const char *n = p->name;
+    /* (aspect-ratio auto, as the initial value is: the width and height attributes' ratio over it) */
+    /* (an ol's start over the UA's list-item reset) */
+    if (!cs->pseudo && cs->el && !strcmp(n, "counter-reset") && (!s || !strcmp(s, "list-item") || !strcmp(s, "reversed(list-item)") || !strcmp(s, "list-item 0"))) {
+        char *ch = dimension_hint(cs->el, n);
+        if (ch) return ch;
+    }
+    if (!cs->pseudo && cs->el && !strcmp(n, "aspect-ratio") && (!s || !strcmp(s, "auto"))) {
+        char *ah = dimension_hint(cs->el, n);
+        if (ah) return ah;
+    }
+    /* (nothing in the cascade: a dimension attribute's presentational hint) */
+    if (!s && !cs->pseudo && cs->el) {
+        char *dh = dimension_hint(cs->el, n);
+        /* (a percentage width or height of a rendered box: its resolved value is what it is used as, below) */
+        if (dh && strchr(dh, '%') && (!strcmp(n, "width") || !strcmp(n, "height")) && cs->used.display && strcmp(cs->used.display, "none")) {
+            s = cs->spec[i] = dh;
+        } else if (dh) return dh;
+    }
+    /* (<font size>: its legacy font size, HTML 15.3.4, the keyword's size) */
+    if (!s && !cs->pseudo && cs->el && !strcmp(n, "font-size") && !strcmp(dom_tag_name(cs->el), "font") && dom_attr(cs->el, "size")) {
+        const char *q = dom_attr(cs->el, "size");
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\f' || *q == '\r') q++;
+        int mode = 0;
+        if (*q == '+') { mode = 1; q++; } else if (*q == '-') { mode = -1; q++; }
+        if (*q >= '0' && *q <= '9') {
+            long v = 0;
+            while (*q >= '0' && *q <= '9' && v < 1000) v = v * 10 + (*q++ - '0');
+            if (mode == 1) v = 3 + v; else if (mode == -1) v = 3 - v;
+            if (v > 7) v = 7;
+            if (v < 1) v = 1;
+            static const int px[] = { 0, 10, 13, 16, 18, 24, 32, 48 };
+            char b[16];
+            snprintf(b, sizeof b, "%dpx", px[v]);
+            return strdup(b);
+        }
+    }
+    /* (an image button's border attribute: over the user agent's input border, as a presentational hint is) */
+    if (s && !cs->pseudo && cs->el && !strncmp(n, "border-", 7) && dom_attr(cs->el, "border") && !strcmp(dom_tag_name(cs->el), "input") &&
+        dom_attr(cs->el, "type") && !strcasecmp(dom_attr(cs->el, "type"), "image") && (!strcmp(s, "2px") || !strcmp(s, "solid"))) {
+        char *dh = dimension_hint(cs->el, n);
+        if (dh) return dh;
+    }
     /* (an element's default display is the user agent's: what layout gave it) */
     if (!s && !strcmp(n, "display") && cs->used.display) s = cs->used.display;
     /* (<table>'s border-spacing: the user agent's 2px) */
@@ -1554,6 +1840,11 @@ static char *compute(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p
             free(r);
             r = strdup(vis ? "auto" : "hidden");
         }
+    }
+    if (r && !strcmp(n, "display") && !strcmp(r, "contents") && dom_valid(cs->el) && (dom_element_state(cs->el) & ((1u << 29) | (1u << 30)))) {
+        /* (in the top layer: contents is block) */
+        free(r);
+        r = strdup("block");
     }
     if (r && !strcmp(n, "display")) {
         /* (math outside MathML: flow) */

@@ -1669,6 +1669,10 @@ static void ts_path_put(char **out, size_t *len, size_t *cap, const char *fmt, d
 }
 
 _Thread_local double text_shaper_outline_cull = -1.0;
+_Thread_local bool text_shaper_outline_glyph_sep = false;
+_Thread_local bool text_shaper_outline_no_kern = false;   /* (font-kerning: none, a canvas's) */   /* (a '|' after each glyph's outline: drawn one by one) */
+static float ts_trim_of(const TextShaper *s, uint32_t cp, const char *at, const char *after, float xa, bool *shift);
+static __thread const char *t_trim_text, *t_trim_from;
 double text_shaper_outline_path(const TextShaper *s, const char *utf8, size_t n, double px, double x, double y,
                                 char **out, size_t *len, size_t *cap)
 {
@@ -1676,13 +1680,20 @@ double text_shaper_outline_path(const TextShaper *s, const char *utf8, size_t n,
     double k0 = px / (double)s->size_pixels, pen = x;
     const char *p = utf8, *end = utf8 + n;
     int prev = -1;
+    /* (fullwidth punctuation side by side: half the space between them gone, as the page's text) */
+    const char *ot = t_trim_text, *of = t_trim_from;
+    t_trim_text = t_trim_from = utf8;
     while (p < end && *p) {
+        const char *at = p;
         uint32_t cp = utf8_decode(&p);
         int gi = 0, owner = 0;
         float xa = 0.0f;
         ts_metric(s, cp, &gi, &xa, &owner);
+        bool tshift = false;
+        double trim = (double)ts_trim_of(s, cp, at, p, xa, &tshift) * k0;
+        if (tshift) pen -= trim;
         const TextShaper *gs = ts_owner_shaper(s, owner);
-        if (prev >= 0 && owner == 0) pen += (double)ts_kern(s, prev, gi) * s->scale * k0;
+        if (prev >= 0 && owner == 0 && !text_shaper_outline_no_kern) pen += (double)ts_kern(s, prev, gi) * s->scale * k0;
         prev = owner == 0 ? gi : -1;
         double k = (double)gs->scale * px / (double)(gs->size_pixels > 0.0f ? gs->size_pixels : s->size_pixels);
         stbtt_vertex *v = NULL;
@@ -1696,9 +1707,12 @@ double text_shaper_outline_path(const TextShaper *s, const char *utf8, size_t n,
             else if (v[q].type == STBTT_vcubic) ts_path_put(out, len, cap, "C%.2f %.2f %.2f %.2f %.2f %.2f", pen + v[q].cx * k, y - v[q].cy * k, pen + v[q].cx1 * k, y - v[q].cy1 * k, vx, vy, 6);
         }
         if (open) ts_path_put(out, len, cap, "Z", 0, 0, 0, 0, 0, 0, 0);
+        if (open && text_shaper_outline_glyph_sep) ts_path_put(out, len, cap, "|", 0, 0, 0, 0, 0, 0, 0);
         if (v) stbtt_FreeShape(&gs->font, v);
         pen += (double)xa * k0;
+        if (!tshift) pen -= trim;
     }
+    t_trim_text = ot; t_trim_from = of;
     return pen - x;
 }
 
@@ -1798,8 +1812,7 @@ static int ts_cjk_punct(uint32_t c)
 
 /* The start of the text a span is of, while one is measured or drawn: what
  * comes before it counts. */
-static __thread const char *t_trim_text;
-static __thread const char *t_trim_from;   /* (where the span starts: a line's start, nothing before it on the line) */
+/* (t_trim_text, t_trim_from: declared above text_shaper_outline_path; t_trim_from: where the span starts, a line's start, nothing before it on the line) */
 
 /* How much of cp's advance goes, by its neighbours (at [at, after) in the
  * text): first of the pair for a closing one, second for an opening one. */

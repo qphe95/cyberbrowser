@@ -679,17 +679,29 @@ static const WUrl *base_url(JSContextHandle ctx, NodeId el) {
 }
 
 /* The element's href attribute parsed (false when absent or unparsable). */
+char *url_legacy_query(const char *in, const char *enc);
 static bool link_url(JSContextHandle ctx, NodeId el, WUrl *out, const char **raw) {
     const char *h = el ? dom_attr(el, "href") : NULL;
     if (raw) *raw = h;
     if (!h) return false;
     const WUrl *b = base_url(ctx, el);
+    /* (non-ASCII in the query: in the document's encoding) */
+    for (const char *c = h; *c; c++) {
+        if ((unsigned char)*c < 0x80) continue;
+        GCValue od = JS_GetPropertyStr(ctx, dom_js(ctx, el), "ownerDocument");
+        GCValue cs = JS_IsObject(od) ? JS_GetPropertyStr(ctx, od, "characterSet") : JS_UNDEFINED;
+        const char *css = JS_IsString(cs) ? JS_ToCString(ctx, cs) : NULL;
+        char *lq = css ? url_legacy_query(h, css) : NULL;
+        if (lq) { bool ok = !wurl_parse(lq, strlen(lq), b, out); free(lq); return ok; }
+        break;
+    }
     return !wurl_parse(h, strlen(h), b, out);
 }
 
 static GCValue js_link_get(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv, int magic) {
     (void)argc; (void)argv;
     NodeId el = dom_node_of(this_val);
+    if (!el) return JS_ThrowTypeError(ctx, "Illegal invocation");   /* (not an element: the prototype, or another object) */
     WUrl u;
     const char *raw = NULL;
     if (!link_url(ctx, el, &u, &raw)) {
@@ -869,6 +881,13 @@ void url_hyperlinks_install(JSContextHandle ctx, GCValue global) {
         for (int k = P_HREF; k <= P_HASH; k++)
             accessor(ctx, p, g_part_names[k], js_link_get, k == P_ORIGIN ? NULL : js_link_set, k);
         method(ctx, p, "toString", js_link_get, 0, P_HREF);
+    }
+    /* (an SVG <a>: the same, but its href is SVGURIReference's; a MathML <a>: its href too, no stringifier) */
+    for (int i = 0; i < 2; i++) {
+        GCValue sp = global_proto(ctx, i ? "MathMLAnchorElement" : "SVGAElement");
+        if (JS_IsObject(sp))
+            for (int k = i ? P_HREF : P_ORIGIN; k <= P_HASH; k++)
+                accessor(ctx, sp, g_part_names[k], js_link_get, k == P_ORIGIN ? NULL : js_link_set, k);
     }
     /* node.baseURI (read-only); the document's own baseURI (which embedder
      * code assigns) becomes the same getter, with a setter that ignores it */

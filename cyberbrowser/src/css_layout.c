@@ -32,6 +32,7 @@
 #include "gc_platform.h"
 #include "url_whatwg.h"
 #include "css_charset.h"
+NodeId frame_container_of_document(NodeId doc);   /* (frame_api.c) */
 
 #include <pthread.h>
 #include <string.h>
@@ -180,6 +181,20 @@ HtmlNode *css_layout_box_node(const LayoutContext *ctx, int idx)
     return layout_node_dom((LayoutContext *)ctx, ctx->tree.nodes[idx].dom_node_idx);
 }
 
+bool media_video_natural_size(uint32_t node, int *w, int *h);
+/* (a <video>'s natural size: its video's once known; *w, *h left as they are otherwise) */
+static void layout_video_natural(const HtmlNode *n, double *w, double *h)
+{
+    if (!n || n->type != HTML_NODE_ELEMENT || !n->tag_name || strcasecmp(n->tag_name, "video") || !n->store_id) return;
+    int vw = 0, vh = 0;
+    if (media_video_natural_size(n->store_id, &vw, &vh)) { *w = vw; *h = vh; }
+}
+static double layout_video_natural_w(const HtmlNode *n)
+{
+    double w = 300.0, h = 150.0;
+    layout_video_natural(n, &w, &h);
+    return w;
+}
 static const char* layout_node_attribute(HtmlNode *node, const char *name)
 {
     if (!node || node->type != HTML_NODE_ELEMENT || !name) return NULL;
@@ -227,6 +242,7 @@ static inline LayoutBox* layout_box(LayoutContext *ctx, int idx)
 /* Forward declarations for display/visibility helpers used during tree build. */
 static CssDisplay layout_default_display(const char *tag_name);
 static unsigned char layout_default_table_role(const char *tag_name);
+static bool input_is_button(HtmlNode *n);
 static char* layout_resolve_url(const char *base_url, const char *href);
 static bool style_is_font_size_prop(const char *prop);
 
@@ -505,6 +521,7 @@ static const LayoutBox *layout_box_template(void)
         box->s->width_set = 0;
         box->s->height_set = 0;
         box->s->visibility_set = 0;
+        box->s->pe_none = box->s->pe_set = 0;
         box->s->text_align = CSS_TEXT_ALIGN_LEFT;
         box->s->text_align_set = 0;
         box->s->ta_match = 0;
@@ -777,6 +794,7 @@ static double css_parse_length(const char *value, double parent_value, double vi
 /* Per-layout unit context: viewport size for vw/vh/vmin/vmax and the root
  * element's font size for rem (set when the root box is styled). */
 static double g_unit_vw = 1024.0, g_unit_vh = 768.0, g_unit_rem = 16.0;
+void css_layout_viewport_size(double *w, double *h) { if (w) *w = g_unit_vw; if (h) *h = g_unit_vh; }
 static double g_unit_gutter;   /* (a frame's root scrolls, overflow: scroll: a classic scrollbar's 15px off the viewport units) */
 static bool g_unit_in_frame;   /* (laying out a frame's document, not the page's: its scrollbars take room) */
 static double g_unit_rr[4] = { 0.7, 0.5, 0.5, 1.0 };   /* (the root font's cap, ex, ch, ic over its size) */
@@ -2441,14 +2459,32 @@ static bool css_parse_url_value(const char *value, char *out, size_t out_size)
     if (*value == '"' || *value == '\'') { quote = *value; value++; }
     const char *end = value;
     if (quote) {
-        while (*end && *end != quote) end++;
+        while (*end && *end != quote) { if (*end == '\\' && end[1]) end++; end++; }
     } else {
-        while (*end && *end != ')' && !isspace((unsigned char)*end)) end++;
+        while (*end && *end != ')' && !isspace((unsigned char)*end)) { if (*end == '\\' && end[1]) end++; end++; }
     }
-    size_t len = (size_t)(end - value);
-    if (len >= out_size) len = out_size - 1;
-    memcpy(out, value, len);
-    out[len] = '\0';
+    /* (its escapes as the characters they are, CSS Syntax 4.3.7: hex digits a code point, else the character itself) */
+    size_t k = 0;
+    for (const char *p = value; p < end && k + 5 < out_size; ) {
+        if (*p != '\\') { out[k++] = *p++; continue; }
+        p++;
+        if (p >= end) break;
+        if (*p == '\n') { p++; continue; }   /* (an escaped newline in a string: nothing) */
+        if (isxdigit((unsigned char)*p)) {
+            unsigned cp = 0;
+            int nd = 0;
+            while (p < end && nd < 6 && isxdigit((unsigned char)*p)) { cp = cp * 16 + (unsigned)(isdigit((unsigned char)*p) ? *p - '0' : (tolower((unsigned char)*p) - 'a' + 10)); p++; nd++; }
+            if (p < end && (*p == ' ' || *p == '\t' || *p == '\n')) p++;
+            if (!cp || cp > 0x10FFFF || (cp >= 0xD800 && cp < 0xE000)) cp = 0xFFFD;
+            if (cp < 0x80) out[k++] = (char)cp;
+            else if (cp < 0x800) { out[k++] = (char)(0xC0 | (cp >> 6)); out[k++] = (char)(0x80 | (cp & 0x3F)); }
+            else if (cp < 0x10000) { out[k++] = (char)(0xE0 | (cp >> 12)); out[k++] = (char)(0x80 | ((cp >> 6) & 0x3F)); out[k++] = (char)(0x80 | (cp & 0x3F)); }
+            else { out[k++] = (char)(0xF0 | (cp >> 18)); out[k++] = (char)(0x80 | ((cp >> 12) & 0x3F)); out[k++] = (char)(0x80 | ((cp >> 6) & 0x3F)); out[k++] = (char)(0x80 | (cp & 0x3F)); }
+            continue;
+        }
+        out[k++] = *p++;
+    }
+    out[k] = '\0';
     return true;
 }
 
@@ -4678,6 +4714,17 @@ static void layout_apply_declaration_in(LayoutBox *box, const CssDeclaration *de
         layout_apply_declaration_in(box, &d2, parent_width, viewport_width, base_url);
         return;
     }
+    /* (a cursor image: fetched, as a browser does to show it) */
+    if ((prop[0] == 'c' || prop[0] == 'C') && !strcasecmp(prop, "cursor") && strstr(value, "url(")) {
+        const char *v = value;
+        while (*v == ' ') v++;
+        char cu[2048];
+        ImageCache *cic = display_list_get_image_cache();
+        if (cic && !strncasecmp(v, "url(", 4) && css_parse_url_value(v, cu, sizeof cu) && cu[0]) {
+            char *abs = layout_resolve_url(base_url, cu);
+            if (abs) { image_cache_request(cic, abs, 0, 0); free(abs); }
+        }
+    }
     if ((prop[0] == 'c' || prop[0] == 'C') && !strcasecmp(prop, "content")) {
         /* (one image and nothing else replaces the element; anything else leaves it be) */
         const char *v = value;
@@ -4789,7 +4836,10 @@ static void layout_apply_declaration_in(LayoutBox *box, const CssDeclaration *de
     box->s->render_features |= decl->feature;
     /* (hidden contents say nothing about a box's size either) */
     if (prop[0] == 'c' && !strcasecmp(prop, "content-visibility")) {
+        bool was_hidden_ = box->s->cv_hidden;
         box->s->cv_hidden = !strcasecmp(value, "hidden");
+        /* (a later declaration's value overriding hidden: its containment gone with it) */
+        if (was_hidden_ && !box->s->cv_hidden) { box->s->contain_size = 0; box->s->contain_layout = 0; box->s->contain_any = 0; box->s->abs_cb &= ~128; }
         if (box->s->cv_hidden) { box->s->contain_size = 3; box->s->contain_layout = 1; box->s->contain_any = 1; box->s->abs_cb |= 128; }
         else if (!strcasecmp(value, "auto")) { box->s->contain_layout = 1; box->s->contain_any = 1; box->s->abs_cb |= 128; }   /* (auto: layout containment always) */   /* (layout containment too: a containing block for what is positioned in it) */
     }
@@ -5240,6 +5290,12 @@ static void layout_apply_declaration_in(LayoutBox *box, const CssDeclaration *de
             }
         }
         no_grad:;
+    }
+    if (prop[0] == 'b' && !strcasecmp(prop, "background") && (!strcasecmp(value, "initial") || !strcasecmp(value, "unset"))) {
+        /* (initial, unset: its color transparent, no image) */
+        box->s->background_color_r = box->s->background_color_g = box->s->background_color_b = box->s->background_color_a = 0.0;
+        box->s->bg_current = 0; box->s->bg_cc_expr = NULL;
+        box->s->background_image_url = "";
     }
     if (prop[0] == 'b' && !strcasecmp(prop, "background")) {
         /* (box keywords in the shorthand: origin, then clip; one: both) */
@@ -6159,6 +6215,10 @@ static void layout_apply_declaration_in(LayoutBox *box, const CssDeclaration *de
         box->s->appearance_none = !strcasecmp(value, "none");
         return;
     }
+    if (prop[0] == 'f' && !strcasecmp(prop, "field-sizing")) {
+        box->s->field_sizing = !strcasecmp(value, "content");
+        return;
+    }
     if (prop[0] == 'a' && !strcasecmp(prop, "accent-color")) {
         double r, g, b, a;
         box->s->accent_set = 0;
@@ -6700,6 +6760,9 @@ static void layout_apply_declaration_in(LayoutBox *box, const CssDeclaration *de
         layout_apply_grid_declaration(box, prop, value, parent_width, viewport_width);
     } else if (PK(5)) {
         box->s->caption_side = !strcasecmp(value, "bottom") ? 2 : !strcasecmp(value, "top") ? 1 : 0;
+    } else if (prop[0] == 'p' && !strcasecmp(prop, "pointer-events")) {
+        if (!strcasecmp(value, "inherit")) box->s->pe_set = 0;
+        else { box->s->pe_none = !strcasecmp(value, "none"); box->s->pe_set = 1; }
     } else if (PK(6)) {
         box->s->visibility = css_parse_visibility(value);
         box->s->visibility_set = 1;
@@ -12047,6 +12110,7 @@ static char* layout_resolve_url(const char *base_url, const char *href) {
  * (hit test, re-render) never re-downloads a sheet. */
 typedef struct UrlSheet { char *url; char *text; size_t len; uint64_t hash; uint64_t id; const char *enc;     uint32_t face_gen;  /* font_registry_face_generation it was last scanned in */
     bool has_property;  /* (has @property rules) */
+    bool bad;           /* (an error status or not CSS: its link's error event) */
 } UrlSheet;
 static uint64_t sheet_hash(const char *s, size_t n);
 #define URL_SHEET_MAX 64
@@ -12056,6 +12120,35 @@ static int g_url_sheet_n, g_url_sheet_next;
 /* The cached sheet for `url`, fetching it on first use (NULL on failure):
  * its text as UTF-8, decoded from its bytes' encoding (fallback_label: the
  * referrer's, when nothing in the response says). */
+/* (a url's text with its CSS escapes as the characters they are, as UTF-8; false when it doesn't fit) */
+static bool css_url_unescape(const char *p, size_t n, char *out, size_t cap)
+{
+    size_t k = 0;
+    const char *end = p + n;
+    while (p < end) {
+        if (k + 5 >= cap) return false;
+        if (*p != '\\') { out[k++] = *p++; continue; }
+        p++;
+        if (p >= end) break;
+        if (*p == '\n') { p++; continue; }
+        if (isxdigit((unsigned char)*p)) {
+            unsigned cp = 0;
+            int nd = 0;
+            while (p < end && nd < 6 && isxdigit((unsigned char)*p)) { cp = cp * 16 + (unsigned)(isdigit((unsigned char)*p) ? *p - '0' : (tolower((unsigned char)*p) - 'a' + 10)); p++; nd++; }
+            if (p < end && (*p == ' ' || *p == '\t' || *p == '\n')) p++;
+            if (!cp || cp > 0x10FFFF || (cp >= 0xD800 && cp < 0xE000)) cp = 0xFFFD;
+            if (cp < 0x80) out[k++] = (char)cp;
+            else if (cp < 0x800) { out[k++] = (char)(0xC0 | (cp >> 6)); out[k++] = (char)(0x80 | (cp & 0x3F)); }
+            else if (cp < 0x10000) { out[k++] = (char)(0xE0 | (cp >> 12)); out[k++] = (char)(0x80 | ((cp >> 6) & 0x3F)); out[k++] = (char)(0x80 | (cp & 0x3F)); }
+            else { out[k++] = (char)(0xF0 | (cp >> 18)); out[k++] = (char)(0x80 | ((cp >> 12) & 0x3F)); out[k++] = (char)(0x80 | ((cp >> 6) & 0x3F)); out[k++] = (char)(0x80 | (cp & 0x3F)); }
+            continue;
+        }
+        out[k++] = *p++;
+    }
+    out[k] = 0;
+    return true;
+}
+
 /* (text with each relative url(...) made absolute against base; NULL when there is none to change) */
 static char *css_sheet_absolute_urls(const char *t, size_t n, const char *base)
 {
@@ -12085,9 +12178,13 @@ static char *css_sheet_absolute_urls(const char *t, size_t n, const char *base)
             else { while (e < n && t[e] != ')' && !isspace((unsigned char)t[e]) && t[e] != '"' && t[e] != '\'') e++; }
             char u[2048];
             size_t ul = e - s;
-            bool rel = ul > 0 && ul < sizeof u && t[s] != '#' && !memchr(t + s, '\\', ul);
+            bool rel = ul > 0 && ul < sizeof u && t[s] != '#';
             if (rel) {
-                memcpy(u, t + s, ul); u[ul] = 0;
+                /* (escapes in it: as their characters first) */
+                if (memchr(t + s, '\\', ul)) { if (!css_url_unescape(t + s, ul, u, sizeof u)) rel = false; }
+                else { memcpy(u, t + s, ul); u[ul] = 0; }
+            }
+            if (rel) {
                 /* (a scheme: absolute already) */
                 const char *c = u;
                 while (*c && (isalnum((unsigned char)*c) || *c == '+' || *c == '-' || *c == '.')) c++;
@@ -12153,7 +12250,14 @@ static const UrlSheet *url_sheet_get_ex(const char *url, const char *fallback_la
         }
     } else ok = dom_fetch_script(url, &buffer, err, sizeof(err));
     const UrlSheet *out = NULL;
-    if (ok && buffer.data && buffer.size > 0) {
+    /* (the status: an error one is no sheet) */
+    int status_ = 200;
+    if (ok && buffer.headers && buffer.headers_size > 12 && !strncmp(buffer.headers, "HTTP/", 5)) {
+        const char *sp_ = strchr(buffer.headers, ' ');
+        if (sp_) status_ = atoi(sp_ + 1);
+    }
+    if (ok && !buffer.data && status_ < 400) { buffer.data = strdup(""); buffer.size = 0; }
+    if (ok && buffer.data && (buffer.size > 0 || status_ < 400)) {
         LOG_INFO("Fetched stylesheet (%zu bytes)", buffer.size);
         UrlSheet *u = &g_url_sheets[g_url_sheet_next];
         if (g_url_sheet_n == URL_SHEET_MAX) { free(u->url); free(u->text); }
@@ -12161,7 +12265,31 @@ static const UrlSheet *url_sheet_get_ex(const char *url, const char *fallback_la
         g_url_sheet_next = (g_url_sheet_next + 1) % URL_SHEET_MAX;
         u->url = strdup(url);
         /* (a response that is not CSS applies nothing) */
-        u->text = css_sheet_type_ok(buffer.headers, buffer.headers_size)
+        bool type_ok_ = css_sheet_type_ok(buffer.headers, buffer.headers_size);
+        /* (no type at all, with nosniff: not CSS either) */
+        if (type_ok_ && buffer.headers && strncasecmp(url, "data:", 5)) {
+            bool has_ct = false, nosniff = false;
+            const char *h = buffer.headers, *he = buffer.headers + buffer.headers_size;
+            for (const char *ln = h; ln < he; ) {
+                const char *e = memchr(ln, '\n', (size_t)(he - ln));
+                if (!e) e = he;
+                if (e - ln > 13 && !strncasecmp(ln, "content-type:", 13)) {
+                    const char *v = ln + 13;
+                    while (v < e && (*v == ' ' || *v == '\t')) v++;
+                    /* (a MIME type: one with a "/") */
+                    if (v < e && *v != '\r') { const char *sl = v; while (sl < e && *sl != '/' && *sl != ';' && *sl != '\r') sl++; if (sl < e && *sl == '/') has_ct = true; }
+                }
+                if (e - ln > 23 && !strncasecmp(ln, "x-content-type-options:", 23)) {
+                    const char *v = ln + 23;
+                    while (v < e && (*v == ' ' || *v == '\t')) v++;
+                    if (e - v >= 7 && !strncasecmp(v, "nosniff", 7)) nosniff = true;
+                }
+                ln = e + 1;
+            }
+            if (nosniff && !has_ct) type_ok_ = false;
+        }
+        u->bad = !type_ok_ || status_ >= 400;
+        u->text = type_ok_ && status_ < 400 && buffer.size
                   ? css_sheet_decode(buffer.data, buffer.size, buffer.headers, buffer.headers_size, fallback_label,
                                      &u->len, &u->enc)
                   : NULL;
@@ -12191,7 +12319,8 @@ static const UrlSheet *url_sheet_get(const char *url) {
 }
 
 bool css_layout_fetch_stylesheet_url(const char *url) {
-    return url && url[0] && url_sheet_get(url) != NULL;
+    const UrlSheet *u = url && url[0] ? url_sheet_get(url) : NULL;
+    return u && !u->bad;
 }
 
 bool css_layout_stylesheet_cached(const char *url) {
@@ -12759,6 +12888,9 @@ static void layout_collect_stylesheets_recursive(LayoutContext *ctx, int dom_idx
             t = e;
         }
         if (ss_ && layout_node_attribute(node, "disabled")) ss_ = false;
+        /* (a type other than text/css: not a style sheet) */
+        { const char *ty_ = layout_node_attribute(node, "type");
+          if (ss_ && ty_ && ty_[0]) { while (isspace((unsigned char)*ty_)) ty_++; size_t tl_ = strcspn(ty_, ";"); while (tl_ && isspace((unsigned char)ty_[tl_ - 1])) tl_--; if (!(tl_ == 8 && !strncasecmp(ty_, "text/css", 8))) ss_ = false; } }
         if (ss_ && alt_) {
             ss_ = false;
             if (node->store_id && SAFE_VALID(ctx->js_ctx) && gc_handle_get_type(ctx->js_ctx) == JS_GC_OBJ_TYPE_JS_CONTEXT) {
@@ -12929,8 +13061,14 @@ static const char *g_ua_stylesheet_css =
     "head, meta, title, link, style, script, base, template, noscript { display: none; }\n"
     /* (HTML's dialogs and popovers: closed ones not rendered; open ones over the page, centred) */
     "dialog:not([open]) { display: none; }\n"
+    "h|*[hidden]:not([hidden=until-found i]):not(h|embed) { display: none; }\n"
+    "h|*[hidden=until-found i]:not(h|embed) { content-visibility: hidden; }\n"
+    "h|embed[hidden] { display: inline; height: 0; width: 0; }\n"
     /* (a closed details: its first summary only) */
-    "details:not([open]) > :not(summary:first-of-type) { display: none !important; }\n"
+    "details:not([open]):not([data-cyber-dua]) > :not(summary:first-of-type) { display: none !important; }\n"
+    "details { display: block; }\n"
+    "details > summary:first-of-type { display: list-item; counter-increment: list-item 0; list-style: disclosure-closed inside; }\n"
+    "details[open] > summary:first-of-type { list-style-type: disclosure-open; }\n"
     "input[type=hidden i] { display: none !important; }\n"
     /* (view transitions' animations, nameable by the page) */
     "@keyframes -ua-view-transition-fade-out { to { opacity: 0; } }\n"
@@ -12939,11 +13077,24 @@ static const char *g_ua_stylesheet_css =
     "dialog { position: absolute; inset-inline-start: 0; inset-inline-end: 0; width: fit-content; height: fit-content; margin: auto; border: solid; padding: 1em; background-color: Canvas; color: CanvasText; }\n"
     "dialog:modal { position: fixed; overflow: auto; inset-block: 0; max-width: calc(100% - 6px - 2em); max-height: calc(100% - 6px - 2em); }\n"
     "[popover]:not(:popover-open) { display: none; }\n"
+    /* (an img sized by its layout, sizes=auto: none of its own until then, HTML 15.4.1) */
+    "h|img:is([sizes=\"auto\" i], [sizes^=\"auto,\" i]) { contain: size !important; contain-intrinsic-size: 300px 150px; }\n"
+    /* (a canvas whose subtree is laid out for drawElementImage: its children over it, out of its flow, drawn only when asked) */
+    "h|canvas:is([content], [layoutsubtree]) { position: relative; }\n"
+    "h|canvas:is([content], [layoutsubtree]) > * { position: absolute; inset-inline: 0; top: 0; }\n"
+    /* (the top layer's backdrops: a box under each, the viewport's size) */
+    ":modal::backdrop, :popover-open::backdrop { display: block; position: fixed; inset: 0; }\n"
+    "[interestfor]::interest-button { display: inline-block; vertical-align: middle; color: inherit; background-color: transparent; box-sizing: border-box; min-inline-size: 24px; min-block-size: max(24px, 1lh); align-content: center; text-align: center; user-select: none; cursor: help; }\n"
+    "dialog:modal::backdrop { background: rgba(0, 0, 0, 0.1); }\n"
+    ":popover-open::backdrop { pointer-events: none !important; }\n"
     "dialog[popover][open] { display: block; }\n"
     "[popover] { position: fixed; inset: 0; width: fit-content; height: fit-content; margin: auto; border: solid; padding: 0.25em; overflow: auto; color: CanvasText; background-color: Canvas; }\n"
     "dialog:popover-open { display: block; }\n"
     "html { font-family: serif; }\n"
-    "body { margin: 8px; }\n"
+    "body:where(:not([marginheight], [topmargin])) { margin-top: 8px; }\n"
+    "body:where(:not([marginheight], [bottommargin])) { margin-bottom: 8px; }\n"
+    "body:where(:not([marginwidth], [leftmargin])) { margin-left: 8px; }\n"
+    "body:where(:not([marginwidth], [rightmargin], [leftmargin])) { margin-right: 8px; }\n"
     "h|p { margin-block: 1em; margin-inline: 0; }\n"
     "h1 { display: block; font-size: 2em; font-weight: bold; margin: 0.67em 0; }\n"
     "h2 { display: block; font-size: 1.5em; font-weight: bold; margin: 0.83em 0; }\n"
@@ -12951,8 +13102,17 @@ static const char *g_ua_stylesheet_css =
     "h4 { display: block; font-size: 1em; font-weight: bold; margin: 1.33em 0; }\n"
     "h5 { display: block; font-size: 0.83em; font-weight: bold; margin: 1.67em 0; }\n"
     "h6 { display: block; font-size: 0.67em; font-weight: bold; margin: 2.33em 0; }\n"
-    "b { font-weight: bold; }\n"
-    "strong { font-weight: bold; }\n"
+    /* (a heading's level moved by headingoffset: its size and margins that level's, data-cyber-hl from form_controls.js) */
+    "[data-cyber-hl=\"1\"] { font-size: 2em; margin-block: 0.67em; }\n"
+    "[data-cyber-hl=\"2\"] { font-size: 1.5em; margin-block: 0.83em; }\n"
+    "[data-cyber-hl=\"3\"] { font-size: 1.17em; margin-block: 1em; }\n"
+    "[data-cyber-hl=\"4\"] { font-size: 1em; margin-block: 1.33em; }\n"
+    "[data-cyber-hl=\"5\"] { font-size: 0.83em; margin-block: 1.67em; }\n"
+    "[data-cyber-hl=\"6\"], [data-cyber-hl=\"7\"], [data-cyber-hl=\"8\"], [data-cyber-hl=\"9\"] { font-size: 0.67em; margin-block: 2.33em; }\n"
+    /* (a wbr: only a break opportunity, no box of its own to place) */
+    "h|wbr { display: inline !important; float: none !important; clear: none !important; position: static !important; }\n"
+    "b { font-weight: bolder; }\n"
+    "strong { font-weight: bolder; }\n"
     /* (ruby: annotations out of the line, put over their bases after layout) */
     "ruby { display: ruby; }\n"
     "rb { display: ruby-base; }\n"
@@ -12963,7 +13123,7 @@ static const char *g_ua_stylesheet_css =
     "rp { display: none; }\n"
     "th { font-weight: bold; }\n"
     /* (HTML's rendering of a table's border, frame and rules) */
-    "table, td, th { border-color: gray; }\n"
+    "table:not([bordercolor]), td, th { border-color: gray; }\n"
     "thead, tbody, tfoot, tr { border-color: inherit; }\n"
     "table:is([frame=void i], [frame=above i], [frame=below i], [frame=hsides i], [frame=lhs i], [frame=rhs i], [frame=vsides i], [frame=box i], [frame=border i]), table:is([frame=void i], [frame=above i], [frame=below i], [frame=hsides i], [frame=lhs i], [frame=rhs i], [frame=vsides i], [frame=box i], [frame=border i]) > tr > :is(td, th), table:is([frame=void i], [frame=above i], [frame=below i], [frame=hsides i], [frame=lhs i], [frame=rhs i], [frame=vsides i], [frame=box i], [frame=border i]) > :is(thead, tbody, tfoot) > tr > :is(td, th) { border-color: black; }\n"
     "table:is([rules=none i], [rules=groups i], [rules=rows i], [rules=cols i], [rules=all i]) { border-style: hidden; border-collapse: collapse; }\n"
@@ -12976,7 +13136,8 @@ static const char *g_ua_stylesheet_css =
     "table[frame=rhs i] { border-style: hidden outset hidden hidden; }\n"
     "table[frame=vsides i] { border-style: hidden outset; }\n"
     "table:is([frame=box i], [frame=border i]) { border-style: outset; }\n"
-    "table[border] > tr > :is(td, th), table[border] > :is(thead, tbody, tfoot) > tr > :is(td, th) { border-width: 1px; border-style: inset; }\n"
+    /* (a border of zero, as it parses: none on the cells) */
+    "table[border]:where(:not([border^=\"0\"], [border^=\"+0\"], [border^=\"-0\"])) > tr > :is(td, th), table[border]:where(:not([border^=\"0\"], [border^=\"+0\"], [border^=\"-0\"])) > :is(thead, tbody, tfoot) > tr > :is(td, th) { border-width: 1px; border-style: inset; }\n"
     "table[rules=none i] > tr > :is(td, th), table[rules=none i] > :is(thead, tbody, tfoot) > tr > :is(td, th), table[rules=groups i] > tr > :is(td, th), table[rules=groups i] > :is(thead, tbody, tfoot) > tr > :is(td, th), table[rules=rows i] > tr > :is(td, th), table[rules=rows i] > :is(thead, tbody, tfoot) > tr > :is(td, th) { border-width: 1px; border-style: none; }\n"
     "table[rules=cols i] > tr > :is(td, th), table[rules=cols i] > :is(thead, tbody, tfoot) > tr > :is(td, th) { border-width: 1px; border-block-style: none; border-inline-style: solid; }\n"
     "table[rules=all i] > tr > :is(td, th), table[rules=all i] > :is(thead, tbody, tfoot) > tr > :is(td, th) { border-width: 1px; border-style: solid; }\n"
@@ -13008,35 +13169,67 @@ static const char *g_ua_stylesheet_css =
     "pre { display: block; font-family: monospace; margin: 1em 0; white-space: pre; }\n"
     "h|textarea { font-family: monospace; white-space: pre-wrap; overflow-wrap: break-word; overflow: auto; }\n"
     "h|textarea[wrap=off i] { white-space: pre; overflow-wrap: normal; }\n"
+    /* (HTML 15.5.x: form controls don't inherit their text's spacing, transform, indent, shadow or alignment) */
+    "h|input, h|select, h|button, h|textarea { letter-spacing: initial; word-spacing: initial; line-height: initial; text-transform: initial; text-indent: initial; text-shadow: initial; }\n"
+    "h|input, h|select, h|textarea { text-align: initial; }\n"
+    "h|table { text-indent: initial; }\n"
+    /* (an iframe's border; frameborder, parsed as an integer: 0 or none a border of no width) */
+    "h|iframe { border: 2px inset; }\n"
+    "h|iframe[frameborder] { border-width: 0; }\n"
+    "h|iframe[frameborder^=\"1\"], h|iframe[frameborder^=\"-1\"], h|iframe[frameborder^=\"2\"], h|iframe[frameborder^=\"-2\"], h|iframe[frameborder^=\"3\"], h|iframe[frameborder^=\"-3\"], h|iframe[frameborder^=\"4\"], h|iframe[frameborder^=\"-4\"], h|iframe[frameborder^=\"5\"], h|iframe[frameborder^=\"-5\"], h|iframe[frameborder^=\"6\"], h|iframe[frameborder^=\"-6\"], h|iframe[frameborder^=\"7\"], h|iframe[frameborder^=\"-7\"], h|iframe[frameborder^=\"8\"], h|iframe[frameborder^=\"-8\"], h|iframe[frameborder^=\"9\"], h|iframe[frameborder^=\"-9\"] { border-width: 2px; }\n"
+    "h|input:is([type=reset i], [type=button i], [type=submit i]), h|button { text-align: center; }\n"
+    "h|input:is([type=radio i], [type=checkbox i], [type=reset i], [type=button i], [type=submit i], [type=color i], [type=search i]), h|select, h|button { box-sizing: border-box; }\n"
+    "h|input:not([type=range i], [type=checkbox i], [type=radio i]) { overflow: clip; overflow-clip-margin: 0; }\n"
+    "h|input[type=image i] { overflow-clip-margin: content-box; }\n"
     /* (a text field being edited shows its text whole) */
     "h|textarea:focus, h|input:focus { text-overflow: clip !important; }\n"
     /* (HTML's bidirectional text rules; dir=auto is a hint, from the text) */
-    "bdi, output, [dir] { unicode-bidi: isolate; }\n"
+    /* (the blocks isolate always; any element a valid dir isolates; an invalid dir is no dir) */
+    "address, blockquote, center, div, figure, figcaption, footer, form, header, hr, legend, listing, main, p, plaintext, pre, "
+    "summary, xmp, article, aside, h1, h2, h3, h4, h5, h6, hgroup, nav, section, search, table, caption, colgroup, col, thead, "
+    "tbody, tfoot, tr, td, th, dir, dd, dl, dt, menu, ol, ul, li, bdi, output, [dir=ltr i], [dir=rtl i], [dir=auto i] { unicode-bidi: isolate; }\n"
     "bdo, bdo[dir] { unicode-bidi: isolate-override; }\n"
     "[dir=ltr i] { direction: ltr; }\n"
     "[dir=rtl i] { direction: rtl; }\n"
     "h|textarea[dir=auto i], pre[dir=auto i] { unicode-bidi: plaintext; }\n"
+    "h|input[type=search i][dir=auto i], h|input[type=tel i][dir=auto i], h|input[type=url i][dir=auto i], h|input[type=email i][dir=auto i] { unicode-bidi: plaintext; }\n"
     "nobr { white-space: nowrap; }\n"
     "marquee { display: inline-block; text-align: initial; overflow: hidden !important; }\n"
     "small { font-size: 0.833em; }\n"
     "sub { vertical-align: sub; font-size: 0.833em; }\n"
     "sup { vertical-align: super; font-size: 0.833em; }\n"
     "big { font-size: 1.17em; }\n"
-    "ul { display: block; margin-block: 1em; margin-inline: 0; padding-inline-start: 40px; }\n"
-    "ol { display: block; margin-block: 1em; margin-inline: 0; padding-inline-start: 40px; }\n"
-    "ul:where(:not([type])) { list-style-type: disc; }\n"
+    "dir, menu, ul, ol { display: block; margin-block: 1em; padding-inline-start: 40px; }\n"
+    "dir:where(:not([type])), menu:where(:not([type])), ul:where(:not([type])) { list-style-type: disc; }\n"
     "ol:where(:not([type])) { list-style-type: decimal; }\n"
+    "dir dir:not([type]), dir menu:not([type]), dir ul:not([type]), menu dir:not([type]), menu menu:not([type]), menu ul:not([type]), ol dir:not([type]), ol menu:not([type]), ol ul:not([type]), ul dir:not([type]), ul menu:not([type]), ul ul:not([type]) { list-style-type: circle; }\n"
+    "dir dir dir:not([type]), dir dir menu:not([type]), dir dir ul:not([type]), dir menu dir:not([type]), dir menu menu:not([type]), dir menu ul:not([type]), dir ol dir:not([type]), dir ol menu:not([type]), dir ol ul:not([type]), dir ul dir:not([type]), dir ul menu:not([type]), dir ul ul:not([type]), menu dir dir:not([type]), menu dir menu:not([type]), menu dir ul:not([type]), menu menu dir:not([type]), menu menu menu:not([type]), menu menu ul:not([type]), menu ol dir:not([type]), menu ol menu:not([type]), menu ol ul:not([type]), menu ul dir:not([type]), menu ul menu:not([type]), menu ul ul:not([type]), ol dir dir:not([type]), ol dir menu:not([type]), ol dir ul:not([type]), ol menu dir:not([type]), ol menu menu:not([type]), ol menu ul:not([type]), ol ol dir:not([type]), ol ol menu:not([type]), ol ol ul:not([type]), ol ul dir:not([type]), ol ul menu:not([type]), ol ul ul:not([type]), ul dir dir:not([type]), ul dir menu:not([type]), ul dir ul:not([type]), ul menu dir:not([type]), ul menu menu:not([type]), ul menu ul:not([type]), ul ol dir:not([type]), ul ol menu:not([type]), ul ol ul:not([type]), ul ul dir:not([type]), ul ul menu:not([type]), ul ul ul:not([type]) { list-style-type: square; }\n"
     "ol, ul, menu { counter-reset: list-item; }\n"
     "ol[reversed] { counter-reset: reversed(list-item); }\n"
-    "li { display: list-item; }\n"
-    "dl { display: block; margin: 1em 0; }\n"
+    "li { display: list-item; text-align: match-parent; }\n"
+    "dl { display: block; margin-block: 1em; }\n"
+    "dir dir, dir dl, dir menu, dir ol, dir ul, dl dir, dl dl, dl menu, dl ol, dl ul, menu dir, menu dl, menu menu, menu ol, menu ul, ol dir, ol dl, ol menu, ol ol, ol ul, ul dir, ul dl, ul menu, ul ol, ul ul { margin-block: 0; }\n"
     "dd { display: block; margin-left: 40px; }\n"
     "blockquote { display: block; margin: 1em 40px; }\n"
     "h|slot { display: contents; }\n"
     "h|q::before { content: open-quote; }\n"
     "h|q::after { content: close-quote; }\n"
     "figure { display: block; margin: 1em 40px; }\n"
-    "hr { display: block; margin: 0.5em 0; border-top: 1px solid #808080; }\n"
+    "hr:not([color]) { color: gray; }\n"
+    "hr { display: block; border-style: inset; border-width: 1px; margin-block: 0.5em; margin-inline: auto; overflow: hidden; }\n"
+    "hr[align=left i] { margin-left: 0; margin-right: auto; }\n"
+    "hr[align=right i] { margin-left: auto; margin-right: 0; }\n"
+    "hr[align=center i] { margin-left: auto; margin-right: auto; }\n"
+    /* (the align attribute of embedded content and images, HTML 15.4.3) */
+    ":is(h|embed, h|iframe, h|img, h|object, h|input[type=image i])[align=left i] { float: left; }\n"
+    ":is(h|embed, h|iframe, h|img, h|object, h|input[type=image i])[align=right i] { float: right; }\n"
+    ":is(h|embed, h|iframe, h|img, h|object, h|input[type=image i])[align=top i] { vertical-align: top; }\n"
+    ":is(h|embed, h|iframe, h|img, h|object, h|input[type=image i])[align=baseline i] { vertical-align: baseline; }\n"
+    ":is(h|embed, h|iframe, h|img, h|object, h|input[type=image i])[align=texttop i] { vertical-align: text-top; }\n"
+    ":is(h|embed, h|iframe, h|img, h|object, h|input[type=image i]):is([align=absmiddle i], [align=abscenter i]) { vertical-align: middle; }\n"
+    ":is(h|embed, h|iframe, h|img, h|object, h|input[type=image i])[align=bottom i] { vertical-align: bottom; }\n"
+    "hr[color], hr[noshade] { border-style: solid; }\n"
+    "hr[size=\"1\"]:not([color], [noshade]) { border-bottom-width: 0; }\n"
     "center { text-align: center; }\n"
     "caption { text-align: center; }\n"
     "table { box-sizing: border-box; }\n"
@@ -13060,6 +13253,24 @@ static const char *g_ua_stylesheet_css =
     "h|input:is([type=submit i], [type=reset i], [type=button i]) { padding: 1px 6px; }\n"
     "h|input:not([type]), h|input:is([type=text i], [type=password i], [type=email i], [type=number i], [type=date i], [type=search i], [type=tel i], [type=url i]), h|textarea { background-color: Field; }\n"
     "h|select { border: 1px solid #767676; box-sizing: border-box; }\n"
+    "h|menubar { display: inline-flex; flex-direction: row; gap: 0.5em; width: max-content; background-color: transparent; border: 1px solid currentColor; border-radius: 0.25em; padding: 0.25em; }\n"
+    "h|menulist { display: block; position: fixed; position-anchor: auto; margin: 0; inset: auto; width: max-content; max-block-size: stretch; overflow: auto; color: CanvasText; background-color: Canvas; border: 1px solid currentColor; padding: 0.25em; position-area: block-end span-inline-end; }\n"
+    "h|menulist:not(:popover-open) { display: none; }\n"
+    "h|menulist > h|hr { color: inherit; margin-inline: 0; border: none; border-block-start: 1px solid currentColor; }\n"
+    "h|menuitem { box-sizing: content-box; }\n"
+    "h|menuitem h|a { display: none; }\n"
+    "h|menubar > h|menuitem { display: inline-flex; }\n"
+    "h|menulist h|menuitem { display: flex; }\n"
+    "h|menubar h|menuitem, h|menulist h|menuitem { align-items: center; padding-inline: 0.5em; padding-block: 0; gap: 0.5em; min-inline-size: 24px; min-block-size: max(24px, 1lh); }\n"
+    "h|select:not([data-cyber-base]) { color: FieldText; }\n"
+    /* (a select's options as its picker shows them (customizable select): a list box's own tree restyles its direct ones) */
+    "h|select[data-cyber-base] h|option { min-inline-size: 24px; min-block-size: max(24px, 1lh); padding-inline: 0.5em; padding-block-end: 0; display: flex; align-items: center; gap: 0.5em; white-space: nowrap; }\n"
+    "h|select[data-cyber-base] h|option::before { content: '\\2713' / ''; }\n"
+    "h|select[data-cyber-base] h|option:not(:checked)::before { visibility: hidden; }\n"
+    "h|select[data-cyber-base] h|option:disabled { color: color-mix(currentColor 50%, transparent); }\n"
+    "h|select[data-cyber-base] h|optgroup { display: block; }\n"
+    "h|select[data-cyber-base] h|optgroup > h|legend { display: block; font-weight: bolder; padding-inline: 0.5em; min-block-size: 1lh; }\n"
+    "h|select[data-cyber-base] h|optgroup:not(:has(> h|legend))::before { content: attr(label); display: block; font-weight: bolder; padding-inline: 0.5em; min-block-size: 1lh; }\n"
     /* (fieldset and legend: HTML's rendering section) */
     "h|fieldset { margin-inline: 2px; border: 2px groove ThreeDFace; padding-block: 0.35em 0.625em; padding-inline: 0.75em; min-inline-size: min-content; }\n"
     "h|legend { padding-inline: 2px; }\n"
@@ -13067,6 +13278,7 @@ static const char *g_ua_stylesheet_css =
     "h|input:is([style*=\"appearance:base\"], [style*=\"appearance: base\"]), h|button:is([style*=\"appearance:base\"], [style*=\"appearance: base\"]) { font-size: inherit; font-family: inherit; font-weight: inherit; font-style: inherit; line-height: inherit; color: inherit; background-color: transparent; border: 1px solid currentColor; box-sizing: border-box; padding: 0; }\n"
     "h|button:is([style*=\"appearance:base\"], [style*=\"appearance: base\"]), h|input[type=button i]:is([style*=\"appearance:base\"], [style*=\"appearance: base\"]), h|input[type=submit i]:is([style*=\"appearance:base\"], [style*=\"appearance: base\"]), h|input[type=reset i]:is([style*=\"appearance:base\"], [style*=\"appearance: base\"]) { padding-block: 0.25em; padding-inline: 0.5em; border-radius: 0.5em; display: inline-flex; }\n"
     "h|input[type=color i]:is([style*=\"appearance:base\"], [style*=\"appearance: base\"]) { border-radius: 0.5em; min-block-size: 24px; min-inline-size: 24px; display: inline-flex; overflow: clip; }\n";
+static bool layout_quirks(LayoutContext *ctx);
 
 static bool layout_collect_document_stylesheets(LayoutContext *ctx, LayoutStyleSheetList *list,
                                                  const char *base_url) {
@@ -13076,6 +13288,42 @@ static bool layout_collect_document_stylesheets(LayoutContext *ctx, LayoutStyleS
      * hidden even when the hardcoded fast-path is bypassed. */
     layout_sheet_list_add_text(list, g_ua_stylesheet_css, strlen(g_ua_stylesheet_css), NULL);
     list->items[list->nitems - 1].ua = true;
+    /* (a document in ISO-8859-8, visual Hebrew: everything overridden, but text fields, HTML 15.3.6) */
+    {
+        const char *mc = layout_doc_meta_charset(ctx);
+        if (mc && !strcmp(mc, "ISO-8859-8")) {
+            static const char iso8 [] =
+                "@namespace \"http://www.w3.org/1999/xhtml\";\n"
+                "address, blockquote, center, div, figure, figcaption, footer, form, header, hr, legend, listing, main, p, plaintext, pre, "
+                "summary, xmp, article, aside, h1, h2, h3, h4, h5, h6, hgroup, nav, section, search, table, caption, colgroup, col, thead, "
+                "tbody, tfoot, tr, td, th, dir, dd, dl, dt, menu, ol, ul, li, [dir=ltr i], [dir=rtl i], [dir=auto i], *|* { unicode-bidi: bidi-override; }\n"
+                "input:not([type=submit i]):not([type=reset i]):not([type=button i]), textarea { unicode-bidi: normal; }\n";
+            layout_sheet_list_add_text(list, iso8, strlen(iso8), NULL);
+            list->items[list->nitems - 1].ua = true;
+        }
+    }
+    /* (an HTML document's forms straight in table parts, where the parser put them: no box, HTML 15.3.8) */
+    {
+        HtmlNode *hrn = ctx->tree.root_idx >= 0 ? layout_node_dom(ctx, ctx->tree.nodes[ctx->tree.root_idx].dom_node_idx) : NULL;
+        NodeId hd = hrn && hrn->store_id && dom_valid(hrn->store_id) ? dom_owner(hrn->store_id) : 0;
+        if (hd && dom_is_html_document(hd)) {
+            static const char tf[] =
+                "@namespace \"http://www.w3.org/1999/xhtml\";\n"
+                "table > form, thead > form, tbody > form, tfoot > form, tr > form { display: none !important; }\n";
+            layout_sheet_list_add_text(list, tf, strlen(tf), NULL);
+            list->items[list->nitems - 1].ua = true;
+        }
+    }
+    /* (quirks mode's list items: their markers inside, but in a list, HTML 15.3.8) */
+    if (layout_quirks(ctx)) {
+        static const char qli[] =
+            "@namespace \"http://www.w3.org/1999/xhtml\";\n"
+            "li { list-style-position: inside; }\n"
+            "li :is(dir, menu, ol, ul) { list-style-position: outside; }\n"
+            ":is(dir, menu, ol, ul) :is(dir, menu, ol, ul, li) { list-style-position: unset; }\n";
+        layout_sheet_list_add_text(list, qli, strlen(qli), NULL);
+        list->items[list->nitems - 1].ua = true;
+    }
 
     int root_dom_idx = ctx->tree.nodes[ctx->tree.root_idx].dom_node_idx;
     css_reg_set_doc(ctx->doc);
@@ -13278,7 +13526,7 @@ typedef struct PseudoSide {
     int n;
     const CssDeclaration *const *decls;
 } PseudoSide;
-enum { PSEUDO_SIDES = 42, SIDE_AMARK = 40, SIDE_BMARK = 41, SIDE_COLMARK = 38, SIDE_COLCUR = 39, SIDE_BTN_ON = 16, SIDE_BTN_OFF = 21, SIDE_LBTN = 26, SIDE_LBTN_ON = 30, SIDE_LBTN_OFF = 34, SIDE_SLIDER = 13, SIDE_MARKER = 5, SIDE_CURRENT = 6, SIDE_GROUP = 7, SIDE_BUTTONS = 8, SIDE_BUTTON0 = 9 };
+enum { PSEUDO_SIDES = 44, SIDE_INTEREST = 43, SIDE_BACKDROP = 42, SIDE_AMARK = 40, SIDE_BMARK = 41, SIDE_COLMARK = 38, SIDE_COLCUR = 39, SIDE_BTN_ON = 16, SIDE_BTN_OFF = 21, SIDE_LBTN = 26, SIDE_LBTN_ON = 30, SIDE_LBTN_OFF = 34, SIDE_SLIDER = 13, SIDE_MARKER = 5, SIDE_CURRENT = 6, SIDE_GROUP = 7, SIDE_BUTTONS = 8, SIDE_BUTTON0 = 9 };
 typedef struct PseudoRec {
     /* ::before, ::after, ::first-letter, ::first-line, ::marker (those two no box), ::scroll-marker,
      * its :target-current, ::scroll-marker-group, ::scroll-button(*, up, down, left, right) */
@@ -14573,6 +14821,8 @@ static bool layout_reads_attr(const char *name)
         "hidden", "colspan", "rowspan", "span", "dir", "lang", "slot", "name", "size", "cols", "rows",
         /* presentational hints */
         "bgcolor", "align", "valign", "nowrap", "cellpadding", "cellspacing", "border", "color", "face", "text",
+        "marginwidth", "marginheight", "topmargin", "bottommargin", "leftmargin", "rightmargin", "noshade", "bordercolor",
+        "-cb-fm",   /* (a frame's body: its frame element's margins) */
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcasecmp(name, names[i]) == 0) return true;
@@ -15200,8 +15450,9 @@ static uint64_t style_ctx_items(const StyleCtxFeatures *f, const HtmlNode *hn, c
 {
     uint64_t h = 1469598103934665603ull;
     h = style_mix(h, &s[0], sizeof(s[0]));
-    if (f->states && hn->store_id) {
-        uint32_t st = dom_element_state(hn->store_id) & 0xffffu;
+    if (hn->store_id) {
+        /* (the top-layer bits always: the UA sheet's popover and dialog rules look at them; the rest when a rule does) */
+        uint32_t st = dom_element_state(hn->store_id) & ((f->states ? 0xffffu : 0u) | DOM_ST_MODAL | DOM_ST_POPOVER_OPEN);
         if (st) h = style_mix(h, &st, sizeof st);
     }
     if (f->all) {
@@ -15324,6 +15575,7 @@ static inline void bit_set(uint64_t *b, int i) { b[i >> 6] |= (uint64_t)1 << (i 
 
 /* Element keys and the reuse flags for every layout node (serial, before
  * the parallel style pass). */
+static int style_auto_direction(LayoutContext *ctx, int dom, HtmlNode *node);
 static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects *has,
                                 const StyleCtxFeatures *cf)
 {
@@ -15402,6 +15654,13 @@ static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects
             if (!h) h = 1;
             hn->attr_hash = h;
         }
+        /* (dir=auto, a bdi: the direction its text gives too) */
+        { const char *dv_ = layout_node_attribute(hn, "dir");
+          if ((dv_ && !strcasecmp(dv_, "auto")) || (hn->tag_name && !strcmp(hn->tag_name, "bdi"))) {
+              int ad_ = style_auto_direction(ctx, ctx->tree.nodes[idx].dom_node_idx, hn) + 7;
+              h = style_mix(h, &ad_, sizeof ad_);
+              if (!h) h = 1;
+          } }
         key[idx] = h;
     }
     for (int idx = 0; idx < n; idx++) {
@@ -15977,6 +16236,13 @@ static bool css_content_value_valid(const char *v)
     while (*v) {
         while (isspace((unsigned char)*v)) v++;
         if (!*v || *v == '!') break;
+        /* (its alternative text after a slash: strings, attr() or counters, none of it shown) */
+        if (*v == '/') {
+            if (!items) return false;
+            v++;
+            while (isspace((unsigned char)*v)) v++;
+            return *v && *v != '/' && *v != '!';
+        }
         if (*v == '"' || *v == '\'') {
             char q = *v++;
             while (*v && *v != q) v += *v == '\\' && v[1] ? 2 : 1;
@@ -16068,9 +16334,9 @@ static const PseudoRec *style_pseudo_rec(StylePass *P, StyleThread *T, const Css
         }
         /* (a button's may be in its (*) rule: "" here has none, for now) */
         bool mk_ = side == 4 || side == SIDE_AMARK || side == SIDE_BMARK;   /* (a ::marker, the element's or its ::after's or ::before's) */
-        bool button = side >= SIDE_BUTTONS && !mk_;
+        bool button = side >= SIDE_BUTTONS && !mk_ && side != SIDE_INTEREST;
         /* (::first-letter: a box when a rule matched; ::marker: its own content when one says, else "" for a rule) */
-        if (side >= 2 && side != SIDE_MARKER && !button && !(mk_ && content)) content = any ? "" : NULL;
+        if (side >= 2 && side != SIDE_MARKER && side != SIDE_INTEREST && !button && !(mk_ && content)) content = any ? "" : NULL;
         else if (content) {
             const char *v = content;
             while (isspace((unsigned char)*v)) v++;
@@ -16179,6 +16445,7 @@ static void layout_unset_property(LayoutBox *box, const char *prop)
     else if (strcasecmp(prop, "text-align") == 0) box->s->text_align_set = 0;
     else if (strcasecmp(prop, "white-space") == 0) box->s->white_space_set = 0;
     else if (strcasecmp(prop, "visibility") == 0) box->s->visibility_set = 0;
+    else if (strcasecmp(prop, "pointer-events") == 0) { box->s->pe_none = 0; box->s->pe_set = 1; }
     else if (strcasecmp(prop, "display") == 0) { /* initial: inline */ box->s->display = CSS_DISPLAY_INLINE; box->s->inline_level = 0; box->s->table_caption = 0; }
 }
 
@@ -16443,6 +16710,13 @@ static bool layout_apply_wide_keyword(LayoutBox *box, const LayoutBox *parent,
     /* (the font shorthand gives each longhand the keyword itself) */
     if (strcasecmp(prop, "font") == 0) return false;
     bool inherited_prop = css_is_inherited(prop);
+    /* (background, background-color: initial or unset, transparent and no image) */
+    if ((initial || !strcasecmp(value, "unset")) && (!strcasecmp(prop, "background") || !strcasecmp(prop, "background-color"))) {
+        box->s->background_color_r = box->s->background_color_g = box->s->background_color_b = box->s->background_color_a = 0.0;
+        box->s->bg_current = 0; box->s->bg_cc_expr = NULL;
+        if (prop[10] == 0) box->s->background_image_url = "";
+        return true;
+    }
     if (!strncasecmp(prop, "border", 6) && (prop[6] == 0 || prop[6] == '-')) {
         /* Which sides (border_styled bits) and parts (1 width, 2 style, 4
          * color) the property is. */
@@ -16939,13 +17213,164 @@ static int style_text_direction(LayoutContext *ctx, int dom)
     return -1;
 }
 
+/* (the first strong character under store node id, as style_text_direction: 1 rtl, 0 ltr, -1 none) */
+static int style_store_text_direction(NodeId id, int depth)
+{
+    if (depth > 64) return -1;
+    for (NodeId c = dom_first_child(id); c; c = dom_next_sibling(c)) {
+        int k = dom_kind(c);
+        if (k == DOM_K_TEXT) {
+            uint32_t len = 0;
+            const unsigned char *p = (const unsigned char *)dom_text(c, &len), *e = p ? p + len : NULL;
+            while (p && p < e) {
+                uint32_t cp = *p++;
+                int more = cp >= 0xF0 ? 3 : cp >= 0xE0 ? 2 : cp >= 0xC0 ? 1 : 0;
+                if (more) cp &= 0x3F >> more;
+                for (; more && p < e; more--) cp = (cp << 6) | (*p++ & 0x3F);
+                BidiClass bc = bidi_class(cp);
+                if (bc == BIDI_L) return 0;
+                if (bc == BIDI_R || bc == BIDI_AL) return 1;
+            }
+        } else if (k == DOM_K_ELEMENT) {
+            const char *t = dom_tag_name(c);
+            if (t && (!strcmp(t, "bdi") || !strcmp(t, "script") || !strcmp(t, "style") || !strcmp(t, "textarea"))) continue;
+            if (dom_get_attr_str(c, "dir")) continue;
+            int r = style_store_text_direction(c, depth + 1);
+            if (r >= 0) return r;
+        }
+    }
+    return -1;
+}
+
+/* (a slot in a shadow tree: the first strong character of what is assigned to it, -2 not a slot) */
+static int style_slot_direction(NodeId s)
+{
+    NodeId root = s;
+    while (dom_parent(root)) root = dom_parent(root);
+    if (root == s || !(g_dom.flags[dom_slot(root)] & DOMF_SHADOW_ROOT)) return -2;
+    uint32_t host = g_dom.host[dom_slot(root)];
+    if (!host) return -2;
+    const char *name = dom_get_attr_str(s, "name");
+    if (!name) name = "";
+    for (NodeId c = dom_first_child(dom_id_of(host)); c; c = dom_next_sibling(c)) {
+        int k = dom_kind(c);
+        const char *ls = k == DOM_K_ELEMENT ? dom_get_attr_str(c, "slot") : NULL;
+        if (strcmp(ls ? ls : "", name)) continue;
+        if (k == DOM_K_TEXT) {
+            uint32_t len = 0;
+            const unsigned char *p = (const unsigned char *)dom_text(c, &len), *e = p ? p + len : NULL;
+            while (p && p < e) {
+                uint32_t cp = *p++;
+                int more = cp >= 0xF0 ? 3 : cp >= 0xE0 ? 2 : cp >= 0xC0 ? 1 : 0;
+                if (more) cp &= 0x3F >> more;
+                for (; more && p < e; more--) cp = (cp << 6) | (*p++ & 0x3F);
+                BidiClass bc = bidi_class(cp);
+                if (bc == BIDI_L) return 0;
+                if (bc == BIDI_R || bc == BIDI_AL) return 1;
+            }
+        } else if (k == DOM_K_ELEMENT) {
+            const char *t = dom_tag_name(c);
+            if (t && (!strcmp(t, "bdi") || !strcmp(t, "script") || !strcmp(t, "style") || !strcmp(t, "textarea"))) continue;
+            if (dom_get_attr_str(c, "dir")) continue;
+            int r = style_store_text_direction(c, 1);
+            if (r >= 0) return r;
+        }
+    }
+    return -1;
+}
+
 /* An element with dir=auto, or a bdi without dir: its direction from its
  * text (1 rtl, 0 ltr, also when it has no strong character); else -1. */
 static int style_auto_direction(LayoutContext *ctx, int dom, HtmlNode *node)
 {
     const char *d = layout_node_attribute(node, "dir");
     if (d ? strcasecmp(d, "auto") != 0 : !(node->tag_name && !strcmp(node->tag_name, "bdi"))) return -1;
+    /* (a text field: its value's first strong character) */
+    bool ta_ = node->tag_name && !strcmp(node->tag_name, "textarea");
+    if (node->tag_name && (!strcmp(node->tag_name, "input") || (ta_ && layout_node_attribute(node, "-cb-value")))) {
+        const char *v = layout_node_attribute(node, "-cb-value");
+        if (!v && !ta_) v = layout_node_attribute(node, "value");
+        for (const unsigned char *p = (const unsigned char *)(v ? v : ""); *p; ) {
+            uint32_t cp = *p++;
+            int more = cp >= 0xF0 ? 3 : cp >= 0xE0 ? 2 : cp >= 0xC0 ? 1 : 0;
+            if (more) cp &= 0x3F >> more;
+            for (; more && *p; more--) cp = (cp << 6) | (*p++ & 0x3F);
+            BidiClass bc = bidi_class(cp);
+            if (bc == BIDI_L) return 0;
+            if (bc == BIDI_R || bc == BIDI_AL) return 1;
+        }
+        return 0;
+    }
+    /* (a slot: what is assigned to it, or its own text when nothing is) */
+    if (node->tag_name && !strcmp(node->tag_name, "slot") && node->store_id) {
+        int sd = style_slot_direction(node->store_id);
+        if (sd >= 0) return sd;
+    }
+    /* (a shadow host: its own tree's text, not its shadow tree's) */
+    if (node->store_id && !ta_) { extern int dom_query_directionality(NodeId id); return dom_query_directionality(node->store_id) ? 1 : 0; }
     return style_text_direction(ctx, dom) == 1 ? 1 : 0;
+}
+
+/* (HTML's rules for parsing a legacy colour value: a named colour as CSS has it, else the
+ * digits it can make out, as "#rrggbb" in out; NULL when it gives none) */
+static const char *hint_legacy_color(const char *v, char *out, size_t cap)
+{
+    if (!v) return NULL;
+    while (*v == ' ' || *v == '\t' || *v == '\n' || *v == '\f' || *v == '\r') v++;
+    size_t n = strlen(v);
+    while (n && (v[n - 1] == ' ' || v[n - 1] == '\t' || v[n - 1] == '\n' || v[n - 1] == '\f' || v[n - 1] == '\r')) n--;
+    if (!n || (n == 11 && !strncasecmp(v, "transparent", 11))) return NULL;
+    double r_, g_, b_, a_;
+    char tmp[160];
+    if (n < sizeof tmp) {
+        memcpy(tmp, v, n); tmp[n] = 0;
+        bool alpha = true;
+        for (size_t i = 0; i < n; i++) if (!isalpha((unsigned char)tmp[i])) alpha = false;
+        if (alpha && css_parse_color(tmp, &r_, &g_, &b_, &a_)) { snprintf(out, cap, "%s", tmp); return out; }   /* (a named colour) */
+    }
+    if (n == 4 && v[0] == '#' && isxdigit((unsigned char)v[1]) && isxdigit((unsigned char)v[2]) && isxdigit((unsigned char)v[3])) {
+        snprintf(out, cap, "#%c%c%c%c%c%c", v[1], v[1], v[2], v[2], v[3], v[3]);
+        return out;
+    }
+    /* (code points past U+FFFF as "00"; up to 128; no leading #; what is no hex digit 0; a multiple of 3 long) */
+    char s[260];
+    size_t k = 0;
+    for (size_t i = 0; i < n && k < 128; ) {
+        unsigned char c = (unsigned char)v[i];
+        int len = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+        if (len == 4) { s[k++] = '0'; if (k < 128) s[k++] = '0'; }
+        else s[k++] = (len == 1 && isxdigit(c)) || (len == 1 && c == '#' && k == 0 && i == 0) ? (char)c : '0';
+        i += (size_t)len;
+    }
+    size_t st = (k && s[0] == '#') ? 1 : 0;
+    char *d = s + st;
+    k -= st;
+    if (!k) { d[0] = '0'; k = 1; }
+    while (k % 3) d[k++] = '0';
+    size_t len = k / 3;
+    const char *comp[3] = { d, d + len, d + 2 * len };
+    if (len > 8) { for (int q = 0; q < 3; q++) comp[q] += len - 8; len = 8; }
+    while (len > 2 && comp[0][0] == '0' && comp[1][0] == '0' && comp[2][0] == '0') { for (int q = 0; q < 3; q++) comp[q]++; len--; }
+    if (len > 2) len = 2;
+    int val[3];
+    for (int q = 0; q < 3; q++) {
+        char h[3] = { comp[q][0], len > 1 ? comp[q][1] : 0, 0 };
+        val[q] = (int)strtol(h, NULL, 16);
+    }
+    snprintf(out, cap, "#%02x%02x%02x", val[0], val[1], val[2]);
+    return out;
+}
+
+/* (for getComputedStyle's hints: a legacy colour value as rgb(), or NULL) */
+bool css_layout_legacy_color_rgb(const char *v, char *out, size_t cap)
+{
+    char tmp[64];
+    const char *c = hint_legacy_color(v, tmp, sizeof tmp);
+    double r_, g_, b_, a_;
+    if (!c || !css_parse_color(c, &r_, &g_, &b_, &a_)) return false;
+    double k = r_ > 1.0 || g_ > 1.0 || b_ > 1.0 ? 1.0 : 255.0;
+    snprintf(out, cap, "rgb(%d, %d, %d)", (int)(r_ * k + 0.5), (int)(g_ * k + 0.5), (int)(b_ * k + 0.5));
+    return true;
 }
 
 static void hint_apply(LayoutContext *ctx, LayoutBox *box, const char *prop, const char *value)
@@ -16954,11 +17379,27 @@ static void hint_apply(LayoutContext *ctx, LayoutBox *box, const char *prop, con
     layout_apply_declaration(box, &d, ctx->viewport_width, ctx->viewport_width, ctx->base_url);
 }
 
+/* (a table's border attribute, HTML 15.3.10: a non-negative integer in px, 1px when it doesn't parse; false absent) */
+static bool table_border_px(const char *v, char *out, size_t cap)
+{
+    if (!v) return false;
+    while (*v == ' ' || *v == '\t' || *v == '\n' || *v == '\f' || *v == '\r') v++;
+    bool neg = *v == '-';
+    if (*v == '+' || *v == '-') v++;
+    long n = -1;
+    if (*v >= '0' && *v <= '9') { n = 0; while (*v >= '0' && *v <= '9' && n < 100000) n = n * 10 + (*v++ - '0'); }
+    if (n < 0 || (neg && n > 0)) n = 1;   /* (not a non-negative integer: as if 1) */
+    snprintf(out, cap, "%ldpx", n);
+    return true;
+}
+
 /* A dimension attribute (width="85%", height="10") as a CSS length. */
 static bool hint_dimension(const char *v, char *out, size_t cap)
 {
     if (!v) return false;
     while (isspace((unsigned char)*v)) v++;
+    /* (HTML's rules for dimension values: a digit first, no sign) */
+    if (!(*v >= '0' && *v <= '9') && !(*v == '.' && v[1] >= '0' && v[1] <= '9')) return false;
     char *end = NULL;
     double n = strtod(v, &end);
     if (end == v || n < 0.0) return false;
@@ -16978,6 +17419,63 @@ static void style_presentational_hints(LayoutContext *ctx, LayoutBox *box, int i
     /* (embedded content: width and height map to the CSS properties) */
     bool embedded = !strcasecmp(tag, "img") || !strcasecmp(tag, "iframe") || !strcasecmp(tag, "video") ||
                     !strcasecmp(tag, "embed") || !strcasecmp(tag, "object");
+    /* (a frameset: a grid over the viewport, its tracks from cols and rows (HTML 15.6, lists of dimensions); its frames
+     * filling their cells) */
+    if (!strcasecmp(tag, "frameset")) {
+        char tr[1024];
+        for (int ax = 0; ax < 2; ax++) {
+            const char *v = layout_node_attribute(node, ax ? "rows" : "cols");
+            size_t o = 0;
+            tr[0] = 0;
+            for (const char *p = v; p && *p && o + 40 < sizeof tr; ) {
+                while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\f') p++;
+                const char *e = p;
+                while (*e && *e != ',') e++;
+                double n = 0;
+                bool num = false;
+                const char *q = p;
+                while (q < e && *q >= '0' && *q <= '9') { n = n * 10 + (*q - '0'); q++; num = true; }
+                if (q < e && *q == '.') { double f = 0.1; q++; while (q < e && *q >= '0' && *q <= '9') { n += (*q - '0') * f; f /= 10; q++; num = true; } }
+                while (q < e && (*q == ' ' || *q == '\t')) q++;
+                if (q < e && *q == '%') o += (size_t)snprintf(tr + o, sizeof tr - o, "%s%gpx", o ? " " : "", (num ? n : 0) / 100.0 * (ax ? ctx->viewport_height : ctx->viewport_width));
+                else if (q < e && *q == '*') o += (size_t)snprintf(tr + o, sizeof tr - o, "%s%gfr", o ? " " : "", num ? n : 1.0);
+                else o += (size_t)snprintf(tr + o, sizeof tr - o, "%s%gpx", o ? " " : "", num ? n : 0.0);
+                p = *e ? e + 1 : e;
+            }
+            if (o) hint_apply(ctx, box, ax ? "grid-template-rows" : "grid-template-columns", tr);
+        }
+        hint_apply(ctx, box, "display", "grid");
+        hint_apply(ctx, box, "overflow", "hidden");
+        char vb[48];
+        snprintf(vb, sizeof vb, "%gpx", ctx->viewport_width); hint_apply(ctx, box, "width", vb);
+        snprintf(vb, sizeof vb, "%gpx", ctx->viewport_height); hint_apply(ctx, box, "height", vb);
+        return;
+    }
+    if (!strcasecmp(tag, "frame")) {
+        hint_apply(ctx, box, "width", "100%");
+        hint_apply(ctx, box, "height", "100%");
+        hint_apply(ctx, box, "min-width", "0");
+        hint_apply(ctx, box, "min-height", "0");
+        hint_apply(ctx, box, "box-sizing", "border-box");
+        return;
+    }
+    /* (an image button's border attribute: as an img's, HTML 15.4.3) */
+    if (!strcasecmp(tag, "input")) {
+        const char *ty_ = layout_node_attribute(node, "type"), *bv = layout_node_attribute(node, "border");
+        if (bv && ty_ && !strcasecmp(ty_, "image")) {
+            while (*bv == ' ' || *bv == '\t' || *bv == '\n' || *bv == '\f' || *bv == '\r') bv++;
+            if (*bv == '+') bv++;
+            if (*bv >= '0' && *bv <= '9') {
+                long n = 0;
+                char bb[32];
+                while (*bv >= '0' && *bv <= '9' && n < 100000) n = n * 10 + (*bv++ - '0');
+                snprintf(bb, sizeof bb, "%ldpx", n);
+                hint_apply(ctx, box, "border-width", bb);
+                hint_apply(ctx, box, "border-style", "solid");
+            }
+        }
+        return;
+    }
     if (!role && !body && !embedded && strcasecmp(tag, "font") != 0 && strcasecmp(tag, "div") != 0 &&
         strcasecmp(tag, "p") != 0 && strncasecmp(tag, "h", 1) != 0 && strcasecmp(tag, "hr") != 0 &&
         strcasecmp(tag, "ol") != 0 && strcasecmp(tag, "ul") != 0 && strcasecmp(tag, "li") != 0)
@@ -16987,21 +17485,102 @@ static void style_presentational_hints(LayoutContext *ctx, LayoutBox *box, int i
     if (embedded) {
         if (hint_dimension(layout_node_attribute(node, "width"), buf, sizeof(buf))) hint_apply(ctx, box, "width", buf);
         if (hint_dimension(layout_node_attribute(node, "height"), buf, sizeof(buf))) hint_apply(ctx, box, "height", buf);
+        /* (a video's width and height attributes: its aspect-ratio too, auto w / h) */
+        if (!strcasecmp(tag, "video")) {
+            const char *wa_ = layout_node_attribute(node, "width"), *ha_ = layout_node_attribute(node, "height");
+            if (wa_ && ha_ && !strchr(wa_, '%') && !strchr(ha_, '%') && atof(wa_) > 0.0 && atof(ha_) > 0.0) {
+                snprintf(buf, sizeof buf, "auto %g / %g", atof(wa_), atof(ha_));
+                hint_apply(ctx, box, "aspect-ratio", buf);
+            }
+        }
+        /* (img and object border: a non-negative integer, a solid border that wide) */
+        const char *bv = (!strcasecmp(tag, "img") || !strcasecmp(tag, "object")) ? layout_node_attribute(node, "border") : NULL;
+        if (bv) {
+            while (*bv == ' ' || *bv == '\t' || *bv == '\n' || *bv == '\f' || *bv == '\r') bv++;
+            if (*bv == '+') bv++;
+            if (*bv >= '0' && *bv <= '9') {
+                long n = 0;
+                while (*bv >= '0' && *bv <= '9' && n < 100000) n = n * 10 + (*bv++ - '0');
+                snprintf(buf, sizeof buf, "%ldpx", n);
+                hint_apply(ctx, box, "border-width", buf);
+                hint_apply(ctx, box, "border-style", "solid");
+            }
+        }
         return;
     }
     if ((role || body) && (v = layout_node_attribute(node, "bgcolor")) && *v)
-        hint_apply(ctx, box, "background-color", v);
-    if (body && (v = layout_node_attribute(node, "text")) && *v) hint_apply(ctx, box, "color", v);   /* (<body text>) */
+        { char lc_[64]; const char *c_ = hint_legacy_color(v, lc_, sizeof lc_); if (c_) hint_apply(ctx, box, "background-color", c_); }
+    /* (<table bordercolor>: its border colour) */
+    if (role == 1 && (v = layout_node_attribute(node, "bordercolor")) && *v) { char lc_[64]; const char *c_ = hint_legacy_color(v, lc_, sizeof lc_); if (c_) hint_apply(ctx, box, "border-color", c_); }
+    if (body && (v = layout_node_attribute(node, "text")) && *v) { char lc_[64]; const char *c_ = hint_legacy_color(v, lc_, sizeof lc_); if (c_) hint_apply(ctx, box, "color", c_); }   /* (<body text>) */
+    if (body) {
+        /* (body margins, HTML 15.3.2: marginheight / marginwidth first, then topmargin etc.) */
+        static const char *const side[4][3] = { { "margin-top", "marginheight", "topmargin" }, { "margin-bottom", "marginheight", "bottommargin" },
+                                               { "margin-left", "marginwidth", "leftmargin" }, { "margin-right", "marginwidth", "rightmargin" } };
+        /* (no body attribute: its frame element's marginheight / marginwidth; a leftmargin alone, both sides) */
+        NodeId fr_ = node->store_id ? frame_container_of_document(dom_owner(node->store_id)) : 0;
+        for (int k = 0; k < 4; k++) {
+            const char *a = layout_node_attribute(node, side[k][1]);
+            if (!a) a = layout_node_attribute(node, side[k][2]);
+            if (!a && k == 3 && !layout_node_attribute(node, "rightmargin")) a = layout_node_attribute(node, "leftmargin");
+            if (!a && fr_) a = dom_get_attr_str(fr_, side[k][1]);
+            if (!a) continue;
+            /* (a non-negative integer, a + allowed; not one: the 8px the attribute's presence kept out of the UA sheet) */
+            while (*a == ' ' || *a == '\t' || *a == '\n' || *a == '\r' || *a == '\f') a++;
+            bool neg_ = *a == '-';
+            if (*a == '+' || *a == '-') a++;
+            if (*a < '0' || *a > '9' || (neg_ && strtol(a, NULL, 10) != 0)) { hint_apply(ctx, box, side[k][0], "8px"); continue; }   /* (a minus an error but before 0) */
+            snprintf(buf, sizeof buf, "%ldpx", neg_ ? 0L : strtol(a, NULL, 10));
+            hint_apply(ctx, box, side[k][0], buf);
+        }
+    }
     if (strcasecmp(tag, "font") == 0) {
-        if ((v = layout_node_attribute(node, "color")) && *v) hint_apply(ctx, box, "color", v);
+        if ((v = layout_node_attribute(node, "color")) && *v) { char lc_[64]; const char *c_ = hint_legacy_color(v, lc_, sizeof lc_); if (c_) hint_apply(ctx, box, "color", c_); }
         if ((v = layout_node_attribute(node, "face")) && *v) hint_apply(ctx, box, "font-family", v);
+        /* (<font size>: legacy font size, HTML 15.3.4: 1 to 7, or relative to 3) */
+        if ((v = layout_node_attribute(node, "size"))) {
+            const char *q = v;
+            while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\f' || *q == '\r') q++;
+            int mode = 0;
+            if (*q == '+') { mode = 1; q++; } else if (*q == '-') { mode = -1; q++; }
+            if (*q >= '0' && *q <= '9') {
+                long n = 0;
+                while (*q >= '0' && *q <= '9' && n < 1000) n = n * 10 + (*q++ - '0');
+                if (mode == 1) n = 3 + n; else if (mode == -1) n = 3 - n;
+                if (n > 7) n = 7;
+                if (n < 1) n = 1;
+                static const char *const kw[] = { "", "x-small", "small", "medium", "large", "x-large", "xx-large", "xxx-large" };
+                hint_apply(ctx, box, "font-size", kw[n]);
+            }
+        }
         return;
     }
     if (role == 1 || role == 4 || role == 6 || strcasecmp(tag, "hr") == 0) {
-        if (hint_dimension(layout_node_attribute(node, "width"), buf, sizeof(buf))) hint_apply(ctx, box, "width", buf);
+        /* (table, cell and column widths ignore zero) */
+        if (hint_dimension(layout_node_attribute(node, "width"), buf, sizeof(buf)) && !((role == 1 || role == 4) && (!strcmp(buf, "0px") || !strcmp(buf, "0%")))) hint_apply(ctx, box, "width", buf);
     }
-    if (role == 1 || role == 3 || role == 4) {
+    if (role == 1 || role == 2 || role == 3 || role == 4) {   /* (table, row group, row, cell) */
         if (hint_dimension(layout_node_attribute(node, "height"), buf, sizeof(buf))) hint_apply(ctx, box, "height", buf);
+    }
+    if (strcasecmp(tag, "hr") == 0) {
+        /* (hr color and size, HTML 15.3.13) */
+        const char *hc = layout_node_attribute(node, "color");
+        bool hcol = hc && *hc;
+        if (hc) { char lc_[64]; const char *c_ = hint_legacy_color(hc, lc_, sizeof lc_); hint_apply(ctx, box, "color", c_ ? c_ : "gray"); }   /* (none it can use: the UA's gray) */
+        const char *hs = layout_node_attribute(node, "size");
+        if (hs) {
+            while (*hs == ' ' || *hs == '\t' || *hs == '\n' || *hs == '\f' || *hs == '\r') hs++;
+            if (*hs == '+') hs++;
+            if (*hs >= '0' && *hs <= '9') {
+                long n = 0;
+                while (*hs >= '0' && *hs <= '9' && n < 100000) n = n * 10 + (*hs++ - '0');
+                if (n >= 1) {
+                    if (hc || layout_node_attribute(node, "noshade")) { snprintf(buf, sizeof buf, "%gpx", n / 2.0); hint_apply(ctx, box, "border-width", buf); hint_apply(ctx, box, "height", "0"); }
+                    else if (n == 1) hint_apply(ctx, box, "border-bottom-width", "0");
+                    else { snprintf(buf, sizeof buf, "%ldpx", n - 2); hint_apply(ctx, box, "height", buf); }
+                }
+            }
+        }
     }
     /* (<ol type>, <ul type>, <li type>: the list style they map to) */
     if (node->tag_name && (!strcasecmp(node->tag_name, "ol") || !strcasecmp(node->tag_name, "ul") || !strcasecmp(node->tag_name, "li")) &&
@@ -17020,6 +17599,9 @@ static void style_presentational_hints(LayoutContext *ctx, LayoutBox *box, int i
             else if (!strcasecmp(v, "square")) ls = "square";
             else if (!strcasecmp(v, "none")) ls = "none";
         }
+        /* (an unsupported type on a list: its default style, which the UA rule left out) */
+        if (!ls && !strcasecmp(node->tag_name, "ol")) ls = "decimal";
+        if (!ls && !strcasecmp(node->tag_name, "ul")) ls = "disc";
         if (ls) hint_apply(ctx, box, "list-style-type", ls);
     }
     v = layout_node_attribute(node, "align");
@@ -17042,7 +17624,7 @@ static void style_presentational_hints(LayoutContext *ctx, LayoutBox *box, int i
         }
         if (hint_dimension(layout_node_attribute(node, "cellspacing"), buf, sizeof(buf)))
             hint_apply(ctx, box, "border-spacing", buf);
-        if (hint_dimension(layout_node_attribute(node, "border"), buf, sizeof(buf)) && strcmp(buf, "0px") != 0) {
+        if (table_border_px(layout_node_attribute(node, "border"), buf, sizeof(buf)) && strcmp(buf, "0px") != 0) {
             hint_apply(ctx, box, "border-style", "outset");
             hint_apply(ctx, box, "border-width", buf);
             hint_apply(ctx, box, "border-color", "gray");
@@ -17075,6 +17657,13 @@ static void style_presentational_hints(LayoutContext *ctx, LayoutBox *box, int i
     hint_apply(ctx, box, "padding", pad);
 }
 
+/* (a ::placeholder colour declaration) */
+static void ta_ph_decl(void *ud, const char *prop, const char *value, bool important)
+{
+    (void)important;
+    double *c = (double *)ud, r, g, b, a;
+    if (prop && value && !strcasecmp(prop, "color") && css_parse_color(value, &r, &g, &b, &a)) { c[0] = r; c[1] = g; c[2] = b; c[3] = a; }
+}
 static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
 {
     LayoutContext *ctx = P->ctx;
@@ -17142,7 +17731,8 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
         if (P->share && !g_css_tree_fn && css_style_shareable(P->sd, dom)) {
             share_ok = true;
             for (HtmlAttribute *attr = node->attributes; attr; attr = attr->next)
-                if (strcasecmp(attr->name, "style") == 0) { share_ok = false; break; }
+                if (strcasecmp(attr->name, "style") == 0 || (strcasecmp(attr->name, "dir") == 0 && attr->value && strcasecmp(attr->value, "auto") == 0)) { share_ok = false; break; }   /* (dir=auto: its own text's direction) */
+            if (node->tag_name && !strcmp(node->tag_name, "bdi")) share_ok = false;
         }
         double my_cqw = 0.0, my_cqh = 0.0;
         if (share_ok && g_cq_n) cq_unit_bases(ctx, dom, &my_cqw, &my_cqh);
@@ -17700,13 +18290,65 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
         }
         box->s->tcy = ok && nd >= 1 && nd <= lim ? 1 : 0;
     }
+    /* (in a table column or column group, what is not a column: no box) */
+    if (node && node->type == HTML_NODE_ELEMENT && parent && parent->s && parent->s->table_role == 6 && box->s->table_role != 6 && parent->s->display != CSS_DISPLAY_NONE) { box->s->display = CSS_DISPLAY_NONE; box->s->disp_contents = 0; }
+    /* (inside a canvas, video, audio or iframe: fallback content, not rendered while scripting is on) */
+    if (node && node->type == HTML_NODE_ELEMENT && node->store_id && box->s->display != CSS_DISPLAY_NONE) {
+        static CssAtom a_canvas, a_video, a_audio, a_iframe, a_geo, a_um, a_perm, a_inst;
+        if (!a_canvas) {
+            css_atom_reserve(8);
+            a_canvas = css_atom_intern("canvas", 6); a_video = css_atom_intern("video", 5);
+            a_audio = css_atom_intern("audio", 5); a_iframe = css_atom_intern("iframe", 6);
+            a_geo = css_atom_intern("geolocation", 11); a_um = css_atom_intern("usermedia", 9);
+            a_perm = css_atom_intern("permission", 10); a_inst = css_atom_intern("install", 7);
+        }
+        NodeId pn = dom_parent(node->store_id);
+        if (pn && dom_kind(pn) == DOM_K_ELEMENT && dom_ns(pn) == DOM_NS_HTML) {
+            CssAtom pt = g_dom.tag[dom_slot(pn)];
+            if ((pt == a_canvas && !dom_get_attr_str(pn, "content") && !dom_get_attr_str(pn, "layoutsubtree")) || pt == a_video || pt == a_audio || pt == a_iframe || pt == a_geo || pt == a_um || pt == a_perm || pt == a_inst) { box->s->display = CSS_DISPLAY_NONE; box->s->disp_contents = 0; }
+        }
+    }
     /* (display: contents on a replaced element or form control: none, CSS Display Appendix B) */
     if (box->s->disp_contents && node && node->type == HTML_NODE_ELEMENT && node->tag_name && parent) {
         static const char *const unb[] = { "br", "wbr", "meter", "progress", "canvas", "embed", "object", "audio", "iframe", "img",
             "video", "frame", "frameset", "input", "textarea", "select", NULL };
         for (int k = 0; unb[k]; k++)
             if (!strcasecmp(node->tag_name, unb[k])) { box->s->disp_contents = 0; box->s->display = CSS_DISPLAY_NONE; break; }
+        /* (in the top layer, or one's backdrop: contents computes to block) */
+        if (box->s->disp_contents && ((node->store_id && (dom_element_state(node->store_id) & (DOM_ST_POPOVER_OPEN | DOM_ST_MODAL))) || !strcmp(node->tag_name, "::backdrop"))) {
+            box->s->disp_contents = 0; box->s->display = CSS_DISPLAY_BLOCK;
+        }
     }
+    /* (a frame's body with no margin attributes of its own: its frame element's marginwidth / marginheight, over the UA's 8px) */
+    if (node && node->type == HTML_NODE_ELEMENT && node->store_id && parent && node->tag_name && !strcasecmp(node->tag_name, "body")) {
+        NodeId fr_ = frame_container_of_document(dom_owner(node->store_id));
+        const char *mw = fr_ ? dom_get_attr_str(fr_, "marginwidth") : NULL, *mh = fr_ ? dom_get_attr_str(fr_, "marginheight") : NULL;
+        long mwv_ = -1, mhv_ = -1;
+        { const char *q_ = mw; if (q_) { while (*q_ == ' ' || *q_ == '\t' || *q_ == '\n' || *q_ == '\f' || *q_ == '\r') q_++; int ng_ = *q_ == '-'; if (*q_ == '+' || *q_ == '-') q_++; if (*q_ >= '0' && *q_ <= '9') { long v_ = strtol(q_, NULL, 10); if (!ng_ || !v_) mwv_ = v_; } } }
+        { const char *q_ = mh; if (q_) { while (*q_ == ' ' || *q_ == '\t' || *q_ == '\n' || *q_ == '\f' || *q_ == '\r') q_++; int ng_ = *q_ == '-'; if (*q_ == '+' || *q_ == '-') q_++; if (*q_ >= '0' && *q_ <= '9') { long v_ = strtol(q_, NULL, 10); if (!ng_ || !v_) mhv_ = v_; } } }   /* (rules for parsing non-negative integers) */
+        if (mwv_ >= 0 && !layout_node_attribute(node, "marginwidth")) {
+            double v = (double)mwv_;
+            if (!layout_node_attribute(node, "leftmargin") && box->s->margin_left == 8.0) box->s->margin_left = v;
+            if (!layout_node_attribute(node, "rightmargin") && !layout_node_attribute(node, "leftmargin") && box->s->margin_right == 8.0) box->s->margin_right = v;
+        }
+        if (mhv_ >= 0 && !layout_node_attribute(node, "marginheight")) {
+            double v = (double)mhv_;
+            if (!layout_node_attribute(node, "topmargin") && box->s->margin_top == 8.0) box->s->margin_top = v;
+            if (!layout_node_attribute(node, "bottommargin") && box->s->margin_bottom == 8.0) box->s->margin_bottom = v;
+        }
+    }
+    /* (a textarea showing its placeholder: its ::placeholder colour, the UA's #757575 by default) */
+    if (node && node->type == HTML_NODE_ELEMENT && node->tag_name && !strcasecmp(node->tag_name, "textarea") && layout_node_attribute(node, "-cb-ph")) {
+        double ph_[4] = { 117.0 / 255.0, 117.0 / 255.0, 117.0 / 255.0, 1.0 };
+        css_layout_highlight_cascade(ctx, dom, "placeholder", ta_ph_decl, ph_);
+        char pc_[96];
+        snprintf(pc_, sizeof pc_, "rgba(%d, %d, %d, %g)", (int)(ph_[0] * 255.0 + 0.5), (int)(ph_[1] * 255.0 + 0.5), (int)(ph_[2] * 255.0 + 0.5), ph_[3]);
+        hint_apply(ctx, box, "color", pc_);
+    }
+    /* (in the top layer: a position other than absolute or fixed computes to absolute) */
+    if (node && node->type == HTML_NODE_ELEMENT && node->store_id && parent && box->s->position != CSS_POSITION_ABSOLUTE && box->s->position != CSS_POSITION_FIXED &&
+        (dom_element_state(node->store_id) & (DOM_ST_POPOVER_OPEN | DOM_ST_MODAL)))
+        box->s->position = CSS_POSITION_ABSOLUTE;
     style_finish_box(P, box, parent, node && node->type == HTML_NODE_ELEMENT);
     /* (a br: a line break whatever its display says but none; never floated) */
     if (node && node->type == HTML_NODE_ELEMENT && node->tag_name && (node->tag_name[0] == 'b' || node->tag_name[0] == 'B') && !strcasecmp(node->tag_name, "br") &&
@@ -17751,10 +18393,27 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
         if (!is_rep) box->s->display = CSS_DISPLAY_INLINE_BLOCK;
     }
     /* (an element whose box is always a block container, inline: an inline-block) */
+    box->s->inl_ctl = 0;
     if (box->s->display == CSS_DISPLAY_INLINE && node && node->type == HTML_NODE_ELEMENT && node->tag_name) {
-        static const char *const bc[] = { "fieldset", "button", "textarea", "select" };
+        static const char *const bc[] = { "fieldset", "button", "textarea", "select", "input" };
         for (size_t k = 0; k < sizeof bc / sizeof bc[0]; k++)
-            if (!strcasecmp(node->tag_name, bc[k])) { box->s->display = CSS_DISPLAY_INLINE_BLOCK; break; }
+            if (!strcasecmp(node->tag_name, bc[k])) { box->s->display = CSS_DISPLAY_INLINE_BLOCK; box->s->inl_ctl = 1; break; }
+    }
+    /* (an embed with no src represents nothing: no box) */
+    if (node && node->type == HTML_NODE_ELEMENT && node->tag_name && !strcasecmp(node->tag_name, "embed") && node->store_id && dom_ns(node->store_id) == DOM_NS_HTML) {
+        const char *es_ = layout_node_attribute(node, "src");
+        const char *et_ = layout_node_attribute(node, "type");   /* (nor a type) */
+        if ((!es_ || !es_[0]) && !et_) { box->s->display = CSS_DISPLAY_NONE; box->s->disp_contents = 0; }
+    }
+    /* (a fieldset as a list item: no marker, a block) */
+    if (box->s->display == CSS_DISPLAY_LIST_ITEM && node && node->type == HTML_NODE_ELEMENT && node->tag_name && !strcasecmp(node->tag_name, "fieldset")) box->s->display = CSS_DISPLAY_BLOCK;
+    /* (a button as a table or inline table: a flow root, block or inline-level) */
+    if (box->s->table_role == 1 && node && node->type == HTML_NODE_ELEMENT && node->tag_name &&
+        (!strcasecmp(node->tag_name, "button") || (!strcasecmp(node->tag_name, "input") && input_is_button(node)))) {
+        box->s->table_role = 0;
+        box->s->display = box->s->inline_level ? CSS_DISPLAY_INLINE_BLOCK : CSS_DISPLAY_BLOCK;
+        box->s->inline_level = 0;
+        box->s->flow_root = 1;
     }
 
     if (share_ok) {
@@ -17802,6 +18461,8 @@ static bool style_is_font_size_prop(const char *prop)
 }
 
 static void style_finish_box_em0(bool em_defer, LayoutBox *box, const LayoutBox *parent, bool element);
+/* (styling a backdrop: display: contents is block there) */
+static __thread bool t_contents_block;
 static void style_finish_box_em(bool em_defer, LayoutBox *box, const LayoutBox *parent, bool element)
 {
     style_finish_box_em0(em_defer, box, parent, element);
@@ -17844,8 +18505,8 @@ static void style_finish_box_em(bool em_defer, LayoutBox *box, const LayoutBox *
      * paints nothing and takes no room of its own) */
     LayoutStyle *s = box->s;
     if (!s->disp_contents || !element) return;
-    /* (the root element: blockified, contents behaving as block, CSS Display 2.5) */
-    if (!parent) { s->disp_contents = 0; s->display = CSS_DISPLAY_BLOCK; return; }
+    /* (the root element: blockified, contents behaving as block, CSS Display 2.5; a backdrop being styled too) */
+    if (!parent || t_contents_block) { s->disp_contents = 0; s->display = CSS_DISPLAY_BLOCK; return; }
     s->contents_pd = (unsigned char)(!parent ? CSS_DISPLAY_BLOCK : parent->s->disp_contents ? parent->s->contents_pd : parent->s->display);
     s->display = CSS_DISPLAY_INLINE;
     s->inline_level = 0;
@@ -18059,6 +18720,7 @@ static void style_finish_box_em0(bool em_defer, LayoutBox *box, const LayoutBox 
         box->s->text_align = (box->s->text_align_how == 2) != (box->s->direction == 1) ? CSS_TEXT_ALIGN_RIGHT
                                                                                        : CSS_TEXT_ALIGN_LEFT;
     if (!box->s->visibility_set && parent) box->s->visibility = parent->s->visibility;
+    if (!box->s->pe_set && parent) box->s->pe_none = parent->s->pe_none;
     /* Typography inheritance: font-family, weight, style, line-height and
      * list-style-type are inherited CSS properties.  text-decoration is
      * technically not inherited, but it visually propagates to inline
@@ -18918,9 +19580,14 @@ static bool layout_pseudo_allowed(const HtmlNode *n)
 {
     static const char *const none[] = {
         "img", "input", "select", "textarea", "iframe", "video", "audio", "canvas", "embed", "object",
-        "br", "wbr", "svg", "math", "meter", "progress", NULL
+        "br", "wbr", "svg", "math", "meter", "progress", "geolocation", "usermedia", "permission", "install", NULL
     };
     if (!n || n->type != HTML_NODE_ELEMENT || !n->tag_name) return false;
+    /* (a checkbox or radio button: they have them, as browsers do) */
+    if (!strcasecmp(n->tag_name, "input")) {
+        const char *ty = layout_node_attribute((HtmlNode *)n, "type");
+        if (ty && (!strcasecmp(ty, "checkbox") || !strcasecmp(ty, "radio"))) return true;
+    }
     for (int i = 0; none[i]; i++)
         if (strcasecmp(n->tag_name, none[i]) == 0) return false;
     return true;
@@ -18986,7 +19653,7 @@ static void layout_pseudo_text(const char *v, const HtmlNode *owner, char *out, 
     out[0] = 0;
     while (*v) {
         while (isspace((unsigned char)*v)) v++;
-        if (!*v) break;
+        if (!*v || *v == '/') break;   /* (the alternative text: not shown) */
         const char *piece = NULL;
         char buf[1024];
         size_t tl = 0;
@@ -19018,6 +19685,20 @@ static void layout_pseudo_text(const char *v, const HtmlNode *owner, char *out, 
                 name[nl] = 0;
                 /* (attribute names match ignoring case in an HTML document only) */
                 bool html = !owner->store_id || dom_is_html_document(dom_owner(owner->store_id));
+                /* (::details-content's: its details element's, the UA tree's part standing in for it) */
+                const char *pv_ = layout_node_attribute((HtmlNode *)owner, "part");
+                if (pv_ && !strcmp(pv_, "cbdetailscontent") && owner->store_id) {
+                    NodeId r_ = owner->store_id;
+                    while (dom_parent(r_)) r_ = dom_parent(r_);
+                    uint32_t h_ = (dom_flags(r_) & DOMF_SHADOW_ROOT) ? g_dom.host[dom_slot(r_)] : 0;
+                    if (h_) {
+                        char ln_[128];
+                        size_t q_ = 0;
+                        for (; name[q_] && q_ + 1 < sizeof ln_; q_++) ln_[q_] = (char)tolower((unsigned char)name[q_]);
+                        ln_[q_] = 0;
+                        piece = dom_get_attr_str(dom_id_of(h_), ln_);
+                    }
+                } else
                 for (const HtmlAttribute *at = owner->attributes; at && !piece; at = at->next)
                     if (at->name && (html ? !strcasecmp(at->name, name) : !strcmp(at->name, name))) piece = at->value;
                 /* (missing: its fallback, a string) */
@@ -19065,6 +19746,7 @@ static void layout_pseudo_text(const char *v, const HtmlNode *owner, char *out, 
 /* The style of pseudo box pe (side 0 ::before, 1 ::after) of element owner:
  * its rules' declarations over the defaults, then what the element's final
  * style gives it. */
+const char *anim_api_web_style(uint32_t el);
 static void layout_pseudo_style(LayoutContext *ctx, int pe, int owner, const PseudoSide *ps, bool em_defer)
 {
     LayoutBox *box = &ctx->boxes[pe], *ob = &ctx->boxes[owner];
@@ -19375,8 +20057,12 @@ static int layout_scroll_pseudo_add(LayoutContext *ctx, LayoutPseudoPair *pairs,
     LayoutStyle *os = ctx->boxes[owner].s;
     CssDisplay held_d = os->display;
     if ((side == SIDE_MARKER || side == SIDE_COLMARK) && (held_d == CSS_DISPLAY_FLEX || held_d == CSS_DISPLAY_GRID)) os->display = CSS_DISPLAY_BLOCK;
+    t_contents_block = side == SIDE_BACKDROP;   /* (a backdrop: contents computes to block) */
     layout_pseudo_style(ctx, pe, owner, &merged, em_defer);
+    t_contents_block = false;
     os->display = held_d;
+    /* (a backdrop: a position other than absolute or fixed computes to absolute) */
+    if (side == SIDE_BACKDROP && ctx->boxes[pe].s->position != CSS_POSITION_ABSOLUTE && ctx->boxes[pe].s->position != CSS_POSITION_FIXED) ctx->boxes[pe].s->position = CSS_POSITION_ABSOLUTE;
     if (side == SIDE_GROUP) { ctx->boxes[pe].s->contain_layout = 1; ctx->boxes[pe].s->contain_size = ctx->boxes[pe].s->position == CSS_POSITION_ABSOLUTE || ctx->boxes[pe].s->position == CSS_POSITION_FIXED ? 2 : 3; ctx->boxes[pe].s->contain_any = 1; ctx->boxes[pe].s->abs_cb |= 128; }   /* (a marker group: always layout and size containment) */
     free(ds);
     layout_box_init(ctx, pt);
@@ -19527,6 +20213,29 @@ static int layout_colmark_count(const LayoutContext *ctx, int i)
     return c < 1 ? 1 : c > 200 ? 200 : c;
 }
 
+/* (box i is in the top layer: a modal dialog or a showing popover) */
+static bool layout_in_top_layer(const LayoutContext *ctx, int i)
+{
+    const HtmlNode *n = layout_node_dom((LayoutContext *)ctx, ctx->tree.nodes[i].dom_node_idx);
+    return n && n->type == HTML_NODE_ELEMENT && n->store_id && (dom_element_state(n->store_id) & (DOM_ST_POPOVER_OPEN | DOM_ST_MODAL));
+}
+
+/* (box i an interest invoker: a button, a link or an area with an interestfor attribute) */
+static bool layout_interest_invoker(const LayoutContext *ctx, int i)
+{
+    const HtmlNode *n = layout_node_dom((LayoutContext *)ctx, ctx->tree.nodes[i].dom_node_idx);
+    if (!n || n->type != HTML_NODE_ELEMENT || !n->tag_name || !layout_node_attribute((HtmlNode *)n, "interestfor")) return false;
+    return !strcasecmp(n->tag_name, "button") || !strcasecmp(n->tag_name, "a") || !strcasecmp(n->tag_name, "area");
+}
+
+/* (a top layer box: a modal dialog, a showing popover, or one's ::backdrop) */
+static bool layout_top_layer_box(const LayoutContext *ctx, int i)
+{
+    if (layout_in_top_layer(ctx, i)) return true;
+    const HtmlNode *n = layout_node_dom((LayoutContext *)ctx, ctx->tree.nodes[i].dom_node_idx);
+    return n && n->tag_name && !strcmp(n->tag_name, "::backdrop");
+}
+
 static void layout_scroll_pseudos_attach(LayoutContext *ctx, LayoutPseudoPair *pairs, HtmlNode *hn, int *kp, bool em_defer)
 {
     static const char *const k_button_tag[4] = { "::scroll-button(up)", "::scroll-button(down)", "::scroll-button(left)", "::scroll-button(right)" };
@@ -19541,6 +20250,12 @@ static void layout_scroll_pseudos_attach(LayoutContext *ctx, LayoutPseudoPair *p
         bool root = parent < 0;
         if (root) parent = i;
         int next = root ? -1 : ctx->tree.nodes[i].next_sibling_idx;
+        /* (::backdrop: just before it, painted under it in the top layer) */
+        if (r && r->side[SIDE_BACKDROP].content && !root && layout_in_top_layer(ctx, i))
+            layout_scroll_pseudo_add(ctx, pairs, hn, kp, i, SIDE_BACKDROP, "::backdrop", "", parent, i, &r->side[SIDE_BACKDROP], NULL, em_defer);
+        /* (::interest-button: an interest invoker's, just after it) */
+        if (r && r->side[SIDE_INTEREST].content && !root && layout_interest_invoker(ctx, i))
+            layout_scroll_pseudo_add(ctx, pairs, hn, kp, i, SIDE_INTEREST, "::interest-button", r->side[SIDE_INTEREST].content, parent, next, &r->side[SIDE_INTEREST], NULL, em_defer);
         /* The buttons, after it. */
         for (int d = 0; r && d < 4; d++) {
             const PseudoSide *any = &r->side[SIDE_BUTTONS], *dir = &r->side[SIDE_BUTTON0 + d];
@@ -19884,6 +20599,8 @@ static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
         if (layout_marker_inside(b, r)) m++;
         if (layout_textarea_text(ctx, i)) m++;
         if (!r) continue;
+        if (r->side[SIDE_BACKDROP].content && layout_in_top_layer(ctx, i)) m++;
+        if (r->side[SIDE_INTEREST].content && layout_interest_invoker(ctx, i)) m++;
         if (!layout_pseudo_allowed(layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx))) continue;
         m += (r->side[0].content != NULL) + (r->side[1].content != NULL) + (r->side[2].content != NULL);
         m += (r->side[3].content != NULL && !r->side[2].content && fl_font_rule(&r->side[3]));   /* (::first-line's box) */
@@ -20209,7 +20926,8 @@ static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
              * its element's style slot left as it was (its attributes too,
              * which attr() reads) and the same rules. */
             /* (an animated one is styled again: what it animates changes) */
-            int j = ptab && !dyn && ctx->style_left[owner] && !anim_has(ctx->ids[owner], side + 1)
+            int j = ptab && !dyn && ctx->style_left[owner] && !anim_has(ctx->ids[owner], side + 1) &&
+                    !(ctx->ids && ctx->ids[owner] && anim_api_web_style(ctx->ids[owner] | (side ? 0x20000000u : 0x40000000u)))
                         ? layout_parked_find(ctx, ptab, ptab_cap, ctx->ids[owner], side) : -1;
             LayoutParkedPseudo *pk = j >= 0 ? &ctx->parked[j] : NULL;
             if (pk && (pk->used || pk->content != pcontent || pk->n != ps->n ||
@@ -20283,6 +21001,28 @@ static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
                 }
             } else {
                 layout_pseudo_style(ctx, pe, owner, ps, em_defer);
+                /* (a script animation's style on it (Element.animate with its pseudoElement): over its rules) */
+                {
+                    const char *wa_ = ctx->ids && ctx->ids[owner] ? anim_api_web_style(ctx->ids[owner] | (side ? 0x20000000u : 0x40000000u)) : NULL;
+                    for (const char *p_ = wa_; p_ && *p_;) {
+                        while (*p_ == ' ' || *p_ == ';') p_++;
+                        const char *c_ = strchr(p_, ':'), *e_ = c_ ? strchr(c_, ';') : NULL;
+                        if (!c_) break;
+                        if (!e_) e_ = p_ + strlen(p_);
+                        char pn_[64], pv_[512];
+                        size_t nl_ = (size_t)(c_ - p_), vl_ = (size_t)(e_ - c_ - 1);
+                        if (nl_ < sizeof pn_ && vl_ < sizeof pv_) {
+                            memcpy(pn_, p_, nl_); pn_[nl_] = 0;
+                            memcpy(pv_, c_ + 1, vl_); pv_[vl_] = 0;
+                            CssDeclaration d_;
+                            memset(&d_, 0, sizeof d_);
+                            d_.property = pn_;
+                            d_.value = pv_[0] == ' ' ? pv_ + 1 : pv_;
+                            layout_apply_declaration(&ctx->boxes[pe], &d_, ctx->viewport_width, ctx->viewport_width, ctx->base_url);
+                        }
+                        p_ = e_;
+                    }
+                }
                 /* (content a gradient: that image, as its background, filling it) */
                 if (pcontent) {
                     const char *g_ = pcontent;
@@ -23269,7 +24009,11 @@ static bool layout_img_natural(const LayoutContext *ctx, HtmlNode *node, double 
                 *nh = (*dims & 32) ? 0 : h;
                 /* (in CSS pixels of its zoom) */
                 if (t_img_vb && t_img_vb->zoom > 0.0f && t_img_vb->zoom != 1.0f) { *nw *= t_img_vb->zoom; *nh *= t_img_vb->zoom; }
-                if (dens > 0.0 && dens != 1.0) { *nw /= dens; *nh /= dens; }   /* (a srcset density) */
+                /* (a srcset density: of the natural sizes it has, not the default object size's) */
+                if (dens > 0.0 && dens != 1.0) {   /* (one of them and a ratio: the other from it, the same) */
+                    if ((*dims & 1) || ((*dims & 6) == 6)) *nw /= dens;
+                    if ((*dims & 2) || ((*dims & 5) == 5)) *nh /= dens;
+                }
                 if (t_img_vb && node->content_img && t_img_vb->content_res > 0.0f && t_img_vb->content_res != 1.0f) { *nw /= t_img_vb->content_res; *nh /= t_img_vb->content_res; }   /* (content: image-set()'s) */
                 *dims &= 7;
                 if (ratio) *ratio = (*dims & 4) && r > 0.0f ? r : 0.0;
@@ -25046,7 +25790,7 @@ static size_t textarea_own_text(HtmlNode *n, char *o, size_t cap)
 /* (rows: by its text's lines when its height is a content size) */
 static double textarea_rows_used(const LayoutBox *b, HtmlNode *n)
 {
-    if (b && b->s->h_kw >= 1 && b->s->h_kw <= 3) {
+    if (b && ((b->s->h_kw >= 1 && b->s->h_kw <= 3) || b->s->field_sizing)) {   /* (field-sizing: content: its own lines too) */
         char t[4096];
         size_t k = textarea_own_text(n, t, sizeof t);
         double lines = 1.0;
@@ -26016,16 +26760,37 @@ static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_ma
         }
         else {
             content = 177.0;
+            /* (in Ahem, whose average character is 1em wide: its size in those, 20 unless said) */
+            {
+                const char *ff_ = box->s->font_family;
+                bool ahem_ = false;
+                for (const char *q_ = ff_; q_ && *q_ && !ahem_; q_++) ahem_ = !strncasecmp(q_, "ahem", 4);
+                if (ahem_) {
+                    const char *sa_ = layout_node_attribute(dom, "size");
+                    long sz_ = sa_ ? strtol(sa_, NULL, 10) : 0;
+                    if (sz_ <= 0) sz_ = 20;
+                    content = (double)sz_ * (box->s->font_size > 0.0 ? box->s->font_size : 13.333);
+                }
+            }
             /* (width: max-content: its value) */
-            const char *vv = layout_node_attribute(dom, "value");
+            const char *vv = layout_node_attribute(dom, "-cb-value");
+            if (!vv) vv = layout_node_attribute(dom, "value");
             double lw = 0.0;
             if (box->s->width_keyword == 2 && vv && vv[0] && layout_measure_text_styled(box, vv, box->s->font_size > 0.0 ? box->s->font_size : 13.333, &lw, NULL)) content = lw;
+            /* (field-sizing: content: its value, else its placeholder, and room for the caret) */
+            if (box->s->field_sizing) {
+                const char *fv = vv && vv[0] ? vv : layout_node_attribute(dom, "placeholder");
+                double fw = 0.0;
+                if (!fv || !fv[0] || !layout_measure_text_styled(box, fv, box->s->font_size > 0.0 ? box->s->font_size : 13.333, &fw, NULL)) fw = 0.0;
+                content = fw + 1.0;
+            }
         }
     } else if (strcasecmp(tag, "textarea") == 0) {
         /* (its cols, 20 unless said: 8.8px each at 16px) */
         content = textarea_count(dom, "cols", 20) * 0.55 * (box->s->font_size > 0.0 ? box->s->font_size : 16.0);
-        /* (width: max-content: its longest line) */
-        if (box->s->width_keyword == 2) {
+        /* (width: max-content: its longest line; field-sizing: content, the same and the caret) */
+        if (box->s->field_sizing) content = 1.0;
+        if (box->s->width_keyword == 2 || box->s->field_sizing) {
             char t[4096];
             size_t k = textarea_own_text(dom, t, sizeof t);
             double best = 0.0;
@@ -26039,7 +26804,7 @@ static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_ma
                 t[e] = sv;
                 a = e + 1;
             }
-            if (best > 0.0) content = best;
+            if (best > 0.0) content = best + (box->s->field_sizing ? 1.0 : 0.0);
         }
     } else if (strcasecmp(tag, "canvas") == 0 && (box->s->height_set || box->s->height_percent > 0.0)) {
         /* (a height gives the width through the bitmap's ratio) */
@@ -26056,7 +26821,7 @@ static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_ma
         content = (wa && wa[0] && (!strchr(wa, 0x25) || (layout_node_attribute(dom, "viewBox") && strcasecmp(tag, "svg")))) ? atof(wa)   /* (a percentage, no ratio: none of its own) */
                                 : (strcasecmp(tag, "svg") == 0 ? 300.0 :
                                    strcasecmp(tag, "canvas") == 0 ? 300.0 :
-                                   strcasecmp(tag, "iframe") == 0 ? 300.0 : 300.0);
+                                   strcasecmp(tag, "iframe") == 0 ? 300.0 : layout_video_natural_w(dom));
         /* (an <svg> of a percentage width with a viewBox: compressible, nothing at its least; its natural fallback at its most) */
         if (!strcasecmp(tag, "svg") && wa && strchr(wa, 0x25) && layout_node_attribute(dom, "viewBox") && !want_max) content = 0.0;
         /* (an <svg> of a ratio alone, no width or height anywhere: nothing of its own to give, as wide as it is let be) */
@@ -26923,6 +27688,9 @@ static bool layout_establishes_bfc(LayoutContext *ctx, int idx)
     HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
     if (dn && dn->type == HTML_NODE_ELEMENT && dn->tag_name &&
         (strcasecmp(dn->tag_name, "td") == 0 || strcasecmp(dn->tag_name, "th") == 0))
+        return true;
+    /* (a button: a formatting context of its own, whatever its display, HTML 15.5.3) */
+    if (dn && dn->type == HTML_NODE_ELEMENT && dn->tag_name && !strcasecmp(dn->tag_name, "button") && b->s->display != CSS_DISPLAY_INLINE)
         return true;
     return false;
 }
@@ -27925,7 +28693,7 @@ void css_layout_print_names(LayoutContext *ctx, int n)
     int r = ctx->tree.root_idx;
     if (r < 0) return;
     const LayoutBox *rb = layout_box(ctx, r);
-    double top = rb->y + rb->padding_top + rb->s->border_top + 2.0 * rb->fs_off, H = rb->mc_h;
+    double top = rb->y + rb->padding_top + rb->s->border_top + rb->fs_cofs, H = rb->mc_h;
     if (H <= 0.5) return;
     if (n > 64) n = 64;
     int last = 0;
@@ -29906,7 +30674,7 @@ static bool layout_multicol(LayoutContext *ctx, int idx)
     /* (margin-trim: as a block container trims) */
     if (s->margin_trim & 1) mt_trim_edge(ctx, idx, true, 0);
     if (s->margin_trim & 4) mt_trim_edge(ctx, idx, false, 0);
-    double top = box->y + box->padding_top + box->s->border_top + 2.0 * box->fs_off, extent = 0.0;   /* (a fieldset: below its legend) */
+    double top = box->y + box->padding_top + box->s->border_top + box->fs_cofs, extent = 0.0;   /* (a fieldset: below its legend) */
     bool auto_h = !s->height_set || box->height_pct_unresolved || s->table_role == 4;   /* (a cell's height: a minimum) */
     /* (in a multicol container's columns of a known height, its own height auto,
      * starting a column there: its columns that high, a row in each of those) */
@@ -29930,9 +30698,9 @@ static bool layout_multicol(LayoutContext *ctx, int idx)
     t_mc_outer_h = s->column_height > 0.0 ? s->column_height : nest_h > 0.0 ? nest_h : !auto_h ? box->content_height : 0.0;
     t_mc_outer_top = top;
     t_mc_depth++;
-    float fs_pre = box->fs_off;
+    float fs_pre = box->fs_cofs;
     layout_block_flow_inner(ctx, idx);
-    top += 2.0 * (box->fs_off - fs_pre);   /* (the legend: known once the flow ran) */
+    top += box->fs_cofs - fs_pre;   /* (the legend: known once the flow ran) */
     t_mc_depth--;
     t_mc_outer_h = saved_oh;
     t_mc_outer_top = saved_ot;
@@ -30153,7 +30921,7 @@ static bool layout_multicol(LayoutContext *ctx, int idx)
     }
     if (auto_h) {
         double frame = box->padding_top + box->padding_bottom + box->s->border_top + box->s->border_bottom;
-        box->content_height = dst - top + 2.0 * box->fs_off;   /* (a fieldset's legend: in its content height) */
+        box->content_height = dst - top + box->fs_cofs;   /* (a fieldset's legend: in its content height) */
         /* (size containment: as if empty) */
         if (CSS_CONTAIN_SIZE_OF(s) & 2) {
             double mn = box->min_height > 0.0 ? box->min_height - (s->box_sizing == CSS_BOX_SIZING_BORDER_BOX ? frame : 0.0) : 0.0;
@@ -30167,7 +30935,7 @@ static bool layout_multicol(LayoutContext *ctx, int idx)
     {
         /* (overflow counts: a column a descendant reaches into has content) */
         if (H > 0.5) {
-            double top_ = box->y + box->padding_top + box->s->border_top + 2.0 * box->fs_off;
+            double top_ = box->y + box->padding_top + box->s->border_top + box->fs_cofs;
             int se_ = mc_tree_end(ctx, idx);
             for (int q = idx + 1; q < se_ && q < ctx->tree.count; q++) {
                 const LayoutBox *qb = layout_box(ctx, q);
@@ -32322,7 +33090,14 @@ static void ifc_collect(LayoutContext *ctx, int p, int c0, int stop, IfcItems *I
                     int cs_ = CSS_CONTAIN_SIZE_OF(cb->s);
                     bool wa_ = !(cb->s->width_set || cb->s->width_percent > 0.0) || cb->s->width_keyword, ha_ = !cb->s->height_set && !(cb->s->height_percent > 0.0);
                     bool emb_ = n->tag_name[0] != 'a' && n->tag_name[0] != 'A';   /* (an embed, a video: 300 by 150) */
-                    double w_ = wa_ ? ((cs_ & 1) ? 0.0 : 300.0) : cb->width - bw, h_ = ha_ ? ((cs_ & 2) ? 0.0 : emb_ ? 150.0 : 54.0) : cb->height - bh;
+                    double vw_ = 300.0, vh_ = 150.0;
+                    layout_video_natural(n, &vw_, &vh_);
+                    double w_ = wa_ ? ((cs_ & 1) ? 0.0 : vw_) : cb->width - bw, h_ = ha_ ? ((cs_ & 2) ? 0.0 : emb_ ? vh_ : 54.0) : cb->height - bh;
+                    /* (one side given, a video's natural ratio for the other) */
+                    if (vw_ > 0.0 && vh_ > 0.0 && (vw_ != 300.0 || vh_ != 150.0) && !(cs_ & 3)) {
+                        if (wa_ && !ha_) w_ = h_ * vw_ / vh_;
+                        else if (ha_ && !wa_) h_ = w_ * vh_ / vw_;
+                    }
                     if (w_ < 0.0) w_ = 0.0;
                     if (h_ < 0.0) h_ = 0.0;
                     layout_resolve_minmax_pcts(cb, avail_width, 0.0);
@@ -34231,7 +35006,7 @@ static double layout_baseline_walk(LayoutContext *ctx, int i, int depth, bool fi
             t_bw_mc = i;
             double v = layout_baseline_walk(ctx, i, depth, first, atomic);
             t_bw_mc = was;
-            double top = mb->y + mb->padding_top + mb->s->border_top + 2.0 * mb->fs_off;
+            double top = mb->y + mb->padding_top + mb->s->border_top + mb->fs_cofs;
             if (!isnan(v)) {
                 /* (runs between spanners: the one of the child the line is in) */
                 const LayoutBox *in = NULL;
@@ -34421,6 +35196,24 @@ static void ifc_atom_metrics(LayoutContext *ctx, int b, IfcVa *v)
              : layout_last_baseline(ctx, b, 0, ab->s->baseline_src ? ab->s->baseline_src == 1 : table_is_table(ab));
     if (isnan(base) && n && n->type == HTML_NODE_ELEMENT && n->tag_name && !strcasecmp(n->tag_name, "button"))
         base = ab->y + ab->height - ab->s->border_bottom - ab->padding_bottom;   /* (a button with no line, or contained: its content box's bottom) */
+    /* (a text field or an input button: its one line of text centered in its content box, whatever its overflow) */
+    if (isnan(base) && n && n->type == HTML_NODE_ELEMENT && n->tag_name && !strcasecmp(n->tag_name, "input") && !ab->s->contain_size &&
+        ab->s->writing_mode == 0) {
+        const char *ty = layout_node_attribute(n, "type");
+        static const char *const k_tf[] = { "text", "search", "tel", "url", "email", "password", "date", "month", "week", "time",
+                                            "datetime-local", "number", "submit", "reset", "button", NULL };
+        bool tf = !ty || !ty[0];
+        for (int q = 0; !tf && k_tf[q]; q++) if (!strcasecmp(ty, k_tf[q])) tf = true;
+        /* (a type that is none of the known ones: a text field) */
+        static const char *const k_known[] = { "hidden", "checkbox", "radio", "file", "image", "color", "range", NULL };
+        if (!tf) { bool kn_ = false; for (int q = 0; !kn_ && k_known[q]; q++) if (!strcasecmp(ty, k_known[q])) kn_ = true; if (!kn_) tf = true; }
+        if (tf) {
+            double ctop = ab->y + ab->s->border_top + ab->padding_top;
+            double ch = ab->height - ab->s->border_top - ab->s->border_bottom - ab->padding_top - ab->padding_bottom;
+            double la = v->A, ld = v->D;
+            if (la + ld > 0.0 && ch > 0.0) base = ctop + (ch - (la + ld)) / 2.0 + la;
+        }
+    }
     if (isnan(base) && table_is_table(ab) && !ab->s->contain_layout && !(n && n->type == HTML_NODE_ELEMENT && ifc_is_replaced(ab, n))) {
         /* (no line in its first row: that row's bottom edge) */
         int r = -1;
@@ -34827,6 +35620,8 @@ static bool layout_first_line_color(const LayoutContext *ctx, int idx, unsigned 
 {
     const PseudoRec *r = ctx->pseudo_rec && idx < ctx->base_count ? (const PseudoRec *)ctx->pseudo_rec[idx] : NULL;
     if (ctx->boxes[idx].s->ruby_role && ctx->boxes[idx].s->ruby_role != 6) r = NULL;   /* (a ruby box is no block container: no first line of its own) */
+    { const HtmlNode *tn_ = css_layout_box_node((LayoutContext *)ctx, idx);   /* (a textarea: a control, no first line of its own) */
+      if (tn_ && tn_->type == HTML_NODE_ELEMENT && tn_->tag_name && !strcasecmp(tn_->tag_name, "textarea")) return false; }
     for (int d = r ? r->side[3].n - 1 : -1; d >= 0; d--) {
         const CssDeclaration *decl = r->side[3].decls[d];
         double cr, cg, cb, ca;
@@ -36150,7 +36945,9 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
                                 fr->w += fr->dx - (tq->x - bb->x);   /* (right to left: it grows leftward) */
                                 fr->dx = tq->x - bb->x;
                             } else {
-                                fr->w = tq->x + tq->w - (bb->x + fr->dx);
+                                /* (never narrower: an empty break opportunity at its left edge, right to left, is inside it) */
+                                double nw = tq->x + tq->w - (bb->x + fr->dx);
+                                if (!(tq->level & 1) || nw > fr->w) fr->w = nw;
                             }
                         }
                     }
@@ -36565,12 +37362,21 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
     HtmlNode *self_dom = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
     bool in_center = self_dom && self_dom->type == HTML_NODE_ELEMENT && self_dom->tag_name &&
                      strcasecmp(self_dom->tag_name, "center") == 0;
+    /* (a div's align attribute: its block children placed as <center>'s are, or against that side, HTML 15.3.3's
+     * -webkit-left / -webkit-right / -webkit-center) */
+    int legacy_al = 0;   /* (2 left, 3 right) */
+    if (!in_center && self_dom && self_dom->type == HTML_NODE_ELEMENT && self_dom->tag_name && !strcasecmp(self_dom->tag_name, "div")) {
+        const char *al_ = layout_node_attribute(self_dom, "align");
+        if (al_ && (!strcasecmp(al_, "center") || !strcasecmp(al_, "middle"))) in_center = true;
+        else if (al_ && !strcasecmp(al_, "left")) legacy_al = 2;
+        else if (al_ && !strcasecmp(al_, "right")) legacy_al = 3;
+    }
 
     int nkids = 0;
     int *kids = layout_collect_flow_children(ctx, idx, &nkids);
 
     /* (a fieldset's rendered legend: in its block-start border, shrink-to-fit; the content starts below it) */
-    box->fs_off = box->fs_gx0 = box->fs_gx1 = 0.0f;
+    box->fs_off = box->fs_gx0 = box->fs_gx1 = box->fs_cofs = 0.0f;
     box->fs_legend = 0;
     if (box->s->is_fieldset && box->s->writing_mode == 0 && kids && !box->s->cv_hidden) {   /* (its contents skipped: the legend too) */
         for (int k = 0; k < nkids; k++) {
@@ -36585,13 +37391,31 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                 lb->width = layout_shrink_to_fit(ctx, L, a > 0.0 ? a : 0.0);
             }
             lb->x = box->s->direction == 1 ? content_left + avail_width - lb->margin_right - lb->width : content_left + lb->margin_left;
+            {   /* (auto inline margins: the legend to the other side, or centred, HTML 15.3.13) */
+                unsigned char ma_ = lb->s->margin_auto;
+                /* (its align attribute: as the auto margins would place it, HTML 15.3.13) */
+                const char *al_ = layout_node_attribute(ln, "align");
+                if (al_ && !ma_) {
+                    if (!strcasecmp(al_, "center")) ma_ = 8 | 2;
+                    else if (!strcasecmp(al_, "right")) ma_ = 8;
+                    else if (!strcasecmp(al_, "left")) ma_ = 2;
+                }
+                double ml_ = (ma_ & 8) ? 0.0 : lb->margin_left, mr_ = (ma_ & 2) ? 0.0 : lb->margin_right;
+                double free_ = avail_width - lb->width - ml_ - mr_;
+                if ((ma_ & 8) && (ma_ & 2)) lb->x = content_left + ml_ + (free_ > 0.0 ? free_ / 2.0 : 0.0);
+                else if (ma_ & 8) lb->x = content_left + avail_width - mr_ - lb->width;
+                else if (ma_ & 2) lb->x = content_left + ml_;
+            }
             lb->y = box->y + lb->margin_top;
             layout_update_content_sizes(lb);
             layout_node_serial(ctx, L);
-            double lh_ = lb->margin_top + lb->height + lb->margin_bottom, bt_ = box->s->border_top;
-            if (lh_ < bt_) layout_move_box(ctx, L, lb->x, lb->y + (bt_ - lh_) / 2.0);
-            else box->fs_off = (float)((lh_ - bt_) / 2.0);
-            content_top = box->y + (lh_ > bt_ ? lh_ : bt_) + box->padding_top;
+            /* (the top border centered on the legend's border box; the content below its margin box and the border both) */
+            double bt_ = box->s->border_top, off_ = lb->margin_top + (lb->height - bt_) / 2.0;
+            if (off_ < 0.0) layout_move_box(ctx, L, lb->x, lb->y - off_);
+            else box->fs_off = (float)off_;
+            double cb_ = lb->y + lb->height + lb->margin_bottom, bb_ = box->y + box->fs_off + bt_;
+            content_top = (cb_ > bb_ ? cb_ : bb_) + box->padding_top;
+            box->fs_cofs = (float)(content_top - box->y - bt_ - box->padding_top);
             box->fs_gx0 = (float)(lb->x - box->x);
             box->fs_gx1 = (float)(lb->x + lb->width - box->x);
             box->fs_legend = L + 1;
@@ -36910,6 +37734,9 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                     if ((mauto & 0xA) == 0xA) child->x = content_left + free_w / 2.0;
                     else if (mauto & 8) child->x = content_left + free_w;
                 }
+            } else if (legacy_al && child->s->float_side == 0 && !(mauto & 0xA) &&
+                       (child->s->width_set || child->s->width_percent > 0.0 || child->s->width_keyword || child->max_width >= 0.0)) {
+                child->x = legacy_al == 2 ? content_left + child->margin_left : content_left + avail_width - child->margin_right - child->width;
             } else if (box->s->direction == 1 && child->s->float_side == 0 &&
                        (child->s->width_set || child->s->width_percent > 0.0 || child->s->width_keyword ||
                         child->max_width >= 0.0 ||
@@ -44896,7 +45723,12 @@ static bool table_place(LayoutContext *ctx, int idx, const LayoutBox *tb, TableG
         /* (inherited: the nearest ancestor's, at this table's zoom) */
         for (int a = html_table || tb != layout_box(ctx, idx) ? -1 : ctx->tree.nodes[idx].parent_idx, g = 0; a >= 0 && g < 2000; a = ctx->tree.nodes[a].parent_idx, g++) {
             const LayoutStyle *as = ctx->boxes[a].s;
-            if (!as->border_spacing_set) continue;
+            if (!as->border_spacing_set) {
+                /* (a <table> on the way: its UA 2px, inherited) */
+                HtmlNode *an_ = layout_node_dom(ctx, ctx->tree.nodes[a].dom_node_idx);
+                if (an_ && an_->type == HTML_NODE_ELEMENT && an_->tag_name && !strcasecmp(an_->tag_name, "table")) { T->hs = T->vs = 2.0; break; }
+                continue;
+            }
             double za = as->zoom > 0.0f ? (double)as->zoom : 1.0, zt = tb->s->zoom > 0.0f ? (double)tb->s->zoom : 1.0;
             T->hs = as->border_spacing_h / za * zt;
             T->vs = as->border_spacing_v / za * zt;
@@ -46949,6 +47781,10 @@ static bool layout_box_abs_cb(LayoutContext *ctx, int p)
 
 static int layout_positioned_ancestor(LayoutContext *ctx, int idx)
 {
+    /* (in the top layer, or one's backdrop: the initial containing block) */
+    { const HtmlNode *tn_ = css_layout_box_node(ctx, idx);
+      if (tn_ && tn_->type == HTML_NODE_ELEMENT && tn_->store_id && (dom_element_state(tn_->store_id) & (DOM_ST_POPOVER_OPEN | DOM_ST_MODAL))) return -1;
+      if (tn_ && tn_->tag_name && !strcmp(tn_->tag_name, "::backdrop")) return -1; }
     int p = ctx->tree.nodes[idx].parent_idx;
     while (p >= 0) {
         CssPosition pos = layout_box(ctx, p)->s->position;
@@ -47020,8 +47856,13 @@ static int layout_fixed_ancestor(LayoutContext *ctx, int idx)
     /* (in the top layer, an open popover or modal dialog: the viewport, whatever is around it) */
     const HtmlNode *tn_ = css_layout_box_node(ctx, idx);
     if (tn_ && tn_->type == HTML_NODE_ELEMENT && tn_->store_id && (dom_element_state(tn_->store_id) & (DOM_ST_POPOVER_OPEN | DOM_ST_MODAL))) return -1;
-    for (int p = ctx->tree.nodes[idx].parent_idx; p >= 0; p = ctx->tree.nodes[p].parent_idx)
+    if (tn_ && tn_->tag_name && !strcmp(tn_->tag_name, "::backdrop")) return -1;   /* (one's backdrop too) */
+    for (int p = ctx->tree.nodes[idx].parent_idx; p >= 0; p = ctx->tree.nodes[p].parent_idx) {
         if (layout_box_abs_cb(ctx, p) && layout_box(ctx, p)->s->abs_cb != 1024) return p;   /* (will-change: position alone: not a fixed box's) */
+        /* (up to a top layer box: what is around that is not its) */
+        const HtmlNode *pn_ = css_layout_box_node(ctx, p);
+        if (pn_ && pn_->type == HTML_NODE_ELEMENT && pn_->store_id && (dom_element_state(pn_->store_id) & (DOM_ST_POPOVER_OPEN | DOM_ST_MODAL))) return -1;
+    }
     return -1;
 }
 
@@ -47394,7 +48235,14 @@ static int layout_default_anchor(LayoutContext *ctx, int idx)
     const char *pa = ctx->boxes[idx].s->position_anchor ? layout_pos_anchor(ctx, idx) : NULL;
     if (pa && strcasecmp(pa, "auto") && strcasecmp(pa, "normal")) return layout_anchor_find(ctx, idx, pa, strlen(pa));
     /* (normal said: as none, unless in a position-area; auto (or not said): its originating element) */
-    if (ctx->tree.nodes[idx].dom_node_idx >= LAYOUT_PSEUDO_DOM0 && (!pa || strcasecmp(pa, "normal") || ctx->boxes[idx].s->position_area)) return ctx->tree.nodes[idx].parent_idx;
+    if (ctx->tree.nodes[idx].dom_node_idx >= LAYOUT_PSEUDO_DOM0 && (!pa || strcasecmp(pa, "normal") || ctx->boxes[idx].s->position_area)) {
+        /* (one beside its element, an ::interest-button: that element, its owner) */
+        int pk = (idx - ctx->base_count) / 2;
+        HtmlNode *pn_ = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+        if (pn_ && pn_->tag_name && !strcmp(pn_->tag_name, "::interest-button") && ctx->pseudo_pairs && idx >= ctx->base_count && pk < ctx->pseudo_nodes_n / 2)
+            return ctx->pseudo_pairs[pk].owner;
+        return ctx->tree.nodes[idx].parent_idx;
+    }
     /* (a popover a button opened: that button) */
     if (ctx->boxes[idx].s->position == CSS_POSITION_ABSOLUTE || ctx->boxes[idx].s->position == CSS_POSITION_FIXED) {
         HtmlNode *n = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
@@ -47470,7 +48318,7 @@ static void layout_anchor_rect(LayoutContext *ctx, int a, int cb, double cb_x, d
             if (ctx->boxes[i].mc_n > 0 && ctx->boxes[i].mc_h > 0.5f && ctx->boxes[i].mc_rgap < 0.0f) { mc = i; break; }
         if (mc >= 0 && !full) {
             const LayoutBox *mb = &ctx->boxes[mc], *chb = &ctx->boxes[mch];
-            double top = mb->y + mb->padding_top + mb->s->border_top + 2.0 * mb->fs_off, H = mb->mc_h, dst = top;
+            double top = mb->y + mb->padding_top + mb->s->border_top + mb->fs_cofs, H = mb->mc_h, dst = top;
             if (chb->mc_seg_h > 0.0f) { top = chb->mc_src; dst = chb->mc_dst; H = chb->mc_seg_h; }
             double W = mb->mc_w, G = mb->mc_gap;
             int k0 = (int)floor((ab->y - top + 0.01) / H), k1 = (int)floor((ab->y + ab->height - top - 0.01) / H);
@@ -48266,8 +49114,10 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
         bool wa_ = !(box->s->width_set || box->s->width_percent > 0.0) || box->s->width_keyword, ha_ = layout_height_auto(box);
         bool aud_ = adom->tag_name[0] == 'a' || adom->tag_name[0] == 'A';
         if (ha_ && box->height - bh_ <= 0.01) {
-            box->height = ((cs_ & 2) ? 0.0 : aud_ ? 54.0 : 150.0) + bh_;
-            if (wa_ && !(has_left && has_right && !aud_)) box->width = ((cs_ & 1) ? 0.0 : 300.0) + bw_;
+            double vw_ = 300.0, vh_ = 150.0;
+            layout_video_natural(adom, &vw_, &vh_);
+            box->height = ((cs_ & 2) ? 0.0 : aud_ ? 54.0 : vh_) + bh_;
+            if (wa_ && !(has_left && has_right && !aud_)) box->width = ((cs_ & 1) ? 0.0 : vw_) + bw_;
             layout_update_content_sizes(box);
             if (wa_) width_auto = false;
         }
@@ -48525,7 +49375,7 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
         const LayoutBox *bb = bc >= 0 ? layout_box(ctx, bc) : NULL;
         if (bb && bb->s->writing_mode != 0) {
             bool up = bb->s->writing_mode == 4 ? bb->s->direction != 1 : bb->s->direction == 1;
-            double top = bb->y + bb->s->border_top + bb->padding_top + 2.0 * bb->fs_off;
+            double top = bb->y + bb->s->border_top + bb->padding_top + bb->fs_cofs;
             static_bottom = up;
             static_y = up ? top + bb->content_height : top;
         }
@@ -49745,7 +50595,18 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
         /* (under a background clipped to its text: its glyphs only that clip, its opacity none of it) */
         bool ct_ = false;
         for (int q = par; q >= 0 && !ct_; q = ctx->tree.nodes[q].parent_idx) ct_ = ctx->boxes[q].s->bg_clip == 3;
-        b->opacity_eff = (par >= 0 ? ctx->boxes[par].opacity_eff : 1.0) *
+        /* (in the top layer, or its backdrop: none of its ancestors' opacity) */
+        bool tl_ = (b->s->position == CSS_POSITION_FIXED || b->s->position == CSS_POSITION_ABSOLUTE) && layout_top_layer_box(ctx, i);
+        /* (a canvas's child drawn with drawElementImage: the global alpha it was drawn with) */
+        double dca_ = 1.0;
+        if (par >= 0 && ctx->boxes[par].s->display != CSS_DISPLAY_NONE) {
+            const HtmlNode *pn_ = css_layout_box_node(ctx, par), *cn_ = css_layout_box_node(ctx, i);
+            if (pn_ && cn_ && pn_->type == HTML_NODE_ELEMENT && pn_->tag_name && !strcasecmp(pn_->tag_name, "canvas") && pn_->store_id && cn_->store_id) {
+                extern float canvas2d_elem_alpha(uint32_t canvas, uint32_t el);
+                dca_ = canvas2d_elem_alpha((uint32_t)pn_->store_id, (uint32_t)cn_->store_id);
+            }
+        }
+        b->opacity_eff = dca_ * (par >= 0 && !tl_ ? ctx->boxes[par].opacity_eff : 1.0) *
                          (b->s->opacity_set && !ct_ ? b->s->opacity : 1.0);
         if (b->s->display == CSS_DISPLAY_NONE) continue;
         double dx = 0.0, dy = 0.0;
@@ -50065,7 +50926,7 @@ static bool cascade_at(LayoutContext *ctx, int dom, const CssCustomProps *props,
     /* (a table's border and cellspacing attributes: after the user agent's rules, before the author's) */
     char hint_w[32] = "", hint_sp[32] = "";
     if (node->tag_name && !strcasecmp(node->tag_name, "table")) {
-        if (!hint_dimension(layout_node_attribute(node, "border"), hint_w, sizeof hint_w) || !strcmp(hint_w, "0px")) hint_w[0] = 0;
+        if (!table_border_px(layout_node_attribute(node, "border"), hint_w, sizeof hint_w) || !strcmp(hint_w, "0px")) hint_w[0] = 0;
         if (!hint_dimension(layout_node_attribute(node, "cellspacing"), hint_sp, sizeof hint_sp)) hint_sp[0] = 0;
     }
     bool hinted = !hint_w[0] && !hint_sp[0];

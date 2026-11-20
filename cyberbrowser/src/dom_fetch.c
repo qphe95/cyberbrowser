@@ -6,6 +6,8 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <time.h>
 
@@ -160,6 +162,19 @@ void dom_fetch_set_wait_hook(void (*fn)(void)) {
 bool dom_fetch_script(const char *url, HttpBuffer *out, char *err, size_t err_len) {
     memset(out, 0, sizeof(*out));
     if (!url) return false;
+    /* (a data: URL's script: its own bytes) */
+    if (!strncasecmp(url, "data:", 5)) {
+        extern uint8_t *data_url_decode(const char *url, size_t *out_len);
+        size_t n = 0;
+        uint8_t *d = data_url_decode(url, &n);
+        if (!d) { if (err && err_len) snprintf(err, err_len, "bad data: URL"); return false; }
+        char *b = (char *)realloc(d, n + 1);
+        if (!b) { free(d); return false; }
+        b[n] = 0;
+        out->data = b;
+        out->size = n;
+        return true;
+    }
     pthread_mutex_lock(&g_mu);
     FetchEntry *e = find_entry(url);
     if (!e) {

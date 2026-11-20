@@ -52,6 +52,7 @@ unsigned long long timer_next_due_ms(void);
 void platform_sleep_ms(unsigned int ms);
 
 #include "page_engine.h"
+#include "browser/canvas2d.h"
 
 extern const char *g_cyber_start_url;
 
@@ -149,6 +150,193 @@ static GCValue cyber_module_normalize(JSContextHandle ctx, const char *module_ba
     return ret;
 }
 
+/* (an import's type attribute, from the attributes as JSON: "" none, else its value in buf) */
+static const char *module_attr_type(const char *json, char *buf, size_t cap)
+{
+    buf[0] = 0;
+    const char *t = json ? strstr(json, "\"type\"") : NULL;
+    if (!t) return buf;
+    t = strchr(t + 6, ':');
+    if (!t) return buf;
+    t++;
+    while (*t == ' ') t++;
+    if (*t != '"') return buf;
+    t++;
+    size_t n = 0;
+    while (t[n] && t[n] != '"' && n + 1 < cap) { buf[n] = t[n]; n++; }
+    buf[n] = 0;
+    return buf;
+}
+
+/* JSModuleCheckSupportedImportAttributes: only "type", and only json, css or text */
+static BOOL cyber_module_check_attrs(JSContextHandle ctx, const char *json)
+{
+    if (!json) return 0;
+    int keys = 0;
+    for (const char *p = json; (p = strchr(p, '"')); ) {
+        const char *e = strchr(p + 1, '"');
+        if (!e) break;
+        const char *after = e + 1;
+        while (*after == ' ') after++;
+        if (*after == ':') { keys++; if (e - p - 1 != 4 || strncmp(p + 1, "type", 4)) { JS_ThrowSyntaxError(ctx, "Unsupported import attribute"); return -1; } }
+        p = e + 1;
+    }
+    char ty[32];
+    module_attr_type(json, ty, sizeof ty);
+    if (!keys || !ty[0]) return 0;
+    if (!strcmp(ty, "json") || !strcmp(ty, "css") || !strcmp(ty, "text")) return 0;
+    JS_ThrowTypeError(ctx, "\"%s\" is not a valid module type.", ty);
+    return -1;
+}
+
+static JSModuleDefHandle cyber_module_loader(JSContextHandle ctx, const char *module_name, void *opaque);
+
+/* (an HTTP token code point) */
+static bool mime_token_char(unsigned char c)
+{
+    return c > 0x20 && c < 0x7f && !strchr("\"(),/:;<=>?@[\\]{}", c);
+}
+/* (a response's MIME type essence, lowercased, from its header block: "" none, "?" one that doesn't parse) */
+static void module_mime(const HttpBuffer *b, char *out, size_t cap)
+{
+    out[0] = 0;
+    const char *h = b->headers;
+    if (!h) return;
+    for (const char *p = h; *p; ) {
+        const char *eol = strstr(p, "\n");
+        size_t L = eol ? (size_t)(eol - p) : strlen(p);
+        if (L > 13 && !strncasecmp(p, "content-type:", 13)) {
+            const char *v = p + 13;
+            while (*v == ' ' || *v == '\t') v++;
+            size_t n = 0;
+            while (v < p + L && *v != ';' && *v != '\r' && n + 1 < cap) { out[n++] = (char)tolower((unsigned char)*v); v++; }
+            while (n && (out[n - 1] == ' ' || out[n - 1] == '\t')) n--;
+            out[n] = 0;
+            /* (type "/" subtype, both tokens) */
+            char *sl = strchr(out, '/');
+            bool ok = sl && sl > out && sl[1];
+            for (char *c = out; ok && *c; c++) if (c != sl && !mime_token_char((unsigned char)*c)) ok = false;
+            if (!ok && cap > 1) { out[0] = '?'; out[1] = 0; }
+        }
+        if (!eol) break;
+        p = eol + 1;
+    }
+}
+/* (JSON MIME type: application/json, text/json, or a subtype ending +json) */
+static bool module_mime_json(const char *m)
+{
+    if (!strcmp(m, "application/json") || !strcmp(m, "text/json")) return true;
+    size_t n = strlen(m);
+    const char *sl = strchr(m, '/');
+    return sl && sl > m && n > 5 && !strcmp(m + n - 5, "+json") && (size_t)(m + n - 5 - sl) > 1;
+}
+
+/* (bytes as a JS string literal: quoted, escaped) */
+static char *module_js_string(const char *s, size_t n)
+{
+    char *o = (char *)malloc(n * 6 + 3);
+    if (!o) return NULL;
+    size_t k = 0;
+    o[k++] = '"';
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '"' || c == '\\') { o[k++] = '\\'; o[k++] = (char)c; }
+        else if (c < 0x20) { k += (size_t)sprintf(o + k, "\\u%04x", c); }
+        else if (c == 0xE2 && i + 2 < n && (unsigned char)s[i + 1] == 0x80 && ((unsigned char)s[i + 2] == 0xA8 || (unsigned char)s[i + 2] == 0xA9)) {
+            k += (size_t)sprintf(o + k, "\\u%04x", (unsigned char)s[i + 2] == 0xA8 ? 0x2028 : 0x2029); i += 2;
+        }
+        else o[k++] = (char)c;
+    }
+    o[k++] = '"';
+    o[k] = 0;
+    return o;
+}
+
+/* (a blob: URL's bytes for a module, while it is registered: as a fetch's body, no headers) */
+static bool module_blob_fetch(JSContextHandle ctx, const char *url, HttpBuffer *buffer)
+{
+    if (strncmp(url, "blob:", 5)) return false;
+    GCValue reg = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__blobRegistry");
+    if (!JS_IsObject(reg)) return false;
+    GCValue have = JS_GetPropertyStr(ctx, reg, url);
+    if (JS_IsUndefined(have) || JS_IsNull(have)) return false;
+    extern bool image_cache_blob_bytes(const char *url, uint8_t **out, size_t *n);
+    uint8_t *b = NULL;
+    size_t n = 0;
+    if (!image_cache_blob_bytes(url, &b, &n) || !b) return false;
+    memset(buffer, 0, sizeof *buffer);
+    buffer->data = (char *)realloc(b, n + 1);
+    if (!buffer->data) { free(b); return false; }
+    buffer->data[n] = 0;
+    buffer->size = n;
+    return true;
+}
+
+/* JSModuleLoaderFunc2: a JSON, CSS or text module (import ... with { type }) made a module whose
+ * default export is the parsed value, a constructed style sheet or the text; the rest as before. */
+static JSModuleDefHandle cyber_module_loader2(JSContextHandle ctx, const char *module_name, const char *attrs, void *opaque)
+{
+    char ty[32];
+    module_attr_type(attrs, ty, sizeof ty);
+    if (!ty[0]) return cyber_module_loader(ctx, module_name, opaque);
+    /* (its module map entry's name, URL \x01 type (quickjs.c): the URL to fetch is before it) */
+    static __thread char urlb[8192];
+    const char *url = module_name, *sep = strchr(module_name, '\x01');
+    if (sep && (size_t)(sep - module_name) < sizeof urlb) { memcpy(urlb, module_name, (size_t)(sep - module_name)); urlb[sep - module_name] = 0; url = urlb; }
+    HttpBuffer buffer = {0};
+    char err[256] = {0};
+    bool blob_ = !strncmp(url, "blob:", 5);
+    if (blob_ && !module_blob_fetch(ctx, url, &buffer)) {
+        JS_ThrowTypeError(ctx, "Failed to fetch dynamically imported module: %s", url);
+        return (JSModuleDefHandle)(GC_HANDLE_NULL);
+    }
+    if (!blob_ && !url_is_network_url(url)) {
+        JS_ThrowReferenceError(ctx, "module '%s' is not a network URL", url);
+        return (JSModuleDefHandle)(GC_HANDLE_NULL);
+    }
+    /* (the Accept header the module type asks for, HTML "fetch a single module script") */
+    const char *acc = !strcmp(ty, "json") ? "Accept: application/json,*/*;q=0.5" : !strcmp(ty, "css") ? "Accept: text/css,*/*;q=0.1" :
+                      "Accept: text/plain,*/*;q=0.5";
+    extern void http_next_accept(const char *a);
+    if (!blob_) http_next_accept(acc);
+    if (!blob_ && (!http_get_to_memory(url, &buffer, err, sizeof(err)) || !buffer.data)) {
+        if (buffer.data) free(buffer.data);
+        JS_ThrowTypeError(ctx, "could not fetch module '%s'", url);
+        return (JSModuleDefHandle)(GC_HANDLE_NULL);
+    }
+    {
+        char mime[128];
+        module_mime(&buffer, mime, sizeof mime);
+        bool bad = mime[0] && ((!strcmp(ty, "json") && !module_mime_json(mime)) || (!strcmp(ty, "css") && strcmp(mime, "text/css")));
+        if (bad) {
+            free(buffer.data);
+            if (buffer.headers) free(buffer.headers);
+            JS_ThrowTypeError(ctx, "Failed to load module script: the server responded with a MIME type of \"%s\".", mime);
+            return (JSModuleDefHandle)(GC_HANDLE_NULL);
+        }
+        if (buffer.headers) { free(buffer.headers); buffer.headers = NULL; }
+    }
+    const char *body = buffer.data;
+    size_t len = buffer.size;
+    if (len >= 3 && (unsigned char)body[0] == 0xEF && (unsigned char)body[1] == 0xBB && (unsigned char)body[2] == 0xBF) { body += 3; len -= 3; }   /* (UTF-8 decoding drops a BOM) */
+    char *lit = module_js_string(body, len);
+    free(buffer.data);
+    if (!lit) { JS_ThrowOutOfMemory(ctx); return (JSModuleDefHandle)(GC_HANDLE_NULL); }
+    size_t cap = strlen(lit) + 128;
+    char *src = (char *)malloc(cap);
+    if (!src) { free(lit); JS_ThrowOutOfMemory(ctx); return (JSModuleDefHandle)(GC_HANDLE_NULL); }
+    if (!strcmp(ty, "json")) snprintf(src, cap, "export default JSON.parse(%s);", lit);
+    else if (!strcmp(ty, "css")) snprintf(src, cap, "const s = new CSSStyleSheet(); s.replaceSync(%s); export default s;", lit);
+    else snprintf(src, cap, "export default %s;", lit);
+    free(lit);
+    GCValue mv = JS_Eval(ctx, src, strlen(src), module_name, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+    free(src);
+    if (JS_IsException(mv)) return (JSModuleDefHandle)(GC_HANDLE_NULL);
+    JSModuleDefHandle m = JS_VALUE_GET_MODULE_HANDLE(mv);
+    if (SAFE_VALID(m)) js_quickjs_set_module_url(ctx, m, url);
+    return m;
+}
+
 /* JSModuleLoaderFunc: fetch the module source over HTTP and compile it as an
  * ES module.  Returns the module definition handle (or null on failure). */
 static JSModuleDefHandle cyber_module_loader(JSContextHandle ctx, const char *module_name,
@@ -157,24 +345,43 @@ static JSModuleDefHandle cyber_module_loader(JSContextHandle ctx, const char *mo
     (void)opaque;
     const char *url = module_name;
 
+    HttpBuffer buffer = {0};
+    char err[256] = {0};
+    /* (a blob: URL, while registered: its bytes) */
+    bool blob_ = !strncmp(url, "blob:", 5);
+    if (blob_ && !module_blob_fetch(ctx, url, &buffer)) {
+        JS_ThrowTypeError(ctx, "Failed to fetch dynamically imported module: %s", url);
+        return (JSModuleDefHandle)(GC_HANDLE_NULL);
+    }
     /* Only http(s) URLs can be fetched; bare names can't be loaded. */
-    if (!url_is_network_url(url)) {
+    if (!blob_ && !url_is_network_url(url)) {
         JS_ThrowReferenceError(ctx, "module '%s' is not a network URL", url);
         return (JSModuleDefHandle)(GC_HANDLE_NULL);
     }
 
-    HttpBuffer buffer = {0};
-    char err[256] = {0};
-    bool ok = http_get_to_memory(url, &buffer, err, sizeof(err));
+    bool ok = blob_ || http_get_to_memory(url, &buffer, err, sizeof(err));
     if (!ok || !buffer.data || buffer.size == 0) {
         platform_log(LOG_LEVEL_WARN, "module_loader", "Failed to fetch module %s: %s",
                      url, err[0] ? err : "unknown");
         if (buffer.data) free(buffer.data);
-        JS_ThrowReferenceError(ctx, "could not fetch module '%s'", url);
+        /* (a fetch that failed: a TypeError, HTML 8.1.4.2's "fetch a single module script" null) */
+        JS_ThrowTypeError(ctx, "could not fetch module '%s'", url);
         return (JSModuleDefHandle)(GC_HANDLE_NULL);
     }
 
     platform_log(LOG_LEVEL_INFO, "module_loader", "Loaded module %s (%zu bytes)", url, buffer.size);
+    /* (a module script: a JavaScript MIME type, strictly) */
+    {
+        extern int html_script_type_kind(const char *type, const char *lang);
+        char mime[128];
+        module_mime(&buffer, mime, sizeof mime);
+        if (buffer.headers) { free(buffer.headers); buffer.headers = NULL; }
+        if (mime[0] && html_script_type_kind(mime, NULL) != 1) {
+            free(buffer.data);
+            JS_ThrowTypeError(ctx, "Failed to load module script: the server responded with a non-JavaScript MIME type of \"%s\".", mime);
+            return (JSModuleDefHandle)(GC_HANDLE_NULL);
+        }
+    }
 
     if (CYBER_ENV(CYBER_T_DUMP_SCRIPTS)) {
         static int module_dump_idx = 0;
@@ -201,7 +408,8 @@ static JSModuleDefHandle cyber_module_loader(JSContextHandle ctx, const char *mo
         platform_log(LOG_LEVEL_WARN, "module_loader", "Module eval error for %s: %s",
                      url, es ? es : "?");
         if (es) JS_FreeCString(ctx, es);
-        JS_ThrowReferenceError(ctx, "could not compile module '%s'", url);
+        /* (its parse error, as it is: the module script's error to rethrow) */
+        JS_Throw(ctx, exc);
         return (JSModuleDefHandle)(GC_HANDLE_NULL);
     }
 
@@ -314,6 +522,7 @@ static void engine_snap_restored(JSRuntimeHandle rt, JSContextHandle ctx) {
     g_dom_layout_requests++;
     display_list_highlights_set(NULL, NULL, 0, NULL, 0);
     html_mirror_forget();   /* (its root's id may be the last document's) */
+    { extern NodeId g_dom_focused; g_dom_focused = DOM_NULL; }   /* (the last page's focused node: an id that aliases) */
     anim_api_init();
     g_inits++;
 }
@@ -340,7 +549,7 @@ static bool init_browser_context(void) {
 
     /* Register the ES module loader so dynamic import() can fetch YouTube's
      * lazily-loaded component chunks over HTTP. */
-    JS_SetModuleLoaderFunc(g_rt, cyber_module_normalize, cyber_module_loader, NULL);
+    JS_SetModuleLoaderFunc2(g_rt, cyber_module_normalize, cyber_module_loader2, cyber_module_check_attrs, NULL);
 
     g_ctx = JS_NewContext(g_rt);
     if (!SAFE_VALID(g_ctx)) {
@@ -413,12 +622,12 @@ static void finish_browser_context(void) {
     gc_core_stop_thread();
 }
 
-/* Reflect url in window.location, document.domain and document.baseURI.
+/* Reflect url in window.location and document.baseURI (document.domain is its getter's, from the location).
  * (The URL goes in as a string value, never as script text.) */
 static void reflect_location(const char *url) {
     static const char js[] =
         "if (window.location) { window.__cyberLocationInit = true; window.location.href = globalThis.__cyber_doc_url; window.__cyberLocationInit = false; "
-        "if (document) { document.domain = window.location.hostname; "
+        "if (document) { "
         "document.baseURI = window.location.href; } } "
         "delete globalThis.__cyber_doc_url;";
     JS_SetPropertyStr(g_ctx, JS_GetGlobalObject(g_ctx), "__cyber_doc_url", JS_NewString(g_ctx, url));
@@ -472,6 +681,8 @@ static void page_observe(void *user, const char *data, size_t len) {
         if (o->page && (!strcmp(type, "text/xml") || !strcmp(type, "application/xml") ||
                         (tl > 4 && !strcmp(type + tl - 4, "+xml"))))
             html_page_stream_set_xml(o->page, type);
+        /* (its bytes: an encoding to sniff, the transport's charset first) */
+        else if (o->page) html_page_stream_set_bytes(o->page, http_last_content_charset(), NULL);
     }
     /* The parser runs inside the navigation's request, on its thread: what
      * its scripts fetch is theirs, not the navigation's (whose mode would
@@ -518,6 +729,11 @@ static char *fetch_start_page(const char *url, size_t *out_size, HtmlPageStream 
         : http_get_to_memory_with_headers(url, headers, nheaders, &buffer, error, sizeof(error));
     http_request_context_set(was.mode, was.initiator);
     if (ok && !obs.url_set) set_document_url(http_last_url());     /* (nothing observed: no script ran) */
+    /* (its Cross-Origin-Opener-Policy, for the popups it opens: frame_api.c) */
+    {
+        extern void frame_api_set_page_coop(const char *headers, size_t n);
+        frame_api_set_page_coop(ok ? buffer.headers : NULL, ok ? buffer.headers_size : 0);
+    }
     html_preload_scan_end(obs.scan);
     if (!ok || !buffer.data || buffer.size == 0) {
         printf("FATAL: Failed to fetch start page: %s\n", error);
@@ -754,7 +970,8 @@ uint64_t gc_os_now_ns(void);
  * between; at most 10 s. */
 static void dispatch_page_lifecycle_events(JSContextHandle ctx) {
     const char *dcl_js =
-        "document.readyState = 'interactive';"
+        "if (window.__cyberDetailsParsed) __cyberDetailsParsed(document);"
+        "(window.__cyberDocSet ? __cyberDocSet(document, 'readyState', 'interactive') : (document.readyState = 'interactive'));"
         "__cyberDispatchTrusted(document, new Event('DOMContentLoaded', { bubbles: true }));";
     JS_Eval(ctx, dcl_js, strlen(dcl_js), "<lifecycle>", JS_EVAL_TYPE_GLOBAL);
     pump_due_work(ctx);
@@ -765,13 +982,21 @@ static void dispatch_page_lifecycle_events(JSContextHandle ctx) {
         pump_due_work(ctx);
     }
     if (g_loop_images) image_cache_process_pending(g_loop_images);
+    /* (media fetching for its first frame: the load event after it) */
+    {
+        extern bool media_delays_load(void);
+        while (media_delays_load() && gc_os_now_ns() / 1000000ull < until) {
+            if (g_loop_images) image_cache_wait_pending_ms(g_loop_images, 5);
+            pump_due_work(ctx);
+        }
+    }
     {
         extern void dom_fire_parsed_preloads(JSContextHandle ctx);
         dom_fire_parsed_preloads(ctx);
         pump_due_work(ctx);
     }
     const char *load_js =
-        "document.readyState = 'complete';"
+        "(window.__cyberDocSet ? __cyberDocSet(document, 'readyState', 'complete') : (document.readyState = 'complete'));"
         "if (window.__cyberPageReveal) __cyberPageReveal();"
         "var loadEvt = new Event('load');"
         "window.dispatchEvent(loadEvt);"
@@ -1694,6 +1919,7 @@ bool page_engine_reset(void) {
     uint64_t t2 = t1;
     dom_store_reset();
     display_list_canvas_reset();
+    canvas2d_reset_all();
     font_feature_values_reset();
     /* (the next document's store ids are the last one's again) */
     css_layout_forget_document();

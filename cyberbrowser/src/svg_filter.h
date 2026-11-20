@@ -24,6 +24,7 @@ typedef struct SvgFilterEnv {
     bool user_zero;      /* user space from the surface's corner (SVG elements), not the box's */
     /* another document's, by its URL (the part before '#'): NULL not there (yet) */
     HtmlDocument *(*ext_doc)(void *ud, const char *url, const char *mods);   /* (mods: the url()'s modifiers after it, "" none) */
+    float origin[2];     /* (user_zero: user space's origin in the surface, a margin round the viewport) */
 } SvgFilterEnv;
 
 /* (true while a filter of another document runs: its nodes are not the page's) */
