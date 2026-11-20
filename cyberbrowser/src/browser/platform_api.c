@@ -3,7 +3,8 @@
  * events (browser/dom_events.js); the form controls' IDL attributes
  * (browser/form_controls.js); <canvas> and its 2D context
  * (browser/canvas_api.js), then its WebGL and WebGPU contexts
- * (browser/webgpu_api.c); XPath (browser/xpath.js). */
+ * (browser/webgpu_api.c); XPath (browser/xpath.js); execCommand
+ * (browser/editing.js). */
 #include <string.h>
 #include <quickjs.h>
 #include <quickjs_gc_unified.h>
@@ -53,6 +54,10 @@ static const char *xpath_js =
 
 static const char *xslt_js =
 #include "xslt_js.inc"
+;
+
+static const char *editing_js =
+#include "editing_js.inc"
 ;
 
 static void platform_api_report(JSContextHandle ctx, const char *name)
@@ -118,6 +123,7 @@ void platform_api_install(JSContextHandle ctx, GCValue global, GCValue window)
     event_path_install(ctx, global);
     platform_api_run(ctx, dom_events_js, "<dom_events>", global, window);
     platform_api_run(ctx, form_controls_js, "<form_controls>", global, window);
+    platform_api_run(ctx, editing_js, "<editing>", global, window);
     platform_api_run(ctx, cssom_js, "<cssom>", global, window);
     platform_api_run(ctx, geometry_js, "<geometry>", global, window);
     platform_api_run(ctx, typed_om_js, "<typed_om>", global, window);

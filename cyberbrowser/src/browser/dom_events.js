@@ -2700,6 +2700,8 @@
     }
     function keyDefault(key, el) {
         var d = global.document, h = global.innerHeight, dx = 0, dy = 0;
+        /* (in editable content: the edit the key makes there, editing.js) */
+        if (!held.Control && !held.Meta && typeof global.__cyberEditKey === 'function' && global.__cyberEditKey(key, !!held.Shift, el)) return;
         /* (in a focusgroup: its navigation, not scrolling) */
         if (/^(Arrow(Up|Down|Left|Right)|Home|End)$/.test(key) && focusgroupMove(key, el)) return;
         switch (key) {
