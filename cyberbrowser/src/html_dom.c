@@ -1816,20 +1816,20 @@ static void ser_element_attrs(JSContextHandle ctx, SerNode n, const char *tag_lo
     {
         SerializeBuffer style_buf;
         serialize_buf_init(&style_buf);
+        const char *animated = n.id ? anim_api_web_style(n.id) : NULL;
+        GCValue style_obj_ = JS_UNDEFINED;
+        if (!n.id && JS_IsObject(n.obj)) style_obj_ = JS_GetPropertyStr(ctx, n.obj, "__style");
         if (attr_style && attr_style[0]) {
             serialize_buf_append(&style_buf, attr_style);
+            /* (the attribute as written, [style="..."] matching it: a separator only before what follows it) */
             size_t sl = strlen(attr_style);
-            if (sl > 0 && attr_style[sl - 1] != ';')
+            if (sl > 0 && attr_style[sl - 1] != ';' && ((animated && animated[0]) || JS_IsObject(style_obj_)))
                 serialize_buf_append(&style_buf, ";");
         }
-        const char *animated = n.id ? anim_api_web_style(n.id) : NULL;
         if (animated) serialize_buf_append(&style_buf, animated);
         /* A store element's style object writes its declarations back to
          * the attribute (css_style_decl.c): the attribute is the style. */
-        if (!n.id && JS_IsObject(n.obj)) {
-            GCValue style_obj = JS_GetPropertyStr(ctx, n.obj, "__style");
-            if (JS_IsObject(style_obj)) append_style_object(ctx, style_obj, &style_buf);
-        }
+        if (JS_IsObject(style_obj_)) append_style_object(ctx, style_obj_, &style_buf);
         if (style_buf.data && style_buf.len > 0)
             sink(ud, "style", style_buf.data);
         else if (attr_style)
@@ -2624,7 +2624,9 @@ static void mir_store_attrs(NodeId s, MirStoreAttrs *a) {
         const DomAttr *at = dom_attr_at(s, style_at);
         const char *v = at->value.s ? at->value.s : "";
         uint32_t vl = at->value.s ? at->value.len : 0;
-        if (vl > 0 && v[vl - 1] != ';') {
+        /* (the attribute as written, [style="..."] matching it; a separator only before Web Animations' style after it) */
+        const char *anim_ = anim_api_web_style(s);
+        if (vl > 0 && v[vl - 1] != ';' && anim_ && anim_[0]) {
             a->style = (char *)malloc(vl + 2);
             memcpy(a->style, v, vl);
             a->style[vl] = ';';
@@ -3009,10 +3011,17 @@ static int mir_build_element(NodeId s, int parent, bool in_svg) {
     return idx;
 }
 
+/* (a void element script gave children: a col's or an hr's render, as any box's; the rest, replaced or not shown, none) */
+static bool mir_void_skips(NodeId s, const char *tag_lower) {
+    if (!html_is_self_closing_tag(tag_lower)) return false;
+    if ((!strcmp(tag_lower, "col") || !strcmp(tag_lower, "hr")) && dom_first_child(s) != DOM_NULL) return false;
+    return true;
+}
+
 static int mir_build_inner(NodeId s, int idx, const char *tag_lower, bool in_svg) {
     HtmlNode *hn;
     mir_read_attrs(s, idx, tag_lower, in_svg);
-    if (html_is_self_closing_tag(tag_lower)) return idx;
+    if (mir_void_skips(s, tag_lower)) return idx;
     if (html_is_raw_content_tag(tag_lower)) {
         hn = po_array_payload(&g_mir.doc->array, idx);
         if (strcmp(tag_lower, "script") == 0) {
@@ -3159,7 +3168,7 @@ static void mir_update_element(NodeId s, int m, bool in_svg) {
     if ((f & DOMF_DIRTY_ATTR) || (g_mir.full && g_dom.wrapper[dom_slot(s)])) {
         if (mir_read_attrs(s, m, tag_lower, in_svg)) g_mir.changed = true;
     }
-    if (html_is_self_closing_tag(tag_lower)) return;
+    if (mir_void_skips(s, tag_lower)) return;
     if (html_is_raw_content_tag(tag_lower)) {
         if (strcmp(tag_lower, "script") == 0) return;
         if (!(f & (DOMF_DIRTY_CHILDREN | DOMF_DIRTY_DESCENDANT)) && !g_mir.full && !((f & DOMF_DIRTY_ATTR) && !strcmp(tag_lower, "textarea"))) return;

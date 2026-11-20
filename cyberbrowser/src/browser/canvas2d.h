@@ -16,6 +16,7 @@ bool canvas2d_paint_key(uint32_t id, char *key, size_t cap);
 bool canvas2d_elem_draw(uint32_t canvas, uint32_t el, float out[4], int *bw, int *bh);
 bool canvas2d_elem_src(uint32_t canvas, uint32_t el, float out[4]);
 bool canvas2d_elem_fx(uint32_t canvas, uint32_t el, unsigned char *n, unsigned char t[8], float v[8], float ds[7]);
+int canvas2d_elem_op(uint32_t canvas, uint32_t el);
 /* (every bitmap dropped: a new document) */
 void canvas2d_reset_all(void);
 

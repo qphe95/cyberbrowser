@@ -206,7 +206,14 @@
                 if (!el.isConnected) return 'unsuccessful_registration';
                 var d = '';
                 try { d = global.getComputedStyle(el).display; } catch (e) { }
-                return /^(block|inline-block|flex|inline-flex|flow-root)$/.test(d) || d === 'block flow' || d === 'inline flow-root' ? '' : 'style_invalid';
+                if (!(/^(block|inline-block|flex|inline-flex|flow-root)$/.test(d) || d === 'block flow' || d === 'inline flow-root')) return 'style_invalid';
+                /* (an ancestor masking it: not clearly shown) */
+                for (var a = el.parentElement; a; a = a.parentElement) {
+                    var mi = 'none';
+                    try { var ac = global.getComputedStyle(a); mi = ac.maskImage || ac.webkitMaskImage || 'none'; } catch (e) { }
+                    if (mi && mi !== 'none') return 'style_invalid';
+                }
+                return '';
             };
             var named = function (f, n) { Object.defineProperty(f, 'name', { value: n }); return f; };
             (attrs || []).forEach(function (a) {
@@ -835,6 +842,11 @@
             if (!ow) throw cloneError(kind);
             return { i: id, ocv: ow };
         }
+        case 'ElementImage': {
+            var ew = typeof global.__cyberElementImageWire === 'function' ? global.__cyberElementImageWire(v) : null;
+            if (!ew) throw cloneError(kind);
+            return { i: id, ei: ew };
+        }
         case 'ImageBitmap': {
             /* (a bitmap: its id in canvas2d.c, shared by the realms of this thread) */
             var bw = typeof global.__cyberBitmapWire === 'function' ? global.__cyberBitmapWire(v) : null;
@@ -912,6 +924,8 @@
             v = made[w.i] = global.__cyberOffscreenMake(w.ocv);
         } else if (w.ib !== undefined) {
             v = made[w.i] = global.__cyberBitmapMake(w.ib);
+        } else if (w.ei !== undefined && typeof global.__cyberElementImageMake === 'function') {
+            v = made[w.i] = global.__cyberElementImageMake(w.ei);
         } else if (w.bl !== undefined) {
             var bytes = new Uint8Array(w.bl);
             v = made[w.i] = w.nm !== undefined ? new global.File([bytes], w.nm, { type: w.t, lastModified: w.lm }) : new Blob([bytes], { type: w.t });
@@ -4195,6 +4209,11 @@
             for (var k = 0; k < nodes.length; k++) {
                 var ns = starts[k], ne = ns + nodes[k].data.length;
                 if (ne <= a || ns >= b) continue;
+                /* (in a canvas laid out for drawElementImage: not painted, what it matched no one's to see in the drawing) */
+                var inCv = false;
+                for (var an = nodes[k].parentNode, g = 0; an && an.nodeType === 1 && g < 256 && !inCv; an = an.parentNode, g++)
+                    inCv = an.localName === 'canvas' && (an.hasAttribute('layoutsubtree') || an.hasAttribute('content'));
+                if (inCv) continue;
                 flat.push(ti, nodes[k], Math.max(a, ns) - ns, Math.min(b, ne) - ns);
             }
         }
@@ -4250,12 +4269,16 @@
             prios.push(0x3fffffff);
             var f0 = flat.length;
             try { hlRange(sr, si, flat); } catch (e) {}
-            /* (text of user-select: none is not selected) */
+            /* (text of user-select: none is not selected; nor inert text, outside the topmost modal dialog or under inert) */
+            var mdl = null;
+            try { var mds = global.document.querySelectorAll(':modal'); mdl = mds.length ? mds[mds.length - 1] : null; } catch (e) { mdl = null; }
             for (var fq = flat.length - 4; fq >= f0; fq -= 4) {
                 var tn = flat[fq + 1], pe = tn && tn.parentElement;
                 var us = '';
                 try { us = pe ? global.getComputedStyle(pe).getPropertyValue('user-select') : ''; } catch (e) { us = ''; }
-                if (us === 'none') flat.splice(fq, 4);
+                var inert_ = false;
+                try { inert_ = !!(pe && ((mdl && !mdl.contains(tn)) || pe.closest('[inert]'))); } catch (e) { inert_ = false; }
+                if (us === 'none' || inert_) flat.splice(fq, 4);
             }
         } else if (sr) {
             /* (collapsed: where the caret is, at a text node's offset) */
@@ -4427,6 +4450,58 @@
             Object.defineProperty(P, name, { configurable: true, enumerable: true, writable: true, value: fn });
         }
         function invalidState(msg) { return new global.DOMException(msg, 'InvalidStateError'); }
+        /* (fullscreen: the element in the top layer over the whole viewport, as a modal is shown, its style the UA sheet's
+         * [data-cyber-fs] rules; document.fullscreenElement, fullscreenchange) */
+        (function () {
+            var EP = global.Element && global.Element.prototype, DocP = global.Document && global.Document.prototype;
+            if (!EP || !DocP) return;
+            var FS = null;
+            var fsOwn = function (d) { try { var od = Object.getOwnPropertyDescriptor(d, 'fullscreenElement'); if (od && od.configurable) delete d.fullscreenElement; } catch (e) { } };
+            Object.defineProperty(DocP, 'fullscreenElement', { configurable: true, enumerable: true, get: function () { return FS && FS.ownerDocument === this && FS.isConnected ? FS : null; } });
+            Object.defineProperty(DocP, 'fullscreenEnabled', { configurable: true, enumerable: true, get: function () { return true; } });
+            var fire = function (el) {
+                var d = el.ownerDocument;
+                global.setTimeout(function () {
+                    try { (el.isConnected ? el : d).dispatchEvent(new global.Event('fullscreenchange', { bubbles: true, composed: true })); } catch (e) { }
+                }, 0);
+            };
+            var leave = function () {
+                var el = FS;
+                if (!el) return null;
+                FS = null;
+                el.removeAttribute('data-cyber-fs');
+                if (el.localName !== 'dialog' || !el.hasAttribute('open')) elState(el, ST_MODAL, false);
+                return el;
+            };
+            method(EP, 'requestFullscreen', function requestFullscreen() {
+                var el = this;
+                return new global.Promise(function (res, rej) {
+                    if (!el.isConnected || !el.ownerDocument || !el.ownerDocument.defaultView) { rej(new TypeError('The element is not connected.')); return; }
+                    /* (a showing popover, a modal dialog: not made fullscreen) */
+                    if (elState(el, ST_POPOVER) || (el.localName === 'dialog' && elState(el, ST_MODAL))) { rej(new TypeError('The element is already in the top layer.')); return; }
+                    fsOwn(el.ownerDocument);
+                    /* (the popovers shown: hidden, up to its topmost popover ancestor, as for a modal dialog) */
+                    if (typeof global.__cyberHidePopoversFor === 'function') { try { global.__cyberHidePopoversFor(el); } catch (e) { } }
+                    if (FS && FS !== el) leave();
+                    FS = el;
+                    el.setAttribute('data-cyber-fs', '');
+                    elState(el, ST_MODAL, true);
+                    fire(el);
+                    global.setTimeout(res, 0);
+                });
+            });
+            if (!EP.webkitRequestFullscreen) method(EP, 'webkitRequestFullscreen', function webkitRequestFullscreen() { return this.requestFullscreen(); });
+            method(DocP, 'exitFullscreen', function exitFullscreen() {
+                var d = this;
+                return new global.Promise(function (res, rej) {
+                    fsOwn(d);
+                    var el = leave();
+                    if (!el) { rej(new TypeError('Not in fullscreen.')); return; }
+                    fire(el);
+                    global.setTimeout(res, 0);
+                });
+            });
+        })();
         function toggleEvent(el, type, oldState, newState, cancelable, source) {
             var C = global.ToggleEvent || global.Event;
             /* (a dialog's: the command button that opened or closed it, its source) */
@@ -4516,6 +4591,8 @@
             };
             var PREV = new WeakMap();
             var dialogFocus = function (dlg) {
+                /* (the dialog focusing steps: the document's autofocus processed flag set) */
+                try { global.__cyberAutofocusDone = true; } catch (e) { }
                 var doc = dlg.ownerDocument, prev = doc && doc.activeElement;
                 PREV.set(dlg, prev && prev !== doc.body ? prev : null);
                 /* (an autofocus dialog: itself) */
@@ -4774,6 +4851,10 @@
                         var cmd = String(n.getAttribute('command') || '').toLowerCase();
                         if (cmd === 'toggle-popover' || cmd === 'show-popover' || cmd === 'hide-popover') t = n.commandForElement || null;
                     } catch (e) { t = null; }
+                }
+                /* (an interest invoker: the popover it shows interest in, its ::interest-button too) */
+                if (!t && n.hasAttribute('interestfor')) {
+                    try { var rt_ = n.getRootNode && n.getRootNode(); t = rt_ && rt_.getElementById ? rt_.getElementById(n.getAttribute('interestfor')) : null; } catch (e) { t = null; }
                 }
                 if (t && (popoverKind(t) === 'auto' || popoverKind(t) === 'hint') && showing(t)) return t;
             }
@@ -5667,6 +5748,21 @@
     /* (a menu tree, its menulists and menubars nested through submenus: one with anything its content model has not
      * (text outside an item or legend, an element other than its own kinds, a focusable container) is lists, all of it) */
     var MENU_ITEMS = { menuitem: 1, menuitemradio: 1, menuitemcheckbox: 1, legend: 1 };
+    /* (a submenu's trigger, its first menuitem, activated: its menulist shown, anchored to it, or hidden) */
+    onWin('click', function (e) {
+        var mi = e.target;
+        while (mi && mi.nodeType === 1 && mi.localName !== 'menuitem') mi = mi.parentElement;
+        if (!mi || mi.nodeType !== 1 || mi.namespaceURI !== 'http://www.w3.org/1999/xhtml' || e.defaultPrevented) return;
+        var sm = mi.parentElement;
+        if (!sm || sm.localName !== 'submenu' || sm.firstElementChild !== mi) return;
+        var ml = null;
+        for (var c = mi.nextElementSibling; c && !ml; c = c.nextElementSibling) if (c.localName === 'menulist') ml = c;
+        if (!ml || mi.hasAttribute('disabled')) return;
+        try {
+            if (ml.matches(':popover-open')) ml.hidePopover();
+            else ml.showPopover({ source: mi });
+        } catch (x) { }
+    });
     var MENU_PARTS = { fieldset: 1, div: 1, submenu: 1, menulist: 1, menubar: 1, hr: 1, template: 1, script: 1, style: 1 };
     function menuTreeBad(el) {
         var root = el;
@@ -8273,7 +8369,7 @@
     /* ---- Window's small members (HTML 7.2.2): stop(), status, external, origin ---- */
     (function () {
         if (!global.document) return;
-        if (!('stop' in global)) Object.defineProperty(global, 'stop', { configurable: true, enumerable: true, writable: true, value: function stop() { } });
+        if (!('stop' in global)) Object.defineProperty(global, 'stop', { configurable: true, enumerable: true, writable: true, value: function stop() { if (typeof global.__cyberStopFrames === 'function') global.__cyberStopFrames(); } });
         if (!('status' in global)) {
             var st = '';
             Object.defineProperty(global, 'status', { configurable: true, enumerable: true, get: function status() { return st; }, set: function status(v) { st = String(v); } });
@@ -9697,6 +9793,32 @@
         try { wrapArg(global.History && global.History.prototype, 'pushState', 2); } catch (e) { }
         try { wrapArg(global.History && global.History.prototype, 'replaceState', 2); } catch (e) { }
     })();
+    /* ---- autofocus (HTML 6.6.7): at each rendering update while the document loads, the first [autofocus] focusable
+     * element focused, unless something has focus already; done once one is focused (the autofocus processed flag) ---- */
+    (function () {
+        var processed = false, loaded = false, after = 0;
+        function flush() {
+            if (processed || global.__cyberAutofocusDone) return;
+            /* (the top document's and its children's, not deeper frames') */
+            try { if (global !== global.top && global.parent !== global.top) return; } catch (e) { return; }
+            var d = global.document;
+            if (!d || typeof global.requestAnimationFrame !== 'function') return;
+            var ae = d.activeElement;
+            if (ae && ae !== d.body && ae !== d.documentElement) { processed = true; return; }
+            var c = d.querySelector('[autofocus]');
+            var fa = global.__cyberFocusableArea;
+            if (c && (typeof fa !== 'function' || fa(c))) {
+                processed = true;
+                try { c.focus(); } catch (e) { }
+                return;
+            }
+            /* (none yet: tried again at the next update, until a little past the load event) */
+            if (loaded && ++after > 2) return;
+            global.requestAnimationFrame(flush);
+        }
+        onWin('DOMContentLoaded', function () { if (typeof global.requestAnimationFrame === 'function') global.requestAnimationFrame(flush); });
+        onWin('load', function () { loaded = true; });
+    })();
     /* ---- focusGroupStart (focusgroup, tentative): the focusgroupstart attribute's presence, on HTML, SVG and MathML elements ---- */
     ['HTMLElement', 'SVGElement', 'MathMLElement'].forEach(function (n) {
         var P = global[n] && global[n].prototype;
@@ -9787,7 +9909,7 @@
             inv.removeAttribute('data-cyber-interest-source');
             var still = false;
             for (var i = 0; i < current.length; i++) if (current[i][1] === c[1]) still = true;
-            if (!still) c[1].removeAttribute('data-cyber-interest-target');
+            if (!still) { c[1].removeAttribute('data-cyber-interest-target'); c[1].removeAttribute('data-cyber-interest-pseudo'); }
             if (c[1].hasAttribute('popover') && c[1].matches(':popover-open')) { try { c[1].hidePopover(); } catch (e) { } }
         }
         function within(n, c) {
@@ -9824,6 +9946,22 @@
                 if (!within(e.target, c) || (e.relatedTarget && within(e.relatedTarget, c))) return;
                 setTimer(c[0], 'lose', delayOf(c[0], 'end'), function () { lose(c[0]); });
             });
+        }, true);
+        /* (its ::interest-button activated, a click or a tap on it: interest shown now) */
+        onWin('click', function (e) {
+            if (typeof global.__cyberScrollPseudoAt !== 'function' || typeof e.clientX !== 'number') return;
+            /* (only a page with interest invokers: the hit test lays the page out) */
+            try { if (!global.document || !global.document.querySelector('[interestfor]')) return; } catch (x) { return; }
+            var hit = null;
+            try { hit = global.__cyberScrollPseudoAt(e.clientX, e.clientY); } catch (x) { }
+            if (!hit || hit[1] !== 43 || !hit[0]) return;
+            var inv = invokerOf(hit[0]);
+            if (!inv) return;
+            clearTimer(inv);
+            /* (anchored to the ::interest-button from now on, shown already or not) */
+            var tg = targetOf(inv);
+            if (tg) tg.setAttribute('data-cyber-interest-pseudo', '');
+            gain(inv);
         }, true);
         /* (a target popover closing: its invokers lose interest, unless that is canceled) */
         onWin('beforetoggle', function (e) {

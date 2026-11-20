@@ -2232,6 +2232,7 @@ static size_t css_at_rule(const char *s, size_t len, size_t pos, bool nested, Cs
 /* The qualified rule or at-rule at pos (white space and comments skipped):
  * added to sheet unless NULL.  *counts: a valid style rule or a known
  * at-rule.  Returns where it ends. */
+static char *css_ua_part_rewrite(char *sel);
 static void css_parse_rule_block(const char *s, size_t len, size_t *pos, CssRule *rule, CssStylesheet *sheet, const char *cond);
 
 static size_t css_rule_item(const char *s, size_t len, size_t pos, bool nested, CssStylesheet *sheet,
@@ -2280,23 +2281,7 @@ static size_t css_rule_item(const char *s, size_t len, size_t pos, bool nested, 
         return pos;
     }
     /* (a customizable select's parts: its UA shadow tree's (browser/form_controls.js)) */
-    if (strstr(sel, "::picker") || strstr(sel, "::checkmark") || strstr(sel, "::details-content") || strstr(sel, "::permission-icon")) {
-        static const char *const from[] = { "::picker(select)", "::picker-icon", "::checkmark", "::details-content", "::permission-icon" };
-        static const char *const to[] = { "::part(cbpicker)", "::part(cbpickericon)", ":is(option)::before", "::part(cbdetailscontent)", "::part(cbpermicon)" };
-        for (int q = 0; q < 5; q++) {
-            char *hit;
-            while ((hit = strstr(sel, from[q])) != NULL) {
-                size_t fl = strlen(from[q]), tl = strlen(to[q]), sl = strlen(sel);
-                char *nw = (char *)malloc(sl - fl + tl + 1);
-                if (!nw) break;
-                memcpy(nw, sel, (size_t)(hit - sel));
-                memcpy(nw + (hit - sel), to[q], tl);
-                strcpy(nw + (hit - sel) + tl, hit + fl);
-                free(sel);
-                sel = nw;
-            }
-        }
-    }
+    sel = css_ua_part_rewrite(sel);
     if (t_scope_a) {
         char *sw = scope_apply(sel, t_scope_a, t_scope_b, true);
         if (sw) { free(sel); sel = sw; }
@@ -2420,6 +2405,30 @@ static bool nest_parent_plain(const char *p)
     return true;
 }
 
+/* (a customizable select's parts and the like: as its UA shadow tree's parts (browser/form_controls.js)) */
+static char *css_ua_part_rewrite(char *sel)
+{
+    if (!sel) return sel;
+    if (strstr(sel, "::picker") || strstr(sel, "::checkmark") || strstr(sel, "::details-content") || strstr(sel, "::permission-icon")) {
+        static const char *const from[] = { "::picker(select)", "::picker-icon", "::details-content", "::permission-icon" };
+        static const char *const to[] = { "::part(cbpicker)", "::part(cbpickericon)", "::part(cbdetailscontent)", "::part(cbpermicon)" };
+        for (int q = 0; q < 4; q++) {
+            char *hit;
+            while ((hit = strstr(sel, from[q])) != NULL) {
+                size_t fl = strlen(from[q]), tl = strlen(to[q]), sl = strlen(sel);
+                char *nw = (char *)malloc(sl - fl + tl + 1);
+                if (!nw) break;
+                memcpy(nw, sel, (size_t)(hit - sel));
+                memcpy(nw + (hit - sel), to[q], tl);
+                strcpy(nw + (hit - sel) + tl, hit + fl);
+                free(sel);
+                sel = nw;
+            }
+        }
+    }
+    return sel;
+}
+
 static char *nest_resolve(const char *parent, const char *child)
 {
     size_t n = 0, cap = strlen(parent) + strlen(child) + 16;
@@ -2509,6 +2518,7 @@ static void css_parse_rule_block(const char *s, size_t len, size_t *pos, CssRule
             char *child = css_strndup_trim(s + a, b - a);
             char *resolved = !child || !child[0] ? NULL : body ? scope_apply(child, t_scope_a, t_scope_b, true) : nest_resolve(parent, child);
             free(child);
+            resolved = css_ua_part_rewrite(resolved);
             size_t p = b + 1;
             CssRule *r = resolved && !css_prelude_invalid(resolved) ? css_stylesheet_add_rule(sheet) : NULL;
             if (r) {

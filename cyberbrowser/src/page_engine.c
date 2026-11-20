@@ -1152,7 +1152,6 @@ static void page_frames_build(void) {
             if (!(fz > 0.0)) fz = 1.0;
             bool frame_laid = css_layout_run(lc, fd, NULL, ws[k] / fz, hs[k] / fz);
             css_media_set_color_scheme(held_cs);
-            g_css_print.on = held_print;
             if (frame_laid) {
                 css_layout_frame_content_note((uint32_t)iframes[k], lc);
                 DisplayList dl;
@@ -1169,6 +1168,8 @@ static void page_frames_build(void) {
                 if (css_layout_build_display_list(lc, &dl)) display_list_frame_set((uint32_t)iframes[k], &dl, (float)fsx, (float)fsy, (float)fz);
                 display_list_free(&dl);
             }
+            /* (print mode back only now: a frame's display list not moved onto the page as the top document's is) */
+            g_css_print.on = held_print;
             css_layout_tree_free(lc);
             free(lc);
         }

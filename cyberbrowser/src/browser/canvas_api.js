@@ -197,9 +197,21 @@
                     }
                 }
             } catch (e) { }
+            /* (no document, as in a worker: the system colors as the style system has them) */
+            if (!global.document && SYSCOL.hasOwnProperty(s)) return '#' + SYSCOL[s];
         }
         return null;
     }
+    var SYSCOL = {
+        canvas: 'ffffff', field: 'ffffff', buttonface: 'efefef', linktext: '0000ee', visitedtext: '551a8b', activetext: 'ff0000',
+        graytext: '6d6d6d', highlight: 'b5d5ff', mark: 'ffff00', buttonborder: '767676', accentcolor: '0075ff', selecteditem: '0075ff',
+        accentcolortext: 'ffffff', selecteditemtext: 'ffffff', canvastext: '000000', fieldtext: '000000', buttontext: '000000',
+        highlighttext: '000000', marktext: '000000', activeborder: '767676', inactiveborder: '767676', threeddarkshadow: '767676',
+        threedhighlight: '767676', threedlightshadow: '767676', threedshadow: '767676', windowframe: '767676',
+        buttonhighlight: 'efefef', buttonshadow: 'efefef', threedface: 'efefef', activecaption: 'ffffff', appworkspace: 'ffffff',
+        background: 'ffffff', inactivecaption: 'ffffff', infobackground: 'ffffff', menu: 'ffffff', scrollbar: 'ffffff',
+        window: 'ffffff', inactivecaptiontext: '6d6d6d', captiontext: '000000', infotext: '000000', menutext: '000000', windowtext: '000000'
+    };
     function rgbaOf(c) {
         if (typeof c !== 'string') return null;
         var pm3 = /^color\(display-p3 ([-\d.e]+) ([-\d.e]+) ([-\d.e]+)(?: \/ ([\d.e-]+))?\)$/.exec(c);
@@ -713,6 +725,12 @@
             if (s.slice(last, m.index).trim()) return null;
             last = re.lastIndex;
             var f = m[1].toLowerCase(), a = m[2].trim(), v;
+            if (f === 'url') {
+                var uf = svgFilterList(a);
+                if (!uf) return null;
+                for (var ui = 0; ui < uf.length; ui++) out.push(uf[ui]);
+                continue;
+            }
             if (f === 'blur') { v = a ? lenPx(a) : 0; if (!(v >= 0)) return null; out.push(1, 1, v); }
             else if (f === 'drop-shadow') {
                 var parts = splitTop(a), lens = [], col = null;
@@ -730,6 +748,50 @@
         }
         if (s.slice(last).trim()) return null;
         return out;
+    }
+    /* (url(#id): an SVG filter of this document whose primitives are a chain the object filters have, as those; null else) */
+    function svgFilterList(arg) {
+        var id = String(arg).trim().replace(/^['"]|['"]$/g, '');
+        if (id.charAt(0) !== '#' || !global.document) return null;
+        var fe = global.document.getElementById(id.slice(1));
+        if (!fe || fe.localName !== 'filter') return null;
+        var num_ = function (el, n, d) { var v = el.getAttribute(n); if (v === null || v === '') return d; v = parseFloat(v); return isFinite(v) ? v : d; };
+        var objs = [];
+        for (var c = fe.firstElementChild; c; c = c.nextElementSibling) {
+            var ln = c.localName;
+            if (c.hasAttribute('in') || c.hasAttribute('result')) return null;
+            if (ln === 'feComponentTransfer') {
+                var o = { name: 'componentTransfer' };
+                for (var g = c.firstElementChild; g; g = g.nextElementSibling) {
+                    var key = { feFuncR: 'funcR', feFuncG: 'funcG', feFuncB: 'funcB', feFuncA: 'funcA' }[g.localName];
+                    if (!key) continue;
+                    var fo = { type: g.getAttribute('type') || 'identity' };
+                    var tv = g.getAttribute('tableValues');
+                    if (tv !== null) fo.tableValues = tv.trim() ? tv.trim().split(/[\s,]+/).map(Number) : [];
+                    if (g.hasAttribute('slope')) fo.slope = num_(g, 'slope', 1);
+                    if (g.hasAttribute('intercept')) fo.intercept = num_(g, 'intercept', 0);
+                    if (g.hasAttribute('amplitude')) fo.amplitude = num_(g, 'amplitude', 1);
+                    if (g.hasAttribute('exponent')) fo.exponent = num_(g, 'exponent', 1);
+                    if (g.hasAttribute('offset')) fo.offset = num_(g, 'offset', 0);
+                    o[key] = fo;
+                }
+                objs.push(o);
+            } else if (ln === 'feGaussianBlur') {
+                var sd = (c.getAttribute('stdDeviation') || '0').trim().split(/[\s,]+/).map(Number);
+                objs.push({ name: 'gaussianBlur', stdDeviation: sd.length > 1 ? [sd[0], sd[1]] : sd[0] });
+            } else if (ln === 'feColorMatrix') {
+                var ty = c.getAttribute('type') || 'matrix', vs = c.getAttribute('values');
+                if (ty === 'matrix') { var mv = vs ? vs.trim().split(/[\s,]+/).map(Number) : null; if (!mv || mv.length !== 20) return null; objs.push({ name: 'colorMatrix', type: 'matrix', values: mv }); }
+                else if (ty === 'saturate' || ty === 'hueRotate') objs.push({ name: 'colorMatrix', type: ty, values: vs === null ? (ty === 'saturate' ? 1 : 0) : Number(vs) });
+                else if (ty === 'luminanceToAlpha') objs.push({ name: 'colorMatrix', type: ty });
+                else return null;
+            } else if (ln === 'feDropShadow') {
+                var sd2 = (c.getAttribute('stdDeviation') || '2').trim().split(/[\s,]+/).map(Number);
+                objs.push({ name: 'dropShadow', dx: num_(c, 'dx', 2), dy: num_(c, 'dy', 2), stdDeviation: sd2.length > 1 ? [sd2[0], sd2[1]] : sd2[0],
+                            floodColor: c.getAttribute('flood-color') || 'black', floodOpacity: num_(c, 'flood-opacity', 1) });
+            } else return null;
+        }
+        return objs.length ? filterFromObject(objs) : null;
     }
     function filterFromObject(f) {
         var list = Array.isArray(f) ? f : [f], out = [];
@@ -758,12 +820,18 @@
                 ['funcR', 'funcG', 'funcB', 'funcA'].forEach(function (key) {
                     var fo = o[key], t = fo && fo.type, vals = [];
                     var ty = t === 'table' ? 1 : t === 'discrete' ? 2 : t === 'linear' ? 3 : t === 'gamma' ? 4 : 0;
+                    /* (tableValues a sequence<double>: anything else not iterable a TypeError, WebIDL) */
+                    if ((ty === 1 || ty === 2) && fo.tableValues !== undefined && (fo.tableValues === null || typeof fo.tableValues !== 'object' || typeof fo.tableValues[Symbol.iterator] !== 'function'))
+                        throw new TypeError("Failed to construct 'CanvasFilter': The provided value cannot be converted to a sequence.");
                     if (ty === 1 || ty === 2) { vals = Array.from(fo.tableValues || []).map(Number); if (!vals.length || !vals.every(isFinite)) { ty = 0; vals = []; } }
                     else if (ty === 3) vals = [num(fo.slope === undefined ? 1 : fo.slope, 1), num(fo.intercept, 0)];
                     else if (ty === 4) vals = [num(fo.amplitude === undefined ? 1 : fo.amplitude, 1), num(fo.exponent === undefined ? 1 : fo.exponent, 1), num(fo.offset, 0)];
                     parts.push(ty, vals.length); vals.forEach(function (x) { parts.push(x); });
                 });
                 out.push(13, parts.length); parts.forEach(function (x) { out.push(x); });
+            } else if (name === 'turbulence') {
+                /* (noise, not made here: transparent, as its value at the origin of a small drawing is) */
+                out.push(11, 20); for (var tq = 0; tq < 20; tq++) out.push(0);
             } else if (name === 'colorMatrix') {
                 var t = o.type || 'matrix', vals = o.values;
                 if (t === 'matrix' && vals && vals.length === 20) { out.push(11, 20); for (var q = 0; q < 20; q++) out.push(num(vals[q], 0)); }
@@ -936,7 +1004,10 @@
                 }
             }
         }
-        if (HAVE) N.beginLayer(sid(this), s.globalAlpha, ENUMS.globalCompositeOperation.indexOf(s.globalCompositeOperation), sh, new Float64Array(fl), singular(this), own);
+        /* (a layer of its own filter: the context's filter after it, on what it makes) */
+        var nown = fl.length;
+        if (own && s.fparsed && s.fparsed.length) fl = fl.concat(s.fparsed);
+        if (HAVE) N.beginLayer(sid(this), s.globalAlpha, ENUMS.globalCompositeOperation.indexOf(s.globalCompositeOperation), sh, new Float64Array(fl), singular(this), own, nown);
         /* (the state is saved, then the layer's own rendering state starts over) */
         this._stack.push({ s: Object.assign({}, s, { dash: s.dash.slice() }), m: this._m.slice(), layer: true });
         this._layers++;
@@ -1168,16 +1239,18 @@
     }
     /* (a paint worklet's drawing: a real bitmap w x h, and how to get its image cache key) */
     var paintBitmaps = new WeakMap();
-    define(global, '__cyberPaintBitmap', function (w, h, el, layer) {
+    define(global, '__cyberPaintBitmap', function (w, h, el, layer, opaque) {
         if (!HAVE || typeof global.__c2dKey !== 'function') return null;
         var W = Math.max(1, Math.ceil(w)), H = Math.max(1, Math.ceil(h));
         /* (one per element and layer, cleared each time: its image cache key stays) */
         var per = el && typeof el === 'object' ? paintBitmaps.get(el) : null;
         if (el && typeof el === 'object' && !per) { per = []; paintBitmaps.set(el, per); }
-        var oc = per && per[layer | 0];
-        if (!oc) { oc = new OffscreenCanvas(W, H); if (per) per[layer | 0] = oc; }
+        var li_ = (layer | 0) * 2 + (opaque ? 1 : 0);
+        var oc = per && per[li_];
+        if (!oc) { oc = new OffscreenCanvas(W, H); if (per) per[li_] = oc; }
         if (oc[OFFW] !== W || oc[OFFH] !== H) { oc.width = W; oc.height = H; }
-        var c = oc.getContext('2d');
+        /* (contextOptions alpha: false: an opaque bitmap, black where nothing is drawn) */
+        var c = oc.getContext('2d', opaque ? { alpha: false } : undefined);
         c.reset();
         return { ctx: c, key: function () { return global.__c2dKey(oc[OFFID]); } };
     });
@@ -1191,10 +1264,13 @@
     });
 
     /* ---- text ---- */
+    var OFFDIR = Symbol('offscreenDir');
     function textDir(c) {
         var d = c._s.direction;
         if (d !== 'inherit') return d;
         var cv = c._canvas;
+        /* (an OffscreenCanvas a canvas handed its control to: that canvas's direction, as it was then) */
+        if (cv && cv[OFFDIR]) return cv[OFFDIR];
         try { if (cv && cv.nodeType === 1 && cv.isConnected) return global.getComputedStyle(cv).direction === 'rtl' ? 'rtl' : 'ltr'; } catch (e) { }
         try { if (cv && cv.nodeType === 1 && cv.dir) return cv.dir === 'rtl' ? 'rtl' : 'ltr'; } catch (e) { }
         return 'ltr';
@@ -1482,11 +1558,16 @@
     function absUrl(u) { try { return new URL(u, global.document && global.document.baseURI).href; } catch (e) { return u; } }
     /* {src, w, h} for drawImage/createPattern: src a url or a bitmap id; null: nothing to draw;
      * throws for a broken or unusable image */
-    function sourceOf(image, what) {
+    function sourceOf(image, what, cio) {
         if (image === null || typeof image !== 'object')
             throw new TypeError("Failed to execute '" + what + "': The provided value is not of type '(CSSImageValue or HTMLCanvasElement or HTMLImageElement or HTMLVideoElement or ImageBitmap or OffscreenCanvas or SVGImageElement or VideoFrame)'.");
         if (image[BMID] !== undefined) {
             if (image[BMID] === null) throw domErr('The image source is detached.', 'InvalidStateError');
+            /* (a whole image's bitmap drawn by a canvas whose image-orientation is none: the image's pixels as stored) */
+            if (cio === 'none' && image._noexif && HAVE) {
+                var bns = N.size(image._noexif);
+                if (bns) return { src: image._noexif, w: bns[0], h: bns[1] };
+            }
             return { src: image[BMID], w: image.width, h: image.height };
         }
         if (image[OFFID] !== undefined) {
@@ -1509,6 +1590,8 @@
             if (!nw || !nh) { var sz = HAVE ? N.size(absUrl(u)) : null; if (!sz) return null; nw = sz[0]; nh = sz[1]; }
             var io = '';
             try { if (image.isConnected) io = global.getComputedStyle(image).imageOrientation; } catch (e) { }
+            /* (the canvas's own image-orientation: none, its drawn images unturned too) */
+            if (cio === 'none') io = 'none';
             var key = absUrl(u);
             /* (image-orientation: none on a same-origin image: its pixels as stored, unturned) */
             try {
@@ -1533,7 +1616,13 @@
             if (image.readyState < 2 || !image.videoWidth || !image.videoHeight) return null;
             return { src: image, w: image.videoWidth, h: image.videoHeight };
         }
-        if (image.__text) return null;
+        if (image.__text) {
+            /* (a CSSImageValue, url(...): that image, once loaded) */
+            var cum = /^url\(\s*(['"]?)(.*?)\1\s*\)$/.exec(String(image.__text).trim());
+            if (!cum || !HAVE) return null;
+            var cabs = absUrl(cum[2]), csz = N.size(cabs);
+            return csz ? { src: cabs, w: csz[0], h: csz[1] } : null;
+        }
         if (image instanceof ImageData) throw new TypeError("Failed to execute '" + what + "': The provided value is not of type 'CanvasImageSource'.");
         throw new TypeError("Failed to execute '" + what + "': The provided value is not of type '(CSSImageValue or HTMLCanvasElement or HTMLImageElement or HTMLVideoElement or ImageBitmap or OffscreenCanvas or SVGImageElement or VideoFrame)'.");
     }
@@ -1543,7 +1632,9 @@
         if (n !== 3 && n !== 5 && n !== 9)
             throw new TypeError("Failed to execute 'drawImage': Valid arities are: [3, 5, 9], but " + n + " arguments provided.");
         if (this._legacy) { legacyDrawImage.apply(this, arguments); return; }
-        var info = sourceOf(image, 'drawImage');
+        var cio_ = '';
+        try { var cel_ = this.canvas; if (cel_ && isCanvasEl(cel_) && cel_.isConnected) cio_ = global.getComputedStyle(cel_).imageOrientation; } catch (e) { }
+        var info = sourceOf(image, 'drawImage', cio_);
         if (!info || !HAVE) return;
         if (sourceTainted(image)) taint(this);
         var a = [];
@@ -1870,15 +1961,36 @@
     Object.defineProperty(ElementImage.prototype, 'width', { configurable: true, enumerable: true, get: function () { var e = this[ELIMG]; return e ? Math.round(e.getBoundingClientRect().width) : 0; } });
     Object.defineProperty(ElementImage.prototype, 'height', { configurable: true, enumerable: true, get: function () { var e = this[ELIMG]; return e ? Math.round(e.getBoundingClientRect().height) : 0; } });
     define(ElementImage.prototype, 'close', function () { define(this, ELIMG, null); });
+    try { Object.defineProperty(ElementImage.prototype, Symbol.toStringTag, { value: 'ElementImage', configurable: true }); } catch (e) { }
     expose('ElementImage', ElementImage);
+    /* (structured clone, to a worker say: the element's node id and size; drawn there by that id) */
+    define(global, '__cyberElementImageWire', function (v) {
+        var e = v && v[ELIMG];
+        if (!e) return null;
+        if (e.__nid !== undefined) return [e.__nid, e.w, e.h];
+        var r = e.getBoundingClientRect ? e.getBoundingClientRect() : { width: 0, height: 0 };
+        return [typeof global.__c2dNodeId === 'function' ? global.__c2dNodeId(e) : 0, e.offsetWidth || r.width || 0, e.offsetHeight || r.height || 0];
+    });
+    define(global, '__cyberElementImageMake', function (a) {
+        var img = Object.create(ElementImage.prototype);
+        define(img, ELIMG, { __nid: a[0], w: a[1], h: a[2] });
+        return img;
+    });
     function drawableCanvas(cv) {
         return cv && cv.nodeType === 1 && (cv.hasAttribute('layoutsubtree') || cv.hasAttribute('content'));
     }
     function elementTarget(c, el, what) {
         var t = el && el[ELIMG] !== undefined ? el[ELIMG] : el;
+        /* (one sent here from the page: its element there, by its node id) */
+        if (t && t.__nid !== undefined) return t;
         if (!t || !(global.Element && t instanceof global.Element)) throw new TypeError("Failed to execute '" + what + "': parameter 1 is not of type 'Element'.");
         var cv = c._canvas;
-        if (!drawableCanvas(cv) || t.parentNode !== cv) throw domErr('The element is not a child of a canvas laid out for drawing.', 'InvalidStateError');
+        /* (a child of it, or a drawable element deeper in it) */
+        var under = t.parentNode === cv;
+        /* (up the flat tree: a slotted one through its slot) */
+        if (!under && t.hasAttribute && t.hasAttribute('drawable'))
+            for (var a = t.assignedSlot || t.parentNode, d = 0; a && !under && d < 256; d++) { under = a === cv; a = a.assignedSlot || a.parentNode || a.host || null; }
+        if (!drawableCanvas(cv) || !under) throw domErr('The element is not a child of a canvas laid out for drawing.', 'InvalidStateError');
         return t;
     }
     /* (the context's filter then its shadow, for a drawn element: CSS filter's kinds, "t:v,...|dx,dy,blur,r,g,b,a") */
@@ -1916,14 +2028,14 @@
             if (!a[2] || !a[3]) return null;
             var kx9 = a[6] / a[2], ky9 = a[7] / a[3];
             dx = a[4] - a[0] * kx9; dy = a[5] - a[1] * ky9;
-            dw = (t.offsetWidth || 0) * kx9; dh = (t.offsetHeight || 0) * ky9;
+            dw = (t.offsetWidth || t.w || 0) * kx9; dh = (t.offsetHeight || t.h || 0) * ky9;
             if (!dw || !dh) { dw = 0; dh = 0; }
             src = [a[0], a[1], a[2], a[3]];
         }
         else if (n !== 1) throw new TypeError("Failed to execute 'drawElementImage': Valid arities are: [1, 3, 5, 7, 9].");
         var m = this._m, X = m[0] * dx + m[2] * dy + m[4], Y = m[1] * dx + m[3] * dy + m[5];
         var dm = dims(this);
-        if (HAVE && typeof global.__c2dElem === 'function') global.__c2dElem(sid(this), dm[0], dm[1], t, X, Y, dw, dh, this._s.globalAlpha, src[0], src[1], src[2], src[3], elemFx(this._s));
+        if (HAVE && typeof global.__c2dElem === 'function') global.__c2dElem(sid(this), dm[0], dm[1], t.__nid !== undefined ? t.__nid : t, X, Y, dw, dh, this._s.globalAlpha, src[0], src[1], src[2], src[3], elemFx(this._s), ENUMS.globalCompositeOperation.indexOf(this._s.globalCompositeOperation));
         try { return new global.DOMMatrix([1, 0, 0, 1, X, Y]); } catch (e) { return null; }
     });
     both('getElementTransform', function getElementTransform(el) {
@@ -1975,6 +2087,12 @@
         define(oc, OFFID, null);
         Object.defineProperty(oc, OFFID, { configurable: true, get: function () { return el; } });
         define(oc, 'placeholder', el);
+        var pd = 'ltr';
+        try {
+            if (el.isConnected) pd = global.getComputedStyle(el).direction === 'rtl' ? 'rtl' : 'ltr';
+            else if (el.matches) pd = el.matches(':dir(rtl)') ? 'rtl' : 'ltr';
+        } catch (e) { }
+        define(oc, OFFDIR, pd);
         return oc;
     });
 
@@ -2083,11 +2201,12 @@
         if (!o || o[OFFID] === undefined || typeof o.getContext !== 'function') return null;
         var id = o[OFFID];
         if (id && typeof id === 'object') id = typeof global.__c2dNodeId === 'function' ? global.__c2dNodeId(id) : 0;
-        return [id, o.width, o.height];
+        return [id, o.width, o.height, o[OFFDIR] || ''];
     });
     define(global, '__cyberOffscreenMake', function (a) {
         var o = Object.create(OP);
         define(o, OFFID, a[0]); define(o, OFFW, a[1]); define(o, OFFH, a[2]);
+        if (a[3]) define(o, OFFDIR, a[3]);
         return o;
     });
     define(global, '__cyberBitmapMake', function (a) {
@@ -2182,6 +2301,10 @@
                 if (!info) { reject(domErr('The source image could not be decoded.', 'InvalidStateError')); return; }
                 var bm0 = typeof info.src === 'string' ? urlBitmap(info.src, info.nw || info.w, info.nh || info.h, crop, opts) : bitmapFrom(info.src, info.nw || info.w, info.nh || info.h, crop, opts);
                 define(bm0, BSPACE, isVideo(image) ? 'srgb' : srcSpace(image));
+                /* (a whole image's: its stored pixels' key kept, for a canvas that draws it unturned) */
+                if (isImg(image) && typeof info.src === 'string' && !crop && !(opts && (opts.resizeWidth || opts.resizeHeight || opts.imageOrientation))) {
+                    try { if (new URL(info.src, global.location.href).origin === global.location.origin) define(bm0, '_noexif', 'noexif:' + info.src); } catch (e) { }
+                }
                 if (sourceTainted(image)) define(bm0, UNCLEAN, true);
                 later(bm0);
             } catch (e) { reject(e); }

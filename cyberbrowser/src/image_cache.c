@@ -44,6 +44,7 @@
 
 #include "turbojpeg.h"
 #include "webp/decode.h"
+#include "webp/demux.h"
 
 #include "http_download.h"
 #include "platform.h"
@@ -436,11 +437,51 @@ static ImagePixels *decode_jpeg(const uint8_t *d, size_t n, int ww, int wh)
     return px;
 }
 
+/* (an animated WebP's frames composited, in order: frame k's RGBA into out (w*h*4) and its timestamp; false when none) */
+static bool webp_anim_frames(const uint8_t *d, size_t n, int *w, int *h, uint8_t **frames, int *ts, int cap, int *nf)
+{
+    WebPData wd = { d, n };
+    WebPAnimDecoderOptions o;
+    if (!WebPAnimDecoderOptionsInit(&o)) return false;
+    o.color_mode = MODE_RGBA;
+    o.use_threads = 0;
+    WebPAnimDecoder *dec = WebPAnimDecoderNew(&wd, &o);
+    if (!dec) return false;
+    WebPAnimInfo info;
+    if (!WebPAnimDecoderGetInfo(dec, &info) || !info.canvas_width || !info.canvas_height) { WebPAnimDecoderDelete(dec); return false; }
+    *w = (int)info.canvas_width; *h = (int)info.canvas_height;
+    size_t fb = (size_t)*w * (size_t)*h * 4;
+    int k = 0;
+    while (k < cap && WebPAnimDecoderHasMoreFrames(dec)) {
+        uint8_t *buf = NULL;
+        int t = 0;
+        if (!WebPAnimDecoderGetNext(dec, &buf, &t)) break;
+        frames[k] = (uint8_t *)malloc(fb);
+        if (!frames[k]) break;
+        memcpy(frames[k], buf, fb);
+        ts[k] = t;
+        k++;
+    }
+    WebPAnimDecoderDelete(dec);
+    *nf = k;
+    return k > 0;
+}
+
 static ImagePixels *decode_webp(const uint8_t *d, size_t n, int ww, int wh)
 {
     WebPDecoderConfig cfg;
     if (!WebPInitDecoderConfig(&cfg)) return NULL;
     if (WebPGetFeatures(d, n, &cfg.input) != VP8_STATUS_OK) return NULL;
+    /* (animated: its first frame, as composited on its canvas) */
+    if (cfg.input.has_animation) {
+        uint8_t *fr[1] = { NULL };
+        int ts[1], aw = 0, ah = 0, nf = 0;
+        ImagePixels *ap = NULL;
+        if (webp_anim_frames(d, n, &aw, &ah, fr, ts, 1, &nf) && (ap = pixels_new(aw, ah)) != NULL)
+            memcpy(ap->data, fr[0], (size_t)aw * (size_t)ah * 4);
+        free(fr[0]);
+        return ap;
+    }
     int w = cfg.input.width, h = cfg.input.height;
     int tw, th;
     target_size(w, h, ww, wh, &tw, &th);
@@ -1452,6 +1493,26 @@ int image_cache_anim_frames(ImageCache *c, const char *url_or_path, int *delays,
         }
         if (px) stbi_image_free(px);
         if (dl) STBI_FREE(dl);
+    }
+    /* (an animated WebP: its frames the same way, their durations from the timestamps) */
+    if (nb > 16 && !memcmp(cb, "RIFF", 4) && !memcmp(cb + 8, "WEBP", 4)) {
+        WebPBitstreamFeatures ft;
+        if (WebPGetFeatures(cb, nb, &ft) == VP8_STATUS_OK && ft.has_animation) {
+            uint8_t *fr[ND];
+            int ts[ND], aw = 0, ah = 0, nf = 0;
+            memset(fr, 0, sizeof fr);
+            if (webp_anim_frames(cb, nb, &aw, &ah, fr, ts, ND, &nf) && nf > 1) {
+                n = nf;
+                for (int k = 0; k < nf; k++) {
+                    d[k] = ts[k] - (k ? ts[k - 1] : 0);
+                    if (d[k] <= 10) d[k] = 100;
+                    if (k == 0) continue;
+                    snprintf(key, sizeof key, "cbgif%d:%s", k, url_or_path);
+                    image_cache_put_rgba(c, key, aw, ah, fr[k]);
+                }
+            }
+            for (int k = 0; k < ND; k++) free(fr[k]);
+        }
     }
     free(cb);
     if (slot < 0 && ntab < NT) { slot = ntab++; tab[slot].url = strdup(url_or_path); }

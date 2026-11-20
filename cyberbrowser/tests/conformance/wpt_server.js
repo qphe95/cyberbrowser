@@ -1024,6 +1024,14 @@ function serveFile(res, url, file, hit) {
         else if (bd >= 0) end = bd;
         /* (no end tag, the file ending in a tag left open ('</html' and nothing after): before that) */
         if (end < 0 && text.lastIndexOf('<') > text.lastIndexOf('>')) end = text.lastIndexOf('<');
+        /* (a raw-text element left open to the end, an <iframe> with no end tag: before it, not inside its text) */
+        if (end < 0) {
+            const lo = text.toLowerCase();
+            for (const t of ['iframe', 'textarea', 'xmp', 'noembed', 'noframes', 'title', 'style']) {
+                const o = lo.lastIndexOf('<' + t);
+                if (o >= 0 && /[\s>\/]/.test(lo[o + t.length + 1] || '') && lo.indexOf('</' + t, o) < 0 && (end < 0 || o < end)) end = o;
+            }
+        }
         /* (a <meta> after it within the first kilobyte: the script at the end, not pushing that meta out of the
          * encoding prescan's reach) */
         if (end >= 0 && end < 1024 && /<meta[\s>]/i.test(text.slice(end, 1030))) end = -1;
@@ -1073,6 +1081,13 @@ function serveFile(res, url, file, hit) {
         if (!broke) for (const k in clean) clean[k] = Buffer.from(clean[k], 'utf8').toString('latin1').replace(/[^\t\x20-\x7e\x80-\xff]/g, '"');
         try { res.writeHead(200, clean); }
         catch (e3) { try { res.writeHead(500); } catch (e2) { } res.end(); return; }
+    }
+    /* (?pipe=trickle(...): its d<seconds> delays, all of them before the body, as a slow response) */
+    const tm = /(?:^|\|)\s*trickle\(([^)]*)\)/.exec(pipe);
+    if (tm) {
+        let secs = 0;
+        for (const part of tm[1].split(':')) { const d = /^d([\d.]+)$/.exec(part.trim()); if (d) secs += Number(d[1]); }
+        if (secs > 0) { setTimeout(() => { try { res.end(data); } catch (e) { } }, Math.min(secs, 30) * 1000); return; }
     }
     res.end(data);
 }

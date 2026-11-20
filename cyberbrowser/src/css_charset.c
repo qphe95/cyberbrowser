@@ -417,7 +417,32 @@ static const char *html_prescan(const uint8_t *s, size_t n, bool final, bool *mo
                 if (!meta) continue;
                 if (!strcmp(an, "http-equiv") && !seen_he) { seen_he = true; if (!strcmp(av, "content-type")) got_pragma = true; }
                 else if (!strcmp(an, "content") && !seen_ct && !cs) { seen_ct = true; const char *c = meta_content_charset(av); if (c) { cs = c; need = 1; } }
-                else if (!strcmp(an, "charset") && !seen_cs) { seen_cs = true; cs = encoding_name_for_label(av, strlen(av)); need = 2; }
+                else if (!strcmp(an, "charset") && !seen_cs) {
+                    seen_cs = true; cs = encoding_name_for_label(av, strlen(av)); need = 2;
+                    /* (character references in it: the tree builder's meta, its value decoded, changes the encoding the same way) */
+                    if (!cs && strchr(av, '&')) {
+                        char dv[256];
+                        size_t o = 0;
+                        for (size_t i = 0; av[i] && o + 1 < sizeof dv;) {
+                            if (av[i] == '&' && av[i + 1] == '#') {
+                                size_t j = i + 2;
+                                bool hex = av[j] == 'x' || av[j] == 'X';
+                                if (hex) j++;
+                                unsigned long cp = 0;
+                                size_t d0 = j;
+                                while (av[j] && (hex ? isxdigit((unsigned char)av[j]) : isdigit((unsigned char)av[j]))) {
+                                    cp = cp * (hex ? 16 : 10) + (unsigned long)(isdigit((unsigned char)av[j]) ? av[j] - '0' : (av[j] | 32) - 'a' + 10);
+                                    if (cp > 0x10FFFF) cp = 0x110000;
+                                    j++;
+                                }
+                                if (j > d0 && cp > 0 && cp < 0x80) { dv[o++] = (char)cp; i = av[j] == ';' ? j + 1 : j; continue; }
+                            }
+                            dv[o++] = av[i++];
+                        }
+                        dv[o] = 0;
+                        cs = encoding_name_for_label(dv, o);
+                    }
+                }
             }
             if (q >= n) NEED();
             p = q + 1;

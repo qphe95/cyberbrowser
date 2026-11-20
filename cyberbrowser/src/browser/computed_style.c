@@ -659,6 +659,14 @@ static char *position_xy_sides(JSContextHandle ctx, ComputedStyle *cs, const cha
 
 static char *compute_value(JSContextHandle ctx, ComputedStyle *cs, const CssPropDef *p, const char *v) {
     const char *n = p->name;
+    /* (a native drop-down select: its line-height its own, normal, as the UA has it, whatever the page's) */
+    if (!strcmp(n, "line-height") && dom_valid(cs->el) && dom_kind(cs->el) == DOM_K_ELEMENT) {
+        const char *tg = dom_tag_name(cs->el);
+        if (tg && !strcasecmp(tg, "select") && !dom_attr(cs->el, "multiple") && !dom_attr(cs->el, "data-cyber-base")) {
+            const char *sz = dom_attr(cs->el, "size");
+            if (!sz || atoi(sz) <= 1) return strdup("normal");
+        }
+    }
     if (!strcmp(n, "object-position") && (strstr(v, "x-start") || strstr(v, "x-end") || strstr(v, "y-start") || strstr(v, "y-end"))) {
         char *sides = position_xy_sides(ctx, cs, v);
         if (sides) {

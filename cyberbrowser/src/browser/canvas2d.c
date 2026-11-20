@@ -51,7 +51,11 @@ typedef struct C2dLayer {
     double *filter; int nfilter;
     bool discard;           /* (opened with a non-invertible transform: never drawn) */
     bool own_filter;        /* (the filter given to beginLayer: global alpha after it; ctx.filter: before) */
+    int nown;               /* (how much of the filter is its own: the rest, the context's, after the alpha) */
     int w, h, ox, oy;       /* (the bitmap under it: size and origin) */
+    /* (a drop shadow offset farther than a margin can reach: what is drawn, drawn again into twin moved by
+     * (tdx, tdy), the shadow's source where the shadow lands) */
+    uint8_t *twin; int tdx, tdy;
 } C2dLayer;
 
 typedef struct C2dSurf {
@@ -68,7 +72,7 @@ typedef struct C2dSurf {
     uint32_t gen;
     uint64_t epoch;
     /* (drawElementImage: the children drawn, where, in bitmap pixels) */
-    struct { uint32_t el; float x, y, w, h, a, sx, sy, sw, sh; unsigned char fn, ft[8]; float fv[8], ds[7]; } *ed;   /* (s*: the part of it drawn, CSS px from its border box; sw 0 the box; f*: its filter as CSS filter's, ds a drop shadow) */
+    struct { uint32_t el; float x, y, w, h, a, sx, sy, sw, sh; unsigned char fn, ft[8], op; float fv[8], ds[7]; } *ed;   /* (s*: the part of it drawn, CSS px from its border box; sw 0 the box; f*: its filter as CSS filter's, ds a drop shadow) */
     int ned, caped;         /* (unique over the process: its image cache key) */
 } C2dSurf;
 
@@ -92,7 +96,7 @@ static void c2d_free_state(C2dSurf *s)
 {
     for (int i = 0; i < s->nstack; i++) free(s->stack[i]);
     s->nstack = 0;
-    for (int i = 0; i < s->nlayers; i++) { free(s->layers[i].px); free(s->layers[i].clip); free(s->layers[i].filter); }
+    for (int i = 0; i < s->nlayers; i++) { free(s->layers[i].px); free(s->layers[i].clip); free(s->layers[i].filter); free(s->layers[i].twin); }
     s->nlayers = 0;
     free(s->clip); s->clip = NULL;
 }
@@ -306,6 +310,8 @@ typedef struct {
     double inv[6];          /* device -> paint space */
     double g[6];
     float lut[1024][4];     /* (gradients: premultiplied) */
+    double stops[64 * 5];   /* (gradients: their stops, for colors at t exactly; ns 0 when more than fit) */
+    int ns;
     C2dImg img;
     int rx, ry;             /* (patterns: repeat on x, y) */
     double cl[4];           /* (images: the source rectangle samples stay in) */
@@ -323,8 +329,28 @@ static bool c2d_invert(const double *m, double *o)
     return true;
 }
 
+/* (a gradient's color at t, premultiplied, from its stops) */
+static void c2d_grad_at(const double *stops, int ns, double t, float *o)
+{
+    double c[4];
+    if (ns <= 0) { c[0] = c[1] = c[2] = c[3] = 0; }
+    else if (t <= stops[0]) { for (int q = 0; q < 4; q++) c[q] = stops[1 + q]; }
+    else if (t >= stops[(ns - 1) * 5]) { for (int q = 0; q < 4; q++) c[q] = stops[(ns - 1) * 5 + 1 + q]; }
+    else {
+        int i = 0;
+        while (i + 1 < ns && stops[(i + 1) * 5] <= t) i++;
+        const double *a = stops + i * 5, *b = stops + (i + 1 < ns ? i + 1 : i) * 5;
+        double f = b[0] > a[0] ? (t - a[0]) / (b[0] - a[0]) : 1.0;
+        for (int q = 0; q < 4; q++) c[q] = a[1 + q] + (b[1 + q] - a[1 + q]) * f;
+    }
+    o[3] = (float)c[3];
+    for (int q = 0; q < 3; q++) o[q] = (float)(c[q] / 255.0 * c[3]);
+}
+
 static void c2d_lut(C2dPaint *p, const double *stops, int ns)
 {
+    p->ns = ns > 0 && ns <= 64 ? ns : 0;
+    if (p->ns) memcpy(p->stops, stops, sizeof(double) * 5 * (size_t)ns);
     /* stops: (offset, r, g, b, a) with r, g, b 0..255, a 0..1, in order */
     for (int k = 0; k < 1024; k++) {
         double t = k / 1023.0;
@@ -492,6 +518,8 @@ static void c2d_paint_at(const C2dPaint *p, int x, int y, float *o)
     }
     if (!(t > 0)) t = 0;
     if (t > 1) t = 1;
+    /* (at t itself: a hard stop where it is, not a table step off) */
+    if (p->ns) { c2d_grad_at(p->stops, p->ns, t, o); return; }
     int k = (int)(t * 1023.0 + 0.5);
     memcpy(o, p->lut[k], sizeof p->lut[k]);
 }
@@ -864,7 +892,30 @@ static void c2d_finish(C2dSurf *s, const C2dBox *b0, const C2dPaint *pt, const C
     float ga = (float)(st->alpha < 0 ? 0 : st->alpha > 1 ? 1 : st->alpha);
     /* (global alpha on the source before its filter and shadow, as Chrome) */
     if (ga < 1) { for (size_t i = 0; i < (size_t)w * h * 4; i++) src[i] *= ga; ga = 1; }
-    if (st->nfilter) c2d_filter_apply(src, w, h, st->filter, st->nfilter);
+    /* (a filter that is one sharp drop shadow, drawn over: the shadow composited first, then the shape, each stored,
+     * as a shadow is drawn) */
+    bool split_ds = false;
+    if (st->nfilter >= 9 && (int)st->filter[0] == 10 && (int)st->filter[1] + 2 == st->nfilter && (int)st->filter[1] >= 7 &&
+        st->filter[4] == 0.0 && ((int)st->filter[1] < 8 || st->filter[5] == 0.0) && st->op == 0 && !shadow && g_finish_part == 0 && !pre && pt && pt->kind == 0) {
+        const double *v = st->filter + 2;
+        const double *cv_ = st->filter[1] >= 8 ? v + 4 : v + 3;
+        float col[4] = { (float)(cv_[0] / 255 * cv_[3]), (float)(cv_[1] / 255 * cv_[3]), (float)(cv_[2] / 255 * cv_[3]), (float)cv_[3] };
+        int ox = (int)lround(v[0]), oy = (int)lround(v[1]);
+        float *sh = (float *)calloc((size_t)w * h * 4, sizeof(float));
+        if (sh) {
+            for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+                int sx_ = x - ox, sy_ = y - oy;
+                if (sx_ < 0 || sy_ < 0 || sx_ >= w || sy_ >= h) continue;
+                float a = src[((size_t)sy_ * w + sx_) * 4 + 3];
+                if (a <= 0) continue;
+                for (int q = 0; q < 4; q++) sh[((size_t)y * w + x) * 4 + q] = col[q] * a;
+            }
+            c2d_composite(s, sh, &sb, st->op);
+            free(sh);
+            split_ds = true;
+        }
+    }
+    if (st->nfilter && !split_ds) c2d_filter_apply(src, w, h, st->filter, st->nfilter);
     if (shadow) {
         double sg = st->sh[6] / 2;
         int ox = (int)lround(st->sh[4]), oy = (int)lround(st->sh[5]), pad = (int)ceil(sg * 3) + 2;
@@ -995,6 +1046,17 @@ static GCValue js_c2d_reset(JSContextHandle ctx, GCValue this_val, int argc, GCV
     JS_ToInt32(ctx, &h, argv[2]);
     bool opq = argc > 3 && JS_ToBool(ctx, argv[3]);
     if (!id) return JS_UNDEFINED;
+    /* (a placeholder's bitmap resized from a worker: the element's size attributes follow) */
+    if (id < C2D_OFF_BASE && JS_IsNumber(argv[0])) {
+        char buf[16];
+        const char *nm[2] = { "width", "height" };
+        int32_t v[2] = { w, h };
+        for (int k = 0; k < 2; k++) {
+            snprintf(buf, sizeof buf, "%d", (int)v[k]);
+            const char *cur = dom_get_attr_str((NodeId)id, nm[k]);
+            if (!cur || strcmp(cur, buf)) dom_set_attr_str((NodeId)id, nm[k], buf);
+        }
+    }
     C2dSurf *s = c2d_make(id, w, h, opq);
     if (s) { s->shown = true; c2d_changed(s); }
     return JS_UNDEFINED;
@@ -1043,7 +1105,23 @@ static void c2d_clip_with(C2dSurf *s, const C2dBox *b, bool have)
 }
 
 /* __c2dDraw(id, w, h, mode, path, paint, state, src): mode 0 fill, 1 stroke, 2 clip, 3 clear */
+static GCValue js_c2d_draw0(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 static GCValue js_c2d_draw(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    GCValue r = js_c2d_draw0(ctx, this_val, argc, argv);
+    if (argc > 0) {
+        C2dSurf *s = c2d_find(c2d_id(ctx, argv[0]));
+        C2dLayer *L = s && s->nlayers ? &s->layers[s->nlayers - 1] : NULL;
+        if (L && L->twin && !s->clip) {
+            uint8_t *keep = s->px;
+            s->px = L->twin; s->ox += L->tdx; s->oy += L->tdy;
+            js_c2d_draw0(ctx, this_val, argc, argv);
+            s->px = keep; s->ox -= L->tdx; s->oy -= L->tdy;
+        }
+    }
+    return r;
+}
+static GCValue js_c2d_draw0(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
 {
     (void)this_val;
     if (argc < 7) return JS_UNDEFINED;
@@ -1186,12 +1264,23 @@ static GCValue js_c2d_begin_layer(JSContextHandle ctx, GCValue this_val, int arg
     double *f0 = argc > 4 ? c2d_f64(ctx, argv[4], &fn0) : NULL;
     /* (a filter reaching out: a margin round the canvas, so what is drawn past its edges can still reach in) */
     int M = f0 && fn0 > 0 ? c2d_filter_reach(f0, fn0) : 0;
+    /* (one sharp drop shadow, offset past what a margin holds: a twin bitmap instead) */
+    bool twin_ = false;
+    int tdx_ = 0, tdy_ = 0;
+    if (M > 1024 && f0 && fn0 >= 9 && (int)f0[0] == 10 && (int)f0[1] + 2 == fn0 && (int)f0[1] >= 7 &&
+        f0[4] == 0.0 && ((int)f0[1] < 8 || f0[5] == 0.0)) {
+        twin_ = true; tdx_ = (int)lround(f0[2]); tdy_ = (int)lround(f0[3]); M = 0;
+    }
     if (M > 1024) M = 1024;
     if ((uint64_t)(s->w + 2 * M) * (uint64_t)(s->h + 2 * M) > C2D_MAX_PX) M = 0;
     uint8_t *fresh = (uint8_t *)calloc((size_t)(s->w + 2 * M) * (s->h + 2 * M), 4);
     if (!fresh) return JS_UNDEFINED;
     C2dLayer *L = &s->layers[s->nlayers++];
     memset(L, 0, sizeof *L);
+    if (twin_) {
+        L->twin = (uint8_t *)calloc((size_t)s->w * s->h, 4);
+        if (L->twin) { L->tdx = tdx_; L->tdy = tdy_; }
+    }
     L->w = s->w; L->h = s->h; L->ox = s->ox; L->oy = s->oy;
     s->w += 2 * M; s->h += 2 * M; s->ox += M; s->oy += M;
     L->px = s->px;
@@ -1208,6 +1297,9 @@ static GCValue js_c2d_begin_layer(JSContextHandle ctx, GCValue this_val, int arg
     double *f = argc > 4 ? c2d_f64(ctx, argv[4], &fn) : NULL;
     if (argc > 5) L->discard = JS_ToBool(ctx, argv[5]) > 0;
     if (argc > 6) L->own_filter = JS_ToBool(ctx, argv[6]) > 0;
+    int32_t nown = -1;
+    if (argc > 7) JS_ToInt32(ctx, &nown, argv[7]);
+    L->nown = nown;
     if (f && fn > 0) { L->filter = (double *)malloc(sizeof(double) * fn); if (L->filter) { memcpy(L->filter, f, sizeof(double) * fn); L->nfilter = fn; } }
     s->px = fresh;
     return JS_UNDEFINED;
@@ -1237,8 +1329,27 @@ static GCValue js_c2d_end_layer(JSContextHandle ctx, GCValue this_val, int argc,
         for (size_t i = 0; i < nl; i++) c2d_load(layer + i * 4, big + i * 4);
         float la = (float)(L.alpha < 0 ? 0 : L.alpha > 1 ? 1 : L.alpha);
         if (la < 1 && !L.own_filter) for (size_t i = 0; i < nl * 4; i++) big[i] *= la;
-        if (L.nfilter) { C2D_LAYER_F = 1; c2d_filter_apply(big, LW, LH, L.filter, L.nfilter); C2D_LAYER_F = 0; }
+        /* (its own filter, then the alpha, then the context's filter, as an image drawn with both) */
+        int k1 = L.own_filter && L.nown >= 0 && L.nown < L.nfilter ? L.nown : L.nfilter;
+        if (L.twin && L.nfilter >= 9) {
+            /* (the twin: the shadow's source, already where it lands; the shadow under what was drawn) */
+            const double *v = L.filter + 2;
+            int c = (int)L.filter[1];
+            const double *cv_ = c >= 8 ? v + 4 : v + 3;
+            float col[4] = { (float)(cv_[0] / 255 * cv_[3]), (float)(cv_[1] / 255 * cv_[3]), (float)(cv_[2] / 255 * cv_[3]), (float)cv_[3] };
+            float tw[4];
+            for (size_t i = 0; i < nl; i++) {
+                c2d_load(L.twin + i * 4, tw);
+                float a = tw[3] * (la < 1 && !L.own_filter ? la : 1.0f), *p = big + i * 4, pa = p[3];
+                for (int e = 0; e < 4; e++) p[e] = p[e] + col[e] * a * (1 - pa);
+            }
+            c2d_svg_quant(big, nl);
+            k1 = 0;
+            L.nfilter = 0;
+        }
+        if (k1) { C2D_LAYER_F = 1; c2d_filter_apply(big, LW, LH, L.filter, k1); C2D_LAYER_F = 0; }
         if (la < 1 && L.own_filter) for (size_t i = 0; i < nl * 4; i++) big[i] *= la;
+        if (k1 < L.nfilter) { C2D_LAYER_F = 1; c2d_filter_apply(big, LW, LH, L.filter + k1, L.nfilter - k1); C2D_LAYER_F = 0; }
         for (int y = 0; y < s->h; y++) {
             int Y = y + my;
             if (Y < 0 || Y >= LH) continue;
@@ -1256,6 +1367,7 @@ static GCValue js_c2d_end_layer(JSContextHandle ctx, GCValue this_val, int argc,
     }
     free(big); free(pre);
     free(layer);
+    free(L.twin);
     free(L.filter);
     c2d_changed(s);
     return JS_UNDEFINED;
@@ -1660,7 +1772,23 @@ static GCValue js_c2d_measure(JSContextHandle ctx, GCValue this_val, int argc, G
     return r;
 }
 
+static GCValue js_c2d_text0(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 static GCValue js_c2d_text(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    GCValue r = js_c2d_text0(ctx, this_val, argc, argv);
+    if (argc > 0) {
+        C2dSurf *s = c2d_find(c2d_id(ctx, argv[0]));
+        C2dLayer *L = s && s->nlayers ? &s->layers[s->nlayers - 1] : NULL;
+        if (L && L->twin && !s->clip) {
+            uint8_t *keep = s->px;
+            s->px = L->twin; s->ox += L->tdx; s->oy += L->tdy;
+            js_c2d_text0(ctx, this_val, argc, argv);
+            s->px = keep; s->ox -= L->tdx; s->oy -= L->tdy;
+        }
+    }
+    return r;
+}
+static GCValue js_c2d_text0(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
 {
     (void)this_val;
     if (argc < 17) return JS_UNDEFINED;
@@ -1694,12 +1822,13 @@ static GCValue js_c2d_text(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     double oy = base == 1 ? na : base == 2 ? asc * 0.8 : base == 3 ? (na - nd) / 2 : base == 4 ? -desc : base == 5 ? -nd : 0;
     /* (user space: text at (x + ox, y + oy), squeezed along x) */
     double t[6] = { kx, 0, 0, 1, x + ox, y + oy };
+    char *fraw = NULL;   /* (filled: the glyphs apart, each covered over the others, as glyph masks are drawn) */
     if (kx == 1) {
         /* (not squeezed: the outline made again with its pen at the place) */
         plutovg_path_t *p2 = plutovg_path_create();
         double a2 = 0, s2 = 0, d2 = 0;
         t_text_x = x + ox; t_text_y = y + oy;
-        t_text_want_raw = stroke != 0;
+        t_text_want_raw = true;
         bool ok2 = p2 && c2d_text_path(ctx, argv + 3, p2, &a2, &s2, &d2, rtl);
         t_text_want_raw = false;
         t_text_x = t_text_y = 0;
@@ -1736,7 +1865,8 @@ static GCValue js_c2d_text(JSContextHandle ctx, GCValue this_val, int argc, GCVa
             c2d_changed(s);
             return JS_UNDEFINED;
         }
-        free(raw);
+        if (ok2 && !stroke && raw && strchr(raw, '|')) fraw = raw;
+        else free(raw);
     }
     st.m[4] += s->ox; st.m[5] += s->oy;
     double *M = st.m;
@@ -1755,6 +1885,28 @@ static GCValue js_c2d_text(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     } else {
         plutovg_matrix_init(&m, (float)mm[0], (float)mm[1], (float)mm[2], (float)mm[3], (float)mm[4], (float)mm[5]);
         st.rule = 0;
+        if (fraw) {
+            have = false;
+            for (char *seg = fraw; seg && *seg; ) {
+                char *bar = strchr(seg, '|');
+                if (bar) *bar = 0;
+                if (*seg) {
+                    plutovg_path_t *gp = plutovg_path_create();
+                    C2dBox gb;
+                    if (gp) {
+                        plutovg_path_parse(gp, seg, (int)strlen(seg));
+                        if (c2d_cover(gp, &m, false, &st, s->w, s->h, &gb)) {
+                            if (!have) b = gb;
+                            else { if (gb.x0 < b.x0) b.x0 = gb.x0; if (gb.y0 < b.y0) b.y0 = gb.y0; if (gb.x1 > b.x1) b.x1 = gb.x1; if (gb.y1 > b.y1) b.y1 = gb.y1; }
+                            have = true;
+                        }
+                        plutovg_path_destroy(gp);
+                    }
+                }
+                seg = bar ? bar + 1 : NULL;
+            }
+            free(fraw);
+        } else
         have = c2d_cover(p, &m, false, &st, s->w, s->h, &b);
     }
     plutovg_path_destroy(p);
@@ -1806,12 +1958,30 @@ static GCValue js_c2d_hit(JSContextHandle ctx, GCValue this_val, int argc, GCVal
 }
 
 /* __c2dElem(id, w, h, el, x, y, dw, dh): a child element drawn at (x, y) (dw, dh <= 0: its own size) */
+static GCValue js_c2d_elem0(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 static GCValue js_c2d_elem(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    GCValue r = js_c2d_elem0(ctx, this_val, argc, argv);
+    if (argc > 0) {
+        C2dSurf *s = c2d_find(c2d_id(ctx, argv[0]));
+        C2dLayer *L = s && s->nlayers ? &s->layers[s->nlayers - 1] : NULL;
+        if (L && L->twin && !s->clip) {
+            uint8_t *keep = s->px;
+            s->px = L->twin; s->ox += L->tdx; s->oy += L->tdy;
+            js_c2d_elem0(ctx, this_val, argc, argv);
+            s->px = keep; s->ox -= L->tdx; s->oy -= L->tdy;
+        }
+    }
+    return r;
+}
+static GCValue js_c2d_elem0(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
 {
     (void)this_val;
     if (argc < 8) return JS_UNDEFINED;
     C2dSurf *s = c2d_get(ctx, argv[0], argv[1], argv[2]);
-    NodeId el = dom_node_of(argv[3]);
+    NodeId el = 0;
+    if (JS_IsNumber(argv[3])) { double nd_ = 0; JS_ToFloat64(ctx, &nd_, argv[3]); el = (NodeId)nd_; }   /* (a worker's: by node id) */
+    else el = dom_node_of(argv[3]);
     if (!s || !el) return JS_UNDEFINED;
     double v[4];
     for (int i = 0; i < 4; i++) if (JS_ToFloat64(ctx, &v[i], argv[4 + i])) return JS_UNDEFINED;
@@ -1828,6 +1998,7 @@ static GCValue js_c2d_elem(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     }
     s->ed[k].el = (uint32_t)el; s->ed[k].x = (float)v[0]; s->ed[k].y = (float)v[1]; s->ed[k].w = (float)v[2]; s->ed[k].h = (float)v[3];
     { double ga = 1.0; if (argc > 8) JS_ToFloat64(ctx, &ga, argv[8]); s->ed[k].a = (float)(ga < 0 ? 0 : ga > 1 ? 1 : ga); }   /* (its global alpha then) */
+    { int32_t op_ = 0; if (argc > 14) JS_ToInt32(ctx, &op_, argv[14]); s->ed[k].op = (unsigned char)(op_ < 0 ? 0 : op_); }   /* (its composite operation then) */
     {
         double sr[4] = { 0, 0, 0, 0 };
         for (int i = 0; i < 4 && argc > 9 + i; i++) if (JS_ToFloat64(ctx, &sr[i], argv[9 + i])) sr[i] = 0;
@@ -1857,6 +2028,14 @@ static GCValue js_c2d_elem(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     }
     c2d_changed(s);
     return JS_UNDEFINED;
+}
+
+/* (the composite operation a child element was drawn with, as globalCompositeOperation's index; 0 when not drawn) */
+int canvas2d_elem_op(uint32_t canvas, uint32_t el)
+{
+    C2dSurf *s = c2d_find(canvas);
+    for (int k = 0; s && k < s->ned; k++) if (s->ed[k].el == el) return s->ed[k].op;
+    return 0;
 }
 
 /* (the global alpha a child element was drawn with; 1 when not drawn) */
@@ -1946,7 +2125,7 @@ void canvas2d_api_install(JSContextHandle ctx)
     struct { const char *n; JSCFunction *f; int a; } fns[] = {
         { "__c2dReset", js_c2d_reset, 4 }, { "__c2dNew", js_c2d_new, 0 }, { "__c2dNodeId", js_c2d_node_id, 1 }, { "__c2dFree", js_c2d_free, 1 },
         { "__c2dDraw", js_c2d_draw, 8 }, { "__c2dSave", js_c2d_save, 1 }, { "__c2dRestore", js_c2d_restore, 1 },
-        { "__c2dBeginLayer", js_c2d_begin_layer, 5 }, { "__c2dEndLayer", js_c2d_end_layer, 1 },
+        { "__c2dBeginLayer", js_c2d_begin_layer, 8 }, { "__c2dEndLayer", js_c2d_end_layer, 1 },
         { "__c2dGet", js_c2d_get, 5 }, { "__c2dPut", js_c2d_put, 12 }, { "__c2dCopy", js_c2d_copy, 6 },
         { "__c2dSize", js_c2d_size, 1 }, { "__c2dPng", js_c2d_png, 2 }, { "__c2dMeasure", js_c2d_measure, 6 },
         { "__c2dText", js_c2d_text, 18 }, { "__c2dHit", js_c2d_hit, 8 }, { "__c2dKey", js_c2d_key, 1 }, { "__c2dElem", js_c2d_elem, 14 }, { "__c2dNoKern", js_c2d_nokern, 1 }, { "__c2dGrad", js_c2d_grad, 3 },

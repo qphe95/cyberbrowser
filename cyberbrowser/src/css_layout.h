@@ -180,6 +180,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
     unsigned char text_align_set;
     unsigned char is_th;
     unsigned char is_fieldset;      /* (a fieldset: no internal table display of its own) */
+    unsigned char is_legend;        /* (a legend: a fieldset's rendered one blockified) */
     unsigned char ovf_visible_given;
     unsigned char ovf_moved;
     unsigned char ovf_from_body;   /* (a root's overflow that is the body's, moved: undone before moving again) */
@@ -791,6 +792,7 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * ancestors, computed after layout for painting. */
     double opacity;
     unsigned char opacity_set;
+    unsigned char opacity_inh;   /* (opacity: inherit, the parent's then: an animated one's taken again) */
     /* transition-* and animation-* (css_anim.h's specification; interned,
      * NULL: all initial). */
     const char *anim_spec;

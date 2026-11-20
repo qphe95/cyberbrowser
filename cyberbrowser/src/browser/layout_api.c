@@ -1237,6 +1237,24 @@ static bool lq_ensure(JSContextHandle ctx)
     GCValue global = JS_GetGlobalObject(ctx);
     GCValue js_doc = JS_GetPropertyStr(ctx, global, "document");
     if (!JS_IsObject(js_doc)) return false;
+    /* (while the document loads: the UA trees not made yet (form_controls.js), made now, as the parser would have) */
+    {
+        static bool in_early_;
+        if (!in_early_) {
+            const char *rs_ = JS_ToCString(ctx, JS_GetPropertyStr(ctx, js_doc, "readyState"));
+            bool loading_ = rs_ && !strcmp(rs_, "loading");
+            if (rs_) JS_FreeCString(ctx, rs_);
+            if (loading_) {
+                GCValue fn_ = JS_GetPropertyStr(ctx, global, "__cyberUAEarly");
+                if (JS_IsFunction(ctx, fn_)) {
+                    in_early_ = true;
+                    GCValue r_ = JS_Call(ctx, fn_, global, 0, NULL);
+                    if (JS_IsException(r_)) JS_GetException(ctx);
+                    in_early_ = false;
+                }
+            }
+        }
+    }
     /* (it holds one document: another realm's asks for a layout of its own,
      * whatever has or hasn't changed) */
     if (g_lq_valid && g_lq_layout.js_ctx != ctx) { g_lq_key = 0; g_lq_cheap_ok = false; }

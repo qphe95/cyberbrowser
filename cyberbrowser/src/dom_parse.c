@@ -287,8 +287,10 @@ static void init_raw_atoms(void) {
     for (int i = 0; i < FX_N; i++) g_fx[i] = css_atom_intern(fx[i], strlen(fx[i]));
     for (int i = 0; i < 10; i++) g_raw_atoms[i] = css_atom_intern(names[i], strlen(names[i]));
 }
+/* (a document whose scripting is off, a sandboxed frame's without allow-scripts: noscript is markup, HTML 13.2.6.4.4) */
+bool g_dom_parse_noscript_plain = false;
 static inline bool is_raw_atom(CssAtom a) {
-    for (int i = 0; i < 10; i++) if (a == g_raw_atoms[i]) return true;
+    for (int i = 0; i < 10; i++) if (a == g_raw_atoms[i]) return !(i == 7 && g_dom_parse_noscript_plain);
     return false;
 }
 
@@ -638,7 +640,7 @@ static size_t prescan_skip(const char *h, size_t len, size_t p) {
     if (p + 10 < len && strncasecmp(h + p + 1, "plaintext", 9) == 0 &&
         (h[p + 10] == '>' || c_isspace((unsigned char)h[p + 10]) || h[p + 10] == '/')) return len;
     static const char *const raw[] = { "script", "style", "textarea", "title", "xmp", "noembed", "noframes", "noscript", "iframe" };
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < (g_dom_parse_noscript_plain ? 7 : 8); i++) {
         size_t tl = strlen(raw[i]);
         if (p + 1 + tl < len && strncasecmp(h + p + 1, raw[i], tl) == 0 &&
             (h[p + 1 + tl] == '>' || c_isspace((unsigned char)h[p + 1 + tl]) || h[p + 1 + tl] == '/')) {

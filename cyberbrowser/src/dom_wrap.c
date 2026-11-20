@@ -384,6 +384,8 @@ void dom_bind(JSContextHandle ctx, NodeId id, GCValue obj) {
 GCValue dom_js_existing(NodeId id) {
     if (!dom_valid(id)) return JS_NULL;
     uint32_t h = g_dom.wrapper[dom_slot(id)];
+    /* (a wrapper the collector has freed: none, never a dangling handle) */
+    if (h && !gc_handle_live((GCHandle)h)) { g_dom.wrapper[dom_slot(id)] = 0; return JS_NULL; }
     return h ? GC_MKHANDLE(JS_TAG_OBJECT, h) : JS_NULL;
 }
 

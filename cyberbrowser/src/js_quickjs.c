@@ -844,6 +844,11 @@ void js_video_src_attr_changed(JSContextHandle ctx, GCValue el, const char *src)
     if (SAFE_IS_NULL(vid)) { JS_GetException(ctx); return; }
     SAFE_SET_STR(vid, HTMLVideoElementHandle, src, src);
     record_captured_url(src);
+    /* (in a document with no browsing context, a template's contents: no load, nor later where it is moved) */
+    {
+        NodeId own_ = dom_owner(dom_node_of(el));
+        if (own_ && (dom_flags(own_) & DOMF_INERT_DOC)) return;
+    }
 
     // Resolve blob: URLs back to the registered object (MediaSource, Blob, etc.)
     if (strncmp(src, "blob:", 5) == 0) {

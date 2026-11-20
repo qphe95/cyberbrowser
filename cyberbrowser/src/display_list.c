@@ -4607,11 +4607,24 @@ static bool inside_svg(PreOrderCompactionArray *arr, int dom_idx)
 /* (the attribute an image-showing element takes its image from: <object>'s
  * data, <embed>'s src, a source-less <video>'s poster; NULL none) */
 static __thread bool t_dl_poster;   /* (a video's poster wanted, its source or not) */
+/* (a video's poster URL, resolved: NULL none) */
+char *display_list_poster_source(const char *base_url, struct HtmlNode *node)
+{
+    t_dl_poster = true;
+    char *u = display_list_image_source(base_url, node, 0.0f);
+    t_dl_poster = false;
+    return u;
+}
 static const char *dl_image_attr(const HtmlNode *node)
 {
     if (!node || node->type != HTML_NODE_ELEMENT || !node->tag_name) return NULL;
     if (!strcasecmp(node->tag_name, "object")) return "data";
     if (!strcasecmp(node->tag_name, "embed")) return "src";
+    /* (an image button: its src) */
+    if (!strcasecmp(node->tag_name, "input")) {
+        const char *ty = node_attribute_value((HtmlNode *)node, "type");
+        return ty && !strcasecmp(ty, "image") ? "src" : NULL;
+    }
     if (!strcasecmp(node->tag_name, "video")) {
         if (t_dl_poster) return "poster";
         const char *src = node_attribute_value((HtmlNode *)node, "src");
@@ -4631,6 +4644,8 @@ bool display_list_object_image(const HtmlNode *node)
     const char *data = node_attribute_value((HtmlNode *)node, attr);
     if (data && data[0] && attr[0] == 'p') return true;   /* (a poster is an image) */
     if (!data || !data[0]) return false;
+    /* (an image button: its src an image, whatever its name) */
+    if (node->tag_name && !strcasecmp(node->tag_name, "input")) return true;
     const char *type = node_attribute_value((HtmlNode *)node, "type");
     if (type && type[0]) return strncasecmp(type, "image/", 6) == 0;
     if (!strncasecmp(data, "data:image/", 11)) return true;   /* (an image's data inline) */
@@ -4714,6 +4729,7 @@ char *display_list_image_source(const char *base_url, HtmlNode *node, float css_
     double dens_ = 1.0;
     double autow_ = -1;
     const char *sizes_ = node->store_id ? img_sizes_of(node->store_id, pic != NULL, &autow_) : node_attribute_value(node, "sizes");
+    if (autow_ >= 0 && css_width > 0.0f) autow_ = css_width;   /* (sizes=auto: the width it is laid out at, once it is) */
     char *picked = srcset ? source_select(srcset, pic ? NULL : src, sizes_, autow_, &dens_) : NULL;
     if (picked) { src = picked; t_srcset_x = dens_; }
     else t_srcset_x = 1.0;
@@ -9113,6 +9129,17 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                     p = ctx->tree.nodes[p].parent_idx;
             /* (an absolute box in the top layer: on the initial containing block, nothing around it clipping) */
             if (b->s->position == CSS_POSITION_ABSOLUTE && dl_top_layer_box(ctx, i)) p = -1;
+            /* (a drawable element deeper in a canvas's subtree: drawn on its own, clipped by none of the boxes between) */
+            if (p >= 0) {
+                HtmlNode *dn_ = css_layout_box_node(ctx, i);
+                if (dn_ && dn_->type == HTML_NODE_ELEMENT && dn_->store_id && node_attribute_value(dn_, "drawable")) {
+                    for (int a_ = p, d_ = 0; a_ >= 0 && d_ < 64; a_ = ctx->tree.nodes[a_].parent_idx, d_++) {
+                        HtmlNode *an_ = css_layout_box_node(ctx, a_);
+                        if (an_ && an_->type == HTML_NODE_ELEMENT && an_->tag_name && !strcasecmp(an_->tag_name, "canvas") &&
+                            (node_attribute_value(an_, "content") || node_attribute_value(an_, "layoutsubtree"))) { p = a_; break; }
+                    }
+                }
+            }
             /* (a fixed box under a paint-contained one: its containing block, clipping it) */
             bool fixed_contained = false;
             if (b->s->position == CSS_POSITION_FIXED && !dl_top_layer_box(ctx, i))   /* (the top layer: on the viewport, whatever is around it) */
@@ -9133,7 +9160,9 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                 if (off) {
                     off[i][0] = off[p][0];
                     off[i][1] = off[p][1];
-                    if (css_layout_box_offset(ctx, p, &sx, &sy)) { off[i][0] += sx; off[i][1] += sy; }
+                    /* (a fieldset's rendered legend: in its border, not scrolled with its content) */
+                    bool fs_leg_ = ctx->boxes[p].s->is_fieldset && ctx->boxes[p].fs_legend == i + 1;
+                    if (!fs_leg_ && css_layout_box_offset(ctx, p, &sx, &sy)) { off[i][0] += sx; off[i][1] += sy; }
                 }
                 LayoutBox *pb = &ctx->boxes[p];
                 /* overflow on <html>/<body> applies to the viewport. */
@@ -9393,12 +9422,18 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
 }
 
 /* (::placeholder's color, the last declared: into ud's, attr() of its element's attributes) */
-typedef struct { double c[4]; HtmlNode *n; } DlPh;
+typedef struct { double c[4]; HtmlNode *n; double own[4]; } DlPh;
 static void dl_ph_decl(void *ud, const char *prop, const char *value, bool important)
 {
     (void)important;
     DlPh *ph = (DlPh *)ud;
     if (!prop || !value || strcasecmp(prop, "color")) return;
+    /* (inherit, unset, currentcolor: its element's color) */
+    {
+        const char *v_ = value;
+        while (*v_ == ' ') v_++;
+        if (!strncasecmp(v_, "inherit", 7) || !strncasecmp(v_, "unset", 5) || !strncasecmp(v_, "currentcolor", 12)) { memcpy(ph->c, ph->own, sizeof ph->c); return; }
+    }
     char buf[512];
     size_t o = 0;
     for (const char *p = value; *p && o + 1 < sizeof buf;) {
@@ -9509,7 +9544,7 @@ static void paint_input_text(LayoutContext *ctx, DisplayList *dl, int i, HtmlNod
     if (!v || !v[0]) {
         v = node_attribute_value(node, "placeholder");
         if (!v || !v[0]) return;
-        DlPh ph = { { 117.0 / 255.0, 117.0 / 255.0, 117.0 / 255.0, 1.0 }, node };   /* (the UA's: #757575) */
+        DlPh ph = { { 117.0 / 255.0, 117.0 / 255.0, 117.0 / 255.0, 1.0 }, node, { s->color_r, s->color_g, s->color_b, s->color_a } };   /* (the UA's: #757575) */
         css_layout_highlight_cascade(ctx, ctx->tree.nodes[i].dom_node_idx, "placeholder", dl_ph_decl, &ph);
         memcpy(rgba, ph.c, sizeof rgba);
     }
@@ -9540,7 +9575,9 @@ static void paint_input_text(LayoutContext *ctx, DisplayList *dl, int i, HtmlNod
     float sx_ = 0.0f, sy_ = 0.0f;
     bool scr_ = node->store_id && dom_scroll_get(node->store_id, &sx_, &sy_) && sx_ != 0.0f;
     /* (text-overflow: cut where it and the marker fit) */
-    if ((s->text_overflow_ellipsis || s->to_str) && w > cw + 0.01 && !scr_ && s->direction == 0) {
+    bool foc_ = node->store_id && (dom_element_state(node->store_id) & DOM_ST_FOCUS);   /* (focused, being edited: none) */
+    bool ell_ = false;
+    if ((s->text_overflow_ellipsis || s->to_str) && w > cw + 0.01 && !scr_ && !foc_ && s->direction == 0) {
         const char *mk = s->to_str ? s->to_str : "\xE2\x80\xA6";
         size_t ml = strlen(mk);
         double mw = text_shaper_span_width(font, mk, 0, ml, scale);
@@ -9552,18 +9589,85 @@ static void paint_input_text(LayoutContext *ctx, DisplayList *dl, int i, HtmlNod
             cut = e;
             q = e;
         }
-        if (cut + ml < sizeof buf) { memcpy(buf + cut, mk, ml); n = cut + ml; buf[n] = 0; w = text_shaper_span_width(font, buf, 0, n, scale); }
+        if (cut + ml < sizeof buf) { memcpy(buf + cut, mk, ml); n = cut + ml; buf[n] = 0; w = text_shaper_span_width(font, buf, 0, n, scale); ell_ = true; }
+    } else if ((s->text_overflow_ellipsis || s->to_str) && w > cw + 0.01 && !scr_ && !foc_ && s->direction == 1 && !btn) {
+        /* (right to left: the line's end at its left, the marker there; what of the text's end fits after it) */
+        const char *mk = s->to_str ? s->to_str : "\xE2\x80\xA6";
+        size_t ml = strlen(mk);
+        double mw = text_shaper_span_width(font, mk, 0, ml, scale);
+        size_t st = n;
+        for (size_t q = n; q > 0;) {
+            size_t b = q - 1;
+            while (b > 0 && ((unsigned char)buf[b] & 0xC0) == 0x80) b--;
+            if (text_shaper_span_width(font, buf, b, n, scale) + mw > cw + 0.01) break;
+            st = b;
+            q = b;
+        }
+        if (ml + (n - st) < sizeof buf) {
+            memmove(buf + ml, buf + st, n - st);
+            memcpy(buf, mk, ml);
+            n = ml + (n - st); buf[n] = 0;
+            w = text_shaper_span_width(font, buf, 0, n, scale);
+            ell_ = true;
+        }
     }
     double x = cx;
-    if (btn) x = cx + (cw - w) / 2.0;
+    /* (text-indent: the line's start that much in, a text field's one line) */
+    if (!btn) {
+        double ti_ = (double)s->text_indent + (double)s->text_indent_pct / 100.0 * cw;
+        if (ti_ != 0.0 && s->direction == 0 && s->text_align != CSS_TEXT_ALIGN_RIGHT && s->text_align != CSS_TEXT_ALIGN_CENTER) { cx += ti_; cw -= ti_; }
+    }
+    x = cx;
+    /* (cut short: an overflowing line, at its start whatever its alignment) */
+    if (ell_ && s->direction == 1) x = cx + cw - w;
+    else if (ell_) x = cx;
+    else if (btn) x = cx + (cw - w) / 2.0;
     else if (s->direction == 1 || s->text_align == CSS_TEXT_ALIGN_RIGHT) x = cx + cw - w;
     else if (s->text_align == CSS_TEXT_ALIGN_CENTER) x = cx + (cw - w) / 2.0;
     /* (where a line of its content's height puts its text: the em box centred in it, as text fragments are) */
     double y = cy + (ch - fs) / 2.0;
+    /* (a button's label of lines: each centred, one under the other, the whole centred in the content box) */
+    if (btn && (strchr(v, '\n') || strchr(v, '\r'))) {
+        double lhl = s->line_height > 0.0 ? s->line_height : lh;
+        int nl = 1;
+        for (const char *p = v; *p; p++) { if (*p == '\r') { nl++; if (p[1] == '\n') p++; } else if (*p == '\n') nl++; }
+        double y0 = cy + (ch - nl * lhl) / 2.0;
+        int from_ = dl->count, k = 0;
+        for (const char *p = v; ; k++) {
+            size_t L = strcspn(p, "\r\n");
+            if (L > 0) {
+                double w1 = text_shaper_span_width(font, p, 0, L, scale);
+                text_shaper_shape_span(font, p, 0, L, (float)(cx + (cw - w1) / 2.0), (float)(y0 + k * lhl + (lhl - fs) / 2.0), scale, false,
+                                       (float)rgba[0], (float)rgba[1], (float)rgba[2], (float)rgba[3] * op, dl);
+            }
+            p += L;
+            if (!*p) break;
+            if (*p == '\r' && p[1] == '\n') p++;
+            p++;
+        }
+        text_shaper_set_spacing(0.0f, 0.0f, 1.0f);
+        text_shaper_set_features(NULL, 0);
+        const float c_[4] = { (float)(box->x + s->border_left), (float)(box->y + s->border_top),
+                              (float)(box->x + box->width - s->border_right), (float)(box->y + box->height - s->border_bottom) };
+        dl_clip_range(dl, from_, c_);
+        return;
+    }
+    /* (align-content start or end: that line at the top or the bottom of the content box) */
+    if ((s->content_set & 2) && s->align_content != CSS_JUSTIFY_CENTER) {
+        double lh_ = s->line_height > 0.0 ? s->line_height : lh;
+        y = (s->align_content == CSS_JUSTIFY_FLEX_END ? cy + ch - lh_ : cy) + (lh_ - fs) / 2.0;
+    }
     (void)lh;
     x -= sx_;   /* (scrolled: as far as its scrollLeft) */
     int from = dl->count;
     text_shaper_shape_span(font, buf, 0, n, (float)x, (float)y, scale, false, (float)rgba[0], (float)rgba[1], (float)rgba[2], (float)rgba[3] * op, dl);
+    /* (given display: inline, a control the line's decorations reach into: theirs over its text too) */
+    if (s->inl_ctl && w > 0.0) {
+        float a0_ = 0.8f, d0_ = 0.2f, g0_ = 0.0f;
+        text_shaper_vmetrics(font, &a0_, &d0_, &g0_);
+        dl_text_decorations(dl, ctx, i, 0, 1, font, fs, (float)x, (float)w, (float)y + a0_ * (float)fs, op, 0);
+        dl_text_decorations(dl, ctx, i, 0, 1, font, fs, (float)x, (float)w, (float)y + a0_ * (float)fs, op, 1);
+    }
     text_shaper_set_spacing(0.0f, 0.0f, 1.0f);
     text_shaper_set_features(NULL, 0);
     const float c[4] = { (float)(box->x + s->border_left), (float)(box->y + s->border_top),
@@ -9602,6 +9706,7 @@ static void paint_native_control(const LayoutContext *ctx, DisplayList *dl, int 
     }
     float x = (float)(box->x + s->border_left + box->padding_left), y = (float)(box->y + s->border_top + box->padding_top);
     float w = (float)box->content_width, h = (float)box->content_height;
+    if (kind >= 4) { x = roundf(x); y = roundf(y); w = roundf(w); h = roundf(h); }   /* (a checkbox or radio: the same size wherever it sits on the pixel grid) */
     if (w <= 0.0f || h <= 0.0f) return;
     float ac[3] = { 0.0f, 0.46f, 1.0f };
     for (int p = i, d = 0; p >= 0 && d < 256; p = ctx->tree.nodes[p].parent_idx, d++) {
@@ -9707,6 +9812,42 @@ static void paint_native_control(const LayoutContext *ctx, DisplayList *dl, int 
             display_list_add_rect(dl, x + (B - th) * 0.5f, y + t0, th, th, ac[0], ac[1], ac[2], op);
         } else {
             display_list_add_rect(dl, x, y + p0, w, tb, tr[0] * 0.8f, tr[1] * 0.8f, tr[2] * 0.8f, op);
+            /* (its list's datalist: a tick under the track at each option's value in its range) */
+            const char *lid = node_attribute_value(node, "list");
+            if (lid && lid[0] && node->store_id && mx > mn) {
+                NodeId doc_ = dom_owner(node->store_id), dl_ = DOM_NULL;
+                uint32_t r_ = doc_ ? dom_slot(doc_) : 0;
+                for (uint32_t s_ = r_; s_ && !dl_; s_ = dom_next_in_subtree(s_, r_)) {
+                    if (g_dom.kind[s_] != DOM_K_ELEMENT) continue;
+                    NodeId c_ = dom_id_of(s_);
+                    const char *iv = dom_get_attr_str(c_, "id");
+                    if (iv && !strcmp(iv, lid)) dl_ = c_;
+                }
+                /* (its step: 1 unless said, any for none; ticks only where a value can be) */
+                double stp_ = 1.0;
+                const char *sa_ = node_attribute_value(node, "step");
+                bool any_ = sa_ && !strcasecmp(sa_, "any");
+                if (sa_ && !any_) { char *e2_ = NULL; double sv_ = strtod(sa_, &e2_); if (e2_ != sa_ && sv_ > 0) stp_ = sv_; }
+                if (dl_ && dom_tag_name(dl_) && !strcmp(dom_tag_name(dl_), "datalist")) {
+                    uint32_t dr_ = dom_slot(dl_);
+                    for (uint32_t s_ = dom_next_in_subtree(dr_, dr_); s_; s_ = dom_next_in_subtree(s_, dr_)) {
+                        if (g_dom.kind[s_] != DOM_K_ELEMENT) continue;
+                        NodeId o_ = dom_id_of(s_);
+                        if (!dom_tag_name(o_) || strcmp(dom_tag_name(o_), "option")) continue;
+                        if (dom_get_attr_str(o_, "disabled")) continue;
+                        const char *ov = dom_get_attr_str(o_, "value");
+                        if (!ov || !ov[0]) continue;
+                        char *end_ = NULL;
+                        double v_ = strtod(ov, &end_);
+                        if (end_ == ov || v_ < mn || v_ > mx) continue;
+                        if (!any_) { double q_ = (v_ - mn) / stp_; if (fabs(q_ - floor(q_ + 0.5)) > 1e-7) continue; }
+                        /* (on a whole pixel, mirrored as a whole pixel the other way) */
+                        float tp = floorf((float)((v_ - mn) / (mx - mn) * (L - th) + th * 0.5f));
+                        if (rev) tp = floorf(L) - 1.0f - tp;
+                        display_list_add_rect(dl, x + tp, y + p0 + tb + 2.0f, 1.0f, 4.0f, 0.46f, 0.46f, 0.46f, op);
+                    }
+                }
+            }
             display_list_add_rect(dl, x + t0, y + (B - th) * 0.5f, th, th, ac[0], ac[1], ac[2], op);
         }
         return;
@@ -10472,6 +10613,19 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         int p = ctx->tree.nodes[c].parent_idx;
         if (p < 0) continue;
         HtmlNode *pn = css_layout_box_node(ctx, p), *cn = css_layout_box_node(ctx, c);
+        /* (a display: contents child of it, a slot say: not a child of its own; its children the canvas's) */
+        if (ctx->boxes[c].s && ctx->boxes[c].s->disp_contents) continue;
+        for (int d_ = 0; d_ < 8 && p >= 0 && ctx->boxes[p].s && ctx->boxes[p].s->disp_contents && ctx->tree.nodes[p].parent_idx >= 0; d_++) {
+            p = ctx->tree.nodes[p].parent_idx;
+            pn = css_layout_box_node(ctx, p);
+        }
+        /* (a drawable element deeper in it: drawn on its own, not with the child it is in) */
+        if (cn && cn->type == HTML_NODE_ELEMENT && cn->store_id && !(pn && pn->type == HTML_NODE_ELEMENT && pn->tag_name && !strcasecmp(pn->tag_name, "canvas")) &&
+            node_attribute_value(cn, "drawable"))
+            for (int a = ctx->tree.nodes[p].parent_idx, d = 0; a >= 0 && d < 64; a = ctx->tree.nodes[a].parent_idx, d++) {
+                HtmlNode *an = css_layout_box_node(ctx, a);
+                if (an && an->type == HTML_NODE_ELEMENT && an->tag_name && !strcasecmp(an->tag_name, "canvas")) { p = a; pn = an; break; }
+            }
         if (!pn || pn->type != HTML_NODE_ELEMENT || !pn->tag_name || strcasecmp(pn->tag_name, "canvas") || !pn->store_id) continue;
         if (!node_attribute_value(pn, "content") && !node_attribute_value(pn, "layoutsubtree")) continue;
         if (!cn || cn->type != HTML_NODE_ELEMENT || !cn->store_id) continue;
@@ -10483,7 +10637,11 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             if (!dc_root || !dc_t || !dc_drawn || !dc_cv) { free(dc_root); free(dc_t); free(dc_drawn); free(dc_cv); dc_root = NULL; dc_t = NULL; dc_drawn = NULL; dc_cv = NULL; break; }
             for (int q = 0; q < ctx->tree.count; q++) dc_root[q] = -1;
         }
-        for (int q = 0; q < ctx->tree.count; q++) if (q == c || dl_box_under(ctx, q, c)) dc_root[q] = c;
+        for (int q = 0; q < ctx->tree.count; q++) if (q == c || dl_box_under(ctx, q, c)) {
+            /* (in the top layer, a modal dialog in it say: on the page, never in the canvas) */
+            if (tl_root && tl_root[q] >= 0 && tl_root[q] != c && dl_box_under(ctx, tl_root[q], c)) { dc_root[q] = -1; continue; }
+            dc_root[q] = c;
+        }
         float d[4];
         int bw = 0, bh = 0;
         if (canvas2d_elem_draw(pn->store_id, cn->store_id, d, &bw, &bh) && bw > 0 && bh > 0) {
@@ -10494,11 +10652,31 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             double kx = cw / bw, ky = ch / bh;
             /* (a size given: scaled to it from its border box) */
             double sx = 1.0, sy = 1.0, ew = ctx->boxes[c].width, eh = ctx->boxes[c].height;
+            double ex = ctx->boxes[c].x, ey = ctx->boxes[c].y;
+            /* (an inline: the boxes in it, together) */
+            if (ctx->boxes[c].s->display == CSS_DISPLAY_INLINE) {
+                double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30;
+                for (int q = 0; q < ctx->tree.count; q++) {
+                    if (dc_root[q] != c || q == c) continue;
+                    const LayoutBox *qb = &ctx->boxes[q];
+                    if (qb->width <= 0.0 || qb->height <= 0.0) continue;
+                    if (qb->x < x0) x0 = qb->x;
+                    if (qb->y < y0) y0 = qb->y;
+                    if (qb->x + qb->width > x1) x1 = qb->x + qb->width;
+                    if (qb->y + qb->height > y1) y1 = qb->y + qb->height;
+                }
+                if (x1 > x0 && y1 > y0) { ex = x0; ey = y0; ew = x1 - x0; eh = y1 - y0; }
+            } else if (ctx->boxes[c].s->has_translate) {
+                /* (its own translation: the element drawn where it was laid out, its content moved within that) */
+                const LayoutStyle *es_ = ctx->boxes[c].s;
+                ex -= es_->translate_x + es_->translate_xpct * ew;
+                ey -= es_->translate_y + es_->translate_ypct * eh;
+            }
             if (d[2] > 0 && ew > 0) sx = d[2] * kx / ew;
             if (d[3] > 0 && eh > 0) sy = d[3] * ky / eh;
             dc_t[c][0] = (float)sx; dc_t[c][1] = (float)sy;
-            dc_t[c][2] = (float)(cx + d[0] * kx - ctx->boxes[c].x * sx);
-            dc_t[c][3] = (float)(cy + d[1] * ky - ctx->boxes[c].y * sy);
+            dc_t[c][2] = (float)(cx + d[0] * kx - ex * sx);
+            dc_t[c][3] = (float)(cy + d[1] * ky - ey * sy);
             dc_drawn[c] = 1;
             dc_any = true;
             dc_cv[c][0] = (float)cx; dc_cv[c][1] = (float)cy; dc_cv[c][2] = (float)(cx + cw); dc_cv[c][3] = (float)(cy + ch);
@@ -10506,7 +10684,8 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
              * drawn, its border box when no part was given: no ink overflow) */
             float sr[4] = { 0, 0, (float)ew, (float)eh };
             canvas2d_elem_src(pn->store_id, cn->store_id, sr);
-            float s0 = (float)ctx->boxes[c].x + sr[0], s1 = (float)ctx->boxes[c].y + sr[1], s2 = s0 + sr[2], s3 = s1 + sr[3];
+            if (ctx->boxes[c].s->display == CSS_DISPLAY_INLINE && sr[2] <= 0.0f && sr[3] <= 0.0f) { sr[2] = (float)ew; sr[3] = (float)eh; }
+            float s0 = (float)ex + sr[0], s1 = (float)ey + sr[1], s2 = s0 + sr[2], s3 = s1 + sr[3];
             for (int q = 0; clip && q < ctx->tree.count; q++) {
                 if (dc_root[q] != c) continue;
                 float r0 = (float)((cx - dc_t[c][2]) / sx), r1 = (float)((cy - dc_t[c][3]) / sy);
@@ -10626,6 +10805,31 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         memcpy(range_xf, cur_xf, sizeof range_xf);
         if (dc_root && dc_root[i] >= 0 && !dc_drawn[dc_root[i]]) pending_hidden = true;   /* (a canvas child not drawn: nothing) */
         /* (a canvas child drawn through the context's filter or shadow: its subtree through that, outside its own) */
+        /* (a canvas child drawn source-atop: only where the canvas has something, its bitmap's alpha a mask over it) */
+        if (dc_root && dc_root[i] == i && dc_drawn[i] && !ol_later && nmask < 64 && g_image_cache) {
+            int p_ = ctx->tree.nodes[i].parent_idx;
+            HtmlNode *pn_ = p_ >= 0 ? css_layout_box_node(ctx, p_) : NULL, *cn_ = css_layout_box_node(ctx, i);
+            char ck_[48];
+            const float *t_ = dc_t[i];
+            if (pn_ && cn_ && canvas2d_elem_op(pn_->store_id, cn_->store_id) == 3 && canvas2d_paint_key(pn_->store_id, ck_, sizeof ck_) && t_[0] > 0 && t_[1] > 0) {
+                DisplayMask m;
+                memset(&m, 0, sizeof m);
+                m.kind = 1;
+                m.x = (float)ctx->boxes[i].x; m.y = (float)ctx->boxes[i].y; m.w = (float)ctx->boxes[i].width; m.h = (float)ctx->boxes[i].height;
+                dl_subtree_union(ctx, i, &m.x, &m.y, &m.w, &m.h);
+                m.ix = (dc_cv[i][0] - t_[2]) / t_[0]; m.iy = (dc_cv[i][1] - t_[3]) / t_[1];
+                m.iw = (dc_cv[i][2] - dc_cv[i][0]) / t_[0]; m.ih = (dc_cv[i][3] - dc_cv[i][1]) / t_[1];
+                m.repeat = 0;
+                m.image_handle = image_cache_request(g_image_cache, ck_, (int)ceilf(m.iw), (int)ceilf(m.ih));
+                int mi = m.image_handle >= 0 ? dl_add_mask(dl, &m) : -1;
+                if (mi >= 0 && dl_add_mask_cmd(dl, DL_MASK_BEGIN, mi, &m)) {
+                    mask_start[nmask] = i;
+                    mask_end[nmask] = subtree_end(ctx, i);
+                    mask_idx[nmask] = mi;
+                    nmask++;
+                }
+            }
+        }
         if (dc_root && dc_root[i] == i && dc_drawn[i] && !ol_later && nmask < 64) {
             int p_ = ctx->tree.nodes[i].parent_idx;
             HtmlNode *pn_ = p_ >= 0 ? css_layout_box_node(ctx, p_) : NULL, *cn_ = css_layout_box_node(ctx, i);
@@ -11359,6 +11563,16 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                 const LayoutBox *cb = &ctx->boxes[c];
                 if (cb->s->table_role != 4 || cb->s->display == CSS_DISPLAY_NONE || cb->width <= 0.0 || cb->height <= 0.0) continue;
                 float cx = (float)cb->x, cy = (float)cb->y, cw = (float)cb->width, ch = (float)cb->height;
+                /* (a group's or column's background where the cell would be without its row's translation: the row
+                 * moves its cells, not what is painted under them from outside it) */
+                if (box->s->table_role != 3) {
+                    int rw_ = ctx->tree.nodes[c].parent_idx;
+                    const LayoutBox *rb_ = rw_ >= 0 ? &ctx->boxes[rw_] : NULL;
+                    if (rb_ && rb_->s->table_role == 3 && rb_->s->has_translate) {
+                        cx -= (float)(rb_->s->translate_x + rb_->s->translate_xpct * rb_->width);
+                        cy -= (float)(rb_->s->translate_y + rb_->s->translate_ypct * rb_->height);
+                    }
+                }
                 snap_rect(&cx, &cy, &cw, &ch);
                 if (box->s->background_color_a > 0.0f &&
                     !display_list_add_rect(dl, cx, cy, cw, ch, (float)box->s->background_color_r, (float)box->s->background_color_g,
@@ -11646,6 +11860,18 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             goto replaced_border;
         }
 
+        /* (an <audio> with controls: its control bar, a light panel and a play button, as browsers draw one) */
+        if (node && node->type == HTML_NODE_ELEMENT && node->tag_name && !strcasecmp(node->tag_name, "audio") &&
+            node_attribute_value(node, "controls") && !box->s->cv_hidden && box->s->visibility != CSS_VISIBILITY_HIDDEN) {
+            float ax = (float)(box->x + box->s->border_left + box->padding_left), ay = (float)(box->y + box->s->border_top + box->padding_top);
+            float aw = (float)(box->width - box->s->border_left - box->s->border_right - box->padding_left - box->padding_right);
+            float ah = (float)(box->height - box->s->border_top - box->s->border_bottom - box->padding_top - box->padding_bottom);
+            if (aw > 0.0f && ah > 0.0f) {
+                display_list_add_rect(dl, ax, ay, aw, ah, 0.945f, 0.953f, 0.957f, op);
+                float bs = ah * 0.3f;
+                if (bs > 1.0f && aw > ah) display_list_add_rect(dl, ax + ah * 0.35f, ay + (ah - bs) / 2.0f, bs * 0.8f, bs, 0.0f, 0.0f, 0.0f, op);
+            }
+        }
         /* (an iframe: its frame's document) */
         if (node && node->type == HTML_NODE_ELEMENT && node->store_id && node->tag_name && !box->s->cv_hidden && box->s->visibility != CSS_VISIBILITY_HIDDEN &&
             (!clip || clip[i][0] <= clip[i][2]) &&
@@ -12937,8 +13163,17 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         }
 
         /* (a fieldset's legend: its top border not painted behind it) */
-        if (box->s->is_fieldset && box->fs_gx1 > box->fs_gx0 && cbr_from >= 0 && dl->count > cbr_from)
-            dl_fieldset_gap(dl, cbr_from, roundf((float)box->x + box->fs_gx0), roundf((float)box->x + box->fs_gx1), (float)box->y + box->fs_off + (float)box->s->border_top);
+        if (box->s->is_fieldset && box->fs_gx1 > box->fs_gx0 && cbr_from >= 0 && dl->count > cbr_from) {
+            /* (as far down as the legend's margin box goes, past the top border: an inline-start border beside it too) */
+            float gy_ = (float)box->y + box->fs_off + (float)box->s->border_top;
+            int lg_ = box->fs_legend - 1;
+            if (lg_ >= 0 && lg_ < ctx->tree.count && box->s->writing_mode == 0) {
+                const LayoutBox *lb_ = &ctx->boxes[lg_];
+                float lbot_ = (float)(lb_->y + lb_->height + lb_->margin_bottom);
+                if (lbot_ > gy_ && lbot_ <= (float)(box->y + box->height)) gy_ = lbot_;
+            }
+            dl_fieldset_gap(dl, cbr_from, roundf((float)box->x + box->fs_gx0), roundf((float)box->x + box->fs_gx1), gy_);
+        }
         if (box->s->table_role == 4 && box->s->border_collapse && cbr_from >= 0 && dl->count > cbr_from && ncb < CBMAX) {
             int tb = ctx->tree.nodes[i].parent_idx;
             while (tb >= 0 && ctx->boxes[tb].s->table_role != 1) tb = ctx->tree.nodes[tb].parent_idx;

@@ -765,7 +765,8 @@
             seqOfStrings(c.inputArguments, 'inputArguments').forEach(function (t) {
                 if (!SYNTAX.test(t)) throw new TypeError("Failed to execute 'registerPaint': Invalid argument types.");
             });
-            void c.contextOptions;
+            var co = c.contextOptions, opaque = false;
+            if (co !== undefined && co !== null) { if (typeof co !== 'object') throw new TypeError("Failed to execute 'registerPaint': The 'contextOptions' is not an object."); opaque = co.alpha !== undefined && !co.alpha; }
             if (typeof cls !== 'function') throw new TypeError("Failed to execute 'registerPaint': The provided callback is not a function.");
             var proto = cls.prototype;
             if (proto === null || typeof proto !== 'object') throw new TypeError("Failed to execute 'registerPaint': The 'prototype' object on the class does not exist.");
@@ -776,7 +777,9 @@
             sigs[name] = sig;
             defs[name] = cls;
             inprops[name] = ip;
+            opaq[name] = opaque;
         }
+        var opaq = Object.create(null);
         var inprops = Object.create(null);
         /* (the paint's styleMap: its inputProperties' computed values, Typed OM's) */
         function inputMap(tom, ip) {
@@ -918,10 +921,12 @@
                     Object.defineProperty(global, '__cyberCanvasImage', { configurable: true, writable: true,
                         value: function () { var a = Array.prototype.slice.call(arguments); a.__img = true; buf.push(a); } });
                     /* (drawn on a bitmap of the tile's size, when there is one: then put as an image) */
-                    var pb = typeof global.__cyberPaintBitmap === 'function' && tl.w > 0 && tl.h > 0 ? global.__cyberPaintBitmap(tl.w, tl.h, el, li) : null;
+                    var pb = typeof global.__cyberPaintBitmap === 'function' && tl.w > 0 && tl.h > 0 ? global.__cyberPaintBitmap(tl.w, tl.h, el, li, opaq[m[1]]) : null;
                     try {
                         var ctx = pb ? pb.ctx : global.__cyberPaintContext(el, true);
-                        new defs[m[1]]().paint(ctx, { width: tl.w, height: tl.h }, lp, args);
+                        var pret = new defs[m[1]]().paint(ctx, { width: tl.w, height: tl.h }, lp, args);
+                        /* (an async paint(): what it draws after its awaits put in the same image when it settles) */
+                        if (pb && pret && typeof pret.then === 'function') (function (pb_) { pret.then(function () { try { pb_.key(); } catch (e) { } }, function () { }); })(pb);
                     } catch (e) { ok = false; }
                     if (pb && ok) {
                         var pkey = pb.key();

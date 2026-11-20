@@ -1290,6 +1290,21 @@ static void frame_load(Frame *f) {
         }
         html_page_stream_set_bytes(ps, cs, inh);
     }
+    /* (a sandboxed frame without allow-scripts: scripting off, its noscript parsed as markup) */
+    extern bool g_dom_parse_noscript_plain;
+    bool held_ns_ = g_dom_parse_noscript_plain;
+    {
+        const char *sb_ = f->iframe ? dom_get_attr_str(f->iframe, "sandbox") : NULL;
+        bool scripts_ = false;
+        for (const char *q_ = sb_; q_ && *q_ && !scripts_; ) {
+            while (*q_ == ' ' || *q_ == '\t' || *q_ == '\n' || *q_ == '\r' || *q_ == '\f') q_++;
+            const char *e_ = q_;
+            while (*e_ && *e_ != ' ' && *e_ != '\t' && *e_ != '\n' && *e_ != '\r' && *e_ != '\f') e_++;
+            if (e_ - q_ == 13 && !strncasecmp(q_, "allow-scripts", 13)) scripts_ = true;
+            q_ = e_;
+        }
+        g_dom_parse_noscript_plain = sb_ && !scripts_;
+    }
     if (ps) {
         /* (about:srcdoc: the attribute's markup) */
         const char *srcdoc = !strcmp(url, "about:srcdoc") ? dom_get_attr_str(f->iframe, "srcdoc") : NULL;
@@ -1323,10 +1338,17 @@ static void frame_load(Frame *f) {
                 else html_page_stream_feed(ps, &c, 1);
             }
         }
+        else if (fetched && !strncasecmp(mime, "application/pdf", 15)) {
+            /* (a PDF: the viewer's page, its gray around the document; none in a sandboxed frame, where plugins are blocked) */
+            bool sbx_ = f->iframe && dom_get_attr_str(f->iframe, "sandbox") != NULL;
+            static const char *const pv = "<!doctype html><html><body style=\"margin:0;background:#525659;height:100vh\"></body></html>";
+            if (!sbx_) html_page_stream_feed(ps, pv, strlen(pv));
+        }
         else if (fetched && buf.data && buf.size) html_page_stream_feed(ps, buf.data, buf.size);
         else if (!blank) platform_log(LOG_LEVEL_WARN, "frame", "could not fetch frame %s: %s", url, err);
         html_page_stream_finish(ps, NULL);
     }
+    g_dom_parse_noscript_plain = held_ns_;
     http_free_buffer(&buf);
     free(jsrc);
     if (!SAFE_VALID(f->ctx)) return;    /* (a script removed the frame) */
@@ -1501,6 +1523,15 @@ static void frame_navigate(JSContextHandle parent, NodeId iframe, const char *ur
  * once it is parsed whole (not as they are met, as an HTML document's do):
  * its frames wait for them, or their load events would come before the
  * handlers those scripts define. */
+/* __cyberStopFrames(): window.stop() in this realm: its frames' navigations not begun yet dropped, each keeping
+ * the document it has (its initial about:blank, what script put in it) */
+static GCValue js_stop_frames(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    for (Frame *f = g_frames; f; f = f->next)
+        if (f->parent == ctx && f->state == FRAME_PENDING && f->ctx) f->state = FRAME_LOADED;
+    return JS_UNDEFINED;
+}
+
 static bool parent_scripts_pending(const Frame *f) {
     if (!SAFE_VALID(f->parent)) return false;
     NodeId doc = dom_owner(f->iframe);
@@ -2192,6 +2223,7 @@ static GCValue js_cyber_domain(JSContextHandle ctx, GCValue this_val, int argc, 
 
 void frame_api_install(JSContextHandle ctx, GCValue global) {
     JS_DefinePropertyValueStr(ctx, global, "__cyberDomain", JS_NewCFunction(ctx, js_cyber_domain, "__cyberDomain", 1), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "__cyberStopFrames", JS_NewCFunction(ctx, js_stop_frames, "__cyberStopFrames", 0), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberFrameAllow", JS_NewCFunction(ctx, js_frame_allow, "__cyberFrameAllow", 1), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberFrameChainHidden", JS_NewCFunction(ctx, js_frame_chain_hidden, "__cyberFrameChainHidden", 0), JS_PROP_CONFIGURABLE);
     JS_DefinePropertyValueStr(ctx, global, "__cyberSharedHub", JS_NewCFunction(ctx, js_shared_hub, "__cyberSharedHub", 0), JS_PROP_CONFIGURABLE);

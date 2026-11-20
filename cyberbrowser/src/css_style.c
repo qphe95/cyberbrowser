@@ -1682,7 +1682,11 @@ static int32_t after_base_list(Builder *b, const char *branch, size_t blen, int 
         /* (a top layer element's backdrop) */
         "::backdrop",
         /* (an interest invoker's button, after it) */
-        "::interest-button" };
+        "::interest-button",
+        /* (an option's checkmark, before its ::before) */
+        "::checkmark",
+        /* (the UA's: a submenu's menuitem's expand icon, after its ::after) */
+        "::-webkit-cyber-menu-icon" };
     char buf[512];
     if (blen == 0 || blen >= sizeof(buf)) return -1;
     memcpy(buf, branch, blen);
@@ -1838,7 +1842,7 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
             /* ::after branches (naive comma split, as the legacy code did). */
             if (ci_strstr((char *)sel, ":after") || ci_strstr((char *)sel, ":before") || ci_strstr((char *)sel, ":first-letter") ||
                 ci_strstr((char *)sel, ":first-line") || ci_strstr((char *)sel, ":marker") || ci_strstr((char *)sel, ":scroll-") ||
-                ci_strstr((char *)sel, ":slider-") || ci_strstr((char *)sel, ":backdrop") || ci_strstr((char *)sel, ":interest-button")) {
+                ci_strstr((char *)sel, ":slider-") || ci_strstr((char *)sel, ":backdrop") || ci_strstr((char *)sel, ":interest-button") || ci_strstr((char *)sel, ":checkmark") || ci_strstr((char *)sel, ":-webkit-cyber-menu-icon")) {
                 const char *bp = sel;
                 while (*bp) {
                     const char *comma = bp;
@@ -1851,7 +1855,7 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
                     if (blen > 0) {
                         /* (logical buttons as physical: horizontal flow, all layout has) */
                         static const unsigned char k_after_kind[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 6, 26, 27, 28, 29, 13, 14, 15,
-                                                                      16, 17, 18, 19, 20, 30, 31, 32, 33, 21, 22, 23, 24, 25, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43 };
+                                                                      16, 17, 18, 19, 20, 30, 31, 32, 33, 21, 22, 23, 24, 25, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45 };
                         int32_t is_before = 0, li = -1;
                         for (int kk = 0; li < 0 && kk < (int)sizeof k_after_kind; kk++) {
                             /* (only those whose kind of name is in it) */
@@ -1864,6 +1868,8 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
                             if (kk >= 41 && kk < 43 && !pm_) continue;
                             if (kk == 43 && !ci_strstr((char *)sel, "::backdrop")) continue;
                             if (kk == 44 && !ci_strstr((char *)sel, "::interest-button")) continue;
+                            if (kk == 45 && !ci_strstr((char *)sel, "::checkmark")) continue;
+                            if (kk == 46 && !ci_strstr((char *)sel, "::-webkit-cyber-menu-icon")) continue;
                             if (kk == 4 && pm_) continue;   /* (the pseudo-element's marker, not the element's) */
                             li = after_base_list(&b, bp, blen, kk);
                             is_before = k_after_kind[kk];
@@ -2424,6 +2430,8 @@ int css_style_match_after(const CssStyleSet *S, const CssStyleDoc *D, int dom,
         {
             const CssRule *ar = S->rules[af->rule].rule;
             if (ar->container_query && g_css_rule_gate && !(g_css_rule_gate_pseudo ? g_css_rule_gate_pseudo : g_css_rule_gate)(ar->container_query, dom)) continue;
+            /* (the page's rules stop at a shadow tree, its elements' pseudo-elements too: only its own and the UA's) */
+            if ((D->flags[dom] & DF_SHADOW) && !S->rules[af->rule].ua && !ar->scoped) continue;
         }
         if (af->rule != last_rule) kinds = 0;
         last_rule = af->rule;
@@ -2431,6 +2439,8 @@ int css_style_match_after(const CssStyleSet *S, const CssStyleDoc *D, int dom,
         kinds |= 1ull << af->is_before;
         /* (the user agent's sheet below every author rule, as for elements) */
         CssAfterMatch m = { af->rule, af->spec - (S->rules[af->rule].ua ? (1 << 28) : 0), af->is_before };
+        /* (a shadow tree's context: below the page's, as for elements (normal declarations)) */
+        if (S->rules[af->rule].rule->shadow && !S->rules[af->rule].ua) m.specificity -= 1 << 27;
         VEC_PUSH(t->after_out, m);
     }
     *out = t->after_out.v;

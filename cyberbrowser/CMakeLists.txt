@@ -369,7 +369,12 @@ foreach(_opt WEBP_BUILD_ANIM_UTILS WEBP_BUILD_CWEBP WEBP_BUILD_DWEBP WEBP_BUILD_
 endforeach()
 add_subdirectory(src/third_party/libwebp EXCLUDE_FROM_ALL)
 target_include_directories(cyberbrowser_lib PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/libwebp/src)
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/libwebp/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/libwebp)
+# (animated WebP: the demuxer and the animation decoder, over the decoder library)
+target_sources(cyberbrowser_lib PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/libwebp/src/demux/demux.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/libwebp/src/demux/anim_decode.c)
 
 # =============================================================================
 # Link libraries

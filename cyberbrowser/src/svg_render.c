@@ -38,9 +38,73 @@ bool svg_intrinsic_size(const char *data, size_t len, float *w, float *h)
     return true;
 }
 
+/* (a background or background-color declaration's color in [b, e): false, none) */
+static bool decl_background(const char *v, const char *ve, double rgba[4])
+{
+    for (const char *b = v; b + 10 < ve; b++) {
+        if (strncasecmp(b, "background", 10)) continue;
+        const char *c = b + 10;
+        if (!strncasecmp(c, "-color", 6)) c += 6;
+        while (c < ve && isspace((unsigned char)*c)) c++;
+        if (c >= ve || *c != ':') continue;
+        c++;
+        const char *ce = c;
+        while (ce < ve && *ce != ';' && *ce != '}') ce++;
+        char buf[128];
+        size_t n = (size_t)(ce - c) < sizeof buf - 1 ? (size_t)(ce - c) : sizeof buf - 1;
+        memcpy(buf, c, n);
+        buf[n] = 0;
+        char *t = buf;
+        while (isspace((unsigned char)*t)) t++;
+        size_t tl = strlen(t);
+        while (tl && isspace((unsigned char)t[tl - 1])) t[--tl] = 0;
+        if (css_color_parse(t, rgba) && rgba[3] > 0.0) return true;
+    }
+    return false;
+}
+
+/* (the root's background from the image's own <style> sheets: a :root or svg rule's; never a linked sheet's,
+ * which an image does not load) */
+static bool sheet_root_background(const char *data, size_t len, double rgba[4])
+{
+    const char *end = data + len;
+    bool got = false;
+    for (const char *p = data; p + 6 < end; p++) {
+        if (p[0] != '<' || strncasecmp(p + 1, "style", 5) || !(isspace((unsigned char)p[6]) || p[6] == '>')) continue;
+        const char *gt = memchr(p, '>', (size_t)(end - p));
+        if (!gt) break;
+        const char *se = gt + 1;
+        while (se + 7 < end && !(se[0] == '<' && se[1] == '/' && !strncasecmp(se + 2, "style", 5))) se++;
+        for (const char *r = gt + 1; r < se;) {
+            const char *ob = memchr(r, '{', (size_t)(se - r));
+            if (!ob) break;
+            const char *cb = memchr(ob, '}', (size_t)(se - ob));
+            if (!cb) break;
+            /* (its selector list: :root or svg on its own among them) */
+            bool hit = false;
+            const char *a = r;
+            while (a < ob) {
+                while (a < ob && (isspace((unsigned char)*a) || *a == ',')) a++;
+                const char *ae = a;
+                while (ae < ob && *ae != ',') ae++;
+                const char *te = ae;
+                while (te > a && isspace((unsigned char)te[-1])) te--;
+                size_t sl = (size_t)(te - a);
+                if ((sl == 5 && !strncasecmp(a, ":root", 5)) || (sl == 3 && !strncasecmp(a, "svg", 3))) hit = true;
+                a = ae;
+            }
+            double c4[4];
+            if (hit && decl_background(ob + 1, cb, c4)) { memcpy(rgba, c4, sizeof c4); got = true; }
+            r = cb + 1;
+        }
+        p = se;
+    }
+    return got;
+}
+
 /* (the root <svg>'s background color from its style attribute, the CSS
  * background an image's root element paints under it; false: none) */
-static bool root_background(const char *data, size_t len, double rgba[4])
+static bool root_attr_background(const char *data, size_t len, double rgba[4])
 {
     const char *end = data + len, *p = data;
     for (; p + 4 < end; p++)
@@ -80,6 +144,12 @@ static bool root_background(const char *data, size_t len, double rgba[4])
         return false;
     }
     return false;
+}
+
+static bool root_background(const char *data, size_t len, double rgba[4])
+{
+    /* (its style attribute's, else its own sheets') */
+    return root_attr_background(data, len, rgba) || sheet_root_background(data, len, rgba);
 }
 
 /* (the root <svg>'s viewBox giving no area, a zero width or height: it renders nothing) */

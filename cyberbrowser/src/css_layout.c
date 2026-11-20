@@ -182,12 +182,24 @@ HtmlNode *css_layout_box_node(const LayoutContext *ctx, int idx)
 }
 
 bool media_video_natural_size(uint32_t node, int *w, int *h);
-/* (a <video>'s natural size: its video's once known; *w, *h left as they are otherwise) */
+bool media_poster_shown(uint32_t node);
+static const char* layout_node_attribute(HtmlNode *node, const char *name);
+static LayoutContext *g_layout_ctx;
+/* (a <video>'s natural size: its video's once known, else its poster's while that shows; *w, *h left as they are otherwise) */
 static void layout_video_natural(const HtmlNode *n, double *w, double *h)
 {
     if (!n || n->type != HTML_NODE_ELEMENT || !n->tag_name || strcasecmp(n->tag_name, "video") || !n->store_id) return;
     int vw = 0, vh = 0;
-    if (media_video_natural_size(n->store_id, &vw, &vh)) { *w = vw; *h = vh; }
+    if (media_video_natural_size(n->store_id, &vw, &vh)) { *w = vw; *h = vh; return; }
+    const char *pa = layout_node_attribute((HtmlNode *)n, "poster");
+    ImageCache *ic = display_list_get_image_cache();
+    const char *lz = layout_node_attribute((HtmlNode *)n, "loading");   /* (a lazy one: its poster not fetched for this) */
+    if (pa && pa[0] && ic && !(lz && !strcasecmp(lz, "lazy")) && media_poster_shown(n->store_id)) {
+        char *u = display_list_poster_source(g_layout_ctx ? g_layout_ctx->base_url : "", (HtmlNode *)n);
+        int pw = 0, ph = 0;
+        if (u && image_cache_natural_size(ic, u, &pw, &ph) && pw > 0 && ph > 0) { *w = pw; *h = ph; }
+        free(u);
+    }
 }
 static double layout_video_natural_w(const HtmlNode *n)
 {
@@ -587,6 +599,7 @@ static void layout_box_init(LayoutContext *ctx, int idx)
         if (box->s->table_role == 4) box->s->vertical_align = 1;
         box->s->is_th = !strcasecmp(node->tag_name, "th");
         box->s->is_fieldset = !strcasecmp(node->tag_name, "fieldset");
+        box->s->is_legend = !strcasecmp(node->tag_name, "legend");
     } else {
         box->s->display = CSS_DISPLAY_INLINE;
         /* (text right in a closed details: not shown) */
@@ -4821,6 +4834,14 @@ static void layout_apply_declaration_in(LayoutBox *box, const CssDeclaration *de
             } else for (int k = 0; k < 8; k++)
                 if (!strcasecmp(mp + 4, mk[k])) box->s->mk_text[k] = wide ? NULL : layout_intern(mkv, strlen(mkv));
         }
+    }
+    /* (overflow-inline / -block: overflow-x or -y, by the writing mode) */
+    if (prop[0] == 'o' && (!strcasecmp(prop, "overflow-inline") || !strcasecmp(prop, "overflow-block"))) {
+        bool inl_ = prop[9] == 'i' || prop[9] == 'I', vert_ = box->s->writing_mode != 0;
+        CssDeclaration ld = *decl;
+        ld.property = (inl_ != vert_) ? "overflow-x" : "overflow-y";
+        layout_apply_declaration_in(box, &ld, parent_width, viewport_width, base_url);
+        return;
     }
     /* (all: every longhand but the two that say how text runs) */
     if (prop[0] == 'a' && !strcasecmp(prop, "all")) {
@@ -12801,6 +12822,11 @@ static void layout_collect_stylesheets_recursive(LayoutContext *ctx, int dom_idx
         bool mskip = media && !css_media_query_matches(media, g_unit_vw, g_unit_vh);
         free(jsm);
         if (mskip) goto next;
+        /* (a <style> of a type other than text/css, ASCII case-insensitively: no style sheet) */
+        if (!strcasecmp(node->tag_name, "style")) {
+            const char *sty_ = layout_node_attribute(node, "type");
+            if (sty_ && sty_[0] && !(strlen(sty_) == 8 && !strncasecmp(sty_, "text/css", 8))) goto next;
+        }
     }
 
     char *cssom = (strcasecmp(node->tag_name, "style") == 0 || strcasecmp(node->tag_name, "link") == 0)
@@ -13076,7 +13102,7 @@ static const char *g_ua_stylesheet_css =
     "@keyframes -ua-mix-blend-mode-plus-lighter { from { mix-blend-mode: plus-lighter; } to { mix-blend-mode: plus-lighter; } }\n"
     "dialog { position: absolute; inset-inline-start: 0; inset-inline-end: 0; width: fit-content; height: fit-content; margin: auto; border: solid; padding: 1em; background-color: Canvas; color: CanvasText; }\n"
     "dialog:modal { position: fixed; overflow: auto; inset-block: 0; max-width: calc(100% - 6px - 2em); max-height: calc(100% - 6px - 2em); }\n"
-    "[popover]:not(:popover-open) { display: none; }\n"
+    "[popover]:not(:popover-open):where(h|*) { display: none; }\n"
     /* (an img sized by its layout, sizes=auto: none of its own until then, HTML 15.4.1) */
     "h|img:is([sizes=\"auto\" i], [sizes^=\"auto,\" i]) { contain: size !important; contain-intrinsic-size: 300px 150px; }\n"
     /* (a canvas whose subtree is laid out for drawElementImage: its children over it, out of its flow, drawn only when asked) */
@@ -13087,8 +13113,17 @@ static const char *g_ua_stylesheet_css =
     "[interestfor]::interest-button { display: inline-block; vertical-align: middle; color: inherit; background-color: transparent; box-sizing: border-box; min-inline-size: 24px; min-block-size: max(24px, 1lh); align-content: center; text-align: center; user-select: none; cursor: help; }\n"
     "dialog:modal::backdrop { background: rgba(0, 0, 0, 0.1); }\n"
     ":popover-open::backdrop { pointer-events: none !important; }\n"
+    /* (an option of a native select: its text on one line, a br in it none) */
+    "select:not([data-cyber-base]) option br { display: none; }\n"
+    "select:not([data-cyber-base]) optgroup > legend { display: none; }\n"
+    "select:not([data-cyber-base]) optgroup[data-cyber-oglbl]::before { content: attr(data-cyber-oglbl); display: block; }\n"
+    /* (a list box's options and groups at any depth, as its slotted ones are) */
+    "select:not([data-cyber-base]) option { display: block; white-space: nowrap; padding-inline: 2px; min-block-size: 1.2em; }\n"
+    "select:not([data-cyber-base]) optgroup { display: block; font-weight: bold; }\n"
+    /* (a list box: on the line by its text's bottom, as its shadow's :host has it, the author's revert too) */
+    "select:not([data-cyber-base])[multiple]:not([size='1']), select:not([data-cyber-base])[size]:not([size='0'], [size='1'], [size='']) { vertical-align: text-bottom; }\n"
     "dialog[popover][open] { display: block; }\n"
-    "[popover] { position: fixed; inset: 0; width: fit-content; height: fit-content; margin: auto; border: solid; padding: 0.25em; overflow: auto; color: CanvasText; background-color: Canvas; }\n"
+    "[popover]:where(h|*) { position: fixed; inset: 0; width: fit-content; height: fit-content; margin: auto; border: solid; padding: 0.25em; overflow: auto; color: CanvasText; background-color: Canvas; }\n"
     "dialog:popover-open { display: block; }\n"
     "html { font-family: serif; }\n"
     "body:where(:not([marginheight], [topmargin])) { margin-top: 8px; }\n"
@@ -13096,12 +13131,12 @@ static const char *g_ua_stylesheet_css =
     "body:where(:not([marginwidth], [leftmargin])) { margin-left: 8px; }\n"
     "body:where(:not([marginwidth], [rightmargin], [leftmargin])) { margin-right: 8px; }\n"
     "h|p { margin-block: 1em; margin-inline: 0; }\n"
-    "h1 { display: block; font-size: 2em; font-weight: bold; margin: 0.67em 0; }\n"
-    "h2 { display: block; font-size: 1.5em; font-weight: bold; margin: 0.83em 0; }\n"
-    "h3 { display: block; font-size: 1.17em; font-weight: bold; margin: 1em 0; }\n"
-    "h4 { display: block; font-size: 1em; font-weight: bold; margin: 1.33em 0; }\n"
-    "h5 { display: block; font-size: 0.83em; font-weight: bold; margin: 1.67em 0; }\n"
-    "h6 { display: block; font-size: 0.67em; font-weight: bold; margin: 2.33em 0; }\n"
+    "h1 { display: block; font-size: 2em; font-weight: bold; margin-block: 0.67em; }\n"
+    "h2 { display: block; font-size: 1.5em; font-weight: bold; margin-block: 0.83em; }\n"
+    "h3 { display: block; font-size: 1.17em; font-weight: bold; margin-block: 1em; }\n"
+    "h4 { display: block; font-size: 1em; font-weight: bold; margin-block: 1.33em; }\n"
+    "h5 { display: block; font-size: 0.83em; font-weight: bold; margin-block: 1.67em; }\n"
+    "h6 { display: block; font-size: 0.67em; font-weight: bold; margin-block: 2.33em; }\n"
     /* (a heading's level moved by headingoffset: its size and margins that level's, data-cyber-hl from form_controls.js) */
     "[data-cyber-hl=\"1\"] { font-size: 2em; margin-block: 0.67em; }\n"
     "[data-cyber-hl=\"2\"] { font-size: 1.5em; margin-block: 0.83em; }\n"
@@ -13123,7 +13158,6 @@ static const char *g_ua_stylesheet_css =
     "rp { display: none; }\n"
     "th { font-weight: bold; }\n"
     /* (HTML's rendering of a table's border, frame and rules) */
-    "table:not([bordercolor]), td, th { border-color: gray; }\n"
     "thead, tbody, tfoot, tr { border-color: inherit; }\n"
     "table:is([frame=void i], [frame=above i], [frame=below i], [frame=hsides i], [frame=lhs i], [frame=rhs i], [frame=vsides i], [frame=box i], [frame=border i]), table:is([frame=void i], [frame=above i], [frame=below i], [frame=hsides i], [frame=lhs i], [frame=rhs i], [frame=vsides i], [frame=box i], [frame=border i]) > tr > :is(td, th), table:is([frame=void i], [frame=above i], [frame=below i], [frame=hsides i], [frame=lhs i], [frame=rhs i], [frame=vsides i], [frame=box i], [frame=border i]) > :is(thead, tbody, tfoot) > tr > :is(td, th) { border-color: black; }\n"
     "table:is([rules=none i], [rules=groups i], [rules=rows i], [rules=cols i], [rules=all i]) { border-style: hidden; border-collapse: collapse; }\n"
@@ -13160,13 +13194,14 @@ static const char *g_ua_stylesheet_css =
     "br[clear=left i] { clear: left; } br[clear=right i] { clear: right; } br[clear=all i], br[clear=both i] { clear: both; }\n"
     "*::scroll-marker { color: #0000EE; text-decoration: underline; }\n"
     "*::column::scroll-marker { color: #0000EE; text-decoration: underline; }\n"
-    "audio:not([controls]) { display: none; }\n"
+    "audio:not([controls]) { display: none !important; }\n"
     "*::marker { unicode-bidi: isolate; font-variant-numeric: tabular-nums; white-space-collapse: preserve; text-transform: none; }\n"
     "code { font-family: monospace; }\n"
     "kbd { font-family: monospace; }\n"
     "samp { font-family: monospace; }\n"
     "tt { font-family: monospace; }\n"
-    "pre { display: block; font-family: monospace; margin: 1em 0; white-space: pre; }\n"
+    "pre { display: block; font-family: monospace; margin-block: 1em; white-space: pre; }\n"
+    "listing, plaintext, xmp { font-family: monospace; white-space: pre; margin-block: 1em; }\n"
     "h|textarea { font-family: monospace; white-space: pre-wrap; overflow-wrap: break-word; overflow: auto; }\n"
     "h|textarea[wrap=off i] { white-space: pre; overflow-wrap: normal; }\n"
     /* (HTML 15.5.x: form controls don't inherit their text's spacing, transform, indent, shadow or alignment) */
@@ -13210,13 +13245,15 @@ static const char *g_ua_stylesheet_css =
     "dl { display: block; margin-block: 1em; }\n"
     "dir dir, dir dl, dir menu, dir ol, dir ul, dl dir, dl dl, dl menu, dl ol, dl ul, menu dir, menu dl, menu menu, menu ol, menu ul, ol dir, ol dl, ol menu, ol ol, ol ul, ul dir, ul dl, ul menu, ul ol, ul ul { margin-block: 0; }\n"
     "dd { display: block; margin-left: 40px; }\n"
-    "blockquote { display: block; margin: 1em 40px; }\n"
+    "blockquote { display: block; margin-block: 1em; margin-inline: 40px; }\n"
     "h|slot { display: contents; }\n"
     "h|q::before { content: open-quote; }\n"
     "h|q::after { content: close-quote; }\n"
-    "figure { display: block; margin: 1em 40px; }\n"
+    "figure { display: block; margin-block: 1em; margin-inline: 40px; }\n"
     "hr:not([color]) { color: gray; }\n"
-    "hr { display: block; border-style: inset; border-width: 1px; margin-block: 0.5em; margin-inline: auto; overflow: hidden; }\n"
+    "hr { display: block; border-style: inset; margin-block: 0.5em; margin-inline: auto; overflow: hidden; }\n"
+    /* (a size with color or noshade: its border width the size hint's, which the UA sheet must not override) */
+    "hr:where(:not([size][color], [size][noshade])) { border-width: 1px; }\n"
     "hr[align=left i] { margin-left: 0; margin-right: auto; }\n"
     "hr[align=right i] { margin-left: auto; margin-right: 0; }\n"
     "hr[align=center i] { margin-left: auto; margin-right: auto; }\n"
@@ -13246,6 +13283,9 @@ static const char *g_ua_stylesheet_css =
     "h|textarea { padding: 2px; border: 1px solid #767676; }\n"
     /* (checkboxes and radios: their 13px box alone, no field padding or border; browsers' margins) */
     "h|input:is([type=checkbox i], [type=radio i]) { padding: 0; border: 0; box-sizing: border-box; }\n"
+    /* (an image button: as an image is, no field's edges) */
+    "h|input[type=image i] { padding: 0; }\n"
+    "h|input[type=image i]:where(:not([border]), [border*='-']) { border: 0; }\n"
     "h|input[type=checkbox i] { margin: 3px 3px 3px 4px; }\n"
     "h|input[type=radio i] { margin: 3px 3px 0px 5px; }\n"
     /* (the system colors that are what controls are filled with) */
@@ -13256,21 +13296,36 @@ static const char *g_ua_stylesheet_css =
     "h|menubar { display: inline-flex; flex-direction: row; gap: 0.5em; width: max-content; background-color: transparent; border: 1px solid currentColor; border-radius: 0.25em; padding: 0.25em; }\n"
     "h|menulist { display: block; position: fixed; position-anchor: auto; margin: 0; inset: auto; width: max-content; max-block-size: stretch; overflow: auto; color: CanvasText; background-color: Canvas; border: 1px solid currentColor; padding: 0.25em; position-area: block-end span-inline-end; }\n"
     "h|menulist:not(:popover-open) { display: none; }\n"
+    /* (a datalist: its options suggestions, never shown in the page, HTML 15.3.1) */
+    "h|datalist { display: none; }\n"
+    /* (a customizable combobox: an input[list] and its datalist of base appearance; the list shown below the input as a picker) */
+    "h|input[data-cyber-base] { border: 1px solid; padding: 0; background-color: transparent; box-sizing: border-box; font: inherit; color: inherit; }\n"
+    "h|datalist[data-cyber-open] { display: block; position: fixed; position-anchor: auto; width: fit-content; height: fit-content; box-sizing: border-box; border: 1px solid; padding: 0; color: CanvasText; background-color: Canvas; margin: 0; inset: auto; min-inline-size: anchor-size(self-inline); min-block-size: 1lh; overflow: auto; position-area: block-end span-inline-end; }\n"
+    "h|datalist[data-cyber-open] h|option[data-cyber-active], h|select[data-cyber-base] h|option[data-cyber-active] { outline: black auto 1px; }\n"
+    "h|datalist[data-cyber-open] h|option { display: flex; min-inline-size: 24px; min-block-size: max(24px, 1lh); padding-inline: 0.5em; padding-block-end: 0; align-items: center; gap: 0.5em; white-space: nowrap; }\n"
+    /* (the fullscreen element (platform_api.js): the whole viewport, over a black backdrop) */
+    "[data-cyber-fs] { position: fixed !important; inset: 0 !important; margin: 0 !important; box-sizing: border-box !important; min-width: 0 !important; max-width: none !important; min-height: 0 !important; max-height: none !important; width: 100% !important; height: 100% !important; transform: none !important; object-fit: contain; }\n"
+    "[data-cyber-fs]::backdrop { background: black; }\n"
+    /* (a submenu: its trigger and its list in the menu around it; a list a menulist's item opens: beside it, an icon on that item) */
+    "h|submenu { display: contents; }\n"
+    "h|menulist h|submenu > h|menulist { position-area: inline-end span-block-end; }\n"
+    "h|menulist h|submenu > h|menuitem:first-child::-webkit-cyber-menu-icon { content: '\\25B8'; margin-inline-start: auto; }\n"
     "h|menulist > h|hr { color: inherit; margin-inline: 0; border: none; border-block-start: 1px solid currentColor; }\n"
     "h|menuitem { box-sizing: content-box; }\n"
     "h|menuitem h|a { display: none; }\n"
-    "h|menubar > h|menuitem { display: inline-flex; }\n"
+    "h|menubar > h|menuitem, h|menubar > h|submenu > h|menuitem { display: inline-flex; }\n"
     "h|menulist h|menuitem { display: flex; }\n"
     "h|menubar h|menuitem, h|menulist h|menuitem { align-items: center; padding-inline: 0.5em; padding-block: 0; gap: 0.5em; min-inline-size: 24px; min-block-size: max(24px, 1lh); }\n"
     "h|select:not([data-cyber-base]) { color: FieldText; }\n"
     /* (a select's options as its picker shows them (customizable select): a list box's own tree restyles its direct ones) */
     "h|select[data-cyber-base] h|option { min-inline-size: 24px; min-block-size: max(24px, 1lh); padding-inline: 0.5em; padding-block-end: 0; display: flex; align-items: center; gap: 0.5em; white-space: nowrap; }\n"
-    "h|select[data-cyber-base] h|option::before { content: '\\2713' / ''; }\n"
-    "h|select[data-cyber-base] h|option:not(:checked)::before { visibility: hidden; }\n"
-    "h|select[data-cyber-base] h|option:disabled { color: color-mix(currentColor 50%, transparent); }\n"
+    "h|select[data-cyber-base] h|option::checkmark { content: '\\2713' / ''; }\n"
+    "h|select[data-cyber-base] h|option:not(:checked)::checkmark { visibility: hidden; }\n"
+    "h|select[data-cyber-base]:not(:disabled) h|option:disabled { color: color-mix(currentColor 50%, transparent); }\n"
     "h|select[data-cyber-base] h|optgroup { display: block; }\n"
     "h|select[data-cyber-base] h|optgroup > h|legend { display: block; font-weight: bolder; padding-inline: 0.5em; min-block-size: 1lh; }\n"
-    "h|select[data-cyber-base] h|optgroup:not(:has(> h|legend))::before { content: attr(label); display: block; font-weight: bolder; padding-inline: 0.5em; min-block-size: 1lh; }\n"
+    "h|select[data-cyber-base] h|optgroup:disabled > h|legend, h|select[data-cyber-base] h|optgroup:disabled::before { color: color-mix(in srgb, currentColor 50%, transparent); }\n"
+    "h|select[data-cyber-base] h|optgroup:not(:has(> h|legend:first-child))::before { content: attr(label); display: block; font-weight: bolder; padding-inline: 0.5em; min-block-size: 1lh; }\n"
     /* (fieldset and legend: HTML's rendering section) */
     "h|fieldset { margin-inline: 2px; border: 2px groove ThreeDFace; padding-block: 0.35em 0.625em; padding-inline: 0.75em; min-inline-size: min-content; }\n"
     "h|legend { padding-inline: 2px; }\n"
@@ -13526,7 +13581,7 @@ typedef struct PseudoSide {
     int n;
     const CssDeclaration *const *decls;
 } PseudoSide;
-enum { PSEUDO_SIDES = 44, SIDE_INTEREST = 43, SIDE_BACKDROP = 42, SIDE_AMARK = 40, SIDE_BMARK = 41, SIDE_COLMARK = 38, SIDE_COLCUR = 39, SIDE_BTN_ON = 16, SIDE_BTN_OFF = 21, SIDE_LBTN = 26, SIDE_LBTN_ON = 30, SIDE_LBTN_OFF = 34, SIDE_SLIDER = 13, SIDE_MARKER = 5, SIDE_CURRENT = 6, SIDE_GROUP = 7, SIDE_BUTTONS = 8, SIDE_BUTTON0 = 9 };
+enum { PSEUDO_SIDES = 46, SIDE_MENUICON = 45, SIDE_CHECKMARK = 44, SIDE_INTEREST = 43, SIDE_BACKDROP = 42, SIDE_AMARK = 40, SIDE_BMARK = 41, SIDE_COLMARK = 38, SIDE_COLCUR = 39, SIDE_BTN_ON = 16, SIDE_BTN_OFF = 21, SIDE_LBTN = 26, SIDE_LBTN_ON = 30, SIDE_LBTN_OFF = 34, SIDE_SLIDER = 13, SIDE_MARKER = 5, SIDE_CURRENT = 6, SIDE_GROUP = 7, SIDE_BUTTONS = 8, SIDE_BUTTON0 = 9 };
 typedef struct PseudoRec {
     /* ::before, ::after, ::first-letter, ::first-line, ::marker (those two no box), ::scroll-marker,
      * its :target-current, ::scroll-marker-group, ::scroll-button(*, up, down, left, right) */
@@ -14821,7 +14876,7 @@ static bool layout_reads_attr(const char *name)
         "hidden", "colspan", "rowspan", "span", "dir", "lang", "slot", "name", "size", "cols", "rows",
         /* presentational hints */
         "bgcolor", "align", "valign", "nowrap", "cellpadding", "cellspacing", "border", "color", "face", "text",
-        "marginwidth", "marginheight", "topmargin", "bottommargin", "leftmargin", "rightmargin", "noshade", "bordercolor",
+        "marginwidth", "marginheight", "topmargin", "bottommargin", "leftmargin", "rightmargin", "noshade", "bordercolor", "background",
         "-cb-fm",   /* (a frame's body: its frame element's margins) */
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
@@ -16334,9 +16389,9 @@ static const PseudoRec *style_pseudo_rec(StylePass *P, StyleThread *T, const Css
         }
         /* (a button's may be in its (*) rule: "" here has none, for now) */
         bool mk_ = side == 4 || side == SIDE_AMARK || side == SIDE_BMARK;   /* (a ::marker, the element's or its ::after's or ::before's) */
-        bool button = side >= SIDE_BUTTONS && !mk_ && side != SIDE_INTEREST;
+        bool button = side >= SIDE_BUTTONS && !mk_ && side != SIDE_INTEREST && side != SIDE_CHECKMARK && side != SIDE_MENUICON;
         /* (::first-letter: a box when a rule matched; ::marker: its own content when one says, else "" for a rule) */
-        if (side >= 2 && side != SIDE_MARKER && side != SIDE_INTEREST && !button && !(mk_ && content)) content = any ? "" : NULL;
+        if (side >= 2 && side != SIDE_MARKER && side != SIDE_INTEREST && side != SIDE_CHECKMARK && side != SIDE_MENUICON && !button && !(mk_ && content)) content = any ? "" : NULL;
         else if (content) {
             const char *v = content;
             while (isspace((unsigned char)*v)) v++;
@@ -16554,6 +16609,13 @@ static bool layout_apply_wide_keyword(LayoutBox *box, const LayoutBox *parent,
         box->s->to_inh = inherit;
         return true;
     }
+    /* (list-style-position, inherited: inherit and unset the parent's, initial outside; revert the UA's, as it stands) */
+    if (!strcasecmp(prop, "list-style-position")) {
+        if (!strncasecmp(value, "revert", 6)) return true;
+        box->s->list_inside = (inherit || unset) && parent ? parent->s->list_inside : 0;
+        box->s->list_inside_set = 1;
+        return true;
+    }
     /* (inherited ones: unset takes the parent's, as inherit; initial the first value) */
     if (!strcasecmp(prop, "overflow-wrap") || !strcasecmp(prop, "word-wrap")) {
         box->s->owrap = (inherit || unset) && parent ? parent->s->owrap : 0;
@@ -16566,7 +16628,7 @@ static bool layout_apply_wide_keyword(LayoutBox *box, const LayoutBox *parent,
         LayoutStyle *s = box->s;
         if (!strcasecmp(prop, "background-clip")) { s->bg_clip = ps->bg_clip; s->bg_clip_col = ps->bg_clip_col; return true; }
         if (!strcasecmp(prop, "background-origin")) { s->bg_origin = ps->bg_origin; return true; }
-        if (!strcasecmp(prop, "opacity")) { s->opacity = ps->opacity; s->opacity_set = ps->opacity_set; return true; }
+        if (!strcasecmp(prop, "opacity")) { s->opacity = ps->opacity; s->opacity_set = ps->opacity_set; s->opacity_inh = 1; return true; }
         if (!strcasecmp(prop, "box-shadow")) {
             s->shadow_set = ps->shadow_set; s->shadow_raw = ps->shadow_raw; s->shadow_n = ps->shadow_n;
             s->shadow_multi = ps->shadow_multi; s->shadow_inset = ps->shadow_inset; s->shadow_cc = ps->shadow_cc;
@@ -17284,7 +17346,9 @@ static int style_slot_direction(NodeId s)
 static int style_auto_direction(LayoutContext *ctx, int dom, HtmlNode *node)
 {
     const char *d = layout_node_attribute(node, "dir");
-    if (d ? strcasecmp(d, "auto") != 0 : !(node->tag_name && !strcmp(node->tag_name, "bdi"))) return -1;
+    /* (a bdi: auto when its dir is neither ltr nor rtl, missing or invalid) */
+    bool bdi_ = node->tag_name && !strcmp(node->tag_name, "bdi");
+    if (d ? (strcasecmp(d, "auto") != 0 && !(bdi_ && strcasecmp(d, "ltr") && strcasecmp(d, "rtl"))) : !bdi_) return -1;
     /* (a text field: its value's first strong character) */
     bool ta_ = node->tag_name && !strcmp(node->tag_name, "textarea");
     if (node->tag_name && (!strcmp(node->tag_name, "input") || (ta_ && layout_node_attribute(node, "-cb-value")))) {
@@ -17483,8 +17547,32 @@ static void style_presentational_hints(LayoutContext *ctx, LayoutBox *box, int i
     char buf[64];
     const char *v;
     if (embedded) {
-        if (hint_dimension(layout_node_attribute(node, "width"), buf, sizeof(buf))) hint_apply(ctx, box, "width", buf);
-        if (hint_dimension(layout_node_attribute(node, "height"), buf, sizeof(buf))) hint_apply(ctx, box, "height", buf);
+        const char *wsrc_ = layout_node_attribute(node, "width"), *hsrc_ = layout_node_attribute(node, "height");
+        /* (an img in a picture: the dimension attributes of the source chosen, when one is) */
+        if (!strcasecmp(tag, "img") && node->store_id) {
+            extern bool css_media_query_matches(const char *query, double vw, double vh);
+            NodeId pic_ = dom_parent(node->store_id);
+            const char *ptg_ = pic_ && dom_kind(pic_) == DOM_K_ELEMENT ? dom_tag_name(pic_) : NULL;
+            if (ptg_ && !strcasecmp(ptg_, "picture"))
+                for (NodeId c_ = dom_first_child(pic_); c_ && c_ != node->store_id; c_ = dom_next_sibling(c_)) {
+                    if (dom_kind(c_) != DOM_K_ELEMENT) continue;
+                    const char *ct_ = dom_tag_name(c_);
+                    if (!ct_ || strcasecmp(ct_, "source") || !dom_get_attr_str(c_, "srcset")) continue;
+                    const char *md_ = dom_get_attr_str(c_, "media");
+                    if (md_ && md_[0] && !css_media_query_matches(md_, ctx->viewport_width, ctx->viewport_height)) continue;
+                    const char *ty_ = dom_get_attr_str(c_, "type");
+                    if (ty_ && ty_[0] && strncasecmp(ty_, "image/", 6)) continue;
+                    wsrc_ = dom_get_attr_str(c_, "width"); hsrc_ = dom_get_attr_str(c_, "height");
+                    break;
+                }
+        }
+        if (hint_dimension(wsrc_, buf, sizeof(buf))) hint_apply(ctx, box, "width", buf);
+        if (hint_dimension(hsrc_, buf, sizeof(buf))) hint_apply(ctx, box, "height", buf);
+        /* (hspace and vspace: the side margins, HTML 15.4.3) */
+        if (!strcasecmp(tag, "img") || !strcasecmp(tag, "embed") || !strcasecmp(tag, "iframe") || !strcasecmp(tag, "object")) {
+            if (hint_dimension(layout_node_attribute(node, "hspace"), buf, sizeof(buf))) { hint_apply(ctx, box, "margin-left", buf); hint_apply(ctx, box, "margin-right", buf); }
+            if (hint_dimension(layout_node_attribute(node, "vspace"), buf, sizeof(buf))) { hint_apply(ctx, box, "margin-top", buf); hint_apply(ctx, box, "margin-bottom", buf); }
+        }
         /* (a video's width and height attributes: its aspect-ratio too, auto w / h) */
         if (!strcasecmp(tag, "video")) {
             const char *wa_ = layout_node_attribute(node, "width"), *ha_ = layout_node_attribute(node, "height");
@@ -17510,6 +17598,23 @@ static void style_presentational_hints(LayoutContext *ctx, LayoutBox *box, int i
     }
     if ((role || body) && (v = layout_node_attribute(node, "bgcolor")) && *v)
         { char lc_[64]; const char *c_ = hint_legacy_color(v, lc_, sizeof lc_); if (c_) hint_apply(ctx, box, "background-color", c_); }
+    /* (background on body, table and its parts: its background image, HTML 15.3.10) */
+    if ((role || body) && (v = layout_node_attribute(node, "background")) && *v) {
+        char bu_[1100];
+        size_t k_ = 0;
+        const char *p_ = v;
+        while (*p_ == ' ' || *p_ == '\t' || *p_ == '\n' || *p_ == '\f' || *p_ == '\r') p_++;
+        if (*p_) {
+            k_ += (size_t)snprintf(bu_, sizeof bu_, "url(\"");
+            for (; *p_ && k_ + 4 < sizeof bu_; p_++) {
+                if (*p_ == '"' || *p_ == '\\') bu_[k_++] = '\\';
+                if (*p_ == '\n' || *p_ == '\r') continue;
+                bu_[k_++] = *p_;
+            }
+            bu_[k_++] = '"'; bu_[k_++] = ')'; bu_[k_] = 0;
+            hint_apply(ctx, box, "background-image", bu_);
+        }
+    }
     /* (<table bordercolor>: its border colour) */
     if (role == 1 && (v = layout_node_attribute(node, "bordercolor")) && *v) { char lc_[64]; const char *c_ = hint_legacy_color(v, lc_, sizeof lc_); if (c_) hint_apply(ctx, box, "border-color", c_); }
     if (body && (v = layout_node_attribute(node, "text")) && *v) { char lc_[64]; const char *c_ = hint_legacy_color(v, lc_, sizeof lc_); if (c_) hint_apply(ctx, box, "color", c_); }   /* (<body text>) */
@@ -17627,7 +17732,6 @@ static void style_presentational_hints(LayoutContext *ctx, LayoutBox *box, int i
         if (table_border_px(layout_node_attribute(node, "border"), buf, sizeof(buf)) && strcmp(buf, "0px") != 0) {
             hint_apply(ctx, box, "border-style", "outset");
             hint_apply(ctx, box, "border-width", buf);
-            hint_apply(ctx, box, "border-color", "gray");
         }
         return;
     }
@@ -18308,6 +18412,31 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
             if ((pt == a_canvas && !dom_get_attr_str(pn, "content") && !dom_get_attr_str(pn, "layoutsubtree")) || pt == a_video || pt == a_audio || pt == a_iframe || pt == a_geo || pt == a_um || pt == a_perm || pt == a_inst) { box->s->display = CSS_DISPLAY_NONE; box->s->disp_contents = 0; }
         }
     }
+    /* (a drawable element in a canvas laid out for drawElementImage: drawn on its own, the containing block of what is
+     * positioned in it, fixed too) */
+    if (node && node->type == HTML_NODE_ELEMENT && node->store_id && box->s->display == CSS_DISPLAY_INLINE && layout_node_attribute(node, "drawable")) {
+        NodeId a_ = dom_parent(node->store_id);
+        for (int d_ = 0; a_ && d_ < 64; d_++, a_ = dom_parent(a_)) {
+            if (dom_kind(a_) != DOM_K_ELEMENT) break;
+            const char *tn_ = dom_tag_name(a_);
+            if (tn_ && !strcasecmp(tn_, "canvas")) {
+                if (dom_get_attr_str(a_, "content") || dom_get_attr_str(a_, "layoutsubtree")) box->s->abs_cb |= 2048;
+                break;
+            }
+        }
+    }
+    /* (assigned to a slot right in a canvas laid out for drawElementImage: placed as the canvas's own children are) */
+    if (node && node->type == HTML_NODE_ELEMENT && parent && parent->s->disp_contents && p >= 0 && box->s->display != CSS_DISPLAY_NONE &&
+        box->s->position == CSS_POSITION_STATIC && ctx->tree.nodes[p].parent_idx >= 0) {
+        HtmlNode *sn_ = css_layout_box_node(ctx, p), *cn_ = css_layout_box_node(ctx, ctx->tree.nodes[p].parent_idx);
+        if (sn_ && cn_ && sn_->type == HTML_NODE_ELEMENT && cn_->type == HTML_NODE_ELEMENT && sn_->tag_name && cn_->tag_name &&
+            !strcasecmp(sn_->tag_name, "slot") && !strcasecmp(cn_->tag_name, "canvas") && node->store_id && dom_parent(node->store_id) != sn_->store_id &&
+            (layout_node_attribute(cn_, "content") || layout_node_attribute(cn_, "layoutsubtree"))) {
+            box->s->position = CSS_POSITION_ABSOLUTE;
+            layout_set_inset(box, 0, "0", 0.0, 0.0);
+            layout_set_inset(box, box->s->direction == 1 ? 1 : 3, "0", 0.0, 0.0);
+        }
+    }
     /* (display: contents on a replaced element or form control: none, CSS Display Appendix B) */
     if (box->s->disp_contents && node && node->type == HTML_NODE_ELEMENT && node->tag_name && parent) {
         static const char *const unb[] = { "br", "wbr", "meter", "progress", "canvas", "embed", "object", "audio", "iframe", "img",
@@ -18384,6 +18513,9 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
     }
     /* (an <audio>: its controls of a fixed shape, no aspect-ratio to them, as browsers have it) */
     if (box->s->aspect_ratio_prop && node && node->type == HTML_NODE_ELEMENT && node->tag_name && !strcasecmp(node->tag_name, "audio")) { box->s->aspect_ratio_prop = 0; box->s->aspect_ratio = 0.0; }
+    /* (a text control: no columns, its text its own one line or area) */
+    if ((box->s->column_count > 0 || box->s->column_width > 0.0) && node && node->type == HTML_NODE_ELEMENT && node->tag_name &&
+        (!strcasecmp(node->tag_name, "input") || !strcasecmp(node->tag_name, "textarea"))) { box->s->column_count = 0; box->s->column_width = 0.0; }
     /* (an inline box of another writing mode than its parent's: an inline-block; a replaced one as it is) */
     if (parent && box->s->writing_mode != parent->s->writing_mode && box->s->display == CSS_DISPLAY_INLINE && box->s->writing_mode_set &&
         node && node->type == HTML_NODE_ELEMENT && node->tag_name) {
@@ -18391,6 +18523,19 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
         bool is_rep = false;
         for (size_t k = 0; k < sizeof rep / sizeof rep[0] && !is_rep; k++) is_rep = !strcasecmp(node->tag_name, rep[k]);
         if (!is_rep) box->s->display = CSS_DISPLAY_INLINE_BLOCK;
+    }
+    /* (a fieldset's rendered legend, its first legend child in flow: blockified, HTML 15.3.13) */
+    if (parent && parent->s->is_fieldset && node && node->type == HTML_NODE_ELEMENT && node->tag_name && !strcasecmp(node->tag_name, "legend") && node->store_id &&
+        !box->s->float_side && box->s->position != CSS_POSITION_ABSOLUTE && box->s->position != CSS_POSITION_FIXED && box->s->display != CSS_DISPLAY_NONE && !box->s->disp_contents) {
+        bool first_ = true;
+        for (NodeId q = dom_prev_sibling(node->store_id); q && first_; q = dom_prev_sibling(q))
+            if (dom_kind(q) == DOM_K_ELEMENT && g_dom.tag[dom_slot(q)] == css_atom_intern("legend", 6)) first_ = false;
+        if (first_) {
+            if (box->s->display == CSS_DISPLAY_INLINE || box->s->display == CSS_DISPLAY_INLINE_BLOCK) box->s->display = CSS_DISPLAY_BLOCK;
+            box->s->inline_level = 0;
+            if (box->s->ruby_role || box->s->ruby_int) { box->s->ruby_role = 0; box->s->ruby_int = 0; box->s->display = CSS_DISPLAY_BLOCK; }
+            if (box->s->table_role >= 2) { box->s->display = CSS_DISPLAY_BLOCK; box->s->table_role = 0; box->s->table_caption = 0; box->s->table_group = 0; }
+        }
     }
     /* (an element whose box is always a block container, inline: an inline-block) */
     box->s->inl_ctl = 0;
@@ -18457,7 +18602,8 @@ static bool style_is_font_size_prop(const char *prop)
             /* (and the face: what ch and ex measure) */
             !strcasecmp(prop, "font-family") || !strcasecmp(prop, "font-weight") || !strcasecmp(prop, "font-style")) ||
            (prop && (prop[0] == 'w' || prop[0] == 'W') && !strcasecmp(prop, "writing-mode")) ||   /* (vi, vb: by it) */
-           (prop && !strcasecmp(prop, "line-height"));   /* (and line-height: what lh is) */
+           (prop && !strcasecmp(prop, "line-height")) ||   /* (and line-height: what lh is) */
+           (prop && (prop[0] == 'a' || prop[0] == 'A') && !strcasecmp(prop, "all"));   /* (and all, which sets them too) */
 }
 
 static void style_finish_box_em0(bool em_defer, LayoutBox *box, const LayoutBox *parent, bool element);
@@ -18883,6 +19029,15 @@ static void style_finish_box_em0(bool em_defer, LayoutBox *box, const LayoutBox 
     /* Table-internal boxes have no margins; rows, row groups and columns no
      * padding, nor borders but in the collapsing border model (CSS 2.1
      * sections 8.3, 8.4, 17.6.1). */
+    /* (a fieldset's legend, in flow: blockified first, its own margins, padding and border kept, HTML 15.3.13) */
+    bool rlegend_ = box->s->is_legend && parent && parent->s && parent->s->is_fieldset && element && !box->s->float_side &&
+                    box->s->position != CSS_POSITION_ABSOLUTE && box->s->position != CSS_POSITION_FIXED;
+    if (rlegend_ && box->s->table_role >= 2) {
+        box->s->display = CSS_DISPLAY_BLOCK;
+        box->s->table_role = 0;
+        box->s->table_caption = 0;
+        box->s->table_group = 0;
+    }
     if (box->s->display == CSS_DISPLAY_OTHER && box->s->table_role >= 2 && box->s->table_role <= 6 &&
         box->s->table_role != 5) {
         box->s->margin_top = box->s->margin_right = box->s->margin_bottom = box->s->margin_left = 0.0;
@@ -19588,6 +19743,8 @@ static bool layout_pseudo_allowed(const HtmlNode *n)
         const char *ty = layout_node_attribute((HtmlNode *)n, "type");
         if (ty && (!strcasecmp(ty, "checkbox") || !strcasecmp(ty, "radio"))) return true;
     }
+    /* (a select of base appearance: a box of its own children, its ::before and ::after as any) */
+    if (!strcasecmp(n->tag_name, "select") && layout_node_attribute((HtmlNode *)n, "data-cyber-base")) return true;
     for (int i = 0; none[i]; i++)
         if (strcasecmp(n->tag_name, none[i]) == 0) return false;
     return true;
@@ -20063,6 +20220,28 @@ static int layout_scroll_pseudo_add(LayoutContext *ctx, LayoutPseudoPair *pairs,
     os->display = held_d;
     /* (a backdrop: a position other than absolute or fixed computes to absolute) */
     if (side == SIDE_BACKDROP && ctx->boxes[pe].s->position != CSS_POSITION_ABSOLUTE && ctx->boxes[pe].s->position != CSS_POSITION_FIXED) ctx->boxes[pe].s->position = CSS_POSITION_ABSOLUTE;
+    /* (a ::checkmark a script animates (Element.animate with pseudoElement ::checkmark): that style over its rules) */
+    if (side == SIDE_CHECKMARK && ctx->ids && ctx->ids[owner]) {
+        const char *wa_ = anim_api_web_style(ctx->ids[owner] | 0x10000000u);
+        for (const char *p_ = wa_; p_ && *p_;) {
+            while (*p_ == ' ' || *p_ == ';') p_++;
+            const char *c_ = strchr(p_, ':'), *e_ = c_ ? strchr(c_, ';') : NULL;
+            if (!c_) break;
+            if (!e_) e_ = p_ + strlen(p_);
+            char pn_[64], pv_[512];
+            size_t nl_ = (size_t)(c_ - p_), vl_ = (size_t)(e_ - c_ - 1);
+            if (nl_ < sizeof pn_ && vl_ < sizeof pv_) {
+                memcpy(pn_, p_, nl_); pn_[nl_] = 0;
+                memcpy(pv_, c_ + 1, vl_); pv_[vl_] = 0;
+                CssDeclaration d_;
+                memset(&d_, 0, sizeof d_);
+                d_.property = pn_;
+                d_.value = pv_[0] == ' ' ? pv_ + 1 : pv_;
+                layout_apply_declaration(&ctx->boxes[pe], &d_, ctx->viewport_width, ctx->viewport_width, ctx->base_url);
+            }
+            p_ = *e_ ? e_ + 1 : e_;
+        }
+    }
     if (side == SIDE_GROUP) { ctx->boxes[pe].s->contain_layout = 1; ctx->boxes[pe].s->contain_size = ctx->boxes[pe].s->position == CSS_POSITION_ABSOLUTE || ctx->boxes[pe].s->position == CSS_POSITION_FIXED ? 2 : 3; ctx->boxes[pe].s->contain_any = 1; ctx->boxes[pe].s->abs_cb |= 128; }   /* (a marker group: always layout and size containment) */
     free(ds);
     layout_box_init(ctx, pt);
@@ -20220,6 +20399,13 @@ static bool layout_in_top_layer(const LayoutContext *ctx, int i)
     return n && n->type == HTML_NODE_ELEMENT && n->store_id && (dom_element_state(n->store_id) & (DOM_ST_POPOVER_OPEN | DOM_ST_MODAL));
 }
 
+/* (box i an HTML option: what has a ::checkmark) */
+static bool layout_is_option_box(const LayoutContext *ctx, int i)
+{
+    const HtmlNode *n = layout_node_dom((LayoutContext *)ctx, ctx->tree.nodes[i].dom_node_idx);
+    return n && n->type == HTML_NODE_ELEMENT && n->tag_name && !strcasecmp(n->tag_name, "option") && n->store_id && dom_ns(n->store_id) == DOM_NS_HTML;
+}
+
 /* (box i an interest invoker: a button, a link or an area with an interestfor attribute) */
 static bool layout_interest_invoker(const LayoutContext *ctx, int i)
 {
@@ -20256,6 +20442,12 @@ static void layout_scroll_pseudos_attach(LayoutContext *ctx, LayoutPseudoPair *p
         /* (::interest-button: an interest invoker's, just after it) */
         if (r && r->side[SIDE_INTEREST].content && !root && layout_interest_invoker(ctx, i))
             layout_scroll_pseudo_add(ctx, pairs, hn, kp, i, SIDE_INTEREST, "::interest-button", r->side[SIDE_INTEREST].content, parent, next, &r->side[SIDE_INTEREST], NULL, em_defer);
+        /* (::checkmark: an option's, its first child, before its ::before) */
+        if (r && r->side[SIDE_CHECKMARK].content && r->side[SIDE_CHECKMARK].content[0] && !root && layout_is_option_box(ctx, i))
+            layout_scroll_pseudo_add(ctx, pairs, hn, kp, i, SIDE_CHECKMARK, "::checkmark", r->side[SIDE_CHECKMARK].content, i, ctx->tree.nodes[i].first_child_idx, &r->side[SIDE_CHECKMARK], NULL, em_defer);
+        /* (a submenu's menuitem's expand icon: its last child, after its ::after) */
+        if (r && r->side[SIDE_MENUICON].content && r->side[SIDE_MENUICON].content[0] && !root)
+            layout_scroll_pseudo_add(ctx, pairs, hn, kp, i, SIDE_MENUICON, "::-webkit-cyber-menu-icon", r->side[SIDE_MENUICON].content, i, -1, &r->side[SIDE_MENUICON], NULL, em_defer);
         /* The buttons, after it. */
         for (int d = 0; r && d < 4; d++) {
             const PseudoSide *any = &r->side[SIDE_BUTTONS], *dir = &r->side[SIDE_BUTTON0 + d];
@@ -20601,6 +20793,8 @@ static void layout_pseudo_attach(LayoutContext *ctx, bool em_defer)
         if (!r) continue;
         if (r->side[SIDE_BACKDROP].content && layout_in_top_layer(ctx, i)) m++;
         if (r->side[SIDE_INTEREST].content && layout_interest_invoker(ctx, i)) m++;
+        if (r->side[SIDE_CHECKMARK].content && r->side[SIDE_CHECKMARK].content[0] && layout_is_option_box(ctx, i)) m++;
+        if (r->side[SIDE_MENUICON].content && r->side[SIDE_MENUICON].content[0]) m++;
         if (!layout_pseudo_allowed(layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx))) continue;
         m += (r->side[0].content != NULL) + (r->side[1].content != NULL) + (r->side[2].content != NULL);
         m += (r->side[3].content != NULL && !r->side[2].content && fl_font_rule(&r->side[3]));   /* (::first-line's box) */
@@ -24716,6 +24910,17 @@ double css_layout_content_area(const LayoutContext *ctx, int i, double *adv)
     return layout_content_area_height(&ctx->boxes[i]);
 }
 
+/* (the line advance line-height: normal gives, whatever it says) */
+static double layout_normal_advance_box(const LayoutBox *box)
+{
+    double fs = box && box->s->font_size > 0.0 ? box->s->font_size : 16.0;
+    TextShaper *font = display_list_get_font(layout_metric_slot(box));
+    if (!font) font = display_list_get_default_font();
+    float lh = font ? text_shaper_normal_line_height(font, (float)fs) : 0.0f;
+    if (lh > 0.5f * fs && lh <= 3.0f * fs + 0.01f) return lh;
+    return layout_line_advance(fs);
+}
+
 /* Line advance honoring an explicit CSS line-height; `normal` uses the
  * font's own ascent + descent + line gap, as browsers do. */
 static double layout_line_advance_box(const LayoutBox *box)
@@ -25152,9 +25357,17 @@ static int* layout_collect_flow_children(LayoutContext *ctx, int idx, int *out_c
     int *kids = (int*)malloc((size_t)cap * sizeof(int));
     if (!kids) return NULL;
     int n = 0;
+    /* (in a display: contents box: a fieldset's rendered legend it holds not in its flow, the fieldset's border has it) */
+    int fsa_ = -1;
+    if (layout_box(ctx, idx)->s->disp_contents) {
+        int a_ = idx;
+        for (int d_ = 0; a_ >= 0 && d_ < 8 && layout_box(ctx, a_)->s->disp_contents; d_++) a_ = ctx->tree.nodes[a_].parent_idx;
+        if (a_ >= 0 && layout_box(ctx, a_)->s->is_fieldset && layout_box(ctx, a_)->fs_legend > 0) fsa_ = layout_box(ctx, a_)->fs_legend - 1;
+    }
     for (int c = node->first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
         LayoutBox *child = layout_box(ctx, c);
         if (!layout_is_in_flow(child)) continue;
+        if (c == fsa_) continue;
         if (n < cap) kids[n++] = c;
     }
     if (n == 0) { free(kids); return NULL; }
@@ -25808,6 +26021,19 @@ static bool input_is_button(HtmlNode *n)
     return t && (!strcasecmp(t, "button") || !strcasecmp(t, "submit") || !strcasecmp(t, "reset"));
 }
 
+/* (an input button's value: its lines, a line feed (CR LF, CR) ending each but the last, as its label shows them) */
+static int input_button_lines(HtmlNode *n)
+{
+    if (!input_is_button(n)) return 1;
+    const char *v = layout_node_attribute(n, "value");
+    int k = 1;
+    for (const char *p = v; p && *p; p++) {
+        if (*p == '\r') { k++; if (p[1] == '\n') p++; }
+        else if (*p == '\n') k++;
+    }
+    return k;
+}
+
 /* ---- last remembered sizes (css-sizing-4): content boxes by element, kept from layouts without size containment ---- */
 enum { REMEMBER_MAX = 512 };
 static uint32_t g_rem_id[REMEMBER_MAX];
@@ -25995,14 +26221,18 @@ static void layout_svg_size_in0(const LayoutBox *b, HtmlNode *dom, double pcw, d
     bool canvas = dom->tag_name && strcasecmp(dom->tag_name, "canvas") == 0;
     /* (a canvas's attributes are its bitmap's size: its natural size, below) */
     double zf = b->s->zoom > 0.0f ? (double)b->s->zoom : 1.0;
+    /* (a length with a unit, em and the rest: as CSS has it; a bare number, pixels) */
+    #define SVG_ATTR_LEN(v_) (strpbrk((v_), "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") \
+        ? css_parse_length((v_), 0.0, g_layout_ctx ? g_layout_ctx->viewport_width : 0.0, b->s->font_size > 0.0 ? b->s->font_size : 16.0) * zf : atof(v_) * zf)
     if (!canvas && w < 0.0 && wa && wa[0]) {
-        if (!strchr(wa, '%')) w = atof(wa) * zf;
+        if (!strchr(wa, '%')) w = SVG_ATTR_LEN(wa);
         else if (pcw > 0.0) w = pcw * atof(wa) / 100.0;
     }
     if (!canvas && h < 0.0 && ha && ha[0]) {
-        if (!strchr(ha, '%')) h = atof(ha) * zf;
+        if (!strchr(ha, '%')) h = SVG_ATTR_LEN(ha);
         else if (pch > 0.0) h = pch * atof(ha) / 100.0;
     }
+    #undef SVG_ATTR_LEN
     /* (an <svg>'s zero width or height attribute beside a size the other way and a viewBox: no natural size that way, the ratio's) */
     bool svg_z_h = !canvas && h == 0.0 && w > 0.0 && ha && ha[0] && !(b->s->height_set || b->s->height_percent > 0.0) && layout_node_attribute(dom, "viewbox");
     bool svg_z_w = !canvas && w == 0.0 && h > 0.0 && wa && wa[0] && !(b->s->width_set || b->s->width_percent > 0.0) && layout_node_attribute(dom, "viewbox");
@@ -26197,7 +26427,11 @@ static bool layout_replaced_at(LayoutContext *ctx, int idx)
     HtmlNode *n = css_layout_box_node(ctx, idx);
     if (n && n->type == HTML_NODE_ELEMENT && n->tag_name) {   /* (a replaced element at block level too) */
         static const char *const rep[] = { "img", "video", "canvas", "iframe", "embed", "object", "svg", NULL };
-        for (int i = 0; rep[i]; i++) if (!strcasecmp(n->tag_name, rep[i])) return true;
+        for (int i = 0; rep[i]; i++) if (!strcasecmp(n->tag_name, rep[i])) {
+            /* (an object with nothing to show, an inline of its fallback: not replaced) */
+            if (i == 5 && !layout_node_attribute(n, "data") && layout_box(ctx, idx)->s->display == CSS_DISPLAY_INLINE) break;
+            return true;
+        }
     }
     return n && n->type == HTML_NODE_ELEMENT && ifc_is_atom(layout_box(ctx, idx), n);
 }
@@ -26755,6 +26989,21 @@ static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_ma
             const char *lv = layout_node_attribute(dom, "value");
             if (!lv) lv = !strcasecmp(ty, "submit") ? "Submit" : !strcasecmp(ty, "reset") ? "Reset" : "";
             double lw = 0.0;
+            if (input_button_lines(dom) > 1) {
+                /* (lines: the widest) */
+                char ln_[512];
+                for (const char *p = lv; ; ) {
+                    size_t L = strcspn(p, "\r\n");
+                    if (L >= sizeof ln_) L = sizeof ln_ - 1;
+                    memcpy(ln_, p, L); ln_[L] = 0;
+                    double w1 = 0.0;
+                    if (ln_[0] && layout_measure_text_styled(box, ln_, box->s->font_size > 0.0 ? box->s->font_size : 13.333, &w1, NULL) && w1 > lw) lw = w1;
+                    p += strcspn(p, "\r\n");
+                    if (!*p) break;
+                    if (*p == '\r' && p[1] == '\n') p++;
+                    p++;
+                }
+            } else
             if (!lv[0] || !layout_measure_text_styled(box, lv, box->s->font_size > 0.0 ? box->s->font_size : 13.333, &lw, NULL)) lw = 0.0;
             content = lw;
         }
@@ -26776,7 +27025,7 @@ static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_ma
             const char *vv = layout_node_attribute(dom, "-cb-value");
             if (!vv) vv = layout_node_attribute(dom, "value");
             double lw = 0.0;
-            if (box->s->width_keyword == 2 && vv && vv[0] && layout_measure_text_styled(box, vv, box->s->font_size > 0.0 ? box->s->font_size : 13.333, &lw, NULL)) content = lw;
+            if (box->s->width_keyword == 2 && vv && vv[0] && !(ty && (!strcasecmp(ty, "range") || !strcasecmp(ty, "color") || !strcasecmp(ty, "file"))) && layout_measure_text_styled(box, vv, box->s->font_size > 0.0 ? box->s->font_size : 13.333, &lw, NULL)) content = lw;
             /* (field-sizing: content: its value, else its placeholder, and room for the caret) */
             if (box->s->field_sizing) {
                 const char *fv = vv && vv[0] ? vv : layout_node_attribute(dom, "placeholder");
@@ -27065,7 +27314,16 @@ static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_ma
             }
             /* A table caption never widens its table past min-content. */
             double w = layout_intrinsic_contribution(ctx, c, want_max && !cb->s->table_caption);
-            if (layout_box_is_block_level(cb) && cb->s->float_side == 0) {
+            /* (an inline with a block in it (display: contents too): lines broken around that block, the inline's
+             * contribution a line of its own) */
+            bool blk_in_ = false;
+            if (one_line && cb->s->display == CSS_DISPLAY_INLINE && cn && cn->type == HTML_NODE_ELEMENT && !layout_box_is_atomic_inline(cb) && cb->s->float_side == 0)
+                for (int g = ctx->tree.nodes[c].first_child_idx; g >= 0 && !blk_in_; g = ctx->tree.nodes[g].next_sibling_idx) {
+                    const LayoutBox *gb = layout_box(ctx, g);
+                    blk_in_ = gb->s->display != CSS_DISPLAY_NONE && gb->s->display != CSS_DISPLAY_INLINE && layout_box_is_block_level(gb) &&
+                              gb->s->float_side == 0 && gb->s->position != CSS_POSITION_ABSOLUTE && gb->s->position != CSS_POSITION_FIXED;
+                }
+            if ((layout_box_is_block_level(cb) && cb->s->float_side == 0) || blk_in_) {
                 if (line > content) content = line;
                 line = 0.0;
                 pending_space = 0.0;
@@ -27073,8 +27331,21 @@ static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_ma
             } else if (one_line) {
                 /* (a float that clears: below the ones before it) */
                 if (cb->s->float_side && cb->s->clear && line > 0.0) { if (line > content) content = line; line = 0.0; pending_space = 0.0; }
+                /* (text with collapsible space at its start or end: that space between it and the inline content beside it) */
+                const char *tx_ = cn && cn->type == HTML_NODE_TEXT && (cb->s->white_space == 0 || cb->s->white_space == 1) ? css_layout_node_text(ctx, cn) : NULL;
+                double sw_ = 0.0;
+                if (tx_ && tx_[0]) {
+                    double fs_ = cb->s->font_size > 0.0 ? cb->s->font_size : 16.0;
+                    if (!layout_measure_text_styled(cb, " ", fs_, &sw_, NULL)) sw_ = fs_ * 0.25;
+                    unsigned char c0_ = (unsigned char)tx_[0];
+                    if ((c0_ == ' ' || c0_ == '\n' || c0_ == '\t' || c0_ == '\r' || c0_ == '\f') && line > 0.0 && pending_space <= 0.0) pending_space = sw_;
+                }
                 line += pending_space + w;
                 pending_space = 0.0;
+                if (tx_ && tx_[0]) {
+                    unsigned char cz_ = (unsigned char)tx_[strlen(tx_) - 1];
+                    if (cz_ == ' ' || cz_ == '\n' || cz_ == '\t' || cz_ == '\r' || cz_ == '\f') pending_space = sw_;
+                }
             } else if (w > content) {
                 content = w;
             }
@@ -27626,13 +27897,37 @@ static void layout_size_atomic_inline(LayoutContext *ctx, int c, double avail)
              strcasecmp(dn->tag_name, "select") == 0)) {
             const char *ty = layout_node_attribute(dn, "type");
             if (!(ty && strcasecmp(ty, "hidden") == 0)) {
-                double lines = strcasecmp(dn->tag_name, "textarea") == 0 ? textarea_rows_used(child, dn) : 1.0;
+                double lines = strcasecmp(dn->tag_name, "textarea") == 0 ? textarea_rows_used(child, dn) : (double)input_button_lines(dn);
+                /* (a select of base appearance: a box of its own content, none of a line here) */
+                if (!strcasecmp(dn->tag_name, "select") && layout_node_attribute(dn, "data-cyber-base") && layout_node_attribute(dn, "data-cyber-nolabel")) lines = 0.0;
                 double fs = child->s->font_size > 0.0 ? child->s->font_size : 16.0;
                 double lh = layout_line_advance_box(child);
                 (void)fs;
                 /* (a checkbox or radio: its 13px square, as wide) */
                 if (ty && (!strcasecmp(ty, "checkbox") || !strcasecmp(ty, "radio")) && strcasecmp(dn->tag_name, "input") == 0) lh = 13.0;
+                /* (a list box: its size's rows, else 4, each as form_controls.js has them, whatever the sheets say) */
+                else if (!strcasecmp(dn->tag_name, "select") && !layout_node_attribute(dn, "data-cyber-base")) {
+                    const char *sz_ = layout_node_attribute(dn, "size");
+                    int n_ = sz_ && sz_[0] ? atoi(sz_) : 0;
+                    if ((layout_node_attribute(dn, "multiple") && n_ != 1) || n_ > 1) {
+                        lines = n_ > 1 ? n_ : 4;
+                        lh = floor(fs * 1.15 + 0.5 + 0.5);
+                    }
+                }
+                /* (a text field: its line no shorter than normal, whatever its line-height) */
+                else if (!strcasecmp(dn->tag_name, "input") && (!ty || !ty[0] || !strcasecmp(ty, "text") || !strcasecmp(ty, "tel") || !strcasecmp(ty, "search") ||
+                         !strcasecmp(ty, "url") || !strcasecmp(ty, "email") || !strcasecmp(ty, "password") || !strcasecmp(ty, "number"))) {
+                    double nlh_ = layout_normal_advance_box(child);
+                    if (lh < nlh_) lh = nlh_;
+                }
                 child->height = lines * lh + layout_vertical_border_padding(child);
+                /* (within its min- and max-height, as any box's; a select's own sizing has them) */
+                if (strcasecmp(dn->tag_name, "select") || !layout_node_attribute(dn, "data-cyber-base") || layout_node_attribute(dn, "data-cyber-nolabel")) {
+                    double vbp_ = layout_vertical_border_padding(child);
+                    bool bb_ = child->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX;
+                    if (child->max_height >= 0.0) { double mx_ = bb_ ? child->max_height : child->max_height + vbp_; if (child->height > mx_) child->height = mx_; }
+                    if (child->min_height > 0.0) { double mn_ = bb_ ? child->min_height : child->min_height + vbp_; if (child->height < mn_) child->height = mn_; }
+                }
             }
         }
     }
@@ -27760,7 +28055,8 @@ static bool layout_inline_range_empty(LayoutContext *ctx, int first, int last)
                 const LayoutStyle *s = b->s;
                 if (s->display != CSS_DISPLAY_INLINE || !d->tag_name ||
                     strcasecmp(d->tag_name, "img") == 0 || strcasecmp(d->tag_name, "br") == 0 ||
-                    layout_is_replaced_form_element(d->tag_name) || strcasecmp(d->tag_name, "svg") == 0 ||
+                    (layout_is_replaced_form_element(d->tag_name) && !(!strcasecmp(d->tag_name, "object") && !layout_node_attribute(d, "data"))) ||   /* (an object with no data: its fallback, an inline) */
+                    strcasecmp(d->tag_name, "svg") == 0 ||
                     strcasecmp(d->tag_name, "canvas") == 0)
                     return false;
                 if (s->margin_left != 0.0 || s->margin_right != 0.0 || s->padding_left != 0.0 ||
@@ -29174,7 +29470,20 @@ static double mc_push_walk(LayoutContext *ctx, int idx, double top, double H, in
             const LayoutBox *pb = layout_box(ctx, prev);
             double pend = pb->y + pb->height - top;
             double gapm = (pb->margin_bottom > 0.0 ? pb->margin_bottom : 0.0) + (cb->margin_top > 0.0 ? cb->margin_top : 0.0);
-            if (pend <= col * H + 0.01 && y - pend <= gapm + 0.01) {
+            /* (a forced break inside the one before, at this column's top: the margins after it kept, CSS Fragmentation 5.2) */
+            bool forced_ = false;
+            if (pend >= col * H - 0.01) {
+                int stk_[64], ns_ = 0;
+                for (int q = ctx->tree.nodes[prev].first_child_idx; q >= 0 && ns_ < 64; q = ctx->tree.nodes[q].next_sibling_idx) stk_[ns_++] = q;
+                while (ns_ > 0 && !forced_) {
+                    int q = stk_[--ns_];
+                    const LayoutBox *qb = layout_box(ctx, q);
+                    if (qb->s->display == CSS_DISPLAY_NONE) continue;
+                    if (mc_brk(ctx, q, false) == 1 && fabs((qb->y - top) - col * H) < 0.5) { forced_ = true; break; }
+                    for (int r = ctx->tree.nodes[q].first_child_idx; r >= 0 && ns_ < 64; r = ctx->tree.nodes[r].next_sibling_idx) stk_[ns_++] = r;
+                }
+            }
+            if (!forced_ && pend <= col * H + 0.01 && y - pend <= gapm + 0.01) {
                 double d = col * H - y;
                 layout_move_box(ctx, c, cb->x, cb->y + d);
                 shift += d;
@@ -31635,6 +31944,7 @@ static uint32_t bidi_utf8_next(const unsigned char **pp, const unsigned char *e)
 static int bidi_controls(const LayoutBox *b, bool open, uint32_t out[2])
 {
     bool r = b->s->direction == 1;
+    if (b->s->disp_contents) return 0;   /* (display: contents: no box, no embedding or isolation) */
     switch (b->s->unicode_bidi) {
     case 1: out[0] = open ? (r ? 0x202B : 0x202A) : 0x202C; return 1;
     case 2: out[0] = open ? (r ? 0x2067 : 0x2066) : 0x2069; return 1;
@@ -32836,6 +33146,11 @@ static void ifc_collect(LayoutContext *ctx, int p, int c0, int stop, IfcItems *I
         LayoutBox *cb = layout_box(ctx, c);
         if (cb->s->display == CSS_DISPLAY_NONE) continue;
         if (p >= 0 && layout_box(ctx, p)->s->is_fieldset && layout_box(ctx, p)->fs_legend == c + 1) continue;   /* (a fieldset's rendered legend: in its border) */
+        if (p >= 0 && layout_box(ctx, p)->s->disp_contents) {   /* (the same through a slot or another display: contents box) */
+            int a_ = p;
+            for (int d_ = 0; a_ >= 0 && d_ < 8 && layout_box(ctx, a_)->s->disp_contents; d_++) a_ = ctx->tree.nodes[a_].parent_idx;
+            if (a_ >= 0 && layout_box(ctx, a_)->s->is_fieldset && layout_box(ctx, a_)->fs_legend == c + 1) continue;
+        }
         if (!layout_is_in_flow(cb)) {
             /* (out of the line, the spaces around it collapsing together:
              * where it is, for its static position) */
@@ -33050,10 +33365,35 @@ static void ifc_collect(LayoutContext *ctx, int p, int c0, int stop, IfcItems *I
         } else if (ifc_is_br(n) && br_in_ruby(ctx, c)) {
             /* (nothing) */
         } else if (ifc_is_br(n)) {
+            /* (the inline ancestors' embeddings: closed before the paragraph
+             * break, opened again after it, as the next paragraph's) */
+            int anc[32], nanc = 0;
+            if (I->gather)
+                for (int a = ctx->tree.nodes[c].parent_idx; a >= 0 && nanc < 32; a = ctx->tree.nodes[a].parent_idx) {
+                    LayoutBox *ab = layout_box(ctx, a);
+                    if (ab->s->display != CSS_DISPLAY_INLINE && !ab->s->disp_contents) break;
+                    anc[nanc++] = a;
+                }
+            for (int k = 0; k < nanc; k++) {
+                uint32_t bc[2];
+                int nb = bidi_controls(layout_box(ctx, anc[k]), false, bc);
+                for (int q = 0; q < nb; q++) {
+                    ifc_cp_put(I, bc[q], 0);
+                    if (ifc_put(I, -1, 0, 0, 0.0, IFC_CTL)) I->t[I->n - 1].cp0 = I->ncp - 1;
+                }
+            }
             ifc_cp_put(I, 0x2029, 0);   /* (a forced break ends a bidi paragraph) */
             if (I->ovr) ifc_cp_put(I, I->ovr, 0);   /* (the block's override: on in the next one too) */
             ifc_put(I, c, 0, 0, 0.0, IFC_BR);
             if (I->gather) I->t[I->n - 1].cp0 = I->ncp - 1;
+            for (int k = nanc - 1; k >= 0; k--) {
+                uint32_t bc[2];
+                int nb = bidi_controls(layout_box(ctx, anc[k]), true, bc);
+                for (int q = 0; q < nb; q++) {
+                    ifc_cp_put(I, bc[q], 0);
+                    if (ifc_put(I, -1, 0, 0, 0.0, IFC_CTL)) I->t[I->n - 1].cp0 = I->ncp - 1;
+                }
+            }
             I->space_before = true;
         } else if (ifc_is_atom(cb, n)) {
             /* (laid out here, at the content start: placed on its line later,
@@ -33098,6 +33438,13 @@ static void ifc_collect(LayoutContext *ctx, int p, int c0, int stop, IfcItems *I
                         if (wa_ && !ha_) w_ = h_ * vw_ / vh_;
                         else if (ha_ && !wa_) h_ = w_ * vh_ / vw_;
                     }
+                    /* (a video of no natural size, an aspect ratio (its width and height attributes'): the default
+                     * width, the height from it; one side given, the other from it; and a limit on one, through it) */
+                    double var_ = emb_ && vw_ == 300.0 && vh_ == 150.0 && !(cs_ & 3) && cb->s->aspect_ratio > 0.0 && cb->s->aspect_ratio_prop ? cb->s->aspect_ratio : 0.0;
+                    if (var_ > 0.0) {
+                        if (ha_) h_ = w_ * var_;
+                        else if (wa_) w_ = h_ / var_;
+                    }
                     if (w_ < 0.0) w_ = 0.0;
                     if (h_ < 0.0) h_ = 0.0;
                     layout_resolve_minmax_pcts(cb, avail_width, 0.0);
@@ -33107,6 +33454,10 @@ static void ifc_collect(LayoutContext *ctx, int p, int c0, int stop, IfcItems *I
                     if (mxh >= 0.0 && h_ > mxh) h_ = mxh > 0.0 ? mxh : 0.0;
                     if (cb->min_width > 0.0 && w_ < cb->min_width - (bbx ? bw : 0.0)) w_ = cb->min_width - (bbx ? bw : 0.0);
                     if (cb->min_height > 0.0 && h_ < cb->min_height - (bbx ? bh : 0.0)) h_ = cb->min_height - (bbx ? bh : 0.0);
+                    if (var_ > 0.0 && wa_ && ha_) {
+                        if (mxw >= 0.0 && w_ * var_ < h_) h_ = w_ * var_;
+                        else if (mxh >= 0.0 && h_ / var_ < w_) w_ = h_ / var_;
+                    }
                     cb->width = w_ + bw;
                     cb->height = h_ + bh;
                 } else {
@@ -35121,6 +35472,14 @@ static double layout_baseline_walk(LayoutContext *ctx, int i, int depth, bool fi
         } else if (!first && !cb->s->overflow_clip && ib->s->display == CSS_DISPLAY_INLINE_BLOCK && cb->s->display == CSS_DISPLAY_BLOCK && cb->s->writing_mode == 0 && ib->s->writing_mode == 0 && !t_bw_marker) {
             v = cb->y + cb->height + cb->margin_bottom;   /* (a block that clips: its margin box's bottom) */
         }
+        /* (a marquee in a line: its own baseline, its last line's, as it has on the line) */
+        if (isnan(v) && cb->s->display == CSS_DISPLAY_INLINE_BLOCK && !cb->s->vertical_align) {
+            HtmlNode *mn_ = css_layout_box_node(ctx, c);
+            if (mn_ && mn_->type == HTML_NODE_ELEMENT && mn_->tag_name && !strcasecmp(mn_->tag_name, "marquee")) {
+                double mv_ = layout_baseline_walk(ctx, c, depth + 1, first, atomic);
+                if (!isnan(mv_) && mv_ <= cb->y + cb->height) v = mv_;
+            }
+        }
         /* (for a flex or grid item: an atomic inline with no line in it has its
          * bottom margin edge) */
         /* (and in a line of a block: the line's baseline, where its bottom margin edge sits) */
@@ -35197,7 +35556,7 @@ static void ifc_atom_metrics(LayoutContext *ctx, int b, IfcVa *v)
     if (isnan(base) && n && n->type == HTML_NODE_ELEMENT && n->tag_name && !strcasecmp(n->tag_name, "button"))
         base = ab->y + ab->height - ab->s->border_bottom - ab->padding_bottom;   /* (a button with no line, or contained: its content box's bottom) */
     /* (a text field or an input button: its one line of text centered in its content box, whatever its overflow) */
-    if (isnan(base) && n && n->type == HTML_NODE_ELEMENT && n->tag_name && !strcasecmp(n->tag_name, "input") && !ab->s->contain_size &&
+    if (isnan(base) && n && n->type == HTML_NODE_ELEMENT && n->tag_name && !strcasecmp(n->tag_name, "input") && !ab->s->contain_size && !ab->s->contain_layout &&
         ab->s->writing_mode == 0) {
         const char *ty = layout_node_attribute(n, "type");
         static const char *const k_tf[] = { "text", "search", "tel", "url", "email", "password", "date", "month", "week", "time",
@@ -35211,8 +35570,23 @@ static void ifc_atom_metrics(LayoutContext *ctx, int b, IfcVa *v)
             double ctop = ab->y + ab->s->border_top + ab->padding_top;
             double ch = ab->height - ab->s->border_top - ab->s->border_bottom - ab->padding_top - ab->padding_bottom;
             double la = v->A, ld = v->D;
+            int nl_ = input_button_lines(n);
+            if (nl_ > 1) { if (la + ld > 0.0 && ch > 0.0) base = ctop + (ch - nl_ * (la + ld)) / 2.0 + (nl_ - 1) * (la + ld) + la; }   /* (lines: the last's) */
+            else
             if (la + ld > 0.0 && ch > 0.0) base = ctop + (ch - (la + ld)) / 2.0 + la;
         }
+    }
+    /* (a textarea, a scroll container: its bottom margin edge, empty or not) */
+    if (n && n->type == HTML_NODE_ELEMENT && n->tag_name && !strcasecmp(n->tag_name, "textarea") && !ab->s->contain_size && !ab->s->contain_layout &&
+        ab->s->writing_mode == 0 && v->A + v->D > 0.0)
+        base = ab->y + ab->height + ab->margin_bottom;   /* (overflow not visible: its bottom margin edge, CSS 2 10.8.1) */
+    /* (a size-contained drop-down select: as if it had no options, its one line centered in its content box) */
+    if (ab->s->contain_size && n && n->type == HTML_NODE_ELEMENT && n->tag_name && !strcasecmp(n->tag_name, "select") &&
+        !layout_node_attribute(n, "data-cyber-base") && (!layout_node_attribute(n, "size") ? !layout_node_attribute(n, "multiple") : atoi(layout_node_attribute(n, "size")) <= 1) && ab->s->writing_mode == 0) {
+        double ctop = ab->y + ab->s->border_top + ab->padding_top;
+        double ch = ab->height - ab->s->border_top - ab->s->border_bottom - ab->padding_top - ab->padding_bottom;
+        double la = v->A, ld = v->D;
+        if (la + ld > 0.0 && ch > 0.0) base = ctop + (ch - (la + ld)) / 2.0 + la;
     }
     if (isnan(base) && table_is_table(ab) && !ab->s->contain_layout && !(n && n->type == HTML_NODE_ELEMENT && ifc_is_replaced(ab, n))) {
         /* (no line in its first row: that row's bottom edge) */
@@ -35369,6 +35743,9 @@ static bool ifc_lines_init(LayoutContext *ctx, int idx, const IfcItems *I, IfcLi
         const LayoutBox *eb = layout_box(ctx, el->box);
         IfcVa *v = &V->el[e];
         ifc_va_metrics(eb, v);
+        /* (display: contents: no box of its own, so no alignment of its own, its contents on its parent's baseline) */
+        bool dc_ = eb->s->disp_contents;
+        if (dc_) v->va = 0;
         /* (a ruby column: its annotations' room over (or under) its content area, in the line) */
         if (eb->s->ruby_role == 6 && eb->s->ruby_first && !eb->s->writing_mode) {
             double over = 0.0, under = 0.0;
@@ -35410,7 +35787,7 @@ static bool ifc_lines_init(LayoutContext *ctx, int idx, const IfcItems *I, IfcLi
             v->bo = 0.0;
         } else {
             v->tb = p >= 0 ? V->el[p].tb : -1;
-            v->bo = (p >= 0 ? V->el[p].bo : 0.0) + ifc_va_offset(eb, v, pv);
+            v->bo = (p >= 0 ? V->el[p].bo : 0.0) + (dc_ ? 0.0 : ifc_va_offset(eb, v, pv));
         }
         stack[sp++] = e;
         for (int q = el->tok0; q < el->tok1 && q < I->n; q++) V->tel[q] = e;
@@ -36553,6 +36930,9 @@ static void ifc_layout(LayoutContext *ctx, int idx, int c0, int stop, const IfcR
         HtmlNode *en_ = css_layout_box_node(ctx, (int)(blk - ctx->boxes));
         const char *ce_ = en_ && en_->type == HTML_NODE_ELEMENT ? layout_node_attribute(en_, "contenteditable") : NULL;
         if (ce_ && strcasecmp(ce_, "false") && en_->store_id && (dom_element_state(en_->store_id) & DOM_ST_FOCUS)) ell_ovf = false;
+        /* (a text control with focus, the same) */
+        if (en_ && en_->type == HTML_NODE_ELEMENT && en_->tag_name && (!strcasecmp(en_->tag_name, "input") || !strcasecmp(en_->tag_name, "textarea")) &&
+            en_->store_id && (dom_element_state(en_->store_id) & DOM_ST_FOCUS)) ell_ovf = false;
     }
     int before = cur->lines;   /* (the block's lines in runs before this one) */
     /* (counted for the container that clamps, through its blocks) */
@@ -37378,9 +37758,25 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
     /* (a fieldset's rendered legend: in its block-start border, shrink-to-fit; the content starts below it) */
     box->fs_off = box->fs_gx0 = box->fs_gx1 = box->fs_cofs = 0.0f;
     box->fs_legend = 0;
+    int fs_deep_ = -1;
+    double fs_deep_x_ = 0.0, fs_deep_y_ = 0.0;
     if (box->s->is_fieldset && box->s->writing_mode == 0 && kids && !box->s->cv_hidden) {   /* (its contents skipped: the legend too) */
         for (int k = 0; k < nkids; k++) {
             int L = kids[k];
+            bool deep_ = false;
+            /* (a display: contents child, a slot: the legend among its children, the flat tree's) */
+            if (layout_box(ctx, L)->s->disp_contents) {
+                int fnd_ = -1;
+                for (int c_ = ctx->tree.nodes[L].first_child_idx; c_ >= 0 && fnd_ < 0; c_ = ctx->tree.nodes[c_].next_sibling_idx) {
+                    HtmlNode *cn_ = css_layout_box_node(ctx, c_);
+                    LayoutBox *cb_ = layout_box(ctx, c_);
+                    if (cn_ && cn_->type == HTML_NODE_ELEMENT && cn_->tag_name && !strcasecmp(cn_->tag_name, "legend") && layout_is_in_flow(cb_) &&
+                        cb_->s->display != CSS_DISPLAY_NONE && !cb_->s->float_side && cb_->s->display != CSS_DISPLAY_INLINE) fnd_ = c_;
+                }
+                if (fnd_ < 0) continue;
+                L = fnd_;
+                deep_ = true;
+            }
             LayoutBox *lb = layout_box(ctx, L);
             HtmlNode *ln = css_layout_box_node(ctx, L);
             if (!ln || ln->type != HTML_NODE_ELEMENT || !ln->tag_name || strcasecmp(ln->tag_name, "legend")) continue;
@@ -37419,8 +37815,11 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
             box->fs_gx0 = (float)(lb->x - box->x);
             box->fs_gx1 = (float)(lb->x + lb->width - box->x);
             box->fs_legend = L + 1;
-            memmove(kids + k, kids + k + 1, (size_t)(nkids - k - 1) * sizeof(int));
-            nkids--;
+            if (deep_) { fs_deep_ = L; fs_deep_x_ = lb->x; fs_deep_y_ = lb->y; }
+            if (!deep_) {
+                memmove(kids + k, kids + k + 1, (size_t)(nkids - k - 1) * sizeof(int));
+                nkids--;
+            }
             break;
         }
     }
@@ -37521,6 +37920,15 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
             nkids = n;
         }
     }
+    /* (a legend in a display: contents child: not an item of the flow, split out of it or not) */
+    if (fs_deep_ >= 0 && kids)
+        for (int k = 0; k < nkids; k++)
+            if (kids[k] == fs_deep_) {
+                memmove(kids + k, kids + k + 1, (size_t)(nkids - k - 1) * sizeof(int));
+                if (piece_of) memmove(piece_of + k, piece_of + k + 1, (size_t)(nkids - k - 1) * sizeof(int));
+                nkids--;
+                k--;
+            }
     /* text-indent: the first line (before any block, and while the pen is
      * on the container's first line) starts this far in. */
     double indent0 = box->s->text_indent + box->s->text_indent_pct * avail_width - layout_hang_first(ctx, idx);
@@ -38138,6 +38546,8 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
             clamp_cut = true;
         }
         if (max_bottom < content_top) max_bottom = content_top;   /* (no negative content height) */
+        /* (a legend in a display: contents child: where the fieldset put it, whatever moved that child) */
+        if (fs_deep_ >= 0) { LayoutBox *dl_ = layout_box(ctx, fs_deep_); if (dl_->x != fs_deep_x_ || dl_->y != fs_deep_y_) layout_move_box(ctx, fs_deep_, fs_deep_x_, fs_deep_y_); }
         double total = max_bottom - box->y + box->padding_bottom + box->s->border_bottom;
         if (total < 0.0) total = 0.0;
         if (clamp_cut) {
@@ -38167,6 +38577,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
             total = bb ? now : now + vbp;
         }
         /* min/max-height clamps (content-box aware). */
+        double nat_total = total;
         if (box->min_height > 0.0 || box->max_height >= 0.0) {
             if (box->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX)
                 total = layout_clamp_size(total, box->min_height, box->max_height);
@@ -38174,6 +38585,20 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                 double ch = layout_total_to_content_height(box, total);
                 ch = layout_clamp_size(ch, box->min_height, box->max_height);
                 total = layout_content_to_total_height(box, ch);
+            }
+        }
+        /* (a button or a drop-down made taller by its min-height: its content centered in it, as in a taller one) */
+        if (total > nat_total + 0.5 && !(CSS_CONTAIN_SIZE_OF(box->s) & 2)) {
+            HtmlNode *bn_ = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+            if (bn_ && bn_->type == HTML_NODE_ELEMENT && bn_->tag_name && (!strcasecmp(bn_->tag_name, "button") ||
+                (!strcasecmp(bn_->tag_name, "select") && !layout_node_attribute(bn_, "multiple") && !layout_node_attribute(bn_, "size")))) {
+                double off_ = (total - nat_total) / 2.0;
+                for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+                    LayoutBox *cb = layout_box(ctx, c);
+                    if (!layout_is_in_flow(cb)) continue;
+                    cb->y += off_;
+                    layout_offset_subtree(ctx, c, 0.0, off_);
+                }
             }
         }
         box->height = total;
@@ -38196,19 +38621,31 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
             layout_update_content_sizes(box);
         }
     } else {
+        /* (a fieldset held to a height its legend's half reaches past: its border box from there, still its borders tall) */
+        if (box->s->is_fieldset && box->fs_off > 0.0f) {
+            double need_ = box->fs_off + box->s->border_top + box->s->border_bottom;
+            if (box->height < box->fs_off + box->s->border_top) { box->height = need_; layout_update_content_sizes(box); }
+        }
         /* <button> centers its content vertically in a taller box. */
         HtmlNode *bn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
         if (bn && bn->type == HTML_NODE_ELEMENT && bn->tag_name &&
-            strcasecmp(bn->tag_name, "button") == 0) {
+            (strcasecmp(bn->tag_name, "button") == 0 ||
+             /* (a native drop-down, its one line, the same) */
+             (!strcasecmp(bn->tag_name, "select") && !layout_node_attribute(bn, "data-cyber-base") &&
+              !layout_node_attribute(bn, "multiple") && !layout_node_attribute(bn, "size") &&
+              ((!box->s->height_set && !(box->s->height_percent > 0.0)) || box->s->appearance_none)))) {
             double used = cur.y - content_top;
             double room = box->content_height - used;
-            if (used > 0.0 && room > 0.5) {
+            /* (its align-content: start, center or end; normal centered) */
+            double part_ = 0.5;
+            if ((box->s->content_set & 2) && (!strcasecmp(bn->tag_name, "button") || box->s->height_set)) part_ = 0.0;   /* (said: the block's own align-content has placed it) */
+            if (used > 0.0 && room > 0.5 && part_ > 0.0) {
                 for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0;
                      c = ctx->tree.nodes[c].next_sibling_idx) {
                     LayoutBox *cb = layout_box(ctx, c);
                     if (!layout_is_in_flow(cb)) continue;
-                    cb->y += room / 2.0;
-                    layout_offset_subtree(ctx, c, 0.0, room / 2.0);
+                    cb->y += room * part_;
+                    layout_offset_subtree(ctx, c, 0.0, room * part_);
                 }
             }
         }
@@ -41612,7 +42049,7 @@ static void grid_column_contributions(GridState *G)
                      !cb->s->width_keyword && !cb->s->mm_kw_w[0];
         /* (a min-width of its own, width auto: that its minimum contribution) */
         it->mc_set = false;
-        if (!it->is_text && !cb->s->width_set && !cb->s->width_keyword && cb->s->min_width > 0.0 && !(cb->s->minmax_pct_bits & 1) && !cb->s->mm_kw_w[0]) {
+        if (!it->is_text && !cb->s->width_set && !cb->s->width_keyword && (cb->s->min_width > 0.0 || (cb->s->min_size_set & 1)) && !(cb->s->minmax_pct_bits & 1) && !cb->s->mm_kw_w[0]) {
             double bp = layout_horizontal_border_padding(cb);
             double m = cb->s->box_sizing == CSS_BOX_SIZING_BORDER_BOX ? (cb->s->min_width > bp ? cb->s->min_width : bp) : cb->s->min_width + bp;
             m += ((cb->s->margin_auto & 8) ? 0.0 : cb->margin_left) + ((cb->s->margin_auto & 2) ? 0.0 : cb->margin_right);
@@ -45075,7 +45512,7 @@ static void layout_anim_write(LayoutStyle *s, int p, const AnimVal *v)
         s->height_set = 1;
         s->height_percent = 0.0;
     } else if (p == ANIM_COLOR) {
-#define ANIM_Q8(c_) (round((double)(c_) * 255.0) / 255.0)   /* (a channel at a whole 8-bit step) */
+#define ANIM_Q8(c_) (round((double)(c_) * 255.0 + 1e-3) / 255.0)   /* (a channel at a whole 8-bit step, a half up despite float error) */
         s->color_r = ANIM_Q8(v->x); s->color_g = ANIM_Q8(v->y); s->color_b = ANIM_Q8(v->z); s->color_a = v->w;
     } else if (p >= ANIM_PADDING_TOP && p <= ANIM_PADDING_LEFT) {
         double *f[4] = { &s->padding_top, &s->padding_right, &s->padding_bottom, &s->padding_left };
@@ -45520,6 +45957,18 @@ static void layout_anim_color_down(LayoutContext *ctx, int idx, const LayoutStyl
     }
 }
 
+/* (an animated opacity: the children whose opacity is inherit, the same) */
+static void layout_anim_opacity_down(LayoutContext *ctx, int idx, const LayoutStyle *from)
+{
+    for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+        LayoutStyle *cs = ctx->boxes[c].s;
+        if (!cs || cs == from || !cs->opacity_inh) continue;
+        cs->opacity = from->opacity; cs->opacity_set = from->opacity_set;
+        if (ctx->slot_ver && c < ctx->base_count) ctx->slot_ver[c] = 0;
+        layout_anim_opacity_down(ctx, c, cs);
+    }
+}
+
 /* (an animated font size: those that had the old one by inheriting it, the new) */
 /* (an animated list-style-type: to the boxes that inherited the one before) */
 static void layout_anim_lst_down(LayoutContext *ctx, int idx, unsigned char was_t, const char *was_s)
@@ -45636,6 +46085,18 @@ static void layout_animate(LayoutContext *ctx, const CssStyleSet *set)
                 q = e_ + 1;
             }
         }
+        /* (a control of native appearance whose background is still the UA's: an animation's or transition's
+         * background does not make it the author's, the control keeps drawing its own, HTML 15.5.x) */
+        if (set_p[ANIM_BGCOLOR] && !box->s->appearance_none) {
+            HtmlNode *an_ = css_layout_box_node(ctx, i);
+            if (an_ && an_->type == HTML_NODE_ELEMENT && an_->tag_name && (!strcasecmp(an_->tag_name, "input") || !strcasecmp(an_->tag_name, "textarea"))) {
+                const LayoutStyle *bs_ = box->s;
+                double k_ = (bs_->background_color_r > 1.0 || bs_->background_color_g > 1.0 || bs_->background_color_b > 1.0) ? 1.0 / 255.0 : 1.0;
+                double r_ = bs_->background_color_r * k_, g_ = bs_->background_color_g * k_, b_ = bs_->background_color_b * k_;
+                bool field_ = bs_->background_color_a >= 0.999 && ((r_ > 0.995 && g_ > 0.995 && b_ > 0.995) || (fabs(r_ - 239.0 / 255.0) < 0.003 && fabs(g_ - 239.0 / 255.0) < 0.003 && fabs(b_ - 239.0 / 255.0) < 0.003));
+                if (field_) set_p[ANIM_BGCOLOR] = false;
+            }
+        }
         bool wrote = false;
         double fs_was_ = box->s->font_size;
         unsigned char lst_was_t = box->s->list_style_type;
@@ -45649,6 +46110,7 @@ static void layout_animate(LayoutContext *ctx, const CssStyleSet *set)
         }
         /* (an animated color: what inherits it, its text first of all, the same) */
         if (set_p[ANIM_COLOR]) layout_anim_color_down(ctx, i, box->s);
+        if (set_p[ANIM_OPACITY]) layout_anim_opacity_down(ctx, i, box->s);
         if (set_p[ANIM_LST] && (box->s->list_style_type != lst_was_t || box->s->list_style != lst_was_s)) layout_anim_lst_down(ctx, i, lst_was_t, lst_was_s);
         any = anim_any();
     }
@@ -46335,6 +46797,24 @@ static void layout_table_box(LayoutContext *ctx, int idx, LayoutBox *tb)
         for (int r = 0; fix && r < T.nrows; r++)
             if (T.rows[r].idx >= 0) { const LayoutBox *rb = layout_box(ctx, T.rows[r].idx); fix[r] = rb->s->height_set && rb->s->height_percent <= 0.0; }
         for (int i = 0; fix && i < T.ncells; i++) if (T.cells[i].rs == 1 && T.cells[i].spec_h > 0.0) fix[T.cells[i].row] = 1;
+        /* (rows with a percentage height, their cells' or their own: that much of the rows' space first, the rest the others') */
+        if (fix && extra > 0.0) {
+            double space_ = extra + sum;
+            double *pct_ = (double *)calloc((size_t)T.nrows + 1, sizeof(double));
+            for (int i = 0; pct_ && i < T.ncells; i++) {
+                const LayoutBox *cb_ = layout_box(ctx, T.cells[i].idx);
+                if (T.cells[i].rs == 1 && cb_->s->height_percent > 0.0 && !cb_->s->h_kw && cb_->s->height_percent > pct_[T.cells[i].row]) pct_[T.cells[i].row] = cb_->s->height_percent;
+            }
+            for (int r = 0; pct_ && r < T.nrows; r++) {
+                if (T.rows[r].idx >= 0) { const LayoutBox *rb = layout_box(ctx, T.rows[r].idx); if (rb->s->height_percent > pct_[r]) pct_[r] = rb->s->height_percent; }
+                if (pct_[r] <= 0.0 || fix[r] || (collapsed && collapsed[r])) continue;
+                double want_ = pct_[r] * space_ - T.rows[r].h;
+                if (want_ > extra) want_ = extra;
+                if (want_ > 0.0) { T.rows[r].h += want_; extra -= want_; }
+                fix[r] = 1;
+            }
+            free(pct_);
+        }
         int nfree = 0;
         double fsum = 0.0;
         for (int r = 0; fix && r < T.nrows; r++) if (!fix[r] && !(collapsed && collapsed[r])) { nfree++; fsum += T.rows[r].h; }
@@ -48252,7 +48732,16 @@ static int layout_default_anchor(LayoutContext *ctx, int idx)
                 if (i == idx || ctx->boxes[i].s->display == CSS_DISPLAY_NONE) continue;
                 HtmlNode *m = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
                 const char *src = m && m->type == HTML_NODE_ELEMENT ? layout_node_attribute(m, "data-cyber-iasrc") : NULL;
-                if (src && !strcmp(src, ia)) return i;
+                if (src && !strcmp(src, ia)) {
+                    /* (an interest target its invoker shows: that invoker's ::interest-button, when it has one) */
+                    if (layout_node_attribute(n, "data-cyber-interest-pseudo") && ctx->pseudo_pairs)
+                        for (int q = 0; q < ctx->pseudo_nodes_n / 2; q++)
+                            if (ctx->pseudo_pairs[q].owner == i && ctx->pseudo_pairs[q].side == SIDE_INTEREST) {
+                                int pb_ = ctx->base_count + 2 * q;
+                                if (pb_ < ctx->tree.count && ctx->boxes[pb_].s->display != CSS_DISPLAY_NONE) return pb_;
+                            }
+                    return i;
+                }
             }
     }
     return -1;
@@ -48334,6 +48823,34 @@ static void layout_anchor_rect(LayoutContext *ctx, int a, int cb, double cb_x, d
             r[1] = y0 + ty - cb_y;
             r[2] = x1 - x0;
             r[3] = y1 - y0;
+        }
+    }
+    /* (in a canvas laid out for drawElementImage, drawn: where the canvas drew it) */
+    if (!full) {
+        extern bool canvas2d_elem_draw(uint32_t canvas, uint32_t el, float out[4], int *bw, int *bh);
+        int c_ = a, p_ = ctx->tree.nodes[a].parent_idx;
+        while (p_ >= 0 && p_ != cb) {
+            HtmlNode *pn_ = css_layout_box_node(ctx, p_);
+            if (pn_ && pn_->type == HTML_NODE_ELEMENT && pn_->tag_name && !strcasecmp(pn_->tag_name, "canvas") &&
+                (layout_node_attribute(pn_, "content") || layout_node_attribute(pn_, "layoutsubtree"))) break;
+            c_ = p_;
+            p_ = ctx->tree.nodes[p_].parent_idx;
+        }
+        HtmlNode *cv_ = p_ >= 0 && p_ != cb ? css_layout_box_node(ctx, p_) : NULL, *cn_ = css_layout_box_node(ctx, c_);
+        float d_[4];
+        int bw_ = 0, bh_ = 0;
+        if (cv_ && cn_ && cv_->store_id && cn_->store_id && canvas2d_elem_draw(cv_->store_id, cn_->store_id, d_, &bw_, &bh_) && bw_ > 0 && bh_ > 0) {
+            const LayoutBox *pb_ = &ctx->boxes[p_], *eb_ = &ctx->boxes[c_];
+            double cx_ = pb_->x + pb_->s->border_left + pb_->padding_left, cy_ = pb_->y + pb_->s->border_top + pb_->padding_top;
+            double cw_ = pb_->width - pb_->s->border_left - pb_->s->border_right - pb_->padding_left - pb_->padding_right;
+            double ch_ = pb_->height - pb_->s->border_top - pb_->s->border_bottom - pb_->padding_top - pb_->padding_bottom;
+            double kx_ = cw_ / bw_, ky_ = ch_ / bh_, sx_ = 1.0, sy_ = 1.0;
+            if (d_[2] > 0 && eb_->width > 0) sx_ = d_[2] * kx_ / eb_->width;
+            if (d_[3] > 0 && eb_->height > 0) sy_ = d_[3] * ky_ / eb_->height;
+            double ox_ = cx_ + d_[0] * kx_ - eb_->x * sx_, oy_ = cy_ + d_[1] * ky_ - eb_->y * sy_;
+            double ax_ = r[0] + cb_x, ay_ = r[1] + cb_y;
+            r[0] = ax_ * sx_ + ox_ - cb_x; r[1] = ay_ * sy_ + oy_ - cb_y;
+            r[2] *= sx_; r[3] *= sy_;
         }
     }
     double m[6];
@@ -49023,7 +49540,15 @@ static void layout_place_absolute(LayoutContext *ctx, int idx)
                 box->top = box->bottom = 0.0; has_top = has_bottom = true;
                 a_mode = area_y; area_y = -1;
             }
+            /* (normal, both insets given, an auto size: the area's own alignment, fit-content, not stretched) */
+            if (!xe && !(xk & 0x3f) && !(xk & ALIGN_KW_SAFE) && area_x >= 0 && !(area_x == 1 && x[0] == 0 && x[1] == 2) && has_left && has_right &&
+                !(box->s->width_set || box->s->width_percent > 0.0 || box->s->width_keyword) && j_mode < 0) { j_mode = area_x; area_x = -1; }
+            if (!ye && !(yk & 0x3f) && !(yk & ALIGN_KW_SAFE) && area_y >= 0 && !(area_y == 1 && y[0] == 0 && y[1] == 2) && has_top && has_bottom &&
+                !(box->s->height_set || box->s->height_percent > 0.0) && a_mode < 0) { a_mode = area_y; area_y = -1; }
             /* (normal in an area spanning all three tracks: anchor-center) */
+            /* (both insets and an auto size: fit-content, centered, not stretched) */
+            if (area_x == 1 && x[0] == 0 && x[1] == 2 && has_left && has_right && !xe && !(xk & 0x3f) && !(box->s->width_set || box->s->width_percent > 0.0 || box->s->width_keyword)) has_left = has_right = false;
+            if (area_y == 1 && y[0] == 0 && y[1] == 2 && has_top && has_bottom && !ye && !(yk & 0x3f) && !(box->s->height_set || box->s->height_percent > 0.0)) has_top = has_bottom = false;
             if (area_x == 1 && x[0] == 0 && x[1] == 2 && has_left == has_right) { has_center_x = true;   /* (one inset: it places the box) */ anchor_cx = ocb_x + r[0] + r[2] / 2.0; area_x = -1; }
             if (area_y == 1 && y[0] == 0 && y[1] == 2 && has_top == has_bottom) { has_center_y = true; anchor_cy = ocb_y + r[1] + r[3] / 2.0; area_y = -1; }
         }
@@ -50606,7 +51131,23 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
                 dca_ = canvas2d_elem_alpha((uint32_t)pn_->store_id, (uint32_t)cn_->store_id);
             }
         }
-        b->opacity_eff = dca_ * (par >= 0 && !tl_ ? ctx->boxes[par].opacity_eff : 1.0) *
+        /* (a drawable element deeper in such a canvas: drawn on its own, its ancestors' opacity up to the canvas none of it) */
+        int opar_ = par;
+        if (par >= 0 && dca_ == 1.0) {
+            const HtmlNode *cn_ = css_layout_box_node(ctx, i);
+            if (cn_ && cn_->type == HTML_NODE_ELEMENT && cn_->store_id && layout_node_attribute((HtmlNode *)cn_, "drawable"))
+                for (int a_ = ctx->tree.nodes[par].parent_idx, d_ = 0; a_ >= 0 && d_ < 64; a_ = ctx->tree.nodes[a_].parent_idx, d_++) {
+                    const HtmlNode *an_ = css_layout_box_node(ctx, a_);
+                    if (!an_ || an_->type != HTML_NODE_ELEMENT || !an_->tag_name || strcasecmp(an_->tag_name, "canvas")) continue;
+                    if (an_->store_id && (layout_node_attribute((HtmlNode *)an_, "content") || layout_node_attribute((HtmlNode *)an_, "layoutsubtree"))) {
+                        extern float canvas2d_elem_alpha(uint32_t canvas, uint32_t el);
+                        dca_ = canvas2d_elem_alpha((uint32_t)an_->store_id, (uint32_t)cn_->store_id);
+                        opar_ = a_;
+                    }
+                    break;
+                }
+        }
+        b->opacity_eff = dca_ * (opar_ >= 0 && !tl_ ? ctx->boxes[opar_].opacity_eff : 1.0) *
                          (b->s->opacity_set && !ct_ ? b->s->opacity : 1.0);
         if (b->s->display == CSS_DISPLAY_NONE) continue;
         double dx = 0.0, dy = 0.0;

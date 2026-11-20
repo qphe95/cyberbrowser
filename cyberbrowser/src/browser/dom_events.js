@@ -2352,7 +2352,15 @@
     }
     /* :hover and :active: the element and what it is in */
     function chainState(el, bit, on) {
-        for (var a = el; a; a = flatParent(a)) if (a.nodeType === 1) global.__cyberElState(a, bit, on);
+        /* (:active: the elements it was set on, cleared as they were, though one has left the tree since) */
+        if (bit === 2 && !on && el && el.__cyberActiveChain) {
+            el.__cyberActiveChain.forEach(function (a) { global.__cyberElState(a, bit, false); });
+            try { delete el.__cyberActiveChain; } catch (e) { }
+            return;
+        }
+        var list = [];
+        for (var a = el; a; a = flatParent(a)) if (a.nodeType === 1) { global.__cyberElState(a, bit, on); list.push(a); }
+        if (bit === 2 && on && el) { try { Object.defineProperty(el, '__cyberActiveChain', { value: list, configurable: true, writable: true }); } catch (e) { } }
     }
     function focusTarget(t, canceled) {
         if (canceled) return;
@@ -2908,13 +2916,14 @@
                 pointer.pressed = null;
                 return;
             }
+            /* (the primary button up: nothing :active any more, wherever it was let go) */
+            if (button === 0 && pointer.active) { chainState(pointer.active, 2, false); pointer.active = null; }
             var t = hitAt(x, y);
             if (!t) return;
             var into = frameInput(t);
             if (into) { into.input.up(x - into.left, y - into.top, button); return; }
             if (pointer.bar) { pointer.bar = null; global.__cyberScrollHold(false); }
             pointer.buttons &= ~(1 << button);
-            if (button === 0 && pointer.active) { chainState(pointer.active, 2, false); pointer.active = null; }
             bothEvents(t, x, y, button, 'pointerup', 'mouseup');
             var on = pointer.pressed && commonAncestor(pointer.pressed, t);
             pointer.pressed = null;

@@ -2841,7 +2841,7 @@
     function pseudoOf(v) {
         if (v === null || v === undefined) return null;
         v = String(v);
-        if (!/^::?(before|after|marker|first-line|first-letter|selection|view-transition|checkmark)/.test(v))
+        if (!/^::?(before|after|marker|first-line|first-letter|selection|view-transition|checkmark|picker-icon)/.test(v))
             throw new global.DOMException('Invalid pseudo-element: ' + v, 'SyntaxError');
         return v === ':before' ? '::before' : v === ':after' ? '::after' : v;
     }
@@ -3057,8 +3057,10 @@
         var text = '';
         values.forEach(function (v, p) { text += p + ': ' + v + '; '; });
         setStyle(el, text || null);
-        applyPseudoBox(el, ['::before', '::checkmark'], 1, '__cyberBfAnim');
+        applyPseudoBox(el, ['::before'], 1, '__cyberBfAnim');
+        applyPseudoBox(el, ['::checkmark'], 3, '__cyberCmAnim');
         applyPseudoBox(el, ['::after'], 2, '__cyberAfAnim');
+        applyPseudoBox(el, ['::picker-icon'], -1, '__cyberPiAnim');
         /* (its ::marker's: a style of the marker's own) */
         var mk = [];
         animations.forEach(function (a) { if (a._effect && a._effect._target === el && a._effect._pseudo === '::marker') mk.push(a); });
@@ -3092,6 +3094,7 @@
         var pt = '';
         pv.forEach(function (v, p) { pt += p + ': ' + v + '; '; });
         hide(el, flag, !!pt);
+        if (ch < 0) { if (typeof global.__cyberPickerIconStyle === 'function') global.__cyberPickerIconStyle(el, pt); return; }
         setStyle(el, pt || null, ch);
     }
     function applyDirty() {

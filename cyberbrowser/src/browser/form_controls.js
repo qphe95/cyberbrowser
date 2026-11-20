@@ -1338,15 +1338,16 @@
             '::slotted(option)::before { content: none; }' +
             '::slotted(optgroup) { display: block; font-weight: bold; }' +
             '::slotted(option:checked) { background-color: #cecece; } :host(:focus) ::slotted(option:checked) { background-color: #cecece !important; color: FieldText !important; }';
-        var BASE = ':host { color: inherit; font: inherit; background-color: transparent; padding-block: 0.25em; padding-inline: 0.5em; border: 1px solid currentColor; border-radius: 0.5em; display: inline-flex; gap: 0.5em; min-inline-size: 24px; min-block-size: max(24px, 1lh); box-sizing: border-box; text-align: inherit; cursor: default; white-space: nowrap; }' +
+        var BASE = ':host { color: inherit; font: inherit; background-color: transparent; padding-block: 0.25em; padding-inline: 0.5em; border: 1px solid currentColor; border-radius: 0.5em; display: inline-flex; gap: 0.5em; min-inline-size: calc-size(auto, max(size, 24px)); min-block-size: max(24px, 1lh); box-sizing: border-box; text-align: inherit; cursor: default; }' +
             ':host(:disabled) { color: color-mix(currentColor 50%, transparent); }' +
+            ':host(:enabled:not([data-cyber-open]):hover) { background-color: color-mix(currentColor 10%, transparent); }' +
+            ':host(:enabled:active) { background-color: color-mix(currentColor 20%, transparent); }' +
             '::slotted(button[data-cyber-selbtn]) { display: contents; border: 0; padding: 0; margin: 0; background: none; color: inherit; font: inherit; }' +
-            '.icon { margin-inline-start: auto; display: block; }' +
+            '.icon { margin-inline-start: auto; display: block; order: 2147483646; }' +
             '.picker { position: fixed; width: fit-content; height: fit-content; box-sizing: border-box; border: 1px solid; padding: 0; color: CanvasText; background-color: Canvas; margin: 0; inset: auto; min-inline-size: anchor-size(self-inline); min-block-size: 1lh; overflow: auto; position-area: block-end span-inline-end; position-try-fallbacks: block-start span-inline-end, block-end span-inline-start, block-start span-inline-start; }' +
             '::slotted(option) { min-inline-size: 24px; min-block-size: max(24px, 1lh); padding-inline: 0.5em; padding-block-end: 0; display: flex; align-items: center; gap: 0.5em; white-space: nowrap; }' +
-            '::slotted(option)::before { content: \'\\2713\' / \'\'; }' +
-            '::slotted(option:not(:checked))::before { visibility: hidden; }' +
-            '::slotted(option:disabled) { color: color-mix(currentColor 50%, transparent); }' +
+
+            ':host(:not(:disabled)) ::slotted(option:disabled) { color: color-mix(currentColor 50%, transparent); }' +
             '::slotted(optgroup) { display: block; }' +
             '::slotted(hr) { margin-inline: 0.5em; }';
         /* (a base-select list box, multiple or of a size over 1: its options in it, that many rows tall) */
@@ -1354,11 +1355,9 @@
             return ':host { display: inline-block; overflow: auto; border: 1px solid; padding: 0; color: inherit; font: inherit; background-color: transparent; box-sizing: content-box; text-align: inherit; cursor: default; block-size: calc(max(24px, 1lh) * ' + rows + '); }' +
                 ':host(:disabled) { color: color-mix(currentColor 50%, transparent); }' +
                 '::slotted(option) { min-inline-size: 24px; min-block-size: max(24px, 1lh); padding-inline: 0.5em; padding-block-end: 0; display: flex; align-items: center; gap: 0.5em; white-space: nowrap; }' +
-                '::slotted(option)::before { content: \'\\2713\' / \'\'; }' +
-                '::slotted(option:not(:checked))::before { visibility: hidden; }' +
-                '::slotted(option:disabled) { color: color-mix(currentColor 50%, transparent); }' +
-                '::slotted(optgroup) { display: block; }' +
-                '::slotted(hr) { margin-inline: 0.5em; }';
+
+                ':host(:not(:disabled)) ::slotted(option:disabled) { color: color-mix(currentColor 50%, transparent); }' +
+                '::slotted(optgroup) { display: block; }';   /* (an hr in it: as wide as the box, its own margins) */
         }
         function selectedOf(sel) {
             var opts = optionsOf(sel), i = selectedIndexOf(sel, opts);
@@ -1369,11 +1368,11 @@
             if (!sel.isConnected) return;
             var cs;
             try { cs = global.getComputedStyle(sel); } catch (e) { return; }
-            var base = cs.appearance === 'base-select';
+            var base = cs.appearance === 'base-select' || cs.appearance === 'base';   /* (base: the same opt-in, its newer name) */
             /* (the UA sheet's options-in-a-picker rules go by this) */
             if (base !== sel.hasAttribute('data-cyber-base')) { if (base) sel.setAttribute('data-cyber-base', ''); else sel.removeAttribute('data-cyber-base'); }
             var size = parseInt(sel.getAttribute('size'), 10);
-            var listbox = !base && (sel.multiple || size > 1);
+            var listbox = !base && ((sel.multiple && size !== 1) || size > 1);   /* (multiple with a size of 1: a drop-down, whatwg/html 8189) */
             var so = selectedOf(sel);
             /* (:checked follows what is selected) */
             for (var i = 0; i < so.opts.length; i++) {
@@ -1383,7 +1382,7 @@
             /* (<selectedcontent>: the selected option's content, when that changed) */
             updateSelectedContent(sel);
             var html, key;
-            if (base && (sel.multiple || size > 1)) {
+            if (base && ((sel.multiple && size !== 1) || size > 1)) {
                 var lbRows = size > 1 ? size : 4;
                 key = 'blb|' + lbRows;
                 html = '<style>' + baseListbox(lbRows) + '</style><slot name="-cb-rest"></slot>';
@@ -1421,11 +1420,23 @@
                 /* (its em lengths in px: the font size of 0 would take them) */
                 /* (its hidden text an item of its own still: the gap only before the label) */
                 var BLBL = anyLbl ? '::slotted(option[data-cyber-lbl]) { font-size: 0 !important; padding-inline: ' + (bfs / 2) + 'px; gap: 0; min-block-size: max(24px, ' + Math.round(bfs * 1.15) + 'px); }' +
-                    '::slotted(option[data-cyber-lbl])::before { font-size: ' + bfs + 'px; }' +
+                    '::slotted(option[data-cyber-lbl])::checkmark { font-size: ' + bfs + 'px; }' +
                     '::slotted(option[data-cyber-lbl])::after { content: attr(data-cyber-lbl); font-size: ' + bfs + 'px; margin-inline-start: ' + (bfs / 2) + 'px; }' : '';
-                key = 'b|' + (btn ? 1 : 0) + '|' + (so.opt ? labelOf(so.opt) : '') + '|' + !!sel[UAOPEN] + '|' + (anyLbl ? bfs : 0);
-                html = '<style>' + BASE + BLBL + '</style>' + (btn ? '<slot name="-cb-button"></slot>' : '<span class="l" part="cbselectedcontent">' + esc(so.opt ? labelOf(so.opt) : '') + '</span>') +
-                    '<span class="icon" part="cbpickericon">\u25be</span><div class="picker" part="cbpicker" popover="manual"><slot name="-cb-rest"></slot></div>';
+                /* (the icon disclosure-open's: pointing along the block axis, upright in vertical text) */
+                var wmv = '';
+                try { wmv = cs.getPropertyValue('writing-mode') || cs.writingMode || ''; } catch (e) { }
+                var icon = /vertical-lr|sideways-lr/.test(wmv) ? '\u25b8' : /vertical-rl|sideways-rl/.test(wmv) ? '\u25c2' : '\u25be';
+                /* (multiple, a drop-down: the one selected option's label, else how many are) */
+                var blbl = so.opt ? labelOf(so.opt) : '';
+                if (sel.multiple) {
+                    var sels_ = so.opts.filter(function (o) { return optionSelected(o); });
+                    blbl = sels_.length > 1 ? sels_.length + ' selected' : sels_.length ? labelOf(sels_[0]) : '';
+                }
+                key = 'b|' + (btn ? 1 : 0) + '|' + blbl + '|' + !!sel[UAOPEN] + '|' + (anyLbl ? bfs : 0) + '|' + icon;
+                /* (no label: no line of it, the box its minimum sizes) */
+                var EMPTY = ':host([data-cyber-nolabel]) { min-inline-size: 24px; } :host([data-cyber-nolabel]) .l { display: none; }';
+                html = '<style>' + BASE + BLBL + EMPTY + '</style>' + (btn ? '<slot name="-cb-button"></slot>' : '<span class="l" part="cbselectedcontent">' + esc(blbl) + '</span>') +
+                    '<span class="icon" part="cbpickericon">' + icon + '</span><div class="picker" part="cbpicker" popover="manual"><slot name="-cb-rest"></slot></div>';
 
             } else if (listbox) {
                 var rows = size > 1 ? size : 4;
@@ -1438,16 +1449,58 @@
                 /* (the label attribute, no namespace, not empty: marked for the sheet, the row its height still) */
                 so.opts.forEach(function (o) {
                     var lv = o.getAttributeNS(null, 'label');
+                    /* (no label, an image in it: its text with the image's alt text, shown the same way) */
+                    if ((lv === null || lv === '') && o.querySelector && o.querySelector('img')) {
+                        var out = '';
+                        (function walk(n) {
+                            for (var c = n.firstChild; c; c = c.nextSibling) {
+                                if (c.nodeType === 3) out += c.data;
+                                else if (c.nodeType === 1) {
+                                    var ln = c.localName;
+                                    if (ln === 'script' || ln === 'style' || ln === 'template') continue;
+                                    if (ln === 'img') { out += c.getAttribute('alt') || ''; continue; }
+                                    walk(c);
+                                }
+                            }
+                        })(o);
+                        lv = out.replace(/[ \t\n\f\r]+/g, ' ').trim();
+                    }
                     if (lv !== null && lv !== '') { if (o.getAttribute('data-cyber-lbl') !== lv) o.setAttribute('data-cyber-lbl', lv); }
                     else if (o.hasAttribute('data-cyber-lbl')) o.removeAttribute('data-cyber-lbl');
+                });
+                /* (an optgroup's label: its first legend's text, else its label attribute, a row of its own) */
+                Array.prototype.forEach.call(sel.querySelectorAll('optgroup'), function (g) {
+                    var lg = null;
+                    for (var c = g.firstElementChild; c && !lg; c = c.nextElementSibling) if (c.localName === 'legend') lg = c;
+                    var gl = lg ? lg.textContent.replace(/[ \t\n\f\r]+/g, ' ').trim() : (g.getAttribute('label') || '');
+                    if (g.getAttribute('data-cyber-oglbl') !== gl) g.setAttribute('data-cyber-oglbl', gl);
                 });
                 var LBL = '::slotted(option[data-cyber-lbl]) { font-size: 0 !important; min-block-size: ' + rowH + 'px !important; }' +
                     '::slotted(option[data-cyber-lbl])::before { content: attr(data-cyber-lbl); font-size: ' + fs + 'px; }';
                 html = '<style>' + LIST + LBL + (cs.boxSizing === 'border-box' ? ':host { height: ' + (rows * rowH + bpb) + 'px; }' : ':host { height: ' + (rows * rowH) + 'px; }') + '</style><slot></slot>';
                 void hset;
             } else {
-                var labels = so.opts.map(labelOf);
-                var shown = so.opt ? labelOf(so.opt) : '';
+                /* (as shown: its label, else its text with its images' alt text in it) */
+                var dispLabel = function (o) {
+                    var l = o.getAttributeNS(null, 'label');
+                    if (l !== null && l !== '') return l;
+                    if (!o.querySelector || !o.querySelector('img')) return labelOf(o);
+                    var out = '';
+                    (function walk(n) {
+                        for (var c = n.firstChild; c; c = c.nextSibling) {
+                            if (c.nodeType === 3) out += c.data;
+                            else if (c.nodeType === 1) {
+                                var ln = c.localName;
+                                if (ln === 'script' || ln === 'style' || ln === 'template') continue;
+                                if (ln === 'img') { out += c.getAttribute('alt') || ''; continue; }
+                                walk(c);
+                            }
+                        }
+                    })(o);
+                    return out.replace(/[ \t\n\f\r]+/g, ' ').trim();
+                };
+                var labels = so.opts.map(dispLabel);
+                var shown = so.opt ? dispLabel(so.opt) : '';
                 /* (a first child <button>: its text the label, <selectedcontent> the option's; the widest of those the width,
                  * whatwg/html#12474) */
                 var fb = sel.firstElementChild;
@@ -1460,7 +1513,8 @@
                                 else if (c.nodeType === 1) {
                                     var ln = c.localName;
                                     if (ln === 'script' || ln === 'style' || ln === 'template') continue;
-                                    if (ln === 'selectedcontent') { out += o ? labelOf(o) : ''; continue; }
+                                    /* (the selected option's: what the selectedcontent holds now, script may have changed it) */
+                                    if (ln === 'selectedcontent') { if (o && o === so.opt && c.firstChild) walk(c); else out += o ? labelOf(o) : ''; continue; }
                                     if (ln === 'img') { out += c.getAttribute('alt') || ''; continue; }
                                     walk(c);
                                 }
@@ -1492,7 +1546,9 @@
                 key += "|" + sizeContained;
                 var plain = cs.appearance === 'none';   /* (appearance: none: no arrow, its line-height its own) */
                 key += '|' + plain;
-                html = '<style>' + DROP + (plain ? '' : ':host { line-height: normal !important; }') + '.l { display: inline-block; min-inline-size: ' + Math.ceil(mw) + 'px; }' + (sizeContained ? ':host { min-inline-size: 18px; }' : '') + '</style><span class="l">' + (shown === '' ? '​' : esc(shown)) + '</span>' + (plain ? '' : '<span class="a"></span>');
+                html = '<style>' + DROP + (plain ? '' : ':host { line-height: normal !important; }') + '.l { display: inline-block; min-inline-size: ' + Math.ceil(mw) + 'px; }' +
+                    /* (its label the whole line, whatever the select's own flex or grid alignment says) */
+                    (plain ? '.l { flex: 1 0 auto; justify-self: stretch; }' : '') + (sizeContained ? ':host { min-inline-size: 18px; }' : '') + '</style><span class="l">' + (shown === '' ? '​' : esc(shown)) + '</span>' + (plain ? '' : '<span class="a"></span>');
             }
             if (!root) {
                 try { root = sel.attachShadow({ mode: 'closed', __cyberUA: true }); } catch (e) { return; }
@@ -1501,9 +1557,14 @@
             if (sel[UAKEY] !== key) {
                 Object.defineProperty(sel, UAKEY, { value: key, configurable: true, writable: true });
                 root.innerHTML = html;
+                if (sel[ICONSTY]) iconStyle(sel);
                 if (base && sel[UAOPEN]) {
                     var pk = root.querySelector('.picker');
                     try { pk.showPopover({ source: sel }); } catch (e) { try { pk.showPopover(); } catch (e2) { } }
+                    /* (a picker not opted in by ::picker(select) { appearance: base-select }: the platform's own, not in the page) */
+                    var pap = '';
+                    try { pap = global.getComputedStyle(pk).appearance; } catch (e) { }
+                    if (pap !== 'base-select' && pap !== 'base') pk.style.setProperty('visibility', 'hidden', 'important');
                 }
             }
             /* (::picker-icon's content: none, no icon; a string, that in its place) */
@@ -1512,12 +1573,21 @@
                 if (ic) {
                     var icv = '';
                     try { icv = global.getComputedStyle(ic).content || ''; } catch (e) { }
-                    var want = '▾', hide = false, sm = /^"((?:[^"\\]|\\.)*)"$/.exec(icv);
+                    var want = typeof icon === 'string' && icon ? icon : '\u25be', hide = false, sm = /^"((?:[^"\\]|\\.)*)"$/.exec(icv);
                     if (icv === 'none') hide = true;
                     else if (sm) want = sm[1].replace(/\\(.)/g, '$1');
                     if (ic.textContent !== want) ic.textContent = want;
                     if (hide !== (ic.style.display === 'none')) ic.style.display = hide ? 'none' : '';
                 }
+                /* (no label and no icon shown: nothing of a line in it, layout sizes it by its minimums alone) */
+                var nolbl_ = false;
+                if (!root.querySelector('slot[name="-cb-button"]')) {
+                    var lb_ = root.querySelector('.l');
+                    var icd_ = '';
+                    try { icd_ = ic ? global.getComputedStyle(ic).display : 'none'; } catch (e) { }
+                    nolbl_ = (!lb_ || lb_.textContent === '') && (!ic || icd_ === 'none');
+                }
+                if (nolbl_ !== sel.hasAttribute('data-cyber-nolabel')) { if (nolbl_) sel.setAttribute('data-cyber-nolabel', ''); else sel.removeAttribute('data-cyber-nolabel'); }
             }
             /* (its picker open: :open, through an attribute the UA sheet reads) */
             var op_ = !!(base && sel[UAOPEN]);
@@ -1557,11 +1627,20 @@
             }
             /* (a details element: its UA tree, its summary and the rest in ::details-content (::part(cbdetailscontent)); made
              * only where a sheet names that, other details as they were) */
-            if (detailsContentUsed(doc)) {
+            /* (or where its summary is inline-level: the rest a block after it, not on its line) */
+            var dcu = detailsContentUsed(doc);
+            {
                 var dts = doc.getElementsByTagName('details');
                 for (var di = 0; di < dts.length; di++) {
                     var de = dts[di];
                     if (de.namespaceURI !== 'http://www.w3.org/1999/xhtml' || de[DETUA] || de.shadowRoot) continue;
+                    if (!dcu) {
+                        var sm_ = null;
+                        for (var dc_ = de.firstElementChild; dc_ && !sm_; dc_ = dc_.nextElementSibling) if (dc_.localName === 'summary') sm_ = dc_;
+                        var sd_ = '';
+                        try { sd_ = sm_ ? global.getComputedStyle(sm_).display : ''; } catch (e) { }
+                        if (!/^inline/.test(sd_)) continue;
+                    }
                     try {
                         var dr = de.attachShadow({ mode: 'closed', __cyberUA: true });
                         Object.defineProperty(de, DETUA, { value: dr, configurable: true });
@@ -1578,6 +1657,15 @@
         /* (the permission elements (WICG PEPC): a label and an icon, the icon ::permission-icon (::part(cbpermicon)),
          * only some of its properties the page's) */
         var PERM_TAGS = ['usermedia', 'geolocation', 'permission', 'camera', 'microphone'];
+        /* (a layout query while the document loads: the permission elements parsed so far rendered first) */
+        Object.defineProperty(global, '__cyberUAEarly', { configurable: true, value: function () {
+            var doc = global.document;
+            if (!doc) return;
+            for (var pt = 0; pt < PERM_TAGS.length; pt++) {
+                var pe = doc.getElementsByTagName(PERM_TAGS[pt]);
+                for (var j = 0; j < pe.length; j++) if (pe[j].namespaceURI === 'http://www.w3.org/1999/xhtml' && !pe[j][PERMUA]) { try { permRender(pe[j]); } catch (e) { } }
+            }
+        } });
         var DETUA = Symbol('detailsUA');
         function detailsContentUsed(doc) {
             var ss = doc.styleSheets;
@@ -1621,9 +1709,39 @@
                 try { root = el.attachShadow({ mode: 'closed', __cyberUA: true }); } catch (e) { return; }
                 Object.defineProperty(el, PERMUA, { value: root, configurable: true });
             }
-            if (el[PERMKEY] === k) return;
-            Object.defineProperty(el, PERMKEY, { value: k, configurable: true, writable: true });
-            root.innerHTML = '<style>' + PERM_CSS + '</style><svg class="i" part="cbpermicon" viewBox="0 0 24 24" height="1em" fill="currentColor" fill-rule="evenodd" aria-hidden="true"><path d="' + PERM_ICON[k] + '"/></svg>';
+            if (el[PERMKEY] !== k) {
+                Object.defineProperty(el, PERMKEY, { value: k, configurable: true, writable: true });
+                root.innerHTML = '<style>' + PERM_CSS + '</style><style class="b"></style><svg class="i" part="cbpermicon" viewBox="0 0 24 24" height="1em" fill="currentColor" fill-rule="evenodd" aria-hidden="true"><path d="' + PERM_ICON[k] + '"/></svg>';
+            }
+            permBounds(el, root);
+        }
+        /* (its size bounds, as the permission element's: a min-height of at most 3em, a max-height of at least 1em,
+         * a min-width of at most three times its fit-content width, a max-width of at least that width) */
+        function permBounds(el, root) {
+            var bs = root.querySelector('style.b'), ic = root.querySelector('svg');
+            if (!bs || !ic) return;
+            var rules = '', icr = '';
+            try {
+                bs.textContent = '';
+                var cs = global.getComputedStyle(el), fs = parseFloat(cs.fontSize) || 16;
+                var px = function (v) { var n = parseFloat(v); return isFinite(n) ? n : NaN; };
+                var bx = px(cs.paddingLeft) + px(cs.paddingRight) + px(cs.borderLeftWidth) + px(cs.borderRightWidth);
+                /* (the icon's end margin: at most 3em) */
+                var ics = global.getComputedStyle(ic), ime = px(ics.marginInlineEnd || ics.marginRight);
+                if (ime > 3 * fs) { icr = '.i { margin-inline-end: ' + (3 * fs) + 'px !important; }'; ime = 3 * fs; }
+                var fc = Math.max(ic.getBoundingClientRect().width, 1.5 * fs) + (isFinite(ime) ? ime : 0) + (isFinite(bx) ? bx : 0);   /* (the icon: no width of its own, as wide as its 1.5em limit) */
+                /* (each within [1em, 3em] tall and [its fit-content width, three times that] wide, the author's where it is inside) */
+                var clamp = function (v, lo, hi, d) { if (!isFinite(v)) v = d; return v < lo ? lo : v > hi ? hi : v; };
+                /* (heights: only an author's out of those bounds pulled in) */
+                var mnh0 = px(cs.minHeight), mxh0 = px(cs.maxHeight);
+                if (mnh0 > 3 * fs) rules += 'min-height: ' + (3 * fs) + 'px !important;';
+                if (mxh0 < fs) rules += 'max-height: ' + fs + 'px !important;';
+                if (fc > 0) {
+                    var mnw = clamp(px(cs.minWidth), fc, 3 * fc, 0), mxw = clamp(px(cs.maxWidth), fc, 3 * fc, Infinity);
+                    rules += 'min-width: ' + mnw + 'px !important; max-width: ' + mxw + 'px !important;';
+                }
+            } catch (e) { }
+            if (rules || icr) bs.textContent = (rules ? ':host { ' + rules + ' }' : '') + icr;
         }
         function schedule() {
             if (pending) return;
@@ -1631,6 +1749,54 @@
             Promise.resolve().then(renderAll);
         }
         global.addEventListener('DOMContentLoaded', renderAll);
+        /* (a customizable combobox, input[list] and datalist of appearance base: the input's own look, and the down arrow
+         * shows the list below it) */
+        var comboBase = function (inp) {
+            try { return global.getComputedStyle(inp).appearance === 'base'; } catch (e) { return false; }
+        };
+        global.addEventListener('keydown', function (e) {
+            var t = e.target;
+            /* (a filterable select's input, input[filter]: the down arrow makes the select's next option the active one) */
+            if (t && t.localName === 'input' && t.hasAttribute('filter') && e.key === 'ArrowDown' && comboBase(t)) {
+                var fsel = null;
+                try { var rt_ = t.getRootNode(); fsel = rt_ && rt_.getElementById ? rt_.getElementById(t.getAttribute('filter')) : null; } catch (x) { fsel = null; }
+                if (fsel && fsel.localName === 'select') {
+                    if (!t.hasAttribute('data-cyber-base')) t.setAttribute('data-cyber-base', '');
+                    var fo = Array.prototype.filter.call(fsel.getElementsByTagName('option'), function (o) { return !o.disabled; });
+                    var fc = 0;
+                    for (var fi = 0; fi < fo.length; fi++) if (fo[fi].hasAttribute('data-cyber-active')) fc = fi;
+                    var fn = Math.min(fc + 1, fo.length - 1);
+                    for (var fj = 0; fj < fo.length; fj++) if (fj !== fn && fo[fj].hasAttribute('data-cyber-active')) fo[fj].removeAttribute('data-cyber-active');
+                    if (fo.length && !fo[fn].hasAttribute('data-cyber-active')) fo[fn].setAttribute('data-cyber-active', '');
+                    e.preventDefault();
+                }
+                return;
+            }
+            if (!t || t.localName !== 'input' || !t.hasAttribute('list') || e.key !== 'ArrowDown') return;
+            var dl = null;
+            try { dl = t.list; } catch (x) { dl = null; }
+            if (!dl || !comboBase(t) || !comboBase(dl)) return;
+            if (!t.hasAttribute('data-cyber-base')) t.setAttribute('data-cyber-base', '');
+            var ik = t.getAttribute('data-cyber-iasrc') || String(++global.__cyberIaSeq || (global.__cyberIaSeq = 1));
+            if (t.getAttribute('data-cyber-iasrc') !== ik) t.setAttribute('data-cyber-iasrc', ik);
+            if (dl.getAttribute('data-cyber-ia') !== ik) dl.setAttribute('data-cyber-ia', ik);
+            /* (the next option the active one, the first to begin with) */
+            var opts_ = Array.prototype.filter.call(dl.getElementsByTagName('option'), function (o) { return !o.disabled; });
+            var cur_ = -1;
+            for (var oi_ = 0; oi_ < opts_.length; oi_++) if (opts_[oi_].hasAttribute('data-cyber-active')) cur_ = oi_;
+            var opened_ = dl.hasAttribute('data-cyber-open');
+            var nx_ = !opened_ ? 0 : Math.min(cur_ + 1, opts_.length - 1);
+            if (opts_.length && nx_ !== cur_) {
+                if (cur_ >= 0) opts_[cur_].removeAttribute('data-cyber-active');
+                opts_[nx_].setAttribute('data-cyber-active', '');
+            }
+            if (!opened_) dl.setAttribute('data-cyber-open', '');
+            e.preventDefault();
+        }, true);
+        global.addEventListener('focusin', function (e) {
+            var t = e.target;
+            if (t && t.localName === 'input' && (t.hasAttribute('list') || t.hasAttribute('filter')) && comboBase(t) && !t.hasAttribute('data-cyber-base')) t.setAttribute('data-cyber-base', '');
+        }, true);
         /* (style sheet links the parser made: their load events, once each, those script inserted fire natively) */
         var linkFired = typeof WeakSet === 'function' ? new WeakSet() : null;
         global.addEventListener('load', function (e) { var t = e.target; if (linkFired && t && t.localName === 'link') linkFired.add(t); }, true);
@@ -1806,6 +1972,18 @@
                 return;
             }
         }, false);
+        /* (::picker-icon animated by script (Element.animate's pseudoElement): its style on the UA tree's icon, kept across renders) */
+        var ICONSTY = Symbol('pickerIconStyle');
+        function iconStyle(sel) {
+            var root = sel[UA], ic = root && root.querySelector('.icon');
+            if (!ic) return;
+            if (sel[ICONSTY]) ic.setAttribute('style', sel[ICONSTY]); else ic.removeAttribute('style');
+        }
+        Object.defineProperty(global, '__cyberPickerIconStyle', { configurable: true, value: function (sel, text) {
+            if (!sel || sel.localName !== 'select') return;
+            Object.defineProperty(sel, ICONSTY, { value: text || '', configurable: true, writable: true });
+            iconStyle(sel);
+        } });
         var JUSTOPENED = Symbol('selectJustOpened');
         global.addEventListener('click', function (e) {
             if (e.button !== 0) return;
